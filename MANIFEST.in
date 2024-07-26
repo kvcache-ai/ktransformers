@@ -1,0 +1,11 @@
+graft third_party
+graft ktransformers
+graft local_chat.py
+include LICENSE README.md
+prune ktransformers/website
+prune ktransformers/logs
+prune ktransformers.egg-info
+prune third_party/llama.cpp/models
+graft ktransformers/website/dist
+global-exclude __pycache__
+include KTransformersOps.*.so

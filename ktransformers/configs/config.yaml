@@ -1,0 +1,37 @@
+log:
+  dir: "logs"
+  file: "lexllama.log"
+  #log level: debug, info, warn, error, crit
+  level: "debug"
+  backup_count: -1
+
+server:
+  ip: 0.0.0.0
+  port: 12456
+
+db:
+  type: "sqllite"
+  database: "server.db"
+  host: "./"
+  pool_size: 10
+
+user:
+  secret_key: "981f1dd2a44e27d68759d0252a486568ed43480b4e616a26e3af3709c3a7ce73"
+  algorithm: "HS256"
+
+model:
+  # type: transformers
+  type: ktransformers
+
+  name: DeepSeek-Coder-V2-Instruct
+  path: /mnt/data/model/DeepSeek-Coder-V2-Instruct/
+  gguf_path: /mnt/data/model/DeepSeek-Coder-V2-GGUF-WJH/
+
+  device: cuda:0
+
+web:
+  mount: False
+  open_cross_domain: True
+
+ext:
+  cpu_infer: 10

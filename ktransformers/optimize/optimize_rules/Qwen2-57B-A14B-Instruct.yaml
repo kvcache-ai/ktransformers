@@ -1,0 +1,37 @@
+- match:
+    class: ktransformers.models.modeling_qwen2_moe.Qwen2MoeRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.RotaryEmbedding
+- match:
+    name: "^model\\.layers\\..*$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "QuantizedLinearMarlin"
+      prefill_op: "QuantizedLinearTorch"
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock
+  replace:
+    class: ktransformers.operators.experts.Qwen2MoeSparseMoeBlockInjected     # mlp module with custom forward function
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersMLPExpert     # custom MoE Kernel with expert paralleism
+    device: "cpu"   # which devices to load this module when initializing
+    kwargs:
+      prefill_device: "cuda"
+      prefill_mlp_type: "MLPExpertsTorch"
+      generate_device: "cpu"
+      generate_mlp_type:  "MLPCPUExperts"
+      out_device: "cuda"
+  recursive: False # don't recursively inject submodules of this module
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.layer_wise_prefill.Qwen2MoeModelPerLayerPrefill"
+    kwargs:
+      per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill

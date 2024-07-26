@@ -1,0 +1,17 @@
+__pycache__
+build
+.vscode
+*.so
+*.cache
+server.db
+logs
+node_modules
+*.nsys-rep
+.vs/
+*pycache*
+*build/
+*/third_party/*
+.DS_Store
+compile_commands.json
+*.egg-info*
+*dist/
