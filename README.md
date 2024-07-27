@@ -3,7 +3,8 @@
   <p align="center">
   
   <picture>
-    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/9fa710bf-1389-46b7-b9d2-3f67b98bd7a6" width=50%>
+    <img alt="KTransformers" src="https://github.com/user-attachments/assets/a1ec04fc-10bb-4fcf-b0fe-cd55071e3423" width=50%>
+
   </picture>
   
   </p>
@@ -25,16 +26,14 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <h2 id="show-cases">🔥 Show Cases</h2>
 <h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
 <p align="center">
-
-  https://github.com/user-attachments/assets/3f85780e-aa53-4d2f-91b2-5585c8dade85
-
+https://github.com/user-attachments/assets/38ee32c7-4280-4563-b068-78181f9c3694
 </p>
 
 - **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
 
 <p align="center">
   <picture>
-    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/81efb94f-f859-4413-b6e0-d986508ad667" width=80%>
+    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/6adb26bd-719a-4b77-9513-8e1b4e79b52b" width=80%>
   </picture>
 </p>
 
@@ -42,9 +41,8 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 - **VSCode Integration:** Wrapped into an OpenAI and Ollama compatible API for seamless integration as a backend for [Tabby](https://github.com/TabbyML/tabby) and various other frontends.
 
 <p align="center">
-  <!-- <img alt="Tabby integration" src="https://XXXX.png" width=55%> -->
 
-  https://github.com/user-attachments/assets/e6e27cb3-8372-44e6-8f1f-34402eae56c1
+https://github.com/user-attachments/assets/4cf59f33-8f67-4806-a5c0-540e49bb8305
   
 </p>
 
