@@ -3,7 +3,8 @@
   <p align="center">
   
   <picture>
-    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/9fa710bf-1389-46b7-b9d2-3f67b98bd7a6" width=50%>
+    <img alt="KTransformers" src="https://github.com/user-attachments/assets/a1ec04fc-10bb-4fcf-b0fe-cd55071e3423" width=50%>
+
   </picture>
   
   </p>
@@ -26,7 +27,11 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
 <p align="center">
 
-  https://github.com/user-attachments/assets/3f85780e-aa53-4d2f-91b2-5585c8dade85
+
+Uploading ktransformers_vs_llamacpp.mp4…
+
+
+  
 
 </p>
 
@@ -44,7 +49,12 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <p align="center">
   <!-- <img alt="Tabby integration" src="https://XXXX.png" width=55%> -->
 
-  https://github.com/user-attachments/assets/e6e27cb3-8372-44e6-8f1f-34402eae56c1
+
+
+https://github.com/user-attachments/assets/4cf59f33-8f67-4806-a5c0-540e49bb8305
+
+
+  
   
 </p>
 
