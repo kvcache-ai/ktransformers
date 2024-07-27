@@ -3,10 +3,10 @@
   <p align="center">
   
   <picture>
-    <img alt="KTransformers" src="https://github.com/user-attachments/assets/a1ec04fc-10bb-4fcf-b0fe-cd55071e3423" width=50%>
+    <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
 
   </picture>
-  
+
   </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference Optimizations</h3>
   <strong><a href="#show-cases">🔥 Show Cases</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#tutorial">📃 Tutorial</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬  Discussion </a> </strong>
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
 
 <p align="center">
   <picture>
-    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/6adb26bd-719a-4b77-9513-8e1b4e79b52b" width=80%>
+    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/d052924e-8631-44de-aad2-97c54b965693" width=80%>
   </picture>
 </p>
 
@@ -221,7 +221,7 @@ Access website with url [http://localhost:10002/web/index.html#/chat](http://loc
 
 <p align="center">
   <picture>
-    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=80%>
+    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=90%>
   </picture>
 </p>
 
@@ -235,7 +235,7 @@ This allows researchers to easily replace original torch modules with optimized 
 </br>
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="https://github.com/user-attachments/assets/6b4c1e54-9f6d-45c5-a3fc-8fa45e7d257e" width=50%>
+    <img alt="Inject-Struction" src="https://github.com/user-attachments/assets/6b4c1e54-9f6d-45c5-a3fc-8fa45e7d257e" width=65%>
   </picture>
 </p>
 
