@@ -26,7 +26,9 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <h2 id="show-cases">🔥 Show Cases</h2>
 <h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
 <p align="center">
-https://github.com/user-attachments/assets/38ee32c7-4280-4563-b068-78181f9c3694
+
+https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
+
 </p>
 
 - **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
@@ -42,8 +44,8 @@ https://github.com/user-attachments/assets/38ee32c7-4280-4563-b068-78181f9c3694
 
 <p align="center">
 
-https://github.com/user-attachments/assets/4cf59f33-8f67-4806-a5c0-540e49bb8305
-  
+https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
+
 </p>
 
 
