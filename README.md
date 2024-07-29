@@ -74,24 +74,37 @@ Some preparation:
   conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
   ```
 
-  Download source code:
+- Make sure that PyTorch, packaging, ninja is installed
+  ```
+  pip install torch packaging ninja
+  ```
+
+<h3>Installation</h3>
+You can install using Pypi:
+
+```
+pip install ktransformers --no-build-isolation
+```
+
+Or download source code and compile:
+ - init source code 
   ```sh
   git clone https://github.com/kvcache-ai/ktransformers.git
   cd ktransformers
   git submodule init
   git submodule update
   ```
+ - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
+ - Compile and install
+   ```
+   bash install.sh
+   ```
 
 <h3>Local Chat</h3>
 We provide a simple command-line local chat Python script that you can run for testing. 
 
   > Note that this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to [RESTful API and Web UI](#id_666). We use the DeepSeek-V2-Lite-Chat-GGUF model as an example here. But we alse support other models, you can replace it with any other model that you want to test. 
 
-<h4>Install</h4>
-
-```sh
-bash install.sh
-```
 
 <h4>Run Example</h4>
 
@@ -109,11 +122,11 @@ wget https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/resolve/main/DeepS
 cd .. # Move to repo's root dir
 
 # Start local chat
-python  ktransformers/local_chat.py --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
 
 # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
-# python  ktransformers/local_chat.py --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
 ```
 
 
@@ -154,7 +167,7 @@ wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2
 
 cd ..
 
-python ktransformers/local_chat.py --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
+python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
 
 # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
@@ -172,11 +185,11 @@ wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/De
 
 cd ..
 
-python ktransformers/local_chat.py --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
 
 # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
-# python  ktransformers/local_chat.py --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
 ```
 
 | model name | weights download link |
@@ -193,15 +206,6 @@ python ktransformers/local_chat.py --model_name deepseek-ai/DeepSeek-V2-Chat-062
 
 <h3>RESTful API and Web UI</h3>
 
-<h4>Install</h4>
-
-[Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```pip install .```
-  
-Install ktransformers with source.
-```
-pip install -r requirements-local_chat.txt
-pip install . --no-build-isolation
-```
 
 Start without website:
 
