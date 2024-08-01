@@ -43,7 +43,11 @@ In the current version of KTransformers, we utilize Marlin for GPU kernels and l
     <img alt="CPUInfer Performance" src="../assets/cpuinfer.png" width=80%>
   </picture>
 </p>
-
+<p align="center">
+  <picture>
+    <img alt="marlin performance" src="https://github.com/IST-DASLab/marlin/blob/master/assets/sustained.png?raw=true" width=80%>
+  </picture>
+</p>
 
 ### Arithmetic Intensity Guided Offloading
 
