@@ -6,7 +6,7 @@ Author       : chenxl
 Date         : 2024-07-27 16:15:27
 Version      : 1.0.0
 LastEditors  : chenxl 
-LastEditTime : 2024-07-29 09:40:24
+LastEditTime : 2024-07-31 09:44:46
 Adapted from:
 https://github.com/Dao-AILab/flash-attention/blob/v2.6.3/setup.py
 Copyright (c) 2023, Tri Dao.
@@ -19,6 +19,7 @@ import re
 import ast
 import subprocess
 import platform
+import http.client
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -28,7 +29,16 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools import setup, Extension
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
-
+class CpuInstructInfo:
+    CPU_INSTRUCT = os.getenv("CPU_INSTRUCT", "NATIVE")
+    FANCY = "FANCY"
+    AVX512 = "AVX512"
+    AVX2 = "AVX2"
+    CMAKE_NATIVE = "-DLLAMA_NATIVE=ON"
+    CMAKE_FANCY = "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON -DLLAMA_AVX512=ON -DLLAMA_AVX512_FANCY_SIMD=ON"
+    CMAKE_AVX512 = "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON -DLLAMA_AVX512=ON"
+    CMAKE_AVX2 = "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON"
+    
 class VersionInfo:
     THIS_DIR = os.path.dirname(os.path.abspath(__file__))
     PACKAGE_NAME = "ktransformers"
@@ -61,12 +71,24 @@ class VersionInfo:
             raise ValueError("Unsupported platform: {}".format(sys.platform))
 
     def get_cpu_instruct(self,):
+        if CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.FANCY:
+            return "fancy"
+        elif CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.AVX512:
+            return "avx512"
+        elif CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.AVX2:
+            return "avx2"
+        else:
+            print("Using native cpu instruct")
         if sys.platform.startswith("linux"):
             with open('/proc/cpuinfo', 'r', encoding="utf-8") as cpu_f:
                 cpuinfo = cpu_f.read()
             flags_line = [line for line in cpuinfo.split(
                 '\n') if line.startswith('flags')][0]
             flags = flags_line.split(':')[1].strip().split(' ')
+            # fancy with AVX512-VL, AVX512-BW, AVX512-DQ, AVX512-VNNI
+            for flag in flags:
+                if 'avx512bw' in flag:
+                    return 'fancy'
             for flag in flags:
                 if 'avx512' in flag:
                     return 'avx512'
@@ -116,6 +138,7 @@ class BuildWheelsCommand(_bdist_wheel):
     def run(self):
         if VersionInfo.FORCE_BUILD:
             super().run()
+            return
         wheel_filename, wheel_url = self.get_wheel_name()
         print("Guessing wheel URL: ", wheel_url)
         try:
@@ -132,7 +155,7 @@ class BuildWheelsCommand(_bdist_wheel):
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
-        except (urllib.error.HTTPError, urllib.error.URLError):
+        except (urllib.error.HTTPError, urllib.error.URLError, http.client.RemoteDisconnected):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
@@ -186,7 +209,19 @@ class CMakeBuild(BuildExtension):
         if "CMAKE_ARGS" in os.environ:
             cmake_args += [
                 item for item in os.environ["CMAKE_ARGS"].split(" ") if item]
-
+            
+        if CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.FANCY:
+            cpu_args = CpuInstructInfo.CMAKE_FANCY
+        elif CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.AVX512:
+            cpu_args = CpuInstructInfo.CMAKE_AVX512
+        elif CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.AVX2:
+            cpu_args = CpuInstructInfo.CMAKE_AVX2
+        else:
+            cpu_args = CpuInstructInfo.CMAKE_NATIVE
+        
+        cmake_args += [
+            item for item in cpu_args.split(" ") if item
+        ]
         # In this example, we pass in the version to C++. You might not need to.
         cmake_args += [
             f"-DEXAMPLE_VERSION_INFO={self.distribution.get_version()}"]

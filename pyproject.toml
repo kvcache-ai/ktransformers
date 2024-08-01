@@ -1,7 +1,7 @@
 [build-system]
 requires = [
   "setuptools",
-  "torch == 2.3.1", 
+  "torch >= 2.3.0", 
   "ninja",
   "packaging"
   ]
@@ -29,7 +29,7 @@ dependencies = [
   "fire"
 ]
 
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 
 authors = [
   {name = "KVCache.AI", email = "zhang.mingxing@outlook.com"}
@@ -50,6 +50,7 @@ keywords = ["ktransformers", "llm"]
 
 classifiers = [
   "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12"
 ]
