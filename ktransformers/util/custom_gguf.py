@@ -259,6 +259,7 @@ class GGUFLoader:
             self.tensor_file_map[name] = f.name
         self.tensor_info.update(tensor_info)
         self.gguf_file_meta.update(info)
+        print(tensor_info["token_embd.weight"])
     
     def get_mmap_tensor(self, name):
         t = self.tensor_info[name]
@@ -268,9 +269,11 @@ class GGUFLoader:
         item_type = t["item_type"]
         item_count = t["item_count"]
         itemsize = int(np.empty([], dtype = item_type).itemsize)
+        print(offset, offset + itemsize * item_count)
         return mmap_data[offset : offset + itemsize * item_count]
     
     def load_gguf_tensor(self, name: str, device:str = "cpu")->torch.Tensor:
+        print("load_gguf_tensor")
         t = self.tensor_info[name]
 
         shape = t["shape"]
@@ -283,9 +286,14 @@ class GGUFLoader:
 
         data = self.get_mmap_tensor(name)
         
+        print("load_gguf_tensor")
+        print(data)
 
         if "cuda" in device.lower():
             values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
+            #values = GGML_DEQUANTIZE[ggml_name](data)
+            #print("load_gguf_tensor")
+            #values = torch.from_numpy(values).to(device = device)
         else:
             values = GGML_DEQUANTIZE[ggml_name](data)
             values = torch.from_numpy(values)
@@ -429,20 +437,24 @@ def dequantize_q4_k(data):
     # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.h#L116
     block_size = GGML_BLOCK_SIZES["Q4_K"]
     num_blocks = len(data) // block_size
-
+    print("dequantize_q4_k")
     data_f16 = np.frombuffer(data, dtype=np.float16).reshape(num_blocks, block_size // 2)
     data_u8 = np.frombuffer(data, dtype=np.uint8).reshape(num_blocks, block_size)
-
+    print("dequantize_q4_k")
     # Casting to float32 because float16 is very slow on CPU
     scale_factors = data_f16[:, 0].reshape(num_blocks, 1, 1).astype(np.float32)
     scale_offsets = data_f16[:, 1].reshape(num_blocks, 1, 1).astype(np.float32)
     qs1 = data_u8[:, 4:16].reshape(num_blocks, 12, 1)
     qs2 = data_u8[:, 16:].reshape(num_blocks, 4, 32)
-
+    print("dequantize_q4_k")
     # Dequantize scales and offsets (6 bits and 4 + 2 bits)
+    print(scale_factors, qs1)
+    scale_factors = scale_factors[-10:]
+    qs1 = qs1[-10:]
     factors = scale_factors * np.concatenate([qs1[:, 0:4] & 0b111111, (qs1[:, 8:] & 15) | ((qs1[:, 0:4] >> 6) << 4)], axis=1)
+    print(factors)
     offsets = scale_offsets * np.concatenate([qs1[:, 4:8] & 0b111111, (qs1[:, 8:] >> 4) | ((qs1[:, 4:8] >> 6) << 4)], axis=1)
-
+    print("dequantize_q4_k")
     # Interleave low and high quantized bits
     qs2 = np.stack([qs2 & 0xf, qs2 >> 4], axis=2).reshape(num_blocks, 8, 32)
     # Dequantize final weights using scales and offsets
