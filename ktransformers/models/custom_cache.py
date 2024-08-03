@@ -46,8 +46,9 @@ class StaticCache(transformers.StaticCache):
         self.value_cache: List[torch.Tensor] = []
         cache_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, self.head_dim)
         if config.architectures[0] == "DeepseekV2ForCausalLM":
-            # key_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, config.qk_rope_head_dim + config.qk_nope_head_dim)
-            # value_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, config.v_head_dim)
+            # TODO: for deepseek, cache_shape is different whether using Absorbed MLA, check it automatically
+            #key_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, config.qk_rope_head_dim + config.qk_nope_head_dim)
+            #value_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, config.v_head_dim)
             key_shape = (max_batch_size, 1, self.max_cache_len, config.qk_rope_head_dim)
             value_shape = (max_batch_size, 1, self.max_cache_len, config.kv_lora_rank)
         else:

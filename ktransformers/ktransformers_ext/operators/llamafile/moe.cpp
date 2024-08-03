@@ -95,7 +95,7 @@ MOE::MOE(MOEConfig config) {
 
     m_local_pos_.resize(config_.group_max_len);
     for (int i = 0; i < config_.group_max_len; i++) {
-        m_local_pos_[i].reserve(config_.expert_num);
+        m_local_pos_[i].resize(config_.routed_expert_num);
     }
     m_local_num_.resize(config_.expert_num);
     m_local_gate_input_ptr_.resize(config_.expert_num);
