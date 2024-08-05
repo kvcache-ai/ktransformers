@@ -112,5 +112,4 @@ def local_chat(
         generated = prefill_and_generate(model, tokenizer, input_tensor.cuda(), max_new_tokens)
 
 if __name__ == "__main__":
-    local_chat(model_path="deepseek-ai/DeepSeek-V2-Lite-Chat", gguf_path="D:\models\DeepSeek-V2-Lite-Chat\Q4_K_M", cpu_infer=23)
-    #fire.Fire(local_chat)
+    fire.Fire(local_chat)

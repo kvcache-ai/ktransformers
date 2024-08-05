@@ -37,7 +37,7 @@ static const struct GemmFuncs {
     // typeof(llamafile_mixmul)* mixmul;
     // typeof(llamafile_mixmul_iqk)* iqk_mixmul = iqk_mul_mat_moe_unsupported;
     GemmFuncs() {
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(_M_X64)
         // if (X86_HAVE(AVX)) {
         //     if (X86_HAVE(FMA)) {
         //         if (X86_HAVE(AVX2)) {
@@ -89,10 +89,12 @@ static const struct GemmFuncs {
         //     sgemm = llamafile_sgemm_unsupported;
         //     mixmul = llamafile_mixmul_unsupported;
         // }
+
 #if defined(__AVX__)
-#if defined(__FMA__)
+#if defined(__FMA__) || (defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__)))
 #if defined(__AVX2__)
 #if defined(__AVX512F__)
+        printf("__AVX512F__\n");
 #if defined(__AVX512VL__) && defined(__AVX512BW__) && defined(__AVX512DQ__) && defined(__AVX512VNNI__) && defined(__AVX512BF16__)
         // AMD Zen4+ (2023-)
         sgemm = llamafile_sgemm_amd_zen4;

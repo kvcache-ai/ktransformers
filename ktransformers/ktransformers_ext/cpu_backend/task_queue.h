@@ -17,6 +17,44 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+class custom_mutex {
+private:
+#ifdef _WIN32
+    HANDLE  global_mutex;
+#elif
+    std::mutex global_mutex;
+#endif
+    
+public:
+    custom_mutex()
+    {
+#ifdef _WIN32
+        HANDLE  global_mutex;
+#endif
+    }
+
+    void lock()
+    {
+#ifdef _WIN32
+        WaitForSingleObject(global_mutex, INFINITE);
+#elif
+        global_mutex.lock();
+#endif
+    }
+
+    void unlock()
+    {
+#ifdef _WIN32
+        ReleaseMutex(global_mutex);
+#elif
+        global_mutex.lock();
+#endif
+    }
+};
 
 class TaskQueue {
    public:
@@ -32,7 +70,7 @@ class TaskQueue {
 
     std::queue<std::function<void()>> tasks;
     std::thread worker;
-    std::mutex mutex;
+    custom_mutex mutex;
     std::atomic<bool> sync_flag;
     std::atomic<bool> exit_flag;
 };

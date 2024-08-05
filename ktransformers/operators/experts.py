@@ -19,7 +19,8 @@ import torch
 import sys, os
 from ktransformers.operators.base_operator import BaseInjectedModule
 
-sys.path.append(os.path.dirname(__file__) + "/../ktransformers_ext/build/Debug/")
+#sys.path.append(os.path.dirname(__file__) + "/../ktransformers_ext/build/")
+sys.path.append(os.path.dirname(__file__) + "\\..\\ktransformers_ext\\build\\Release")
 import cpuinfer_ext
 from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
@@ -179,6 +180,7 @@ class MLPCPUExperts(MLPExpertsBase):
     def forward(self, input_tensor, expert_ids, weights):
         # generate, capture and run cuda graph
         if input_tensor.size(0)==1:
+            # TODO: this branch is unreachable, but the shape of input_tensor([1,hidden_size]) and input_tensor_cpu([hidden_size]) is not compatible
             #print("capturing experts")
             MLPCPUExperts.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
             MLPCPUExperts.expert_ids_cpu.copy_(expert_ids, non_blocking=True)

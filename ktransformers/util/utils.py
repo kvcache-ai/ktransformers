@@ -147,7 +147,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000):
         seq_length += 1
 
         cuda_graph_runner = CUDAGraphRunner()
-        #cuda_graph_runner.capture(model, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, return_dict=False, use_cache=True)
+        cuda_graph_runner.capture(model, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, return_dict=False, use_cache=True)
         start_time = time.time()
         for _ in range(1, max_new_tokens):
             next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values)
