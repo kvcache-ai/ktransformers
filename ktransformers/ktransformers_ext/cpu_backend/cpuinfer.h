@@ -29,9 +29,9 @@ class CPUInfer {
         printf("alive\n");
         backend_ = new Backend(thread_num - 1);
         task_queue_ = new TaskQueue();
-        //for (int i = 0; i < (1 << 16); ++i) {
-        //    ggml_table_f32_f16[i] = GGML_COMPUTE_FP16_TO_FP32(i);
-        //}
+        for (int i = 0; i < (1 << 16); ++i) {
+            ggml_table_f32_f16[i] = GGML_COMPUTE_FP16_TO_FP32(i);
+        }
     }
 
     ~CPUInfer() {

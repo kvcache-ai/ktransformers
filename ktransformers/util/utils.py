@@ -76,9 +76,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000):
     tokens = []
     
     def decode_one_tokens(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values):
-        #logits = cuda_graph_runner(cur_token, position_ids, cache_position)
-        #past_key_values.change_seq_length(1)
-        #"""
+        logits = cuda_graph_runner(cur_token, position_ids, cache_position)
+        past_key_values.change_seq_length(1)
+        """
         inputs_embeds = model.model.embed_tokens(cur_token.to("cpu")).to("cuda")
         custom_stream = torch.cuda.Stream()
         with torch.cuda.stream(custom_stream):
@@ -87,7 +87,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000):
                          cache_position = cache_position,
                          past_key_values = past_key_values,
                          return_dict = False, use_cache = True) [0]
-        #"""            
+        """            
         torch.cuda.synchronize()
         #print(logits)
         next_token_scores = logits_warper(inputs, logits[:, -1, :])
