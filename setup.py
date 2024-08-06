@@ -67,6 +67,8 @@ class VersionInfo:
         """
         if sys.platform.startswith("linux"):
             return f'linux_{platform.uname().machine}'
+        elif sys.platform == "win32":
+            return "win_amd64"
         else:
             raise ValueError("Unsupported platform: {}".format(sys.platform))
 
@@ -97,6 +99,8 @@ class VersionInfo:
                     return 'avx2'
             raise ValueError(
                 "Unsupported cpu Instructions: {}".format(flags_line))
+        elif sys.platform == "win32":
+            return 'native'
         else:
             raise ValueError("Unsupported platform: {}".format(sys.platform))
 
