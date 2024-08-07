@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.17)
 project(cpuinfer_ext VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -190,7 +190,13 @@ else()
     message(STATUS "Unknown architecture")
 endif()
 
-find_package(CUDA REQUIRED)
+# message(STATUS "CUDAToolkit_ROOT:${CUDAToolkit_ROOT}")
+# find_package(FindCUDAToolkit REQUIRED)
+# if(CUDAToolkit_FOUND)
+#     message(STATUS "Found CUDA cudart lib at:${CUDAToolkit_LIBRARY_DIR}")
+# else()
+#     message(STATUS "Can't found CUDA lib")
+# endif()
 
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
@@ -199,7 +205,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pybind11 ${CMAKE_
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
-include_directories("${CUDA_INCLUDE_DIRS}")
+include_directories("D:/CUDA/v12.5/include")
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
@@ -210,4 +216,4 @@ message(STATUS "ALL_SOURCES: ${ALL_SOURCES}")
 
 pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
 target_link_libraries(${PROJECT_NAME} PRIVATE llama)
-target_link_libraries(${PROJECT_NAME} PRIVATE "/usr/local/cuda/lib64/libcudart.so")
+target_link_libraries(${PROJECT_NAME} PRIVATE "D:/CUDA/v12.5/lib/x64/cudart.lib")#CUDA::cudart

@@ -321,8 +321,8 @@ bool llamafile_sgemm(long m, long n, long k, const void* A, long lda, const void
     assert(ith < nth);
 
 #if QK_K == 256
-#if defined(__x86_64__)
-#if defined(__AVX2__) && defined(__FMA__)
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__AVX2__) && (defined(__FMA__) || (defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__))))
     // if (X86_CHECK(AVX2) && X86_CHECK(FMA)) {
     if (Btype == GGML_TYPE_Q8_K && Ctype == GGML_TYPE_F32) {
         if (iqk_mul_mat(m, n, k * QK_K, Atype, A, B, (float*)C, ldc, ith, nth)) {

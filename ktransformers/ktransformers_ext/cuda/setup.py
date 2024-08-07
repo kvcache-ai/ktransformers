@@ -10,7 +10,7 @@ setup(name='KTransformersOps',
                 'custom_gguf/dequant.cu',
                 'binding.cpp',
                 'gptq_marlin/gptq_marlin.cu',
-                # 'gptq_marlin_repack.cu',
+               # 'gptq_marlin_repack.cu',
       ])
       ],
       cmdclass={'build_ext': BuildExtension
