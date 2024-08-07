@@ -3,6 +3,6 @@
 // Copyrigth 2024 Iwan Kawrakow.
 // Copyright(c) 2024 by KVCache.AI, All Rights Reserved.
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(_M_X64)
 #include "iqk_mul_mat.inc"
 #endif  // __x86_64__

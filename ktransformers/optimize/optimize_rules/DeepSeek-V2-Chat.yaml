@@ -26,7 +26,7 @@
       prefill_device: "cuda"
       prefill_mlp_type: "MLPExpertsTorch"
       generate_device: "cpu"
-      generate_mlp_type:  "MLPCPUExperts"
+      generate_mlp_type: "MLPCPUExperts"
       out_device: "cuda"
   recursive: False # don't recursively inject submodules of this module
 - match:
