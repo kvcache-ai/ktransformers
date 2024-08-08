@@ -1703,28 +1703,63 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
+
+
     // Define kernel configurations
-    if (false) {
+#define undefined_error TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " + \
+    str(prob_n) + ", " + str(prob_k) + "]" + \
+        ", has_act_order = " + str(has_act_order) + \
+        ", num_groups = " + str(num_groups) + \
+        ", group_size = " + str(group_size) + \
+        ", thread_m_blocks = " + str(thread_m_blocks) + \
+        ", thread_n_blocks = " + str(thread_n_blocks) + \
+        ", thread_k_blocks = " + str(thread_k_blocks));
+
+
+    if (num_bits == 4 && num_threads == 256)
+    {
+        if (false) {
+        }
+        CALL_IF(4, 32, 2, 256)
+        CALL_IF(4, 16, 4, 256)
+        CALL_IF(4, 8, 8, 256)
+        else {
+            undefined_error
+        }
     }
-    CALL_IF(4, 32, 2, 256)
-    CALL_IF(4, 16, 4, 256)
-    CALL_IF(4, 8, 8, 256)
-    CALL_IF(4, 8, 4, 128)
-    CALL_IF(4, 4, 8, 128)
-    CALL_IF(8, 32, 2, 256)
-    CALL_IF(8, 16, 4, 256)
-    CALL_IF(8, 8, 8, 256)
-    CALL_IF(8, 8, 4, 128)
-    CALL_IF(8, 4, 8, 128)
+    else if (num_bits == 4 && num_threads == 128)
+    {
+        if (false) {
+        }
+        CALL_IF(4, 8, 4, 128)
+        CALL_IF(4, 4, 8, 128)
+        else {
+            undefined_error
+        }
+    }
+    else if (num_bits == 8 && num_threads == 256)
+    {
+        if (false) {
+        }
+        CALL_IF(8, 32, 2, 256)
+        CALL_IF(8, 16, 4, 256)
+        CALL_IF(8, 8, 8, 256)
+        else {
+            undefined_error
+        }
+    }
+    else if (num_bits == 8 && num_threads == 128)
+    {
+        if (false) {
+        }
+        CALL_IF(8, 8, 4, 128)
+        CALL_IF(8, 4, 8, 128)
+        else {
+            undefined_error
+        }
+    }
     else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
-                             str(prob_n) + ", " + str(prob_k) + "]" +
-                             ", has_act_order = " + str(has_act_order) +
-                             ", num_groups = " + str(num_groups) +
-                             ", group_size = " + str(group_size) +
-                             ", thread_m_blocks = " + str(thread_m_blocks) +
-                             ", thread_n_blocks = " + str(thread_n_blocks) +
-                             ", thread_k_blocks = " + str(thread_k_blocks));
+        undefined_error
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
