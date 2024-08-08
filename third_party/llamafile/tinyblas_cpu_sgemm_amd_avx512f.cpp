@@ -3,7 +3,7 @@
 // Copyrigth 2024 Mozilla Foundation.
 // Copyright(c) 2024 by KVCache.AI, All Rights Reserved.
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(_M_X64)
 #define llamafile_sgemm llamafile_sgemm_amd_avx512f
 #include "tinyblas_cpu_sgemm.inc"
 #endif  // __x86_64__
