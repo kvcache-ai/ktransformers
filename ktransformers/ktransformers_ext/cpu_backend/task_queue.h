@@ -3,8 +3,8 @@
  * @Author       : chenht2022
  * @Date         : 2024-07-16 10:43:18
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022 
- * @LastEditTime : 2024-07-25 10:33:47
+ * @LastEditors  : chenxl 
+ * @LastEditTime : 2024-08-08 04:23:51
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #ifndef CPUINFER_TASKQUEUE_H
@@ -25,7 +25,7 @@ class custom_mutex {
 private:
 #ifdef _WIN32
     HANDLE  global_mutex;
-#elif
+#else
     std::mutex global_mutex;
 #endif
     
@@ -41,7 +41,7 @@ public:
     {
 #ifdef _WIN32
         WaitForSingleObject(global_mutex, INFINITE);
-#elif
+#else
         global_mutex.lock();
 #endif
     }
@@ -50,7 +50,7 @@ public:
     {
 #ifdef _WIN32
         ReleaseMutex(global_mutex);
-#elif
+#else
         global_mutex.lock();
 #endif
     }
