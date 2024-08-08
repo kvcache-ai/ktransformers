@@ -6,7 +6,7 @@ Author       : chenht2022
 Date         : 2024-07-25 10:32:05
 Version      : 1.0.0
 LastEditors  : chenht2022 
-LastEditTime : 2024-07-25 10:33:00
+LastEditTime : 2024-08-06 10:41:28
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 import os, sys
@@ -15,21 +15,21 @@ sys.path.append(os.path.dirname(__file__) + '/../build')
 import cpuinfer_ext
 import torch
 
+expert_num = 160
+hidden_size = 5120
+intermediate_size = 1536
+stride = 16
+group_min_len = 10
+group_max_len = 1024
+n_routed_experts = 6
+layer_num = 10
+qlen = 1
+CPUInfer = cpuinfer_ext.CPUInfer(64)
+warm_up_iter = 1000
+test_iter = 10000
+
 def bench_moe(quant_mode: str):
     with torch.inference_mode(mode=True):
-        expert_num = 10
-        hidden_size = 5120
-        intermediate_size = 1536
-        stride = 16
-        group_min_len = 10
-        group_max_len = 1024
-        n_routed_experts = 6
-        layer_num = 10
-        qlen = 1
-        CPUInfer = cpuinfer_ext.CPUInfer(64)
-        warm_up_iter = 1000
-        test_iter = 10000
-
         hidden_type = 30 # ggml_type::GGML_TYPE_BF16
         if quant_mode == "fp32":
             gate_type = 0 # ggml_type::GGML_TYPE_F32
@@ -104,32 +104,38 @@ def bench_moe(quant_mode: str):
             up_projs.append(up_proj)
             down_projs.append(down_proj)
             moes.append(moe)
-        expert_ids = torch.randint(0, expert_num, (layer_num, qlen, n_routed_experts), dtype=torch.int64, device = "cuda").to("cpu").contiguous()
+        expert_ids = torch.stack([torch.stack([torch.randperm(expert_num, dtype=torch.int64, device = "cuda")[:n_routed_experts] for _ in range(qlen)]) for _ in range(layer_num)]).to("cpu").contiguous()
         weights = torch.rand((layer_num, qlen, n_routed_experts), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
         input = torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
         output = torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
 
         # warm up
         for i in range(warm_up_iter):
-            CPUInfer.submit(moes[i % layer_num].forward, 
-                            qlen, 
-                            n_routed_experts, 
-                            expert_ids[i % layer_num].data_ptr(), 
-                            weights[i % layer_num].data_ptr(),
-                            input[i % layer_num].data_ptr(), 
-                            output[i % layer_num].data_ptr())
+            CPUInfer.submit(
+                moes[i % layer_num].forward( 
+                    qlen, 
+                    n_routed_experts, 
+                    expert_ids[i % layer_num].data_ptr(), 
+                    weights[i % layer_num].data_ptr(),
+                    input[i % layer_num].data_ptr(), 
+                    output[i % layer_num].data_ptr()
+                )
+            )
             CPUInfer.sync()
 
         # test
         start = time.perf_counter()
         for i in range(test_iter):
-            CPUInfer.submit(moes[i % layer_num].forward, 
-                            qlen, 
-                            n_routed_experts, 
-                            expert_ids[i % layer_num].data_ptr(), 
-                            weights[i % layer_num].data_ptr(),
-                            input[i % layer_num].data_ptr(), 
-                            output[i % layer_num].data_ptr())
+            CPUInfer.submit(
+                moes[i % layer_num].forward( 
+                    qlen, 
+                    n_routed_experts, 
+                    expert_ids[i % layer_num].data_ptr(), 
+                    weights[i % layer_num].data_ptr(),
+                    input[i % layer_num].data_ptr(), 
+                    output[i % layer_num].data_ptr()
+                )
+            )
             CPUInfer.sync()
         end = time.perf_counter()
         total_time = end - start
