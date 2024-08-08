@@ -6,7 +6,7 @@ Author       : chenht2022
 Date         : 2024-07-16 10:43:18
 Version      : 1.0.0
 LastEditors  : chenht2022 
-LastEditTime : 2024-07-25 10:32:55
+LastEditTime : 2024-08-06 10:36:04
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 import os, sys
@@ -15,15 +15,18 @@ sys.path.append(os.path.dirname(__file__) + '/../build')
 import cpuinfer_ext
 import torch
 
+hidden_size = 5120
+intermediate_size = 3072
+stride = 16
+group_max_len = 1024
+layer_num = 10
+qlen = 1
+CPUInfer = cpuinfer_ext.CPUInfer(64)
+warm_up_iter = 1000
+test_iter = 10000
+
 def bench_mlp(quant_mode: str):
     with torch.inference_mode(mode=True):
-        hidden_size = 5120
-        intermediate_size = 3072
-        stride = 16
-        layer_num = 10
-        CPUInfer = cpuinfer_ext.CPUInfer(64)
-        warm_up_iter = 1000
-        test_iter = 10000
 
         hidden_type = 30 # ggml_type::GGML_TYPE_BF16
         if quant_mode == "fp32":
@@ -93,32 +96,39 @@ def bench_mlp(quant_mode: str):
             gate_proj = torch.randn((intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             up_proj = torch.randn((intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             down_proj = torch.randn((hidden_size, intermediate_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-            config = cpuinfer_ext.mlp.MLPConfig(hidden_size, intermediate_size, stride, gate_proj.data_ptr(), up_proj.data_ptr(), down_proj.data_ptr(), gate_type, up_type, down_type, hidden_type)
+            config = cpuinfer_ext.mlp.MLPConfig(hidden_size, intermediate_size, stride, group_max_len, gate_proj.data_ptr(), up_proj.data_ptr(), down_proj.data_ptr(), gate_type, up_type, down_type, hidden_type)
             mlp = cpuinfer_ext.mlp.MLP(config)
             gate_projs.append(gate_proj)
             up_projs.append(up_proj)
             down_projs.append(down_proj)
             mlps.append(mlp)
+        input = torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
+        output = torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
 
         # warm up
         for i in range(warm_up_iter):
-            mlp = mlps[i % layer_num]
-            input = torch.randn((1, hidden_size), dtype=torch.bfloat16).contiguous()
-            output = torch.empty((1, hidden_size), dtype=torch.bfloat16).contiguous()
-            CPUInfer.submit(mlp.forward, input.data_ptr(), output.data_ptr())
+            CPUInfer.submit(
+                mlps[i % layer_num].forward( 
+                    qlen, 
+                    input[i % layer_num].data_ptr(), 
+                    output[i % layer_num].data_ptr()
+                )
+            )
             CPUInfer.sync()
 
         # test
-        total_time = 0
+        start = time.perf_counter()
         for i in range(test_iter):
-            mlp = mlps[i % layer_num]
-            input = torch.randn((1, hidden_size), dtype=torch.bfloat16).contiguous()
-            output = torch.empty((1, hidden_size), dtype=torch.bfloat16).contiguous()
-            start = time.perf_counter()
-            CPUInfer.submit(mlp.forward, input.data_ptr(), output.data_ptr())
+            CPUInfer.submit(
+                mlps[i % layer_num].forward( 
+                    qlen, 
+                    input[i % layer_num].data_ptr(), 
+                    output[i % layer_num].data_ptr()
+                )
+            )
             CPUInfer.sync()
-            end = time.perf_counter()
-            total_time += end - start
+        end = time.perf_counter()
+        total_time = end - start
         print('Quant mode: ', quant_mode)
         print('Time(s): ', total_time)
         print('Iteration: ', test_iter) 
