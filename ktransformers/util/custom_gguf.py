@@ -98,6 +98,7 @@ def quant_shape_to_byte_shape(shape: Sequence[int], quant_type: GGMLQuantization
 
 GGML_TYPES = {
     "F32": 0,
+    "F16": 1,
     "Q4_0": 2,
     "Q5_0": 6,
     "Q8_0": 8,
@@ -112,6 +113,7 @@ GGML_NAMES = {ggml_type: name for name, ggml_type in GGML_TYPES.items()}
 
 GGML_BLOCK_SIZES = {
     "F32": 4,
+    "F16": 2,
     "Q4_0": 2 + 16,
     "Q5_0": 2 + 4 + 16,
     "Q8_0": 2 + 32,
@@ -124,6 +126,7 @@ GGML_BLOCK_SIZES = {
 
 GGML_ELEMENTS_PER_BLOCK = {
     "F32": 1,
+    "F16": 1,
     "Q4_0": 32,
     "Q5_0": 32,
     "Q8_0": 32,
