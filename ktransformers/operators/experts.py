@@ -19,8 +19,9 @@ import torch
 import sys, os
 from ktransformers.operators.base_operator import BaseInjectedModule
 
-#sys.path.append(os.path.dirname(__file__) + "/../ktransformers_ext/build/")
-sys.path.append(os.path.dirname(__file__) + "\\..\\ktransformers_ext\\build\\Release")
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build", "Release"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build", "Debug"))
 import cpuinfer_ext
 from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
