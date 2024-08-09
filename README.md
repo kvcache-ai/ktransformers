@@ -82,11 +82,12 @@ Some preparation:
 <h3>Installation</h3>
 
 1. Use a Docker image, see [documentation for Docker](./doc/en/docker.md) 
-2. You can install using Pypi:
+2. You can install using Pypi (for linux):
 
    ```
    pip install ktransformers --no-build-isolation
    ```
+   for windows we prepare a pre compiled whl package in [ktransformers-0.1.1+cu125torch24avx2-cp311-cp311-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.1/ktransformers-0.1.1+cu125torch24avx2-cp311-cp311-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced. 
 
 3. Or you can download source code and compile:
    - init source code 
@@ -97,10 +98,15 @@ Some preparation:
      git submodule update
      ```
    - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
-   - Compile and install
+   - Compile and install (for Linux)
      ```
      bash install.sh
      ```
+
+   - Compile and install(for Windows)
+     ```
+     install.bat
+     ``` 
 
 <h3>Local Chat</h3>
 We provide a simple command-line local chat Python script that you can run for testing. 
