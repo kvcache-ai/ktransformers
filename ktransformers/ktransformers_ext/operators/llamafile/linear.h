@@ -3,7 +3,7 @@
  * @Author       : chenht2022
  * @Date         : 2024-07-12 10:07:58
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022 
+ * @LastEditors  : chenht2022
  * @LastEditTime : 2024-07-25 10:35:00
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
@@ -22,34 +22,38 @@
 #include "llama.cpp/ggml-quants.h"
 #include "llama.cpp/ggml.h"
 #include "llamafile/sgemm.h"
+#include "shared_mem_buffer.h"
 
 struct LinearConfig {
     int input_size;
     int output_size;
     int stride;
+    int group_max_len;
     void* proj;
     ggml_type proj_type;
     ggml_type hidden_type;
 
     LinearConfig() {}
 
-    LinearConfig(int input_size, int output_size, int stride, void* proj, ggml_type proj_type, ggml_type hidden_type)
-        : input_size(input_size), output_size(output_size), stride(stride), proj(proj), proj_type(proj_type), hidden_type(hidden_type) {}
+    LinearConfig(int input_size, int output_size, int stride, int group_max_len, void* proj, ggml_type proj_type, ggml_type hidden_type)
+        : input_size(input_size), output_size(output_size), stride(stride), group_max_len(group_max_len), proj(proj), proj_type(proj_type), hidden_type(hidden_type) {}
 };
 
 class Linear {
    public:
     Linear(LinearConfig);
+    ~Linear();
     void warm_up(Backend* backend);
-    void forward(const void* input, void* output, Backend* backend);
+    void forward_many(int qlen, const void* input, void* output, Backend* backend);
+    void forward(int qlen, const void* input, void* output, Backend* backend);
 
    private:
     LinearConfig config_;
     void* proj_;  // [output_size * input_size ( /32 if quantized)]
 
-    std::vector<float> input_fp32_;    // [input_size]
-    std::vector<uint8_t> proj_input_;  // [input_size * 4]
-    std::vector<float> proj_output_;   // [output_size]
+    float* input_fp32_;    // [group_max_len * input_size]
+    uint8_t* proj_input_;  // [group_max_len * input_size * ggml_type_size(ggml_internal_get_type_traits(proj_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(proj_type).vec_dot_type)]
+    float* proj_output_;   // [group_max_len * output_size]
 };
 
 #endif

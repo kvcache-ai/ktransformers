@@ -14,14 +14,17 @@ import time
 import torch
 import torch.nn.quantized as nnq
 
+scale, zero_point = 0.1, 0  # Adjust scale and zero_point based on your dataset
+
+input_size = 16384
+output_size = 5120
+layer_num = 10
+qlen = 1
+warm_up_iter = 1000
+test_iter = 10000
+
 def bench_linear(quant_mode: str):
     with torch.inference_mode(mode=True):
-        input_size = 16384
-        output_size = 5120
-        layer_num = 10
-        warm_up_iter = 1000
-        test_iter = 10000
-
         if quant_mode == "fp32":
             proj_type = torch.float32
             bytes_per_elem = 4.000000
@@ -41,37 +44,32 @@ def bench_linear(quant_mode: str):
         for _ in range(layer_num):
             proj = torch.randn((output_size, input_size), dtype = torch.float32, device = "cuda").to("cpu").contiguous()
             if quant_mode == "qint8":
-                scale, zero_point = 0.1, 0  # Adjust scale and zero_point based on your dataset
                 proj_q = torch.quantize_per_tensor(proj, scale, zero_point, torch.qint8)
                 quantized_layer = nnq.Linear(input_size, output_size)
                 quantized_layer.set_weight_bias(proj_q, None)
                 projs.append(quantized_layer)
             else:
                 projs.append(proj.to(proj_type))
+        input = torch.randn((layer_num, qlen, input_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
 
         # warm up
         for i in range(warm_up_iter):
-            input = torch.randn((1, input_size), dtype=torch.float32).contiguous()
-            if quant_mode == "qint8":
-                input_q = torch.quantize_per_tensor(input, scale, zero_point, torch.quint8)
-                quantized_layer = projs[i % layer_num]
-                t_output = quantized_layer(input_q)
+            if isinstance(projs[i % layer_num], nnq.Linear):
+                input_q = torch.quantize_per_tensor(input[i % layer_num].to(torch.float32), scale, zero_point, torch.quint8)
+                t_output = projs[i % layer_num](input_q)
             else:
-                t_output = torch.mm(input.to(proj_type), projs[i % layer_num].t())
+                t_output = torch.mm(input[i % layer_num].to(proj_type), projs[i % layer_num].t())
 
         # test
-        total_time = 0
+        start = time.perf_counter()
         for i in range(test_iter):
-            input = torch.randn((1, input_size), dtype=torch.float32).contiguous()
-            start = time.perf_counter()
-            if quant_mode == "qint8":
-                input_q = torch.quantize_per_tensor(input, scale, zero_point, torch.quint8)
-                quantized_layer = projs[i % layer_num]
-                t_output = quantized_layer(input_q)
+            if isinstance(projs[i % layer_num], nnq.Linear):
+                input_q = torch.quantize_per_tensor(input[i % layer_num].to(torch.float32), scale, zero_point, torch.quint8)
+                t_output = projs[i % layer_num](input_q)
             else:
-                t_output = torch.mm(input.to(proj_type), projs[i % layer_num].t())
-            end = time.perf_counter()
-            total_time += end - start
+                t_output = torch.mm(input[i % layer_num].to(proj_type), projs[i % layer_num].t())
+        end = time.perf_counter()
+        total_time = end - start
         print('Quant mode: ', quant_mode)
         print('Time(s): ', total_time)
         print('Iteration: ', test_iter) 
