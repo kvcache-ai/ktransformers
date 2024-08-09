@@ -155,7 +155,7 @@ class MLPCPUExperts(MLPExpertsBase):
         self.moe = MOE(moe_config)
         self.cpu_infer = MLPCPUExperts.CPU_INFER
         if warmup:
-            self.cpu_infer.submit(self.moe.warm_up)
+            self.cpu_infer.submit(self.moe.warm_up())
             self.cpu_infer.sync()
         if MLPCPUExperts.output_gpu == None:
             MLPCPUExperts.input_tensor_cpu = torch.empty((self.config.hidden_size), device="cpu", pin_memory=True)
@@ -168,7 +168,7 @@ class MLPCPUExperts(MLPExpertsBase):
         MLPCPUExperts.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
         MLPCPUExperts.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
         MLPCPUExperts.weights_cpu.copy_(weights, non_blocking=True)
-        self.cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream().cuda_stream, self.moe.forward, 1, expert_ids.size(0), MLPCPUExperts.expert_ids_cpu.data_ptr(), MLPCPUExperts.weights_cpu.data_ptr(), MLPCPUExperts.input_tensor_cpu.data_ptr(), MLPCPUExperts.output_cpu.data_ptr())
+        self.cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream().cuda_stream, self.moe.forward(1, expert_ids.size(0), MLPCPUExperts.expert_ids_cpu.data_ptr(), MLPCPUExperts.weights_cpu.data_ptr(), MLPCPUExperts.input_tensor_cpu.data_ptr(), MLPCPUExperts.output_cpu.data_ptr()))
     
     def sync_for_one_decode(self):
         self.cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
@@ -183,7 +183,7 @@ class MLPCPUExperts(MLPExpertsBase):
             MLPCPUExperts.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
             MLPCPUExperts.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
             MLPCPUExperts.weights_cpu.copy_(weights, non_blocking=True)
-            self.cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream().cuda_stream, self.moe.forward, 1, expert_ids.size(1), MLPCPUExperts.expert_ids_cpu.data_ptr(), MLPCPUExperts.weights_cpu.data_ptr(), MLPCPUExperts.input_tensor_cpu.data_ptr(), MLPCPUExperts.output_cpu.data_ptr())
+            self.cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream().cuda_stream, self.moe.forward(1, expert_ids.size(1), MLPCPUExperts.expert_ids_cpu.data_ptr(), MLPCPUExperts.weights_cpu.data_ptr(), MLPCPUExperts.input_tensor_cpu.data_ptr(), MLPCPUExperts.output_cpu.data_ptr()))
             self.cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
             MLPCPUExperts.output_gpu.copy_(MLPCPUExperts.output_cpu, non_blocking=True)
             #print("capturing experts finish")
@@ -193,7 +193,7 @@ class MLPCPUExperts(MLPExpertsBase):
             expert_ids = expert_ids.contiguous().cpu()
             weights = weights.contiguous().to(torch.float32).cpu()
             output = torch.empty_like(input_tensor).contiguous()
-            self.cpu_infer.submit(self.moe.forward, expert_ids.size(0), expert_ids.size(1), expert_ids.data_ptr(), weights.data_ptr(), input_tensor.data_ptr(), output.data_ptr())
+            self.cpu_infer.submit(self.moe.forward(expert_ids.size(0), expert_ids.size(1), expert_ids.data_ptr(), weights.data_ptr(), input_tensor.data_ptr(), output.data_ptr()))
             self.cpu_infer.sync()
             return output.to(device=object.__getattribute__(self, "device"))
     
