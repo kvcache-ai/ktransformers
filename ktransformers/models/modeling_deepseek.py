@@ -1048,7 +1048,7 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
         first unpad the input, then computes the attention scores and pad the final attention scores.
-        Args:
+        # Args:
             query_states (`torch.Tensor`):
                 Input query states to be passed to Flash Attention API
             key_states (`torch.Tensor`):
@@ -1245,12 +1245,14 @@ class DeepseekV2DecoderLayer(nn.Module):
             cache_position=cache_position,
             **kwargs,
         )
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)

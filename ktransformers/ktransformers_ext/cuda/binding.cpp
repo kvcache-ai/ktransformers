@@ -3,8 +3,8 @@
  * @Author       : Azure-Tang
  * @Date         : 2024-07-25 13:38:30
  * @Version      : 1.0.0
- * @LastEditors  : Azure 
- * @LastEditTime : 2024-07-26 08:36:03
+ * @LastEditors  : kkk1nak0
+ * @LastEditTime : 2024-08-09 01:45:02
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 **/
 
@@ -22,6 +22,8 @@ PYBIND11_MODULE(KTransformersOps, m) {
       m.def("dequantize_q8_0", &dequantize_q8_0, "Function to dequantize q8_0 data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("dequantize_q6_k", &dequantize_q6_k, "Function to dequantize q6_k data.",
+            py::arg("data"), py::arg("blk_size"), py::arg("device"));
+      m.def("dequantize_q5_k", &dequantize_q5_k, "Function to dequantize q5_k data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("dequantize_q4_k",  &dequantize_q4_k, "Function to dequantize q4_k data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));

@@ -49,7 +49,7 @@ void SharedMemBuffer::dealloc(void* object) {
 void SharedMemBuffer::arrange(std::vector<std::pair<void**, uint64_t>> requests) {
     uint64_t offset = 0;
     for (auto& request : requests) {
-        *(request.first) = buffer_ + offset;
+        *(request.first) = (uint8_t*)buffer_ + offset;
         offset += request.second;
     }
 }
