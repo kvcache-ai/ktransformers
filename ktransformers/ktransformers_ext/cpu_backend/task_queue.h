@@ -51,7 +51,7 @@ public:
 #ifdef _WIN32
         ReleaseMutex(global_mutex);
 #else
-        global_mutex.lock();
+        global_mutex.unlock();
 #endif
     }
 };
