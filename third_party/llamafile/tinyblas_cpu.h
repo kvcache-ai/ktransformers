@@ -223,7 +223,7 @@ inline float32x4_t badder(float32x4_t a, float b, float32x4_t c, float32x4_t* e)
 }
 #endif
 
-#if defined(__FMA__)
+#if defined(__FMA__) || (defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__)))
 #if defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__)
 template <>
 inline __m256 madd(__m256 a, __m256 b, __m256 c) {

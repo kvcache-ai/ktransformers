@@ -47,13 +47,13 @@ void Linear::forward_many(int qlen, const void* input, void* output, Backend* ba
     int nth = config_.output_size / config_.stride;
     backend->do_work_stealing_job(nth, [&](int task_id) {
         int ith = task_id;
-        void* proj_ptr = proj_ + ith * config_.stride * config_.input_size * ggml_type_size(config_.proj_type) / ggml_blck_size(config_.proj_type);
+        void* proj_ptr = (uint8_t*)proj_ + ith * config_.stride * config_.input_size * ggml_type_size(config_.proj_type) / ggml_blck_size(config_.proj_type);
         float* proj_output_ptr = proj_output_ + ith * config_.stride;
         llamafile_sgemm(config_.stride, qlen, config_.input_size / ggml_blck_size(config_.proj_type), proj_ptr, config_.input_size / ggml_blck_size(config_.proj_type), proj_input_ptr, config_.input_size / ggml_blck_size(config_.proj_type), proj_output_ptr, config_.output_size, 0, 1, GGML_TASK_TYPE_COMPUTE, config_.proj_type, ggml_internal_get_type_traits(config_.proj_type).vec_dot_type, GGML_TYPE_F32, GGML_PREC_DEFAULT);
         if (config_.stride % ggml_blck_size(config_.hidden_type) == 0) {
             for (int i = 0; i < qlen; i++) {
                 float* output_fp32_ptr = proj_output_ + i * config_.output_size + ith * config_.stride;
-                void* output_ptr = output + i * config_.output_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type) + ith * config_.stride * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type);
+                void* output_ptr = (uint8_t*)output + i * config_.output_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type) + ith * config_.stride * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type);
                 from_float(output_fp32_ptr, output_ptr, config_.stride, config_.hidden_type);
             }
         }
@@ -69,5 +69,5 @@ void Linear::forward(int qlen, const void* input, void* output, Backend* backend
     }
     int forward_len = std::min(qlen, config_.group_max_len);
     forward_many(forward_len, input, output, backend);
-    forward(qlen - forward_len, input + forward_len * config_.input_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type), output + forward_len * config_.output_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type), backend);
+    forward(qlen - forward_len, (uint8_t*)input + forward_len * config_.input_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type), (uint8_t*)output + forward_len * config_.output_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type), backend);
 }

@@ -37,7 +37,7 @@ class LinearBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&Linear::warm_up, args_->linear);
         }
-        static std::pair<intptr_t, intptr_t> interface(Linear& linear) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(Linear& linear) {
             Args* args = new Args{nullptr, &linear};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -55,7 +55,7 @@ class LinearBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&Linear::forward, args_->linear, args_->qlen, args_->input, args_->output);
         }
-        static std::pair<intptr_t, intptr_t> interface(Linear& linear, int qlen, intptr_t input, intptr_t output) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(Linear& linear, int qlen, intptr_t input, intptr_t output) {
             Args* args = new Args{nullptr, &linear, qlen, (const void*)input, (void*)output};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -74,7 +74,7 @@ class MLPBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&MLP::warm_up, args_->mlp);
         }
-        static std::pair<intptr_t, intptr_t> interface(MLP& mlp) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(MLP& mlp) {
             Args* args = new Args{nullptr, &mlp};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -92,7 +92,7 @@ class MLPBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&MLP::forward, args_->mlp, args_->qlen, args_->input, args_->output);
         }
-        static std::pair<intptr_t, intptr_t> interface(MLP& mlp, int qlen, intptr_t input, intptr_t output) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(MLP& mlp, int qlen, intptr_t input, intptr_t output) {
             Args* args = new Args{nullptr, &mlp, qlen, (const void*)input, (void*)output};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -111,7 +111,7 @@ class MOEBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&MOE::warm_up, args_->moe);
         }
-        static std::pair<intptr_t, intptr_t> interface(MOE& moe) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(MOE& moe) {
             Args* args = new Args{nullptr, &moe};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -132,7 +132,7 @@ class MOEBindings {
             Args* args_ = (Args*)args;
             args_->cpuinfer->enqueue(&MOE::forward, args_->moe, args_->qlen, args_->k, args_->expert_ids, args_->weights, args_->input, args_->output);
         }
-        static std::pair<intptr_t, intptr_t> interface(MOE& moe, int qlen, int k, intptr_t expert_ids, intptr_t weights, intptr_t input, intptr_t output) {
+        static std::pair<intptr_t, intptr_t> cpuinfer_interface(MOE& moe, int qlen, int k, intptr_t expert_ids, intptr_t weights, intptr_t input, intptr_t output) {
             Args* args = new Args{nullptr, &moe, qlen, k, (const uint64_t*)expert_ids, (const float*)weights, (const void*)input, (void*)output};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
@@ -154,8 +154,8 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
         }));
     py::class_<Linear>(linear_module, "Linear")
         .def(py::init<LinearConfig>())
-        .def("warm_up", &LinearBindings::WarmUpBindinds::interface)
-        .def("forward", &LinearBindings::ForwardBindings::interface);
+        .def("warm_up", &LinearBindings::WarmUpBindinds::cpuinfer_interface)
+        .def("forward", &LinearBindings::ForwardBindings::cpuinfer_interface);
 
     auto mlp_module = m.def_submodule("mlp");
     py::class_<MLPConfig>(mlp_module, "MLPConfig")
@@ -164,8 +164,8 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
         }));
     py::class_<MLP>(mlp_module, "MLP")
         .def(py::init<MLPConfig>())
-        .def("warm_up", &MLPBindings::WarmUpBindinds::interface)
-        .def("forward", &MLPBindings::ForwardBindings::interface);
+        .def("warm_up", &MLPBindings::WarmUpBindinds::cpuinfer_interface)
+        .def("forward", &MLPBindings::ForwardBindings::cpuinfer_interface);
 
     auto moe_module = m.def_submodule("moe");
     py::class_<MOEConfig>(moe_module, "MOEConfig")
@@ -174,6 +174,6 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
         }));
     py::class_<MOE>(moe_module, "MOE")
         .def(py::init<MOEConfig>())
-        .def("warm_up", &MOEBindings::WarmUpBindinds::interface)
-        .def("forward", &MOEBindings::ForwardBindings::interface);
+        .def("warm_up", &MOEBindings::WarmUpBindinds::cpuinfer_interface)
+        .def("forward", &MOEBindings::ForwardBindings::cpuinfer_interface);
 }

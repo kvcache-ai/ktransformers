@@ -23,7 +23,7 @@
  */
 #include "gptq_marlin.cuh"
 #include "gptq_marlin_dtypes.cuh"
-
+#include <c10/cuda/CUDAGuard.h>
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
                     std::is_same<scalar_t, nv_bfloat16>::value, \
@@ -1703,28 +1703,63 @@ void marlin_mm_f16i4(const void* A, const void* B, void* C, void* s,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
+
+
     // Define kernel configurations
-    if (false) {
+#define undefined_error TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " + \
+    str(prob_n) + ", " + str(prob_k) + "]" + \
+        ", has_act_order = " + str(has_act_order) + \
+        ", num_groups = " + str(num_groups) + \
+        ", group_size = " + str(group_size) + \
+        ", thread_m_blocks = " + str(thread_m_blocks) + \
+        ", thread_n_blocks = " + str(thread_n_blocks) + \
+        ", thread_k_blocks = " + str(thread_k_blocks));
+
+
+    if (num_bits == 4 && num_threads == 256)
+    {
+        if (false) {
+        }
+        CALL_IF(4, 32, 2, 256)
+        CALL_IF(4, 16, 4, 256)
+        CALL_IF(4, 8, 8, 256)
+        else {
+            undefined_error
+        }
     }
-    CALL_IF(4, 32, 2, 256)
-    CALL_IF(4, 16, 4, 256)
-    CALL_IF(4, 8, 8, 256)
-    CALL_IF(4, 8, 4, 128)
-    CALL_IF(4, 4, 8, 128)
-    CALL_IF(8, 32, 2, 256)
-    CALL_IF(8, 16, 4, 256)
-    CALL_IF(8, 8, 8, 256)
-    CALL_IF(8, 8, 4, 128)
-    CALL_IF(8, 4, 8, 128)
+    else if (num_bits == 4 && num_threads == 128)
+    {
+        if (false) {
+        }
+        CALL_IF(4, 8, 4, 128)
+        CALL_IF(4, 4, 8, 128)
+        else {
+            undefined_error
+        }
+    }
+    else if (num_bits == 8 && num_threads == 256)
+    {
+        if (false) {
+        }
+        CALL_IF(8, 32, 2, 256)
+        CALL_IF(8, 16, 4, 256)
+        CALL_IF(8, 8, 8, 256)
+        else {
+            undefined_error
+        }
+    }
+    else if (num_bits == 8 && num_threads == 128)
+    {
+        if (false) {
+        }
+        CALL_IF(8, 8, 4, 128)
+        CALL_IF(8, 4, 8, 128)
+        else {
+            undefined_error
+        }
+    }
     else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
-                             str(prob_n) + ", " + str(prob_k) + "]" +
-                             ", has_act_order = " + str(has_act_order) +
-                             ", num_groups = " + str(num_groups) +
-                             ", group_size = " + str(group_size) +
-                             ", thread_m_blocks = " + str(thread_m_blocks) +
-                             ", thread_n_blocks = " + str(thread_n_blocks) +
-                             ", thread_k_blocks = " + str(thread_k_blocks));
+        undefined_error
     }
 
     A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
@@ -1739,6 +1774,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& perm, torch::Tensor& workspace,
                                int64_t num_bits, int64_t size_m, int64_t size_n,
                                int64_t size_k, bool is_k_full) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   // Verify num_bits
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
@@ -1781,7 +1817,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({size_m, size_n}, options);
   torch::Tensor a_tmp = torch::empty({size_m, size_k}, options);
