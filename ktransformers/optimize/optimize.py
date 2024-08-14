@@ -58,7 +58,6 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
     #print("gen_optimize_config", prefix, module_name, translated_name)
     recursive = True
     for rule in rule_list:
-        #print(rule)
         match_meta = rule["match"]
         if "class" not in match_meta and "name" not in match_meta:
             raise Exception("match must have at least one of \"class\" and \"name\"")
@@ -87,6 +86,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
                 out_data[module_name]["kwargs"].update(copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict())
         if "recursive" in rule:
             recursive = bool(rule["recursive"])
+        break
             
     if module_name not in out_data:
         out_data[module_name]= {
@@ -127,5 +127,6 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     with torch.device("meta"):
         inject(module, optimize_config, model_config, gguf_loader)
     load_weights(module, gguf_loader)
-    model_config.gguf_loader = gguf_loader
+    module.gguf_loader = gguf_loader
     del_meta(module)
+    torch.cuda.empty_cache()

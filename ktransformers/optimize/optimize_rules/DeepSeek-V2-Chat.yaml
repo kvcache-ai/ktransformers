@@ -1,14 +1,21 @@
 - match:
-    name: "^model\\.layers\\..*\\.|^lm_head"
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda"
-      prefill_device: "cuda"
-- match:
     class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
   replace:
     class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+#- match:
+#    name: "^model\\.layers\\.([1-5][0-9])\\.mlp\\.shared_experts.*$"  # regular expression 
+#    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+#  replace:
+#    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+#    kwargs:
+#      generate_device: "cpu"
+#      prefill_device: "cuda"
+#      generate_op: "QuantizedLinearCPUInfer"
+#      prefill_op: "QuantizedLinearTorch"
+#      out_device: "cuda"
 - match:
     name: "^model\\.layers\\.(?!.*self_attn).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
@@ -24,6 +31,9 @@
     class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
   replace:
     class: ktransformers.operators.experts.DeepseekV2MoEInjected     # mlp module with custom forward function
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
 - match:
     name: "^model\\.layers\\..*\\.mlp\\.experts$"
   replace:
@@ -39,16 +49,21 @@
     name: "^model\\.layers\\..*\\.self_attn$"
   replace:
     class: ktransformers.operators.attention.DeepseekV2AttentionInjected # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
 - match:
     name: "^model$"
   replace:
     class: "ktransformers.operators.layer_wise_prefill.DeepseekV2ModelKTransformers"
     kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
       per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
 - match:
     name: "^model.embed_tokens"
   replace:
     class: "default"
     kwargs:
-        generate_device: "cpu"
-        prefill_device: "cpu"
+      generate_device: "cpu"
+      prefill_device: "cpu"
