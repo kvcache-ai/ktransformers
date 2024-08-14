@@ -89,7 +89,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch._dynamo.config.suppress_errors = True
     batch_size, seq_length = inputs.shape
-    device_map = model.config.gguf_loader.tensor_device_map
+    device_map = model.gguf_loader.tensor_device_map
     torch_device = get_device('blk.0.self_attn', device_map)
     torch_device = "cuda:0" if torch_device == "cuda" else torch_device
     inputs = inputs.to(torch_device)

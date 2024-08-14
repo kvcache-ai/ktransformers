@@ -1,14 +1,10 @@
 - match:
-    name: "^model\\.layers\\..*\\."
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda"
-      prefill_device: "cuda"
-- match:
     class: ktransformers.models.modeling_mixtral.MixtralRotaryEmbedding
   replace:
     class: ktransformers.operators.RoPE.RotaryEmbedding
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
 - match:
     name: "^model\\.layers\\..*$"
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
@@ -43,3 +39,11 @@
     kwargs:
         generate_device: "cpu"
         prefill_device: "cpu"
+
+- match:
+    name: "^model\\.layers\\..*\\."
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"

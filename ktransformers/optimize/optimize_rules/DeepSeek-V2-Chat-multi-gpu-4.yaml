@@ -1,33 +1,4 @@
 - match:
-    name: "^model\\.layers\\.([0-9])\\."
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda:0"
-      prefill_device: "cuda:0"
-- match:
-    name: "(^model\\.layers\\.([1][0-9])\\.)"
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda:1"
-      prefill_device: "cuda:1"
-- match:
-    name: "(^model\\.layers\\.([2][0-9])\\.)"
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda:2"
-      prefill_device: "cuda:2"
-- match:
-    name: "(^model\\.layers\\.([345][0-9])\\.)|(^model.norm)|(^lm_head)"
-  replace:
-    class: "default"
-    kwargs:
-      generate_device: "cuda:3"
-      prefill_device: "cuda:3"
-
-- match:
     name: "^model.embed_tokens"
   replace:
     class: "default"
@@ -69,7 +40,7 @@
       prefill_device: "cuda:3"
 
 - match:
-    name: "^model\\.layers\\.([1][0-9])\\.(?!self_attn).*$"  # regular expression 
+    name: "^model\\.layers\\.([0-9])\\.(?!self_attn).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
   replace:
     class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
@@ -226,3 +197,32 @@
         10: "cuda:1"
         20: "cuda:2"
         30: "cuda:3"
+
+- match:
+    name: "^model\\.layers\\.([0-9])\\."
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:0"
+      prefill_device: "cuda:0"
+- match:
+    name: "(^model\\.layers\\.([1][0-9])\\.)"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:1"
+      prefill_device: "cuda:1"
+- match:
+    name: "(^model\\.layers\\.([2][0-9])\\.)"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:2"
+      prefill_device: "cuda:2"
+- match:
+    name: "(^model\\.layers\\.([345][0-9])\\.)|(^model.norm)|(^lm_head)"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:3"
+      prefill_device: "cuda:3"
