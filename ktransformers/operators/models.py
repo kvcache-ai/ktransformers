@@ -6,7 +6,7 @@ Author       : Azure-Tang
 Date         : 2024-07-25 11:25:24
 Version      : 1.0.0
 LastEditors  : Azure 
-LastEditTime : 2024-08-08 10:09:14
+LastEditTime : 2024-08-14 14:53:05
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -155,7 +155,7 @@ QWEN2MOE_INPUTS_DOCSTRING = r"""
     "The bare Qwen2MoE Model outputting raw hidden-states without any specific head on top.",
     QWEN2MOE_START_DOCSTRING,
 )
-class Qwen2MoeModelKTransformers(BaseInjectedModule):
+class KQwen2MoeModel(BaseInjectedModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2MoeDecoderLayer`]
 
@@ -451,7 +451,7 @@ DeepseekV2_INPUTS_DOCSTRING = r"""
 """
 
 
-class DeepseekV2ModelKTransformers(BaseInjectedModule):
+class KDeepseekV2Model(BaseInjectedModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV2DecoderLayer`]
 
