@@ -94,7 +94,6 @@ static const struct GemmFuncs {
 #if defined(__FMA__) || (defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__)))
 #if defined(__AVX2__)
 #if defined(__AVX512F__)
-        printf("__AVX512F__\n");
 #if defined(__AVX512VL__) && defined(__AVX512BW__) && defined(__AVX512DQ__) && defined(__AVX512VNNI__) && defined(__AVX512BF16__)
         // AMD Zen4+ (2023-)
         sgemm = llamafile_sgemm_amd_zen4;

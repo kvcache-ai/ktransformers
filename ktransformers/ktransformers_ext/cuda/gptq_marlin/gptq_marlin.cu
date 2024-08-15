@@ -23,7 +23,7 @@
  */
 #include "gptq_marlin.cuh"
 #include "gptq_marlin_dtypes.cuh"
-
+#include <c10/cuda/CUDAGuard.h>
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
                     std::is_same<scalar_t, nv_bfloat16>::value, \
@@ -1774,6 +1774,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& perm, torch::Tensor& workspace,
                                int64_t num_bits, int64_t size_m, int64_t size_n,
                                int64_t size_k, bool is_k_full) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   // Verify num_bits
   TORCH_CHECK(num_bits == 4 || num_bits == 8,
               "num_bits must be 4 or 8. Got = ", num_bits);
@@ -1816,7 +1817,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({size_m, size_n}, options);
   torch::Tensor a_tmp = torch::empty({size_m, size_k}, options);

@@ -15,3 +15,6 @@ node_modules
 compile_commands.json
 *.egg-info*
 *dist/
+ktransformers/server/local_store/
+ktransformers/server_test1.db
+*.patch

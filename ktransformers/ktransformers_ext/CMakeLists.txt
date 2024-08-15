@@ -22,14 +22,13 @@ option(LLAMA_AVX2                            "llama: enable AVX2"               
 option(LLAMA_AVX512                          "llama: enable AVX512"                             OFF)
 option(LLAMA_AVX512_VBMI                     "llama: enable AVX512-VBMI"                        OFF)
 option(LLAMA_AVX512_VNNI                     "llama: enable AVX512-VNNI"                        OFF)
+option(LLAMA_AVX512_BF16                     "llama: enable AVX512-BF16"                        OFF)
 option(LLAMA_FMA                             "llama: enable FMA"                                OFF)
 # in MSVC F16C is implied with AVX2/AVX512
 if (NOT MSVC)
     option(LLAMA_F16C                        "llama: enable F16C"                               OFF)
 endif()
 option(LLAMA_AVX512_FANCY_SIMD               "llama: enable AVX512-VL, AVX512-BW, AVX512-DQ, AVX512-VNNI"                        OFF)
-option(LLAMA_AVX512_BF16                     "llama: enable AVX512-BF16"                                                         OFF)
-
 
 # Architecture specific
 # TODO: probably these flags need to be tweaked on some architectures
