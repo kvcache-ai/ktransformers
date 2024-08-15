@@ -190,7 +190,7 @@
 - match:
     name: "^model$"
   replace:
-    class: "ktransformers.operators.layer_wise_prefill.KDeepseekV2Model"
+    class: "ktransformers.operators.models.KDeepseekV2Model"
     kwargs:
       per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
       transfer_map: 

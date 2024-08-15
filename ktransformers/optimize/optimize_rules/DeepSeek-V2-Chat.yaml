@@ -55,7 +55,7 @@
 - match:
     name: "^model$"
   replace:
-    class: "ktransformers.operators.layer_wise_prefill.KDeepseekV2Model"
+    class: "ktransformers.operators.models.KDeepseekV2Model"
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
