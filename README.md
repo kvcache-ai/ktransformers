@@ -276,11 +276,11 @@ Below is an example of a YAML template for replacing all original Linear modules
     name: "^model\\.layers\\..*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
   replace:
-    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     device: "cpu"   # which devices to load this module when initializing
     kwargs:
       generate_device: "cuda"
-      generate_linear_type: "QuantizedLinearMarlin"
+      generate_linear_type: "KLinearMarlin"
 ```
 
 Each rule in the YAML file has two parts: `match` and `replace`. The `match` part specifies which module should be replaced, and the `replace` part specifies the module to be injected into the model along with the initialization keywords.

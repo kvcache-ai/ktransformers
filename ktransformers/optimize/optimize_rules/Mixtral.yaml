@@ -9,26 +9,26 @@
     name: "^model\\.layers\\..*$"
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
   replace:
-    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-      generate_op: "QuantizedLinearMarlin"
-      prefill_op: "QuantizedLinearTorch"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
 - match:
     name: "^model\\.layers\\..*\\.block_sparse_moe$"
     class: ktransformers.models.modeling_mixtral.MixtralSparseMoeBlock
   replace: 
-    class: ktransformers.operators.experts.MisrtalSparseMoEBlockInjected
+    class: ktransformers.operators.experts.KMisrtalSparseMoEBlock
 - match:
     name: "^model\\.layers\\..*\\.block_sparse_moe\\.experts$"
   replace: 
-    class: ktransformers.operators.experts.KTransformersMLPExpert
+    class: ktransformers.operators.experts.KTransformersExperts
     kwargs:
       prefill_device: "cuda"
-      prefill_mlp_type: "MLPExpertsTorch"
+      prefill_op: "KExpertsTorch"
       generate_device: "cpu"
-      generate_mlp_type:  "MLPCPUExperts"
+      generate_op:  "KExpertsCPU"
       out_device: "cuda"
   recursive: False # don't recursively inject submodules of this module
 

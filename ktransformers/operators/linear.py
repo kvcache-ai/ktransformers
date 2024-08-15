@@ -6,7 +6,7 @@ Author       : Azure-Tang, Boxin Zhang
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
 LastEditors  : Azure 
-LastEditTime : 2024-07-26 09:27:53
+LastEditTime : 2024-08-14 14:57:04
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -34,8 +34,8 @@ import cpuinfer_ext
 from ktransformers.operators.cpuinfer import CPUInfer
 from ktransformers.server.config.config import Config
 
-#class QuantizedLinearBase(BaseInjectedModule, ABC):
-class QuantizedLinearBase(ABC):
+#class KLinearBase(BaseInjectedModule, ABC):
+class KLinearBase(ABC):
     def __init__(
         self,
         key: str,
@@ -106,7 +106,7 @@ class QuantizedLinearBase(ABC):
         pass
 
 
-class QuantizedLinearTorch(QuantizedLinearBase):
+class KLinearTorch(KLinearBase):
     def __init__(
         self,
         key: str,
@@ -158,7 +158,7 @@ class QuantizedLinearTorch(QuantizedLinearBase):
             self.bias = None
 
 
-class QuantizedLinearMarlin(QuantizedLinearBase):
+class KLinearMarlin(KLinearBase):
     marlin_q_w: torch.Tensor
     marlin_s: torch.Tensor
     g_idx: torch.Tensor
@@ -252,7 +252,7 @@ class QuantizedLinearMarlin(QuantizedLinearBase):
         self.sort_indices = None
         self.workspace = None
 
-class QuantizedLinearCPUInfer(QuantizedLinearBase):
+class KLinearCPUInfer(KLinearBase):
     CPU_INFER = CPUInfer(Config().cpu_infer)
     def __init__(
         self,
@@ -281,7 +281,7 @@ class QuantizedLinearCPUInfer(QuantizedLinearBase):
             out_device = x.device
             self.input_tensor_cpu.copy_(x, non_blocking=True)
             qlen = origin_shape[1]
-            QuantizedLinearCPUInfer.CPU_INFER.submit_with_cuda_stream(
+            KLinearCPUInfer.CPU_INFER.submit_with_cuda_stream(
                 torch.cuda.current_stream().cuda_stream,
                 self.linear.forward(
                     qlen, 
@@ -289,7 +289,7 @@ class QuantizedLinearCPUInfer(QuantizedLinearBase):
                     self.output_cpu.data_ptr()
                 )
             )
-            QuantizedLinearCPUInfer.CPU_INFER.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
+            KLinearCPUInfer.CPU_INFER.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
             self.output_gpu.copy_(self.output_cpu, non_blocking=True)
             if self.has_bias:
                 self.output_gpu += self.bias
@@ -301,14 +301,14 @@ class QuantizedLinearCPUInfer(QuantizedLinearBase):
             qlen = origin_shape[1]
             output_shape = (*origin_shape[:-1], self.out_features)
             output = torch.empty(output_shape, device=x.device, dtype=x.dtype)
-            QuantizedLinearCPUInfer.CPU_INFER.submit(
+            KLinearCPUInfer.CPU_INFER.submit(
                 self.linear.forward(
                     qlen, 
                     x.data_ptr(), 
                     output.data_ptr()
                 )
             )
-            QuantizedLinearCPUInfer.CPU_INFER.sync()
+            KLinearCPUInfer.CPU_INFER.sync()
             if self.has_bias:
                 output = output + self.bias
             output = output.to(dtype=dtype, device=out_device)
@@ -329,8 +329,8 @@ class QuantizedLinearCPUInfer(QuantizedLinearBase):
         self.linear = cpuinfer_ext.linear.Linear(config)
         
         if warmup:
-            QuantizedLinearCPUInfer.CPU_INFER.submit(self.linear.warm_up())
-            QuantizedLinearCPUInfer.CPU_INFER.sync()
+            KLinearCPUInfer.CPU_INFER.submit(self.linear.warm_up())
+            KLinearCPUInfer.CPU_INFER.sync()
         self.input_tensor_cpu = torch.zeros((1, 1, self.in_features), device="cpu", pin_memory=True)
         self.output_cpu = torch.zeros((1, 1, self.out_features), device="cpu", pin_memory=True, dtype=torch.bfloat16)
         self.output_gpu = torch.zeros((1, 1, self.out_features), device=self.out_device)
@@ -355,12 +355,12 @@ class QuantizedLinearCPUInfer(QuantizedLinearBase):
             self.bias = None        
 
 LINEAR_MAP = {
-    "QuantizedLinearMarlin": QuantizedLinearMarlin,
-    "QuantizedLinearTorch": QuantizedLinearTorch,
-    "QuantizedLinearCPUInfer": QuantizedLinearCPUInfer
+    "KLinearMarlin": KLinearMarlin,
+    "KLinearTorch": KLinearTorch,
+    "KLinearCPUInfer": KLinearCPUInfer
 }
 
-class KTransformerLinear(BaseInjectedModule, QuantizedLinearBase):
+class KTransformersLinear(BaseInjectedModule, KLinearBase):
     def __init__(
         self,
         key: str,
@@ -369,20 +369,20 @@ class KTransformerLinear(BaseInjectedModule, QuantizedLinearBase):
         orig_module: nn.Module,
         # device: str = "cuda",
         generate_device: str = "cuda",
-        generate_op: str| None = "QuantizedLinearMarlin",
+        generate_op: str| None = "KLinearMarlin",
         prefill_device: str = "cuda",
-        prefill_op: str| None = "QuantizedLinearTorch",
+        prefill_op: str| None = "KLinearTorch",
         **kwargs,
     ):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
-        QuantizedLinearBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        KLinearBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         # build all the linear operators
         if prefill_op is not None:
             assert prefill_op in LINEAR_MAP, f"linear_type {prefill_op} not supported"
-            if prefill_op == "QuantizedLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using QuantizedLinearTorch instead.")
+            if prefill_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
+                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
                 print(f"module info: key:{key} orig_module:{orig_module}")
-                self.prefill_linear = QuantizedLinearTorch(key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+                self.prefill_linear = KLinearTorch(key, gguf_loader, config, orig_module, prefill_device, **kwargs)
             else:
                 self.prefill_linear = LINEAR_MAP[prefill_op](key, gguf_loader, config, orig_module, prefill_device, **kwargs)
         else:
@@ -390,11 +390,11 @@ class KTransformerLinear(BaseInjectedModule, QuantizedLinearBase):
 
         if generate_op is not None:
             assert generate_op in LINEAR_MAP, f"linear_type {generate_op} not supported"
-            if generate_op == "QuantizedLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using QuantizedLinearTorch instead.")
+            if generate_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
+                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
                 print(f"module info: key:{key} orig_module:{orig_module}")
-                self.generate_op = "QuantizedLinearTorch"
-                self.generate_linear = QuantizedLinearTorch(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+                self.generate_op = "KLinearTorch"
+                self.generate_linear = KLinearTorch(key, gguf_loader, config, orig_module, generate_device, **kwargs)
             else:
                 self.generate_linear = LINEAR_MAP[generate_op](key, gguf_loader, config, orig_module, generate_device, **kwargs)
         else:
