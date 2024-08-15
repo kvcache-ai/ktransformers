@@ -7,11 +7,11 @@ import pycuda.autoinit
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
 import numpy as np
-from ktransformers.operators.linear import KTransformerLinear, QuantizedLinearMarlin
-from ktransformers.operators.experts import KTransformersMLPExpert, MLPExpertsTorch
+from ktransformers.operators.linear import KTransformersLinear, KLinearMarlin
+from ktransformers.operators.experts import KTransformersExperts, KExpertsTorch
 from ktransformers.util.custom_gguf import GGUFLoader, dequantize_q4_k_gpu, dequantize_q4_k
 import torch
-import CudaOps
+import KTransformersOps
 torch.set_default_dtype(torch.bfloat16)
 import time
 from transformers import (

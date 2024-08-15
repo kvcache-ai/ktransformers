@@ -220,7 +220,7 @@ def compute_max_diff(output, output_ref):
 
 class MarlinWorkspace:
 
-    def __init__(self, out_features, min_thread_n, max_parallel):
+    def __init__(self, out_features, min_thread_n, max_parallel, device):
         assert (out_features % min_thread_n == 0), (
             "out_features = {} is undivisible by min_thread_n = {}".format(
                 out_features, min_thread_n))
@@ -229,4 +229,4 @@ class MarlinWorkspace:
 
         self.scratch = torch.zeros(max_workspace_size,
                                    dtype=torch.int,
-                                   device="cuda")
+                                   device=device)

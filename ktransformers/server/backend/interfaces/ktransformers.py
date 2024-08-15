@@ -6,6 +6,7 @@ from ktransformers.optimize.optimize import optimize_and_load_gguf
 from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.local_chat import custom_models, default_optimize_rules
+from ktransformers.util.utils import get_device
 
 
 class KTransformersThreadContext(TransformersThreadContext):
@@ -48,8 +49,11 @@ class KTransformersInterface(TransformersInterface):
     
     def decode_one_tokens(self):
         if not hasattr(self, "cuda_graph_runner"):
+            device_map = self.model.gguf_loader.tensor_device_map
+            torch_device = get_device('blk.0.self_attn', device_map)
+            torch_device = "cuda:0" if torch_device == "cuda" else torch_device
             self.cuda_graph_runner = CUDAGraphRunner()
-            self.cuda_graph_runner.capture(self.model, self.current_ids, self.active_cache_position.unsqueeze(0), self.active_cache_position, self.cache, return_dict=False, use_cache=True)
+            self.cuda_graph_runner.capture(self.model, self.current_ids, self.active_cache_position.unsqueeze(0), self.active_cache_position, self.cache, main_device=torch_device, return_dict=False, use_cache=True)
         
         if hasattr(self, "cuda_graph_runner"):
             logits = self.cuda_graph_runner(self.current_ids, self.active_cache_position.unsqueeze(0), self.active_cache_position)

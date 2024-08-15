@@ -6,7 +6,7 @@ Author       : Azure-Tang
 Date         : 2024-07-25 11:25:24
 Version      : 1.0.0
 LastEditors  : Azure 
-LastEditTime : 2024-07-26 09:27:48
+LastEditTime : 2024-08-14 14:53:05
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -45,6 +45,8 @@ from ktransformers.models.modeling_deepseek import BaseModelOutputWithPast, Deep
 from transformers.models.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.utils import InferenceState
+from ktransformers.util.custom_gguf import GGUFLoader
+from transformers.configuration_utils import PretrainedConfig
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -72,34 +74,6 @@ QWEN2MOE_START_DOCSTRING = r"""
             load the weights associated with the model, only the configuration. Check out the
             [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
-
-
-@add_start_docstrings(
-    "The bare Qwen2MoE Model outputting raw hidden-states without any specific head on top.",
-    QWEN2MOE_START_DOCSTRING,
-)
-class Qwen2MoePreTrainedModel(PreTrainedModel):
-    config_class = Qwen2MoeConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["Qwen2MoeDecoderLayer"]
-    _skip_keys_device_placement = "past_key_values"
-    _supports_flash_attn_2 = True
-    _supports_sdpa = True
-    _supports_cache_class = True
-    _supports_static_cache = True
-
-    def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-
 
 QWEN2MOE_INPUTS_DOCSTRING = r"""
     Args:
@@ -177,13 +151,11 @@ QWEN2MOE_INPUTS_DOCSTRING = r"""
             the complete sequence length.
 """
 
-from ktransformers.util.custom_gguf import GGUFLoader
-from transformers.configuration_utils import PretrainedConfig
 @add_start_docstrings(
     "The bare Qwen2MoE Model outputting raw hidden-states without any specific head on top.",
     QWEN2MOE_START_DOCSTRING,
 )
-class Qwen2MoeModelPerLayerPrefill(BaseInjectedModule):
+class KQwen2MoeModel(BaseInjectedModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2MoeDecoderLayer`]
 
@@ -198,10 +170,13 @@ class Qwen2MoeModelPerLayerPrefill(BaseInjectedModule):
         orig_module: nn.Module,
         device: str = "cuda",
         per_layer_prefill_intput_threshold: int = 30000, # if None, no per-layer prefill
+        transfer_map: dict = None,
         **kwargs,
     ):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, device, **kwargs)
         self.per_layer_prefill_intput_threshold = per_layer_prefill_intput_threshold
+        self.transfer_map = transfer_map
+        self.stream_device_map = dict()
 
     @add_start_docstrings_to_model_forward(QWEN2MOE_INPUTS_DOCSTRING)
     def forward(
@@ -287,7 +262,20 @@ class Qwen2MoeModelPerLayerPrefill(BaseInjectedModule):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers):
+            if self.transfer_map is not None and i in self.transfer_map: 
+                prev_stream = torch.cuda.current_stream()
+                cur_device = self.transfer_map[i]
+                if cur_device not in self.stream_device_map:
+                    self.stream_device_map[cur_device] = torch.cuda.Stream(cur_device)
+                torch.cuda.set_device(cur_device)
+                self.stream_device_map[cur_device].wait_stream(prev_stream)
+                torch.cuda.set_stream(self.stream_device_map[cur_device])
+                hidden_states = hidden_states.to(self.transfer_map[i], non_blocking = True)
+                causal_mask = causal_mask.to(self.transfer_map[i], non_blocking = True) if causal_mask is not None else None
+                position_ids = position_ids.to(self.transfer_map[i], non_blocking = True) if position_ids is not None else None
+                cache_position = cache_position.to(self.transfer_map[i], non_blocking = True) if cache_position is not None else None
+                
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -463,7 +451,7 @@ DeepseekV2_INPUTS_DOCSTRING = r"""
 """
 
 
-class DeepseekV2ModelPerLayerPrefill(BaseInjectedModule):
+class KDeepseekV2Model(BaseInjectedModule):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`DeepseekV2DecoderLayer`]
 
@@ -478,10 +466,13 @@ class DeepseekV2ModelPerLayerPrefill(BaseInjectedModule):
         orig_module: nn.Module,
         device: str = "cuda",
         per_layer_prefill_intput_threshold: int = 30000, # if None, no per-layer prefill
+        transfer_map: dict = None,
         **kwargs,
     ):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, device, **kwargs)
         self.per_layer_prefill_intput_threshold = per_layer_prefill_intput_threshold
+        self.transfer_map = transfer_map
+        self.stream_device_map = dict()
 
     @add_start_docstrings_to_model_forward(DeepseekV2_INPUTS_DOCSTRING)
     def forward(
@@ -584,7 +575,20 @@ class DeepseekV2ModelPerLayerPrefill(BaseInjectedModule):
         t_cpu = 0
         t_f = 0
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers):
+            if self.transfer_map is not None and i in self.transfer_map: 
+                prev_stream = torch.cuda.current_stream()
+                cur_device = self.transfer_map[i]
+                if cur_device not in self.stream_device_map:
+                    self.stream_device_map[cur_device] = torch.cuda.Stream(cur_device)
+                torch.cuda.set_device(cur_device)
+                self.stream_device_map[cur_device].wait_stream(prev_stream)
+                torch.cuda.set_stream(self.stream_device_map[cur_device])
+                hidden_states = hidden_states.to(self.transfer_map[i], non_blocking = True)
+                causal_mask = causal_mask.to(self.transfer_map[i], non_blocking = True) if causal_mask is not None else None
+                position_ids = position_ids.to(self.transfer_map[i], non_blocking = True) if position_ids is not None else None
+                cache_position = cache_position.to(self.transfer_map[i], non_blocking = True) if cache_position is not None else None
+
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 

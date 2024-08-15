@@ -14,17 +14,38 @@ import time
 import torch
 import torch.nn.quantized as nnq
 
+scale, zero_point = 0.1, 0  # Adjust scale and zero_point based on your dataset
+
+hidden_size = 5120
+intermediate_size = 3072
+layer_num = 10
+qlen = 1
+warm_up_iter = 1000
+test_iter = 10000
+
 def act_fn(x):
     return x / (1.0 + torch.exp(-x))
 
+def mlp_torch(input, gate_proj, up_proj, down_proj):
+    if isinstance(gate_proj, nnq.Linear):
+        input_q = torch.quantize_per_tensor(input.to(torch.float32), scale, zero_point, torch.quint8)
+        gate_buf = gate_proj(input_q)
+        up_buf = up_proj(input_q)
+        gate_buf = gate_buf.dequantize()
+        up_buf = up_buf.dequantize()
+        intermediate = act_fn(gate_buf) * up_buf
+        intermediate_q = torch.quantize_per_tensor(intermediate, scale, zero_point, torch.quint8)
+        expert_output = down_proj(intermediate_q)
+        ret = expert_output.dequantize()
+    else:
+        gate_buf = torch.mm(input.to(gate_proj.dtype), gate_proj.t())
+        up_buf = torch.mm(input.to(up_proj.dtype), up_proj.t())
+        intermediate = act_fn(gate_buf) * up_buf
+        ret = torch.mm(intermediate.to(down_proj.dtype), down_proj.t())
+    return ret
+
 def bench_mlp(quant_mode: str):
     with torch.inference_mode(mode=True):
-        hidden_size = 5120
-        intermediate_size = 3072
-        layer_num = 10
-        warm_up_iter = 1000
-        test_iter = 10000
-
         if quant_mode == "fp32":
             proj_type = torch.float32
             bytes_per_elem = 4.000000
@@ -48,7 +69,6 @@ def bench_mlp(quant_mode: str):
             up_proj = torch.randn((intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             down_proj = torch.randn((hidden_size, intermediate_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             if quant_mode == "qint8":
-                scale, zero_point = 0.1, 0  # Adjust scale and zero_point based on your dataset
                 gate_proj_q = torch.quantize_per_tensor(gate_proj, scale, zero_point, torch.qint8)
                 quantized_gate = nnq.Linear(hidden_size, intermediate_size)
                 quantized_gate.set_weight_bias(gate_proj_q, None)
@@ -65,58 +85,18 @@ def bench_mlp(quant_mode: str):
                 gate_projs.append(gate_proj.to(proj_type))
                 up_projs.append(up_proj.to(proj_type))
                 down_projs.append(down_proj.to(proj_type))
+        input = torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()
 
         # warm up
         for i in range(warm_up_iter):
-            input = torch.randn((1, hidden_size), dtype=torch.float32).contiguous()
-            if quant_mode == "qint8":
-                input_q = torch.quantize_per_tensor(input, scale, zero_point, torch.quint8)
-                quantized_gate = gate_projs[i % layer_num]
-                gate_buf = quantized_gate(input_q)
-                quantized_up = up_projs[i % layer_num]
-                up_buf = quantized_gate(input_q)
-                gate_buf = gate_buf.dequantize()
-                up_buf = up_buf.dequantize()
-                intermediate = act_fn(gate_buf) * up_buf
-                intermediate_q = torch.quantize_per_tensor(intermediate, scale, zero_point, torch.quint8)
-                quantized_down = down_projs[i % layer_num]
-                t_output = quantized_down(intermediate_q)
-            else:
-                gate_proj = gate_projs[i%layer_num]
-                up_proj = up_projs[i%layer_num]
-                down_proj = down_projs[i%layer_num]
-                gate_buf = torch.mm(input.to(proj_type), gate_proj.t())
-                up_buf = torch.mm(input.to(proj_type), up_proj.t())
-                intermediate = act_fn(gate_buf) * up_buf
-                t_output = torch.mm(intermediate.to(proj_type), down_proj.t())
+            mlp_torch(input[i % layer_num], gate_projs[i % layer_num], up_projs[i % layer_num], down_projs[i % layer_num])
 
         # test
-        total_time = 0
+        start = time.perf_counter()
         for i in range(test_iter):
-            input = torch.randn((1, hidden_size), dtype=torch.float32).contiguous()
-            start = time.perf_counter()
-            if quant_mode == "qint8":
-                input_q = torch.quantize_per_tensor(input, scale, zero_point, torch.quint8)
-                quantized_gate = gate_projs[i % layer_num]
-                gate_buf = quantized_gate(input_q)
-                quantized_up = up_projs[i % layer_num]
-                up_buf = quantized_gate(input_q)
-                gate_buf = gate_buf.dequantize()
-                up_buf = up_buf.dequantize()
-                intermediate = act_fn(gate_buf) * up_buf
-                intermediate_q = torch.quantize_per_tensor(intermediate, scale, zero_point, torch.quint8)
-                quantized_down = down_projs[i % layer_num]
-                t_output = quantized_down(intermediate_q)
-            else:
-                gate_proj = gate_projs[i%layer_num]
-                up_proj = up_projs[i%layer_num]
-                down_proj = down_projs[i%layer_num]
-                gate_buf = torch.mm(input.to(proj_type), gate_proj.t())
-                up_buf = torch.mm(input.to(proj_type), up_proj.t())
-                intermediate = act_fn(gate_buf) * up_buf
-                t_output = torch.mm(intermediate.to(proj_type), down_proj.t())
-            end = time.perf_counter()
-            total_time += end - start
+            mlp_torch(input[i % layer_num], gate_projs[i % layer_num], up_projs[i % layer_num], down_projs[i % layer_num])
+        end = time.perf_counter()
+        total_time = end - start
         print('Quant mode: ', quant_mode)
         print('Time(s): ', total_time)
         print('Iteration: ', test_iter) 

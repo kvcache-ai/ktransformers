@@ -1,17 +1,15 @@
 /**
- * @Description  :  
+ * @Description  :
  * @Author       : chenht2022
  * @Date         : 2024-07-22 02:03:22
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022 
+ * @LastEditors  : chenht2022
  * @LastEditTime : 2024-07-25 10:35:07
- * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
-**/
+ * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
+ **/
 #include "moe.h"
 #include <iostream>
 #include <cstdint>
-
-uint8_t* MOE::buffer_ = nullptr;
 
 MOE::MOE(MOEConfig config) {
     config_ = config;
@@ -19,79 +17,46 @@ MOE::MOE(MOEConfig config) {
     up_proj_ = config_.up_proj;
     down_proj_ = config_.down_proj;
 
-    if (MOE::buffer_ == nullptr) {
-        uint64_t buffer_size = 0;
-        buffer_size += sizeof(float) * config_.group_max_len * config_.hidden_size;
-        buffer_size += config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type);
-        buffer_size += config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type);
-        buffer_size += config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type);
-        buffer_size += config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type);
-        buffer_size += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-        buffer_size += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-        buffer_size += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-        buffer_size += config_.routed_expert_num * config_.group_max_len * config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type);
-        buffer_size += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.hidden_size;
-        buffer_size += sizeof(float) * config_.group_max_len * config_.hidden_size;
-        buffer_ = (uint8_t*)malloc(buffer_size);
-    }
-
-    uint64_t offset = 0;
-    s_input_fp32_ = (float*)(buffer_ + offset);
-    offset += sizeof(float) * config_.hidden_size;
-    s_gate_input_ = (uint8_t*)(buffer_ + offset);
-    offset += config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type);
-    s_up_input_ = (uint8_t*)(buffer_ + offset);
-    offset += config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type);
+    std::vector<std::pair<void**, uint64_t>> s_mem_requests;
+    s_mem_requests.push_back({(void**)&s_input_fp32_, sizeof(float) * config_.hidden_size});
+    s_mem_requests.push_back({(void**)&s_gate_input_, config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type)});
+    s_mem_requests.push_back({(void**)&s_up_input_, config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type)});
     s_gate_output_.resize(config_.routed_expert_num);
     s_up_output_.resize(config_.routed_expert_num);
     s_intermediate_fp32_.resize(config_.routed_expert_num);
     s_down_input_.resize(config_.routed_expert_num);
     s_down_output_.resize(config_.routed_expert_num);
     for (int i = 0; i < config_.routed_expert_num; i++) {
-        s_gate_output_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.intermediate_size;
-        s_up_output_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.intermediate_size;
-        s_intermediate_fp32_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.intermediate_size;
-        s_down_input_[i] = (uint8_t*)(buffer_ + offset);
-        offset += config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type);
-        s_down_output_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.hidden_size;
+        s_mem_requests.push_back({(void**)&s_gate_output_[i], sizeof(float) * config_.intermediate_size});
+        s_mem_requests.push_back({(void**)&s_up_output_[i], sizeof(float) * config_.intermediate_size});
+        s_mem_requests.push_back({(void**)&s_intermediate_fp32_[i], sizeof(float) * config_.intermediate_size});
+        s_mem_requests.push_back({(void**)&s_down_input_[i], config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type)});
+        s_mem_requests.push_back({(void**)&s_down_output_[i], sizeof(float) * config_.hidden_size});
     }
-    s_output_fp32_ = (float*)(buffer_ + offset);
+    s_mem_requests.push_back({(void**)&s_output_fp32_, sizeof(float) * config_.hidden_size});
+    shared_mem_buffer.alloc(this, s_mem_requests);
 
-    offset = 0;
+    std::vector<std::pair<void**, uint64_t>> m_mem_requests;
     m_input_fp32_.resize(config_.group_max_len);
     m_gate_input_.resize(config_.group_max_len);
     m_up_input_.resize(config_.group_max_len);
     for (int i = 0; i < config_.group_max_len; i++) {
-        m_input_fp32_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.hidden_size;
-        m_gate_input_[i] = (uint8_t*)(buffer_ + offset);
-        offset += config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type);
-        m_up_input_[i] = (uint8_t*)(buffer_ + offset);
-        offset += config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type);
+        m_mem_requests.push_back({(void**)&m_input_fp32_[i], sizeof(float) * config_.hidden_size});
+        m_mem_requests.push_back({(void**)&m_gate_input_[i], config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type)});
+        m_mem_requests.push_back({(void**)&m_up_input_[i], config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type)});
     }
-    m_local_gate_input_ = (uint8_t*)(buffer_ + offset);
-    offset += config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type);
-    m_local_up_input_ = (uint8_t*)(buffer_ + offset);
-    offset += config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type);
-    m_local_gate_output_ = (float*)(buffer_ + offset);
-    offset += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-    m_local_up_output_ = (float*)(buffer_ + offset);
-    offset += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-    m_local_intermediate_fp32_ = (float*)(buffer_ + offset);
-    offset += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size;
-    m_local_down_input_ = (uint8_t*)(buffer_ + offset);
-    offset += config_.routed_expert_num * config_.group_max_len * config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type);
-    m_local_down_output_ = (float*)(buffer_ + offset);
-    offset += sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.hidden_size;
+    m_mem_requests.push_back({(void**)&m_local_gate_input_, config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.gate_type).vec_dot_type)});
+    m_mem_requests.push_back({(void**)&m_local_up_input_, config_.routed_expert_num * config_.group_max_len * config_.hidden_size * ggml_type_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.up_type).vec_dot_type)});
+    m_mem_requests.push_back({(void**)&m_local_gate_output_, sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size});
+    m_mem_requests.push_back({(void**)&m_local_up_output_, sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size});
+    m_mem_requests.push_back({(void**)&m_local_intermediate_fp32_, sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.intermediate_size});
+    m_mem_requests.push_back({(void**)&m_local_down_input_, config_.routed_expert_num * config_.group_max_len * config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type)});
+    m_mem_requests.push_back({(void**)&m_local_down_output_, sizeof(float) * config_.routed_expert_num * config_.group_max_len * config_.hidden_size});
     m_output_fp32_.resize(config_.group_max_len);
     for (int i = 0; i < config_.group_max_len; i++) {
-        m_output_fp32_[i] = (float*)(buffer_ + offset);
-        offset += sizeof(float) * config_.hidden_size;
+        m_mem_requests.push_back({(void**)&m_output_fp32_[i], sizeof(float) * config_.hidden_size});
     }
+    shared_mem_buffer.alloc(this, m_mem_requests);
 
     m_local_pos_.resize(config_.group_max_len);
     for (int i = 0; i < config_.group_max_len; i++) {
@@ -105,6 +70,10 @@ MOE::MOE(MOEConfig config) {
     m_local_intermediate_fp32_ptr_.resize(config_.expert_num);
     m_local_down_input_ptr_.resize(config_.expert_num);
     m_local_down_output_ptr_.resize(config_.expert_num);
+}
+
+MOE::~MOE() {
+    shared_mem_buffer.dealloc(this);
 }
 
 void MOE::warm_up(Backend* backend) {

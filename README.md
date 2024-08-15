@@ -268,7 +268,10 @@ In this example, the AutoModel is first initialized on the meta device to avoid 
 
 After injection, the original `generate` interface is available, but we also provide a compatible `prefill_and_generate` method, which enables further optimizations like CUDAGraph to improve generation speed.
 
-<h3>YAML Template</h3>
+<h3>How to custom your model</h3>
+
+A detailed tutorial of the injection and multi-GPU using DeepSeek-V2 as an example is given [here](doc/en/injection_tutorial.md).
+
 Below is an example of a YAML template for replacing all original Linear modules with Marlin, an advanced 4-bit quantization kernel.
 
 ```yaml
@@ -287,7 +290,7 @@ Each rule in the YAML file has two parts: `match` and `replace`. The `match` par
 
 You can find example rule templates for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models, in the [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) directory. These templates are used to power the `local_chat.py` demo.
 
-A detailed description of the injection using DeepSeek-V2 as an example is given [here](doc/en/deepseek-v2-injection.md).
+If you are interested in our design principles and the implementation of the injection framework, please refer to the [design document](doc/en/deepseek-v2-injection.md).
 
 <h2 id="ack">Acknowledgment and Contributors</h2>
 

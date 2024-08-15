@@ -6,13 +6,14 @@ Author       : Azure-Tang, Boxin Zhang
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
 LastEditors  : Azure 
-LastEditTime : 2024-07-26 09:27:53
+LastEditTime : 2024-08-14 14:57:04
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
 
+import ctypes
 import torch
-from torch import nn
+from torch import Tensor, nn
 import KTransformersOps 
 from ktransformers.util.custom_gguf import GGUFLoader
 from ktransformers.util.utils import InferenceState
@@ -25,10 +26,16 @@ from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marl
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig
 from abc import ABC, abstractmethod
+import sys, os
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build", "Release"))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build", "Debug"))
+import cpuinfer_ext
+from ktransformers.operators.cpuinfer import CPUInfer
+from ktransformers.server.config.config import Config
 
-
-#class QuantizedLinearBase(BaseInjectedModule, ABC):
-class QuantizedLinearBase(ABC):
+#class KLinearBase(BaseInjectedModule, ABC):
+class KLinearBase(ABC):
     def __init__(
         self,
         key: str,
@@ -99,7 +106,7 @@ class QuantizedLinearBase(ABC):
         pass
 
 
-class QuantizedLinearTorch(QuantizedLinearBase):
+class KLinearTorch(KLinearBase):
     def __init__(
         self,
         key: str,
@@ -118,6 +125,7 @@ class QuantizedLinearTorch(QuantizedLinearBase):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
         out_device = x.device
+        # TODO: support CUDA Graph when using cpu, but CPUInfer is recommended.
         x = x.to(device=self.device, dtype=self.dtype)
         x = x @ self.w
         if self.has_bias:
@@ -128,7 +136,7 @@ class QuantizedLinearTorch(QuantizedLinearBase):
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
         if device is None: device = self.device
         if w is None: w = self.load_weight(device=device)
-
+        
         if isinstance(w, nn.Parameter):
             self.w = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
             self.has_bias = False
@@ -150,7 +158,7 @@ class QuantizedLinearTorch(QuantizedLinearBase):
             self.bias = None
 
 
-class QuantizedLinearMarlin(QuantizedLinearBase):
+class KLinearMarlin(KLinearBase):
     marlin_q_w: torch.Tensor
     marlin_s: torch.Tensor
     g_idx: torch.Tensor
@@ -176,7 +184,7 @@ class QuantizedLinearMarlin(QuantizedLinearBase):
         self.act_order = act_order
         self.is_k_full = is_k_full
 
-    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = "cuda"):
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
         if device is None: device = self.device
         assert device.lower() != "cpu", "Marlin quantized linear only supports GPU device"
         if w is None: w = self.load_weight(device=device)
@@ -200,7 +208,7 @@ class QuantizedLinearMarlin(QuantizedLinearBase):
             weight, self.num_bits, self.group_size, self.act_order
         )
         self.workspace = MarlinWorkspace(
-            self.out_features, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL
+            self.out_features, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL,self.device
         )
         self.marlin_q_w = marlin_q_w
         self.marlin_s = marlin_s
@@ -243,36 +251,138 @@ class QuantizedLinearMarlin(QuantizedLinearBase):
         self.g_idx = None
         self.sort_indices = None
         self.workspace = None
-    
+
+class KLinearCPUInfer(KLinearBase):
+    CPU_INFER = CPUInfer(Config().cpu_infer)
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        device: str = "cpu",
+        out_device: str = "cuda", # this device mean which device the output should on. TODO: support cpu.
+        stride = 16,
+        group_max_len = 1024,
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        self.has_bias = False
+        self.dtype = torch.get_default_dtype()
+        self.w = None
+        self.has_bias = False
+        self.stride = stride
+        self.group_max_len = group_max_len
+        self.out_device = out_device
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        origin_shape = x.shape # [batch_size, q_len, hidden_size]
+        if origin_shape[1] == 1:
+            out_device = x.device
+            self.input_tensor_cpu.copy_(x, non_blocking=True)
+            qlen = origin_shape[1]
+            KLinearCPUInfer.CPU_INFER.submit_with_cuda_stream(
+                torch.cuda.current_stream().cuda_stream,
+                self.linear.forward(
+                    qlen, 
+                    self.input_tensor_cpu.data_ptr(), 
+                    self.output_cpu.data_ptr()
+                )
+            )
+            KLinearCPUInfer.CPU_INFER.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
+            self.output_gpu.copy_(self.output_cpu, non_blocking=True)
+            if self.has_bias:
+                self.output_gpu += self.bias
+            return self.output_gpu
+        else:
+            dtype = x.dtype
+            out_device = x.device
+            x = x.to(device=self.device)
+            qlen = origin_shape[1]
+            output_shape = (*origin_shape[:-1], self.out_features)
+            output = torch.empty(output_shape, device=x.device, dtype=x.dtype)
+            KLinearCPUInfer.CPU_INFER.submit(
+                self.linear.forward(
+                    qlen, 
+                    x.data_ptr(), 
+                    output.data_ptr()
+                )
+            )
+            KLinearCPUInfer.CPU_INFER.sync()
+            if self.has_bias:
+                output = output + self.bias
+            output = output.to(dtype=dtype, device=out_device)
+            return output
+
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None, warmup:bool = True):
+        print(f"loading {self.key} to {self.device} using CPUInfer")
+        if device is None: device = self.device
+        self.load_weights(w=w, device=device)
+        if self.bias is not None:
+            self.has_bias = True
+            self.bias = self.bias.to(device)
+            
+        weight_ptr = ctypes.addressof(
+            ctypes.cast(self.weight.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents
+        )
+        config = cpuinfer_ext.linear.LinearConfig(self.in_features, self.out_features, self.stride, self.group_max_len, weight_ptr, self.weight_type, 30)
+        self.linear = cpuinfer_ext.linear.Linear(config)
+        
+        if warmup:
+            KLinearCPUInfer.CPU_INFER.submit(self.linear.warm_up())
+            KLinearCPUInfer.CPU_INFER.sync()
+        self.input_tensor_cpu = torch.zeros((1, 1, self.in_features), device="cpu", pin_memory=True)
+        self.output_cpu = torch.zeros((1, 1, self.out_features), device="cpu", pin_memory=True, dtype=torch.bfloat16)
+        self.output_gpu = torch.zeros((1, 1, self.out_features), device=self.out_device)
+
+    def load_weights(self, w: dict | nn.Parameter | tuple | None = None, device: str = "cpu"):
+        if self.key + ".weight" in self.gguf_loader.tensor_info:
+            if self.key + ".bias" in self.gguf_loader.tensor_file_map:
+                self.weight = self.gguf_loader.get_mmap_tensor(self.key + ".weight")
+                self.weight_type = self.gguf_loader.tensor_info[self.key + ".weight"]["ggml_type"]
+                self.bias = self.gguf_loader.load_gguf_tensor(self.key + ".bias", device=device)
+            else:
+                self.weight = self.gguf_loader.get_mmap_tensor(self.key + ".weight")
+                self.weight_type = self.gguf_loader.tensor_info[self.key + ".weight"]["ggml_type"]
+                self.bias = None
+        else:
+            raise ValueError(f"Linear {self.key} not found in gguf_loader")
+
+    def unload(self):
+        if self.w is not None:
+            self.w = None
+        if self.has_bias:
+            self.bias = None        
+
 LINEAR_MAP = {
-    "QuantizedLinearMarlin": QuantizedLinearMarlin,
-    "QuantizedLinearTorch": QuantizedLinearTorch,
-    "QuantizedLinearTorch": QuantizedLinearTorch,
+    "KLinearMarlin": KLinearMarlin,
+    "KLinearTorch": KLinearTorch,
+    "KLinearCPUInfer": KLinearCPUInfer
 }
 
-class KTransformerLinear(BaseInjectedModule, QuantizedLinearBase):
+class KTransformersLinear(BaseInjectedModule, KLinearBase):
     def __init__(
         self,
         key: str,
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        device: str = "cuda",
+        # device: str = "cuda",
         generate_device: str = "cuda",
-        generate_op: str| None = "QuantizedLinearMarlin",
+        generate_op: str| None = "KLinearMarlin",
         prefill_device: str = "cuda",
-        prefill_op: str| None = "QuantizedLinearTorch",
+        prefill_op: str| None = "KLinearTorch",
         **kwargs,
     ):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, device, **kwargs)
-        QuantizedLinearBase.__init__(self, key, gguf_loader, config, orig_module, device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        KLinearBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         # build all the linear operators
         if prefill_op is not None:
             assert prefill_op in LINEAR_MAP, f"linear_type {prefill_op} not supported"
-            if prefill_op == "QuantizedLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using QuantizedLinearTorch instead.")
+            if prefill_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
+                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
                 print(f"module info: key:{key} orig_module:{orig_module}")
-                self.prefill_linear = QuantizedLinearTorch(key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+                self.prefill_linear = KLinearTorch(key, gguf_loader, config, orig_module, prefill_device, **kwargs)
             else:
                 self.prefill_linear = LINEAR_MAP[prefill_op](key, gguf_loader, config, orig_module, prefill_device, **kwargs)
         else:
@@ -280,16 +390,15 @@ class KTransformerLinear(BaseInjectedModule, QuantizedLinearBase):
 
         if generate_op is not None:
             assert generate_op in LINEAR_MAP, f"linear_type {generate_op} not supported"
-            if generate_op == "QuantizedLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using QuantizedLinearTorch instead.")
+            if generate_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
+                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
                 print(f"module info: key:{key} orig_module:{orig_module}")
-                self.generate_op = "QuantizedLinearTorch"
-                self.generate_linear = QuantizedLinearTorch(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+                self.generate_op = "KLinearTorch"
+                self.generate_linear = KLinearTorch(key, gguf_loader, config, orig_module, generate_device, **kwargs)
             else:
                 self.generate_linear = LINEAR_MAP[generate_op](key, gguf_loader, config, orig_module, generate_device, **kwargs)
         else:
             self.generate_linear = None
-        self.device = device
         self.mode = InferenceState.UNLOAD
 
     def forward(self, x):

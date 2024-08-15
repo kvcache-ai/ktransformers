@@ -3,8 +3,8 @@
  * @Author       : Azure-Tang
  * @Date         : 2024-07-25 13:38:30
  * @Version      : 1.0.0
- * @LastEditors  : Azure 
- * @LastEditTime : 2024-07-26 08:36:03
+ * @LastEditors  : kkk1nak0
+ * @LastEditTime : 2024-08-12 03:05:04
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 **/
 
@@ -23,7 +23,13 @@ PYBIND11_MODULE(KTransformersOps, m) {
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("dequantize_q6_k", &dequantize_q6_k, "Function to dequantize q6_k data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
+      m.def("dequantize_q5_k", &dequantize_q5_k, "Function to dequantize q5_k data.",
+            py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("dequantize_q4_k",  &dequantize_q4_k, "Function to dequantize q4_k data.",
+            py::arg("data"), py::arg("blk_size"), py::arg("device"));
+      m.def("dequantize_q3_k",  &dequantize_q3_k, "Function to dequantize q3_k data.",
+            py::arg("data"), py::arg("blk_size"), py::arg("device"));
+      m.def("dequantize_q2_k",  &dequantize_q2_k, "Function to dequantize q2_k data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("gptq_marlin_gemm", &gptq_marlin_gemm, "Function to perform GEMM using Marlin quantization.",
             py::arg("a"), py::arg("b_q_weight"), py::arg("b_scales"), py::arg("g_idx"),
