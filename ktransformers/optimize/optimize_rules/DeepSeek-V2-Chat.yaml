@@ -9,53 +9,53 @@
 #    name: "^model\\.layers\\.([1-5][0-9])\\.mlp\\.shared_experts.*$"  # regular expression 
 #    class: torch.nn.Linear  # only match modules matching name and class simultaneously
 #  replace:
-#    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+#    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
 #    kwargs:
 #      generate_device: "cpu"
 #      prefill_device: "cuda"
-#      generate_op: "QuantizedLinearCPUInfer"
-#      prefill_op: "QuantizedLinearTorch"
+#      generate_op: "KLinearCPUInfer"
+#      prefill_op: "KLinearTorch"
 #      out_device: "cuda"
 - match:
     name: "^model\\.layers\\.(?!.*self_attn).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
   replace:
-    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-      generate_op: "QuantizedLinearMarlin"
-      prefill_op: "QuantizedLinearTorch"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
 - match:
     name: "^model\\.layers\\..*\\.mlp$"
     class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
   replace:
-    class: ktransformers.operators.experts.DeepseekV2MoEInjected     # mlp module with custom forward function
+    class: ktransformers.operators.experts.KDeepseekV2MoE     # mlp module with custom forward function
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
 - match:
     name: "^model\\.layers\\..*\\.mlp\\.experts$"
   replace:
-    class: ktransformers.operators.experts.KTransformersMLPExpert     # custom MoE Kernel with expert paralleism
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
     kwargs:
       prefill_device: "cuda"
-      prefill_mlp_type: "MLPExpertsTorch"
+      prefill_op: "KExpertsTorch"
       generate_device: "cpu"
-      generate_mlp_type: "MLPCPUExperts"
+      generate_op: "KExpertsCPU"
       out_device: "cuda"
   recursive: False # don't recursively inject submodules of this module
 - match:
     name: "^model\\.layers\\..*\\.self_attn$"
   replace:
-    class: ktransformers.operators.attention.DeepseekV2AttentionInjected # optimized MLA implementation
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
 - match:
     name: "^model$"
   replace:
-    class: "ktransformers.operators.layer_wise_prefill.DeepseekV2ModelKTransformers"
+    class: "ktransformers.operators.layer_wise_prefill.KDeepseekV2Model"
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"

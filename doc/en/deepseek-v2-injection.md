@@ -90,7 +90,7 @@ The YAML rule is listed below.
 - match:
     name: "^model\\.layers\\..*\\.self_attn$" # regular expression
   replace:
-    class: ktransformers.operators.attention.DeepseekV2AttentionInjected # optimized MLA implementation
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
 ```
 
 As we can see, each rule in the YAML file has two parts: `match` and `replace`. 
@@ -98,9 +98,9 @@ The match part specifies which module should be replaced, and the replace part s
 
 <h3 id="experts">Routed Experts </h3>
 
-For routed experts, the module we inject is a wrapper of CPUInfer, KTransformersMLPExpert. There are several implementations within a wrapper, and we need to specify keywords to tell the wrapper which implementation we want to use and how we intend to use it.
+For routed experts, the module we inject is a wrapper of CPUInfer, KTransformersExperts. There are several implementations within a wrapper, and we need to specify keywords to tell the wrapper which implementation we want to use and how we intend to use it.
 
-In KTransformers, some models exhibit different behaviors during prefilling and generation for better performance. KTransformersMLPExpert is one of them. All these special modules have a `device` keyword describing which device the module should be initialized on. Other keywords specify the behaviors during prefilling and generation and may be differ when using different injection modules. Here, we specify which implementation on which device we want to use during prefilling and generation, and which device the output should be on.
+In KTransformers, some models exhibit different behaviors during prefilling and generation for better performance. KTransformersExperts is one of them. All these special modules have a `device` keyword describing which device the module should be initialized on. Other keywords specify the behaviors during prefilling and generation and may be differ when using different injection modules. Here, we specify which implementation on which device we want to use during prefilling and generation, and which device the output should be on.
 Note that we only use these parameters when layer-wise prefilling is enabled; otherwise, prefilling is conducted with the same configuration as generation.
 
 In the original implementation of Transformers, MoE is implemented using `nn.ModuleList`. We don't want KTransformers to iterate through all the sub-modules in the list, so we set `recursive: False` in this rule to prevent recursive injection into submodules of the current module. Here is the YAML rule:
@@ -109,13 +109,13 @@ In the original implementation of Transformers, MoE is implemented using `nn.Mod
 - match:
     name: "^model\\.layers\\..*\\.mlp\\.experts$"
   replace:
-    class: ktransformers.operators.experts.KTransformersMLPExpert     # custom MoE Kernel with expert parallelism
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert parallelism
     device: "cpu"   # device to load this module on initialization
     kwargs:
       prefill_device: "cuda"
-      prefill_mlp_type: "MLPExpertsTorch"
+      prefill_op: "KExpertsTorch"
       generate_device: "cpu"
-      generate_mlp_type:  "MLPCPUExperts"
+      generate_op:  "KExpertsCPU"
       out_device: "cuda"
   recursive: False # don't recursively inject submodules of this module
 ```
@@ -126,7 +126,7 @@ If we inject the expert list as a custom module, we can't use the interface in `
 - match:
     class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
   replace:
-    class: ktransformers.operators.experts.DeepseekV2MoEInjected     # MLP module with custom forward function
+    class: ktransformers.operators.experts.KDeepseekV2MoE     # MLP module with custom forward function
 ```
 
 <h3 id="linear">Other Linear Modules</h3>
@@ -140,12 +140,12 @@ We also need to transfer some keywords similar to the injection of experts. Here
     name: "^model\\.layers\\.(?!.*self_attn).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
   replace:
-    class: ktransformers.operators.linear.KTransformerLinear  # optimized Kernel on quantized data types
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-      generate_op: "QuantizedLinearMarlin"
-      prefill_op: "QuantizedLinearTorch"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
 ```
 
 <h3 id="Pre-compute Buffers">Pre-compute Buffers </h3>
