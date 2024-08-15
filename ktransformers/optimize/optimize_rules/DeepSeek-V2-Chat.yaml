@@ -5,17 +5,6 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-#- match:
-#    name: "^model\\.layers\\.([1-5][0-9])\\.mlp\\.shared_experts.*$"  # regular expression 
-#    class: torch.nn.Linear  # only match modules matching name and class simultaneously
-#  replace:
-#    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
-#    kwargs:
-#      generate_device: "cpu"
-#      prefill_device: "cuda"
-#      generate_op: "KLinearCPUInfer"
-#      prefill_op: "KLinearTorch"
-#      out_device: "cuda"
 - match:
     name: "^model\\.layers\\.(?!.*self_attn).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
@@ -52,14 +41,6 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-- match:
-    name: "^model$"
-  replace:
-    class: "ktransformers.operators.models.KDeepseekV2Model"
-    kwargs:
-      generate_device: "cuda"
-      prefill_device: "cuda"
-      per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
 - match:
     name: "^model.embed_tokens"
   replace:
