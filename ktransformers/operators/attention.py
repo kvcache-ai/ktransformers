@@ -15,7 +15,7 @@ from ktransformers.util.custom_gguf import GGUFLoader
 from transformers.configuration_utils import PretrainedConfig
 from transformers.cache_utils import Cache
 
-class DeepseekV2AttentionInjected(BaseInjectedModule, DeepseekV2Attention):
+class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self,
