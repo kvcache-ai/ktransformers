@@ -165,7 +165,7 @@ Through these two rules, we place all previously unmatched layers (and their sub
 ## Muti-GPU
 
 If you have multiple GPUs, you can set the device for each module to different GPUs. 
-DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples [here](ktransformers/optimize/optimize_rules).
+DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat-multi-gpu.yaml).
 
 
 <p align="center">
