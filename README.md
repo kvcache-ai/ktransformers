@@ -22,7 +22,7 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 <br/><br/>
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
-<h2 id="Updates">🔥 Updates</h2>
+<h2 id="Updates">✨ Updates</h2>
 
 * **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
 * **Aug 14, 2024**: Support llamfile as linear backend, 
