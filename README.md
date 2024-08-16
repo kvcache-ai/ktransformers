@@ -22,6 +22,12 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 <br/><br/>
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
+<h2 id="Updates">🔥 Updates</h2>
+
+* **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
+* **Aug 14, 2024**: Support llamfile as linear backend, 
+* **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
+* **Aug 9, 2024**: Support windows native.
 
 <h2 id="show-cases">🔥 Show Cases</h2>
 <h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
