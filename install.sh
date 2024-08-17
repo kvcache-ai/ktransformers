@@ -1,4 +1,6 @@
-#!/bin/bash
+set ff=unix
+
+# !/bin/bash
 set -e  
 
 # clear build dirs
