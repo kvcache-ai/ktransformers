@@ -107,9 +107,9 @@ def main():
     parser.add_argument("--web", type=bool, default=False)
     parser.add_argument("--model_name", type=str, default=cfg.model_name)
     parser.add_argument("--model_path", type=str, default=cfg.model_path)
-    parser.add_argument("--device", type=str, default=cfg.model_device)
+    parser.add_argument("--device", type=str, default=cfg.model_device, help="Warning: Abandoning this parameter")
     parser.add_argument("--gguf_path", type=str, default=cfg.gguf_path)
-    parser.add_argument("--optimize_config_path", type=str, required=False)
+    parser.add_argument("--optimize_config_path", default=None, type=str, required=False)
     parser.add_argument("--cpu_infer", type=int, default=cfg.cpu_infer)
     parser.add_argument("--type", type=str, default=cfg.backend_type)
 
