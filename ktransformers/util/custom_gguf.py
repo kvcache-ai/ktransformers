@@ -681,7 +681,7 @@ def dequantize_f16_gpu(data, device):
     res = torch.from_numpy(data)
     res_gpu = torch.empty_like(res, device=device)
     res_gpu.copy_(res)
-    return res
+    return res_gpu
 
 GGML_DEQUANTIZE = {
     "F32": dequantize_f32,
