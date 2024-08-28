@@ -3,8 +3,8 @@
  * @Author       : chenht2022
  * @Date         : 2024-07-12 10:07:58
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022
- * @LastEditTime : 2024-07-25 10:34:58
+ * @LastEditors  : kkk1nak0
+ * @LastEditTime : 2024-08-15 07:45:18
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "linear.h"
@@ -24,10 +24,14 @@ Linear::~Linear() {
     shared_mem_buffer.dealloc(this);
 }
 
-void Linear::warm_up(Backend* backend) {
+void Linear::warm_up(Backend *backend) {
     std::vector<float> input_fp32(config_.input_size);
-    std::vector<uint8_t> input(config_.input_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type));
-    std::vector<uint8_t> output(config_.output_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type));
+    std::vector<uint8_t> input(config_.input_size *
+                               ggml_type_size(config_.hidden_type) /
+                               ggml_blck_size(config_.hidden_type));
+    std::vector<uint8_t> output(config_.output_size *
+                                ggml_type_size(config_.hidden_type) /
+                                ggml_blck_size(config_.hidden_type));
     for (int i = 0; i < config_.input_size; i++) {
         input_fp32[i] = 0;
     }
@@ -45,7 +49,7 @@ void Linear::forward_many(int qlen, const void* input, void* output, Backend* ba
         proj_input_ptr = proj_input_;
     }
     int nth = config_.output_size / config_.stride;
-    backend->do_work_stealing_job(nth, [&](int task_id) {
+    backend->do_work_stealing_job(nth, nullptr, [&](int task_id) {
         int ith = task_id;
         void* proj_ptr = (uint8_t*)proj_ + ith * config_.stride * config_.input_size * ggml_type_size(config_.proj_type) / ggml_blck_size(config_.proj_type);
         float* proj_output_ptr = proj_output_ + ith * config_.stride;
@@ -57,7 +61,7 @@ void Linear::forward_many(int qlen, const void* input, void* output, Backend* ba
                 from_float(output_fp32_ptr, output_ptr, config_.stride, config_.hidden_type);
             }
         }
-    });
+    }, nullptr);
     if (config_.stride % ggml_blck_size(config_.hidden_type) != 0) {
         from_float(proj_output_, output, qlen * config_.output_size, config_.hidden_type);
     }

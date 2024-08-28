@@ -3,8 +3,8 @@
  * @Author       : chenht2022
  * @Date         : 2024-07-16 10:43:18
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022
- * @LastEditTime : 2024-07-25 10:35:04
+ * @LastEditors  : kkk1nak0
+ * @LastEditTime : 2024-08-15 07:44:38
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "mlp.h"
@@ -31,10 +31,14 @@ MLP::~MLP() {
     shared_mem_buffer.dealloc(this);
 }
 
-void MLP::warm_up(Backend* backend) {
+void MLP::warm_up(Backend *backend) {
     std::vector<float> input_fp32(config_.hidden_size);
-    std::vector<uint8_t> input(config_.hidden_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type));
-    std::vector<uint8_t> output(config_.hidden_size * ggml_type_size(config_.hidden_type) / ggml_blck_size(config_.hidden_type));
+    std::vector<uint8_t> input(config_.hidden_size *
+                               ggml_type_size(config_.hidden_type) /
+                               ggml_blck_size(config_.hidden_type));
+    std::vector<uint8_t> output(config_.hidden_size *
+                                ggml_type_size(config_.hidden_type) /
+                                ggml_blck_size(config_.hidden_type));
     for (int i = 0; i < config_.hidden_size; i++) {
         input_fp32[i] = 0;
     }
@@ -42,9 +46,7 @@ void MLP::warm_up(Backend* backend) {
     forward_many(1, input.data(), output.data(), backend);
 }
 
-static float act_fn(float x) {
-    return x / (1.0f + expf(-x));
-}
+static float act_fn(float x) { return x / (1.0f + expf(-x)); }
 
 void MLP::forward_many(int qlen, const void* input, void* output, Backend* backend) {
     const void* gate_input_ptr;
@@ -72,7 +74,7 @@ void MLP::forward_many(int qlen, const void* input, void* output, Backend* backe
         }
     }
     int nth = config_.intermediate_size / config_.stride;
-    backend->do_work_stealing_job(nth, [&](int task_id) {
+    backend->do_work_stealing_job(nth, nullptr, [&](int task_id) {
         int ith = task_id;
         void* gate_proj_ptr = (uint8_t*)gate_proj_ + ith * config_.stride * config_.hidden_size * ggml_type_size(config_.gate_type) / ggml_blck_size(config_.gate_type);
         float* gate_output_ptr = gate_output_ + ith * config_.stride;
@@ -90,12 +92,12 @@ void MLP::forward_many(int qlen, const void* input, void* output, Backend* backe
                 from_float(intermediate_fp32_ptr, down_input_ptr, config_.stride, ggml_internal_get_type_traits(config_.down_type).vec_dot_type);
             }
         }
-    });
+    }, nullptr);
     if (config_.stride % ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) != 0) {
         from_float(intermediate_fp32_, down_input_, qlen * config_.intermediate_size, ggml_internal_get_type_traits(config_.down_type).vec_dot_type);
     }
     nth = config_.hidden_size / config_.stride;
-    backend->do_work_stealing_job(nth, [&](int task_id) {
+    backend->do_work_stealing_job(nth, nullptr, [&](int task_id) {
         int ith = task_id;
         void* down_proj_ptr = (uint8_t*)down_proj_ + ith * config_.stride * config_.intermediate_size * ggml_type_size(config_.down_type) / ggml_blck_size(config_.down_type);
         float* down_output_ptr = down_output_ + ith * config_.stride;
@@ -107,7 +109,7 @@ void MLP::forward_many(int qlen, const void* input, void* output, Backend* backe
                 from_float(output_fp32_ptr, output_ptr, config_.stride, config_.hidden_type);
             }
         }
-    });
+    }, nullptr);
     if (config_.stride % ggml_blck_size(config_.hidden_type) != 0) {
         from_float(down_output_, output, qlen * config_.hidden_size, config_.hidden_type);
     }
