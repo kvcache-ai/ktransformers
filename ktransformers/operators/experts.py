@@ -6,7 +6,7 @@ Author       : Azure-Tang, Boxin Zhang, chenht2022
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
 LastEditors  : Azure 
-LastEditTime : 2024-08-15 02:36:29
+LastEditTime : 2024-08-27 03:50:23
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -436,7 +436,7 @@ class KExpertsTorch(KExpertsBase):
             final_hidden_states.index_add_(0, top_x, current_hidden_states)
 
 
-        return final_hidden_states.to(org_dtype, device=org_device)
+        return final_hidden_states.to(dtype=org_dtype, device=org_device)
 
 EXPERTS_MAP = {
     "KExpertsCPU": KExpertsCPU,

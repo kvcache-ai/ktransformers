@@ -1,17 +1,16 @@
 <div align="center">
   <!-- <h1>KTransformers</h1> -->
   <p align="center">
-  
-  <picture>
+
+<picture>
     <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
 
-  </picture>
+</picture>
 
-  </p>
+</p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference Optimizations</h3>
   <strong><a href="#show-cases">🔥 Show Cases</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#tutorial">📃 Tutorial</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬  Discussion </a> </strong>
 </div>
-
 
 <h2 id="intro">🎉 Introduction</h2>
 KTransformers, pronounced as Quick Transformers, is designed to enhance your 🤗 <a href="https://github.com/huggingface/transformers">Transformers</a> experience with advanced kernel optimizations and placement/parallelism strategies.
@@ -22,16 +21,42 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 <br/><br/>
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
-<h2 id="Updates">✨ Updates</h2>
+<h2 id="Updates">🔥 Updates</h2>
 
+* **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM.
+* **Aug 28, 2024**: Decrease DeepseekV2's required DRAM from 20G to 10G.
 * **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
-* **Aug 14, 2024**: Support llamfile as linear backend, 
+* **Aug 14, 2024**: Support llamfile as linear backend. 
 * **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
 * **Aug 9, 2024**: Support windows native.
 
 <h2 id="show-cases">🔥 Show Cases</h2>
-<h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
+<h3>1M Context Local Inference on a Desktop with Only 24GB VRAM</h3>
 <p align="center">
+
+https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
+
+* **1M Context InternLM 2.5 7B**: Operates at full bf16 precision, utilizing 24GB VRAM and 150GB DRAM, which is feasible on a local desktop setup. It achieves a 92.88% success rate on the 1M "Needle In a Haystack" test and 100% on the 128K NIAH test.
+
+<p align="center">
+  <picture>
+    <img alt="Single Needle Retrieval 128K" src="./doc/assets/needle_128K.png" width=100%>
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <img alt="Single Needle Retrieval 1000K" src="./doc/assets/needle_1M.png" width=100%>
+  </picture>
+</p>
+
+* **Enhanced Speed**: Reaches 16.91 tokens/s for generation with a 1M context using sparse attention, powered by llamafile kernels. This method is over 10 times faster than full attention approach of llama.cpp.
+
+* **Flexible Sparse Attention Framework**: Offers a flexible block sparse attention framework for CPU offloaded decoding. Compatible with SnapKV, Quest, and InfLLm. Further information is available [here](./doc/en/long_context_tutorial.md).
+
+<div>
+<h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
+</div>
 
 https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
 
@@ -53,7 +78,6 @@ https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
 https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
 
 </p>
-
 
 <strong>More advanced features will coming soon, so stay tuned!</strong>
 
@@ -89,17 +113,21 @@ Some preparation:
   ```
   
 - Linux-x86_64 with gcc, g++ and cmake
+  
   ```sh
   sudo apt-get update
   sudo apt-get install gcc g++ cmake ninja-build
   ```
+
 - We recommend using [Conda](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) to create a virtual environment with Python=3.11 to run our program.
+  
   ```sh
   conda create --name ktransformers python=3.11
   conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
   ```
 
 - Make sure that PyTorch, packaging, ninja is installed
+  
   ```
   pip install torch packaging ninja
   ```
@@ -107,37 +135,44 @@ Some preparation:
 <h3>Installation</h3>
 
 1. Use a Docker image, see [documentation for Docker](./doc/en/docker.md) 
-2. You can install using Pypi (for linux):
 
+2. You can install using Pypi (for linux):
+   
    ```
    pip install ktransformers --no-build-isolation
    ```
+   
    for windows we prepare a pre compiled whl package in [ktransformers-0.1.1+cu125torch24avx2-cp311-cp311-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.1/ktransformers-0.1.1+cu125torch24avx2-cp311-cp311-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced. 
 
 3. Or you can download source code and compile:
+   
    - init source code 
+     
      ```sh
      git clone https://github.com/kvcache-ai/ktransformers.git
      cd ktransformers
      git submodule init
      git submodule update
      ```
+   
    - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
+   
    - Compile and install (for Linux)
+     
      ```
      bash install.sh
      ```
-
+   
    - Compile and install(for Windows)
+     
      ```
      install.bat
-     ``` 
+     ```
 
 <h3>Local Chat</h3>
-We provide a simple command-line local chat Python script that you can run for testing. 
+We provide a simple command-line local chat Python script that you can run for testing.
 
-  > Note that this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to [RESTful API and Web UI](#id_666). We use the DeepSeek-V2-Lite-Chat-GGUF model as an example here. But we also support other models, you can replace it with any other model that you want to test. 
-
+> Note that this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to [RESTful API and Web UI](#id_666). We use the DeepSeek-V2-Lite-Chat-GGUF model as an example here. But we also support other models, you can replace it with any other model that you want to test. 
 
 <h4>Run Example</h4>
 
@@ -162,23 +197,30 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 # python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
 ```
 
-
 It features the following arguments:
 
 - `--model_path` (required): Name of the model (such as "deepseek-ai/DeepSeek-V2-Lite-Chat" which will automatically download configs from [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)). Or if you already got local files  you may directly use that path to initialize the model.  
-  >Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.
+  
+  > Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.
+
 - `--gguf_path` (required): Path of a directory containing GGUF files which could that can be downloaded from [Hugging Face](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main) (we only support q4_k_m and q8_0 for now, more formats are coming soon).
+
 - `--optimize_rule_path` (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.
+
 - `--max_new_tokens`: Int (default=1000). Maximum number of new tokens to generate.
+
 - `--cpu_infer`: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).
 
 <h3 id="supported-model"> Supported Model</h3>
 
-| Model Name | Model Size | VRAM | Minimum DRAM | Recommended DRAM |
-| ----  | ---- | ---- | ---- | ---- |
-| DeepSeek-V2-q4_k_m | 133G | 24G | 136G | 192G |
-| Qwen2-57B-A14B-Instruct-q4_k_m | 33G | 8G | 34G | 64G |
-| DeepSeek-V2-Lite-q4_k_m | 9.7G | 3G | 13G | 16G |
+| Model Name                     | Model Size | VRAM  | Minimum DRAM    | Recommended DRAM  |
+| ------------------------------ | ---------- | ----- | --------------- | ----------------- |
+| DeepSeek-V2-q4_k_m             | 133G       | 10G   | 136G            | 192G              |
+| Qwen2-57B-A14B-Instruct-q4_k_m | 33G        | 8G    | 34G             | 64G               |
+| DeepSeek-V2-Lite-q4_k_m        | 9.7G       | 3G    | 13G             | 16G               |
+| Mixtral-8x7B-q4_k_m            | 25G        | 1.6G  | 51G             | 64G               |
+| Mixtral-8x22B-q4_k_m           | 80G        | 4G    | 86.1G           | 96G               |
+| InternLM2.5-7B-Chat-1M         | 15.5G      | 15.5G | 8G(32K context) | 150G (1M context) |
 
 
 More will come soon. Please let us know which models you are most interested in. 
@@ -187,7 +229,6 @@ Be aware that you need to be subject to their corresponding model licenses when 
 
 <details>
   <summary>Click To Show how to run other examples</summary>
-
 
 * Qwen2-57B
 
@@ -208,6 +249,7 @@ python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --g
 ```
 
 * DeepseekV2
+  
 ```sh
 mkdir DeepSeek-V2-Chat-0628-GGUF && cd DeepSeek-V2-Chat-0628-GGUF
 # Download weights
@@ -221,8 +263,11 @@ cd ..
 python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
 
 # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
+
 # python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+
 ```
 
 | model name | weights download link |
@@ -245,11 +290,15 @@ Start without website:
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
 ```
+
 Start with website:
+
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
 ```
+
 Or you want to start server with transformers, the model_path should include safetensors
+
 ```bash
 ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
 ```
@@ -264,10 +313,9 @@ Access website with url [http://localhost:10002/web/index.html#/chat](http://loc
 
 More information about the RESTful API server can be found [here](doc/en/api/server/server.md). You can also find an example of integrating with Tabby [here](doc/en/api/server/tabby.md).
 
-
 <h2 id="tutorial">📃 Brief Injection Tutorial</h2>
 At the heart of KTransformers is a user-friendly, template-based injection framework. 
-This allows researchers to easily replace original torch modules with optimized variants. It also simplifies the process of combining multiple optimizations, allowing the exploration of their synergistic effects. 
+This allows researchers to easily replace original torch modules with optimized variants. It also simplifies the process of combining multiple optimizations, allowing the exploration of their synergistic effects.
 
 </br>
 <p align="center">

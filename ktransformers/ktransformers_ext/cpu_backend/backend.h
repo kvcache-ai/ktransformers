@@ -3,7 +3,7 @@
  * @Author       : chenht2022
  * @Date         : 2024-07-22 02:03:05
  * @Version      : 1.0.0
- * @LastEditors  : chenht2022 
+ * @LastEditors  : chenht2022
  * @LastEditTime : 2024-07-25 10:33:38
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
@@ -31,20 +31,25 @@ struct ThreadState {
 };
 
 class Backend {
-   public:
+  public:
     Backend(int);
     ~Backend();
     int get_thread_num();
-    void do_work_stealing_job(int, std::function<void(int)>);
+    void do_work_stealing_job(int, std::function<void(int)>,
+                              std::function<void(int)>,
+                              std::function<void(int)>);
+    static thread_local int thread_local_id;
 
-   private:
+  private:
     int thread_num_;
-    std::vector<ThreadState> thread_state_;  // [thread_num]
-    std::function<void(int)> func_;
+    int max_thread_num_;
+    std::vector<ThreadState> thread_state_; // [thread_num]
+    std::function<void(int)> init_func_;
+    std::function<void(int)> compute_func_;
+    std::function<void(int)> finalize_func_;
     std::vector<std::thread> workers_;
 
     void process_tasks(int);
     void worker_thread(int);
 };
-
 #endif

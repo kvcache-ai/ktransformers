@@ -46,7 +46,8 @@ class CUDAGraphRunner:
             capture_stream.wait_stream(torch.cuda.current_stream())
             torch.cuda.set_device(main_device)
             torch.cuda.set_stream(capture_stream)
-        past_key_values.change_seq_length(-1)
+        if past_key_values != None:    
+            past_key_values.change_seq_length(-1)
         torch.cuda.synchronize(self.main_device)
         #self.graph.debug_dump("cuda_graph_hooked.dot")
 

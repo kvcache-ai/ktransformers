@@ -35,3 +35,19 @@ web:
 
 ext:
   cpu_infer: 10
+
+long_context:
+  chunk_size: 4096
+  max_seq_len: 32000
+  block_size: 128
+  local_windows_len: 4096
+  second_select_num: 32
+  anchor_type: DYNAMIC
+  kv_type: FP16
+  dense_layer_num: 2
+  anchor_num: 1
+  preselect_block: True
+  head_select_mode: SHARED
+  preselect_block_count: 32
+  layer_step: 1
+  token_step: 100

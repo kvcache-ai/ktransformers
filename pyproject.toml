@@ -27,7 +27,8 @@ dependencies = [
   "wheel",
   "colorlog",
   "build",
-  "fire"
+  "fire",
+  "protobuf"
 ]
 
 requires-python = ">=3.10"

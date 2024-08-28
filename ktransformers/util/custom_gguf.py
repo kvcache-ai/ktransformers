@@ -6,7 +6,7 @@ Author       : Azure-Tang, Boxin Zhang, chenht2022
 Date         : 2024-07-26 08:48:54
 Version      : 1.0.0
 LastEditors  : kkk1nak0
-LastEditTime : 2024-08-12 07:21:55
+LastEditTime : 2024-08-14 08:20:45
 Adapted from https://github.com/99991/pygguf/blob/main/gguf.py
 Copyright (c) 2023-2024 The ggml authors
 Copyright (c) 2024 Thomas Germer
@@ -294,7 +294,6 @@ class GGUFLoader:
         else:
             values = GGML_DEQUANTIZE[ggml_name](data)
             values = torch.from_numpy(values)
-
         values = values.view(shape[::-1])
         if "attn_q" in name and self.gguf_file_meta['general.architecture'] in ["llama"]:
             n_head = self.gguf_file_meta['llama.attention.head_count']
