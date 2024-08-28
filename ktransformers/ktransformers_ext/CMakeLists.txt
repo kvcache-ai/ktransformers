@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(cpuinfer_ext VERSION 0.1.0)
 
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 set(CMAKE_BUILD_TYPE "Release")
@@ -215,7 +216,8 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
-set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4})
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
+set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5})
 message(STATUS "ALL_SOURCES: ${ALL_SOURCES}")
 
 pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
@@ -223,5 +225,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE llama)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{CUDA_PATH}/lib/x64/cudart.lib")#CUDA::cudart
 elseif(UNIX)
+    if(NOT DEFINED ENV{CUDA_HOME} OR "$ENV{CUDA_HOME}" STREQUAL "")
+        set(ENV{CUDA_HOME} "/usr/local/cuda")
+    endif()
     target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{CUDA_HOME}/lib64/libcudart.so")
 endif()
