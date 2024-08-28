@@ -69,6 +69,25 @@ Some preparation:
   export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
   export CUDA_PATH=/usr/local/cuda
   ``` -->
+- Set CUDA_HOME (for linux) or CUDA_PATH (for windows)
+
+  For Linux, please add the following environment variables (suppose cuda is installed in "/usr/local/cuda").
+  ```sh
+  export CUDA_HOME=/usr/local/cuda
+  export PATH=/usr/local/cuda/bin:$PATH
+  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH  
+  ```
+
+  For Windows, please add the CUDA_PATH to the "System variables" section of "Environment Variables" (suppose cuda is installed in "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vX.X").
+  - Variable name: "CUDA_PATH"
+  - Variable value: "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vX.X"
+
+  Then append the following paths to the "Path" variable.
+
+    ```sh
+  %CUDA_PATH%\bin;%CUDA_PATH%\libnvvp
+  ```
+  
 - Linux-x86_64 with gcc, g++ and cmake
   ```sh
   sudo apt-get update
