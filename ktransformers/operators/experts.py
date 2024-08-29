@@ -6,7 +6,7 @@ Author       : Azure-Tang, Boxin Zhang, chenht2022
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
 LastEditors  : Azure 
-LastEditTime : 2024-08-27 03:50:23
+LastEditTime : 2024-08-29 09:41:10
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -202,7 +202,7 @@ class KExpertsCPU(KExpertsBase):
     def forward(self, input_tensor, expert_ids, weights):
         # generate, capture and run cuda graph
         # print(expert_ids)
-        if input_tensor.size(0)==1:
+        if input_tensor.size(0)==1 and torch.cuda.is_current_stream_capturing():
             # TODO: this branch is unreachable, but the shape of input_tensor([1,hidden_size]) and input_tensor_cpu([hidden_size]) is not compatible
             #print("capturing experts")
             KExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
@@ -636,7 +636,7 @@ class KDeepseekV2MoE(BaseInjectedModule, DeepseekV2MoE):
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         
-        if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode"):
+        if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode") and torch.cuda.is_current_stream_capturing():
             self.experts.generate_experts.submit_for_one_decode(hidden_states[0], topk_idx[0], topk_weight[0])
             if self.config.n_shared_experts is not None:
                 y_ = self.shared_experts(identity).squeeze(0)
