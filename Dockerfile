@@ -25,7 +25,7 @@ rm -rf /var/lib/apt/lists/* &&
 cd ktransformers &&
 git submodule init &&
 git submodule update &&
-pip install ninja pyproject numpy &&
+pip install ninja pyproject numpy cpufeature &&
 pip install flash-attn &&
 CPU_INSTRUCT=NATIVE  KTRANSFORMERS_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9" pip install . --no-build-isolation --verbose &&
 pip cache purge
