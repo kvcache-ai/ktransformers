@@ -6,7 +6,7 @@ Author       : Azure-Tang, Boxin Zhang
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
 LastEditors  : Azure 
-LastEditTime : 2024-08-14 14:57:04
+LastEditTime : 2024-08-29 09:11:16
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
 '''
 
@@ -277,7 +277,7 @@ class KLinearCPUInfer(KLinearBase):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         origin_shape = x.shape # [batch_size, q_len, hidden_size]
-        if origin_shape[1] == 1:
+        if origin_shape[1] == 1 and torch.cuda.is_current_stream_capturing():
             out_device = x.device
             self.input_tensor_cpu.copy_(x, non_blocking=True)
             qlen = origin_shape[1]
