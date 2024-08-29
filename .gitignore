@@ -18,4 +18,3 @@ compile_commands.json
 ktransformers/server/local_store/
 ktransformers/server_test1.db
 *.patch
-local_chat_djw.py
