@@ -23,8 +23,8 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
-* **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM.
-* **Aug 28, 2024**: Decrease DeepseekV2's required DRAM from 20G to 10G.
+* **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is [here](./doc/en/long_context_tutorial.md).
+* **Aug 28, 2024**: Decrease DeepseekV2's required VRAM from 21G to 11G.
 * **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
 * **Aug 14, 2024**: Support llamfile as linear backend. 
 * **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
@@ -52,7 +52,7 @@ https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
 
 * **Enhanced Speed**: Reaches 16.91 tokens/s for generation with a 1M context using sparse attention, powered by llamafile kernels. This method is over 10 times faster than full attention approach of llama.cpp.
 
-* **Flexible Sparse Attention Framework**: Offers a flexible block sparse attention framework for CPU offloaded decoding. Compatible with SnapKV, Quest, and InfLLm. Further information is available [here](./doc/en/long_context_tutorial.md).
+* **Flexible Sparse Attention Framework**: Offers a flexible block sparse attention framework for CPU offloaded decoding. Compatible with SnapKV, Quest, and InfLLm. Further information is available [here](./doc/en/long_context_introduction.md).
 
 <div>
 <h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
@@ -62,7 +62,7 @@ https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
 
 </p>
 
-- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
+- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 11GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
 
 <p align="center">
   <picture>
@@ -215,7 +215,7 @@ It features the following arguments:
 
 | Model Name                     | Model Size | VRAM  | Minimum DRAM    | Recommended DRAM  |
 | ------------------------------ | ---------- | ----- | --------------- | ----------------- |
-| DeepSeek-V2-q4_k_m             | 133G       | 10G   | 136G            | 192G              |
+| DeepSeek-V2-q4_k_m             | 133G       | 11G   | 136G            | 192G              |
 | Qwen2-57B-A14B-Instruct-q4_k_m | 33G        | 8G    | 34G             | 64G               |
 | DeepSeek-V2-Lite-q4_k_m        | 9.7G       | 3G    | 13G             | 16G               |
 | Mixtral-8x7B-q4_k_m            | 25G        | 1.6G  | 51G             | 64G               |
