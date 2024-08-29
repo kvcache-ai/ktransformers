@@ -134,7 +134,7 @@ Some preparation:
 
 <h3>Installation</h3>
 
-1. Use a Docker image, see [documentation for Docker](./doc/en/docker.md) 
+1. Use a Docker image, see [documentation for Docker](./doc/en/Docker.md) 
 
 2. You can install using Pypi (for linux):
    
