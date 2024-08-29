@@ -46,7 +46,7 @@
   replace:
     class: "ktransformers.operators.models.KDeepseekV2Model"
     kwargs:
-      per_layer_prefill_intput_threshold: 2000 # 0 is close layer wise prefill
+      per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
 - match:
     name: "^model.embed_tokens"
   replace:
