@@ -670,11 +670,12 @@ class KDeepseekV2Model(BaseInjectedModule):
             if self.transfer_map is not None and i in self.transfer_map:
                 prev_stream = torch.cuda.current_stream()
                 cur_device = self.transfer_map[i]
-                if cur_device not in self.stream_device_map:
+                if cur_device not in self.stream_device_map and cur_device.lower() != "cpu":
                     self.stream_device_map[cur_device] = torch.cuda.Stream(cur_device)
-                torch.cuda.set_device(cur_device)
-                self.stream_device_map[cur_device].wait_stream(prev_stream)
-                torch.cuda.set_stream(self.stream_device_map[cur_device])
+                if cur_device.lower() != "cpu":
+                    torch.cuda.set_device(cur_device)
+                    self.stream_device_map[cur_device].wait_stream(prev_stream)
+                    torch.cuda.set_stream(self.stream_device_map[cur_device])
                 hidden_states = hidden_states.to(
                     self.transfer_map[i], non_blocking=True
                 )

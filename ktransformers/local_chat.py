@@ -67,6 +67,7 @@ def local_chat(
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     if mode == 'long_context':
+        assert config.architectures[0] == "LlamaForCausalLM", "only LlamaForCausalLM support long_context mode"
         torch.set_default_dtype(torch.float16)
     else:
         torch.set_default_dtype(config.torch_dtype)
@@ -143,8 +144,9 @@ def local_chat(
         input_tensor = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, return_tensors="pt"
         )
-        assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
-        "please change max_seq_len in  ~/.ktransformers/config.yaml"
+        if mode == 'long_context':
+            assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
+            "please change max_seq_len in  ~/.ktransformers/config.yaml"
         torch.set_default_dtype(
             torch.bfloat16
         )  # TODO: Remove this, replace dtype using config
