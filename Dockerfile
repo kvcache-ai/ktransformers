@@ -12,6 +12,7 @@ EOF
 
 FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel as compile_server
 WORKDIR /workspace
+ENV CUDA_HOME /usr/local/cuda
 COPY --from=web_compile /home/ktransformers /workspace/ktransformers
 RUN <<EOF
 apt update -y &&  apt install -y  --no-install-recommends \
@@ -27,7 +28,7 @@ git submodule init &&
 git submodule update &&
 pip install ninja pyproject numpy cpufeature &&
 pip install flash-attn &&
-CPU_INSTRUCT=NATIVE  KTRANSFORMERS_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9" pip install . --no-build-isolation --verbose &&
+CPU_INSTRUCT=NATIVE  KTRANSFORMERS_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0+PTX" pip install . --no-build-isolation --verbose &&
 pip cache purge
 EOF
 
