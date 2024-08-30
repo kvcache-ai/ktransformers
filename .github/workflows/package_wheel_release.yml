@@ -28,7 +28,6 @@ jobs:
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.1.1', torch: '2.4.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'FANCY', torch_cu: '121'}
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.1.1', torch: '2.4.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'AVX512', torch_cu: '121'}
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.1.1', torch: '2.4.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'AVX2', torch_cu: '121'}
-         - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.5.1', torch: '2.3.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'FANCY', torch_cu: '124'}
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.2.2', torch: '2.3.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'FANCY', torch_cu: '121'}
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.2.2', torch: '2.3.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'AVX512', torch_cu: '121'}
          - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.2.2', torch: '2.3.0', cudaarch: '8.0;8.6;8.7;8.9;9.0+PTX', instruct: 'AVX2', torch_cu: '121'}
@@ -187,8 +186,10 @@ jobs:
             }
           }
           if ($IsWindows) {
-            $env:CUDA_PATH = "$env:CUDA_PATH/Library"
-            $env:CUDA_HOME = $env:CUDA_PATH
+            if (Test-Path -Path "$env:CUDA_PATH/Library/bin/nvcc.exe"){
+              $env:CUDA_PATH = "$env:CUDA_PATH/Library"
+              $env:CUDA_HOME = $env:CUDA_PATH
+            }
             $env:PATH = "$env:CUDA_PATH/bin;" + $env:PATH
             $directory = "$env:CUDA_PATH/lib/x64/"
             if (-not (Test-Path -Path $directory)) {
@@ -197,7 +198,7 @@ jobs:
             }
             cp $env:CUDA_PATH/lib/*.lib $env:CUDA_PATH/lib/x64/
             $env:INCLUDE =$env:CUDA_PATH + "/include/targets/x64;" + $env:INCLUDE
-
+            $env:INCLUDE =$env:CONDA_PREFIX + "/include;" + $env:INCLUDE
           }
           python -m pip install torch==${{ matrix.torch }} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu${{ matrix.torch_cu }}
           python -m pip install cpufeature build wheel ninja packaging setuptools
