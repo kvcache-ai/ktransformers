@@ -195,11 +195,11 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                         [:,:min(self.chunck_size, min(past_key_value.max_cache_len-cur_idx, self.chunck_size))]
                 self.attn_mask[:, :, :, cur_idx+self.chunck_size:] = -1e+38
                 self.attn_mask[:, :, :, :cur_idx] = 0
-                chunck_mask = torch.narrow(self.attn_mask, 2, 0, min(self.chunck_size, q_len-cur_idx))
+                chunk_mask = torch.narrow(self.attn_mask, 2, 0, min(self.chunck_size, q_len-cur_idx))
 
             cur_output, _, _ = self.forward_chunck(
                             hidden_states[:, cur_idx:min(cur_idx + self.chunck_size, q_len), ...],
-                            chunck_mask,
+                            chunk_mask,
                             position_ids[:, cur_idx:min(cur_idx + self.chunck_size, q_len)],
                             past_key_value,
                             output_attentions,
