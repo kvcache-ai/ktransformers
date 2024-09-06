@@ -31,6 +31,8 @@ PYBIND11_MODULE(KTransformersOps, m) {
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("dequantize_q2_k",  &dequantize_q2_k, "Function to dequantize q2_k data.",
             py::arg("data"), py::arg("blk_size"), py::arg("device"));
+      m.def("dequantize_iq4_xs",  &dequantize_iq4_xs, "Function to dequantize iq4_xs data.",
+            py::arg("data"), py::arg("blk_size"), py::arg("device"));
       m.def("gptq_marlin_gemm", &gptq_marlin_gemm, "Function to perform GEMM using Marlin quantization.",
             py::arg("a"), py::arg("b_q_weight"), py::arg("b_scales"), py::arg("g_idx"),
             py::arg("perm"), py::arg("workspace"), py::arg("num_bits"), py::arg("size_m"),

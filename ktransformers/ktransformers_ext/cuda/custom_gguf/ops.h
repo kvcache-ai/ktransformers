@@ -19,3 +19,4 @@ torch::Tensor dequantize_q5_k(torch::Tensor data, int blk_size, torch::Device de
 torch::Tensor dequantize_q4_k(torch::Tensor data, int blk_size, torch::Device device);
 torch::Tensor dequantize_q3_k(torch::Tensor data, int blk_size, torch::Device device);
 torch::Tensor dequantize_q2_k(torch::Tensor data, int blk_size, torch::Device device);
+torch::Tensor dequantize_iq4_xs(torch::Tensor data, int blk_size, torch::Device device);
