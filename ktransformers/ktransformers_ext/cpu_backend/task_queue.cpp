@@ -16,17 +16,23 @@ TaskQueue::TaskQueue() {
 }
 
 TaskQueue::~TaskQueue() {
-    exit_flag.store(true, std::memory_order_seq_cst);
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        exit_flag.store(true, std::memory_order_seq_cst);
+    }
+    cv.notify_all();
     if (worker.joinable()) {
         worker.join();
     }
 }
 
 void TaskQueue::enqueue(std::function<void()> task) {
-    mutex.lock();
-    tasks.push(task);
-    sync_flag.store(false, std::memory_order_seq_cst);
-    mutex.unlock();
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        tasks.push(task);
+        sync_flag.store(false, std::memory_order_seq_cst);
+    }
+    cv.notify_one();
 }
 
 void TaskQueue::sync() {
@@ -36,22 +42,22 @@ void TaskQueue::sync() {
 
 void TaskQueue::processTasks() {
     while (true) {
-        mutex.lock();
-        if (tasks.empty()) {
-            if (exit_flag.load(std::memory_order_seq_cst)) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [this]() { return !tasks.empty() || exit_flag.load(std::memory_order_seq_cst); });
+            if (exit_flag.load(std::memory_order_seq_cst) && tasks.empty()) {
                 return;
             }
-            mutex.unlock();
-            continue;
+            task = tasks.front();
+            tasks.pop();
         }
-        std::function<void()> task = tasks.front();
-        mutex.unlock();
         task();
-        mutex.lock();
-        tasks.pop();
-        if (tasks.empty()) {
-            sync_flag.store(true, std::memory_order_seq_cst);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (tasks.empty()) {
+                sync_flag.store(true, std::memory_order_seq_cst);
+            }
         }
-        mutex.unlock();
     }
 }
