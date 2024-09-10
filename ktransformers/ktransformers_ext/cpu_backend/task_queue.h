@@ -69,8 +69,9 @@ class TaskQueue {
     void processTasks();
 
     std::queue<std::function<void()>> tasks;
+    std::mutex mutex;
+    std::condition_variable cv;
     std::thread worker;
-    custom_mutex mutex;
     std::atomic<bool> sync_flag;
     std::atomic<bool> exit_flag;
 };
