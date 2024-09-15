@@ -62,7 +62,7 @@ https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
 
 </p>
 
-- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 11GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
+- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
 
 <p align="center">
   <picture>
@@ -87,31 +87,14 @@ https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
 Some preparation:
 
 - CUDA 12.1 and above, if you didn't have it yet, you may install from [here](https://developer.nvidia.com/cuda-downloads).
-
-  <!-- ```
+  
+  ```sh
+  # Adding CUDA to PATH
   export PATH=/usr/local/cuda/bin:$PATH
   export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
   export CUDA_PATH=/usr/local/cuda
-  ``` -->
-- Set CUDA_HOME (for linux) or CUDA_PATH (for windows)
-
-  For Linux, please add the following environment variables (suppose cuda is installed in "/usr/local/cuda").
-  ```sh
-  export CUDA_HOME=/usr/local/cuda
-  export PATH=/usr/local/cuda/bin:$PATH
-  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH  
   ```
 
-  For Windows, please add the CUDA_PATH to the "System variables" section of "Environment Variables" (suppose cuda is installed in "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vX.X").
-  - Variable name: "CUDA_PATH"
-  - Variable value: "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\vX.X"
-
-  Then append the following paths to the "Path" variable.
-
-    ```sh
-  %CUDA_PATH%\bin;%CUDA_PATH%\libnvvp
-  ```
-  
 - Linux-x86_64 with gcc, g++ and cmake
   
   ```sh
@@ -154,15 +137,15 @@ Some preparation:
      git submodule init
      git submodule update
      ```
-   
+
    - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
-   
+
    - Compile and install (for Linux)
      
      ```
      bash install.sh
      ```
-   
+
    - Compile and install(for Windows)
      
      ```
@@ -203,7 +186,7 @@ It features the following arguments:
   
   > Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.
 
-- `--gguf_path` (required): Path of a directory containing GGUF files which could that can be downloaded from [Hugging Face](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main) (we only support q4_k_m and q8_0 for now, more formats are coming soon).
+- `--gguf_path` (required): Path of a directory containing GGUF files which could that can be downloaded from [Hugging Face](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main).
 
 - `--optimize_rule_path` (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.
 
@@ -211,17 +194,16 @@ It features the following arguments:
 
 - `--cpu_infer`: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).
 
-<h3 id="supported-model"> Supported Model</h3>
+<h3 id="supported-model"> Suggested Model</h3>
 
 | Model Name                     | Model Size | VRAM  | Minimum DRAM    | Recommended DRAM  |
 | ------------------------------ | ---------- | ----- | --------------- | ----------------- |
-| DeepSeek-V2-q4_k_m             | 133G       | 11G   | 136G            | 192G              |
+| DeepSeek-V2-q4_k_m             | 133G       | 24G   | 136G            | 192G              |
 | Qwen2-57B-A14B-Instruct-q4_k_m | 33G        | 8G    | 34G             | 64G               |
 | DeepSeek-V2-Lite-q4_k_m        | 9.7G       | 3G    | 13G             | 16G               |
 | Mixtral-8x7B-q4_k_m            | 25G        | 1.6G  | 51G             | 64G               |
 | Mixtral-8x22B-q4_k_m           | 80G        | 4G    | 86.1G           | 96G               |
 | InternLM2.5-7B-Chat-1M         | 15.5G      | 15.5G | 8G(32K context) | 150G (1M context) |
-
 
 More will come soon. Please let us know which models you are most interested in. 
 
@@ -232,43 +214,46 @@ Be aware that you need to be subject to their corresponding model licenses when 
 
 * Qwen2-57B
 
-```sh
-pip install flash_attn # For Qwen2
+  ```sh
+  pip install flash_attn # For Qwen2
 
-mkdir Qwen2-57B-GGUF && cd Qwen2-57B-GGUF
+  mkdir Qwen2-57B-GGUF && cd Qwen2-57B-GGUF
 
-wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
+  wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
 
-cd ..
+  cd ..
 
-python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
+  python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
 
-# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
-# python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-```
+  # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+  # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
+  # python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+  ```
 
 * DeepseekV2
   
-```sh
-mkdir DeepSeek-V2-Chat-0628-GGUF && cd DeepSeek-V2-Chat-0628-GGUF
-# Download weights
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
+  ```sh
+  mkdir DeepSeek-V2-Chat-0628-GGUF && cd DeepSeek-V2-Chat-0628-GGUF
+  # Download weights
+  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
+  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
+  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
+  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
 
-cd ..
+  cd ..
 
-python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+  python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
 
-# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+  # If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
 
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
+  # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
 
-# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+  # python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
 
 ```
+```
+
+  ```
 
 | model name | weights download link |
 |----------|----------|
