@@ -19,7 +19,7 @@
     name: "^model\\.layers\\..*\\.block_sparse_moe$"
     class: ktransformers.models.modeling_mixtral.MixtralSparseMoeBlock
   replace: 
-    class: ktransformers.operators.experts.KMisrtalSparseMoEBlock
+    class: ktransformers.operators.experts.KMistralSparseMoEBlock
 - match:
     name: "^model\\.layers\\..*\\.block_sparse_moe\\.experts$"
   replace: 
