@@ -727,7 +727,7 @@ class KDeepseekV2MoE(BaseInjectedModule, DeepseekV2MoE):
         )
         return final_out
 
-class KMisrtalSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
+class KMistralSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
     
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
