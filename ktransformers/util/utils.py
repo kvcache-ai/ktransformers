@@ -174,7 +174,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         prefill_time = first_token_time
         print(stream.put(next_token.item()), end="", flush=True)
         generated_ids[:, seq_length] = next_token
-        tokens.append(next_token)
+        tokens.append(int(next_token))
         inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
         cache_position = torch.tensor([seq_length], device=torch_device)
         position_ids = cache_position.unsqueeze(0)
@@ -191,7 +191,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
             inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
             generated_ids[:, cache_position] = next_token.int()
-            tokens.append(next_token.int())
+            tokens.append(int(next_token))
             seq_length += 1
             
             if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token) == '<|im_end|>':
