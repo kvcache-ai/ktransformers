@@ -1,10 +1,10 @@
 /**
- * @Description  :
- * @Author       : chenht2022
- * @Date         : 2024-07-16 10:43:18
- * @Version      : 1.0.0
- * @LastEditors  : chenxl 
- * @LastEditTime : 2024-08-08 04:23:51
+ * @Description :
+ * @Author    : chenht2022
+ * @Date     : 2024-07-16 10:43:18
+ * @Version   : 1.0.0
+ * @LastEditors : chenht
+ * @LastEditTime : 2024-10-09 11:08:07
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #ifndef CPUINFER_TASKQUEUE_H
@@ -22,36 +22,96 @@
 #endif
 
 class custom_mutex {
-private:
+   private:
 #ifdef _WIN32
-    HANDLE  global_mutex;
+    CRITICAL_SECTION cs;
 #else
-    std::mutex global_mutex;
+    std::mutex mtx;
 #endif
-    
-public:
-    custom_mutex()
-    {
+
+   public:
+    custom_mutex() {
 #ifdef _WIN32
-        HANDLE  global_mutex;
+        InitializeCriticalSection(&cs);
+#else
+        // No initialization required for std::mutex
 #endif
     }
 
-    void lock()
-    {
+    ~custom_mutex() {
 #ifdef _WIN32
-        WaitForSingleObject(global_mutex, INFINITE);
-#else
-        global_mutex.lock();
+        DeleteCriticalSection(&cs);
 #endif
     }
 
-    void unlock()
-    {
+    void lock() {
 #ifdef _WIN32
-        ReleaseMutex(global_mutex);
+        EnterCriticalSection(&cs);
 #else
-        global_mutex.unlock();
+        mtx.lock();
+#endif
+    }
+
+    void unlock() {
+#ifdef _WIN32
+        LeaveCriticalSection(&cs);
+#else
+        mtx.unlock();
+#endif
+    }
+
+#ifdef _WIN32
+    CRITICAL_SECTION* get_handle() {
+        return &cs;
+    }
+#else
+    std::mutex* get_handle() {
+        return &mtx;
+    }
+#endif
+};
+
+class custom_condition_variable {
+   private:
+#ifdef _WIN32
+    CONDITION_VARIABLE cond_var;
+#else
+    std::condition_variable cond_var;
+#endif
+
+   public:
+    custom_condition_variable() {
+#ifdef _WIN32
+        InitializeConditionVariable(&cond_var);
+#endif
+    }
+
+    template <typename Predicate>
+    void wait(custom_mutex& mutex, Predicate pred) {
+#ifdef _WIN32
+        while (!pred()) {
+            SleepConditionVariableCS(&cond_var, mutex.get_handle(), INFINITE);
+        }
+#else
+        std::unique_lock<std::mutex> lock(*mutex.get_handle(), std::adopt_lock);
+        cond_var.wait(lock, pred);
+        lock.release();
+#endif
+    }
+
+    void notify_one() {
+#ifdef _WIN32
+        WakeConditionVariable(&cond_var);
+#else
+        cond_var.notify_one();
+#endif
+    }
+
+    void notify_all() {
+#ifdef _WIN32
+        WakeAllConditionVariable(&cond_var);
+#else
+        cond_var.notify_all();
 #endif
     }
 };
@@ -69,8 +129,8 @@ class TaskQueue {
     void processTasks();
 
     std::queue<std::function<void()>> tasks;
-    std::mutex mutex;
-    std::condition_variable cv;
+    custom_mutex mutex;
+    custom_condition_variable cv;
     std::thread worker;
     std::atomic<bool> sync_flag;
     std::atomic<bool> exit_flag;
