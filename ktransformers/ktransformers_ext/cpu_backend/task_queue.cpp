@@ -1,10 +1,10 @@
 /**
- * @Description  :
- * @Author       : chenht2022
- * @Date         : 2024-07-17 12:25:51
- * @Version      : 1.0.0
- * @LastEditors  : chenht2022
- * @LastEditTime : 2024-07-25 10:33:44
+ * @Description :
+ * @Author    : chenht2022
+ * @Date     : 2024-07-17 12:25:51
+ * @Version   : 1.0.0
+ * @LastEditors : chenht2022
+ * @LastEditTime : 2024-10-09 11:08:10
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "task_queue.h"
@@ -17,8 +17,9 @@ TaskQueue::TaskQueue() {
 
 TaskQueue::~TaskQueue() {
     {
-        std::unique_lock<std::mutex> lock(mutex);
+        mutex.lock();
         exit_flag.store(true, std::memory_order_seq_cst);
+        mutex.unlock();
     }
     cv.notify_all();
     if (worker.joinable()) {
@@ -28,9 +29,10 @@ TaskQueue::~TaskQueue() {
 
 void TaskQueue::enqueue(std::function<void()> task) {
     {
-        std::unique_lock<std::mutex> lock(mutex);
+        mutex.lock();
         tasks.push(task);
         sync_flag.store(false, std::memory_order_seq_cst);
+        mutex.unlock();
     }
     cv.notify_one();
 }
@@ -44,20 +46,22 @@ void TaskQueue::processTasks() {
     while (true) {
         std::function<void()> task;
         {
-            std::unique_lock<std::mutex> lock(mutex);
-            cv.wait(lock, [this]() { return !tasks.empty() || exit_flag.load(std::memory_order_seq_cst); });
+            mutex.lock();
+            cv.wait(mutex, [this]() { return !tasks.empty() || exit_flag.load(std::memory_order_seq_cst); });
             if (exit_flag.load(std::memory_order_seq_cst) && tasks.empty()) {
                 return;
             }
             task = tasks.front();
             tasks.pop();
+            mutex.unlock();
         }
         task();
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            mutex.lock();
             if (tasks.empty()) {
                 sync_flag.store(true, std::memory_order_seq_cst);
             }
+            mutex.unlock();
         }
     }
 }
