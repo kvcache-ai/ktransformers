@@ -7,7 +7,7 @@ log:
 
 server:
   ip: 0.0.0.0
-  port: 12456
+  port: 10002
 
 db:
   type: "sqllite"
@@ -24,10 +24,13 @@ model:
   type: ktransformers
 
   name: DeepSeek-Coder-V2-Instruct
-  path: /mnt/data/model/DeepSeek-Coder-V2-Instruct/
-  gguf_path: /mnt/data/model/DeepSeek-Coder-V2-GGUF-WJH/
+  # path: /mnt/data/model/DeepSeek-Coder-V2-Instruct/
+  path: deepseek-ai/DeepSeek-V2-Lite-Chat
+  # gguf_path: /mnt/data/model/DeepSeek-Coder-V2-GGUF-WJH/
+  gguf_path: ./DeepSeek-V2-Lite-Chat-GGUF
 
   device: cuda:0
+  cache_lens: 8192
 
 web:
   mount: False
@@ -50,4 +53,7 @@ long_context:
   head_select_mode: SHARED
   preselect_block_count: 32
   layer_step: 1
-  token_step: 100
+  token_step: 
+
+local_chat:
+  prompt_file: "./ktransformers/p.txt"
