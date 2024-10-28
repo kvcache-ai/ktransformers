@@ -91,7 +91,7 @@ def local_chat():
         generated = asyncio.run(async_inference(messages))
         his_content += [
             {"role": "user", "content": content},
-            {"role": "assitant", "content": generated},
+            {"role": "assistant", "content": generated},
         ]
 
 
