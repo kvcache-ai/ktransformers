@@ -194,16 +194,19 @@ It features the following arguments:
 
 - `--cpu_infer`: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).
 
-<h3 id="supported-model"> Suggested Model</h3>
+<h3 id="suggested-model"> Suggested Model</h3>
 
 | Model Name                     | Model Size | VRAM  | Minimum DRAM    | Recommended DRAM  |
 | ------------------------------ | ---------- | ----- | --------------- | ----------------- |
-| DeepSeek-V2-q4_k_m             | 133G       | 24G   | 136G            | 192G              |
+| DeepSeek-V2-q4_k_m             | 133G       | 11G   | 136G            | 192G              |
+| DeepSeek-V2.5-q4_k_m           | 133G       | 11G   | 136G            | 192G              |
+| DeepSeek-V2.5-IQ4_XS           | 117G       | 10G   | 107G            | 128G              |
 | Qwen2-57B-A14B-Instruct-q4_k_m | 33G        | 8G    | 34G             | 64G               |
 | DeepSeek-V2-Lite-q4_k_m        | 9.7G       | 3G    | 13G             | 16G               |
 | Mixtral-8x7B-q4_k_m            | 25G        | 1.6G  | 51G             | 64G               |
 | Mixtral-8x22B-q4_k_m           | 80G        | 4G    | 86.1G           | 96G               |
 | InternLM2.5-7B-Chat-1M         | 15.5G      | 15.5G | 8G(32K context) | 150G (1M context) |
+
 
 More will come soon. Please let us know which models you are most interested in. 
 
