@@ -249,10 +249,6 @@ Be aware that you need to be subject to their corresponding model licenses when 
   # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
 
   # python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
-
-```
-```
-
   ```
 
 | model name | weights download link |
