@@ -4,6 +4,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 import uvicorn.logging
 import uvicorn
+import sys
+
+project_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, project_dir)
 from fastapi.middleware.cors import CORSMiddleware
 from ktransformers.server.args import ArgumentParser
 from ktransformers.server.config.config import Config
