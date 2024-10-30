@@ -9,11 +9,11 @@ import asyncio
 import os
 import platform
 import sys
-
-from ktransformers.server.args import ArgumentParser
-
 project_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, project_dir)
+from ktransformers.server.args import ArgumentParser
+
+
 from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
 from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
