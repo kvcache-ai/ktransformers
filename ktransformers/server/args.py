@@ -9,19 +9,19 @@ class ArgumentParser:
     def parse_args(self):
         parser = argparse.ArgumentParser(prog="kvcache.ai", description="Ktransformers")
         parser.add_argument("--host", type=str, default=self.cfg.server_ip)
-        parser.add_argument("--port", type=int, default=8082)
+        parser.add_argument("--port", type=int, default=self.cfg.server_port)
         parser.add_argument("--ssl_keyfile", type=str)
         parser.add_argument("--ssl_certfile", type=str)
-        parser.add_argument("--web", type=bool, default=True)
-        parser.add_argument("--model_name", type=str, default='DeepSeek-V2-Lite-Chat')
-        parser.add_argument("--model_dir", type=str, default='/mnt/data/model/DeepSeek-V2-Lite-Chat')
+        parser.add_argument("--web", type=bool, default=self.cfg.mount_web)
+        parser.add_argument("--model_name", type=str, default=self.cfg.model_name)
+        parser.add_argument("--model_dir", type=str, default=self.cfg.model_dir)
         parser.add_argument(
             "--device", type=str, default=self.cfg.model_device, help="Warning: Abandoning this parameter"
         )
-        parser.add_argument("--gguf_path", type=str, default='/mnt/data/model/DeepSeek-V2-Lite-Chat-GGUF')
-        parser.add_argument("--optimize_config_path", default='/mnt/data/benchmark/ktransformers-dev/ktransformers/optimize/optimize_rules/DeepSeek-V2-Lite-Chat.yaml', type=str, required=False)
+        parser.add_argument("--gguf_path", type=str, default=self.cfg.gguf_path)
+        parser.add_argument("--optimize_config_path", default=self.cfg.optimize_config_path, type=str, required=False)
         parser.add_argument("--cpu_infer", type=int, default=self.cfg.cpu_infer)
-        parser.add_argument("--type", type=str, default='ktransformers')
+        parser.add_argument("--type", type=str, default=self.cfg.backend_type)
 
         # model configs
         # parser.add_argument("--model_cache_lens", type=int, default=self.cfg.cache_lens)  # int?
@@ -69,7 +69,7 @@ class ArgumentParser:
         parser.add_argument("--print_timings", type=bool, default=self.cfg.print_timings)
         parser.add_argument("--amnesia", type=bool, default=self.cfg.amnesia)
         parser.add_argument("--batch_size", type=int, default=self.cfg.batch_size)
-        parser.add_argument("--cache_lens", type=int, default='32768')
+        parser.add_argument("--cache_lens", type=int, default=self.cfg.cache_lens)
 
         # log configs
         # log level: debug, info, warn, error, crit
