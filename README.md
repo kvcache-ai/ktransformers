@@ -151,7 +151,7 @@ Some preparation:
      ```
      install.bat
      ```
-
+4. If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./doc/en/makefile_usage.md) 
 <h3>Local Chat</h3>
 We provide a simple command-line local chat Python script that you can run for testing.
 
