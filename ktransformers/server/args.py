@@ -14,7 +14,8 @@ class ArgumentParser:
         parser.add_argument("--ssl_certfile", type=str)
         parser.add_argument("--web", type=bool, default=self.cfg.mount_web)
         parser.add_argument("--model_name", type=str, default=self.cfg.model_name)
-        parser.add_argument("--model_dir", type=str, default=self.cfg.model_dir)
+        parser.add_argument("--model_dir", type=str)
+        parser.add_argument("--model_path", type=str)
         parser.add_argument(
             "--device", type=str, default=self.cfg.model_device, help="Warning: Abandoning this parameter"
         )
@@ -100,6 +101,16 @@ class ArgumentParser:
         parser.add_argument("--prompt_file", type=str, default=self.cfg.prompt_file)
 
         args = parser.parse_args()
+        if (args.model_dir is not None):
+            if (args.model_path is not None):
+                # if pass model_dir and model_path, we use model_path
+                args.model_dir = args.model_path
+            else:
+                # if only pass model_dir, we use model_dir
+                args.model_path = args.model_dir
+        else:
+            args.model_dir = self.cfg.model_dir
+            args.model_path = self.cfg.model_path
         # set config from args
         for key, value in vars(args).items():
             if value is not None and hasattr(self.cfg, key):
