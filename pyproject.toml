@@ -70,3 +70,7 @@ ktransformers = "ktransformers.server.main:main"
 [tool.setuptools.packages.find]
 where = ["./", ]
 include = ["ktransformers"]
+[tool.black]
+line-length = 120
+preview = true
+unstable = true
