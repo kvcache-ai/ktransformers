@@ -95,7 +95,7 @@ class Config(metaclass=Singleton):
         self.gguf_path: Optional[str] = self.model.get("gguf_path", None)
         # self.model_cache_lens = self.model.get("cache_lens")
         self.optimize_config_path: Optional[str] = self.model.get(
-            "optimize_config_path", "./ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat.yaml"
+            "optimize_config_path", None
         )
         self.paged = self.model.get("paged", True)
 
