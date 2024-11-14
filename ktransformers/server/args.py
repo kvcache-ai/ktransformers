@@ -101,7 +101,7 @@ class ArgumentParser:
         parser.add_argument("--prompt_file", type=str, default=self.cfg.prompt_file)
 
         args = parser.parse_args()
-        if (args.model_dir is not None):
+        if (args.model_dir is not None or args.model_path is not None):
             if (args.model_path is not None):
                 # if pass model_dir and model_path, we use model_path
                 args.model_dir = args.model_path
