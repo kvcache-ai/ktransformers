@@ -134,7 +134,7 @@ class TransformersInterface(BackendInterfaceBase):
 
         self.tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
         self.model = AutoModelForCausalLM.from_pretrained(args.model_dir, device_map=args.device, use_safetensors=True)
-        logger.info(f"{args.model_name} loaded from {args.model_dir} to {args.device}")
+        # logger.info(f"{args.model_name} loaded from {args.model_dir} to {args.device}")
 
         self.cache = StaticCache(
             config=self.model.config,
@@ -143,7 +143,7 @@ class TransformersInterface(BackendInterfaceBase):
             device=args.device,
             dtype=self.model.dtype,
         )
-        logger.info(f"StaticCache (length={args.cache_lens}) created at {args.device}, batch size:{args.batch_size}")
+        # logger.info(f"StaticCache (length={args.cache_lens}) created at {args.device}, batch size:{args.batch_size}")
 
         self.streamer = TextStreamer(self.tokenizer)
 

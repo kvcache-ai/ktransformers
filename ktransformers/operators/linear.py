@@ -54,15 +54,15 @@ class KLinearBase(ABC):
 
         self.has_bias = False
         self.dtype = torch.get_default_dtype()
-        if orig_module is not None:
-            self.in_features = orig_module.in_features
-            self.out_features = orig_module.out_features
-        else:
-            shape = self.gguf_loader.tensor_info[key + ".weight"]["shape"]
-            if len(shape) == 1:
-                print("Warning: orig_module is not set, but has in_features or out_features equals to 1, can't get in_features and out_features from GGUF")
-            self.in_features  = self.gguf_loader.tensor_info[key + ".weight"]["shape"][0]
-            self.out_features = self.gguf_loader.tensor_info[key + ".weight"]["shape"][1]
+        # if orig_module is not None:
+        #     self.in_features = orig_module.in_features
+        #     self.out_features = orig_module.out_features
+        # else:
+        shape = self.gguf_loader.tensor_info[key + ".weight"]["shape"]
+        if len(shape) == 1:
+            print("Warning: orig_module is not set, but has in_features or out_features equals to 1, can't get in_features and out_features from GGUF")
+        self.in_features  = self.gguf_loader.tensor_info[key + ".weight"]["shape"][0]
+        self.out_features = self.gguf_loader.tensor_info[key + ".weight"]["shape"][1]
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
