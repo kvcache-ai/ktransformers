@@ -19,7 +19,7 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 # from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
-from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from ktransformers.util.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import PreTrainedModel # ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 # from transformers.processing_utils import Unpack
 from transformers.utils import (

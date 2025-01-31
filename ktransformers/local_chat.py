@@ -78,7 +78,7 @@ def local_chat():
                 else:
                     content += line + "\n"
         if content == "":
-            if True: # config.prompt_file == None or config.prompt_file == "":
+            if config.prompt_file == None or config.prompt_file == "":
                 content = "hi"
             else:
                 content = open(config.prompt_file, "r").read()
