@@ -643,7 +643,7 @@ class KDeepseekV2Model(BaseInjectedModule):
             org_device = input_ids.device
             # TODO move to embed_tokens's device, not hard code to cpu
             input_ids = input_ids.to("cpu")
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids).to(org_device)
             input_ids = input_ids.to(org_device)
 
         if per_layer_prefill_flag:

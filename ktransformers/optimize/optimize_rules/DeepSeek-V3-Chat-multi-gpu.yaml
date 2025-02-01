@@ -8,17 +8,17 @@
 
 - match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\."
-    class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+    class: ktransformers.operators.RoPE.DeepSeekV3YarnRotaryEmbedding
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\."
-    class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+    class: ktransformers.operators.RoPE.DeepSeekV3YarnRotaryEmbedding
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
