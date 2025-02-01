@@ -15,7 +15,7 @@ from ktransformers.server.args import ArgumentParser
 
 
 from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
-from ktransformers.models.modeling_deepseekv3 import DeepseekV3ForCausalLM
+from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
@@ -78,7 +78,7 @@ def local_chat():
                 else:
                     content += line + "\n"
         if content == "":
-            if config.prompt_file == None or config.prompt_file == "":
+            if not config.prompt_file:
                 content = "hi"
             else:
                 content = open(config.prompt_file, "r").read()

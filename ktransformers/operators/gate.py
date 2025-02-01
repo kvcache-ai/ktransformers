@@ -16,7 +16,7 @@ from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_gguf import GGUFLoader
-from ktransformers.models.modeling_deepseekv3 import MoEGate
+from ktransformers.models.modeling_deepseek_v3 import DeepseekV3TopkRouter
 from ktransformers.util.utils import InferenceState
 from ktransformers.server.config.config import Config
 from transformers.activations import ACT2FN
@@ -118,11 +118,10 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
         else:
             raise ValueError("Invalid weight type")
         self.orig_module.weight = self.orig_module.weight.to(device)
-        if self.topk_method == "noaux_tc":
-            self.orig_module.e_score_correction_bias = self.orig_module.e_score_correction_bias.to(device)
+        self.orig_module.e_score_correction_bias = self.orig_module.e_score_correction_bias.to(device)
 
     def unload(self):
         if self.weight is not None:
             self.weight = None
-        if self.topk_method == "noaux_tc":
+        if self.e_score_correction_bias is not None:
             self.e_score_correction_bias = None

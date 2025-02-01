@@ -54,4 +54,4 @@ long_context:
   token_step: 
 
 local_chat:
-  prompt_file: "./ktransformers/p.txt"
+  prompt_file: ""
