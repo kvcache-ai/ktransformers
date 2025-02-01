@@ -222,7 +222,7 @@ class KLinearMarlin(KLinearBase):
         x = x.to(self.device)
         orig_shape = list(x.shape)
         orig_dtype = x.dtype
-        x = x.reshape(-1, x.shape[-1])
+        x = x.reshape(-1, orig_shape[-1])
         marlin_s = self.marlin_s.to(x.dtype)
         x = KTransformersOps.gptq_marlin_gemm(
             x,
