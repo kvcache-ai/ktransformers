@@ -135,3 +135,7 @@ class StaticCache(transformers.StaticCache):
             # In-place ops prevent breaking the static address
             self.key_cache[layer_idx].zero_()
             self.value_cache[layer_idx].zero_()
+    
+    def get_max_cache_shape(self) -> Tuple[int, int, int, int]:
+        """Returns the maximum shape of the cache."""
+        return self.max_cache_len

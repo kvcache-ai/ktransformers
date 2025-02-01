@@ -47,7 +47,7 @@
   
 - match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp$"
-    class: ktransformers.models.modeling_deepseekv3.DeepseekV3MoE
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
   replace:
     class: ktransformers.operators.experts.KDeepseekV3MoE     # mlp module with custom forward function
     kwargs:
@@ -55,7 +55,7 @@
       prefill_device: "cuda:0"
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\.mlp$"
-    class: ktransformers.models.modeling_deepseekv3.DeepseekV3MoE
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
   replace:
     class: ktransformers.operators.experts.KDeepseekV3MoE     # mlp module with custom forward function
     kwargs:
@@ -64,7 +64,7 @@
 
 - match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.gate$"
-    class: ktransformers.models.modeling_deepseekv3.MoEGate
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3TopkRouter
   replace:
     class: ktransformers.operators.gate.KMoEGate
     kwargs:
@@ -72,7 +72,7 @@
       prefill_device: "cuda:0"
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\.mlp\\.gate$"
-    class: ktransformers.models.modeling_deepseekv3.MoEGate
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3TopkRouter
   replace:
     class: ktransformers.operators.gate.KMoEGate     # mlp module with custom forward function
     kwargs:

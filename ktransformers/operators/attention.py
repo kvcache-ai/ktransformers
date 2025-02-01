@@ -13,7 +13,8 @@ from ktransformers.models.configuration_deepseek import DeepseekV2Config
 from ktransformers.models.configuration_llama import LlamaConfig
 from ktransformers.models.modeling_llama import LlamaRotaryEmbedding
 from ktransformers.models.modeling_deepseek import DeepseekV2Attention, apply_rotary_pos_emb
-from ktransformers.models.modeling_deepseekv3 import DeepseekV3Attention, apply_rotary_pos_emb
+from ktransformers.models.modeling_deepseek_v3 import DeepseekV3Attention
+from ktransformers.models.modeling_deepseek_v3 import apply_rotary_pos_emb as apply_rotary_pos_emb_v3
 from typing import Optional, Tuple
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_gguf import GGUFLoader
@@ -95,7 +96,7 @@ class KDeepseekV3Attention(BaseInjectedModule, DeepseekV3Attention):
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
         cos, sin = self.rotary_emb(q_pe, position_ids)
-        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin)
+        q_pe, k_pe = apply_rotary_pos_emb_v3(q_pe, k_pe, cos, sin)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
