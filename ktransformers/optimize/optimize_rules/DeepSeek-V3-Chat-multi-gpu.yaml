@@ -10,7 +10,7 @@
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\."
     class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.DeepSeekV3YarnRotaryEmbedding
+    class: ktransformers.operators.RoPE.RotaryEmbeddingV3
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
@@ -18,7 +18,7 @@
     name: "^model\\.layers\\.([3456][0-9])\\."
     class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.DeepSeekV3YarnRotaryEmbedding
+    class: ktransformers.operators.RoPE.RotaryEmbeddingV3
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
@@ -64,7 +64,7 @@
 
 - match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.gate$"
-    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3TopkRouter
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
     class: ktransformers.operators.gate.KMoEGate
     kwargs:
@@ -72,7 +72,7 @@
       prefill_device: "cuda:0"
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\.mlp\\.gate$"
-    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3TopkRouter
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
     class: ktransformers.operators.gate.KMoEGate     # mlp module with custom forward function
     kwargs:
@@ -106,14 +106,14 @@
 - match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.self_attn$"
   replace:
-    class: ktransformers.operators.attention.KDeepseekV3Attention # optimized MLA implementation
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\.self_attn$"
   replace:
-    class: ktransformers.operators.attention.KDeepseekV3Attention # optimized MLA implementation
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"

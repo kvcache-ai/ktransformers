@@ -16,9 +16,6 @@ from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_gguf import GGUFLoader
-from ktransformers.models.modeling_deepseek_v3 import DeepseekV3TopkRouter
-from ktransformers.util.utils import InferenceState
-from ktransformers.server.config.config import Config
 from transformers.activations import ACT2FN
 from transformers.configuration_utils import PretrainedConfig
 from abc import ABC, abstractmethod
@@ -102,6 +99,8 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
     ):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         KMoEGateBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
 
     def forward(self, hidden_states) -> torch.Tensor:
         return self.orig_module.forward(hidden_states)

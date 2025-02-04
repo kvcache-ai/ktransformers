@@ -625,6 +625,13 @@ class KDeepseekV2Model(BaseInjectedModule):
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
+        
+        if inputs_embeds is None:
+            org_device = input_ids.device
+            # TODO move to embed_tokens's device, not hard code to cpu
+            input_ids = input_ids.to("cpu")
+            inputs_embeds = self.embed_tokens(input_ids).to(org_device)
+            input_ids = input_ids.to(org_device)
 
         if cache_position is None:
             past_seen_tokens = (
@@ -638,13 +645,6 @@ class KDeepseekV2Model(BaseInjectedModule):
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
-
-        if inputs_embeds is None:
-            org_device = input_ids.device
-            # TODO move to embed_tokens's device, not hard code to cpu
-            input_ids = input_ids.to("cpu")
-            inputs_embeds = self.embed_tokens(input_ids).to(org_device)
-            input_ids = input_ids.to(org_device)
 
         if per_layer_prefill_flag:
             causal_mask = None
@@ -717,6 +717,8 @@ class KDeepseekV2Model(BaseInjectedModule):
                     self.load_layer_to(decoder_layer, InferenceState.PREFILL)
                     torch.cuda.empty_cache()
                 t4 = time.time()
+                # with open("log.txt", "a") as f:
+                #     f.write(f"@@@@@@@@@@@@@@@@@layer {i}@@@@@@@@@@@@@@@@@@@@ \n")
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
@@ -739,13 +741,17 @@ class KDeepseekV2Model(BaseInjectedModule):
             hidden_states = layer_outputs[0]
 
             # @@@@@@@ TODO open this notes, tmp close to fit deepseekv3
-            # if use_cache:
-            #     next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+            if use_cache:
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
+        # with open("log.txt", "a") as f:
+        #     f.write(f"@@@After layers\n")
+        #     f.write(f"hidden_states={hidden_states}\n")
+        #     f.write(f"hidden_states.shape={hidden_states.shape}\n")
 
         if per_layer_prefill_flag:
             t6 = time.time()

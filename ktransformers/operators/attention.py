@@ -151,7 +151,7 @@ class KDeepseekV3Attention(BaseInjectedModule, DeepseekV3Attention):
 
         attn_output = self.o_proj(attn_output)
 
-        return attn_output, attn_weights 
+        return attn_output, attn_weights, past_key_value
 
     def forward(
         self,
@@ -220,7 +220,7 @@ class KDeepseekV3Attention(BaseInjectedModule, DeepseekV3Attention):
                 attn_output = torch.cat((attn_output, cur_output), dim=-2)
                 attn_weight = torch.cat((attn_weight, cur_attn_weight), dim=-2)
                 
-        return attn_output, attn_weight
+        return attn_output, attn_weight, past_key_value
 
 class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
     """Multi-headed attention from 'Attention Is All You Need' paper"""

@@ -734,7 +734,7 @@ class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
         identity = hidden_states
         orig_shape = hidden_states.shape
         sequence_length = orig_shape[1]
-        topk_idx, topk_weight, router_logits= self.gate(hidden_states)
+        topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         
         # only for generate phase
@@ -745,7 +745,7 @@ class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
             y = self.experts.generate_experts.sync_for_one_decode().unsqueeze(0)
             y += y_
             y.resize_(*orig_shape)
-            return y, router_logits
+            return y
 
         if self.config.n_shared_experts is not None:
             y_ = self.shared_experts(identity).squeeze(0)
@@ -768,7 +768,7 @@ class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
             )
         if self.config.n_shared_experts is not None:
             y += y_
-        return y, router_logits
+        return y
 
     @torch.no_grad()
     def moe_on_cpuinfer(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
