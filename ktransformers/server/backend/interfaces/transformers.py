@@ -198,7 +198,7 @@ class TransformersInterface(BackendInterfaceBase):
         return self.streamer.put(new_tokens)
 
     def logits_to_token(self, logits: torch.Tensor):
-        logits = logits / self.args.temperature
+        logits = logits / self.args.temperature if self.args.temperature!=0 else logits
 
         for token_idx in self.ever_generated_ids:
             if logits[token_idx] < 0:
@@ -318,7 +318,9 @@ class TransformersInterface(BackendInterfaceBase):
         if isinstance(local_messages, List):
             input_ids = self.format_and_tokenize_input_ids(thread_id, local_messages)
         elif isinstance(local_messages, str):
+            #local_messages = local_messages[0]['content']
             input_ids = self.tokenize_prompt(local_messages)
+            #input_ids = torch.tensor([[6366]], device=input_ids.device)
         else:
             raise ValueError("local_messages should be List or str")
 
