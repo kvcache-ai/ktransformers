@@ -81,8 +81,10 @@ def local_chat():
                 content = "hi"
             else:
                 content = open(config.prompt_file, "r").read()
+                print("User: ", content)
         elif os.path.isfile(content):
             content = open(content, "r").read()
+            print("User: ", content)
         messages = his_content + [{"role": "user", "content": content}]
 
         async def async_inference(messages):
