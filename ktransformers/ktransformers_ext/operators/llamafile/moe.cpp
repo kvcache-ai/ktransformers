@@ -224,7 +224,7 @@ void MOE::forward_many(int qlen, int k, const uint64_t* expert_ids, const float*
     int stride = QK_K;
     int nth = config_.intermediate_size / stride;
     backend->do_work_stealing_job(nth * config_.expert_num, nullptr, [&](int task_id) {
-        int expert_idx = task_id / nth;
+        uint64_t expert_idx = task_id / nth;
         int ith = task_id % nth;
         void* gate_input_ptr = m_local_gate_input_ptr_[expert_idx];
         void* gate_proj_ptr = (uint8_t*)gate_proj_ + (expert_idx * config_.intermediate_size + ith * stride) * config_.hidden_size * ggml_type_size(config_.gate_type) / ggml_blck_size(config_.gate_type);
@@ -246,7 +246,7 @@ void MOE::forward_many(int qlen, int k, const uint64_t* expert_ids, const float*
     stride = QK_K;
     nth = config_.hidden_size / stride;
     backend->do_work_stealing_job(nth * config_.expert_num, nullptr, [&](int task_id) {
-        int expert_idx = task_id / nth;
+        uint64_t expert_idx = task_id / nth;
         int ith = task_id % nth;
         void* down_input_ptr = m_local_down_input_ptr_[expert_idx];
         void* down_proj_ptr = (uint8_t*)down_proj_ + (expert_idx * config_.hidden_size + ith * stride) * config_.intermediate_size * ggml_type_size(config_.down_type) / ggml_blck_size(config_.down_type);

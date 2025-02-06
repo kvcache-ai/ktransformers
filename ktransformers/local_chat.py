@@ -32,7 +32,7 @@ custom_models = {
 ktransformer_rules_dir = os.path.dirname(os.path.abspath(__file__)) + "/optimize/optimize_rules/"
 default_optimize_rules = {
     "DeepseekV2ForCausalLM": ktransformer_rules_dir + "DeepSeek-V2-Chat.yaml",
-    "DeepseekV3ForCausalLM": ktransformer_rules_dir + "DeepSeek-V3-Chat.yaml",
+    "DeepseekV3ForCausalLM": ktransformer_rules_dir + "DeepSeek-V3-Chat-multi-gpu.yaml",
     "Qwen2MoeForCausalLM": ktransformer_rules_dir + "Qwen2-57B-A14B-Instruct.yaml",
     "LlamaForCausalLM": ktransformer_rules_dir + "Internlm2_5-7b-Chat-1m.yaml",
     "MixtralForCausalLM": ktransformer_rules_dir + "Mixtral.yaml",
