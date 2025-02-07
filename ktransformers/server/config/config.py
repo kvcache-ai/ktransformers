@@ -93,6 +93,8 @@ class Config(metaclass=Singleton):
         self.model_name: str = self.model.get("name", "")
         self.model_device: str = self.model.get("device", "cuda:0")
         self.gguf_path: Optional[str] = self.model.get("gguf_path", None)
+        self.use_cuda_graph = self.model.get("use_cuda_graph", True)
+        self.trust_remote_code = self.model.get("trust_remote_code", True)
         # self.model_cache_lens = self.model.get("cache_lens")
         self.optimize_config_path: Optional[str] = self.model.get(
             "optimize_config_path", None
