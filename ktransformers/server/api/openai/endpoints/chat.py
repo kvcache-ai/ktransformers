@@ -10,8 +10,16 @@ from ktransformers.server.backend.base import BackendInterfaceBase
 
 router = APIRouter()
 
+models = [
+    {"id": "0", "name": "ktranformers-model"},
+]
 
-@router.post('/chat/completions',tags=['openai'])
+@router.get('/models', tags=['openai'])
+async def list_models():
+    return models
+
+
+@router.post('/chat/completions', tags=['openai'])
 async def chat_completion(request:Request,create:ChatCompletionCreate):
     id = str(uuid4())
 
@@ -23,12 +31,12 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
     if create.stream:
         async def inner():
             chunk = ChatCompletionChunk(id=id,object='chat.completion.chunk',created=int(time()))
-            async for token in interface.inference(input_message,id):     
+            async for token in interface.inference(input_message,id):
                 chunk.set_token(token)
                 yield chunk
         return chat_stream_response(request,inner())
     else:
         comp = ChatCompletionObject(id=id,object='chat.completion.chunk',created=int(time()))
-        async for token in interface.inference(input_message,id):     
+        async for token in interface.inference(input_message,id):
             comp.append_token(token)
         return comp
