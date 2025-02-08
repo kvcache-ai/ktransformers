@@ -138,10 +138,10 @@ class KLinearTorch(KLinearBase):
         if w is None: w = self.load_weight(device=device)
         
         if isinstance(w, nn.Parameter):
-            self.w = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.w = w.to(dtype=self.dtype).T
             self.has_bias = False
         elif isinstance(w, tuple):
-            self.w = w[0].to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.w = w[0].to(dtype=self.dtype).T
             self.bias = w[1].to(dtype=self.dtype)
             self.has_bias = True
         else:
