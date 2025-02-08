@@ -329,14 +329,14 @@ class TransformersInterface(BackendInterfaceBase):
         self.profiler.create_and_start_timer("prefill")
         for t in self.prefill(input_ids, self.check_is_new(thread_id)):
             if t is not None:
-                print(t, end="")
+                print(t, end="",flush=True)
                 yield t
         self.profiler.pause_timer("prefill")
 
         self.profiler.create_and_start_timer("decode")
         for t in self.generate():
             if t is not None:
-                print(t, end="")
+                print(t, end="",flush=True)
                 yield t
         print("")
         self.profiler.pause_timer("decode")
