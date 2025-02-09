@@ -27,7 +27,7 @@ gpu: 4090D 24G VRAM <br>
 ### V0.3-Preview
 #### settings
 - model: DeepseekV3-BF16 (online quant into int8 for CPU and int4 for GPU)
-- CPU: cpu_model_name：Intel(R) Xeon(R) Gold 6454S, 32 cores per socket, 2 socket, 2numa nodes
+- CPU: cpu_model_name：Intel(R) Xeon(R) Gold 6454S, 32 cores per socket, 2 socket, 2 numa nodes
 - GPU: (1~4)x 4090D 24GVRAM (requires more VRAM for longer prompt)
 
 #### memory consumptions:
@@ -39,7 +39,8 @@ gpu: 4090D 24G VRAM <br>
 | KTrans (8 experts) Prefill token/s |   185.96  |  255.26   |  252.58   |  195.62   |
 | KTrans (6 experts) Prefill token/s |   203.70  |  286.55   |  271.08   |  207.20   |
 
-**The prefill of KTrans V0.3 is up to <u>x3.45</u> times faster than KTrans V0.2. The decoding speed is the same as KTrans V0.2 (6 experts version) so it is omitted.**
+**The prefill of KTrans V0.3 is up to <u>x3.45</u> times faster than KTrans V0.2, and is up to <u>x63.53</u> times faster than Llama.**
+**The decoding speed is the same as KTrans V0.2 (6 experts version) so it is omitted.**
 
 The main acceleration comes from 
 - Intel AMX instruction set and our specially designed cache friendly memory layout
