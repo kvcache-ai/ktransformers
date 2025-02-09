@@ -19,3 +19,6 @@ ktransformers/server/local_store/
 ktransformers/server_test1.db
 *.patch
 img/
+tmp1.txt
+test_65_300_1536.txt
+test.txt
