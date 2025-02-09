@@ -24,6 +24,27 @@ gpu: 4090D 24G VRAM <br>
 
 **The highest speedup reaches up to <u>x3.03</u> in decoding and <u>x9.44</u> in prefill.**
 
+### V0.3-Preview
+#### settings
+- model: DeepseekV3-BF16 (online quant into int8 for CPU and int4 for GPU)
+- CPU: cpu_model_name：Intel(R) Xeon(R) Gold 6454S, 32 cores per socket, 2 socket, 2numa nodes
+- GPU: (1~4)x 4090D 24GVRAM (requires more VRAM for longer prompt)
+
+#### memory consumptions:
+- 644GB DRAM, at least 12GB VRAM
+
+#### Benchmark Results
+| Prompt length  | 1K  | 2K  | 4K  | 8K |
+|---------------|-----|-----|-----|-----|
+| KTrans (8 experts) Prefill token/s |   185.96  |  255.26   |  252.58   |  195.62   |
+| KTrans (6 experts) Prefill token/s |   203.70  |  286.55   |  271.08   |  207.20   |
+
+**The prefill of KTrans V0.3 is up to <u>x3.45</u> times faster than KTrans V0.2. The decoding speed is the same as KTrans V0.2 (6 experts version) so it is omitted.**
+
+The main acceleration comes from 
+- Intel AMX instruction set and our specially designed cache friendly memory layout
+- Expert selection strategy that selects fewer experts based on offline profile results of out of domain data
+
 ## how to run
 ### v0.2 showcase
 #### single socket version(32 cores)
