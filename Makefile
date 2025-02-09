@@ -17,5 +17,5 @@ dev_install:
 	pip install -r requirements-local_chat.txt
 
 	echo "Installing ktransformers"
-	KTRANSFORMERS_FORCE_BUILD=TRUE pip install -e . --no-build-isolation
+	KTRANSFORMERS_FORCE_BUILD=TRUE pip install -e . -v --no-build-isolation
 	echo "Installation completed successfully"

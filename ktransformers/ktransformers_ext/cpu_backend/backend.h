@@ -38,6 +38,9 @@ class Backend {
     void do_work_stealing_job(int, std::function<void(int)>,
                               std::function<void(int)>,
                               std::function<void(int)>);
+    #ifdef USE_NUMA
+    static thread_local int numa_node;
+    #endif
     static thread_local int thread_local_id;
 
   private:

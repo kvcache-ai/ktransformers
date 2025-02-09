@@ -278,13 +278,15 @@ class CMakeBuild(BuildExtension):
         if "CMAKE_BUILD_PARALLEL_LEVEL" not in os.environ:
             if hasattr(self, "parallel") and self.parallel:
                 build_args += [f"-j{self.parallel}"]
-
+        print("CMake args:", cmake_args)
         build_temp = Path(ext.sourcedir) / "build"
         if not build_temp.exists():
             build_temp.mkdir(parents=True)
-        subprocess.run(
-            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True
+        result = subprocess.run(
+            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True
         )
+        print("Standard output:", result.stdout)
+        print("Standard error:", result.stderr)
         subprocess.run(
             ["cmake", "--build", ".", *build_args], cwd=build_temp, check=True
         )
