@@ -1,4 +1,22 @@
-# Report
+# GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM
+# SUMMARY
+
+https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
+
+</p>
+
+- **[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:** Running its Q4_K_M version using only 14GB VRAM and 382GB DRAM.
+	- Prefill Speed: 
+ 		- KTransfermor: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, v3 only) → 286.55 (selectively using 6 experts, v3 only)  
+ 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **63.53× speedup**.  
+ 	- Decode Speed(tokens/s):  
+ 		- KTransfermor: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, v3 only)  
+ 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
+	- Upcoming Open Source Release:
+		- AMX optimizations and selective expert activation will be open-sourced in v0.3.  
+		- Currently available only in preview binary distribution, which can be found [here](xxx).  
+
+
 ## Prerequisites
 We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
@@ -11,8 +29,8 @@ GPU: 4090D 24G VRAM <br>
 - GPU: 4090D 24G VRAM
 - We test after enough warm up
 #### Memory consumption:
-  - Single socket: 382G DRAM, at least 12G VRAM
-  - Dual socket: 1T DRAM, at least 12G VRAM
+  - Single socket: 382G DRAM, at least 14GB VRAM
+  - Dual socket: 1T DRAM, at least 14GB VRAM
 
 #### Benchmark Results
 
@@ -32,7 +50,7 @@ GPU: 4090D 24G VRAM <br>
 - GPU: (1~4)x 4090D 24GVRAM (requires more VRAM for longer prompt)
 
 #### Memory consumptions:
-- 644GB DRAM, at least 12GB VRAM
+- 644GB DRAM, at least 14GB VRAM
 
 #### Benchmark results
 | Prompt length  | 1K  | 2K  | 4K  | 8K |
