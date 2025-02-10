@@ -1,6 +1,6 @@
 # Report
 ## Prerequisites
-We run our best performance tests on <br>
+We run our best performance tests(V0.2) on <br>
 cpu: Intel(R) Xeon(R) Gold 6454S 1T DRAM(2 NUMA nodes)<br>
 gpu: 4090D 24G VRAM <br>
 ## Bench result
@@ -50,7 +50,7 @@ The main acceleration comes from
 
 *From our research on DeepSeekV2, DeepSeekV3 and DeepSeekR1, 
 when we slightly decrease the activation experts num in inference, 
-the output quality doesn't change,But the speed of decoding and prefill 
+the output quality doesn't change. But the speed of decoding and prefill 
 is speed up which is inspiring. So our showcase makes use of this finding*
 
 ## how to run
