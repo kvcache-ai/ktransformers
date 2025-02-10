@@ -1,15 +1,17 @@
 # GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM
 # SUMMARY
 
+- **Fed 10, 2025**: Support DeepseekR1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~64x speedup.<br>
+
 https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 
 </p>
 
 - **[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:** Running its Q4_K_M version using only 14GB VRAM and 382GB DRAM.
-	- Prefill Speed: 
+	- Prefill Speed (tokens/s): 
  		- KTransfermor: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, V0.3 only) → 286.55 (selectively using 6 experts, V0.3 only)  
  		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **63.53× speedup**.  
- 	- Decode Speed(tokens/s):  
+ 	- Decode Speed (tokens/s):  
  		- KTransfermor: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, V0.3 only)  
  		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
 	- Upcoming Open Source Release:
