@@ -47,6 +47,12 @@ The main acceleration comes from
 - Intel AMX instruction set and our specially designed cache friendly memory layout
 - Expert selection strategy that selects fewer experts based on offline profile results of out of domain data
 
+
+*From our research on DeepSeekV2, DeepSeekV3 and DeepSeekR1, 
+when we slightly decrease the activation experts num in inference, 
+the output quality doesn't change,But the speed of decoding and prefill 
+is speed up which is inspiring. So our showcase makes use of this finding*
+
 ## how to run
 ### v0.2 showcase
 #### single socket version(32 cores)
