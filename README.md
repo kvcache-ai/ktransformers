@@ -127,7 +127,7 @@ Some preparation:
 - Make sure that PyTorch, packaging, ninja is installed
   
   ```
-  pip install torch packaging ninja
+  pip install torch packaging ninja cpufeature numpy
   ```
 
 <h3>Installation</h3>
