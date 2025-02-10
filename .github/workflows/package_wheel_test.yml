@@ -54,11 +54,11 @@ jobs:
 
       - name: Setup Mamba
         if: matrix.cuda != ''
-        uses: conda-incubator/setup-miniconda@v2.3.0
+        uses: conda-incubator/setup-miniconda@v3
         with:
           activate-environment: "ktransformers"
           python-version: ${{ matrix.pyver }}
-          miniforge-variant: Mambaforge
+          miniforge-variant: Miniforge3
           miniforge-version: latest
           use-mamba: true
           add-pip-as-python-dependency: true
