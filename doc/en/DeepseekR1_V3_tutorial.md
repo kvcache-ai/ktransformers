@@ -1,4 +1,25 @@
+<!-- omit in toc -->
 # GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM
+- [SUMMARY](#summary)
+	- [Prerequisites](#prerequisites)
+	- [Bench Result](#bench-result)
+		- [V0.2](#v02)
+			- [Settings](#settings)
+			- [Memory consumption:](#memory-consumption)
+			- [Benchmark Results](#benchmark-results)
+		- [V0.3-Preview](#v03-preview)
+			- [Settings](#settings-1)
+			- [Memory consumptions:](#memory-consumptions)
+			- [Benchmark results](#benchmark-results-1)
+	- [How to Run](#how-to-run)
+		- [V0.2 Showcase](#v02-showcase)
+			- [Single socket version (32 cores)](#single-socket-version-32-cores)
+			- [Dual socket version (64 cores)](#dual-socket-version-64-cores)
+		- [V0.3 Showcase](#v03-showcase)
+			- [Dual socket version (64 cores)](#dual-socket-version-64-cores-1)
+	- [Some Explanations](#some-explanations)
+	- [FAQ](#faq)
+
 # SUMMARY
 
 > **Fed 10, 2025**: Support DeepseekR1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup.<br>
@@ -138,3 +159,5 @@ DeepSeek's MLA operators are highly computationally intensive. While running eve
 
 5. Why Intel CPUs?
 Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.
+## FAQ
+[See detail](./FAQ.md)
