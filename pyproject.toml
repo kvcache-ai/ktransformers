@@ -23,7 +23,7 @@ dependencies = [
   "blessed >= 1.20.0",
   "accelerate >= 0.31.0",
   "sentencepiece >= 0.1.97",
-  "flash_attn == 2.7.4.post1"
+  "flash_attn == 2.7.4.post1",
   "setuptools",
   "ninja",
   "wheel",
