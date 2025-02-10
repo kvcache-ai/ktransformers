@@ -1,6 +1,5 @@
 fire
 transformers==4.43.2
-flash_attn==2.7.4.post1
 numpy
 torch>=2.3.0
 packaging
