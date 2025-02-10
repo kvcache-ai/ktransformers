@@ -31,7 +31,7 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 * **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
 * **Aug 9, 2024**: Support windows native.
 
-<h2 id="show-cases">🔥 Show Cases</h2>
+<h2 id="show-cases">🌟 Show Cases</h2>
 
 <div>
 <h3>GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>

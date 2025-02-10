@@ -1,7 +1,14 @@
 # GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM
 # SUMMARY
 
-- **Fed 10, 2025**: Support DeepseekR1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~64x speedup.<br>
+> **Fed 10, 2025**: Support DeepseekR1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~64x speedup.<br>
+
+Hi, we're the KTransformers team (formerly known for our local CPU/GPU hybrid inference open source project with DeepSeek-V2).  
+
+We've heard your requests for DeepSeek-R1/V3 support—and we're excited to finally deliver! 
+Apologies for the wait, but we've been cooking up something truly amazing!
+
+Today, we're proud to announce that we not only support DeepSeek-R1/V3, as showcased in the video below:  
 
 https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 
@@ -14,9 +21,10 @@ https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
  	- Decode Speed (tokens/s):  
  		- KTransfermor: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, V0.3 only)  
  		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
-	- Upcoming Open Source Release:
-		- AMX optimizations and selective expert activation will be open-sourced in V0.3.  
-		- Currently available only in preview binary distribution, which can be found [here](xxx).  
+  
+
+But we're also previewing our upcoming optimizations, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to **64× faster than llama.cpp** for local inference.
+The binary distribution is available now and the source code will come ASAP! Check out the details [here](xxx)  
 
 
 ## Prerequisites
@@ -98,11 +106,32 @@ python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path 
 <when you see chat, then press enter to load the text prompt_file>
 ```
 The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65
+
+### V0.3 Showcase
+#### Dual socket version (64 cores)
+Our local_chat test command is:
+``` shell
+python -m ktransformers.local_chat --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65  --cache_lens 1536 
+<when you see chat, then press enter to load the text prompt_file>
+```
+The parameters' meaning is the same with V0.2. But As we  use dual socket, we set cpu_infer to 65
+
 ## Some Explanations
 1. Also we want to make further use of our two NUMA nodes on Xeon Gold cpu. 
 To avoid the cost of data transfer between nodes, we "copy" the critical matrix on 
 both nodes which takes more memory consumption but accelerates the prefill and decoding process.
 But this method takes huge memory and slow when loading weights, So be patient when loading
-and monitor the memory usage. (we are considering to make this method as an option). We are going to optimize this huge memory overhead. Stay tuned~ <br>
+and monitor the memory usage. We are going to optimize this huge memory overhead. Stay tuned~ <br>
 2. The command args `--cpu_infer 65` specifies how many cores to use (it's ok that it exceeds the physical number, 
 but it's not the more the better. Adjust it slightly lower to your actual number of cores)<br>
+
+3. Why CPU/GPU Hybrid Inference?
+DeepSeek's MLA operators are highly computationally intensive. While running everything on CPU is possible, offloading the heavy computations to the GPU results in a massive performance boost.  
+
+4. Where Does the Speedup Come From?
+
+   - Expert Offload: Unlike traditional layer-based or KVCache offloading (as seen in llama.cpp), we offload the expert computation to the CPU and MLA/KVCache to GPU, aligning perfectly with DeepSeek’s architecture for optimal efficiency.  
+   - Intel AMX Optimization – Our AMX-accelerated kernel is meticulously tuned, running several times faster than existing llama.cpp implementations. We plan to open-source this kernel after cleansing and are considering upstream contributions to llama.cpp.  
+
+5. Why Intel CPUs?
+Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.
