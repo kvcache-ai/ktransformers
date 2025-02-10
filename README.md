@@ -23,6 +23,7 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
+* **Fed 10, 2025**: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~64x speedup. The detailed tutorial is [here](./doc/en/DeepseekR1_V3_tutorial.md)
 * **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is [here](./doc/en/long_context_tutorial.md).
 * **Aug 28, 2024**: Decrease DeepseekV2's required VRAM from 21G to 11G.
 * **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
@@ -30,7 +31,44 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 * **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
 * **Aug 9, 2024**: Support windows native.
 
-<h2 id="show-cases">🔥 Show Cases</h2>
+<h2 id="show-cases">🌟 Show Cases</h2>
+
+<div>
+<h3>GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
+</div>
+
+https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
+
+</p>
+
+- **[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:** Running its Q4_K_M version using only 14GB VRAM and 382GB DRAM.
+	- Prefill Speed (tokens/s): 
+ 		- KTransfermor: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, V0.3 only) → 286.55 (selectively using 6 experts, V0.3 only)  
+ 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **63.53× speedup**.  
+ 	- Decode Speed (tokens/s):  
+ 		- KTransfermor: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, V0.3 only)  
+ 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
+	- Upcoming Open Source Release:
+		- AMX optimizations and selective expert activation will be open-sourced in V0.3.  
+		- Currently available only in preview binary distribution, which can be downloaded [here](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl).  
+
+- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
+
+<p align="center">
+  <picture>
+    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/d052924e-8631-44de-aad2-97c54b965693" width=100%>
+  </picture>
+</p>
+
+- **Faster Speed:** Achieving 126 tokens/s for 2K prompt prefill and 13.6 tokens/s for generation through MoE offloading and injecting advanced kernels from [Llamafile](https://github.com/Mozilla-Ocho/llamafile/tree/main) and [Marlin](https://github.com/IST-DASLab/marlin).
+- **VSCode Integration:** Wrapped into an OpenAI and Ollama compatible API for seamless integration as a backend for [Tabby](https://github.com/TabbyML/tabby) and various other frontends.
+
+<p align="center">
+
+https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
+
+</p>
+
 <h3>1M Context Local Inference on a Desktop with Only 24GB VRAM</h3>
 <p align="center">
 
@@ -54,30 +92,7 @@ https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
 
 * **Flexible Sparse Attention Framework**: Offers a flexible block sparse attention framework for CPU offloaded decoding. Compatible with SnapKV, Quest, and InfLLm. Further information is available [here](./doc/en/long_context_introduction.md).
 
-<div>
-<h3>GPT-4-level Local VSCode Copilot on a Desktop with only 24GB VRAM</h3>
-</div>
 
-https://github.com/user-attachments/assets/0b9fa2da-66f0-48eb-b4b9-f0e1f06f8927
-
-</p>
-
-- **Local 236B DeepSeek-Coder-V2:** Running its Q4_K_M version using only 21GB VRAM and 136GB DRAM, attainable on a local desktop machine, which scores even better than GPT4-0613 in [BigCodeBench](https://huggingface.co/blog/leaderboard-bigcodebench).
-
-<p align="center">
-  <picture>
-    <img alt="DeepSeek-Coder-V2 Score" src="https://github.com/user-attachments/assets/d052924e-8631-44de-aad2-97c54b965693" width=100%>
-  </picture>
-</p>
-
-- **Faster Speed:** Achieving 126 tokens/s for 2K prompt prefill and 13.6 tokens/s for generation through MoE offloading and injecting advanced kernels from [Llamafile](https://github.com/Mozilla-Ocho/llamafile/tree/main) and [Marlin](https://github.com/IST-DASLab/marlin).
-- **VSCode Integration:** Wrapped into an OpenAI and Ollama compatible API for seamless integration as a backend for [Tabby](https://github.com/TabbyML/tabby) and various other frontends.
-
-<p align="center">
-
-https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
-
-</p>
 
 <strong>More advanced features will coming soon, so stay tuned!</strong>
 

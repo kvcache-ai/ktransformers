@@ -61,6 +61,12 @@ class MOE {
     void* up_proj_;    // [expert_num * intermediate_size * hidden_size ( /32 if quantized)]
     void* down_proj_;  // [expert_num * hidden_size * intermediate_size ( /32 if quantized)]
 
+    #ifdef USE_NUMA
+    std::vector<void*> gate_proj_numa_;  // [numa_num, expert_num * intermediate_size * hidden_size ( /32 if quantized)]
+    std::vector<void*> up_proj_numa_;    // [numa_num, expert_num * intermediate_size * hidden_size ( /32 if quantized)]
+    std::vector<void*> down_proj_numa_;  // [numa_num, expert_num * hidden_size * intermediate_size ( /32 if quantized)]
+    #endif
+
     float* s_input_fp32_;                      // [hidden_size]
     uint8_t* s_gate_input_;                    // [hidden_size * ggml_type_size(ggml_internal_get_type_traits(gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(gate_type).vec_dot_type)]
     uint8_t* s_up_input_;                      // [hidden_size * ggml_type_size(ggml_internal_get_type_traits(up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(up_type).vec_dot_type)]
