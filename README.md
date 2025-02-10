@@ -43,8 +43,8 @@ https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 
 - **[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:** Running its Q4_K_M version using only 12GB VRAM and 382GB DRAM.
 	- Prefill Speed: 
- 		- KTransfermor: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → xxx (optimized AMX-based MoE kernel, v3 only) → XXX (selectively using 6 experts, v3 only)  
- 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **XXX× speedup**.  
+ 		- KTransfermor: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, v3 only) → 286.55 (selectively using 6 experts, v3 only)  
+ 		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **63.53× speedup**.  
  	- Decode Speed(tokens/s):  
  		- KTransfermor: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, v3 only)  
  		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
