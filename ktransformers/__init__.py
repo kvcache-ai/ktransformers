@@ -5,7 +5,7 @@ Description  :
 Author       : kkk1nak0
 Date         : 2024-08-15 07:34:46
 Version      : 1.0.0
-LastEditors  : Azure-Tang 
-LastEditTime : 2024-08-29 22:35:51
+LastEditors  : unicornchan 
+LastEditTime : 2025-02-10 00:59:53
 '''
-__version__ = "0.1.4"
+__version__ = "0.2.0"

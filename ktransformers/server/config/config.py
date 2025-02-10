@@ -93,6 +93,8 @@ class Config(metaclass=Singleton):
         self.model_name: str = self.model.get("name", "")
         self.model_device: str = self.model.get("device", "cuda:0")
         self.gguf_path: Optional[str] = self.model.get("gguf_path", None)
+        self.use_cuda_graph = self.model.get("use_cuda_graph", True)
+        self.trust_remote_code = self.model.get("trust_remote_code", True)
         # self.model_cache_lens = self.model.get("cache_lens")
         self.optimize_config_path: Optional[str] = self.model.get(
             "optimize_config_path", None
@@ -102,7 +104,7 @@ class Config(metaclass=Singleton):
         self.total_context = self.model.get("total_context", 2**18)
         self.max_batch_size = self.model.get("max_batch_size", 20 if self.paged else 1)
         self.max_chunk_size = self.model.get("max_chunk_size", 2048)
-        self.max_new_tokens = self.model.get("max_new_tokens", 500)
+        self.max_new_tokens = self.model.get("max_new_tokens", 2000)
         self.json_mode = self.model.get("json_mode", False)
         self.healing = self.model.get("healing", False)
         self.ban_strings: Optional[list] = self.model.get("ban_strings", None)
