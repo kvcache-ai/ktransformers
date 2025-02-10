@@ -23,8 +23,8 @@ https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
  		- Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to **3.03× speedup**.  
   
 
-But we're also previewing our upcoming optimizations, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to **64× faster than llama.cpp** for local inference.
-The binary distribution is available now and the source code will come ASAP! Check out the details [here](xxx)  
+We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to **64× faster than llama.cpp** for local inference.
+The binary distribution is available now and the source code will come ASAP! Check out the wheel package [here](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl)  
 
 
 ## Prerequisites
@@ -111,6 +111,8 @@ The parameters' meaning is the same. But As we  use dual socket, we set cpu_infe
 #### Dual socket version (64 cores)
 Our local_chat test command is:
 ``` shell
+wget https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
+pip install ./ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
 python -m ktransformers.local_chat --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65  --cache_lens 1536 
 <when you see chat, then press enter to load the text prompt_file>
 ```
