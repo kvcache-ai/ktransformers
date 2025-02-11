@@ -373,4 +373,4 @@ KTransformer is actively maintained and developed by contributors from the <a hr
 
 <h2 id="ack">Discussion</h2>
 
-If you have any question, fell free to open issue or you can add our WeChat Group. QR Code: [WeChat Group](WeChatGrouop.jpg)
+If you have any questions, feel free to open an issue. Alternatively, you can join our WeChat group for further discussion. QR Code: [WeChat Group](WeChatGrouop.jpg)
