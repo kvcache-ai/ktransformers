@@ -369,3 +369,8 @@ If you are interested in our design principles and the implementation of the inj
 The development of KTransformer is based on the flexible and versatile framework provided by Transformers. We also benefit from advanced kernels such as GGUF/GGML, Llamafile, and Marlin. We are planning to contribute back to the community by upstreaming our modifications.
 
 KTransformer is actively maintained and developed by contributors from the <a href="https://madsys.cs.tsinghua.edu.cn/">MADSys group</a> at Tsinghua University and members from <a href="http://approaching.ai/">Approaching.AI</a>. We welcome new contributors to join us in making KTransformer faster and easier to use.
+
+
+<h2 id="ack">Discussion</h2>
+
+If you have any question, fell free to open issue or you can add our WeChat Group. QR Code: [WeChat Group](WeChatGrouop.jpg)
