@@ -85,7 +85,7 @@ def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
         module.load()
 
 def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cuda_graph: bool = True,
-                         mode = 'normal'):
+                         mode = 'normal', force_think: bool = False):
     import os
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch._dynamo.config.suppress_errors = True
@@ -172,6 +172,8 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
 
         prefill_count = seq_length
         prefill_time = first_token_time
+        if force_think:
+            print("<think>\n")
         print(stream.put(next_token.item()), end="", flush=True)
         generated_ids[:, seq_length] = next_token
         tokens.append(int(next_token))
