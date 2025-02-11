@@ -140,7 +140,7 @@ Some preparation:
    pip install ktransformers --no-build-isolation
    ```
    
-   for windows we prepare a pre compiled whl package in [ktransformers-0.1.1+cu125torch24avx2-cp311-cp311-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/tag/v0.2.0), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced. 
+   for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced. 
 
 3. Or you can download source code and compile:
    
