@@ -19,6 +19,8 @@
 			- [Dual socket version (64 cores)](#dual-socket-version-64-cores-1)
 	- [Some Explanations](#some-explanations)
 	- [FAQ](#faq)
+		- [R1 No Thinking](#r1-no-thinking)
+		- [More FAQ](#more-faq)
 
 # SUMMARY
 
@@ -110,21 +112,30 @@ Our local_chat test command is:
 ``` shell
 git clone https://github.com/kvcache-ai/ktransformers.git
 cd ktransformers
-numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 33  --cache_lens 1536 
+git submodule init
+git submodule update
+numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 33 --max_new_tokens 1000
 <when you see chat, then press enter to load the text prompt_file>
 ```
-\<your model path\> can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
-\<your gguf path\> can also be online, but as its large we recommend you download it and quantize the model to what you want <br>
-The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes
+`<your model path>` can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
+`<your gguf path>` can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
+`--max_new_tokens 1000` is the max output token length. If you find the answer is truncated, you
+can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.). 
+<br>
+The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes<br>
+Attention! If you are testing R1 and it may skip thinking. So you can add arg: `--force_think true`. This is explained in [FAQ](#faq) part
+
 #### Dual socket version (64 cores)
 Make suer before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set) <br>
 Our local_chat test command is:
 ``` shell
 git clone https://github.com/kvcache-ai/ktransformers.git
 cd ktransformers
+git submodule init
+git submodule update
 export USE_NUMA=1
 make dev_install # or sh ./install.sh
-python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65  --cache_lens 1536 
+python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65 --max_new_tokens 1000
 <when you see chat, then press enter to load the text prompt_file>
 ```
 The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65
@@ -135,7 +146,7 @@ Our local_chat test command is:
 ``` shell
 wget https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
 pip install ./ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
-python -m ktransformers.local_chat --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65  --cache_lens 1536 
+python -m ktransformers.local_chat --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65 --max_new_tokens 1000
 <when you see chat, then press enter to load the text prompt_file>
 ```
 The parameters' meaning is the same with V0.2. But As we  use dual socket, we set cpu_infer to 65
@@ -160,4 +171,8 @@ DeepSeek's MLA operators are highly computationally intensive. While running eve
 5. Why Intel CPUs?
 Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.
 ## FAQ
+### R1 No Thinking
+Attention! If you are testing R1 and it may skip thinking. So you can add arg: `--force_think true`. The detail is in [FAQ](./FAQ.md) part <br>
+
+### More FAQ
 [See detail](./FAQ.md)
