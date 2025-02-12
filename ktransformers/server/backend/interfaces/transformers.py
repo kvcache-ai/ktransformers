@@ -325,7 +325,7 @@ class TransformersInterface(BackendInterfaceBase):
         else:
             raise ValueError("local_messages should be List or str")
         if Config().user_force_think:
-            token_thinks = torch.tensor([self.tokenizer.encode("<think>\\n",add_special_tokens=False)])
+            token_thinks = torch.tensor([self.tokenizer.encode("<think>\\n",add_special_tokens=False)],device=input_ids.device)
             input_ids = torch.cat(
                 [input_ids, token_thinks], dim=1
             )
@@ -334,8 +334,9 @@ class TransformersInterface(BackendInterfaceBase):
 
         self.profiler.create_and_start_timer("prefill")
         if Config().user_force_think:
-            print("<think>\n")
-            yield "<think>\n"
+            t = "<think>\n"
+            print(t,end="",flush=True)
+            yield t
         for t in self.prefill(input_ids, self.check_is_new(thread_id)):
             if t is not None:
                 print(t, end="",flush=True)
@@ -346,7 +347,7 @@ class TransformersInterface(BackendInterfaceBase):
         for t in self.generate():
             if t is not None:
                 print(t, end="",flush=True)
-                yield t
+                yield t 
         print("")
         self.profiler.pause_timer("decode")
         self.report_last_time_performance()

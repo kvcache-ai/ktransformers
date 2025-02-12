@@ -122,4 +122,5 @@ class ArgumentParser:
         self.cfg.server_ip = args.host
         self.cfg.server_port = args.port
         self.cfg.backend_type = args.type
+        self.cfg.user_force_think = args.force_think
         return args
