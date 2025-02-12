@@ -17,10 +17,10 @@
 #include <queue>
 #include <thread>
 #include <vector>
-#include "cuda_runtime.h"
 
 #include "backend.h"
 #include "task_queue.h"
+#include "../vendors/vendor.h"
 
 #include "llama.cpp/ggml-impl.h"
 
