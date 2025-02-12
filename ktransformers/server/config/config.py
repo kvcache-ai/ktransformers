@@ -83,6 +83,7 @@ class Config(metaclass=Singleton):
         self.user_config: dict = cfg.get("user", {})
         self.user_secret_key = self.user_config.get("secret_key", "")
         self.user_algorithm = self.user_config.get("algorithm", "")
+        self.user_force_think = self.user_config.get("force_think", False)
 
         # model config
         self.model: dict = cfg.get("model", {})
