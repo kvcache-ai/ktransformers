@@ -80,6 +80,24 @@
       prefill_device: "cuda:1"
 
 - match:
+    name: "^model\\.layers\\.(0|[1-4])\\.mlp\\.experts$" # inject experts in layer 0~4 as marlin expert
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts  
+    kwargs:
+      generate_device: "cuda:0" # run in cuda:0
+      generate_op:  "KExpertsMarlin"
+  recursive: False
+
+- match:
+    name: "^model\\.layers\\.([3][0])\\.mlp\\.experts$" # inject experts in layer 30~31 as marlin expert
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cuda:1"
+      generate_op:  "KExpertsMarlin"
+  recursive: False 
+
+- match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
   replace:
     class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
@@ -139,5 +157,5 @@
   replace:
     class: "default"
     kwargs:
-      generate_device: "cuda:1"
-      prefill_device: "cuda:1"
+      generate_device: "cuda:0"
+      prefill_device: "cuda:0"
