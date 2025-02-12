@@ -160,7 +160,7 @@ def local_chat(
             messages, add_generation_prompt=True, return_tensors="pt"
         )
         if force_think:
-            token_thinks = torch.tensor([tokenizer.encode("<think>\\n",add_special_tokens=False)])
+            token_thinks = torch.tensor([tokenizer.encode("<think>\\n",add_special_tokens=False)],device=input_tensor.device)
             input_tensor = torch.cat(
                 [input_tensor, token_thinks], dim=1
             )
