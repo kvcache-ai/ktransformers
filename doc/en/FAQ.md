@@ -17,3 +17,9 @@ So we fix this by manually adding "\<think>\n" token at prompt end (you can chec
 and pass the arg `--force_think true ` can let the local_chat initiate the response with "\<think>\n"
 
 from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552
+
+### 3 version `GLIBCXX_3.4.30' not found
+The detailed error:
+>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)
+
+It may because of your conda env have no this version. Your can first exit your conda env by `conda deactivate` and use `whereis libstdc++.so.6` to find the path. And re enter your conda env and copy the .so by `cp <path of outter libstdc++> <path of your conda env libstdc++>` 
