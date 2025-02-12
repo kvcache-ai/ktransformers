@@ -1,6 +1,6 @@
 # FAQ
 ## Install
-### ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found
+### Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found
 ```
 in Ubuntu 22.04 installation need to add the:
 sudo add-apt-repository ppa:ubuntu-toolchain-r/test
@@ -8,7 +8,7 @@ sudo apt-get update
 sudo apt-get install --only-upgrade libstdc++6
 ```
 from-https://github.com/kvcache-ai/ktransformers/issues/117#issuecomment-2647542979
-### DeepSeek-R1 not outputting initial <think> token
+### Q: DeepSeek-R1 not outputting initial <think> token
 
 > from deepseek-R1 doc:<br>
 > Additionally, we have observed that the DeepSeek-R1 series models tend to bypass thinking pattern (i.e., outputting "\<think>\n\n\</think>") when responding to certain queries, which can adversely affect the model's performance. To ensure that the model engages in thorough reasoning, we recommend enforcing the model to initiate its response with "\<think>\n" at the beginning of every output.
@@ -19,7 +19,7 @@ and pass the arg `--force_think true ` can let the local_chat initiate the respo
 from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552
 
 ## Usage
-### If I got more VRAM than the model's requirement, how can I fully utilize it?
+### Q: If I got more VRAM than the model's requirement, how can I fully utilize it?
 
 1. Get larger context.
    1. local_chat.py: You can increase the context window size by setting `--max_new_tokens` to a larger value.
@@ -41,23 +41,29 @@ from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552
     > Note: The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.
 
 
-### If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?
+### Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?
 
 Use the `--optimize_rule_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml` to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.
 
 > Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.
 
-### How to get the best performance?
+### Q: How to get the best performance?
 
 You have to set `--cpu_infer` to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.
 
-### My DeepSeek-R1 model is not thinking.
+### Q: My DeepSeek-R1 model is not thinking.
 
 According to DeepSeek, you need to enforce the model to initiate its response with "\<think>\n" at the beginning of every output by passing the arg `--force_think true `.
 
-### Loading gguf error
+### Q: Loading gguf error
 
 Make sure you:
 1. Have the `gguf` file in the `--gguf_path` directory.
 2. The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.
 3. The folder name it self should not end with `.gguf`, eg. `Deep-gguf` is correct, `Deep.gguf` is wrong.
+
+### Q: Version `GLIBCXX_3.4.30' not found
+The detailed error:
+>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)
+
+It may because of your conda env have no this version. Your can first exit your conda env by `conda deactivate` and use `whereis libstdc++.so.6` to find the path. And re enter your conda env and copy the .so by `cp <path of outter libstdc++> <path of your conda env libstdc++>` 

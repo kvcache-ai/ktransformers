@@ -90,6 +90,7 @@ class ArgumentParser:
         # user config
         parser.add_argument("--user_secret_key", type=str, default=self.cfg.user_secret_key)
         parser.add_argument("--user_algorithm", type=str, default=self.cfg.user_algorithm)
+        parser.add_argument("--force_think", type=bool, default=self.cfg.user_force_think)
 
         # web config
         parser.add_argument("--web_cross_domain", type=bool, default=self.cfg.web_cross_domain)
@@ -121,4 +122,5 @@ class ArgumentParser:
         self.cfg.server_ip = args.host
         self.cfg.server_port = args.port
         self.cfg.backend_type = args.type
+        self.cfg.user_force_think = args.force_think
         return args
