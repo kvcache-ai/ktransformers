@@ -129,7 +129,7 @@ class VersionInfo:
 
     def get_package_version(self, full_version=False):
         flash_version = self.get_flash_version()
-        package_version = f"{str(flash_version)}+cu{self.get_cuda_bare_metal_version(CUDA_HOME)}torch{self.get_torch_version()}{self.get_cpu_instruct()}"
+        package_version = f"{str(flash_version)}+torch{self.get_torch_version()}{self.get_cpu_instruct()}"
         if full_version:
             return package_version
         if not VersionInfo.FORCE_BUILD:
@@ -306,7 +306,7 @@ setup(
                 'cxx': ['-O3'],
                 'nvcc': [
                     '-O3',
-                    '--use_fast_math',
+                    # '--use_fast_math',
                     '-Xcompiler', '-fPIC',
                 ]
             }
