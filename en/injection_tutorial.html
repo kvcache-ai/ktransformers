@@ -1,0 +1,510 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Injection Tutorial - Ktransformers</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/injection_tutorial.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="tutorial-inject-operator-step-by-step"><a class="header" href="#tutorial-inject-operator-step-by-step">Tutorial: Inject Operator Step by Step</a></h1>
+<blockquote>
+<p>Author: Azure-Tang</p>
+</blockquote>
+<h2 id="tldr"><a class="header" href="#tldr">TL;DR</a></h2>
+<p>This tutorial will guide you through the process of injecting custom operators into a model using the KTransformers framework. We will use the DeepSeekV2-Chat model as an example to demonstrate how to inject custom operators into the model step by step. The tutorial will cover the following topics:</p>
+<ul>
+<li><a href="#how-to-write-injection-rules">How to write injection rules</a>
+<ul>
+<li><a href="#understanding-model-structure">Understanding the structure of the model</a></li>
+</ul>
+</li>
+<li><a href="#muti-gpu">Multi-GPU</a></li>
+<li><a href="#how-to-write-a-new-operator-and-inject-into-the-model">How to write a new operator and inject it into the model</a></li>
+</ul>
+<h2 id="how-to-write-injection-rules"><a class="header" href="#how-to-write-injection-rules">How to Write Injection Rules</a></h2>
+<p>The basic form of the injection rules for the Inject framework is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.*$"  # Target module name
+    class: torch.nn.Linear  # Target module
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:0"
+      # your_op_param_1: 1234
+      # your_op_param_2: 5678
+  recursive: True
+</code></pre>
+<ul>
+<li>match: This field marks the matching rules, which can appear in two forms, name and class. These two matching rules can appear together or separately; they only match when both criteria are met.</li>
+<li>replace:
+<ul>
+<li>class: Python class that can be imported to replace the target module. If no replacement is desired, set to default.</li>
+<li>kwargs: List of parameters needed for module initialization.
+<ul>
+<li>generate_device: The device for this module, can be set to “cpu”, “cuda”, “cuda:1”, etc.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>recursive: Whether to recursively inject this module’s submodules, default is True.</li>
+</ul>
+<p>For the recursive field: Some modules contain multiple submodules, such as the Self-attention module typically includes q/k/v/o four linear modules. If we replace the self-attention module but do not want the internal linear modules to be covered by other rules, set this rule to False.</p>
+<h2 id="understanding-model-structure"><a class="header" href="#understanding-model-structure">Understanding Model Structure</a></h2>
+<p>Using <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat">deepseek-ai/DeepSeek-V2-Lite-Chat</a> as an example, we can follow the above rules step by step to inject our custom module and run it. KTransformers offers a high degree of flexibility, allowing you to replace/experiment with basic operators. However, it also requires users to clearly understand the structure of the model they are running.</p>
+<p>Fortunately, knowing the structure of a model is very simple. Open the file list on the <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/tree/main">deepseek-ai/DeepSeek-V2-Lite</a> homepage, and you can see the following files:</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="../assets/model_structure_guild.png" width=60%>
+  </picture>
+</p>
+<p>From the <code>.saftensors</code> file, we can see the name of each layer’s weights, corresponding to the match.name attribute in the injection rules.
+From the <code>modeling_deepseek.py</code> file, we can see the specific implementation of each module class, with the class name corresponding to the match.class attribute in the injection rules.</p>
+<p>The structure of the DeepSeekV2 model from the <code>.saftensors</code> and <code>modeling_deepseek.py</code> files is as follows:</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="../assets/deepseekv2_structure.png" width=60%>
+  </picture>
+</p>
+<p>Supported operators and their corresponding classes are as follows:</p>
+<div class="table-wrapper"><table><thead><tr><th>match</th><th>replace</th><th>backends</th><th>descriptions</th></tr></thead><tbody>
+<tr><td>Linear</td><td>KTransformersLinear</td><td>KLinearMarlin</td><td>Marlin as backend</td></tr>
+<tr><td></td><td></td><td>KLinearTorch</td><td>pytorch as backend</td></tr>
+<tr><td></td><td></td><td>KLinearCPUInfer</td><td>llamafile as backend</td></tr>
+<tr><td>experts</td><td>KTransformersExperts</td><td>KExpertsTorch</td><td>pytorch as backend</td></tr>
+<tr><td></td><td></td><td>KExpertsMarlin</td><td>Marlin as backend</td></tr>
+<tr><td></td><td></td><td>KExpertsCPU</td><td>llamafile as backend</td></tr>
+<tr><td>Attention</td><td>KDeepseekV2Attention</td><td>KDeepseekV2Attention</td><td>MLA implementation</td></tr>
+<tr><td>MoE</td><td>KMistralSparseMoEBlock</td><td>KQwen2MoeSparseMoeBlock</td><td>MoE for Qwen2</td></tr>
+<tr><td></td><td>KDeepseekV2MoE</td><td>KDeepseekV2MoE</td><td>MoE for DeepseekV2</td></tr>
+<tr><td>Model</td><td>KQwen2MoeModel</td><td>KQwen2MoeModel</td><td>Model for Qwen2</td></tr>
+<tr><td></td><td>KDeepseekV2Model</td><td>KDeepseekV2Model</td><td>Model for DeepseekV2</td></tr>
+<tr><td>RoPE</td><td>RotaryEmbedding</td><td>RotaryEmbedding</td><td>RoPE module</td></tr>
+<tr><td></td><td>YarnRotaryEmbedding</td><td>YarnRotaryEmbedding</td><td>RoPE module</td></tr>
+</tbody></table>
+</div>
+<p>Then we start step-by-step injection of custom modules, our targets are:</p>
+<ul>
+<li>Replace the linear module with custom Marlin linear module.</li>
+<li>Replace the self-attention module with a custom Absorption-based MLA module.</li>
+<li>Replace the experts module with a custom Experts module.</li>
+<li>Replace the MoE module with a custom MoE module.</li>
+<li>Replace the RoPE module with a custom RoPE module.</li>
+<li>Set the running device for each module.</li>
+</ul>
+<p>The full implementation of the injection rules can be found in the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat.yaml">here</a>.</p>
+<h2 id="matrix-absorption-based-mla-injection"><a class="header" href="#matrix-absorption-based-mla-injection">Matrix Absorption-based MLA Injection</a></h2>
+<p>For the injection of the Attention module, we only need to use a regular expression to match the module names used in transformers and replace them with our own MLA module implementation. The YAML injection rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.self_attn$"  # Regular expression
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # Optimized MLA implementation
+</code></pre>
+<p>As you can see, each rule in the YAML file has two parts: match and replace. The match part specifies the module to be replaced, and the replace part specifies the module to be injected into the model along with the initialization keywords.</p>
+<h2 id="injection-of-routed-experts"><a class="header" href="#injection-of-routed-experts">Injection of Routed Experts</a></h2>
+<p>For Routed Experts (corresponding to the exps in the diagram), the module we inject is CPUInfer, which is wrapped in the wrapper module KTransformersExperts. KTransformersExperts has multiple implementations, and we need to specify keywords to tell the wrapper module which implementation we want to use and how we plan to use it.</p>
+<p>In the source code of the transformer, MoE is implemented using nn.ModuleList. We do not want KTransformers to traverse all submodules in the list and inject them one by one, so in this rule, we set recursive: False to prevent recursive injection into the submodules of this module. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # Custom MoE kernel with expert parallelism
+    kwargs:
+      generate_device: "cpu"
+      generate_op: "MLPCPUExperts"
+      out_device: "cuda"
+  recursive: False # Don't recursively inject submodules of this module
+</code></pre>
+<p>If we inject Routed Experts as a custom module, we cannot use the interfaces in the original <code>nn.ModuleList</code>. Therefore, it is necessary to modify the forward function in the FFN module. The simplest method is to implement a new module with a custom forward function and inject it.</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV2MoE     # MLP module with custom forward function
+</code></pre>
+<h2 id="injection-of-linear-layers"><a class="header" href="#injection-of-linear-layers">Injection of Linear Layers</a></h2>
+<p>For the remaining linear layer modules, we aim to use quantized operators to save storage space while improving performance. Since there is no current research on using MLA and quantization together, we do not want to inject linear into the MLA operator. Therefore, we can modify the regular expression and add a type check in the match part of the rule. Only modules that match both the name and class simultaneously will be injected. We also need to pass some keywords similar to the injection of Routed Experts. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\.(?!.*self_attn).*$"  # Regular expression
+    class: torch.nn.Linear  # Only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # Optimized kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      generate_op: "QuantizedLinearMarlin"
+</code></pre>
+<h2 id="injection-of-modules-with-pre-calculated-buffers"><a class="header" href="#injection-of-modules-with-pre-calculated-buffers">Injection of Modules with Pre-calculated Buffers</a></h2>
+<p>To avoid occupying resources when initializing the injected original model, we use torch’s meta device to initialize the original model. The RoPE module pre-calculates some buffers during initialization, but no calculations are performed when using the meta device. Therefore, we need to compensate for the calculation of the buffer when loading the model. Simply, we inject a custom module into the rotary embedding module, which performs pre-calculation during loading. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+</code></pre>
+<h2 id="specifying-running-devices-for-modules"><a class="header" href="#specifying-running-devices-for-modules">Specifying Running Devices for Modules</a></h2>
+<p>Finally, we set a fallback basic attribute generate_device for all modules:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.|^lm_head"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda"
+  
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+        generate_device: "cpu"
+</code></pre>
+<p>Through these two rules, we place all previously unmatched layers (and their submodules) and lm_head on cuda, and the embedding on cpu. Note that the properties of a module will be determined by the first rule it matches. For example, if you later set a new replace.kwargs.generate_device in an injected module, the device set earlier will take precedence. If your computer has multiple cards, you can also configure the model to multiple cards.</p>
+<h2 id="muti-gpu"><a class="header" href="#muti-gpu">Muti-GPU</a></h2>
+<p>If you have multiple GPUs, you can set the device for each module to different GPUs.
+DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat-multi-gpu.yaml">here</a>.</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="../assets/multi_gpu.png" width=60%>
+  </picture>
+</p>
+<p>First of all, for multi-GPU, we have to inject an new operator <code>KDeepseekV2Model</code>. And set division of the layers to different GPUs. For our case, we have to set the <code>transfer_map</code> in the <code>KDeepseekV2Model</code> operatoras as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      transfer_map: 
+        30: "cuda:1"
+</code></pre>
+<p>And we have to set the device for each module in the model.</p>
+<p>For example, for <code>routed experts</code>, the yaml for one GPU is:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # Custom MoE kernel with expert parallelism
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op: "MLPCUDAExperts"
+      out_device: "cuda:0"
+  recursive: False # Don't recursively inject submodules of this module
+</code></pre>
+<p>But for two GPUs, we need to set the device for each module in the model.</p>
+<pre><code class="language-yaml"># allcate 0-29 layers‘s out_device to cuda:0
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False # don't recursively inject submodules of this module
+
+# allocate 30-59 layers‘s out_device to cuda:1
+- match:
+    name: "^model\\.layers\\.([345][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:1"
+  recursive: False # don't recursively inject submodules of this module
+</code></pre>
+<p>For other modules, we can set the device in the same way.</p>
+<h2 id="how-to-write-a-new-operator-and-inject-into-the-model"><a class="header" href="#how-to-write-a-new-operator-and-inject-into-the-model">How to Write a New Operator and Inject into the Model</a></h2>
+<p>In this section, we will explain how to write an operator that can be injected, using the implementation of a new linear as an example.</p>
+<p>First, all injectable operators need to inherit from the BaseInjectedModule class, which inherits some attributes required by our injection framework. Its initialization function needs to meet the following basic format:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+</code></pre>
+<p>If users have other parameters that need to be passed to this class, they can also be included in the init function and re-passed in the kwargs parameter in the yaml file. For example, if our operator wants to pass a parameter <code>my_param</code>, the init function can be written as:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        my_param: bool = True,
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        self.my_param = my_param
+</code></pre>
+<p>Then our injection rule can be written as:</p>
+<pre><code class="language-yaml">- match: 
+    name: "^model\\.layers\\..*$"  # Regular expression matches the module name.
+    class: torch.nn.Linear  # Type restrictions can be added.
+  replace:
+    class: ktransformers.operators.linear.LinearTorchInject  # Inject module path
+    kwargs: # Extra parameters
+      generate_device: "cuda"
+      my_param: True
+</code></pre>
+<p>For the linear module, it is also necessary to read weights from a gguf file. We provide the <code>KLinearBase</code> class to help users read weights from gguf files. Users only need to inherit and implement the load, unload, and forward functions. Therefore, a fully injectable linear class would look like this:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule, KLinearBase):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        KLinearBase.__init__(self)
+        self.has_bias = False
+        self.dtype = torch.get_default_dtype()
+        self.w = None
+        self.has_bias = False
+    
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if device is None: device = self.device
+        if w is None: w = self.load_weight(device=device)
+
+        if isinstance(w, nn.Parameter):
+            self.w = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.has_bias = False
+        elif isinstance(w, tuple):
+            self.w = w[0].to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.bias = w[1].to(dtype=self.dtype)
+            self.has_bias = True
+        else:
+            raise ValueError("Invalid weight type")
+        self.w = self.w.to(device)
+        if self.has_bias:
+            self.bias = self.bias.to(device)
+
+    def unload(self):
+        if self.w is not None:
+            self.w = None
+        if self.has_bias:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        dtype = x.dtype
+        out_device = x.device
+        x = x.to(device=self.device, dtype=self.dtype)
+        x = x @ self.w
+        if self.has_bias:
+            x = x + self.bias
+        x = x.to(dtype=dtype, device=out_device)
+        return x
+</code></pre>
+<p>Note that the <code>self.load_weight</code> function is provided by the KLinearBase class to help users load weights from a gguf file into the module. The implementation details of KLinearBase can be found on <a href="https://github.com/kvcache-ai/ktransformers/blob/44f57270c9514d79fab224186d90ccf61059331a/ktransformers/operators/linear.py#L31">GITHUB</a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../en/deepseek-v2-injection.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../en/api/server/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../en/deepseek-v2-injection.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../en/api/server/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

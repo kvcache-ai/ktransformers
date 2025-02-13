@@ -129,7 +129,7 @@
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/zh/api/server/README.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/api/server/server.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -158,18 +158,40 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="server"><a class="header" href="#server">Server</a></h1>
-<p>Still Under Construction... (May have bugs and lack of documentation)</p>
+                        <h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
+<p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
+<img src="server-arch.png" height="600" alt="Server architecture">
+<h2 id="api"><a class="header" href="#api">API</a></h2>
+<p>The Server provides model inference services externally through a RESTful API, with two methods of interaction: ChatCompletion and Assistant.</p>
+<ul>
+<li>The ChatCompletion interface requires users to provide all historical dialogues at once, after which the model responds. AI service providers (such as <a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a>) and local inference frameworks (such as <a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a>) both offer the ChatCompletion interface. To ensure compatibility with OpenAI and Ollama, the Server offers APIs that are consistent with theirs. Therefore, applications currently using OpenAI and Ollama can seamlessly switch to our Server. For example: <a href="tabby.html">How to use Tabby and ktransformers locally with a 236B model for code completion?</a>.</li>
+<li>The Assistant is suitable for applications that need to reuse a series of resources and call the model. For instance, in educational applications, developers can create an Assistant named "Second Grade Math Teacher" and set an initial prompt ("You are an experienced second-grade math teacher..."), and upload relevant materials (second grade math textbooks). After creating the Assistant, the application needs to create a Thread to store the dialogues between the user and the model (Message). When calling the model, the application creates a Run to obtain the Assistant's response. Compared to ChatCompletion, the Assistant-enabled Server handles the reuse of conversational contexts and multi-turn dialogues, making model calls in complex scenarios more convenient. The <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> introduces such an Assistant interface, and the Server provides a consistent API.</li>
+</ul>
+<p>These API definitions are located in <code>server/api</code>, and their specific usage can be seen <a href="api.html">here</a>.</p>
+<h2 id="integrating-model-inference-frameworks"><a class="header" href="#integrating-model-inference-frameworks">Integrating Model Inference Frameworks</a></h2>
+<p>The Server uses ktransformers for model calling and inference. It also supports other inference frameworks, such as the already supported <a href="https://huggingface.co/docs/transformers/index">transformers</a>, and plans to support <a href="https://github.com/turboderp/exllamav2">exllamav2</a>. These functionalities are implemented in <code>server/backend</code>.</p>
+<p>The model inference functionalities of the frameworks are abstracted into a base class <code>BackendInterfaceBase</code>. This class includes a function: inference. It takes historical dialogue information messages as input and returns the text result from the model. The inference function adopts an async generator design, allowing the Server to return model responses in a streaming manner.</p>
+<pre><code class="language-python">class BackendInterfaceBase:
+  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
+    ...
+</code></pre>
+<p>This inference function naturally implements the functionality of ChatCompletion because its inputs and outputs are historical dialogues and model responses, respectively. Thus, the ChatCompletion API can directly call the inference function to complete model inference.</p>
+<p>Assistant is more complex than ChatCompletion, requiring the Server to store the related state of the Assistant and call the inference function appropriately. The Server maintains a set of Assistant logic in the database, storing the Assistants, Threads, and Messages created by applications. In memory, the Server maintains a <code>ThreadContext</code> for each Thread, gathering information related to each Thread's Assistant, etc. When a user sends a new Message, the Server calls the get_local_messages function of ThreadContext to obtain messages and then calls the inference function to get the inference results.</p>
+<pre><code class="language-python">class MyThreadContext(ThreadContext):
+    def get_local_messages(self):
+      ...
+</code></pre>
+<p>Since different model inference frameworks have different historical dialogue input formats, <code>ThreadContext</code> and <code>BackendInterface</code> need to be used in pairs. Besides its own ktransformers, the Server also supports transformers. For integrating other model inference frameworks, refer to the implementations of <code>TransformersInterface</code> and <code>TransformersThreadContext</code> in <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../../../en/makefile_usage.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../../../en/injection_tutorial.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../../../zh/api/server/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../../en/api/server/website.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -179,11 +201,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../../../en/makefile_usage.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../../../en/injection_tutorial.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../../../zh/api/server/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../../en/api/server/website.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

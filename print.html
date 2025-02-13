@@ -506,6 +506,377 @@ The only thing you need to do is wrap your custom module and write YAML files. W
 <li>The <code>forward</code> function is a function in torch that will be called during inference, where the module author has the freedom to achieve higher performance.</li>
 <li>The <code>load</code> function is used to load all parameters of this module. The default implementation is to call the <code>load</code> function of all submodules. You can modify this function to customize its loading method and explicitly control the loading of its submodules.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tutorial-inject-operator-step-by-step"><a class="header" href="#tutorial-inject-operator-step-by-step">Tutorial: Inject Operator Step by Step</a></h1>
+<blockquote>
+<p>Author: Azure-Tang</p>
+</blockquote>
+<h2 id="tldr"><a class="header" href="#tldr">TL;DR</a></h2>
+<p>This tutorial will guide you through the process of injecting custom operators into a model using the KTransformers framework. We will use the DeepSeekV2-Chat model as an example to demonstrate how to inject custom operators into the model step by step. The tutorial will cover the following topics:</p>
+<ul>
+<li><a href="en/injection_tutorial.html#how-to-write-injection-rules">How to write injection rules</a>
+<ul>
+<li><a href="en/injection_tutorial.html#understanding-model-structure">Understanding the structure of the model</a></li>
+</ul>
+</li>
+<li><a href="en/injection_tutorial.html#muti-gpu">Multi-GPU</a></li>
+<li><a href="en/injection_tutorial.html#how-to-write-a-new-operator-and-inject-into-the-model">How to write a new operator and inject it into the model</a></li>
+</ul>
+<h2 id="how-to-write-injection-rules"><a class="header" href="#how-to-write-injection-rules">How to Write Injection Rules</a></h2>
+<p>The basic form of the injection rules for the Inject framework is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.*$"  # Target module name
+    class: torch.nn.Linear  # Target module
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:0"
+      # your_op_param_1: 1234
+      # your_op_param_2: 5678
+  recursive: True
+</code></pre>
+<ul>
+<li>match: This field marks the matching rules, which can appear in two forms, name and class. These two matching rules can appear together or separately; they only match when both criteria are met.</li>
+<li>replace:
+<ul>
+<li>class: Python class that can be imported to replace the target module. If no replacement is desired, set to default.</li>
+<li>kwargs: List of parameters needed for module initialization.
+<ul>
+<li>generate_device: The device for this module, can be set to “cpu”, “cuda”, “cuda:1”, etc.</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>recursive: Whether to recursively inject this module’s submodules, default is True.</li>
+</ul>
+<p>For the recursive field: Some modules contain multiple submodules, such as the Self-attention module typically includes q/k/v/o four linear modules. If we replace the self-attention module but do not want the internal linear modules to be covered by other rules, set this rule to False.</p>
+<h2 id="understanding-model-structure"><a class="header" href="#understanding-model-structure">Understanding Model Structure</a></h2>
+<p>Using <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat">deepseek-ai/DeepSeek-V2-Lite-Chat</a> as an example, we can follow the above rules step by step to inject our custom module and run it. KTransformers offers a high degree of flexibility, allowing you to replace/experiment with basic operators. However, it also requires users to clearly understand the structure of the model they are running.</p>
+<p>Fortunately, knowing the structure of a model is very simple. Open the file list on the <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/tree/main">deepseek-ai/DeepSeek-V2-Lite</a> homepage, and you can see the following files:</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="en/../assets/model_structure_guild.png" width=60%>
+  </picture>
+</p>
+<p>From the <code>.saftensors</code> file, we can see the name of each layer’s weights, corresponding to the match.name attribute in the injection rules.
+From the <code>modeling_deepseek.py</code> file, we can see the specific implementation of each module class, with the class name corresponding to the match.class attribute in the injection rules.</p>
+<p>The structure of the DeepSeekV2 model from the <code>.saftensors</code> and <code>modeling_deepseek.py</code> files is as follows:</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="en/../assets/deepseekv2_structure.png" width=60%>
+  </picture>
+</p>
+<p>Supported operators and their corresponding classes are as follows:</p>
+<div class="table-wrapper"><table><thead><tr><th>match</th><th>replace</th><th>backends</th><th>descriptions</th></tr></thead><tbody>
+<tr><td>Linear</td><td>KTransformersLinear</td><td>KLinearMarlin</td><td>Marlin as backend</td></tr>
+<tr><td></td><td></td><td>KLinearTorch</td><td>pytorch as backend</td></tr>
+<tr><td></td><td></td><td>KLinearCPUInfer</td><td>llamafile as backend</td></tr>
+<tr><td>experts</td><td>KTransformersExperts</td><td>KExpertsTorch</td><td>pytorch as backend</td></tr>
+<tr><td></td><td></td><td>KExpertsMarlin</td><td>Marlin as backend</td></tr>
+<tr><td></td><td></td><td>KExpertsCPU</td><td>llamafile as backend</td></tr>
+<tr><td>Attention</td><td>KDeepseekV2Attention</td><td>KDeepseekV2Attention</td><td>MLA implementation</td></tr>
+<tr><td>MoE</td><td>KMistralSparseMoEBlock</td><td>KQwen2MoeSparseMoeBlock</td><td>MoE for Qwen2</td></tr>
+<tr><td></td><td>KDeepseekV2MoE</td><td>KDeepseekV2MoE</td><td>MoE for DeepseekV2</td></tr>
+<tr><td>Model</td><td>KQwen2MoeModel</td><td>KQwen2MoeModel</td><td>Model for Qwen2</td></tr>
+<tr><td></td><td>KDeepseekV2Model</td><td>KDeepseekV2Model</td><td>Model for DeepseekV2</td></tr>
+<tr><td>RoPE</td><td>RotaryEmbedding</td><td>RotaryEmbedding</td><td>RoPE module</td></tr>
+<tr><td></td><td>YarnRotaryEmbedding</td><td>YarnRotaryEmbedding</td><td>RoPE module</td></tr>
+</tbody></table>
+</div>
+<p>Then we start step-by-step injection of custom modules, our targets are:</p>
+<ul>
+<li>Replace the linear module with custom Marlin linear module.</li>
+<li>Replace the self-attention module with a custom Absorption-based MLA module.</li>
+<li>Replace the experts module with a custom Experts module.</li>
+<li>Replace the MoE module with a custom MoE module.</li>
+<li>Replace the RoPE module with a custom RoPE module.</li>
+<li>Set the running device for each module.</li>
+</ul>
+<p>The full implementation of the injection rules can be found in the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat.yaml">here</a>.</p>
+<h2 id="matrix-absorption-based-mla-injection"><a class="header" href="#matrix-absorption-based-mla-injection">Matrix Absorption-based MLA Injection</a></h2>
+<p>For the injection of the Attention module, we only need to use a regular expression to match the module names used in transformers and replace them with our own MLA module implementation. The YAML injection rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.self_attn$"  # Regular expression
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # Optimized MLA implementation
+</code></pre>
+<p>As you can see, each rule in the YAML file has two parts: match and replace. The match part specifies the module to be replaced, and the replace part specifies the module to be injected into the model along with the initialization keywords.</p>
+<h2 id="injection-of-routed-experts"><a class="header" href="#injection-of-routed-experts">Injection of Routed Experts</a></h2>
+<p>For Routed Experts (corresponding to the exps in the diagram), the module we inject is CPUInfer, which is wrapped in the wrapper module KTransformersExperts. KTransformersExperts has multiple implementations, and we need to specify keywords to tell the wrapper module which implementation we want to use and how we plan to use it.</p>
+<p>In the source code of the transformer, MoE is implemented using nn.ModuleList. We do not want KTransformers to traverse all submodules in the list and inject them one by one, so in this rule, we set recursive: False to prevent recursive injection into the submodules of this module. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # Custom MoE kernel with expert parallelism
+    kwargs:
+      generate_device: "cpu"
+      generate_op: "MLPCPUExperts"
+      out_device: "cuda"
+  recursive: False # Don't recursively inject submodules of this module
+</code></pre>
+<p>If we inject Routed Experts as a custom module, we cannot use the interfaces in the original <code>nn.ModuleList</code>. Therefore, it is necessary to modify the forward function in the FFN module. The simplest method is to implement a new module with a custom forward function and inject it.</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV2MoE     # MLP module with custom forward function
+</code></pre>
+<h2 id="injection-of-linear-layers"><a class="header" href="#injection-of-linear-layers">Injection of Linear Layers</a></h2>
+<p>For the remaining linear layer modules, we aim to use quantized operators to save storage space while improving performance. Since there is no current research on using MLA and quantization together, we do not want to inject linear into the MLA operator. Therefore, we can modify the regular expression and add a type check in the match part of the rule. Only modules that match both the name and class simultaneously will be injected. We also need to pass some keywords similar to the injection of Routed Experts. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\.(?!.*self_attn).*$"  # Regular expression
+    class: torch.nn.Linear  # Only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # Optimized kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      generate_op: "QuantizedLinearMarlin"
+</code></pre>
+<h2 id="injection-of-modules-with-pre-calculated-buffers"><a class="header" href="#injection-of-modules-with-pre-calculated-buffers">Injection of Modules with Pre-calculated Buffers</a></h2>
+<p>To avoid occupying resources when initializing the injected original model, we use torch’s meta device to initialize the original model. The RoPE module pre-calculates some buffers during initialization, but no calculations are performed when using the meta device. Therefore, we need to compensate for the calculation of the buffer when loading the model. Simply, we inject a custom module into the rotary embedding module, which performs pre-calculation during loading. The YAML rule is as follows:</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+</code></pre>
+<h2 id="specifying-running-devices-for-modules"><a class="header" href="#specifying-running-devices-for-modules">Specifying Running Devices for Modules</a></h2>
+<p>Finally, we set a fallback basic attribute generate_device for all modules:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.|^lm_head"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda"
+  
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+        generate_device: "cpu"
+</code></pre>
+<p>Through these two rules, we place all previously unmatched layers (and their submodules) and lm_head on cuda, and the embedding on cpu. Note that the properties of a module will be determined by the first rule it matches. For example, if you later set a new replace.kwargs.generate_device in an injected module, the device set earlier will take precedence. If your computer has multiple cards, you can also configure the model to multiple cards.</p>
+<h2 id="muti-gpu"><a class="header" href="#muti-gpu">Muti-GPU</a></h2>
+<p>If you have multiple GPUs, you can set the device for each module to different GPUs.
+DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat-multi-gpu.yaml">here</a>.</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="en/../assets/multi_gpu.png" width=60%>
+  </picture>
+</p>
+<p>First of all, for multi-GPU, we have to inject an new operator <code>KDeepseekV2Model</code>. And set division of the layers to different GPUs. For our case, we have to set the <code>transfer_map</code> in the <code>KDeepseekV2Model</code> operatoras as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      transfer_map: 
+        30: "cuda:1"
+</code></pre>
+<p>And we have to set the device for each module in the model.</p>
+<p>For example, for <code>routed experts</code>, the yaml for one GPU is:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # Custom MoE kernel with expert parallelism
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op: "MLPCUDAExperts"
+      out_device: "cuda:0"
+  recursive: False # Don't recursively inject submodules of this module
+</code></pre>
+<p>But for two GPUs, we need to set the device for each module in the model.</p>
+<pre><code class="language-yaml"># allcate 0-29 layers‘s out_device to cuda:0
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False # don't recursively inject submodules of this module
+
+# allocate 30-59 layers‘s out_device to cuda:1
+- match:
+    name: "^model\\.layers\\.([345][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:1"
+  recursive: False # don't recursively inject submodules of this module
+</code></pre>
+<p>For other modules, we can set the device in the same way.</p>
+<h2 id="how-to-write-a-new-operator-and-inject-into-the-model"><a class="header" href="#how-to-write-a-new-operator-and-inject-into-the-model">How to Write a New Operator and Inject into the Model</a></h2>
+<p>In this section, we will explain how to write an operator that can be injected, using the implementation of a new linear as an example.</p>
+<p>First, all injectable operators need to inherit from the BaseInjectedModule class, which inherits some attributes required by our injection framework. Its initialization function needs to meet the following basic format:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+</code></pre>
+<p>If users have other parameters that need to be passed to this class, they can also be included in the init function and re-passed in the kwargs parameter in the yaml file. For example, if our operator wants to pass a parameter <code>my_param</code>, the init function can be written as:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        my_param: bool = True,
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        self.my_param = my_param
+</code></pre>
+<p>Then our injection rule can be written as:</p>
+<pre><code class="language-yaml">- match: 
+    name: "^model\\.layers\\..*$"  # Regular expression matches the module name.
+    class: torch.nn.Linear  # Type restrictions can be added.
+  replace:
+    class: ktransformers.operators.linear.LinearTorchInject  # Inject module path
+    kwargs: # Extra parameters
+      generate_device: "cuda"
+      my_param: True
+</code></pre>
+<p>For the linear module, it is also necessary to read weights from a gguf file. We provide the <code>KLinearBase</code> class to help users read weights from gguf files. Users only need to inherit and implement the load, unload, and forward functions. Therefore, a fully injectable linear class would look like this:</p>
+<pre><code class="language-python">class LinearTorchInject(BaseInjectedModule, KLinearBase):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        KLinearBase.__init__(self)
+        self.has_bias = False
+        self.dtype = torch.get_default_dtype()
+        self.w = None
+        self.has_bias = False
+    
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if device is None: device = self.device
+        if w is None: w = self.load_weight(device=device)
+
+        if isinstance(w, nn.Parameter):
+            self.w = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.has_bias = False
+        elif isinstance(w, tuple):
+            self.w = w[0].to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            self.bias = w[1].to(dtype=self.dtype)
+            self.has_bias = True
+        else:
+            raise ValueError("Invalid weight type")
+        self.w = self.w.to(device)
+        if self.has_bias:
+            self.bias = self.bias.to(device)
+
+    def unload(self):
+        if self.w is not None:
+            self.w = None
+        if self.has_bias:
+            self.bias = None
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        dtype = x.dtype
+        out_device = x.device
+        x = x.to(device=self.device, dtype=self.dtype)
+        x = x @ self.w
+        if self.has_bias:
+            x = x + self.bias
+        x = x.to(dtype=dtype, device=out_device)
+        return x
+</code></pre>
+<p>Note that the <code>self.load_weight</code> function is provided by the KLinearBase class to help users load weights from a gguf file into the module. The implementation details of KLinearBase can be found on <a href="https://github.com/kvcache-ai/ktransformers/blob/44f57270c9514d79fab224186d90ccf61059331a/ktransformers/operators/linear.py#L31">GITHUB</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
+<p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
+<img src="en/api/server/server-arch.png" height="600" alt="Server architecture">
+<h2 id="api"><a class="header" href="#api">API</a></h2>
+<p>The Server provides model inference services externally through a RESTful API, with two methods of interaction: ChatCompletion and Assistant.</p>
+<ul>
+<li>The ChatCompletion interface requires users to provide all historical dialogues at once, after which the model responds. AI service providers (such as <a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a>) and local inference frameworks (such as <a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a>) both offer the ChatCompletion interface. To ensure compatibility with OpenAI and Ollama, the Server offers APIs that are consistent with theirs. Therefore, applications currently using OpenAI and Ollama can seamlessly switch to our Server. For example: <a href="en/api/server/tabby.html">How to use Tabby and ktransformers locally with a 236B model for code completion?</a>.</li>
+<li>The Assistant is suitable for applications that need to reuse a series of resources and call the model. For instance, in educational applications, developers can create an Assistant named "Second Grade Math Teacher" and set an initial prompt ("You are an experienced second-grade math teacher..."), and upload relevant materials (second grade math textbooks). After creating the Assistant, the application needs to create a Thread to store the dialogues between the user and the model (Message). When calling the model, the application creates a Run to obtain the Assistant's response. Compared to ChatCompletion, the Assistant-enabled Server handles the reuse of conversational contexts and multi-turn dialogues, making model calls in complex scenarios more convenient. The <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> introduces such an Assistant interface, and the Server provides a consistent API.</li>
+</ul>
+<p>These API definitions are located in <code>server/api</code>, and their specific usage can be seen <a href="en/api/server/api.html">here</a>.</p>
+<h2 id="integrating-model-inference-frameworks"><a class="header" href="#integrating-model-inference-frameworks">Integrating Model Inference Frameworks</a></h2>
+<p>The Server uses ktransformers for model calling and inference. It also supports other inference frameworks, such as the already supported <a href="https://huggingface.co/docs/transformers/index">transformers</a>, and plans to support <a href="https://github.com/turboderp/exllamav2">exllamav2</a>. These functionalities are implemented in <code>server/backend</code>.</p>
+<p>The model inference functionalities of the frameworks are abstracted into a base class <code>BackendInterfaceBase</code>. This class includes a function: inference. It takes historical dialogue information messages as input and returns the text result from the model. The inference function adopts an async generator design, allowing the Server to return model responses in a streaming manner.</p>
+<pre><code class="language-python">class BackendInterfaceBase:
+  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
+    ...
+</code></pre>
+<p>This inference function naturally implements the functionality of ChatCompletion because its inputs and outputs are historical dialogues and model responses, respectively. Thus, the ChatCompletion API can directly call the inference function to complete model inference.</p>
+<p>Assistant is more complex than ChatCompletion, requiring the Server to store the related state of the Assistant and call the inference function appropriately. The Server maintains a set of Assistant logic in the database, storing the Assistants, Threads, and Messages created by applications. In memory, the Server maintains a <code>ThreadContext</code> for each Thread, gathering information related to each Thread's Assistant, etc. When a user sends a new Message, the Server calls the get_local_messages function of ThreadContext to obtain messages and then calls the inference function to get the inference results.</p>
+<pre><code class="language-python">class MyThreadContext(ThreadContext):
+    def get_local_messages(self):
+      ...
+</code></pre>
+<p>Since different model inference frameworks have different historical dialogue input formats, <code>ThreadContext</code> and <code>BackendInterface</code> need to be used in pairs. Besides its own ktransformers, the Server also supports transformers. For integrating other model inference frameworks, refer to the implementations of <code>TransformersInterface</code> and <code>TransformersThreadContext</code> in <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="start-with-website"><a class="header" href="#start-with-website">Start with website</a></h1>
+<p>This document provides the necessary steps to set up and run the web service for this project.</p>
+<h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
+<h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
+<p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
+<p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
+<pre><code class="language-bash">cd ktransformers/website
+</code></pre>
+<p>Next, install the Vue CLI with the following command:</p>
+<pre><code class="language-bash">npm install @vue/cli
+</code></pre>
+<p>Now you can build the project:</p>
+<pre><code class="language-bash">npm run build
+</code></pre>
+<p>Finally you can build ktransformers with website:</p>
+<pre><code>cd ../../
+pip install .
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion"><a class="header" href="#how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion">How to Use Tabby and ktransformers Locally with 236B Large Models for Code Completion?</a></h1>
+<p><a href="https://tabby.tabbyml.com/docs/welcome/">Tabby</a> is an open-source code assistant that allows users to manually configure the backend framework and model, and use it across multiple IDEs/editors, such as VSCode and IntelliJ. Since Tabby can interface with Ollama on the framework side, and the ktransformers server provides a consistent API with Ollama, we can connect Tabby to the ktransformers server. This setup allows us to experience fast, heterogeneous inference in code completion scenarios.</p>
+<ol>
+<li>Start ktransformers.</li>
+</ol>
+<pre><code class="language-bash">./ktransformers --port 9112
+</code></pre>
+<ol start="2">
+<li>Install Tabby: Follow the official tutorial to install Tabby on a Linux server or Windows PC with an NVIDIA GPU <a href="https://tabby.tabbyml.com/docs/quick-start/installation/linux/">here</a>.</li>
+<li>Configure Tabby: Create <code>~/.tabby/config.toml</code> and add the following configuration.</li>
+</ol>
+<pre><code class="language-toml">[model.completion.http]
+kind = "ollama/completion"
+api_endpoint = "http://127.0.0.1:9112/"
+model_name = "DeepSeek-Coder-V2-Instruct"
+prompt_template = "&lt;｜fim▁begin｜&gt;{prefix}&lt;｜fim▁hole｜&gt;{suffix}&lt;｜fim▁end｜&gt;" # Prompt Template
+</code></pre>
+<p>In this configuration, <code>kind</code> specifies that ktransformers uses the standard Ollama API to serve Tabby; <code>api_endpoint</code> matches the interface bound when launching ktransformers; <code>model_name</code> is set to the model used by ktransformers, here <code>DeepSeek-Coder-V2-Instruct</code> is the backend inference model; <code>prompt_template</code> is the model's prompt template, which requires a corresponding template for different models to use the Fill In the Middle feature properly.
+Here we demonstrate the relevant configuration for Tabby using the Ollama API to provide the Completion feature. For configuration information about other functions available in Tabby, refer to <a href="https://tabby.tabbyml.com/docs/administration/model/">here</a>.</p>
+<ol start="4">
+<li>
+<p>Start the Tabby service: <code>./tabby serve</code>.
+<img src="en/api/server/run-tabby.png" alt="image-20240709112329577" style="zoom:50%;" /></p>
+<p>After launching, you should see access to the <code>/api/tags</code> interface in the ktransformers command line (in version v0.13.0 of Tabby, this changes to access to the <code>/api/show/</code> interface).
+<img src="en/api/server/visit-api-tags.png" alt="image-20240709111648215" style="zoom:67%;" /></p>
+</li>
+<li>
+<p>Register a Tabby account, obtain a Token: After starting the Tabby service, open the corresponding link in a browser (as shown above at 0.0.0.0:8080), and follow the <a href="https://tabby.tabbyml.com/docs/quick-start/register-account/">tutorial</a> to create a user and get a Token.</p>
+</li>
+<li>
+<p>Start VSCode, install the Tabby extension plugin, and use the Token obtained in the previous step to connect to the Tabby Server, following <a href="https://tabby.tabbyml.com/docs/extensions/installation/vscode/">here</a>.</p>
+</li>
+<li>
+<p>Open any code file and experience the fast heterogeneous inference of ktransformers.</p>
+</li>
+</ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="makefile"><a class="header" href="#makefile">Makefile</a></h1>
 <h2 id="target"><a class="header" href="#target">Target</a></h2>
 <h3 id="flake_find"><a class="header" href="#flake_find">flake_find:</a></h3>
@@ -527,86 +898,6 @@ unstable = true
 <pre><code class="language-bash">make dev_install
 </code></pre>
 <p>install the package in the development mode. It means that the package is installed in the editable mode. So if you modify the code, you don't need to reinstall the package. We recommend the developer to use this method to install the package.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="server"><a class="header" href="#server">Server</a></h1>
-<p>Still Under Construction... (May have bugs and lack of documentation)</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="后端服务server"><a class="header" href="#后端服务server">后端服务（Server）</a></h1>
-<p>Server 将 ktransformers 的快速异构推理能力通过 API 提供给外界调用。</p>
-<img src="zh/api/server/server-arch.png" height="600" alt="Server架构">
-<h2 id="api"><a class="header" href="#api">API</a></h2>
-<p>Server 通过 RESTful API 对外提供模型推理服务，提供  ChatCompletion 和 Assistant 两种调用方式。</p>
-<ul>
-<li>ChatCompletion 接口要求用户一次提供所有的历史对话，然后返回模型的回复。AI 服务提供商（例如<a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a> ）和本地推理框架（例如<a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a> ）都提供 ChatCompletion 接口。为了兼容 OpenAI 和 Ollama，Server 分别提供和它们一致的 API 接口。因此，当前使用 OpenAI 和 Ollama 的应用可以无缝切换到我们的 Server。例如： <a href="zh/api/server/tabby.html">如何使用 Tabby 和 ktransformers 在本地利用 236B 的大模型做代码补全？</a>。</li>
-<li>Assistant 适用于应用需要复用一系列资源并调用模型的场景。例如，在教育应用场景中，应用开发者可以创建一个名为二年级数学老师的 Assistant，并设置初始prompt（“你是一个有经验的的二年级数学老师...”），上传相关的资料（二年级数学教材）。创建 Assistant 后，应用需要创建一个 Thread 来存储用户和模型的对话消息（Message）。调用模型时，应用需要创建一个 Run 来获得 Assistant 的回复。相对于 ChatCompletion，实现了 Assistant 的 Server 代替应用实现了对话背景复用和多轮对话，使得复杂场景下的模型的调用更加方便。 <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> 提出了这样的 Assistant 接口，而 Server 也提供和它一致的 API 。</li>
-</ul>
-<p>这些 API 定义在<code>server/api</code>中，它们的具体使用请见<a href="zh/api/server/api.html">这里</a>。</p>
-<h2 id="对接模型推理框架"><a class="header" href="#对接模型推理框架">对接模型推理框架</a></h2>
-<p>Server 通过 ktransformers 调用模型并进行推理。Server 也支持其他的推理框架，例如已经支持的 <a href="https://huggingface.co/docs/transformers/index">transformers</a> ，并计划支持 <a href="https://github.com/turboderp/exllamav2">exllamav2</a>。这些功能在<code>server/backend</code> 中实现。</p>
-<p>Server 将模型推理框架的推理功能抽象成一个基类<code>BackendInterfaceBase</code>。这个基类包含一个函数：inference。它的输入是是历史的对话信息 messages，输出是模型返回的文字结果。inference 函数采用 async generator 的设计，这使得 Server 可以流式地返回模型的回复。</p>
-<pre><code class="language-python">class BackendInterfaceBase:
-  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
-  	...
-</code></pre>
-<p>这个 inference 函数，因为它的输入和输出分别是历史对话和模型回复，所以它自然地实现了 ChatCompletion 的功能。因此 ChatCompletion API 可以直接调用inference 函数完成模型推理。</p>
-<p>而 Assistant 则比 ChatCompletion 复杂许多，需要 Server 存储 Assistant 的相关状态，并以合适的方式调用 inference 函数。Server 在数据库中维护了一套 Assistant 逻辑，存储应用创建的 Assistant，Thread 和 Message。在内存中，Server 为每个 Thread 维护一个 <code>ThreadContext</code>，集合每个Thread 相关的 Assistant 等信息。当用户发出新的 Message 时，Server 调用 ThreadContext 的get_local_messages函数，获得 messages，并调用 inference 函数获得推理结果。</p>
-<pre><code class="language-python">class MyThreadContext(ThreadContext):
-    def get_local_messages(self):
-      ...
-</code></pre>
-<p>由于不同的模型推理框架有着不同的历史对话输入格式，所以 <code>ThreadContext</code> 和 <code>BackendInterface</code> 需要成对地使用。Server 除了自己的 ktransformers 之外，还支持 transformers。如果要对接其他的模型推理框架，可以参考在 <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a> 中<code>TransformersInterface</code>和<code>TransformersThreadContext</code>的实现。</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="start-with-website"><a class="header" href="#start-with-website">Start with website</a></h1>
-<p>This document provides the necessary steps to set up and run the web service for this project.</p>
-<h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
-<h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
-<p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
-<p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
-<pre><code class="language-bash">cd ktransformers/website
-</code></pre>
-<p>Next, install the Vue CLI with the following command:</p>
-<pre><code class="language-bash">npm install @vue/cli
-</code></pre>
-<p>Now you can build the project:</p>
-<pre><code class="language-bash">npm run build
-</code></pre>
-<p>Finally you can build ktransformers with website:</p>
-<pre><code>cd ../../
-pip install .
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="如何使用-tabby-和-ktransformers-在本地利用-236b-的大模型做代码补全"><a class="header" href="#如何使用-tabby-和-ktransformers-在本地利用-236b-的大模型做代码补全">如何使用 Tabby 和 ktransformers 在本地利用 236B 的大模型做代码补全？</a></h1>
-<p><a href="https://tabby.tabbyml.com/docs/welcome/">Tabby</a> 是一个开源的代码助手，用户可以手动配置后端使用的框架及模型，并在多个 IDE/编辑器 上使用，例如 VSCode 和 InteliJ。因为 Tabby 在框架侧可以对接到 Ollama，并且 ktransformers server 提供和 Ollama 一致的 API 接口，所以我们可以将 Tabby 对接到 ktransformers server。并在代码补全的场景中体验到 ktransformers 快速的异构推理。</p>
-<ol>
-<li>启动 ktransformers。</li>
-</ol>
-<pre><code class="language-bash">./ktransformers --port 9112
-</code></pre>
-<ol start="2">
-<li>安装 Tabby：按照 Tabby 的官方教程在带有英伟达 GPU 的 Linux 服务器或者 Windows PC 上<a href="https://tabby.tabbyml.com/docs/quick-start/installation/linux/">安装 Tabby</a>。</li>
-<li>配置 Tabby：创建<code>~/.tabby/config.toml</code>，并加入以下配置。</li>
-</ol>
-<pre><code class="language-toml">[model.completion.http]
-kind = "ollama/completion"
-api_endpoint = "http://127.0.0.1:9112/"
-model_name = "DeepSeek-Coder-V2-Instruct"
-prompt_template = "&lt;｜fim▁begin｜&gt;{prefix}&lt;｜fim▁hole｜&gt;{suffix}&lt;｜fim▁end｜&gt;" # Prompt Template
-</code></pre>
-<p>在这个配置中，<code>kind</code> 指明 ktransformers 使用 Ollama 的标准 API 为 Tabby 提供服务；<code>api_endpoint</code> 与 ktransforer 启动时绑定的接口保持一致；<code>model_name</code> 设置为 ktransformers 使用的模型，这里使用 <code>DeepSeek-Coder-V2-Instruct</code> 作为后台推理的模型；<code>prompt_template</code> 是模型的提示词模板，针对不同的模型，使用相对应的模版才能正常使用模型 Fill In the Middle 的功能。
-在这里演示的是 Tabby 使用 Ollama API 提供 Completion 功能的相关配置，有关 Tabby 其他可选功能的配置信息请参照<a href="https://tabby.tabbyml.com/docs/administration/model/">这里</a>。</p>
-<ol start="4">
-<li>启动 Tabby 服务：<code>./tabby serve</code>。
-<img src="zh/api/server/run-tabby.png" alt="image-20240709112329577" style="zoom:50%;" /></li>
-</ol>
-<p>​	启动之后，期望会在 ktransformers 的命令行界面看到对 <code>/api/tags</code> 接口的访问(在 Tabby 新版本 v0.13.0 中变为对 <code>/api/show/</code> 接口的访问)。
-<img src="zh/api/server/visit-api-tags.png" alt="image-20240709111648215" style="zoom:67%;" /></p>
-<ol start="6">
-<li>
-<p>注册 Tabby 账户，获取 Token：在启动 Tabby 服务后，在浏览器中打开相应的链接(如上图的 0.0.0.0:8080)，并参照<a href="https://tabby.tabbyml.com/docs/quick-start/register-account/">教程</a> 创建用户并获取 Token。</p>
-</li>
-<li>
-<p>启动 VScode 安装 Tabby 拓展插件，并在相关提示下，使用上一步获得的 Token 连接 Tabby Server，参照<a href="https://tabby.tabbyml.com/docs/extensions/installation/vscode/">这里</a>。</p>
-</li>
-<li>
-<p>打开任意代码文件，体验 ktransformers 的快速异构推理。</p>
-</li>
-</ol>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="faq-1"><a class="header" href="#faq-1">FAQ</a></h1>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
@@ -674,6 +965,21 @@ Refer to the ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-ma
 <p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
 </blockquote>
 <p>It may because of your conda env have no this version. Your can first exit your conda env by <code>conda deactivate</code> and use <code>whereis libstdc++.so.6</code> to find the path. And re enter your conda env and copy the .so by <code>cp &lt;path of outter libstdc++&gt; &lt;path of your conda env libstdc++&gt;</code></p>
+<div style="break-before: page; page-break-before: always;"></div><h2 id="hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference"><a class="header" href="#hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference">Hello everyone, here is the successfully reproduced environment configuration for your reference:</a></h2>
+<h3 id="case-1"><a class="header" href="#case-1">Case 1</a></h3>
+<ul>
+<li>Configuration: l40s 48G + 9654 x2 (192 cores) + 768G DDR5 12-channel</li>
+<li>Performance: prefill 108 tokens/s, decode 10.8 tokens/s</li>
+<li>Used version: main source code compiled</li>
+</ul>
+<h3 id="case-2"><a class="header" href="#case-2">Case 2</a></h3>
+<ul>
+<li>Configuration: Dual Xeon 6430 32C processors, totaling 64 cores and 128 threads, 480GB DDR5 memory, single 4090 24G graphics card</li>
+<li>Performance: Running speed approximately 6-8 tokens per second</li>
+</ul>
+<h2 id="note"><a class="header" href="#note">NOTE</a></h2>
+<p>If there are any other configurations that have been successfully run, please feel free to let us know. We will keep updating for everyone to refer to when reproducing. (It has been found that it also works on 2080, AMD, etc. (doge : )
+<a href="https://docs.qq.com/smartsheet/form/AVxgQOYhhNfl%2FBB08J2%2Fv3rnnq?tab=BB08J2">click here</a></p>
 
                     </main>
 

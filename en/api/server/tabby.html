@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Website - Ktransformers</title>
+        <title>Tabby - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -129,7 +129,7 @@
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/zh/api/server/website.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/api/server/tabby.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -158,34 +158,52 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="start-with-website"><a class="header" href="#start-with-website">Start with website</a></h1>
-<p>This document provides the necessary steps to set up and run the web service for this project.</p>
-<h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
-<h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
-<p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
-<p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
-<pre><code class="language-bash">cd ktransformers/website
+                        <h1 id="how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion"><a class="header" href="#how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion">How to Use Tabby and ktransformers Locally with 236B Large Models for Code Completion?</a></h1>
+<p><a href="https://tabby.tabbyml.com/docs/welcome/">Tabby</a> is an open-source code assistant that allows users to manually configure the backend framework and model, and use it across multiple IDEs/editors, such as VSCode and IntelliJ. Since Tabby can interface with Ollama on the framework side, and the ktransformers server provides a consistent API with Ollama, we can connect Tabby to the ktransformers server. This setup allows us to experience fast, heterogeneous inference in code completion scenarios.</p>
+<ol>
+<li>Start ktransformers.</li>
+</ol>
+<pre><code class="language-bash">./ktransformers --port 9112
 </code></pre>
-<p>Next, install the Vue CLI with the following command:</p>
-<pre><code class="language-bash">npm install @vue/cli
+<ol start="2">
+<li>Install Tabby: Follow the official tutorial to install Tabby on a Linux server or Windows PC with an NVIDIA GPU <a href="https://tabby.tabbyml.com/docs/quick-start/installation/linux/">here</a>.</li>
+<li>Configure Tabby: Create <code>~/.tabby/config.toml</code> and add the following configuration.</li>
+</ol>
+<pre><code class="language-toml">[model.completion.http]
+kind = "ollama/completion"
+api_endpoint = "http://127.0.0.1:9112/"
+model_name = "DeepSeek-Coder-V2-Instruct"
+prompt_template = "&lt;｜fim▁begin｜&gt;{prefix}&lt;｜fim▁hole｜&gt;{suffix}&lt;｜fim▁end｜&gt;" # Prompt Template
 </code></pre>
-<p>Now you can build the project:</p>
-<pre><code class="language-bash">npm run build
-</code></pre>
-<p>Finally you can build ktransformers with website:</p>
-<pre><code>cd ../../
-pip install .
-</code></pre>
+<p>In this configuration, <code>kind</code> specifies that ktransformers uses the standard Ollama API to serve Tabby; <code>api_endpoint</code> matches the interface bound when launching ktransformers; <code>model_name</code> is set to the model used by ktransformers, here <code>DeepSeek-Coder-V2-Instruct</code> is the backend inference model; <code>prompt_template</code> is the model's prompt template, which requires a corresponding template for different models to use the Fill In the Middle feature properly.
+Here we demonstrate the relevant configuration for Tabby using the Ollama API to provide the Completion feature. For configuration information about other functions available in Tabby, refer to <a href="https://tabby.tabbyml.com/docs/administration/model/">here</a>.</p>
+<ol start="4">
+<li>
+<p>Start the Tabby service: <code>./tabby serve</code>.
+<img src="run-tabby.png" alt="image-20240709112329577" style="zoom:50%;" /></p>
+<p>After launching, you should see access to the <code>/api/tags</code> interface in the ktransformers command line (in version v0.13.0 of Tabby, this changes to access to the <code>/api/show/</code> interface).
+<img src="visit-api-tags.png" alt="image-20240709111648215" style="zoom:67%;" /></p>
+</li>
+<li>
+<p>Register a Tabby account, obtain a Token: After starting the Tabby service, open the corresponding link in a browser (as shown above at 0.0.0.0:8080), and follow the <a href="https://tabby.tabbyml.com/docs/quick-start/register-account/">tutorial</a> to create a user and get a Token.</p>
+</li>
+<li>
+<p>Start VSCode, install the Tabby extension plugin, and use the Token obtained in the previous step to connect to the Tabby Server, following <a href="https://tabby.tabbyml.com/docs/extensions/installation/vscode/">here</a>.</p>
+</li>
+<li>
+<p>Open any code file and experience the fast heterogeneous inference of ktransformers.</p>
+</li>
+</ol>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../../../zh/api/server/server.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../../../en/api/server/website.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../../../zh/api/server/tabby.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../../en/makefile_usage.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -195,11 +213,11 @@ pip install .
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../../../zh/api/server/server.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../../../en/api/server/website.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../../../zh/api/server/tabby.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../../en/makefile_usage.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
