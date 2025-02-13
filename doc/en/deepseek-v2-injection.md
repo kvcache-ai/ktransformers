@@ -1,4 +1,4 @@
-# Tutorial: Heterogeneous and Local DeepSeek-V2 Inferences
+# Tutorial: Heterogeneous and Local DeepSeek-V2 Inference
 
 DeepSeek-(Code)-V2 is a series of strong mixture-of-experts (MoE) models, featuring a total of 236 billion parameters, with 21 billion parameters activated per token. This model has demonstrated remarkable reasoning capabilities across various benchmarks, positioning it as one of the SOTA open models and nearly comparable in performance to GPT-4. 
 
