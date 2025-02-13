@@ -1,4 +1,5 @@
 import torch
+import asyncio
 from transformers import AutoTokenizer, AutoConfig, GenerationConfig
 from ktransformers.server.backend.interfaces.transformers import (
     TransformersInterface,
@@ -69,6 +70,8 @@ class KTransformersInterface(TransformersInterface):
         if self.model.generation_config.pad_token_id is None:
             self.model.generation_config.pad_token_id = self.model.generation_config.eos_token_id
         self.streamer = TextStreamer(self.tokenizer)
+
+        self._infer_lock = asyncio.Lock()
 
     def decode_one_tokens(self):
         device_map = self.model.gguf_loader.tensor_device_map
@@ -172,3 +175,8 @@ class KTransformersInterface(TransformersInterface):
     def active_cache_position(self):
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
         return torch.tensor([self.seq_length - 1], device=device)
+    
+    async def inference(self, local_messages, thread_id: str):
+        async with self._infer_lock:
+            async for v in super().inference(local_messages, thread_id):
+                yield v
