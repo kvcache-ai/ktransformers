@@ -576,8 +576,6 @@ class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
         routing_weights_expert = routing_weights.to(self.experts.device) if isinstance(self.experts, KExpertsBase) else routing_weights_expert.cpu()
 
         shared_expert_output = self.shared_expert(hidden_states)
-        tmp  = self.shared_expert_gate(hidden_states) 
-        print("shared_expert_gate shape ", tmp.shape)
         shared_expert_output = (
             F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
         )

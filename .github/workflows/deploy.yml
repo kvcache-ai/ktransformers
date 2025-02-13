@@ -4,12 +4,12 @@ on:
   push:
     branches:
       - main
-      - server_support
+      # - server_support
 
   pull_request:
     branches:
       - main
-      - server_support
+      # - server_support
 
 defaults:
   run:

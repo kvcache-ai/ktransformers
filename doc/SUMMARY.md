@@ -7,12 +7,11 @@
 - [Injection Tutorial](en/injection_tutorial.md)
 
 # Server
-- [Server](zh/api/server/README.md)
   - [Server](en/api/server/server.md)
-  - [Website](zh/api/server/website.md)
-  - [Tabby](zh/api/server/tabby.md)
+  - [Website](en/api/server/website.md)
+  - [Tabby](en/api/server/tabby.md)
 # For Developer
-- [For Developer](en/injection_tutorial.md)
+- [Makefile Usage](en/makefile_usage.md)
 
 # FAQ
 - [FAQ](en/FAQ.md)
