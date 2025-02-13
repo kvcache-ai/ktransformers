@@ -283,13 +283,13 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 <h3>RESTful API and Web UI</h3>
 
 
-Start without website:
+启动不带网站的服务：
 
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
 ```
 
-Start with website:
+启动带网站的服务：
 
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
@@ -360,7 +360,6 @@ YAML 文件中的每个规则都有两部分：`match` 和 `replace`。`match` �
 
 您可以在 [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) 目录中找到用于优化 DeepSeek-V2 和 Qwen2-57B-A14 的示例规则模板。这些模板用于为 `local_chat.py` 示例提供支持。
 
-If you are interested in our design principles and the implementation of the injection framework, please refer to the [design document](doc/en/deepseek-v2-injection.md).
 如果您对我们的设计原则和注入框架的实现感兴趣，请参考 [设计文档](doc/en/deepseek-v2-injection.md)。
 
 <h2 id="ack">致谢和贡献者</h2>
