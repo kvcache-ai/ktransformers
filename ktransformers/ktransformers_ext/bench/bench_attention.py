@@ -13,12 +13,12 @@ import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import cpuinfer_ext
+import cpuinfer_ext3
 import torch
 
 layer_num = 10
 kv_head_num = 8
-q_head_num = 32
+q_head_num = 322
 head_dim = 128
 block_len = 128
 anchor_num = 1
