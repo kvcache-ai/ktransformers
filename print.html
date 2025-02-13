@@ -1,0 +1,726 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Ktransformers</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon.svg">
+        <link rel="shortcut icon" href="favicon.png">
+        <link rel="stylesheet" href="css/variables.css">
+        <link rel="stylesheet" href="css/general.css">
+        <link rel="stylesheet" href="css/chrome.css">
+        <link rel="stylesheet" href="css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <div align="center">
+  <!-- <h1 id="ktransformers"><a class="header" href="#ktransformers">KTransformers</a></h1> -->
+  <p align="center">
+<picture>
+    <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
+</picture>
+</p>
+</div>
+<h2 id="intro"><a class="header" href="#intro">🎉 Introduction</a></h2>
+KTransformers, pronounced as Quick Transformers, is designed to enhance your 🤗 <a href="https://github.com/huggingface/transformers">Transformers</a> experience with advanced kernel optimizations and placement/parallelism strategies.
+<br/><br/>
+KTransformers is a flexible, Python-centric framework designed with extensibility at its core. 
+By implementing and injecting an optimized module with a single line of code, users gain access to a Transformers-compatible
+interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified ChatGPT-like web UI. 
+<br/><br/>
+Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
+<h2 id="Updates"><a class="header" href="#Updates">🔥 Updates</a></h2>
+<ul>
+<li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is <a href="./doc/en/DeepseekR1_V3_tutorial.html">here</a>.</li>
+<li><strong>Aug 28, 2024</strong>: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is <a href="./doc/en/long_context_tutorial.html">here</a>.</li>
+<li><strong>Aug 28, 2024</strong>: Decrease DeepseekV2's required VRAM from 21G to 11G.</li>
+<li><strong>Aug 15, 2024</strong>: Update detailed <a href="doc/en/injection_tutorial.html">TUTORIAL</a> for injection and multi-GPU.</li>
+<li><strong>Aug 14, 2024</strong>: Support llamfile as linear backend.</li>
+<li><strong>Aug 12, 2024</strong>: Support multiple GPU; Support new model: mixtral 8*7B  and 8*22B; Support q2k, q3k, q5k dequant on gpu.</li>
+<li><strong>Aug 9, 2024</strong>: Support windows native.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
+<h1 id="gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram"><a class="header" href="#gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram">GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM</a></h1>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#summary">SUMMARY</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#prerequisites">Prerequisites</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#bench-result">Bench Result</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v02">V0.2</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#settings">Settings</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#memory-consumption">Memory consumption:</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#benchmark-results">Benchmark Results</a></li>
+</ul>
+</li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v03-preview">V0.3-Preview</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#settings-1">Settings</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#memory-consumptions">Memory consumptions:</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#benchmark-results-1">Benchmark results</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#how-to-run">How to Run</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v02-showcase">V0.2 Showcase</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#single-socket-version-32-cores">Single socket version (32 cores)</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#dual-socket-version-64-cores">Dual socket version (64 cores)</a></li>
+</ul>
+</li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v03-showcase">V0.3 Showcase</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#dual-socket-version-64-cores-1">Dual socket version (64 cores)</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#some-explanations">Some Explanations</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#faq">FAQ</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#r1-no-thinking">R1 No Thinking</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#more-faq">More FAQ</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<h1 id="summary"><a class="header" href="#summary">SUMMARY</a></h1>
+<blockquote>
+<p><strong>Feb 10, 2025</strong>: Support DeepseekR1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup.<br></p>
+</blockquote>
+<p>Hi, we're the KTransformers team (formerly known for our local CPU/GPU hybrid inference open source project with DeepSeek-V2).</p>
+<p>We've heard your requests for DeepSeek-R1/V3 support—and we're excited to finally deliver!
+Apologies for the wait, but we've been cooking up something truly amazing!</p>
+<p>Today, we're proud to announce that we not only support DeepSeek-R1/V3, as showcased in the video below:</p>
+<p>https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285</p>
+</p>
+<ul>
+<li><strong>[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:</strong> Running its Q4_K_M version using only 14GB VRAM and 382GB DRAM.
+<ul>
+<li>Prefill Speed (tokens/s):
+<ul>
+<li>KTransformers: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, V0.3 only) → 286.55 (selectively using 6 experts, V0.3 only)</li>
+<li>Compared to 10.31 tokens/s in llama.cpp with 2×32 cores, achieving up to <strong>27.79× speedup</strong>.</li>
+</ul>
+</li>
+<li>Decode Speed (tokens/s):
+<ul>
+<li>KTransformers: 8.73 (32 cores) → 11.26 (dual-socket, 2×32 cores) → 13.69 (selectively using 6 experts, V0.3 only)</li>
+<li>Compared to 4.51 tokens/s in llama.cpp with 2×32 cores, achieving up to <strong>3.03× speedup</strong>.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p>We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to <strong>28× faster than llama.cpp</strong> for local inference.
+The binary distribution is available now and the source code will come ASAP! Check out the wheel package <a href="https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl">here</a></p>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<p>We run our best performance tests (V0.2) on <br>
+CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
+GPU: 4090D 24G VRAM <br>
+Memory: standard DDR5-4800 server DRAM (1 TB)</p>
+<h2 id="bench-result"><a class="header" href="#bench-result">Bench Result</a></h2>
+<h3 id="v02"><a class="header" href="#v02">V0.2</a></h3>
+<h4 id="settings"><a class="header" href="#settings">Settings</a></h4>
+<ul>
+<li>Model: DeepseekV3-q4km (int4)<br></li>
+<li>CPU: cpu_model_name: Intel (R) Xeon (R) Gold 6454S, 32 cores per socket, 2 sockets, 2 numa nodes</li>
+<li>GPU: 4090D 24G VRAM</li>
+<li>We test after enough warm up</li>
+</ul>
+<h4 id="memory-consumption"><a class="header" href="#memory-consumption">Memory consumption:</a></h4>
+<ul>
+<li>Single socket: 382G DRAM, at least 14GB VRAM</li>
+<li>Dual socket: 1T DRAM, at least 14GB VRAM</li>
+</ul>
+<h4 id="benchmark-results"><a class="header" href="#benchmark-results">Benchmark Results</a></h4>
+<p>"6 experts" case is part of V0.3's preview</p>
+<div class="table-wrapper"><table><thead><tr><th>Prompt<br>(500 tokens)</th><th>Dual socket Ktrans (6 experts)</th><th>Dual socket Ktrans (8 experts)</th><th>Single socket Ktrans (6 experts)</th><th>Single socket Ktrans (8 experts)</th><th>llama.cpp (8 experts)</th></tr></thead><tbody>
+<tr><td>Prefill token/s</td><td>97.32</td><td>82.94</td><td>65.14</td><td>54.21</td><td>10.31</td></tr>
+<tr><td>Decode token/s</td><td>13.69</td><td>12.208</td><td>10.303</td><td>8.73</td><td>4.51</td></tr>
+</tbody></table>
+</div>
+<p><strong>The highest speedup reaches up to <u>3.03x</u> in decoding and <u>9.44x</u> in prefill.</strong></p>
+<h3 id="v03-preview"><a class="header" href="#v03-preview">V0.3-Preview</a></h3>
+<h4 id="settings-1"><a class="header" href="#settings-1">Settings</a></h4>
+<ul>
+<li>Model: DeepseekV3-BF16 (online quant into int8 for CPU and int4 for GPU)</li>
+<li>CPU: cpu_model_name: Intel (R) Xeon (R) Gold 6454S, 32 cores per socket, 2 socket, 2 numa nodes</li>
+<li>GPU: (1~4)x 4090D 24GVRAM (requires more VRAM for longer prompt)</li>
+</ul>
+<h4 id="memory-consumptions"><a class="header" href="#memory-consumptions">Memory consumptions:</a></h4>
+<ul>
+<li>644GB DRAM, at least 14GB VRAM</li>
+</ul>
+<h4 id="benchmark-results-1"><a class="header" href="#benchmark-results-1">Benchmark results</a></h4>
+<div class="table-wrapper"><table><thead><tr><th>Prompt length</th><th>1K</th><th>2K</th><th>4K</th><th>8K</th></tr></thead><tbody>
+<tr><td>KTrans (8 experts) Prefill token/s</td><td>185.96</td><td>255.26</td><td>252.58</td><td>195.62</td></tr>
+<tr><td>KTrans (6 experts) Prefill token/s</td><td>203.70</td><td>286.55</td><td>271.08</td><td>207.20</td></tr>
+</tbody></table>
+</div>
+<p><strong>The prefill of KTrans V0.3 is up to <u>3.45x</u> times faster than KTrans V0.2, and is up to <u>27.79x</u> times faster than llama.cpp.</strong>
+<strong>The decoding speed is the same as KTrans V0.2 (6 experts version) so it is omitted</strong></p>
+<p>The main acceleration comes from</p>
+<ul>
+<li>Intel AMX instruction set and our specially designed cache friendly memory layout</li>
+<li>Expert selection strategy that selects fewer experts based on offline profile results of out of domain data</li>
+</ul>
+<p><em>From our research on DeepSeekV2, DeepSeekV3 and DeepSeekR1,
+when we slightly decrease the activation experts num in inference,
+the output quality doesn't change. But the speed of decoding and prefill
+is speed up which is inspiring. So our showcase makes use of this finding</em></p>
+<h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
+<h3 id="v02-showcase"><a class="header" href="#v02-showcase">V0.2 Showcase</a></h3>
+<h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
+<p>Our local_chat test command is:</p>
+<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
+&lt;when you see chat, then press enter to load the text prompt_file&gt;
+</code></pre>
+<p><code>&lt;your model path&gt;</code> can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
+<code>&lt;your gguf path&gt;</code> can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
+<code>--max_new_tokens 1000</code> is the max output token length. If you find the answer is truncated, you
+can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).
+<br>
+The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes<br>
+Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. This is explained in <a href="en/DeepseekR1_V3_tutorial.html#faq">FAQ</a> part</p>
+<h4 id="dual-socket-version-64-cores"><a class="header" href="#dual-socket-version-64-cores">Dual socket version (64 cores)</a></h4>
+<p>Make suer before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set) <br>
+Our local_chat test command is:</p>
+<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+export USE_NUMA=1
+make dev_install # or sh ./install.sh
+python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 65 --max_new_tokens 1000
+&lt;when you see chat, then press enter to load the text prompt_file&gt;
+</code></pre>
+<p>The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65</p>
+<h3 id="v03-showcase"><a class="header" href="#v03-showcase">V0.3 Showcase</a></h3>
+<h4 id="dual-socket-version-64-cores-1"><a class="header" href="#dual-socket-version-64-cores-1">Dual socket version (64 cores)</a></h4>
+<p>Our local_chat test command is:</p>
+<pre><code class="language-shell">wget https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
+pip install ./ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl
+python -m ktransformers.local_chat --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 65 --max_new_tokens 1000
+&lt;when you see chat, then press enter to load the text prompt_file&gt;
+</code></pre>
+<p>The parameters' meaning is the same with V0.2. But As we  use dual socket, we set cpu_infer to 65</p>
+<h2 id="some-explanations"><a class="header" href="#some-explanations">Some Explanations</a></h2>
+<ol>
+<li>
+<p>Also we want to make further use of our two NUMA nodes on Xeon Gold cpu.
+To avoid the cost of data transfer between nodes, we "copy" the critical matrix on
+both nodes which takes more memory consumption but accelerates the prefill and decoding process.
+But this method takes huge memory and slow when loading weights, So be patient when loading
+and monitor the memory usage. We are going to optimize this huge memory overhead. Stay tuned~ <br></p>
+</li>
+<li>
+<p>The command args <code>--cpu_infer 65</code> specifies how many cores to use (it's ok that it exceeds the physical number,
+but it's not the more the better. Adjust it slightly lower to your actual number of cores)<br></p>
+</li>
+<li>
+<p>Why CPU/GPU Hybrid Inference?
+DeepSeek's MLA operators are highly computationally intensive. While running everything on CPU is possible, offloading the heavy computations to the GPU results in a massive performance boost.</p>
+</li>
+<li>
+<p>Where Does the Speedup Come From?</p>
+<ul>
+<li>Expert Offload: Unlike traditional layer-based or KVCache offloading (as seen in llama.cpp), we offload the expert computation to the CPU and MLA/KVCache to GPU, aligning perfectly with DeepSeek’s architecture for optimal efficiency.</li>
+<li>Intel AMX Optimization – Our AMX-accelerated kernel is meticulously tuned, running several times faster than existing llama.cpp implementations. We plan to open-source this kernel after cleansing and are considering upstream contributions to llama.cpp.</li>
+</ul>
+</li>
+<li>
+<p>Why Intel CPUs?
+Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.</p>
+</li>
+</ol>
+<h2 id="faq"><a class="header" href="#faq">FAQ</a></h2>
+<h3 id="r1-no-thinking"><a class="header" href="#r1-no-thinking">R1 No Thinking</a></h3>
+<p>Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. The detail is in <a href="en/./FAQ.html">FAQ</a> part <br></p>
+<h3 id="more-faq"><a class="header" href="#more-faq">More FAQ</a></h3>
+<p><a href="en/./FAQ.html">See detail</a></p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tutorial-heterogeneous-and-local-deepseek-v2-inference"><a class="header" href="#tutorial-heterogeneous-and-local-deepseek-v2-inference">Tutorial: Heterogeneous and Local DeepSeek-V2 Inference</a></h1>
+<p>DeepSeek-(Code)-V2 is a series of strong mixture-of-experts (MoE) models, featuring a total of 236 billion parameters, with 21 billion parameters activated per token. This model has demonstrated remarkable reasoning capabilities across various benchmarks, positioning it as one of the SOTA open models and nearly comparable in performance to GPT-4.</p>
+<p align="center">
+  <picture>
+    <img alt="DeepSeek-Coder-V2 Score" src="en/../assets/BigCodeBench.png" width=80%>
+  </picture>
+</p>
+<p>Moreover, unlike previous models that employed traditional attention mechanisms like Grouped-Query Attention (GQA), DeepSeek-V2 incorporates a novel Multi-head Latent Attention (MLA). This innovation significantly reduces the size of the KV cache required during inference, enhancing efficiency.</p>
+<p>However, despite its efficiency, the practicality of running such a large model on personal computing setups seems impractical. Official documentation for DeepSeek-V2 indicates that eight 80GB GPUs are necessary for standard inference operations, and even the scaled-down Q4_k_m version requires at least two 80GB GPUs. These requirements are beyond the reach of most individual researchers and small teams.</p>
+<p>Nonetheless, by employing several cutting-edge optimization techniques, we have successfully operated this colossal model on a desktop computer with only 21GB of VRAM and 136GB of DRAM. In this document, we outline the specific optimizations utilized and provide a detailed tutorial on how to implement these strategies using KTransformers.</p>
+<h2 id="applied-optimizations"><a class="header" href="#applied-optimizations">Applied Optimizations</a></h2>
+<h3 id="optimized-mla-operator"><a class="header" href="#optimized-mla-operator">Optimized MLA Operator</a></h3>
+<p>The following figure provides a brief overview of DeepSeek-V2 architecture. At the heart of its attention layer, DeepSeek-V2 introduces a novel MLA operator that represents the heads of key-value pairs using a common, joint compressed representation, which holds significant potential for efficiency improvements. However, the official open-source implementation of the MLA operator explicitly decompresses this compressed representation and caches the decompressed key-value pairs. This process not only enlarges the KV cache size but also diminishes inference performance.</p>
+<p align="center">
+  <picture>
+    <img alt="DeepSeek on KTransformers" src="en/../assets/DeepSeek-on-KTransformers.PNG" width=80%>
+  </picture>
+</p>
+<p>To truly capitalize on the benefits of MLA, we have implemented an optimized version for inference. According to its original paper, we absorb the decompression matrices directly into the q_proj and out_proj weights. Consequently, the compressed representation does not need to be decompressed to compute the attention. This adjustment significantly reduces the KV cache size and increases the arithmetic intensity of this operator, which greatly optimizes the utilization of GPU computational power.</p>
+<h3 id="advanced-quantization-kernels"><a class="header" href="#advanced-quantization-kernels">Advanced Quantization Kernels</a></h3>
+<p>The original DeepSeek-V2 model stores its parameters in BF16 format, consuming approximately 470GB of raw storage. This exceeds the RAM capacity available on mainstream desktop computers. To address this, we leverage the well-established GGUF community's quantized weights to simplify the process for users.
+However, quantized data types are not typically supported by highly-optimized BLAS packages. As a result, the original HuggingFace Transformers' Torch implementation must dequantize these tensors to supported data types before processing, which introduces unnecessary computational overhead and increases memory traffic. To overcome this, we have incorporated advanced kernels that operate directly on quantized data types, thereby optimizing inference performance.</p>
+<p>In the current version of KTransformers, we utilize Marlin for GPU kernels and llamafile for CPU kernels. These kerenls are specially designed to benefit from modern GPU architecture and modern CPU instruction extensions such as AVX512-BF16 (AMD Zen4 or newer) and AVX-VNNI (Intel Alder Lake or newer), that are tailored for quantized data types and machine learning workloads. We also use expert parallelism and other optimization for MOE inferencem on CPU based on llamafile, and call them as CPUInfer.  As demonstrated in Figure 2(cite from Marlin), Marlin can achieve near ideal 3.87x speedup compare to corresponding Torch counterparts. As demonstrated in the following figure, our micro benchmarks show that inference using CPUInfer performs several times faster than Torch in low bits representation. Note that in practical inference such as using transformers, the Torch baseline use BF16 or FP16 as linear weights, and will occupy more memory resources, or it will be more slower due to dequantization when using quanted weights.</p>
+<p align="center">
+  <picture>
+    <img alt="CPUInfer Performance" src="en/../assets/cpuinfer.png" width=80%>
+  </picture>
+</p>
+<p align="center">
+  <picture>
+    <img alt="marlin performance" src="https://github.com/IST-DASLab/marlin/blob/master/assets/sustained.png?raw=true" width=80%>
+  </picture>
+</p>
+<h3 id="arithmetic-intensity-guided-offloading"><a class="header" href="#arithmetic-intensity-guided-offloading">Arithmetic Intensity Guided Offloading</a></h3>
+<p>Storing all 236 billion parameters of a model in GPU VRAM is clearly impractical for local users. Therefore, we strategically store only the most computationally intensive parameters on the GPU. For instance, after our optimizations, the MLA operator, which contains 128 heads with a shared compressed key-value representation, shows an arithmetic intensity of 512. This makes it the most intensive operator, particularly during smaller inference batch sizes. Hence, it is allocated to the GPU to leverage the power of tensor cores.</p>
+<p>On the other hand, as shown in Figure 1, each transformer block in DeepSeek-V2 includes 160 mixture-of-experts (MoE) experts, comprising 96% of the total parameters. However, the MoE router activates only 6 out of these 160 experts for each token, which means that only 3.75% of the MoE parameters are utilized during the decoding phase. With a batch size of one, the arithmetic intensity of the MoE operation is roughly 0.075. This operation, primarily involving a batched General Matrix-Vector Multiplication (GEMV), can thus be efficiently handled by the CPU.</p>
+<p>Following this principle of arranging all operators by their arithmetic intensity and placing the most intensive ones in the GPU as much as possible, we prioritize positioning the MoE parameters and word embeddings computations on the CPU side to utilize its larger memory capacity. Meanwhile, the remaining parameters, including shared experts, projections in the attention module, and MLA, are stored in the GPU VRAM. As these parameters are accessed by every token, their placement on the GPU maximizes the benefits of high memory bandwidth. This configuration leads to approximately 20.7 GB of VRAM usage and 136GB DRAM memory requests if the Q4_K_M version is used, which is feasible even on a local desktop. Additionally, the placement can be adjusted according to the actual configuration, adhering to the same principle.</p>
+<p>Moreover, as an extensible framework, KTransformers is set to support more advanced operators in future releases, continually enhancing its capability to handle diverse workloads efficiently.</p>
+<h2 id="yaml-template"><a class="header" href="#yaml-template">YAML Template</a></h2>
+<p>To implement the above optimizations in KTransformers, users need to write a YAML file containing the optimized rules.
+KTransformers will iterate through all sub-modules of the model, match rules specified in the YAML rule file, and replace them with advanced modules as specified.</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="en/../assets/InjectStruction.png" width=80%>
+  </picture>
+</p>
+<p>Specifically, the following rules are used:</p>
+<ul>
+<li>Replace the Attention module with our <a href="en/deepseek-v2-injection.html#mla">optimized MLA Operator</a>.</li>
+<li>Replace routed experts with <a href="en/deepseek-v2-injection.html#experts">CPUInfer kernels</a> that use Llamafile.</li>
+<li>Replace all Linear modules not belonging to attention with <a href="en/deepseek-v2-injection.html#linear">Marlin</a> kernels.</li>
+</ul>
+<h3 id="mla"><a class="header" href="#mla">MLA</a></h3>
+<p>For attention module injection, we only need to match the module name used in Transformers using a regular expression and replace it with our pre-implemented module.
+The YAML rule is listed below.</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.self_attn$" # regular expression
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
+</code></pre>
+<p>As we can see, each rule in the YAML file has two parts: <code>match</code> and <code>replace</code>.
+The match part specifies which module should be replaced, and the replace part specifies the module to be injected into the model along with the initialization keywords.</p>
+<h3 id="experts"><a class="header" href="#experts">Routed Experts </a></h3>
+<p>For routed experts, the module we inject is a wrapper of CPUInfer, KTransformersExperts. There are several implementations within a wrapper, and we need to specify keywords to tell the wrapper which implementation we want to use and how we intend to use it.</p>
+<p>In KTransformers, some models exhibit different behaviors during prefilling and generation for better performance. KTransformersExperts is one of them. All these special modules have a <code>device</code> keyword describing which device the module should be initialized on. Other keywords specify the behaviors during prefilling and generation and may be differ when using different injection modules. Here, we specify which implementation on which device we want to use during prefilling and generation, and which device the output should be on.
+Note that we only use these parameters when layer-wise prefilling is enabled; otherwise, prefilling is conducted with the same configuration as generation.</p>
+<p>In the original implementation of Transformers, MoE is implemented using <code>nn.ModuleList</code>. We don't want KTransformers to iterate through all the sub-modules in the list, so we set <code>recursive: False</code> in this rule to prevent recursive injection into submodules of the current module. Here is the YAML rule:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert parallelism
+    device: "cpu"   # device to load this module on initialization
+    kwargs:
+      prefill_device: "cuda"
+      prefill_op: "KExpertsTorch"
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda"
+  recursive: False # don't recursively inject submodules of this module
+</code></pre>
+<p>If we inject the expert list as a custom module, we can't use the interface in <code>nn.ModuleList</code> as default. We need to change the forward function in the FFN module. The simplest way is implementing a new module using custom forward function and inject it. We have implemented the new module, and the injection can be done by simply adding an injection rule. We can use the <code>class</code> instead of <code>name</code> to match a module that will be replaced. Here is the YAML rule:</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2MoE
+  replace:
+    class: ktransformers.operators.experts.KDeepseekV2MoE     # MLP module with custom forward function
+</code></pre>
+<h3 id="linear"><a class="header" href="#linear">Other Linear Modules</a></h3>
+<p>For the remained linear modules, we want to use our quantization kernels. However, we don't want to inject linear in the MLA operator because we currently don't know the effect of using quantization in MLA.
+So, we can change our regular expression and add a class check in the match part of the rule. Only modules matching both name and class simultaneously will be injected.
+We also need to transfer some keywords similar to the injection of experts. Here is the YAML rule:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\.(?!.*self_attn).*$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+</code></pre>
+<h3 id="Pre-compute Buffers"><a class="header" href="#Pre-compute Buffers">Pre-compute Buffers </a></h3>
+<p>The original model is initialized on the meta device. The rotary embedding module pre-computes some buffers when initializing, which has no effect and doesn't compute anything when using the meta device. Therefore, we need to compute the buffers when loading the model. For convenience, we inject the rotary embedding module with our custom module, which performs pre-computations when loading. Here is the YAML rule:</p>
+<pre><code class="language-yaml">- match:
+    class: ktransformers.models.modeling_deepseek.DeepseekV2YarnRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbedding
+</code></pre>
+<h2 id="wrap-your-custom-module"><a class="header" href="#wrap-your-custom-module">Wrap Your Custom Module</a></h2>
+<p>We have implemented some modules, but you may need to inject your custom module using KTransformers.
+The only thing you need to do is wrap your custom module and write YAML files. We provide a base operator specifying interfaces an injection module should have. You only need to inherit from that module and change the <code>__init__</code>, <code>forward</code>, or <code>load</code> function as needed.</p>
+<ul>
+<li>The <code>__init__</code> function of the base operator maintains the necessary information for injection and execution of the KTransformers framework. To override this function, subclass modules need to call the base operator's <code>__init__</code> function in their own initializer.</li>
+<li>The <code>forward</code> function is a function in torch that will be called during inference, where the module author has the freedom to achieve higher performance.</li>
+<li>The <code>load</code> function is used to load all parameters of this module. The default implementation is to call the <code>load</code> function of all submodules. You can modify this function to customize its loading method and explicitly control the loading of its submodules.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="makefile"><a class="header" href="#makefile">Makefile</a></h1>
+<h2 id="target"><a class="header" href="#target">Target</a></h2>
+<h3 id="flake_find"><a class="header" href="#flake_find">flake_find:</a></h3>
+<pre><code class="language-bash">make flake_find
+</code></pre>
+<p>find all the python files under ./ktransformers dir and find the Error, Warning, Fatal... (their codes) into a list that are not consistent with the pep8 standard. For now we have get all this list in the .flake8 file's extend-ignore section in order to let flakes8 ignore them temporarily.(we may improve them in the future)</p>
+<h3 id="format"><a class="header" href="#format">format:</a></h3>
+<pre><code class="language-bash">make format
+</code></pre>
+<p>we use black to format all the python files under ./ktransformers dir. It obeys the pep8 standard
+but we modify the line length to 120 by add</p>
+<pre><code class="language-toml">[tool.black]
+line-length = 120
+preview = true
+unstable = true
+</code></pre>
+<p>in the pyproject.toml file.</p>
+<h3 id="dev_install"><a class="header" href="#dev_install">dev_install:</a></h3>
+<pre><code class="language-bash">make dev_install
+</code></pre>
+<p>install the package in the development mode. It means that the package is installed in the editable mode. So if you modify the code, you don't need to reinstall the package. We recommend the developer to use this method to install the package.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="server"><a class="header" href="#server">Server</a></h1>
+<p>Still Under Construction... (May have bugs and lack of documentation)</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="后端服务server"><a class="header" href="#后端服务server">后端服务（Server）</a></h1>
+<p>Server 将 ktransformers 的快速异构推理能力通过 API 提供给外界调用。</p>
+<img src="zh/api/server/server-arch.png" height="600" alt="Server架构">
+<h2 id="api"><a class="header" href="#api">API</a></h2>
+<p>Server 通过 RESTful API 对外提供模型推理服务，提供  ChatCompletion 和 Assistant 两种调用方式。</p>
+<ul>
+<li>ChatCompletion 接口要求用户一次提供所有的历史对话，然后返回模型的回复。AI 服务提供商（例如<a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a> ）和本地推理框架（例如<a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a> ）都提供 ChatCompletion 接口。为了兼容 OpenAI 和 Ollama，Server 分别提供和它们一致的 API 接口。因此，当前使用 OpenAI 和 Ollama 的应用可以无缝切换到我们的 Server。例如： <a href="zh/api/server/tabby.html">如何使用 Tabby 和 ktransformers 在本地利用 236B 的大模型做代码补全？</a>。</li>
+<li>Assistant 适用于应用需要复用一系列资源并调用模型的场景。例如，在教育应用场景中，应用开发者可以创建一个名为二年级数学老师的 Assistant，并设置初始prompt（“你是一个有经验的的二年级数学老师...”），上传相关的资料（二年级数学教材）。创建 Assistant 后，应用需要创建一个 Thread 来存储用户和模型的对话消息（Message）。调用模型时，应用需要创建一个 Run 来获得 Assistant 的回复。相对于 ChatCompletion，实现了 Assistant 的 Server 代替应用实现了对话背景复用和多轮对话，使得复杂场景下的模型的调用更加方便。 <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> 提出了这样的 Assistant 接口，而 Server 也提供和它一致的 API 。</li>
+</ul>
+<p>这些 API 定义在<code>server/api</code>中，它们的具体使用请见<a href="zh/api/server/api.html">这里</a>。</p>
+<h2 id="对接模型推理框架"><a class="header" href="#对接模型推理框架">对接模型推理框架</a></h2>
+<p>Server 通过 ktransformers 调用模型并进行推理。Server 也支持其他的推理框架，例如已经支持的 <a href="https://huggingface.co/docs/transformers/index">transformers</a> ，并计划支持 <a href="https://github.com/turboderp/exllamav2">exllamav2</a>。这些功能在<code>server/backend</code> 中实现。</p>
+<p>Server 将模型推理框架的推理功能抽象成一个基类<code>BackendInterfaceBase</code>。这个基类包含一个函数：inference。它的输入是是历史的对话信息 messages，输出是模型返回的文字结果。inference 函数采用 async generator 的设计，这使得 Server 可以流式地返回模型的回复。</p>
+<pre><code class="language-python">class BackendInterfaceBase:
+  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
+  	...
+</code></pre>
+<p>这个 inference 函数，因为它的输入和输出分别是历史对话和模型回复，所以它自然地实现了 ChatCompletion 的功能。因此 ChatCompletion API 可以直接调用inference 函数完成模型推理。</p>
+<p>而 Assistant 则比 ChatCompletion 复杂许多，需要 Server 存储 Assistant 的相关状态，并以合适的方式调用 inference 函数。Server 在数据库中维护了一套 Assistant 逻辑，存储应用创建的 Assistant，Thread 和 Message。在内存中，Server 为每个 Thread 维护一个 <code>ThreadContext</code>，集合每个Thread 相关的 Assistant 等信息。当用户发出新的 Message 时，Server 调用 ThreadContext 的get_local_messages函数，获得 messages，并调用 inference 函数获得推理结果。</p>
+<pre><code class="language-python">class MyThreadContext(ThreadContext):
+    def get_local_messages(self):
+      ...
+</code></pre>
+<p>由于不同的模型推理框架有着不同的历史对话输入格式，所以 <code>ThreadContext</code> 和 <code>BackendInterface</code> 需要成对地使用。Server 除了自己的 ktransformers 之外，还支持 transformers。如果要对接其他的模型推理框架，可以参考在 <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a> 中<code>TransformersInterface</code>和<code>TransformersThreadContext</code>的实现。</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="start-with-website"><a class="header" href="#start-with-website">Start with website</a></h1>
+<p>This document provides the necessary steps to set up and run the web service for this project.</p>
+<h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
+<h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
+<p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
+<p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
+<pre><code class="language-bash">cd ktransformers/website
+</code></pre>
+<p>Next, install the Vue CLI with the following command:</p>
+<pre><code class="language-bash">npm install @vue/cli
+</code></pre>
+<p>Now you can build the project:</p>
+<pre><code class="language-bash">npm run build
+</code></pre>
+<p>Finally you can build ktransformers with website:</p>
+<pre><code>cd ../../
+pip install .
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="如何使用-tabby-和-ktransformers-在本地利用-236b-的大模型做代码补全"><a class="header" href="#如何使用-tabby-和-ktransformers-在本地利用-236b-的大模型做代码补全">如何使用 Tabby 和 ktransformers 在本地利用 236B 的大模型做代码补全？</a></h1>
+<p><a href="https://tabby.tabbyml.com/docs/welcome/">Tabby</a> 是一个开源的代码助手，用户可以手动配置后端使用的框架及模型，并在多个 IDE/编辑器 上使用，例如 VSCode 和 InteliJ。因为 Tabby 在框架侧可以对接到 Ollama，并且 ktransformers server 提供和 Ollama 一致的 API 接口，所以我们可以将 Tabby 对接到 ktransformers server。并在代码补全的场景中体验到 ktransformers 快速的异构推理。</p>
+<ol>
+<li>启动 ktransformers。</li>
+</ol>
+<pre><code class="language-bash">./ktransformers --port 9112
+</code></pre>
+<ol start="2">
+<li>安装 Tabby：按照 Tabby 的官方教程在带有英伟达 GPU 的 Linux 服务器或者 Windows PC 上<a href="https://tabby.tabbyml.com/docs/quick-start/installation/linux/">安装 Tabby</a>。</li>
+<li>配置 Tabby：创建<code>~/.tabby/config.toml</code>，并加入以下配置。</li>
+</ol>
+<pre><code class="language-toml">[model.completion.http]
+kind = "ollama/completion"
+api_endpoint = "http://127.0.0.1:9112/"
+model_name = "DeepSeek-Coder-V2-Instruct"
+prompt_template = "&lt;｜fim▁begin｜&gt;{prefix}&lt;｜fim▁hole｜&gt;{suffix}&lt;｜fim▁end｜&gt;" # Prompt Template
+</code></pre>
+<p>在这个配置中，<code>kind</code> 指明 ktransformers 使用 Ollama 的标准 API 为 Tabby 提供服务；<code>api_endpoint</code> 与 ktransforer 启动时绑定的接口保持一致；<code>model_name</code> 设置为 ktransformers 使用的模型，这里使用 <code>DeepSeek-Coder-V2-Instruct</code> 作为后台推理的模型；<code>prompt_template</code> 是模型的提示词模板，针对不同的模型，使用相对应的模版才能正常使用模型 Fill In the Middle 的功能。
+在这里演示的是 Tabby 使用 Ollama API 提供 Completion 功能的相关配置，有关 Tabby 其他可选功能的配置信息请参照<a href="https://tabby.tabbyml.com/docs/administration/model/">这里</a>。</p>
+<ol start="4">
+<li>启动 Tabby 服务：<code>./tabby serve</code>。
+<img src="zh/api/server/run-tabby.png" alt="image-20240709112329577" style="zoom:50%;" /></li>
+</ol>
+<p>​	启动之后，期望会在 ktransformers 的命令行界面看到对 <code>/api/tags</code> 接口的访问(在 Tabby 新版本 v0.13.0 中变为对 <code>/api/show/</code> 接口的访问)。
+<img src="zh/api/server/visit-api-tags.png" alt="image-20240709111648215" style="zoom:67%;" /></p>
+<ol start="6">
+<li>
+<p>注册 Tabby 账户，获取 Token：在启动 Tabby 服务后，在浏览器中打开相应的链接(如上图的 0.0.0.0:8080)，并参照<a href="https://tabby.tabbyml.com/docs/quick-start/register-account/">教程</a> 创建用户并获取 Token。</p>
+</li>
+<li>
+<p>启动 VScode 安装 Tabby 拓展插件，并在相关提示下，使用上一步获得的 Token 连接 Tabby Server，参照<a href="https://tabby.tabbyml.com/docs/extensions/installation/vscode/">这里</a>。</p>
+</li>
+<li>
+<p>打开任意代码文件，体验 ktransformers 的快速异构推理。</p>
+</li>
+</ol>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="faq-1"><a class="header" href="#faq-1">FAQ</a></h1>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
+<pre><code>in Ubuntu 22.04 installation need to add the:
+sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+sudo apt-get update
+sudo apt-get install --only-upgrade libstdc++6
+</code></pre>
+<p>from-https://github.com/kvcache-ai/ktransformers/issues/117#issuecomment-2647542979</p>
+<h3 id="q-deepseek-r1-not-outputting-initial--token"><a class="header" href="#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial <think> token</a></h3>
+<blockquote>
+<p>from deepseek-R1 doc:<br>
+Additionally, we have observed that the DeepSeek-R1 series models tend to bypass thinking pattern (i.e., outputting "&lt;think&gt;\n\n&lt;/think&gt;") when responding to certain queries, which can adversely affect the model's performance. To ensure that the model engages in thorough reasoning, we recommend enforcing the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output.</p>
+</blockquote>
+<p>So we fix this by manually adding "&lt;think&gt;\n" token at prompt end (you can check out at local_chat.py),
+and pass the arg <code>--force_think true </code> can let the local_chat initiate the response with "&lt;think&gt;\n"</p>
+<p>from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552</p>
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
+<h3 id="q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it"><a class="header" href="#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></h3>
+<ol>
+<li>
+<p>Get larger context.</p>
+<ol>
+<li>local_chat.py: You can increase the context window size by setting <code>--max_new_tokens</code> to a larger value.</li>
+<li>server: Increase the `--cache_lens' to a larger value.</li>
+</ol>
+</li>
+<li>
+<p>Move more weights to the GPU.
+Refer to the ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-marlin.yaml</p>
+<pre><code class="language-yaml">- match:
+   name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$" # inject experts in layer 4~10 as marlin expert
+ replace:
+   class: ktransformers.operators.experts.KTransformersExperts  
+   kwargs:
+     generate_device: "cuda:0" # run in cuda:0; marlin only support GPU
+     generate_op:  "KExpertsMarlin" # use marlin expert
+ recursive: False
+</code></pre>
+<p>You can modify layer as you want, eg. <code>name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$"</code> to <code>name: "^model\\.layers\\.([4-12])\\.mlp\\.experts$"</code> to move more weights to the GPU.</p>
+<blockquote>
+<p>Note: The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.</p>
+</blockquote>
+</li>
+</ol>
+<h3 id="q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them"><a class="header" href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></h3>
+<p>Use the <code>--optimize_rule_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
+<blockquote>
+<p>Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.</p>
+</blockquote>
+<h3 id="q-how-to-get-the-best-performance"><a class="header" href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></h3>
+<p>You have to set <code>--cpu_infer</code> to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.</p>
+<h3 id="q-my-deepseek-r1-model-is-not-thinking"><a class="header" href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></h3>
+<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think true </code>.</p>
+<h3 id="q-loading-gguf-error"><a class="header" href="#q-loading-gguf-error">Q: Loading gguf error</a></h3>
+<p>Make sure you:</p>
+<ol>
+<li>Have the <code>gguf</code> file in the <code>--gguf_path</code> directory.</li>
+<li>The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.</li>
+<li>The folder name it self should not end with <code>.gguf</code>, eg. <code>Deep-gguf</code> is correct, <code>Deep.gguf</code> is wrong.</li>
+</ol>
+<h3 id="q-version-glibcxx_3430-not-found"><a class="header" href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></h3>
+<p>The detailed error:</p>
+<blockquote>
+<p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
+</blockquote>
+<p>It may because of your conda env have no this version. Your can first exit your conda env by <code>conda deactivate</code> and use <code>whereis libstdc++.so.6</code> to find the path. And re enter your conda env and copy the .so by <code>cp &lt;path of outter libstdc++&gt; &lt;path of your conda env libstdc++&gt;</code></p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="ace.js"></script>
+        <script src="editor.js"></script>
+        <script src="mode-rust.js"></script>
+        <script src="theme-dawn.js"></script>
+        <script src="theme-tomorrow_night.js"></script>
+
+        <script src="elasticlunr.min.js"></script>
+        <script src="mark.min.js"></script>
+        <script src="searcher.js"></script>
+
+        <script src="clipboard.min.js"></script>
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+    </div>
+    </body>
+</html>
