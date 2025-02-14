@@ -173,7 +173,7 @@
 <p>The following figure provides a brief overview of DeepSeek-V2 architecture. At the heart of its attention layer, DeepSeek-V2 introduces a novel MLA operator that represents the heads of key-value pairs using a common, joint compressed representation, which holds significant potential for efficiency improvements. However, the official open-source implementation of the MLA operator explicitly decompresses this compressed representation and caches the decompressed key-value pairs. This process not only enlarges the KV cache size but also diminishes inference performance.</p>
 <p align="center">
   <picture>
-    <img alt="DeepSeek on KTransformers" src="../assets/DeepSeek-on-KTransformers.PNG" width=80%>
+    <img alt="DeepSeek on KTransformers" src="../assets/DeepSeek-on-KTransformers.png" width=80%>
   </picture>
 </p>
 <p>To truly capitalize on the benefits of MLA, we have implemented an optimized version for inference. According to its original paper, we absorb the decompression matrices directly into the q_proj and out_proj weights. Consequently, the compressed representation does not need to be decompressed to compute the attention. This adjustment significantly reduces the KV cache size and increases the arithmetic intensity of this operator, which greatly optimizes the utilization of GPU computational power.</p>
