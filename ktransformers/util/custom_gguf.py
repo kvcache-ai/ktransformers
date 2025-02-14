@@ -166,6 +166,8 @@ class GGUFLoader:
         # Check dir exist
         if not os.path.exists(gguf_path):
             raise FileNotFoundError(f"GGUF dir not found: {gguf_path}")
+        if os.path.isfile(gguf_path):
+            gguf_path = os.path.dirname(gguf_path)
         
         self.tensor_info = {}
         self.gguf_path = gguf_path
@@ -175,14 +177,18 @@ class GGUFLoader:
         self.tensor_device_map = {}
         
         # Walk through all the .gguf files in the directory
+        found_gguf = False
         for root, dirs, files in os.walk(gguf_path):
             for file in files:
                 if file.endswith(".gguf"):
+                    found_gguf = True
                     file_name = os.path.join(root, file)
                     with open(file_name, "rb") as f:
                         self.load_gguf(f)
                         if file_name not in self.file_data_map:
                             self.file_data_map[file_name] = np.memmap(file_name, mode = 'r')
+        if not found_gguf:
+            raise FileNotFoundError(f"Cannot find any .gguf files in: {gguf_path}")
                             
     def load_gguf(self, f):
         f.seek(0)
