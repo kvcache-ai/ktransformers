@@ -1,6 +1,6 @@
 
 # How to Run DeepSeek-R1
-In this document, we will show you how to run the local_chat.py script to test the DeepSeek-R1's performance. There are two versions: 
+In this document, we will show you how to install and run KTransformers on your local machine. There are two versions: 
 * V0.2 is the current main branch.
 * V0.3 is a preview version only provides binary distribution for now.
 * To reproduce our DeepSeek-R1/V3 results, please refer to [Deepseek-R1/V3 Tutorial](./DeepseekR1_V3_tutorial.md) for more detail settings after installation.
