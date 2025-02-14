@@ -23,14 +23,13 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
-* **Feb 10, 2025**: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is [here](./doc/en/DeepseekR1_V3_tutorial.md).
-* **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is [here](./doc/en/long_context_tutorial.md).
+* **Feb 10, 2025**: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. For detailed show case and reproduction tutorial, see [here](./doc/en/DeepseekR1_V3_tutorial.md).
 * **Aug 28, 2024**: Decrease DeepseekV2's required VRAM from 21G to 11G.
-* **Aug 15, 2024**: Update detailed [TUTORIAL](doc/en/injection_tutorial.md) for injection and multi-GPU. 
+* **Aug 15, 2024**: Update detailed [tutorial](doc/en/injection_tutorial.md) for injection and multi-GPU. 
 * **Aug 14, 2024**: Support llamfile as linear backend. 
 * **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
 * **Aug 9, 2024**: Support windows native.
-
+<!-- * **Aug 28, 2024**: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is [here](./doc/en/long_context_tutorial.md). -->
 <h2 id="show-cases">🌟 Show Cases</h2>
 
 <div>
@@ -105,11 +104,6 @@ Getting started with KTransformers is simple! Follow the steps below to set up a
 
 To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/).
 
-Alternatively, you can install it directly via pip:
-
-```bash
-pip install ktransformers
-```
 
 <h2 id="tutorial">📃 Brief Injection Tutorial</h2>
 At the heart of KTransformers is a user-friendly, template-based injection framework. 
