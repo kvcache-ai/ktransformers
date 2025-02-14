@@ -1,7 +1,7 @@
 <!-- omit in toc -->
 # GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM
 - [SUMMARY](#summary)
-	- [Prerequisites](#prerequisites)
+	- [Show Case Environment](#show-case-environment)
 	- [Bench Result](#bench-result)
 		- [V0.2](#v02)
 			- [Settings](#settings)
@@ -50,7 +50,7 @@ We also give our upcoming optimizations previews, including an Intel AMX-acceler
 The binary distribution is available now and the source code will come ASAP! Check out the wheel package [here](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl)  
 
 
-## Prerequisites
+## Show Case Environment
 We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
 GPU: 4090D 24G VRAM <br>
@@ -110,10 +110,6 @@ is speed up which is inspiring. So our showcase makes use of this finding*
 #### Single socket version (32 cores)
 Our local_chat test command is:
 ``` shell
-git clone https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers
-git submodule init
-git submodule update
 numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 33 --max_new_tokens 1000
 <when you see chat, then press enter to load the text prompt_file>
 ```
@@ -121,24 +117,28 @@ numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path <your model 
 `<your gguf path>` can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
 `--max_new_tokens 1000` is the max output token length. If you find the answer is truncated, you
 can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.). 
-<br>
-The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes<br>
+
+The command `numactl -N 1 -m 1` aims to advoid data transfer between numa nodes<br>
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: `--force_think true`. This is explained in [FAQ](#faq) part
 
 #### Dual socket version (64 cores)
-Make suer before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set) <br>
-Our local_chat test command is:
+
+Make suer before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set). You may check the doc [here](./install.md) for install details. <br>
+
+Test Command:
 ``` shell
-git clone https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers
-git submodule init
-git submodule update
-export USE_NUMA=1
-make dev_install # or sh ./install.sh
+# ---For those who have not installed ktransformers---
+# git clone https://github.com/kvcache-ai/ktransformers.git
+# cd ktransformers
+# git submodule init
+# git submodule update
+# export USE_NUMA=1
+# make dev_install # or sh ./install.sh
+# ----------------------------------------------------
 python ./ktransformers/local_chat.py --model_path <your model path> --gguf_path <your gguf path>  --prompt_file <your prompt txt file>  --cpu_infer 65 --max_new_tokens 1000
 <when you see chat, then press enter to load the text prompt_file>
 ```
-The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65
+The parameters' meaning is the same. But As we use dual socket, we set cpu_infer to 65
 
 ### V0.3 Showcase
 #### Dual socket version (64 cores)
