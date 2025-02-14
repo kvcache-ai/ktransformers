@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Deepseek-R1/V3 Show Case - Ktransformers</title>
+        <title>Deepseek-R1/V3 Tutorial - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -163,7 +163,7 @@
 <ul>
 <li><a href="#summary">SUMMARY</a>
 <ul>
-<li><a href="#show-case-environment">Show Case Environment</a></li>
+<li><a href="#prerequisites">Prerequisites</a></li>
 <li><a href="#bench-result">Bench Result</a>
 <ul>
 <li><a href="#v02">V0.2</a>
@@ -237,7 +237,7 @@ Apologies for the wait, but we've been cooking up something truly amazing!</p>
 </ul>
 <p>We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to <strong>28× faster than llama.cpp</strong> for local inference.
 The binary distribution is available now and the source code will come ASAP! Check out the wheel package <a href="https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl">here</a></p>
-<h2 id="show-case-environment"><a class="header" href="#show-case-environment">Show Case Environment</a></h2>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
 <p>We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
 GPU: 4090D 24G VRAM <br>
@@ -296,30 +296,33 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <h3 id="v02-showcase"><a class="header" href="#v02-showcase">V0.2 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>
-<pre><code class="language-shell">numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
+<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
 &lt;when you see chat, then press enter to load the text prompt_file&gt;
 </code></pre>
 <p><code>&lt;your model path&gt;</code> can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
 <code>&lt;your gguf path&gt;</code> can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
 <code>--max_new_tokens 1000</code> is the max output token length. If you find the answer is truncated, you
-can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).</p>
-<p>The command <code>numactl -N 1 -m 1</code> aims to advoid data transfer between numa nodes<br>
+can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).
+<br>
+The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes<br>
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. This is explained in <a href="#faq">FAQ</a> part</p>
 <h4 id="dual-socket-version-64-cores"><a class="header" href="#dual-socket-version-64-cores">Dual socket version (64 cores)</a></h4>
-<p>Make suer before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set). You may check the doc <a href="./install.html">here</a> for install details. <br></p>
-<p>Test Command:</p>
-<pre><code class="language-shell"># ---For those who have not installed ktransformers---
-# git clone https://github.com/kvcache-ai/ktransformers.git
-# cd ktransformers
-# git submodule init
-# git submodule update
-# export USE_NUMA=1
-# make dev_install # or sh ./install.sh
-# ----------------------------------------------------
+<p>Make suer before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set) <br>
+Our local_chat test command is:</p>
+<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+export USE_NUMA=1
+make dev_install # or sh ./install.sh
 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 65 --max_new_tokens 1000
 &lt;when you see chat, then press enter to load the text prompt_file&gt;
 </code></pre>
-<p>The parameters' meaning is the same. But As we use dual socket, we set cpu_infer to 65</p>
+<p>The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65</p>
 <h3 id="v03-showcase"><a class="header" href="#v03-showcase">V0.3 Showcase</a></h3>
 <h4 id="dual-socket-version-64-cores-1"><a class="header" href="#dual-socket-version-64-cores-1">Dual socket version (64 cores)</a></h4>
 <p>Our local_chat test command is:</p>
@@ -368,7 +371,7 @@ Intel is currently the only CPU vendor that supports AMX-like instructions, whic
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../en/install.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -382,7 +385,7 @@ Intel is currently the only CPU vendor that supports AMX-like instructions, whic
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../en/install.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
