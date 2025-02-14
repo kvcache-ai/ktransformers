@@ -1,0 +1,466 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Installation Guide - Ktransformers</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/install.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<p>In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:</p>
+<ul>
+<li>V0.2 is the current main branch.</li>
+<li>V0.3 is a preview version only provides binary distribution for now.</li>
+<li>To reproduce our DeepSeek-R1/V3 results, please refer to <a href="./DeepseekR1_V3_tutorial.html">Deepseek-R1/V3 Tutorial</a> for more detail settings after installation.</li>
+</ul>
+<h2 id="preparation"><a class="header" href="#preparation">Preparation</a></h2>
+<p>Some preparation:</p>
+<ul>
+<li>
+<p>CUDA 12.1 and above, if you didn't have it yet, you may install from <a href="https://developer.nvidia.com/cuda-downloads">here</a>.</p>
+<pre><code class="language-sh"># Adding CUDA to PATH
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export CUDA_PATH=/usr/local/cuda
+</code></pre>
+</li>
+<li>
+<p>Linux-x86_64 with gcc, g++ and cmake</p>
+<pre><code class="language-sh">sudo apt-get update
+sudo apt-get install gcc g++ cmake ninja-build
+</code></pre>
+</li>
+<li>
+<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Conda</a> to create a virtual environment with Python=3.11 to run our program.</p>
+<pre><code class="language-sh">conda create --name ktransformers python=3.11
+conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
+</code></pre>
+</li>
+<li>
+<p>Make sure that PyTorch, packaging, ninja is installed</p>
+<pre><code>pip install torch packaging ninja cpufeature numpy
+</code></pre>
+</li>
+</ul>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
+   
+   >We are working on the latest docker image, please wait for a while.
+
+2. ~~You can install using Pypi (for linux):~~
+    > We are working on the latest pypi package, please wait for a while.
+   
+   ```
+   pip install ktransformers --no-build-isolation
+   ```
+   
+   for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
+<ul>
+<li>
+<p>Download source code and compile:</p>
+<ul>
+<li>
+<p>init source code</p>
+<pre><code class="language-sh">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+</code></pre>
+</li>
+<li>
+<p>[Optional] If you want to run with website, please <a href="./doc/en/api/server/website.html">compile the website</a> before execute <code>bash install.sh</code></p>
+</li>
+<li>
+<p>For Linux</p>
+<ul>
+<li>
+<p>For simple install:</p>
+<pre><code class="language-shell">bash install.sh
+</code></pre>
+</li>
+<li>
+<p>For those who have two cpu and 1T RAM:</p>
+<pre><code class="language-shell"># Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
+export USE_NUMA=1
+bash install.sh # or `make dev_install`
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>For Windows</p>
+<pre><code class="language-shell">install.bat
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is <a href="./doc/en/makefile_usage.html">here</a></p>
+</li>
+</ul>
+<h3 id="local-chat"><a class="header" href="#local-chat">Local Chat</a></h3>
+We provide a simple command-line local chat Python script that you can run for testing.
+<blockquote>
+<p>Note: this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to <a href="#id_666">RESTful API and Web UI</a>.</p>
+</blockquote>
+<h4 id="run-example"><a class="header" href="#run-example">Run Example</a></h4>
+<pre><code class="language-shell"># Begin from root of your cloned repo!
+# Begin from root of your cloned repo!!
+# Begin from root of your cloned repo!!! 
+
+# Download mzwing/DeepSeek-V2-Lite-Chat-GGUF from huggingface
+mkdir DeepSeek-V2-Lite-Chat-GGUF
+cd DeepSeek-V2-Lite-Chat-GGUF
+
+wget https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/resolve/main/DeepSeek-V2-Lite-Chat.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
+
+cd .. # Move to repo's root dir
+
+# Start local chat
+python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
+# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+</code></pre>
+<p>It features the following arguments:</p>
+<ul>
+<li>
+<p><code>--model_path</code> (required): Name of the model (such as "deepseek-ai/DeepSeek-V2-Lite-Chat" which will automatically download configs from <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite">Hugging Face</a>). Or if you already got local files  you may directly use that path to initialize the model.</p>
+<blockquote>
+<p>Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.</p>
+</blockquote>
+</li>
+<li>
+<p><code>--gguf_path</code> (required): Path of a directory containing GGUF files which could that can be downloaded from <a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">Hugging Face</a>. Note that the directory should only contains GGUF of current model, which means you need one separate directory for each model.</p>
+</li>
+<li>
+<p><code>--optimize_rule_path</code> (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the <a href="ktransformers/optimize/optimize_rules">ktransformers/optimize/optimize_rules</a> directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.</p>
+</li>
+<li>
+<p><code>--max_new_tokens</code>: Int (default=1000). Maximum number of new tokens to generate.</p>
+</li>
+<li>
+<p><code>--cpu_infer</code>: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).</p>
+</li>
+</ul>
+<details>
+<summary>Supported Models/quantization</summary>
+<h3 id="supported-models-include"><a class="header" href="#supported-models-include">Supported models include:</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Models</strong></th><th>❌ <strong>Deprecated Models</strong></th></tr></thead><tbody>
+<tr><td>DeepSeek-R1</td><td><del>InternLM2.5-7B-Chat-1M</del></td></tr>
+<tr><td>DeepSeek-V3</td><td></td></tr>
+<tr><td>DeepSeek-V2</td><td></td></tr>
+<tr><td>DeepSeek-V2.5</td><td></td></tr>
+<tr><td>Qwen2-57B</td><td></td></tr>
+<tr><td>DeepSeek-V2-Lite</td><td></td></tr>
+<tr><td>Mixtral-8x7B</td><td></td></tr>
+<tr><td>Mixtral-8x22B</td><td></td></tr>
+</tbody></table>
+</div>
+<h3 id="support-quantize-format"><a class="header" href="#support-quantize-format">Support quantize format:</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Formats</strong></th><th>❌ <strong>Deprecated Formats</strong></th></tr></thead><tbody>
+<tr><td>Q2_K_L</td><td><del>IQ2_XXS</del></td></tr>
+<tr><td>Q2_K_XS</td><td></td></tr>
+<tr><td>Q3_K_M</td><td></td></tr>
+<tr><td>Q4_K_M</td><td></td></tr>
+<tr><td>Q5_K_M</td><td></td></tr>
+<tr><td>Q6_K</td><td></td></tr>
+<tr><td>Q8_0</td><td></td></tr>
+</tbody></table>
+</div></details>
+<details>
+<summary>Suggested Model</summary>
+<div class="table-wrapper"><table><thead><tr><th>Model Name</th><th>Model Size</th><th>VRAM</th><th>Minimum DRAM</th><th>Recommended DRAM</th></tr></thead><tbody>
+<tr><td>DeepSeek-R1-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
+<tr><td>DeepSeek-V3-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
+<tr><td>DeepSeek-V2-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
+<tr><td>DeepSeek-V2.5-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
+<tr><td>DeepSeek-V2.5-IQ4_XS</td><td>117G</td><td>10G</td><td>107G</td><td>128G</td></tr>
+<tr><td>Qwen2-57B-A14B-Instruct-q4_k_m</td><td>33G</td><td>8G</td><td>34G</td><td>64G</td></tr>
+<tr><td>DeepSeek-V2-Lite-q4_k_m</td><td>9.7G</td><td>3G</td><td>13G</td><td>16G</td></tr>
+<tr><td>Mixtral-8x7B-q4_k_m</td><td>25G</td><td>1.6G</td><td>51G</td><td>64G</td></tr>
+<tr><td>Mixtral-8x22B-q4_k_m</td><td>80G</td><td>4G</td><td>86.1G</td><td>96G</td></tr>
+<tr><td>InternLM2.5-7B-Chat-1M</td><td>15.5G</td><td>15.5G</td><td>8G(32K context)</td><td>150G (1M context)</td></tr>
+</tbody></table>
+</div>
+<p>More will come soon. Please let us know which models you are most interested in.</p>
+<p>Be aware that you need to be subject to their corresponding model licenses when using <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/LICENSE">DeepSeek</a> and <a href="https://huggingface.co/Qwen/Qwen2-72B-Instruct/blob/main/LICENSE">QWen</a>.</p>
+</details>
+<details>
+  <summary>Click To Show how to run other examples</summary>
+<ul>
+<li>
+<p>Qwen2-57B</p>
+<pre><code class="language-sh">pip install flash_attn # For Qwen2
+
+mkdir Qwen2-57B-GGUF &amp;&amp; cd Qwen2-57B-GGUF
+
+wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
+
+cd ..
+
+python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
+# python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+</code></pre>
+</li>
+<li>
+<p>Deepseek-V2</p>
+<pre><code class="language-sh">mkdir DeepSeek-V2-Chat-0628-GGUF &amp;&amp; cd DeepSeek-V2-Chat-0628-GGUF
+# Download weights
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
+
+cd ..
+
+python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
+
+# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+</code></pre>
+</li>
+</ul>
+<div class="table-wrapper"><table><thead><tr><th>model name</th><th>weights download link</th></tr></thead><tbody>
+<tr><td>Qwen2-57B</td><td><a href="https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/tree/main">Qwen2-57B-A14B-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-coder</td><td><a href="https://huggingface.co/LoneStriker/DeepSeek-Coder-V2-Instruct-GGUF/tree/main">DeepSeek-Coder-V2-Instruct-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-chat</td><td><a href="https://huggingface.co/bullerwins/DeepSeek-V2-Chat-0628-GGUF/tree/main">DeepSeek-V2-Chat-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-lite</td><td><a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">DeepSeek-V2-Lite-Chat-GGUF-Q4K-M</a></td></tr>
+<tr><td>DeepSeek-R1</td><td><a href="https://huggingface.co/unsloth/DeepSeek-R1-GGUF/tree/main/DeepSeek-R1-Q4_K_M">DeepSeek-R1-gguf-Q4K-M</a></td></tr>
+</tbody></table>
+</div></details>
+<!-- pin block for jump -->
+<span id='id_666'> 
+<h3 id="restful-api-and-web-ui-deprected"><a class="header" href="#restful-api-and-web-ui-deprected">RESTful API and Web UI (deprected) </a></h3>
+<p>Start without website:</p>
+<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
+</code></pre>
+<p>Start with website:</p>
+<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
+</code></pre>
+<p>Or you want to start server with transformers, the model_path should include safetensors</p>
+<pre><code class="language-bash">ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
+</code></pre>
+<p>Access website with url <a href="http://localhost:10002/web/index.html#/chat">http://localhost:10002/web/index.html#/chat</a> :</p>
+<p align="center">
+  <picture>
+    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=90%>
+  </picture>
+</p>
+<p>More information about the RESTful API server can be found <a href="doc/en/api/server/server.html">here</a>. You can also find an example of integrating with Tabby <a href="doc/en/api/server/tabby.html">here</a>.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../en/DeepseekR1_V3_tutorial.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../en/DeepseekR1_V3_tutorial.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
