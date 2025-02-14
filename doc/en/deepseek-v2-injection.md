@@ -24,7 +24,7 @@ The following figure provides a brief overview of DeepSeek-V2 architecture. At t
 
 <p align="center">
   <picture>
-    <img alt="DeepSeek on KTransformers" src="../assets/DeepSeek-on-KTransformers.PNG" width=80%>
+    <img alt="DeepSeek on KTransformers" src="../assets/DeepSeek-on-KTransformers.png" width=80%>
   </picture>
 </p>
 
