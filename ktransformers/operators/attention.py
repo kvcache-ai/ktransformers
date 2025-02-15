@@ -262,7 +262,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             """
 
             # flash attn doesn't support head_dim bigger than 256
-            # use vLLM triton attention kernel for MQA
+            # use triton attention kernel adapted from vLLM and SGLang for MQA
             decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
                              page_table,
                              position_ids.squeeze(0).to(torch.int32), attn_logits,
