@@ -166,25 +166,32 @@
 <li><a href="#show-case-environment">Show Case Environment</a></li>
 <li><a href="#bench-result">Bench Result</a>
 <ul>
+<li><a href="#v021">V0.2.1</a>
+<ul>
+<li><a href="#memory-consumption">Memory consumption:</a></li>
+<li><a href="#change-log">Change Log</a></li>
+<li><a href="#benchmark-results">Benchmark Results</a></li>
+</ul>
+</li>
 <li><a href="#v02">V0.2</a>
 <ul>
 <li><a href="#settings">Settings</a></li>
-<li><a href="#memory-consumption">Memory consumption:</a></li>
-<li><a href="#benchmark-results">Benchmark Results</a></li>
+<li><a href="#memory-consumption-1">Memory consumption:</a></li>
+<li><a href="#benchmark-results-1">Benchmark Results</a></li>
 </ul>
 </li>
 <li><a href="#v03-preview">V0.3-Preview</a>
 <ul>
 <li><a href="#settings-1">Settings</a></li>
 <li><a href="#memory-consumptions">Memory consumptions:</a></li>
-<li><a href="#benchmark-results-1">Benchmark results</a></li>
+<li><a href="#benchmark-results-2">Benchmark results</a></li>
 </ul>
 </li>
 </ul>
 </li>
 <li><a href="#how-to-run">How to Run</a>
 <ul>
-<li><a href="#v02-showcase">V0.2 Showcase</a>
+<li><a href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a>
 <ul>
 <li><a href="#single-socket-version-32-cores">Single socket version (32 cores)</a></li>
 <li><a href="#dual-socket-version-64-cores">Dual socket version (64 cores)</a></li>
@@ -198,6 +205,12 @@
 </ul>
 </li>
 <li><a href="#some-explanations">Some Explanations</a></li>
+<li><a href="#next">Next</a>
+<ul>
+<li><a href="#faster">Faster</a></li>
+<li><a href="#easier">Easier</a></li>
+</ul>
+</li>
 <li><a href="#faq">FAQ</a>
 <ul>
 <li><a href="#r1-no-thinking">R1 No Thinking</a></li>
@@ -237,12 +250,55 @@ Apologies for the wait, but we've been cooking up something truly amazing!</p>
 </ul>
 <p>We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to <strong>28× faster than llama.cpp</strong> for local inference.
 The binary distribution is available now and the source code will come ASAP! Check out the wheel package <a href="https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl">here</a></p>
+<blockquote>
+<p><strong>Feb 15, 2025</strong>: KTransformers V0.2.1: Longer Context (from 4K to 8K for 24GB VRAM) &amp; Slightly Faster Speed （+15%) (Up to 16 Tokens/s), update docs <a href="./doc/en/DeepseekR1_V3_tutorial.html">here</a> and <a href="https://kvcache-ai.github.io/ktransformers/">online books</a>.</p>
+</blockquote>
+<p>We speed up the decode and prefill speed a littlt bit. The reason for the limited performance improvement mainly lies in the fact that the inference process is still constrained by the CPU's computational speed and memory bandwidth. The MLA part handled by the GPU accounts for a relatively small proportion.</p>
+<p>Besides the improvements in speed, we've also significantly updated the documentation to enhance usability, including:<br></p>
+<ul>
+<li>Added Multi-GPU configuration tutorial.</li>
+<li>Consolidated installation guide.</li>
+<li>Add a detailed tutorial on registering extra GPU memory with ExpertMarlin;</li>
+</ul>
 <h2 id="show-case-environment"><a class="header" href="#show-case-environment">Show Case Environment</a></h2>
 <p>We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
 GPU: 4090D 24G VRAM <br>
-Memory: standard DDR5-4800 server DRAM (1 TB)</p>
+Memory: standard DDR5-4800 server DRAM (1 TB), each socket with 8×DDR5-4800</p>
 <h2 id="bench-result"><a class="header" href="#bench-result">Bench Result</a></h2>
+<h3 id="v021"><a class="header" href="#v021">V0.2.1</a></h3>
+<ul>
+<li>Model: DeepseekV3-q4km (int4)<br></li>
+<li>CPU: cpu_model_name: Intel (R) Xeon (R) Gold 6454S, 32 cores per socket, 2 sockets, 2 numa nodes</li>
+<li>GPU: 4090 24G VRAM</li>
+<li>We test after enough warm up</li>
+</ul>
+<h4 id="memory-consumption"><a class="header" href="#memory-consumption">Memory consumption:</a></h4>
+<ul>
+<li>Single socket: 382G DRAM, at least 14GB VRAM</li>
+<li>Dual socket: 1T DRAM, at least 14GB VRAM</li>
+</ul>
+<h4 id="change-log"><a class="header" href="#change-log">Change Log</a></h4>
+<ul>
+<li>Longer Context (from 4K to 8K for 24GB VRAM) and Slightly Faster Speed （+15%):<br>
+Integrated the highly efficient Triton MLA Kernel from the fantastic sglang project, enable much longer context length and slightly faster prefill/decode speed</li>
+<li>We suspect the impressive improvement comes from the change of hardwre platform (4090D-&gt;4090)</li>
+</ul>
+<h4 id="benchmark-results"><a class="header" href="#benchmark-results">Benchmark Results</a></h4>
+<p>"6 experts" case is part of V0.3's preview</p>
+<div class="table-wrapper"><table><thead><tr><th>Prompt</th><th>hi (2)</th><th>1K (969)</th><th>2K (1930)</th><th>4K (3846)</th><th>llama.cpp (8 experts)</th></tr></thead><tbody>
+<tr><td>Output length</td><td>10tokens</td><td>300tokens</td><td>300tokens</td><td>300tokens</td><td>300tokens</td></tr>
+<tr><td><strong>6 experts V0.2.0</strong></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>Prefill token/s</td><td>13</td><td>105</td><td>102</td><td>88</td><td>CUDA OOM</td></tr>
+<tr><td>decode token/s</td><td>16.8</td><td>15.4</td><td>14.2</td><td>13.0</td><td>CUDA OOM</td></tr>
+<tr><td><strong>6 experts V0.2.1</strong></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>Prefill token/s</td><td>13</td><td>111</td><td>112.5</td><td>102 <strong>(1.16x speedup)</strong></td><td>101</td></tr>
+<tr><td>decode token/s</td><td>16.8</td><td>15.9</td><td>15.4</td><td>14.9 <strong>(1.15x speedup)</strong></td><td>13.9</td></tr>
+<tr><td><strong>8 experts V0.2.1</strong></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>Prefill token/s</td><td>12.2</td><td>88.2</td><td>88.5</td><td>81.9</td><td>80</td></tr>
+<tr><td>Decode token/s</td><td>13.4</td><td>13.5</td><td>13.4</td><td>13.2</td><td>12.4</td></tr>
+</tbody></table>
+</div>
 <h3 id="v02"><a class="header" href="#v02">V0.2</a></h3>
 <h4 id="settings"><a class="header" href="#settings">Settings</a></h4>
 <ul>
@@ -251,12 +307,12 @@ Memory: standard DDR5-4800 server DRAM (1 TB)</p>
 <li>GPU: 4090D 24G VRAM</li>
 <li>We test after enough warm up</li>
 </ul>
-<h4 id="memory-consumption"><a class="header" href="#memory-consumption">Memory consumption:</a></h4>
+<h4 id="memory-consumption-1"><a class="header" href="#memory-consumption-1">Memory consumption:</a></h4>
 <ul>
 <li>Single socket: 382G DRAM, at least 14GB VRAM</li>
 <li>Dual socket: 1T DRAM, at least 14GB VRAM</li>
 </ul>
-<h4 id="benchmark-results"><a class="header" href="#benchmark-results">Benchmark Results</a></h4>
+<h4 id="benchmark-results-1"><a class="header" href="#benchmark-results-1">Benchmark Results</a></h4>
 <p>"6 experts" case is part of V0.3's preview</p>
 <div class="table-wrapper"><table><thead><tr><th>Prompt<br>(500 tokens)</th><th>Dual socket Ktrans (6 experts)</th><th>Dual socket Ktrans (8 experts)</th><th>Single socket Ktrans (6 experts)</th><th>Single socket Ktrans (8 experts)</th><th>llama.cpp (8 experts)</th></tr></thead><tbody>
 <tr><td>Prefill token/s</td><td>97.32</td><td>82.94</td><td>65.14</td><td>54.21</td><td>10.31</td></tr>
@@ -275,7 +331,7 @@ Memory: standard DDR5-4800 server DRAM (1 TB)</p>
 <ul>
 <li>644GB DRAM, at least 14GB VRAM</li>
 </ul>
-<h4 id="benchmark-results-1"><a class="header" href="#benchmark-results-1">Benchmark results</a></h4>
+<h4 id="benchmark-results-2"><a class="header" href="#benchmark-results-2">Benchmark results</a></h4>
 <div class="table-wrapper"><table><thead><tr><th>Prompt length</th><th>1K</th><th>2K</th><th>4K</th><th>8K</th></tr></thead><tbody>
 <tr><td>KTrans (8 experts) Prefill token/s</td><td>185.96</td><td>255.26</td><td>252.58</td><td>195.62</td></tr>
 <tr><td>KTrans (6 experts) Prefill token/s</td><td>203.70</td><td>286.55</td><td>271.08</td><td>207.20</td></tr>
@@ -293,7 +349,7 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
-<h3 id="v02-showcase"><a class="header" href="#v02-showcase">V0.2 Showcase</a></h3>
+<h3 id="v02--v021-showcase"><a class="header" href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>
 <pre><code class="language-shell">numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
@@ -358,6 +414,20 @@ DeepSeek's MLA operators are highly computationally intensive. While running eve
 Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.</p>
 </li>
 </ol>
+<h2 id="next"><a class="header" href="#next">Next</a></h2>
+<h3 id="faster"><a class="header" href="#faster">Faster</a></h3>
+<ul>
+<li>The FlashInfer (https://github.com/flashinfer-ai/flashinfer) project is releasing an even more efficient fused MLA operator, promising further speedups</li>
+<li>vLLM has explored multi-token prediction in DeepSeek-V3, and support is on our roadmap for even better performance</li>
+<li>We are collaborating with Intel to enhance the AMX kernel (v0.3) and optimize for Xeon6/MRDIMM</li>
+</ul>
+<h3 id="easier"><a class="header" href="#easier">Easier</a></h3>
+<ul>
+<li>Official Docker images to simplify installation</li>
+<li>Fix the server integration for web API access</li>
+<li>Support for more quantization types, including the highly requested dynamic quantization from unsloth</li>
+</ul>
+<p>Stay tuned for more updates!</p>
 <h2 id="faq"><a class="header" href="#faq">FAQ</a></h2>
 <h3 id="r1-no-thinking"><a class="header" href="#r1-no-thinking">R1 No Thinking</a></h3>
 <p>Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. The detail is in <a href="./FAQ.html">FAQ</a> part <br></p>
