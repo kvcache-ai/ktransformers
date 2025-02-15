@@ -9,7 +9,7 @@
 - [Why KTransformers So Fast](en/deepseek-v2-injection.md)
 - [Injection Tutorial](en/injection_tutorial.md)
 - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md)
-# Server(Temperary Deprected)
+# Server (Temporary Deprecated)
   - [Server](en/api/server/server.md)
   - [Website](en/api/server/website.md)
   - [Tabby](en/api/server/tabby.md)
