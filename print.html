@@ -182,12 +182,261 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <li><strong>Aug 12, 2024</strong>: Support multiple GPU; Support new model: mixtral 8*7B  and 8*22B; Support q2k, q3k, q5k dequant on gpu.</li>
 <li><strong>Aug 9, 2024</strong>: Support windows native.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<p>In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:</p>
+<ul>
+<li>V0.2 is the current main branch.</li>
+<li>V0.3 is a preview version only provides binary distribution for now.</li>
+<li>To reproduce our DeepSeek-R1/V3 results, please refer to <a href="en/./DeepseekR1_V3_tutorial.html">Deepseek-R1/V3 Tutorial</a> for more detail settings after installation.</li>
+</ul>
+<h2 id="preparation"><a class="header" href="#preparation">Preparation</a></h2>
+<p>Some preparation:</p>
+<ul>
+<li>
+<p>CUDA 12.1 and above, if you didn't have it yet, you may install from <a href="https://developer.nvidia.com/cuda-downloads">here</a>.</p>
+<pre><code class="language-sh"># Adding CUDA to PATH
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export CUDA_PATH=/usr/local/cuda
+</code></pre>
+</li>
+<li>
+<p>Linux-x86_64 with gcc, g++ and cmake</p>
+<pre><code class="language-sh">sudo apt-get update
+sudo apt-get install gcc g++ cmake ninja-build
+</code></pre>
+</li>
+<li>
+<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Conda</a> to create a virtual environment with Python=3.11 to run our program.</p>
+<pre><code class="language-sh">conda create --name ktransformers python=3.11
+conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
+</code></pre>
+</li>
+<li>
+<p>Make sure that PyTorch, packaging, ninja is installed</p>
+<pre><code>pip install torch packaging ninja cpufeature numpy
+</code></pre>
+</li>
+</ul>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
+   
+   >We are working on the latest docker image, please wait for a while.
+
+2. ~~You can install using Pypi (for linux):~~
+    > We are working on the latest pypi package, please wait for a while.
+   
+   ```
+   pip install ktransformers --no-build-isolation
+   ```
+   
+   for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
+<ul>
+<li>
+<p>Download source code and compile:</p>
+<ul>
+<li>
+<p>init source code</p>
+<pre><code class="language-sh">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule init
+git submodule update
+</code></pre>
+</li>
+<li>
+<p>[Optional] If you want to run with website, please <a href="en/./doc/en/api/server/website.html">compile the website</a> before execute <code>bash install.sh</code></p>
+</li>
+<li>
+<p>For Linux</p>
+<ul>
+<li>
+<p>For simple install:</p>
+<pre><code class="language-shell">bash install.sh
+</code></pre>
+</li>
+<li>
+<p>For those who have two cpu and 1T RAM:</p>
+<pre><code class="language-shell"># Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
+export USE_NUMA=1
+bash install.sh # or `make dev_install`
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>For Windows</p>
+<pre><code class="language-shell">install.bat
+</code></pre>
+</li>
+</ul>
+</li>
+<li>
+<p>If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is <a href="en/./doc/en/makefile_usage.html">here</a></p>
+</li>
+</ul>
+<h3 id="local-chat"><a class="header" href="#local-chat">Local Chat</a></h3>
+We provide a simple command-line local chat Python script that you can run for testing.
+<blockquote>
+<p>Note: this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to <a href="en/install.html#id_666">RESTful API and Web UI</a>.</p>
+</blockquote>
+<h4 id="run-example"><a class="header" href="#run-example">Run Example</a></h4>
+<pre><code class="language-shell"># Begin from root of your cloned repo!
+# Begin from root of your cloned repo!!
+# Begin from root of your cloned repo!!! 
+
+# Download mzwing/DeepSeek-V2-Lite-Chat-GGUF from huggingface
+mkdir DeepSeek-V2-Lite-Chat-GGUF
+cd DeepSeek-V2-Lite-Chat-GGUF
+
+wget https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/resolve/main/DeepSeek-V2-Lite-Chat.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
+
+cd .. # Move to repo's root dir
+
+# Start local chat
+python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
+# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+</code></pre>
+<p>It features the following arguments:</p>
+<ul>
+<li>
+<p><code>--model_path</code> (required): Name of the model (such as "deepseek-ai/DeepSeek-V2-Lite-Chat" which will automatically download configs from <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite">Hugging Face</a>). Or if you already got local files  you may directly use that path to initialize the model.</p>
+<blockquote>
+<p>Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.</p>
+</blockquote>
+</li>
+<li>
+<p><code>--gguf_path</code> (required): Path of a directory containing GGUF files which could that can be downloaded from <a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">Hugging Face</a>. Note that the directory should only contains GGUF of current model, which means you need one separate directory for each model.</p>
+</li>
+<li>
+<p><code>--optimize_rule_path</code> (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the <a href="en/ktransformers/optimize/optimize_rules">ktransformers/optimize/optimize_rules</a> directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.</p>
+</li>
+<li>
+<p><code>--max_new_tokens</code>: Int (default=1000). Maximum number of new tokens to generate.</p>
+</li>
+<li>
+<p><code>--cpu_infer</code>: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).</p>
+</li>
+</ul>
+<details>
+<summary>Supported Models/quantization</summary>
+<h3 id="supported-models-include"><a class="header" href="#supported-models-include">Supported models include:</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Models</strong></th><th>❌ <strong>Deprecated Models</strong></th></tr></thead><tbody>
+<tr><td>DeepSeek-R1</td><td><del>InternLM2.5-7B-Chat-1M</del></td></tr>
+<tr><td>DeepSeek-V3</td><td></td></tr>
+<tr><td>DeepSeek-V2</td><td></td></tr>
+<tr><td>DeepSeek-V2.5</td><td></td></tr>
+<tr><td>Qwen2-57B</td><td></td></tr>
+<tr><td>DeepSeek-V2-Lite</td><td></td></tr>
+<tr><td>Mixtral-8x7B</td><td></td></tr>
+<tr><td>Mixtral-8x22B</td><td></td></tr>
+</tbody></table>
+</div>
+<h3 id="support-quantize-format"><a class="header" href="#support-quantize-format">Support quantize format:</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Formats</strong></th><th>❌ <strong>Deprecated Formats</strong></th></tr></thead><tbody>
+<tr><td>Q2_K_L</td><td><del>IQ2_XXS</del></td></tr>
+<tr><td>Q2_K_XS</td><td></td></tr>
+<tr><td>Q3_K_M</td><td></td></tr>
+<tr><td>Q4_K_M</td><td></td></tr>
+<tr><td>Q5_K_M</td><td></td></tr>
+<tr><td>Q6_K</td><td></td></tr>
+<tr><td>Q8_0</td><td></td></tr>
+</tbody></table>
+</div></details>
+<details>
+<summary>Suggested Model</summary>
+<div class="table-wrapper"><table><thead><tr><th>Model Name</th><th>Model Size</th><th>VRAM</th><th>Minimum DRAM</th><th>Recommended DRAM</th></tr></thead><tbody>
+<tr><td>DeepSeek-R1-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
+<tr><td>DeepSeek-V3-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
+<tr><td>DeepSeek-V2-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
+<tr><td>DeepSeek-V2.5-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
+<tr><td>DeepSeek-V2.5-IQ4_XS</td><td>117G</td><td>10G</td><td>107G</td><td>128G</td></tr>
+<tr><td>Qwen2-57B-A14B-Instruct-q4_k_m</td><td>33G</td><td>8G</td><td>34G</td><td>64G</td></tr>
+<tr><td>DeepSeek-V2-Lite-q4_k_m</td><td>9.7G</td><td>3G</td><td>13G</td><td>16G</td></tr>
+<tr><td>Mixtral-8x7B-q4_k_m</td><td>25G</td><td>1.6G</td><td>51G</td><td>64G</td></tr>
+<tr><td>Mixtral-8x22B-q4_k_m</td><td>80G</td><td>4G</td><td>86.1G</td><td>96G</td></tr>
+<tr><td>InternLM2.5-7B-Chat-1M</td><td>15.5G</td><td>15.5G</td><td>8G(32K context)</td><td>150G (1M context)</td></tr>
+</tbody></table>
+</div>
+<p>More will come soon. Please let us know which models you are most interested in.</p>
+<p>Be aware that you need to be subject to their corresponding model licenses when using <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/LICENSE">DeepSeek</a> and <a href="https://huggingface.co/Qwen/Qwen2-72B-Instruct/blob/main/LICENSE">QWen</a>.</p>
+</details>
+<details>
+  <summary>Click To Show how to run other examples</summary>
+<ul>
+<li>
+<p>Qwen2-57B</p>
+<pre><code class="language-sh">pip install flash_attn # For Qwen2
+
+mkdir Qwen2-57B-GGUF &amp;&amp; cd Qwen2-57B-GGUF
+
+wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
+
+cd ..
+
+python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
+# python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
+</code></pre>
+</li>
+<li>
+<p>Deepseek-V2</p>
+<pre><code class="language-sh">mkdir DeepSeek-V2-Chat-0628-GGUF &amp;&amp; cd DeepSeek-V2-Chat-0628-GGUF
+# Download weights
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
+wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
+
+cd ..
+
+python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+
+# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
+
+# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
+
+# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
+</code></pre>
+</li>
+</ul>
+<div class="table-wrapper"><table><thead><tr><th>model name</th><th>weights download link</th></tr></thead><tbody>
+<tr><td>Qwen2-57B</td><td><a href="https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/tree/main">Qwen2-57B-A14B-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-coder</td><td><a href="https://huggingface.co/LoneStriker/DeepSeek-Coder-V2-Instruct-GGUF/tree/main">DeepSeek-Coder-V2-Instruct-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-chat</td><td><a href="https://huggingface.co/bullerwins/DeepSeek-V2-Chat-0628-GGUF/tree/main">DeepSeek-V2-Chat-gguf-Q4K-M</a></td></tr>
+<tr><td>DeepseekV2-lite</td><td><a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">DeepSeek-V2-Lite-Chat-GGUF-Q4K-M</a></td></tr>
+<tr><td>DeepSeek-R1</td><td><a href="https://huggingface.co/unsloth/DeepSeek-R1-GGUF/tree/main/DeepSeek-R1-Q4_K_M">DeepSeek-R1-gguf-Q4K-M</a></td></tr>
+</tbody></table>
+</div></details>
+<!-- pin block for jump -->
+<span id='id_666'> 
+<h3 id="restful-api-and-web-ui-deprected"><a class="header" href="#restful-api-and-web-ui-deprected">RESTful API and Web UI (deprected) </a></h3>
+<p>Start without website:</p>
+<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
+</code></pre>
+<p>Start with website:</p>
+<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
+</code></pre>
+<p>Or you want to start server with transformers, the model_path should include safetensors</p>
+<pre><code class="language-bash">ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
+</code></pre>
+<p>Access website with url <a href="http://localhost:10002/web/index.html#/chat">http://localhost:10002/web/index.html#/chat</a> :</p>
+<p align="center">
+  <picture>
+    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=90%>
+  </picture>
+</p>
+<p>More information about the RESTful API server can be found <a href="en/doc/en/api/server/server.html">here</a>. You can also find an example of integrating with Tabby <a href="en/doc/en/api/server/tabby.html">here</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
 <h1 id="gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram"><a class="header" href="#gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram">GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM</a></h1>
 <ul>
 <li><a href="en/DeepseekR1_V3_tutorial.html#summary">SUMMARY</a>
 <ul>
-<li><a href="en/DeepseekR1_V3_tutorial.html#prerequisites">Prerequisites</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#show-case-environment">Show Case Environment</a></li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#bench-result">Bench Result</a>
 <ul>
 <li><a href="en/DeepseekR1_V3_tutorial.html#v02">V0.2</a>
@@ -261,7 +510,7 @@ Apologies for the wait, but we've been cooking up something truly amazing!</p>
 </ul>
 <p>We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to <strong>28× faster than llama.cpp</strong> for local inference.
 The binary distribution is available now and the source code will come ASAP! Check out the wheel package <a href="https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl">here</a></p>
-<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<h2 id="show-case-environment"><a class="header" href="#show-case-environment">Show Case Environment</a></h2>
 <p>We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
 GPU: 4090D 24G VRAM <br>
@@ -320,33 +569,30 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <h3 id="v02-showcase"><a class="header" href="#v02-showcase">V0.2 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>
-<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers
-git submodule init
-git submodule update
-numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
+<pre><code class="language-shell">numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
 &lt;when you see chat, then press enter to load the text prompt_file&gt;
 </code></pre>
 <p><code>&lt;your model path&gt;</code> can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
 <code>&lt;your gguf path&gt;</code> can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
 <code>--max_new_tokens 1000</code> is the max output token length. If you find the answer is truncated, you
-can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).
-<br>
-The command numactl -N 1 -m 1 aims to advoid data transfer between numa nodes<br>
+can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).</p>
+<p>The command <code>numactl -N 1 -m 1</code> aims to advoid data transfer between numa nodes<br>
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. This is explained in <a href="en/DeepseekR1_V3_tutorial.html#faq">FAQ</a> part</p>
 <h4 id="dual-socket-version-64-cores"><a class="header" href="#dual-socket-version-64-cores">Dual socket version (64 cores)</a></h4>
-<p>Make suer before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set) <br>
-Our local_chat test command is:</p>
-<pre><code class="language-shell">git clone https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers
-git submodule init
-git submodule update
-export USE_NUMA=1
-make dev_install # or sh ./install.sh
+<p>Make suer before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set). You may check the doc <a href="en/./install.html">here</a> for install details. <br></p>
+<p>Test Command:</p>
+<pre><code class="language-shell"># ---For those who have not installed ktransformers---
+# git clone https://github.com/kvcache-ai/ktransformers.git
+# cd ktransformers
+# git submodule init
+# git submodule update
+# export USE_NUMA=1
+# make dev_install # or sh ./install.sh
+# ----------------------------------------------------
 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 65 --max_new_tokens 1000
 &lt;when you see chat, then press enter to load the text prompt_file&gt;
 </code></pre>
-<p>The parameters' meaning is the same. But As we  use dual socket, we set cpu_infer to 65</p>
+<p>The parameters' meaning is the same. But As we use dual socket, we set cpu_infer to 65</p>
 <h3 id="v03-showcase"><a class="header" href="#v03-showcase">V0.3 Showcase</a></h3>
 <h4 id="dual-socket-version-64-cores-1"><a class="header" href="#dual-socket-version-64-cores-1">Dual socket version (64 cores)</a></h4>
 <p>Our local_chat test command is:</p>
@@ -390,8 +636,8 @@ Intel is currently the only CPU vendor that supports AMX-like instructions, whic
 <p>Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. The detail is in <a href="en/./FAQ.html">FAQ</a> part <br></p>
 <h3 id="more-faq"><a class="header" href="#more-faq">More FAQ</a></h3>
 <p><a href="en/./FAQ.html">See detail</a></p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="tutorial-heterogeneous-and-local-deepseek-v2-inference"><a class="header" href="#tutorial-heterogeneous-and-local-deepseek-v2-inference">Tutorial: Heterogeneous and Local DeepSeek-V2 Inference</a></h1>
-<p>DeepSeek-(Code)-V2 is a series of strong mixture-of-experts (MoE) models, featuring a total of 236 billion parameters, with 21 billion parameters activated per token. This model has demonstrated remarkable reasoning capabilities across various benchmarks, positioning it as one of the SOTA open models and nearly comparable in performance to GPT-4.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="tutorial-heterogeneous-and-local-moe-inference"><a class="header" href="#tutorial-heterogeneous-and-local-moe-inference">Tutorial: Heterogeneous and Local MoE Inference</a></h1>
+<p>DeepSeek-(Code)-V2 is a series of strong mixture-of-experts (MoE) models, featuring a total of 236 billion parameters, with 21 billion parameters activated per token. This model has demonstrated remarkable reasoning capabilities across various benchmarks, positioning it as one of the SOTA open models and nearly comparable in performance to GPT-4. DeepSeek-R1 uses a similar architecture to DeepSeek-V2, but with a bigger number of parameters.</p>
 <p align="center">
   <picture>
     <img alt="DeepSeek-Coder-V2 Score" src="en/../assets/BigCodeBench.png" width=80%>
@@ -799,6 +1045,102 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
         return x
 </code></pre>
 <p>Note that the <code>self.load_weight</code> function is provided by the KLinearBase class to help users load weights from a gguf file into the module. The implementation details of KLinearBase can be found on <a href="https://github.com/kvcache-ai/ktransformers/blob/44f57270c9514d79fab224186d90ccf61059331a/ktransformers/operators/linear.py#L31">GITHUB</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="muti-gpu-1"><a class="header" href="#muti-gpu-1">Muti-GPU</a></h1>
+<p>Assume you have read the <a href="en/./injection_tutorial.html">Injection Tutorial</a> and have a basic understanding of how to inject a model. In this tutorial, we will show you how to use KTransformers to run a model on multiple GPUs.</p>
+<p>If you have multiple GPUs, you can set the device for each module to different GPUs.
+DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml">here</a>.</p>
+<p align="center">
+  <picture>
+    <img alt="Inject-Struction" src="en/../assets/multi_gpu.png" width=60%>
+  </picture>
+</p>
+<p>First of all, for multi-GPU, we have to inject an new operator <code>KDeepseekV2Model</code>. And set division of the layers to different GPUs. For our case, we have to set the <code>transfer_map</code> in the <code>KDeepseekV2Model</code> operatoras as follows:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      transfer_map: 
+        30: "cuda:1"
+</code></pre>
+<p>And we have to set the device for each module in the model.</p>
+<p>For example, for <code>routed experts</code>, the yaml for one GPU is:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # Custom MoE kernel with expert parallelism
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op: "MLPCUDAExperts"
+      out_device: "cuda:0"
+  recursive: False # Don't recursively inject submodules of this module
+</code></pre>
+<p>But for two GPUs, we need to set the device for each module in the model.</p>
+<pre><code class="language-yaml"># allcate 0-29 layers‘s out_device to cuda:0
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False # don't recursively inject submodules of this module
+
+# allocate 30-59 layers‘s out_device to cuda:1
+- match:
+    name: "^model\\.layers\\.([345][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:1"
+  recursive: False # don't recursively inject submodules of this module
+</code></pre>
+<p>For other modules, we can set the device in the same way.</p>
+<h1 id="how-to-fully-utilize-multi-gpus-vram"><a class="header" href="#how-to-fully-utilize-multi-gpus-vram">How to fully utilize multi-GPU's VRAM</a></h1>
+<p>When you have multiple GPUs, you can fully utilize the VRAM of each GPU by moving more weights to the GPU.</p>
+<p>For example, for DeepSeekV2-Chat, we can move the weights of the experts to the GPU.</p>
+<p>For example, the yaml for two GPUs is:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False
+</code></pre>
+<p>But we got extra 60GB VRAM on cuda:0, we can move experts in layer 4~8 to cuda:0.</p>
+<pre><code class="language-yaml"># Add new rule before old rule.
+- match:
+    name: "^model\\.layers\\.([4-8])\\.mlp\\.experts$" # inject experts in layer 4~8 as marlin expert
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts  
+    kwargs:
+      generate_device: "cuda:0"
+      generate_op:  "KExpertsMarlin"
+  recursive: False
+
+- match:
+    name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     
+    kwargs:
+      generate_device: "cpu"
+      generate_op:  "KExpertsCPU"
+      out_device: "cuda:0"
+  recursive: False 
+</code></pre>
+<p>Adjust the layer range as you want. Note that:</p>
+<ul>
+<li>The loading speed will be significantly slower for each expert moved to the GPU.</li>
+<li>You have to close the cuda graph if you want to move the experts to the GPU.</li>
+<li>For DeepSeek-R1/V3, each expert moved to the GPU will consume approximately 6GB of VRAM.</li>
+<li>The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
 <p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
 <img src="en/api/server/server-arch.png" height="600" alt="Server architecture">
