@@ -26,11 +26,11 @@ KTransformers aims to provide a versatile platform for experimenting with novel 
 - **Aug 12, 2024**: Enabled multi-GPU inference and introduced new models: Mixtral 8x7B and 8x22B; support added for q2k, q3k, q5k quants on GPUs.
 - **Aug 9, 2024**:  Native Windows support added.
 
-## 🌟 Show Cases
+## <h2 id="show-cases">🌟 Show Cases</h2>
 
 ### O1-level Local VSCode Copilot with only 24GB VRAM
 
-![Showcase Video](https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285)
+https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 
 - **[NEW!]** Local 671B DeepSeek-Coder-V3/R1: Runs its Q4_K_M version using just 14GB VRAM and 382GB DRAM ([Tutorial](./doc/en/DeepseekR1_V3_tutorial.md)).
   - **Prefill Speed (tokens/sec):**
@@ -50,7 +50,16 @@ KTransformers aims to provide a versatile platform for experimenting with novel 
 - **Faster Inference:** Achieves 126 tokens/sec for 2K prompt prefill and 13.6 tokens/sec for generation using MoE offloading and use of optimized kernels from [LlamaFile](https://github.com/Mozilla-Ocho/llamafile/) and [Marlin](https://github.com/IST-DASLab/marlin).
 - **VSCode Integration:** Features an OpenAI and Ollama-compatible API for seamless integration as a backend for [Tabby](https://github.com/TabbyML/tabby) and various other frontends.
 
-## 📃 Brief Injection Tutorial
+<h2 id="quick-start">🚀 Quick Start</h2>
+
+
+Getting started with KTransformers is simple! Follow the steps below to set up and start using it.
+
+### 📥 Installation
+
+To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/).
+
+<h2 id="quick-start">🚀 Quick Start</h2>
 
 At the core of KTransformers is a user-friendly, template-based injection framework. This allows researchers to effortlessly replace original torch modules with optimized variants. It also simplifies the process of combining multiple optimizations to explore their synergistic effects.
 
