@@ -94,222 +94,8 @@ https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
 
 <h2 id="quick-start">🚀 快速入门</h2>
 
-<h3>准备工作</h3>
-一些准备工作：
 
-- 如果您还没有 CUDA 12.1 及以上版本，可以从 [这里](https://developer.nvidia.com/cuda-downloads) 安装。
-  
-  ```sh
-  # Adding CUDA to PATH
-  export PATH=/usr/local/cuda/bin:$PATH
-  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-  export CUDA_PATH=/usr/local/cuda
-  ```
-
-- Linux-x86_64 系统，需要安装 gcc、g++ 和 cmake
-  
-  ```sh
-  sudo apt-get update
-  sudo apt-get install gcc g++ cmake ninja-build
-  ```
-
-- 我们建议使用 Conda 创建一个 Python=3.11 的虚拟环境来运行我们的程序。
-  
-  ```sh
-  conda create --name ktransformers python=3.11
-  conda activate ktransformers # 您可能需要先运行 ‘conda init’ 并重新打开 shell
-  ```
-
-- 确保安装了 PyTorch、packaging、ninja
-  
-  ```
-  pip install torch packaging ninja cpufeature numpy
-  ```
-
-<h3>安装</h3>
-
-1. 使用 Docker 镜像，详见 [Docker 文档](./doc/en/Docker.md) 
-
-2. 您可以使用 Pypi 安装（适用于 Linux）：
-   
-   ```
-   pip install ktransformers --no-build-isolation
-   ```
-   
-   对于 Windows，我们提供了一个预编译的 whl 包 [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl)，需要 cuda-12.5、torch-2.4、python-3.11，更多预编译包正在制作中。
-
-3. 或者您可以下载源代码并编译：
-   
-   - init source code 
-     
-     ```sh
-     git clone https://github.com/kvcache-ai/ktransformers.git
-     cd ktransformers
-     git submodule init
-     git submodule update
-     ```
-
-   - [可选] 如果您想运行网站，请在执行```bash install.sh```之前, 进行 [compile the website](./doc/en/api/server/website.md)
-
-   - 编译并安装（适用于 Linux）
-     
-     ```
-     bash install.sh
-     ```
-
-   - 编译并安装（适用于 Windows）
-     
-     ```
-     install.bat
-     ```
-4. 如果您是开发者，可以使用 makefile 来编译和格式化代码。makefile 的详细用法请参见 [这里](./doc/en/makefile_usage.md) 
-
-<h3>本地聊天</h3>
-我们提供了一个简单的命令行本地聊天 Python 脚本，您可以运行它进行测试。
-
-> 请注意，这只是一个非常简单的测试工具，仅支持一轮聊天，不记忆上一次输入。如果您想体验模型的全部功能，可以前往 RESTful API 和 Web UI。这里以 DeepSeek-V2-Lite-Chat-GGUF 模型为例，但我们也支持其他模型，您可以替换为您想要测试的任何模型。
-
-<h4>运行示例</h4>
-
-```shell
-# 从克隆的仓库根目录开始！
-# 从克隆的仓库根目录开始！！
-# 从克隆的仓库根目录开始!!!
-
-# 从 Hugging Face 下载 mzwing/DeepSeek-V2-Lite-Chat-GGUF
-mkdir DeepSeek-V2-Lite-Chat-GGUF
-cd DeepSeek-V2-Lite-Chat-GGUF
-
-wget https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/resolve/main/DeepSeek-V2-Lite-Chat.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
-
-cd .. # 返回仓库根目录
-
-# 启动本地聊天
-python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-
-# 如果遇到报错 “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, 请尝试：
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
-# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-```
-
-它具有以下参数:
-
-- `--model_path` (required): 模型名称 (例如 "deepseek-ai/DeepSeek-V2-Lite-Chat" 将自动从 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) 下载配置)。或者，如果您已经有本地文件，可以直接使用该路径来初始化模型。
-  
-  > Note: <strong>.safetensors</strong> 文件不是必需的。我们只需要配置文件来构建模型和分词器。
-
-- `--gguf_path` (required): 包含 GGUF 文件的目录路径，可以从 [Hugging Face](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main) 下载。请注意，该目录应仅包含当前模型的 GGUF，这意味着您需要为每个模型使用一个单独的目录。
-
-- `--optimize_rule_path` (必需，Qwen2Moe 和 DeepSeek-V2 除外): 包含优化规则的 YAML 文件路径。在 [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) 目录中有两个预写的规则文件，用于优化 DeepSeek-V2 和 Qwen2-57B-A14，这两个是 SOTA MoE 模型。 
-
-- `--max_new_tokens`: Int (default=1000). 要生成的最大 new tokens。
-
-- `--cpu_infer`: Int (default=10). 用于推理的 CPU 数量。理想情况下应设置为（总核心数 - 2）。
-
-<h3 id="suggested-model"> 建议模型</h3>
-
-| Model Name                     | Model Size | VRAM  | Minimum DRAM    | Recommended DRAM  |
-| ------------------------------ | ---------- | ----- | --------------- | ----------------- |
-| DeepSeek-R1-q4_k_m		 | 377G       | 14G   | 382G            | 512G		    |
-| DeepSeek-V3-q4_k_m		 | 377G       | 14G   | 382G            | 512G		    |
-| DeepSeek-V2-q4_k_m             | 133G       | 11G   | 136G            | 192G              |
-| DeepSeek-V2.5-q4_k_m           | 133G       | 11G   | 136G            | 192G              |
-| DeepSeek-V2.5-IQ4_XS           | 117G       | 10G   | 107G            | 128G              |
-| Qwen2-57B-A14B-Instruct-q4_k_m | 33G        | 8G    | 34G             | 64G               |
-| DeepSeek-V2-Lite-q4_k_m        | 9.7G       | 3G    | 13G             | 16G               |
-| Mixtral-8x7B-q4_k_m            | 25G        | 1.6G  | 51G             | 64G               |
-| Mixtral-8x22B-q4_k_m           | 80G        | 4G    | 86.1G           | 96G               |
-| InternLM2.5-7B-Chat-1M         | 15.5G      | 15.5G | 8G(32K context) | 150G (1M context) |
-
-
-更多即将推出。请告诉我们您最感兴趣的模型。
-
-请注意，在使用 [DeepSeek](https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/LICENSE) 和 [QWen](https://huggingface.co/Qwen/Qwen2-72B-Instruct/blob/main/LICENSE) 时，需要遵守相应的模型许可证。
-
-<details>
-  <summary>点击显示如何运行其他示例</summary>
-
-* Qwen2-57B
-
-  ```sh
-  pip install flash_attn # For Qwen2
-
-  mkdir Qwen2-57B-GGUF && cd Qwen2-57B-GGUF
-
-  wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
-
-  cd ..
-
-  python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
-
-  # 如果遇到报错 “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, 请尝试：
-  # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
-  # python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-  ```
-
-* DeepseekV2
-  
-  ```sh
-  mkdir DeepSeek-V2-Chat-0628-GGUF && cd DeepSeek-V2-Chat-0628-GGUF
-  # Download weights
-  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
-  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
-  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
-  wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
-
-  cd ..
-
-  python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
-
-  # 如果遇到报错 “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, 请尝试：
-
-  # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
-
-  # python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
-  ```
-
-| model name | weights download link |
-|----------|----------|
-| Qwen2-57B | [Qwen2-57B-A14B-gguf-Q4K-M](https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/tree/main) |
-| DeepseekV2-coder |[DeepSeek-Coder-V2-Instruct-gguf-Q4K-M](https://huggingface.co/LoneStriker/DeepSeek-Coder-V2-Instruct-GGUF/tree/main) |
-| DeepseekV2-chat |[DeepSeek-V2-Chat-gguf-Q4K-M](https://huggingface.co/bullerwins/DeepSeek-V2-Chat-0628-GGUF/tree/main) |
-| DeepseekV2-lite | [DeepSeek-V2-Lite-Chat-GGUF-Q4K-M](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main) |
-
-</details>
-
-<!-- pin block for jump -->
-<span id='id_666'> 
-
-<h3>RESTful API and Web UI</h3>
-
-
-启动不带网站的服务：
-
-```sh
-ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
-```
-
-启动带网站的服务：
-
-```sh
-ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
-```
-
-或者，如果您想使用 transformers 启动服务，model_path 应该包含 safetensors 文件：
-
-```bash
-ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
-```
-
-通过 [http://localhost:10002/web/index.html#/chat](http://localhost:10002/web/index.html#/chat)  访问：
-
-<p align="center">
-  <picture>
-    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=90%>
-  </picture>
-</p>
-
-关于 RESTful API 服务器的更多信息可以在这里找到 [这里](doc/en/api/server/server.md)。您还可以在这里找到与 Tabby 集成的示例 [这里](doc/en/api/server/tabby.md)。
+KTransformers 的入门非常简单！请参考我们的[安装指南]((https://kvcache-ai.github.io/ktransformers/))进行安装。
 
 <h2 id="tutorial">📃 简要注入教程</h2>
 KTransformers 的核心是一个用户友好的、基于模板的注入框架。这使得研究人员可以轻松地将原始 torch 模块替换为优化的变体。它还简化了多种优化的组合过程，允许探索它们的协同效应。
@@ -320,7 +106,7 @@ KTransformers 的核心是一个用户友好的、基于模板的注入框架。
   </picture>
 </p>
 
-鉴于 vLLM 已经是一个用于大规模部署优化的优秀框架，KTransformers 特别关注受资源限制的本地部署。我们特别关注异构计算时机，例如量化模型的 GPU/CPU 卸载。例如，我们支持高效的 <a herf="https://github.com/Mozilla-Ocho/llamafile/tree/main">Llamafile</a> 和<a herf="https://github.com/IST-DASLab/marlin">Marlin</a> 内核，分别用于 CPU 和 GPU。 更多详细信息可以在这里找到 <a herf="doc/en/operators/llamafile.md">这里</a>。
+鉴于 vLLM 已经是一个用于大规模部署优化的优秀框架，KTransformers 特别关注受资源限制的本地部署。我们特别关注异构计算时机，例如量化模型的 GPU/CPU 卸载。例如，我们支持高效的 <a herf="https://github.com/Mozilla-Ocho/llamafile/tree/main">Llamafile</a> 和<a herf="https://github.com/IST-DASLab/marlin">Marlin</a> 内核，分别用于 CPU 和 GPU。 更多详细信息可以在 <a herf="doc/en/operators/llamafile.md">这里</a>找到。
 
 
 <h3>示例用法</h3>
@@ -340,7 +126,7 @@ generated = prefill_and_generate(model, tokenizer, input_tensor.cuda(), max_new_
 
 <h3>如何自定义您的模型</h3>
 
-一个详细的使用 DeepSeek-V2 作为示例的注入和 multi-GPU 教程在这里给出 [这里](doc/en/injection_tutorial.md)。
+一个详细的使用 DeepSeek-V2 作为示例的注入和 multi-GPU 教程在 [这里](doc/en/injection_tutorial.md)。
 
 以下是一个将所有原始 Linear 模块替换为 Marlin 的 YAML 模板示例，Marlin 是一个高级的 4 位量化内核。
 
