@@ -17,8 +17,8 @@
 #include <c10/cuda/CUDAGuard.h>
 
 __global__ void dequantize_q8_0_kernel(float* output, const float* scales, const int8_t* qs, int num_blocks, int blk_size) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks;block_id+=blockDim.x * gridDim.x){
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long block_id=global_idx; block_id<num_blocks;block_id+=blockDim.x * gridDim.x){
         for(int i=0;i<blk_size;i++){
             float scale = scales[block_id];
             output[block_id * blk_size + i] = scale * qs[block_id * blk_size + i];
@@ -37,8 +37,8 @@ __device__ void get_scale_min_k4(int j, const uint8_t * q, uint8_t * __restrict_
 }
 
 __global__ void dequantize_q2_k_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks; block_id+= blockDim.x * gridDim.x){
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long block_id=global_idx; block_id<num_blocks; block_id+= blockDim.x * gridDim.x){
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
 
         const float d   = __half2float(*(reinterpret_cast<half*>(data + block_id * blk_size + 80)));
@@ -72,10 +72,10 @@ __global__ void dequantize_q2_k_kernel(int8_t* data, float* output, int blk_size
 
 __global__ void dequantize_q3_k_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
     
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;    
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;    
     const uint32_t kmask1 = 0x03030303;
     const uint32_t kmask2 = 0x0f0f0f0f;
-    for (auto block_id=global_idx; block_id<num_blocks; block_id+= blockDim.x * gridDim.x){
+    for (long long block_id=global_idx; block_id<num_blocks; block_id+= blockDim.x * gridDim.x){
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
 
         uint32_t aux[4];
@@ -128,8 +128,8 @@ __global__ void dequantize_q3_k_kernel(int8_t* data, float* output, int blk_size
 
 
 __global__ void dequantize_q4_k_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks;block_id+=blockDim.x * gridDim.x){
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long block_id=global_idx; block_id<num_blocks; block_id+=blockDim.x * gridDim.x){
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
         // const uint8_t * q = data[i].qs;
         const uint8_t * q = (uint8_t*)(data + block_id * 144 + 16);
@@ -152,8 +152,8 @@ __global__ void dequantize_q4_k_kernel(int8_t* data, float* output, int blk_size
 }
 
 __global__ void dequantize_q5_k_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks; block_id+= blockDim.x * gridDim.x){
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long block_id = global_idx; block_id < num_blocks; block_id += blockDim.x * gridDim.x){
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
 
         const float d   = __half2float(*(reinterpret_cast<half*>(data + block_id * blk_size + 0)));
@@ -181,8 +181,8 @@ __global__ void dequantize_q5_k_kernel(int8_t* data, float* output, int blk_size
 }
 
 __global__ void dequantize_q6_k_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks;block_id+=blockDim.x * gridDim.x){
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long  block_id=global_idx; block_id<num_blocks;block_id+=blockDim.x * gridDim.x){
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
         const float d = __half2float(*(reinterpret_cast<half*>(data + block_id * blk_size + 208)));
 
@@ -215,8 +215,8 @@ __global__ void dequantize_q6_k_kernel(int8_t* data, float* output, int blk_size
 static constexpr __device__ int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
 __global__ void dequantize_iq4_xs_kernel(int8_t* data, float* output, int blk_size, int num_blocks) {
-    int global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    for (auto block_id=global_idx; block_id<num_blocks; block_id+=blockDim.x * gridDim.x) {
+    long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    for (long long block_id=global_idx; block_id<num_blocks; block_id+=blockDim.x * gridDim.x) {
         float* __restrict__ output_blk = (float*)(output + block_id * 256);
         const float d = __half2float(*(reinterpret_cast<half*>(data + block_id * blk_size)));
         const uint16_t scales_h = *(reinterpret_cast<uint16_t*>(data + block_id * blk_size + 2));

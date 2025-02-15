@@ -183,6 +183,53 @@
       prefill_device: "cuda:3"
 
 # === MLP Experts Replacement ===
+# replace with marlin expert. Open and modify layer-num as needed.
+# Each layer of malin experts takes about 6GB of GPU memory.
+# !!!Do remember 'close' cuda graph if you are using marlin expert.!!!
+# !!!KExpertsTorch is untested, we don't have enough VRAM.!!!
+
+# # GPU 0: layers 3–4
+# - match:
+#     name: "^model\\.layers\\.([3-4])\\.mlp\\.experts$"
+#   replace:
+#     class: ktransformers.operators.experts.KTransformersExperts
+#     kwargs:
+#       generate_device: "cuda:0"
+#       generate_op:  "KExpertsMarlin"
+#   recursive: False
+
+# # GPU 1: layers 15–17
+# - match:
+#     name: "^model\\.layers\\.(1[5-7])\\.mlp\\.experts$"
+#   replace:
+#     class: ktransformers.operators.experts.KTransformersExperts
+#     kwargs:
+#       generate_device: "cuda:1"
+#       generate_op:  "KExpertsMarlin"
+#   recursive: False
+
+# # GPU 2: layers 30–32
+# - match:
+#     name: "^model\\.layers\\.(3[0-2])\\.mlp\\.experts$"
+#   replace:
+#     class: ktransformers.operators.experts.KTransformersExperts
+#     kwargs:
+#       generate_device: "cuda:2"
+#       generate_op:  "KExpertsMarlin"
+#   recursive: False
+
+# # GPU 3: layers 45–46
+# - match:
+#     name: "^model\\.layers\\.(4[5-6])\\.mlp\\.experts$"
+#   replace:
+#     class: ktransformers.operators.experts.KTransformersExperts
+#     kwargs:
+#       generate_device: "cuda:3"
+#       generate_op:  "KExpertsMarlin"
+#   recursive: False
+
+
+# === MLP Experts Replacement ===
 
 # GPU 0: layers 0–14
 - match:
@@ -315,6 +362,8 @@
     kwargs:
       generate_device: "cuda:2"
       prefill_device: "cuda:2"
+
+# don't inject lm_head if already inject marlin experts
 
 # For final modules (model.norm and lm_head), ensure they are on GPU 3 (as in your original config)
 - match:
