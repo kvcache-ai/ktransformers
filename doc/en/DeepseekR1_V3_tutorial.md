@@ -3,21 +3,28 @@
 - [SUMMARY](#summary)
 	- [Show Case Environment](#show-case-environment)
 	- [Bench Result](#bench-result)
+		- [V0.2.1](#v021)
+			- [Memory consumption:](#memory-consumption)
+			- [Change Log](#change-log)
+			- [Benchmark Results](#benchmark-results)
 		- [V0.2](#v02)
 			- [Settings](#settings)
-			- [Memory consumption:](#memory-consumption)
-			- [Benchmark Results](#benchmark-results)
+			- [Memory consumption:](#memory-consumption-1)
+			- [Benchmark Results](#benchmark-results-1)
 		- [V0.3-Preview](#v03-preview)
 			- [Settings](#settings-1)
 			- [Memory consumptions:](#memory-consumptions)
-			- [Benchmark results](#benchmark-results-1)
+			- [Benchmark results](#benchmark-results-2)
 	- [How to Run](#how-to-run)
-		- [V0.2 Showcase](#v02-showcase)
+		- [V0.2 \& V0.2.1 Showcase](#v02--v021-showcase)
 			- [Single socket version (32 cores)](#single-socket-version-32-cores)
 			- [Dual socket version (64 cores)](#dual-socket-version-64-cores)
 		- [V0.3 Showcase](#v03-showcase)
 			- [Dual socket version (64 cores)](#dual-socket-version-64-cores-1)
 	- [Some Explanations](#some-explanations)
+	- [Next](#next)
+		- [Faster](#faster)
+		- [Easier](#easier)
 	- [FAQ](#faq)
 		- [R1 No Thinking](#r1-no-thinking)
 		- [More FAQ](#more-faq)
@@ -49,13 +56,54 @@ https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 We also give our upcoming optimizations previews, including an Intel AMX-accelerated kernel and a selective expert activation method, which will significantly enhance performance. With V0.3-preview, we achieve up to 286 tokens/s for prefill, making it up to **28× faster than llama.cpp** for local inference.
 The binary distribution is available now and the source code will come ASAP! Check out the wheel package [here](https://github.com/kvcache-ai/ktransformers/releases/download/v0.1.4/ktransformers-0.3.0rc0+cu126torch26fancy-cp311-cp311-linux_x86_64.whl)  
 
+> **Feb 15, 2025**: KTransformers V0.2.1: Longer Context (from 4K to 8K for 24GB VRAM) & Slightly Faster Speed （+15%) (Up to 16 Tokens/s), update docs [here](./doc/en/DeepseekR1_V3_tutorial.md) and [online books](https://kvcache-ai.github.io/ktransformers/).
+
+We speed up the decode and prefill speed a littlt bit. The reason for the limited performance improvement mainly lies in the fact that the inference process is still constrained by the CPU's computational speed and memory bandwidth. The MLA part handled by the GPU accounts for a relatively small proportion.
+
+Besides the improvements in speed, we've also significantly updated the documentation to enhance usability, including:<br>
+- Added Multi-GPU configuration tutorial.
+- Consolidated installation guide.
+- Add a detailed tutorial on registering extra GPU memory with ExpertMarlin;
+
 
 ## Show Case Environment
 We run our best performance tests (V0.2) on <br>
 CPU: Intel (R) Xeon (R) Gold 6454S 1T DRAM (2 NUMA nodes) <br>
 GPU: 4090D 24G VRAM <br>
-Memory: standard DDR5-4800 server DRAM (1 TB)
+Memory: standard DDR5-4800 server DRAM (1 TB), each socket with 8×DDR5-4800
 ## Bench Result
+### V0.2.1
+- Model: DeepseekV3-q4km (int4)<br>
+- CPU: cpu_model_name: Intel (R) Xeon (R) Gold 6454S, 32 cores per socket, 2 sockets, 2 numa nodes
+- GPU: 4090 24G VRAM
+- We test after enough warm up
+#### Memory consumption:
+  - Single socket: 382G DRAM, at least 14GB VRAM
+  - Dual socket: 1T DRAM, at least 14GB VRAM
+#### Change Log
+- Longer Context (from 4K to 8K for 24GB VRAM) and Slightly Faster Speed （+15%):<br>
+Integrated the highly efficient Triton MLA Kernel from the fantastic sglang project, enable much longer context length and slightly faster prefill/decode speed
+- We suspect that some of the improvements come from the change of hardwre platform (4090D->4090)
+#### Benchmark Results
+
+
+"6 experts" case is part of V0.3's preview
+
+
+| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | llama.cpp (8 experts) | 
+| --- | --- | --- | --- | --- | --- | 
+| Output length | 10tokens | 300tokens | 300tokens | 300tokens | 300tokens | 
+| **6 experts V0.2.0** |  |  |  |  |  |
+| Prefill token/s | 13 | 105 | 102 | 88 | CUDA OOM |
+| decode token/s | 16.8 | 15.4 | 14.2 | 13.0 | CUDA OOM |
+| **6 experts V0.2.1** |   |   |   |   |   |
+| Prefill token/s | 13 | 111 | 112.5 | 102 **(1.16x speedup)** | 101 |
+| decode token/s | 16.8 | 15.9 | 15.4 | 14.9 **(1.15x speedup)** | 13.9 |
+| **8 experts V0.2.1** |   |   |   |   |   |
+| Prefill token/s | 12.2 | 88.2 | 88.5 | 81.9 | 80 |
+| Decode token/s | 13.4 | 13.5 | 13.4 | 13.2 | 12.4 |
+
+
 ### V0.2
 #### Settings
 - Model: DeepseekV3-q4km (int4)<br>
@@ -106,7 +154,7 @@ the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding*
 
 ## How to Run
-### V0.2 Showcase
+### V0.2 & V0.2.1 Showcase
 #### Single socket version (32 cores)
 Our local_chat test command is:
 ``` shell
@@ -170,6 +218,17 @@ DeepSeek's MLA operators are highly computationally intensive. While running eve
 
 5. Why Intel CPUs?
 Intel is currently the only CPU vendor that supports AMX-like instructions, which delivers significantly better performance compared to AVX-only alternatives.
+## Next
+### Faster
+* The FlashInfer (https://github.com/flashinfer-ai/flashinfer) project is releasing an even more efficient fused MLA operator, promising further speedups
+* vLLM has explored multi-token prediction in DeepSeek-V3, and support is on our roadmap for even better performance
+* We are collaborating with Intel to enhance the AMX kernel (v0.3) and optimize for Xeon6/MRDIMM
+### Easier
+* Official Docker images to simplify installation
+* Fix the server integration for web API access
+* Support for more quantization types, including the highly requested dynamic quantization from unsloth
+
+Stay tuned for more updates! 
 ## FAQ
 ### R1 No Thinking
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: `--force_think true`. The detail is in [FAQ](./FAQ.md) part <br>
