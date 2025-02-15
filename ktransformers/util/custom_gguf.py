@@ -276,8 +276,38 @@ class GGUFLoader:
         itemsize = int(np.empty([], dtype = item_type).itemsize)
         return mmap_data[offset : offset + itemsize * item_count]
     
+    def load_expert_tensor(self, name, data, expert_id, elements_per_expert, device = "gpu")->torch.Tensor:
+        t = self.tensor_info[name]
+        if device.lower() == "cpu":
+            print(f"loading expert {expert_id} of {name} with CPU")
+        shape = t["shape"]
+        ggml_type = t["ggml_type"]
+        if ggml_type not in GGML_NAMES:
+            raise NotImplementedError(f"ggml_type {ggml_type} not implemented")
+        ggml_name = GGML_NAMES[ggml_type]
+
+        # TODO: experts may fused in quant block, split it
+        assert elements_per_expert % GGML_ELEMENTS_PER_BLOCK[ggml_name] == 0, "experts may fused in quant block, please use CPU dequant"
+
+        blocks_per_experts = elements_per_expert // GGML_ELEMENTS_PER_BLOCK[ggml_name]
+        block_size = GGML_BLOCK_SIZES[ggml_name]
+        offset = expert_id * block_size * blocks_per_experts
+        data = data[offset: offset + block_size * blocks_per_experts]
+        
+        if "cuda" in device.lower():
+            values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
+        else:
+            values = GGML_DEQUANTIZE[ggml_name](data)
+            values = torch.from_numpy(values)
+
+        values = values.view(shape[-2::-1])
+
+        return values
+
     def load_gguf_tensor(self, name: str, device:str = "cpu")->torch.Tensor:
         t = self.tensor_info[name]
+        if device.lower() == "cpu":
+            print(f"loading {name} with CPU")
         
         shape = t["shape"]
         ggml_type = t["ggml_type"]
