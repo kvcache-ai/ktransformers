@@ -90,7 +90,7 @@ Integrated the highly efficient Triton MLA Kernel from the fantastic sglang proj
 "6 experts" case is part of V0.3's preview
 
 
-| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | llama.cpp (8 experts) | 
+| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | 8K (7678) | 
 | --- | --- | --- | --- | --- | --- | 
 | Output length | 10tokens | 300tokens | 300tokens | 300tokens | 300tokens | 
 | **6 experts V0.2.0** |  |  |  |  |  |
