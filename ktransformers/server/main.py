@@ -105,6 +105,10 @@ def custom_openapi(app):
 
 def main():
     cfg = Config()
+
+    # Temporarily disable cuda graph by default because of a bug in the prefix cache.
+    cfg.use_cuda_graph = False
+
     arg_parser = ArgumentParser(cfg)
 
     # 初始化消息
