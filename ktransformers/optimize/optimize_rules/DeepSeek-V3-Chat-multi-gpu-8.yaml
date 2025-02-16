@@ -713,6 +713,8 @@
       generate_device: "cuda:7"
       prefill_device: "cuda:7"
 
+# don't inject lm_head if already inject marlin experts
+
 # For final modules (model.norm and lm_head), ensure they are on GPU 7 (as in your original config)
 - match:
     name: "(^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.)|(^model\\.norm)|(^lm_head)"

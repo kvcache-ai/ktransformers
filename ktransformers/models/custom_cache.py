@@ -172,7 +172,6 @@ class StaticCache(transformers.StaticCache):
         for layer_idx in range(len(self.key_cache)):
             # In-place ops prevent breaking the static address
             self.key_cache[layer_idx].zero_()
-            # Add a check to call zero_() only if value_cache[layer_idx] is not None
             if self.value_cache[layer_idx] is not None:
                 self.value_cache[layer_idx].zero_()
     

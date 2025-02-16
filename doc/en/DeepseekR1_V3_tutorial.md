@@ -83,14 +83,14 @@ Memory: standard DDR5-4800 server DRAM (1 TB), each socket with 8×DDR5-4800
 #### Change Log
 - Longer Context (from 4K to 8K for 24GB VRAM) and Slightly Faster Speed （+15%):<br>
 Integrated the highly efficient Triton MLA Kernel from the fantastic sglang project, enable much longer context length and slightly faster prefill/decode speed
-- We suspect the impressive improvement comes from the change of hardwre platform (4090D->4090)
+- We suspect that some of the improvements come from the change of hardwre platform (4090D->4090)
 #### Benchmark Results
 
 
 "6 experts" case is part of V0.3's preview
 
 
-| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | llama.cpp (8 experts) | 
+| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | 8K (7678) | 
 | --- | --- | --- | --- | --- | --- | 
 | Output length | 10tokens | 300tokens | 300tokens | 300tokens | 300tokens | 
 | **6 experts V0.2.0** |  |  |  |  |  |
