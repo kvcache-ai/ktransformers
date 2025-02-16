@@ -51,7 +51,8 @@ def _fwd_grouped_kernel_stage1(
 
     VALID_BLOCK_H = min(BLOCK_H, kv_group_num)
     cur_head = cur_head_id * VALID_BLOCK_H + tl.arange(0, BLOCK_H)
-    mask_h = cur_head < q_head_num
+    mask_h = cur_head < (cur_head_id + 1) * VALID_BLOCK_H
+    mask_h = mask_h & (cur_head < q_head_num)
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_dv = tl.arange(0, BLOCK_DV)
