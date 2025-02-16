@@ -174,6 +174,18 @@ class StaticCache(transformers.StaticCache):
             self.key_cache[layer_idx].zero_()
             if self.value_cache[layer_idx] is not None:
                 self.value_cache[layer_idx].zero_()
+            self.past_tokens[layer_idx] = 0
+
+    def remove_suffix(self, start_pos):
+        for layer_idx in range(len(self.key_cache)):
+            # In-place ops prevent breaking the static address
+            if self.is_MLA:
+                k_cache = self.key_cache[layer_idx]
+                k_cache.view(-1, k_cache.shape[-1])[start_pos:].zero_()
+            else:
+                self.key_cache[layer_idx][..., start_pos:, :].zero_()
+                self.value_cache[layer_idx][..., start_pos:, :].zero_()
+            self.past_tokens[layer_idx] = start_pos
     
     def get_max_cache_shape(self) -> Tuple[int, int, int, int]:
         """Returns the maximum shape of the cache."""
