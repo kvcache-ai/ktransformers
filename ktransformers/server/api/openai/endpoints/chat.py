@@ -7,16 +7,13 @@ from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import chat_stream_response
 from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate,ChatCompletionChunk,ChatCompletionObject
 from ktransformers.server.backend.base import BackendInterfaceBase
+from ktransformers.server.config.config import Config
 
 router = APIRouter()
 
-models = [
-    {"id": "0", "name": "ktranformers-model"},
-]
-
 @router.get('/models', tags=['openai'])
 async def list_models():
-    return models
+    return [{"id": Config().model_name, "name": Config().model_name}]
 
 
 @router.post('/chat/completions', tags=['openai'])
