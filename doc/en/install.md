@@ -235,7 +235,7 @@ Be aware that you need to be subject to their corresponding model licenses when 
 <!-- pin block for jump -->
 <span id='id_666'> 
 
-<h3>RESTful API and Web UI (deprected) </h3>
+<h3>RESTful API and Web UI  </h3>
 
 
 Start without website:
