@@ -13,6 +13,7 @@ from transformers import (
 from ktransformers.server.config.config import Config
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.utils.multi_timer import Profiler
+from torch.nn.attention import SDPBackend
 import torch
 import sys, os
 from ..base import ThreadContext, BackendInterfaceBase
@@ -292,7 +293,7 @@ class TransformersInterface(BackendInterfaceBase):
     def generate(self):
         self.profiler.set_counter("decode", 0)
         for _ in range(1, self.args.max_new_tokens):
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+            with torch.nn.attention.sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION, SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
                 next_token = self.decode_one_tokens()
                 self.profiler.inc("decode")
                 if next_token == self.tokenizer.eos_token_id:
