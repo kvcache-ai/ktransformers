@@ -258,7 +258,7 @@ class CMakeBuild(BuildExtension):
 
             # CMake allows an arch-in-generator style for backward compatibility
             contains_arch = any(x in cmake_generator for x in {"ARM", "Win64"})
-            if not single_config and not contains_arch:
+            if not single_config and not contains_arch and cmake_generator:
                 cmake_args += ["-A", PLAT_TO_CMAKE[self.plat_name]]
 
             # Multi-config generators have a different way to specify configs
