@@ -138,8 +138,6 @@ class StaticCache(transformers.StaticCache):
             page_idx = cache_position // self.page_size
             page_offset = cache_position % self.page_size
             # key shape (self.max_pages, self.page_size, 1, config.kv_lora_rank + config.qk_rope_head_dim)
-            #print("page_idx", page_idx)
-            #print("page_offset", page_offset)
             k_out[page_idx, page_offset, :, :self.kv_lora_rank] = key_states
             k_out[page_idx, page_offset, :, self.kv_lora_rank:] = value_states
             return k_out, self.page_table_list[layer_idx]

@@ -119,6 +119,7 @@ class KExpertsCPU(KExpertsBase):
     output_cpu:Tensor = None
     output_gpu_map:dict = {} # Manage output tensor buffer on different gpu
     #stream_map:dict = {} # Manage cuda stream on different gpu
+    #gguf_loader:GGUFLoader = None
     CPU_INFER = CPUInfer(Config().cpu_infer)
     def __init__(
         self,
@@ -132,6 +133,9 @@ class KExpertsCPU(KExpertsBase):
         **kwargs
     ):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        #if KExpertsCPU.gguf_loader is None:
+        #    KExpertsCPU.gguf_loader = GGUFLoader("/mnt/data/model/DeepseekV3-q4km-gguf")
+        self.gguf_loader = gguf_loader
         assert device.lower() == "cpu", "KExpertsCPU can only be loaded on CPU"
         self.n_routed_experts = n_routed_experts
         self.out_device = out_device
@@ -532,7 +536,7 @@ class KTransformersExperts(BaseInjectedModule, KExpertsBase):
                  generate_device: str = "cpu",
                  generate_op: str | None = "KExpertsCPU",
                  **kwargs):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KExpertsBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         if generate_op is not None:
             self.generate_experts = EXPERTS_MAP[generate_op](key, gguf_loader, config, len(orig_module), device=generate_device, **kwargs)
