@@ -383,7 +383,7 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
         prefill_op: str| None = "KLinearTorch",
         **kwargs,
     ):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KLinearBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         # build all the linear operators
         if prefill_op is not None:
