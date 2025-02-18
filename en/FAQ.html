@@ -226,7 +226,7 @@ Note KExpertsTorch is untested.</p>
 <blockquote>
 <p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
 </blockquote>
-<p>It may because of your conda env have no this version. Your can first exit your conda env by <code>conda deactivate</code> and use <code>whereis libstdc++.so.6</code> to find the path. And re enter your conda env and copy the .so by <code>cp &lt;path of outter libstdc++&gt; &lt;path of your conda env libstdc++&gt;</code></p>
+<p>Running conda install -c conda-forge libstdcxx-ng can solve the problem.</p>
 
                     </main>
 

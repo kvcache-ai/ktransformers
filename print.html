@@ -414,7 +414,7 @@ python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-062
 </div></details>
 <!-- pin block for jump -->
 <span id='id_666'> 
-<h3 id="restful-api-and-web-ui-deprected"><a class="header" href="#restful-api-and-web-ui-deprected">RESTful API and Web UI (deprected) </a></h3>
+<h3 id="restful-api-and-web-ui"><a class="header" href="#restful-api-and-web-ui">RESTful API and Web UI  </a></h3>
 <p>Start without website:</p>
 <pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
 </code></pre>
@@ -1378,7 +1378,7 @@ Note KExpertsTorch is untested.</p>
 <blockquote>
 <p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
 </blockquote>
-<p>It may because of your conda env have no this version. Your can first exit your conda env by <code>conda deactivate</code> and use <code>whereis libstdc++.so.6</code> to find the path. And re enter your conda env and copy the .so by <code>cp &lt;path of outter libstdc++&gt; &lt;path of your conda env libstdc++&gt;</code></p>
+<p>Running conda install -c conda-forge libstdcxx-ng can solve the problem.</p>
 <div style="break-before: page; page-break-before: always;"></div><h2 id="hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference"><a class="header" href="#hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference">Hello everyone, here is the successfully reproduced environment configuration for your reference:</a></h2>
 <h3 id="case-1"><a class="header" href="#case-1">Case 1</a></h3>
 <ul>
