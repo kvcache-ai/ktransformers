@@ -226,6 +226,7 @@ Intel is currently the only CPU vendor that supports AMX-like instructions, whic
 ### Easier
 * Official Docker images to simplify installation
 * Fix the server integration for web API access
+* Fix the local chat only accepting a single line prompt (currently \n begins generating prompt)
 * Support for more quantization types, including the highly requested dynamic quantization from unsloth
 
 Stay tuned for more updates! 
