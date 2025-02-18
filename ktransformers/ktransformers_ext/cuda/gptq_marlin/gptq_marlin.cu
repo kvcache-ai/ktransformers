@@ -36,7 +36,7 @@ inline std::string str(T x) {
 
 namespace gptq_marlin {
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800) || defined(__HIP_PLATFORM_AMD__)
 
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,

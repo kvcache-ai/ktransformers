@@ -39,7 +39,7 @@ using I4 = Vec<int, 4>;
 
 constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800) || defined (__HIP_PLATFORM_AMD__)
 // No support for async
 #else
 
