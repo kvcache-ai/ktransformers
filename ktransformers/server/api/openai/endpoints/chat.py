@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from fastapi.requests import Request
 from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import chat_stream_response
-from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate,ChatCompletionChunk,ChatCompletionObject
+from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate,ChatCompletionChunk,ChatCompletionObject, Usage
 from ktransformers.server.backend.base import BackendInterfaceBase
 from ktransformers.server.config.config import Config
 
@@ -34,6 +34,7 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
         return chat_stream_response(request,inner())
     else:
         comp = ChatCompletionObject(id=id,object='chat.completion.chunk',created=int(time()))
+        comp.usage = Usage(completion_tokens=1, prompt_tokens=1, total_tokens=2)
         async for token in interface.inference(input_message,id):
             comp.append_token(token)
         return comp
