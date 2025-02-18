@@ -78,6 +78,7 @@ class KTransformersInterface(TransformersInterface):
         torch_device = get_device("blk.0.self_attn", device_map)
         torch_device = "cuda:0" if torch_device == "cuda" else torch_device
         global warm_uped
+        torch.cuda.set_device(torch_device)
         if self.args.use_cuda_graph and warm_uped == True:
             
             if not hasattr(self, "cuda_graph_runner"):
@@ -130,6 +131,7 @@ class KTransformersInterface(TransformersInterface):
         logger.debug(f"input_ids: {input_ids.shape}")
 
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
+        device = "cuda:0" if device == "cuda" else device
 
         if is_new:
             self.cache.reset()
@@ -161,6 +163,7 @@ class KTransformersInterface(TransformersInterface):
         if not (type(self) is TransformersInterface):
             input_ids = input_ids.to("cpu")
         inputs_embeds = self.model.model.embed_tokens(input_ids).to(device)
+        torch.cuda.set_device(device)
         if self.use_static_cache:
             logits = self.model(
                 inputs_embeds=inputs_embeds,
