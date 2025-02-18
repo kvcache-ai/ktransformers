@@ -10,7 +10,7 @@ import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 os.environ['https_proxy'] = ''
 os.environ['http_proxy'] = ''
-hint = 'There is a single choice question. Answer the question by replying A, B, C, D. No other answers are accepted. Just the letter.'
+hint = 'There is a single choice question. Answer the question by replying A, B, C, D, E, F, G, H, I, J. No other answers are accepted. Just the letter.'
 
 
 class DataEvaluator:
@@ -25,7 +25,7 @@ class DataEvaluator:
         """
         # 读取 Parquet 文件
         # dataset = load_dataset('parquet', data_files=file_path)
-        ds = load_dataset(file_path,"all")
+        ds = load_dataset("TIGER-Lab/MMLU-Pro")
         df = pd.DataFrame(ds['test'])
         # print(ds)
         # # ds_1 =  ds['train']
@@ -49,7 +49,7 @@ class DataEvaluator:
         :return: A formatted prompt string.
         """
         # 查看ABCD。。。的选项
-        options_str = "\n".join([f"{chr(65 + i)}. {opt}" for i, opt in enumerate(record['choices'])])
+        options_str = "\n".join([f"{chr(65+i)}. {opt}" for i, opt in enumerate(record['options'])])
         prompt = hint + "\nQuestion: " + record['question'] + "\n" + options_str + "\nAnswer: '"
         return prompt
         
@@ -108,7 +108,7 @@ def main(concurrent_requests, data_evaluator: DataEvaluator, result_file, log_fi
     total_score = 0
 
     results = []
-   # 设置随机数种子
+    # 设置随机数种子
     random.seed(42)
     random.shuffle(data_evaluator.data)
     for i in range(min(concurrent_requests, len(data_evaluator.data))):
@@ -126,7 +126,7 @@ def main(concurrent_requests, data_evaluator: DataEvaluator, result_file, log_fi
             if prediction is None:
                 raise Exception(f"Failed to get prediction for {question}")
 
-            answer = chr(data_item['answer'] + 65)
+            answer = data_item['answer']
             # Compute score
             score = data_evaluator.score(data_evaluator.post_processing(prediction), answer)
 
@@ -135,7 +135,7 @@ def main(concurrent_requests, data_evaluator: DataEvaluator, result_file, log_fi
 
             # Collect the result data
             result_data = {
-                "question_id": i,
+                "question_id": data_item['question_id'],
                 "answer": answer,
                 "prediction": data_evaluator.post_processing(prediction),
                 "score": score,
@@ -172,11 +172,11 @@ def main(concurrent_requests, data_evaluator: DataEvaluator, result_file, log_fi
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API Generate Tester")
     parser.add_argument("--concurrent", type=int, default=1000, help="Number of concurrent evaluations")
-    parser.add_argument("--file", type=str, default="cais/mmlu", help="Path to the mmlu.jsonl file")
-    parser.add_argument("--result", type=str, default="./mmlu_result_silicon.json", help="Path to save the result JSON file")
-    parser.add_argument("--log", type=str, default="./mmlu_result_silicon.log", help="Path to save the log file")
+    parser.add_argument("--file", type=str, default="TIGER-Lab/MMLU-Pro", help="Path to the mmlu.jsonl file")
+    parser.add_argument("--result", type=str, default="./mmlu_pro.json", help="Path to save the result JSON file")
+    parser.add_argument("--log", type=str, default="./mmlu_pro.log", help="Path to save the log file")
     parser.add_argument("--model", type=str, default="Pro/deepseek-ai/DeepSeek-V3", help="Model name or path")
-    parser.add_argument("--api_url", type=str, default="http://localhost:10003/v1/chat/completions", help="API URL")
+    parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
     # parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
 
     args = parser.parse_args()
