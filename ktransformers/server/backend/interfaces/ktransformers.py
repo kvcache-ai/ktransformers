@@ -15,7 +15,7 @@ from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.local_chat import custom_models, default_optimize_rules
 from ktransformers.util.utils import get_device
 
-
+warm_uped = False
 class KTransformersThreadContext(TransformersThreadContext):
     pass
 
@@ -77,7 +77,10 @@ class KTransformersInterface(TransformersInterface):
         device_map = self.model.gguf_loader.tensor_device_map
         torch_device = get_device("blk.0.self_attn", device_map)
         torch_device = "cuda:0" if torch_device == "cuda" else torch_device
-        if self.args.use_cuda_graph:
+        global warm_uped
+        torch.cuda.set_device(torch_device)
+        if self.args.use_cuda_graph and warm_uped == True:
+            
             if not hasattr(self, "cuda_graph_runner"):
                 self.cuda_graph_runner = CUDAGraphRunner()
                 self.cuda_graph_runner.capture(
@@ -99,7 +102,10 @@ class KTransformersInterface(TransformersInterface):
                 torch.cuda.synchronize()
                 logits = logits[0, -1, :]
                 return self.logits_to_token(logits)
-
+        
+        if self.args.use_cuda_graph:
+            warm_uped = True
+            
         if self.use_static_cache:
             mask = torch.ones((1, self.seq_length)).to(torch_device)
             logits = self.model(
@@ -125,6 +131,7 @@ class KTransformersInterface(TransformersInterface):
         logger.debug(f"input_ids: {input_ids.shape}")
 
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
+        device = "cuda:0" if device == "cuda" else device
 
         if is_new:
             self.cache.reset()
@@ -156,6 +163,7 @@ class KTransformersInterface(TransformersInterface):
         if not (type(self) is TransformersInterface):
             input_ids = input_ids.to("cpu")
         inputs_embeds = self.model.model.embed_tokens(input_ids).to(device)
+        torch.cuda.set_device(device)
         if self.use_static_cache:
             logits = self.model(
                 inputs_embeds=inputs_embeds,

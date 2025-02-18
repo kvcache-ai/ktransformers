@@ -93,11 +93,11 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module = None,
-        generate_device: str = "cuda",
         prefill_device: str = "cuda",
+        generate_device: str = "cuda",
         **kwargs,
     ):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KMoEGateBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         self.generate_device = generate_device
         self.prefill_device = prefill_device
