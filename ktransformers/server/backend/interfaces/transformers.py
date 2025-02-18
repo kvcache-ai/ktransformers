@@ -18,7 +18,7 @@ import sys, os
 from ..base import ThreadContext, BackendInterfaceBase
 from ktransformers.server.config.log import logger
 from ..args import ConfigArgs, default_args
-
+from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled, MLAWrapperSingleton
 
 # This TextStreamer is a modified version from https://github.com/huggingface/transformers/blob/main/src/transformers/generation/streamers.py
 class TextStreamer:
@@ -330,8 +330,14 @@ class TransformersInterface(BackendInterfaceBase):
     @torch.no_grad
     def generate(self):
         self.profiler.set_counter("decode", 0)
-        for _ in range(1, self.args.max_new_tokens):
+        for i in range(1, self.args.max_new_tokens):
+            
             with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+                if i > 1 and flashinfer_enabled:
+                    MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
+                                             num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
+                                             head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size,
+                                             sm_scale=(self.model.config.qk_rope_head_dim + self.model.config.qk_nope_head_dim) ** (-0.5), q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
                 next_token = self.decode_one_tokens()
                 self.profiler.inc("decode")
                 if next_token == self.tokenizer.eos_token_id:

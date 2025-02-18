@@ -104,7 +104,10 @@ class KTransformersInterface(TransformersInterface):
                 torch.cuda.synchronize()
                 logits = logits[0, -1, :]
                 return self.logits_to_token(logits)
-
+        
+        if self.args.use_cuda_graph:
+            warm_uped = True
+            
         if self.use_static_cache:
             mask = torch.ones((1, self.seq_length)).to(torch_device)
             logits = self.model(
@@ -118,7 +121,6 @@ class KTransformersInterface(TransformersInterface):
         else:
             logits = self.model(self.current_ids, return_dict=False)[0]
         logits = logits[0, -1, :]
-        warm_uped = True
 
         return self.logits_to_token(logits)
 
