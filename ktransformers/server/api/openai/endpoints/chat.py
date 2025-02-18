@@ -33,7 +33,7 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                 yield chunk
         return chat_stream_response(request,inner())
     else:
-        comp = ChatCompletionObject(id=id,object='chat.completion.chunk',created=int(time()))
+        comp = ChatCompletionObject(id=id,object='chat.completion',created=int(time()))
         comp.usage = Usage(completion_tokens=1, prompt_tokens=1, total_tokens=2)
         async for token in interface.inference(input_message,id):
             comp.append_token(token)
