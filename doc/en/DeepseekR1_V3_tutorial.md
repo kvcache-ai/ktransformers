@@ -171,7 +171,7 @@ Attention! If you are testing R1 and it may skip thinking. So you can add arg: `
 
 #### Dual socket version (64 cores)
 
-Make suer before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set). You may check the doc [here](./install.md) for install details. <br>
+Make sure before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set). You may check the doc [here](./install.md) for install details. <br>
 
 Test Command:
 ``` shell
