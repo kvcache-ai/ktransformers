@@ -19,3 +19,7 @@ dev_install:
 	echo "Installing ktransformers"
 	KTRANSFORMERS_FORCE_BUILD=TRUE pip install -e . -v --no-build-isolation
 	echo "Installation completed successfully"
+install_numa:
+	USE_NUMA=1 make dev_install
+install_no_numa:
+	env -u USE_NUMA make dev_install
