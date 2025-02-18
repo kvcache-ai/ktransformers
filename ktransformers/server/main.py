@@ -105,6 +105,7 @@ def custom_openapi(app):
 
 def main():
     cfg = Config()
+
     arg_parser = ArgumentParser(cfg)
 
     # 初始化消息
