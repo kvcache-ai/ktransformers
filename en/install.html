@@ -171,9 +171,20 @@
 <li>
 <p>CUDA 12.1 and above, if you didn't have it yet, you may install from <a href="https://developer.nvidia.com/cuda-downloads">here</a>.</p>
 <pre><code class="language-sh"># Adding CUDA to PATH
-export PATH=/usr/local/cuda/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-export CUDA_PATH=/usr/local/cuda
+if [ -d "/usr/local/cuda/bin" ]; then
+    export PATH=$PATH:/usr/local/cuda/bin
+fi
+
+if [ -d "/usr/local/cuda/lib64" ]; then
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+    # Or you can add it to /etc/ld.so.conf and run ldconfig as root:
+    # echo "/usr/local/cuda-12.x/lib64" | sudo tee -a /etc/ld.so.conf
+    # sudo ldconfig
+fi
+
+if [ -d "/usr/local/cuda" ]; then
+    export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
+fi
 </code></pre>
 </li>
 <li>
@@ -183,15 +194,23 @@ sudo apt-get install gcc g++ cmake ninja-build
 </code></pre>
 </li>
 <li>
-<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Conda</a> to create a virtual environment with Python=3.11 to run our program.</p>
+<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Miniconda3</a> or <a href="https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh">Anaconda3</a> to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is <code>~/anaconda3</code>, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes <code>GLIBCXX-3.4.32</code></p>
 <pre><code class="language-sh">conda create --name ktransformers python=3.11
 conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
+
+conda install -c conda-forge libstdcxx-ng # Anaconda provides a package called `libstdcxx-ng` that includes a newer version of `libstdc++`, which can be installed via `conda-forge`.
+
+strings ~/anaconda3/envs/ktransformers-0.3/lib/libstdc++.so.6 | grep GLIBCXX
 </code></pre>
 </li>
 <li>
-<p>Make sure that PyTorch, packaging, ninja is installed</p>
-<pre><code>pip install torch packaging ninja cpufeature numpy
+<p>Make sure that PyTorch, packaging, ninja is installed You can also <a href="https://pytorch.org/get-started/previous-versions/">install previous versions of PyTorch</a></p>
+<pre><code>pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+pip3 install packaging ninja cpufeature numpy
 </code></pre>
+</li>
+<li>
+<p>At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.</p>
 </li>
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
