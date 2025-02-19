@@ -163,6 +163,17 @@
 <h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
 <h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
 <p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
+<p>Note: The version of Node.js in the Ubuntu or Debian GNU/Linux software repository is too low, causing compilation errors. Users can also install Node.js through the Nodesource repository, provided they uninstall the outdated version first.</p>
+<pre><code class="language-bash">
+  # sudo apt-get remove nodejs npm -y &amp;&amp; sudo apt-get autoremove -y
+  sudo apt-get update -y &amp;&amp; sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+  sudo chmod 644 /usr/share/keyrings/nodesource.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_23.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list
+  sudo apt-get update -y
+  sudo apt-get install nodejs -y
+
+</code></pre>
 <p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
 <pre><code class="language-bash">cd ktransformers/website
 </code></pre>
