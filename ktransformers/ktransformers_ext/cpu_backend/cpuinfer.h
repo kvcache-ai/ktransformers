@@ -17,7 +17,11 @@
 #include <queue>
 #include <thread>
 #include <vector>
-#include "cuda_runtime.h"
+#ifdef KTRANSFORMERS_USE_CUDA
+#include "vendors/cuda.h"
+#elif KTRANSFORMERS_USE_MUSA
+#include "vendors/musa.h"
+#endif
 
 #include "backend.h"
 #include "task_queue.h"
