@@ -68,4 +68,4 @@ Make sure you:
 The detailed error:
 >ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)
 
-Running conda install -c conda-forge libstdcxx-ng can solve the problem.
+Running `conda install -c conda-forge libstdcxx-ng` can solve the problem.
