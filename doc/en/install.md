@@ -11,9 +11,20 @@ Some preparation:
   
   ```sh
   # Adding CUDA to PATH
-  export PATH=/usr/local/cuda/bin:$PATH
-  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-  export CUDA_PATH=/usr/local/cuda
+  if [ -d "/usr/local/cuda/bin" ]; then
+      export PATH=$PATH:/usr/local/cuda/bin
+  fi
+
+  if [ -d "/usr/local/cuda/lib64" ]; then
+      export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+      # Or you can add it to /etc/ld.so.conf and run ldconfig as root:
+      # echo "/usr/local/cuda-12.x/lib64" | sudo tee -a /etc/ld.so.conf
+      # sudo ldconfig
+  fi
+
+  if [ -d "/usr/local/cuda" ]; then
+      export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
+  fi
   ```
 
 - Linux-x86_64 with gcc, g++ and cmake
@@ -23,18 +34,26 @@ Some preparation:
   sudo apt-get install gcc g++ cmake ninja-build
   ```
 
-- We recommend using [Conda](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) to create a virtual environment with Python=3.11 to run our program.
+- We recommend using [Miniconda3](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) or [Anaconda3](https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh) to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is `~/anaconda3`, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes `GLIBCXX-3.4.32`
+
   
   ```sh
   conda create --name ktransformers python=3.11
   conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
+  
+  conda install -c conda-forge libstdcxx-ng # Anaconda provides a package called `libstdcxx-ng` that includes a newer version of `libstdc++`, which can be installed via `conda-forge`.
+
+  strings ~/anaconda3/envs/ktransformers-0.3/lib/libstdc++.so.6 | grep GLIBCXX
   ```
 
-- Make sure that PyTorch, packaging, ninja is installed
+- Make sure that PyTorch, packaging, ninja is installed You can also [install previous versions of PyTorch](https://pytorch.org/get-started/previous-versions/)
   
   ```
-  pip install torch packaging ninja cpufeature numpy
+  pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+  pip3 install packaging ninja cpufeature numpy
   ```
+
+ - At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.
 
 ## Installation
 
