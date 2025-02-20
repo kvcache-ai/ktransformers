@@ -308,8 +308,13 @@ class CMakeBuild(BuildExtension):
                     "-DCMAKE_OSX_ARCHITECTURES={}".format(";".join(archs))]
 
         if "CMAKE_BUILD_PARALLEL_LEVEL" not in os.environ:
+            cpu_count = os.cpu_count()
+            if cpu_count is None:
+                cpu_count = 1
             if hasattr(self, "parallel") and self.parallel:
-                build_args += [f"-j{self.parallel}"]
+                build_args += [f"--parallel={self.parallel}"]
+            else:
+                build_args += [f"--parallel={cpu_count}"]
         print("CMake args:", cmake_args)
         build_temp = Path(ext.sourcedir) / "build"
         if not build_temp.exists():
