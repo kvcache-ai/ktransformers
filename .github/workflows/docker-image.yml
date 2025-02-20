@@ -37,22 +37,8 @@ jobs:
           - {instruct: "NATIVE",  platform: "linux/amd64"}
         # for arm64
           - {instruct: "NATIVE",  platform: "linux/arm64"}
-    # 运行测试，如果需要的话，将注释取消掉并且修改为自己需要的内容
-    # See also https://docs.docker.com/docker-hub/builds/automated-testing/
 
     steps:
-        # - uses: actions/checkout@v2
-
-        # - name: Run tests
-        #   run: |
-        #     if [ -f docker-compose.test.yml ]; then
-        #       docker-compose --file docker-compose.test.yml build
-        #       docker-compose --file docker-compose.test.yml run sut
-        #     else
-        #       docker build . --file Dockerfile
-        #     fi
-
-          # needs: test
         - name: Move Docker data directory
           run: |
             sudo systemctl stop docker
