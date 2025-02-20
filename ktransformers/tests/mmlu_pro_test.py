@@ -176,7 +176,7 @@ if __name__ == "__main__":
     parser.add_argument("--result", type=str, default="./mmlu_pro.json", help="Path to save the result JSON file")
     parser.add_argument("--log", type=str, default="./mmlu_pro.log", help="Path to save the log file")
     parser.add_argument("--model", type=str, default="Pro/deepseek-ai/DeepSeek-V3", help="Model name or path")
-    parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
+    parser.add_argument("--api_url", type=str, default="http://localhost:15488/v1/chat/completions", help="API URL")
     # parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
 
     args = parser.parse_args()
