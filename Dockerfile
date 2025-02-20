@@ -30,7 +30,8 @@ git submodule update &&
 pip install ninja pyproject numpy cpufeature &&
 pip install flash-attn &&
 CPU_INSTRUCT=${CPU_INSTRUCT}  KTRANSFORMERS_FORCE_BUILD=TRUE TORCH_CUDA_ARCH_LIST="8.0;8.6;8.7;8.9;9.0+PTX" pip install . --no-build-isolation --verbose &&
-pip cache purge
+pip cache purge &&
+cp /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /opt/conda/lib/
 EOF
 
 ENTRYPOINT ["tail", "-f", "/dev/null"]
