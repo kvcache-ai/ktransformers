@@ -81,7 +81,7 @@ Some preparation:
      git submodule update
      ```
 
-   - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
+   - [Optional] If you want to run with website, please [compile the website](./api/server/website.md) before execute ```bash install.sh```
 
    - For Linux
      - For simple install:
@@ -103,7 +103,7 @@ Some preparation:
      install.bat
      ```
 
-* If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./doc/en/makefile_usage.md) 
+* If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./makefile_usage.md) 
 
 <h3>Local Chat</h3>
 We provide a simple command-line local chat Python script that you can run for testing.
