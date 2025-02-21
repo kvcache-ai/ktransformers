@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # coding=utf-8
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang, Azure-Tang
 Version      : 0.1.0
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 import torch
+from torch_auto_backend import CUDA, CUDA0
 from torch import nn
 import itertools
 import time
@@ -36,7 +37,7 @@ def set_module(model, submodule_key, module):
         cur_mod[int(tokens[-1])] = module
 
 def set_param(module: nn.Module, name: str, weights: torch.Tensor):
-    
+
     param=nn.parameter.Parameter(weights, requires_grad=False)
     if isinstance(module, nn.Linear) and len(weights.shape)==1:
         param.unsqueeze_(0)
@@ -46,7 +47,7 @@ def get_device(gguf_module_key:str, device_map:dict):
     if gguf_module_key in device_map:
         return device_map[gguf_module_key]["generate_device"]
     else:
-        return "cuda"
+        return CUDA
 
 def get_all_used_cuda_device(device_map:dict):
     all_device_list = set()
@@ -77,7 +78,7 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
         else:
             #print(load_config.tensor_file_map.keys())
             raise Exception(f"can't find {translated_key} in GGUF file!")
-        
+
 def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
     #print(f"recursively loading weights {prefix}")
     if not isinstance(module, base_operator.BaseInjectedModule):
@@ -96,12 +97,12 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     batch_size, seq_length = inputs.shape
     device_map = model.gguf_loader.tensor_device_map
     torch_device = get_device('blk.0.self_attn', device_map)
-    torch_device = "cuda:0" if torch_device == "cuda" else torch_device
+    torch_device = CUDA0 if torch_device == CUDA else torch_device
     inputs = inputs.to(torch_device)
     all_cuda_device = get_all_used_cuda_device(device_map)
 
     tokens = []
-    
+
     def decode_one_tokens(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, use_cuda_graph: bool = True):
         if cuda_graph_runner is None:
             use_cuda_graph = False
@@ -129,7 +130,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         else:
             next_token = torch.argmax(next_token_scores, dim=-1)
         return next_token
-    
+
     torch.cuda.set_device(torch_device)
     with torch.no_grad():
         stream = TextStreamer(tokenizer)
@@ -164,7 +165,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             logits_warper = (
                 model._get_logits_warper(generation_config,device=inputs.device)
             )
-        except: 
+        except:
             logits_warper = (
                 model._get_logits_warper(generation_config)
             )
@@ -187,9 +188,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         cache_position = torch.tensor([seq_length], device=torch_device, dtype=torch.int32)
         position_ids = cache_position.unsqueeze(0)
         seq_length += 1
-        
+
         cuda_graph_runner = None
-            
+
         start_time = time.time()
         for i in range(1, max_new_tokens):
             global warm_uped
@@ -206,7 +207,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             generated_ids[:, cache_position] = next_token.int()
             tokens.append(int(next_token))
             seq_length += 1
-            
+
             if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token) == '<|im_end|>':
                 print(stream.end(), end="", flush=True)
                 break
@@ -214,7 +215,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                 print(stream.put(next_token.item()), end="", flush=True)
             cache_position += 1
             position_ids = cache_position.unsqueeze(0)
-        
+
 
     total_time = time.time() - start_time
     tokens_generated = len(tokens)

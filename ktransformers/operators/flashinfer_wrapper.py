@@ -4,6 +4,7 @@ Author       : Boxin Zhang
 Version      : 0.2.2
 '''
 import torch
+from util.torch_auto_backend import CUDA
 
 flashinfer_enabled = False
 
@@ -11,7 +12,7 @@ try:
     import flashinfer
     flashinfer_enabled = False # disabled now, TODO:use new version of flashinfer and enable
     print("found flashinfer")
-    
+
 except ImportError:
     print("flashinfer not found, use triton for linux")
 
@@ -70,7 +71,7 @@ class MLAWrapper():
                  max_batch_size,
                  max_pages,
                  use_cuda_graph = True,
-                 device = "cuda",
+                 device = CUDA,
                  ):
         self.float_workspace_buffer = torch.empty(128*1024*1024, dtype=torch.int8, device=device)
         self.max_batch_size = max_batch_size
@@ -99,7 +100,7 @@ class MLAWrapper():
             kv_len_arr=self.kv_len_arr_buf,
         )
         self.need_plan = True
-    
+
     def plan(self,
              qo_indptr,
              kv_indptr,
@@ -149,7 +150,7 @@ class MLAWrapperSingleton():
         if device not in cls.wrappers:
             cls.make_instance(device, *args, **kwargs)
         return cls.wrappers[device]
-    
+
     @classmethod
     def make_instance(cls, device, *args, **kwargs):
         cls.wrappers[device] = MLAWrapper(*args, **kwargs, device=device)
@@ -179,7 +180,7 @@ class MLAWrapperSingleton():
                 sm_scale,
                 q_data_type,
                 kv_data_type,)
-            
+
 
 if __name__ == "__main__":
     max_batch_size = 1
@@ -187,19 +188,19 @@ if __name__ == "__main__":
     page_size = 64
     num_heads = 128
 
-    q_nope = torch.randn((1, num_heads, 512), dtype=torch.bfloat16, device="cuda")
-    q_pe = torch.randn((1, num_heads, 64), dtype=torch.bfloat16, device="cuda")
-    ckv = torch.randn((max_pages, page_size, 512), dtype=torch.bfloat16, device="cuda")
-    k_pe = torch.randn((max_pages, page_size, 64), dtype=torch.bfloat16, device="cuda")
-    
+    q_nope = torch.randn((1, num_heads, 512), dtype=torch.bfloat16, device=CUDA)
+    q_pe = torch.randn((1, num_heads, 64), dtype=torch.bfloat16, device=CUDA)
+    ckv = torch.randn((max_pages, page_size, 512), dtype=torch.bfloat16, device=CUDA)
+    k_pe = torch.randn((max_pages, page_size, 64), dtype=torch.bfloat16, device=CUDA)
+
 
     wrapper = MLAWrapperSingleton.get_instance(
-        "cuda",
+        CUDA,
         max_batch_size,
         max_pages,
     )
-    
-    kv_len_arr = torch.tensor([10], dtype=torch.int32, device="cuda")
+
+    kv_len_arr = torch.tensor([10], dtype=torch.int32, device=CUDA)
 
     wrapper.plan(
         None,
@@ -235,6 +236,6 @@ if __name__ == "__main__":
         False,
         192 ** (-0.5)
     )
-    
+
     torch.testing.assert_close(attn_output, attn_ref, rtol=1e-3, atol=1e-3)
     print("test past")

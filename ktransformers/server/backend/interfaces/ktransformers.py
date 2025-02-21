@@ -1,4 +1,5 @@
 import torch
+from util.torch_auto_backend import CUDA, CUDA0
 import asyncio
 from transformers import AutoTokenizer, AutoConfig, GenerationConfig
 from ktransformers.server.backend.interfaces.transformers import (
@@ -18,6 +19,7 @@ from ktransformers.util.utils import get_device
 
 warm_uped = False
 
+
 class KTransformersThreadContext(TransformersThreadContext):
     pass
 
@@ -26,7 +28,9 @@ class KTransformersInterface(TransformersInterface):
     def __init__(self, args: ConfigArgs = default_args):
         self.args = args
         torch.set_grad_enabled(False)
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model_dir, device=args.device, trust_remote_code=args.trust_remote_code)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            args.model_dir, device=args.device, trust_remote_code=args.trust_remote_code
+        )
         config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=args.trust_remote_code)
         torch.set_default_dtype(config.torch_dtype)
         if config.architectures[0] == "Qwen2MoeForCausalLM":
@@ -62,12 +66,7 @@ class KTransformersInterface(TransformersInterface):
         try:
             self.model.generation_config = GenerationConfig.from_pretrained(args.model_dir)
         except:
-            gen_config = GenerationConfig(
-                max_length=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
+            gen_config = GenerationConfig(max_length=128, temperature=0.7, top_p=0.9, do_sample=True)
             self.model.generation_config = gen_config
         if self.model.generation_config.pad_token_id is None:
             self.model.generation_config.pad_token_id = self.model.generation_config.eos_token_id
@@ -80,7 +79,7 @@ class KTransformersInterface(TransformersInterface):
 
         device_map = self.model.gguf_loader.tensor_device_map
         torch_device = get_device("blk.0.self_attn", device_map)
-        torch_device = "cuda:0" if torch_device == "cuda" else torch_device
+        torch_device = CUDA0 if torch_device == CUDA else torch_device
         torch.cuda.set_device(torch_device)
         if warm_uped and self.args.use_cuda_graph:
             if not hasattr(self, "cuda_graph_runner"):
@@ -104,10 +103,10 @@ class KTransformersInterface(TransformersInterface):
                 torch.cuda.synchronize()
                 logits = logits[0, -1, :]
                 return self.logits_to_token(logits)
-        
+
         if self.args.use_cuda_graph:
             warm_uped = True
-            
+
         if self.use_static_cache:
             mask = torch.ones((1, self.seq_length)).to(torch_device)
             logits = self.model(
@@ -124,37 +123,35 @@ class KTransformersInterface(TransformersInterface):
 
         return self.logits_to_token(logits)
 
-
-
     @torch.no_grad
     def prefill(self, input_ids: torch.Tensor, is_new: bool):
         input_ids_length = input_ids.shape[-1]
         logger.debug(f"input_ids: {input_ids.shape}")
 
-        device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
-        device = "cuda:0" if device == "cuda" else device
+        device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", CUDA0)
+        device = CUDA0 if device == CUDA else device
 
         if is_new:
             self.ever_generated_ids.clear()
             same_prefix = 0
             flat_input_ids = input_ids.flatten()
 
-            if getattr(self, 'generated_ids', None) is None:
+            if getattr(self, "generated_ids", None) is None:
                 self.generated_ids = torch.zeros(
                     self.args.batch_size,
                     input_ids.shape[-1] + self.args.max_new_tokens + 1,
                     dtype=torch.int,
                     device=self.args.device,
                 )
-                self.seq_length = 1            
-            
+                self.seq_length = 1
+
             flat_prev_ids = self.generated_ids.flatten()
             for i in range(min(self.seq_length, flat_input_ids.shape[0]) - 1):
                 if flat_input_ids[i] == flat_prev_ids[i]:
                     same_prefix += 1
                 else:
                     break
-            
+
             logger.debug(f"same prefix len: {same_prefix}")
             self.cache.remove_suffix(same_prefix)
             self.seq_length = same_prefix
@@ -172,11 +169,9 @@ class KTransformersInterface(TransformersInterface):
         expected_length = self.seq_length + self.args.max_new_tokens + 1
         delta_length = expected_length - self.generated_ids.shape[-1]
         if delta_length > 0:
-            new_generate_ids = torch.zeros(
-                self.args.batch_size, delta_length, dtype=torch.int, device=self.args.device
-            )
+            new_generate_ids = torch.zeros(self.args.batch_size, delta_length, dtype=torch.int, device=self.args.device)
             self.generated_ids = torch.cat([self.generated_ids, new_generate_ids], dim=-1)
-        
+
         logger.debug(f"cache position: {former_seq_length} to {self.seq_length}")
         cache_position = torch.arange(former_seq_length, self.seq_length, device=device)
         self.generated_ids[:, cache_position] = input_ids.to(self.args.device).to(torch.int)
@@ -206,7 +201,7 @@ class KTransformersInterface(TransformersInterface):
     def active_cache_position(self):
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
         return torch.tensor([self.seq_length - 1], device=device)
-    
+
     async def inference(self, local_messages, thread_id: str):
         async with self._infer_lock:
             async for v in super().inference(local_messages, thread_id):
