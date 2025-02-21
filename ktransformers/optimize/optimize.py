@@ -129,4 +129,7 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     load_weights(module, gguf_loader)
     module.gguf_loader = gguf_loader
     del_meta(module)
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.xpu.is_available():
+        torch.xpu.empty_cache()

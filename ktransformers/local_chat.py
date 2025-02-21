@@ -61,6 +61,7 @@ def local_chat(
     prompt_file : str | None = None,
     mode: str = "normal",
     force_think: bool = False,
+    device: str = "cuda",
 ):
 
 
@@ -171,7 +172,7 @@ def local_chat(
             torch.bfloat16
         )  # TODO: Remove this, replace dtype using config
         generated = prefill_and_generate(
-            model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode, force_think
+            model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode, force_think
         )
 
 
