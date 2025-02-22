@@ -9,7 +9,7 @@ flashinfer_enabled = False
 
 try:
     import flashinfer
-    flashinfer_enabled = True
+    flashinfer_enabled = False
     print("found flashinfer")
     
 except ImportError:

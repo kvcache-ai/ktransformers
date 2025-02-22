@@ -77,9 +77,19 @@
     kwargs:
         generate_device: "cpu"
         prefill_device: "cpu"
+- match:
+    name: "^lm_head"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda:1"
+      prefill_device: "cuda:1"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
 
 - match:
-    name: "(^model.norm)|(^lm_head)"
+    name: "(^model.norm)"
   replace:
     class: "default"
     kwargs:
