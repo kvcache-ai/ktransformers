@@ -381,13 +381,13 @@ class TransformersInterface(BackendInterfaceBase):
 
         self.profiler.create_and_start_timer("prefill")
 
-               
+        if Config().user_force_think:
+            think = '<think>\n'
+            print(think, end="",flush=True)
+            yield think
+        
         for t in self.prefill(input_ids, self.check_is_new(thread_id)):
             # output think token after prefill done
-            if Config().user_force_think:
-                think = '<think>\n'
-                print(think, end="",flush=True)
-                yield think
             if t is not None:
                 print(t, end="",flush=True)
                 yield t
