@@ -127,6 +127,7 @@ GGML_BLOCK_SIZES = {
     "Q5_K": 2 + 2 + 12 + 256 // 8 + 256 // 2,
     "Q6_K": 256 // 2 + 256 // 4 + 256 // 16 + 2,
     "IQ4_XS": 2 + 2 + 256 // 2 + 256 // 64,
+    "FP8": 1,
 }
 
 GGML_ELEMENTS_PER_BLOCK = {
@@ -142,6 +143,7 @@ GGML_ELEMENTS_PER_BLOCK = {
     "Q5_K": 256,
     "Q6_K": 256,
     "IQ4_XS": 256,
+    "FP8": 1,
 }
 
 DATA_TYPES = {
@@ -158,6 +160,7 @@ DATA_TYPES = {
     "uint64": 10,
     "int64": 11,
     "float64": 12,
+    "FP8": 13,
 }
 
 class GGUFLoader:
@@ -392,6 +395,9 @@ def read_value(f, data_type):
     elif data_type == DATA_TYPES["array"]:
         elem_type, count = struct.unpack("<IQ", f.read(4 + 8))
         return [read_value(f, elem_type) for _ in range(count)]
+
+    elif data_type == DATA_TYPES["FP8"]:
+        return struct.unpack("<B", f.read(1))[0]
 
     else:
         raise NotImplementedError(f"Data type {data_type} not implemented")
