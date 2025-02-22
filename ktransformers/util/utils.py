@@ -79,7 +79,7 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
             raise Exception(f"can't find {translated_key} in GGUF file!")
         
 def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
-    # print(f"recursively loading weights {prefix},{return_when_injected=}, {only_load_injected=}")
+    #print(f"recursively loading weights {prefix}")
     if not isinstance(module, base_operator.BaseInjectedModule):
         load_cur_state_dict(module, gguf_loader, prefix)
         for name, child in module._modules.items():
