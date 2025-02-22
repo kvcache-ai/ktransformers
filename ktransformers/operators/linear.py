@@ -403,7 +403,7 @@ class KLinearCPUInfer(KLinearBase):
             self.bias = None
 
 LINEAR_MAP = {
-    "KLinearMarlin": KLinearTorch,
+    "KLinearMarlin": KLinearMarlin,
     "KLinearTorch": KLinearTorch,
     "KLinearCPUInfer": KLinearCPUInfer
 }
@@ -417,7 +417,7 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
         orig_module: nn.Module,
         # device: str = "cuda",
         generate_device: str = CUDA,
-        generate_op: str| None = "KLinearTorch",
+        generate_op: str| None = "KLinearMarlin",
         prefill_device: str = CUDA,
         prefill_op: str| None = "KLinearTorch",
         **kwargs,
