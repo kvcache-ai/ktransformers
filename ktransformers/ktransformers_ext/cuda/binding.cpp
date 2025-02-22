@@ -7,7 +7,9 @@
 **/
 
 #include "custom_gguf/ops.h"
+#ifdef KTRANSFORMERS_USE_CUDA
 #include "gptq_marlin/ops.h"
+#endif
 // Python bindings
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -52,7 +54,8 @@ PYBIND11_MODULE(KTransformersOps, m) {
         return dequantize_iq4_xs((int8_t*)data, num_bytes, blk_size, ele_per_blk, device, target_dtype);
         }, "Function to dequantize iq4_xs data.",
         py::arg("data"), py::arg("num_bytes"), py::arg("blk_size"), py::arg("ele_per_blk"), py::arg("device"), py::arg("target_dtype"));
-    
+
+#ifdef KTRANSFORMERS_USE_CUDA
     m.def("gptq_marlin_gemm", &gptq_marlin_gemm, "Function to perform GEMM using Marlin quantization.",
         py::arg("a"), py::arg("b_q_weight"), py::arg("b_scales"), py::arg("g_idx"),
         py::arg("perm"), py::arg("workspace"), py::arg("num_bits"), py::arg("size_m"),

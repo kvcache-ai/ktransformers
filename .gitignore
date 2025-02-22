@@ -28,3 +28,4 @@ ktransformers/tests/chat_txt.txt
 mmlu_result_q4km.json
 mmlu_result_q4km.log
 ktransformers/tests/mmlu_result_silicon.log
+ktransformers/ktransformers_ext/cuda_musa/
