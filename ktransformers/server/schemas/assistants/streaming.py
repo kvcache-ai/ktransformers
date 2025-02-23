@@ -73,7 +73,7 @@ class RunStepDelta(Object):
 
 class Done():
     def to_stream_reply(self):
-        return f"event: done\ndata: [DONE]\n\n"
+        return f"data: [DONE]\n\n"
 
 
 async def check_client_link(request: Request, async_events: AsyncIterable):
