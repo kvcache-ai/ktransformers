@@ -649,9 +649,12 @@ class KDeepseekV2Model(BaseInjectedModule):
         if per_layer_prefill_flag:
             causal_mask = None
         else:
-            causal_mask = self._update_causal_mask(
-                attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-            )
+            if os.name == 'nt':
+                causal_mask = self._update_causal_mask(
+                    attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+                )
+            else:
+                causal_mask = None
 
         # embed positions
         hidden_states = inputs_embeds
