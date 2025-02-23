@@ -209,6 +209,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp ${CMAKE
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
 if (WIN32)
     include_directories("$ENV{CUDA_PATH}/include")
+    add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
 elseif (UNIX)
     if (KTRANSFORMERS_USE_CUDA)
         find_package(CUDA REQUIRED)
