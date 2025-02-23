@@ -58,7 +58,7 @@ def local_chat(
     gguf_path: str | None = None,
     max_new_tokens: int = 300,
     cpu_infer: int = Config().cpu_infer,
-    use_cuda_graph: bool = True,
+    use_cuda_graph: bool = False,
     prompt_file : str | None = None,
     mode: str = "normal",
     force_think: bool = False,
@@ -160,6 +160,9 @@ def local_chat(
         input_tensor = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, return_tensors="pt"
         )
+
+        # input_tensor = torch.tensor([[0, 6657, 84646]], device=input_tensor.device)
+
         if force_think:
             token_thinks = torch.tensor([tokenizer.encode("<think>\\n",add_special_tokens=False)],device=input_tensor.device)
             input_tensor = torch.cat(
@@ -181,4 +184,6 @@ def local_chat(
 
 
 if __name__ == "__main__":
-    fire.Fire(local_chat)
+    # fire.Fire(local_chat)
+    # local_chat(model_path="/mnt/data/model/DeepSeek-R1", gguf_path="/mnt/data/model/DeepseekV3-q4km-gguf", cpu_infer=33, force_think=False)
+    local_chat(model_path="/mnt/data/model/Moonlight-16B-A3B-Instruct", gguf_path="/mnt/data/model/Moonlight-16B-A3B-Instruct-GGUF", cpu_infer=33, force_think=False)
