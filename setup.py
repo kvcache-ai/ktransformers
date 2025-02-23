@@ -350,6 +350,7 @@ elif MUSA_HOME is not None:
         "at::cuda": "at::musa",
         "#include <ATen/cuda/CUDAContext.h>": "#include \"torch_musa/csrc/aten/musa/MUSAContext.h\"",
         "#include <c10/cuda/CUDAGuard.h>": "#include \"torch_musa/csrc/core/MUSAGuard.h\"",
+        "nv_bfloat16": "mt_bfloat16",
         }).run()
     ops_module = MUSAExtension('KTransformersOps', [
         'ktransformers/ktransformers_ext/cuda_musa/custom_gguf/dequant.mu',
