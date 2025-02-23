@@ -159,7 +159,7 @@ class KExpertsCPU(KExpertsBase):
         down_ptr = ctypes.addressof(
             ctypes.cast(self.down.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents
         )
-        # print(self.gate_qtype, self.up_qtype, self.down_qtype)
+        #print(self.gate_type, self.up_type, self.down_type)
         n_routed_experts = self.n_routed_experts
         # n_routed_experts = len(self.orig_module)
         moe_config = MOEConfig(
@@ -450,9 +450,9 @@ class KExpertsTorch(KExpertsBase):
                     self.up[i] = w["up"][i, ...].to(device=device, dtype=self.dtype)
                     self.down[i] = w["down"][i, ...].to(device=device, dtype=self.dtype)
         
-        self.up = torch.cat(self.gate, dim=0)
+        self.up = torch.cat(self.up, dim=0)
         self.gate = torch.cat(self.gate, dim=0)
-        self.down = torch.cat(self.gate, dim=0)
+        self.down = torch.cat(self.down, dim=0)
         return 
 
     def unload(self):
