@@ -441,10 +441,10 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             # mla_wrapper run output: [tokens, self.num_heads, self.kv_lora_rank]
             # attn_output [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # out_absorb [self.num_heads, self.v_head_dim, self.kv_lora_rank]
-            attn_output = attn_output.transpose(1, 2)
-            attn_output = torch.matmul(attn_output, out_absorb.mT)
+            attn_output = attn_output.transpose(1, 2) # [bsz, self.num_heads, q_len, self.kv_lora_rank]
+            attn_output = torch.matmul(attn_output, out_absorb.mT) # [bsz, self.num_heads, q_len, self.v_head_dim]
             
-            attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim)
+            attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim) # [bsz, q_len, self.num_heads * self.v_head_dim]
             attn_output = self.o_proj(attn_output)
 
             return attn_output, None, past_key_value
