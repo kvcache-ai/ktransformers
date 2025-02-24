@@ -11,6 +11,7 @@ class CompletionCreate(BaseModel):
     stream: bool = False
     temperature: Optional[float]
     top_p: Optional[float]
+    repetition_penalty: Optional[float]
 
     def get_tokenizer_messages(self):
         if isinstance(self.prompt,List):
