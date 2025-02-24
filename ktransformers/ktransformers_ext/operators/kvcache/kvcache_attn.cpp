@@ -10,6 +10,8 @@
 
 #include "kvcache.h"
 
+#include <chrono>
+
 void KVCache::attention_kvhead_(const uint16_t *q_in_data, ggml_fp16_t *output,
                                 float *attn_lse, int batch_size,
                                 Backend *backend) {

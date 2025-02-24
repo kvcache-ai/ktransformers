@@ -10,6 +10,8 @@
 
 #include "kvcache.h"
 
+#include <chrono>
+
 void KVCache::get_anchor_one_block(ggml_fp16_t *anchor, int layer_id,
                                    int block_idx, Backend *backend) {
     // Timer start
