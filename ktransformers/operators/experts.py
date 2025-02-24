@@ -450,9 +450,9 @@ class KExpertsTorch(KExpertsBase):
                     self.up[i] = w["up"][i, ...].to(device=device, dtype=self.dtype)
                     self.down[i] = w["down"][i, ...].to(device=device, dtype=self.dtype)
         
-        self.up = torch.cat(self.up, dim=0)
-        self.gate = torch.cat(self.gate, dim=0)
-        self.down = torch.cat(self.down, dim=0)
+        self.up = torch.stack(self.up, dim=0)
+        self.gate = torch.stack(self.gate, dim=0)
+        self.down = torch.stack(self.down, dim=0)
         return 
 
     def unload(self):
@@ -501,14 +501,16 @@ class KExpertsTorch(KExpertsBase):
 
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.expert_num):
+            if not expert_mask[expert_idx].any():
+                continue
             idx, top_x = torch.where(expert_mask[expert_idx])
             # Index the correct hidden states and compute the expert hidden state for
             # the current expert. We need to make sure to multiply the output hidden
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states_cpu[None, top_x].reshape(-1, hidden_dim)
-            G = current_state @ self.gate[expert_idx,...].T
+            G = current_state @ self.gate[expert_idx].T
             A = self.act_fn(G)
-            U = current_state @ self.up[expert_idx,...].T
+            U = current_state @ self.up[expert_idx].T
             H = A * U  # Element-wise multiplication
             current_hidden_states = H @ self.down[expert_idx,...].T * routing_weights_cpu[top_x, idx, None]
             # However `index_add_` only support torch tensors for indexing so we'll use
