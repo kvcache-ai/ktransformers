@@ -9,9 +9,8 @@ class CompletionCreate(BaseModel):
     model: str
     prompt: str | List[str]
     stream: bool = False
-    temperature: Optional[float]
-    top_p: Optional[float]
-    frequency_penalty: Optional[float]
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
 
     def get_tokenizer_messages(self):
         if isinstance(self.prompt,List):
