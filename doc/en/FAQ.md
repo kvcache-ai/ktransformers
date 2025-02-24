@@ -55,7 +55,7 @@ You have to set `--cpu_infer` to the number of cores you want to use. The more c
 
 ### Q: My DeepSeek-R1 model is not thinking.
 
-According to DeepSeek, you need to enforce the model to initiate its response with "\<think>\n" at the beginning of every output by passing the arg `--force_think true `.
+According to DeepSeek, you need to enforce the model to initiate its response with "\<think>\n" at the beginning of every output by passing the arg `--force_think True `.
 
 ### Q: Loading gguf error
 
@@ -63,9 +63,12 @@ Make sure you:
 1. Have the `gguf` file in the `--gguf_path` directory.
 2. The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.
 3. The folder name it self should not end with `.gguf`, eg. `Deep-gguf` is correct, `Deep.gguf` is wrong.
+4. The file itself is not corrupted; you can verify this by checking that the sha256sum matches the one from huggingface, modelscope, or hf-mirror.
 
 ### Q: Version `GLIBCXX_3.4.30' not found
 The detailed error:
 >ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)
 
 Running `conda install -c conda-forge libstdcxx-ng` can solve the problem.
+
+

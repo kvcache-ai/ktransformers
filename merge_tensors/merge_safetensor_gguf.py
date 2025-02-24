@@ -3,7 +3,6 @@
 import os
 # insert the path of the project
 import sys
-sys.path.insert(0, "/home/azure/ktransformers")
 import argparse
 import torch
 from ktransformers.util.custom_gguf import GGUFLoader, translate_name_to_gguf
