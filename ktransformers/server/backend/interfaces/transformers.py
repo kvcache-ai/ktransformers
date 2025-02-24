@@ -340,7 +340,7 @@ class TransformersInterface(BackendInterfaceBase):
                                              sm_scale=(self.model.config.qk_rope_head_dim + self.model.config.qk_nope_head_dim) ** (-0.5), q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
                 next_token = self.decode_one_tokens()
                 self.profiler.inc("decode")
-                if next_token == self.tokenizer.eos_token_id:
+                if next_token == self.tokenizer.eos_token_id or "<|im_end|>" == self.tokenizer.decode(next_token):
                     assert self.args.batch_size == 1
                     break
                 yield self.append_new_tokens(next_token)

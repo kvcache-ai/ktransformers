@@ -5,3 +5,4 @@ torch>=2.3.0
 packaging
 cpufeature
 protobuf
+tiktoken
