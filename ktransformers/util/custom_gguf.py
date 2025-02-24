@@ -25,6 +25,7 @@ import os
 from enum import IntEnum
 import torch
 import KTransformersOps
+from .custom_loader import SafeTensorLoader
 
 class GGMLQuantizationType(IntEnum):
     F32     = 0
@@ -168,12 +169,15 @@ class GGUFLoader:
     gguf_path: str
     tensor_file_map: dict # {tensor_name: tensor_file_path}
     gguf_file_meta: dict
+    safetensor_loader: SafeTensorLoader
     def __init__(self, gguf_path: str):
         # Check dir exist
         if not os.path.exists(gguf_path):
             raise FileNotFoundError(f"GGUF dir not found: {gguf_path}")
         if os.path.isfile(gguf_path):
             gguf_path = os.path.dirname(gguf_path)
+
+        self.safetensor_loader = None
         
         self.tensor_info = {}
         self.gguf_path = gguf_path
@@ -181,7 +185,13 @@ class GGUFLoader:
         self.file_data_map = {}
         self.gguf_file_meta = {}
         self.tensor_device_map = {}
-        
+
+        # I know this is ugly, but I don't want to change the original code too much
+        # TODO: merge gguf load and other loads.
+        safetensor_loader = SafeTensorLoader(gguf_path)
+        if safetensor_loader.tensor_file_map:
+            self.safetensor_loader = safetensor_loader
+            return
         # Walk through all the .gguf files in the directory
         found_gguf = False
         for root, dirs, files in os.walk(gguf_path):
@@ -288,6 +298,13 @@ class GGUFLoader:
         itemsize = int(np.empty([], dtype = item_type).itemsize)
         return mmap_data[offset : offset + itemsize * item_count]
     
+    def get_undequanted_tensor_and_ggml_type(self, name):
+        t = self.tensor_info[name]
+        data = self.get_mmap_tensor(name)
+        ggml_type = t["ggml_type"]
+        data = torch.from_numpy(data)
+        return data, ggml_type
+
     def load_expert_tensor(self, name, data, expert_id, elements_per_expert, device = "gpu")->torch.Tensor:
         t = self.tensor_info[name]
         if device.lower() == "cpu":
