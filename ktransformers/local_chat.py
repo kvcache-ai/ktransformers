@@ -64,7 +64,6 @@ def local_chat(
     force_think: bool = False,
 ):
 
-
     torch.set_grad_enabled(False)
 
     Config().cpu_infer = cpu_infer
