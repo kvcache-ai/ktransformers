@@ -103,7 +103,7 @@ Getting started with KTransformers is simple! Follow the steps below to set up a
 
 ### 📥 Installation
 
-To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/).
+To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
 
 
 <h2 id="tutorial">📃 Brief Injection Tutorial</h2>

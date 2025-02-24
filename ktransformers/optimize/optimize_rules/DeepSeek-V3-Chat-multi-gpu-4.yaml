@@ -188,7 +188,7 @@
 # !!!Do remember 'close' cuda graph if you are using marlin expert.!!!
 # !!!KExpertsTorch is untested, we don't have enough VRAM.!!!
 
-# # GPU 0: layers 3–4
+# GPU 0: layers 3–4
 # - match:
 #     name: "^model\\.layers\\.([3-4])\\.mlp\\.experts$"
 #   replace:
@@ -363,11 +363,20 @@
       generate_device: "cuda:2"
       prefill_device: "cuda:2"
 
-# don't inject lm_head if already inject marlin experts
-
-# For final modules (model.norm and lm_head), ensure they are on GPU 3 (as in your original config)
 - match:
-    name: "(^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.)|(^model\\.norm)|(^lm_head)"
+    name: "^lm_head"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda:3"
+      prefill_device: "cuda:3"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+# For final modules (model.norm), ensure they are on GPU 3 (as in your original config)
+- match:
+    name: "(^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.)|(^model\\.norm)"
   replace:
     class: "default"
     kwargs:
