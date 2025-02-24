@@ -1,3 +1,4 @@
+# Adopted from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/inference/kernel.py
 from typing import Tuple
 
 import torch
