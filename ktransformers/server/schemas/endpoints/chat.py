@@ -27,7 +27,7 @@ class ChatCompletionCreate(BaseModel):
     stream : bool = False
     temperature: Optional[float]
     top_p: Optional[float]
-    repetition_penalty: Optional[float]
+    frequency_penalty: Optional[float]
 
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]

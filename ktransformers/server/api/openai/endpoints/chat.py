@@ -28,13 +28,13 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
     if create.stream:
         async def inner():
             chunk = ChatCompletionChunk(id=id,object='chat.completion.chunk',created=int(time()))
-            async for token in interface.inference(input_message,id,create.temperature,create.top_p,create.repetition_penalty):
+            async for token in interface.inference(input_message,id,create.temperature,create.top_p):
                 chunk.set_token(token)
                 yield chunk
         return chat_stream_response(request,inner())
     else:
         comp = ChatCompletionObject(id=id,object='chat.completion',created=int(time()))
         comp.usage = Usage(completion_tokens=1, prompt_tokens=1, total_tokens=2)
-        async for token in interface.inference(input_message,id,create.temperature,create.top_p,create.repetition_penalty):
+        async for token in interface.inference(input_message,id,create.temperature,create.top_p):
             comp.append_token(token)
         return comp
