@@ -72,3 +72,24 @@ The detailed error:
 Running `conda install -c conda-forge libstdcxx-ng` can solve the problem.
 
 
+### Q: When running the bfloat16 moe model, the data shows NaN
+The detailed error:
+```shell
+Traceback (most recent call last):
+  File "/root/ktransformers/ktransformers/local_chat.py", line 183, in <module>
+    fire.Fire(local_chat)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 135, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 468, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 684, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/root/ktransformers/ktransformers/local_chat.py", line 177, in local_chat
+    generated = prefill_and_generate(
+  File "/root/ktransformers/ktransformers/util/utils.py", line 204, in prefill_and_generate
+    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
+  File "/root/ktransformers/ktransformers/util/utils.py", line 128, in decode_one_tokens
+    next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
+RuntimeError: probability tensor contains either `inf`, `nan` or element < 0
+```
+**SOLUTION**: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.
