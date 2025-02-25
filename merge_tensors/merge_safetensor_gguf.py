@@ -3,6 +3,7 @@
 import os
 # insert the path of the project
 import sys
+sys.path.insert(0, "/home/azure/ktransformers")
 import argparse
 import torch
 from ktransformers.util.custom_gguf import GGUFLoader, translate_name_to_gguf
@@ -180,7 +181,7 @@ def write_combined_tensor(target_tensor_map: dict, output_path: str, gguf_loader
         
         output_file = os.path.join(output_path, f"model-{shard_idx:05}-of-{total_shards:05}.safetensors")
         print(f"Saving layer {layer_num} to {output_file}")
-        print(tensors.keys())
+        # print(tensors.keys())
         save_file(tensors, output_file)
         shard_idx += 1
     

@@ -6,3 +6,4 @@ packaging
 cpufeature
 protobuf
 tiktoken
+blobfile
