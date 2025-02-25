@@ -76,12 +76,10 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "replace" in rule:
             replace_meta = rule["replace"]
             if module_name not in out_data:
-                
                 out_data[module_name]={"key": translated_name,
                                     "class": replace_meta["class"] if "class" in replace_meta else "default",
                                     # "device": replace_meta["device"] if "device" in replace_meta else default_device,
                                     "kwargs": copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict()}
-                print("after:", out_data[module_name])
             else:
                 if out_data[module_name]["class"] == "default":
                     out_data[module_name]["class"] = replace_meta["class"] if "class" in replace_meta else "default"
@@ -98,7 +96,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
                        "prefill_device": default_device}
         }
 
-    print(out_data[module_name])
+    #print(out_data[module_name])
     #input()
 
     if recursive:
@@ -125,7 +123,6 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
     
     optimize_config = dict()
-    print("###########Default device###########", default_device)
     gen_optimize_config(module, optimize_config, rule_list, default_device = default_device)
     
     model_config = translate_model_config(model_config)

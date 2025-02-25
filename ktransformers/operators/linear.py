@@ -21,13 +21,14 @@ if torch.cuda.is_available():
 from ktransformers.util.custom_gguf import GGUFLoader
 from ktransformers.util.utils import InferenceState
 
-from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
-    MarlinWorkspace,
-    marlin_quantize,
-    GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_MIN_THREAD_K,
-    GPTQ_MARLIN_MAX_PARALLEL,
-)
+if not torch.xpu.is_available():
+    from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
+        MarlinWorkspace,
+        marlin_quantize,
+        GPTQ_MARLIN_MIN_THREAD_N,
+        GPTQ_MARLIN_MIN_THREAD_K,
+        GPTQ_MARLIN_MAX_PARALLEL,
+    )
 
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig

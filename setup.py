@@ -36,6 +36,8 @@ try:
 except ImportError:
     MUSA_HOME=None
 
+KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
+
 class CpuInstructInfo:
     CPU_INSTRUCT = os.getenv("CPU_INSTRUCT", "NATIVE")
     FANCY = "FANCY"
@@ -151,8 +153,8 @@ class VersionInfo:
             backend_version = f"cu{self.get_cuda_bare_metal_version(CUDA_HOME)}"
         elif MUSA_HOME is not None:
             backend_version = f"mu{self.get_musa_bare_metal_version(MUSA_HOME)}"
-        elif torch.xpu.is_available()
-            backend_version = f"mu{xpu+}"
+        elif torch.xpu.is_available():
+            backend_version = f"xpu"
         else:
             raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
         package_version = f"{flash_version}+{backend_version}torch{torch_version}{cpu_instruct}"
@@ -250,8 +252,10 @@ class CMakeBuild(BuildExtension):
             cmake_args += ["-DKTRANSFORMERS_USE_CUDA=ON"]
         elif MUSA_HOME is not None:
             cmake_args += ["-DKTRANSFORMERS_USE_MUSA=ON"]
+        elif KTRANSFORMERS_BUILD_XPU:
+            cmake_args += ["-DKTRANSFORMERS_USE_XPU=ON"]
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME or MUSA_HOME are not set.")
 
         build_args = []
         if "CMAKE_ARGS" in os.environ:
@@ -370,16 +374,26 @@ elif MUSA_HOME is not None:
             ]
         }
     )
-elif torch.xpu.is_available()
-    ops_module = None  #XPUExtension is not available now.
+elif torch.xpu.is_available():#XPUExtension is not available now.
+    pass
 else:
     raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
 
-setup(
-    version=VersionInfo().get_package_version(),
-    cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
-    ext_modules=[
-        CMakeExtension("cpuinfer_ext"),
-        ops_module,
-    ] 
-)
+if torch.xpu.is_available(): 
+    setup(
+        version=VersionInfo().get_package_version(),
+        cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+        ext_modules=[
+            CMakeExtension("cpuinfer_ext"),
+        ] 
+    )
+else:
+    setup(
+        version=VersionInfo().get_package_version(),
+        cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+        ext_modules=[
+            CMakeExtension("cpuinfer_ext"),
+            ops_module,
+        ] 
+    )
+
