@@ -122,7 +122,7 @@ class MLAWrapper():
         if kv_indices is None:
             assert self.max_batch_size == 1
             kv_indices = self.kv_indices_buf
-
+        
         self.wrapper.plan(
             qo_indptr,
             kv_indptr,
@@ -189,7 +189,14 @@ class MLAWrapperSingleton():
     @classmethod
     def reset_buffer(cls):
         for device, wrapper in cls.wrappers.items():
-            wrapper.qo_indptr_buf[1] = 1
+            wrapper.qo_indptr_buf[1] = 1 # assert max_batch_size=1 here.
+            
+    @classmethod
+    def update_buffer(cls, max_pages):
+        for device, wrapper in cls.wrappers.items():
+            wrapper.kv_indptr_buf[1] = max_pages # assert max_batch_size=1 here.
+            wrapper.kv_indices_buf = torch.arange(0, max_pages, dtype=torch.int32, device=device)
+            wrapper.wrapper._kv_indices_buf = wrapper.kv_indices_buf
             
 
 if __name__ == "__main__":
