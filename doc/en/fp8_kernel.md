@@ -1,4 +1,4 @@
-# FP8 Linear Kernel for DeepSeek-V3
+# FP8 Linear Kernel for DeepSeek-V3/R1
 
 ## Overview
 The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:
@@ -17,8 +17,8 @@ So those who are persuing the best performance can use the FP8 linear kernel for
 ### Using Pre-Merged Weights
 
 Pre-merged weights are available on Hugging Face:
-[KVCache-ai/DeepSeek-V3](https://huggingface.co/KVCache-ai/DeepSeek-V3)
-[KVCache-ai/DeepSeek-R1](https://huggingface.co/KVCache-ai/DeepSeek-R1)
+[KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid](https://huggingface.co/KVCache-ai/DeepSeek-V3)
+[KVCache-ai/DeepSeek-R1-GGML-FP8-Hybrid](https://huggingface.co/KVCache-ai/DeepSeek-R1)
 > Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.
 
 
@@ -29,7 +29,7 @@ pip install -U huggingface_hub
 # Optional: Use HF Mirror for faster downloads in special area.
 # export HF_ENDPOINT=https://hf-mirror.com 
 
-huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3 --local-dir <local_dir>
+huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid --local-dir <local_dir>
 ```
 ### Using merge scripts
 If you got local DeepSeek-R1/V3 fp8 safetensors and q4km gguf weights, you can merge them using the following scripts.
