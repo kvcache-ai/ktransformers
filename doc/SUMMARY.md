@@ -5,10 +5,11 @@
 - [Installation Guide](en/install.md)
 
 # Tutorial 
-- [Deepseek-R1/V3 Show Case](en/DeepseekR1_V3_tutorial.md)
+- [Deepseek-R1/V3 Show Case/Tutorial](en/DeepseekR1_V3_tutorial.md)
 - [Why KTransformers So Fast](en/deepseek-v2-injection.md)
 - [Injection Tutorial](en/injection_tutorial.md)
 - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md)
+- [Use FP8 GPU Kernel](en/fp8_kernel.md)
 # Server
   - [Server](en/api/server/server.md)
   - [Website](en/api/server/website.md)
