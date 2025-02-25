@@ -1,7 +1,7 @@
 [build-system]
 requires = [
   "setuptools",
-  "torch >= 2.3.0", 
+  "torch >= 2.3.0",
   "ninja",
   "packaging",
   "cpufeature"
@@ -12,25 +12,7 @@ build-backend = "setuptools.build_meta"
 
 name = "ktransformers"
 
-dynamic = ["version"]
-
-dependencies = [
-  "torch >= 2.3.0",
-  "transformers == 4.43.2",
-  "fastapi >= 0.111.0",
-  "uvicorn >= 0.30.1",
-  "langchain >= 0.2.0",
-  "blessed >= 1.20.0",
-  "accelerate >= 0.31.0",
-  "sentencepiece >= 0.1.97",
-  "setuptools",
-  "ninja",
-  "wheel",
-  "colorlog",
-  "build",
-  "fire",
-  "protobuf"
-]
+dynamic = ["version", "dependencies"]
 
 requires-python = ">=3.10"
 

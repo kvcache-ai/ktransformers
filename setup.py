@@ -67,17 +67,17 @@ class VersionInfo:
     def get_rocm_bare_metal_version(self, rocm_dir):
         """
         Get the ROCm version from the ROCm installation directory.
-        
+
         Args:
             rocm_dir: Path to the ROCm installation directory
-        
+
         Returns:
             A string representation of the ROCm version (e.g., "63" for ROCm 6.3)
         """
         try:
             # Try using rocm_agent_enumerator to get version info
             raw_output = subprocess.check_output(
-                [rocm_dir + "/bin/rocminfo", "--version"], 
+                [rocm_dir + "/bin/rocminfo", "--version"],
                 universal_newlines=True,
                 stderr=subprocess.STDOUT)
             # Extract version number from output
@@ -90,7 +90,7 @@ class VersionInfo:
         except (subprocess.CalledProcessError, FileNotFoundError):
             # If rocminfo --version fails, try alternative methods
             pass
-        
+
         try:
             # Try reading version from release file
             with open(os.path.join(rocm_dir, "share/doc/hip/version.txt"), "r") as f:
@@ -100,7 +100,7 @@ class VersionInfo:
                 return rocm_version
         except (FileNotFoundError, IOError):
             pass
-        
+
         # If all else fails, try to extract from directory name
         dir_name = os.path.basename(os.path.normpath(rocm_dir))
         match = re.search(r'rocm-(\d+\.\d+)', dir_name)
@@ -109,7 +109,7 @@ class VersionInfo:
             version = parse(version_str)
             rocm_version = f"{version.major}{version.minor}"
             return rocm_version
-        
+
         # Fallback to extracting from hipcc version
         try:
             raw_output = subprocess.check_output(
@@ -124,7 +124,7 @@ class VersionInfo:
                 return rocm_version
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
-        
+
         # If we still can't determine the version, raise an error
         raise ValueError(f"Could not determine ROCm version from directory: {rocm_dir}")
 
@@ -319,7 +319,7 @@ class CMakeBuild(BuildExtension):
             raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
         # log cmake_args
         print("CMake args:", cmake_args)
-        
+
         build_args = []
         if "CMAKE_ARGS" in os.environ:
             cmake_args += [
@@ -398,6 +398,23 @@ class CMakeBuild(BuildExtension):
             ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
         )
 
+dependencies = [
+    "torch >= 2.3.0",
+    "transformers == 4.43.2",
+    "fastapi >= 0.111.0",
+    "uvicorn >= 0.30.1",
+    "langchain >= 0.2.0",
+    "blessed >= 1.20.0",
+    "accelerate >= 0.31.0",
+    "sentencepiece >= 0.1.97",
+    "setuptools",
+    "ninja",
+    "wheel",
+    "colorlog",
+    "build",
+    "fire",
+    "protobuf"
+]
 if CUDA_HOME is not None or ROCM_HOME is not None:
     ops_module = CUDAExtension('KTransformersOps', [
         'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
@@ -415,6 +432,7 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
         }
     )
 elif MUSA_HOME is not None:
+    dependencies.remove("torch >= 2.3.0")
     SimplePorting(cuda_dir_path="ktransformers/ktransformers_ext/cuda", mapping_rule={
         # Common rules
         "at::cuda": "at::musa",
@@ -443,6 +461,7 @@ else:
 setup(
     name=VersionInfo.PACKAGE_NAME,
     version=VersionInfo().get_package_version(),
+    install_requires=dependencies,
     cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
     ext_modules=[
         CMakeExtension("cpuinfer_ext"),
