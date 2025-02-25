@@ -26,6 +26,7 @@ from enum import IntEnum
 import torch
 if not torch.xpu.is_available():
     import KTransformersOps
+from .custom_loader import SafeTensorLoader
 import ctypes
 
 class GGMLQuantizationType(IntEnum):
@@ -129,6 +130,7 @@ GGML_BLOCK_SIZES = {
     "Q5_K": 2 + 2 + 12 + 256 // 8 + 256 // 2,
     "Q6_K": 256 // 2 + 256 // 4 + 256 // 16 + 2,
     "IQ4_XS": 2 + 2 + 256 // 2 + 256 // 64,
+    "FP8": 1,
 }
 
 GGML_ELEMENTS_PER_BLOCK = {
@@ -144,6 +146,7 @@ GGML_ELEMENTS_PER_BLOCK = {
     "Q5_K": 256,
     "Q6_K": 256,
     "IQ4_XS": 256,
+    "FP8": 1,
 }
 
 DATA_TYPES = {
@@ -160,6 +163,7 @@ DATA_TYPES = {
     "uint64": 10,
     "int64": 11,
     "float64": 12,
+    "FP8": 13,
 }
 
 class GGUFLoader:
@@ -167,12 +171,15 @@ class GGUFLoader:
     gguf_path: str
     tensor_file_map: dict # {tensor_name: tensor_file_path}
     gguf_file_meta: dict
+    safetensor_loader: SafeTensorLoader
     def __init__(self, gguf_path: str):
         # Check dir exist
         if not os.path.exists(gguf_path):
             raise FileNotFoundError(f"GGUF dir not found: {gguf_path}")
         if os.path.isfile(gguf_path):
             gguf_path = os.path.dirname(gguf_path)
+
+        self.safetensor_loader = None
         
         self.tensor_info = {}
         self.gguf_path = gguf_path
@@ -180,7 +187,13 @@ class GGUFLoader:
         self.file_data_map = {}
         self.gguf_file_meta = {}
         self.tensor_device_map = {}
-        
+
+        # I know this is ugly, but I don't want to change the original code too much
+        # TODO: merge gguf load and other loads.
+        safetensor_loader = SafeTensorLoader(gguf_path)
+        if safetensor_loader.tensor_file_map:
+            self.safetensor_loader = safetensor_loader
+            return
         # Walk through all the .gguf files in the directory
         found_gguf = False
         for root, dirs, files in os.walk(gguf_path):
@@ -287,6 +300,13 @@ class GGUFLoader:
         itemsize = int(np.empty([], dtype = item_type).itemsize)
         return mmap_data[offset : offset + itemsize * item_count]
     
+    def get_undequanted_tensor_and_ggml_type(self, name):
+        t = self.tensor_info[name]
+        data = self.get_mmap_tensor(name)
+        ggml_type = t["ggml_type"]
+        data = torch.from_numpy(data)
+        return data, ggml_type
+
     def load_expert_tensor(self, name, data, expert_id, elements_per_expert, device = "cuda", target_dtype = torch.get_default_dtype())->torch.Tensor:
         t = self.tensor_info[name]
         if device.lower() == "cpu":
@@ -419,6 +439,9 @@ def read_value(f, data_type):
     elif data_type == DATA_TYPES["array"]:
         elem_type, count = struct.unpack("<IQ", f.read(4 + 8))
         return [read_value(f, elem_type) for _ in range(count)]
+
+    elif data_type == DATA_TYPES["FP8"]:
+        return struct.unpack("<B", f.read(1))[0]
 
     else:
         raise NotImplementedError(f"Data type {data_type} not implemented")

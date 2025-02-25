@@ -1,0 +1,34 @@
+{
+    "name": "Ktrans Dev Container",
+    "privileged": true,
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "..",
+        "args": {
+            "http_proxy": "${env:http_proxy}",
+            "https_proxy": "${env:https_proxy}",
+        }
+    },
+    "runArgs": [
+        "--network=host",
+        "--gpus",
+        "all"
+        // "--gpu all"
+    ],
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "mounts": [
+        "source=/mnt/data,target=/mnt/incontainer,type=bind,consistency=cached"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+            ],
+            "settings": {
+                "terminal.integrated.shell.linux": "/bin/bash",
+                "cmake.configureOnOpen": true,
+                "cmake.generator": "Ninja"
+            }
+        }
+    }
+}
