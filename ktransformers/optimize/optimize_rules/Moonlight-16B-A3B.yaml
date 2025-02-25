@@ -1,7 +1,7 @@
 - match:
     class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3
+    class: ktransformers.operators.RoPE.RotaryEmbeddingV3
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
@@ -53,6 +53,17 @@
       generate_op: "KExpertsCPU"
       out_device: "cuda"
   recursive: False # don't recursively inject submodules of this module
+# if want to use more VRAM, use experts Marlin and disable CUDA Graph(disable CUDA Graph may cause low performance)
+#- match:
+#    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+#  replace:
+#    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
+#    kwargs:
+#      prefill_device: "cuda"
+#      prefill_op: "KExpertsTorch"
+#      generate_device: "cuda"
+#      generate_op: "KExpertsMarlin"
+#  recursive: False # don't recursively inject submodules of this module
 - match:
     name: "^model\\.layers\\..*\\.self_attn$"
   replace:
@@ -60,7 +71,6 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
 - match:
     name: "^model$"
   replace:

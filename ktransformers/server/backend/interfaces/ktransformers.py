@@ -14,6 +14,7 @@ from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.local_chat import custom_models, default_optimize_rules
 from ktransformers.util.utils import get_device
+from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled, MLAWrapperSingleton
 
 
 warm_uped = False
@@ -186,6 +187,8 @@ class KTransformersInterface(TransformersInterface):
             input_ids = input_ids.to("cpu")
         inputs_embeds = self.model.model.embed_tokens(input_ids).to(device)
         torch.cuda.set_device(device)
+        if flashinfer_enabled:
+            MLAWrapperSingleton.need_plan_all()
         if self.use_static_cache:
             logits = self.model(
                 inputs_embeds=inputs_embeds,
@@ -198,6 +201,8 @@ class KTransformersInterface(TransformersInterface):
         else:
             logits = self.model(inputs_embeds=inputs_embeds, return_dict=False)[0]
 
+        if flashinfer_enabled:
+            MLAWrapperSingleton.reset_buffer()
         self.prepare_logits_wrapper(input_ids, device)
         next_token = self.logits_to_token(logits[0, -1, :])
         yield self.append_new_tokens(next_token)
