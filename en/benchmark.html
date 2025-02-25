@@ -1,0 +1,273 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Benchmark - Ktransformers</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/benchmark.md" title="Suggest an edit" aria-label="Suggest an edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h2 id="benchmark"><a class="header" href="#benchmark">Benchmark</a></h2>
+<p>To conduct a quick and convenient check, we have employed a simple Python script available <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/tests">here</a> to assess the precision of our <strong><a href="https://github.com/kvcache-ai/ktransformers">ktransformers</a></strong> project. For this evaluation, we utilized the same dataset, which was shuffled in a consistent manner and limited to the first 1,000 data points, to test our implementation across a variety of CPU kernels, MLA kernels, and quantization formats.</p>
+<p>We selected the DeepSeek-V3 model in its bf16, int8, and q4km versions for this test. The MMLU dataset, which can be found <a href="https://huggingface.co/datasets/cais/mmlu">here</a>, was used (we selected all datasets and shuffled them with a fixed random seed).</p>
+<p><strong>!!! However, we skipped the few-shot part and only chose the first 1,000 data points for a quick check.</strong> Please note that this approach may result in results that are not consistent with the technical report of DeepSeek-V3. And the test of R1 and further more tests are on going.</p>
+<p>To verify our results, we chose <a href="https://cloud.siliconflow.cn/models">cloud service platform</a> as baseline. All tests were conducted using the same script and datasets, allowing us to make a preliminary assessment of our project's precision.</p>
+<p>We set the argument <code>temperature=0.6</code>, and to simplify the test process, we skipped the few-shot part and used the following prompt: <code>There is a single choice question. Answer the question by replying A, B, C, D. No other answers are accepted. Just the letter. \nQuestion: {question}\nA. {option_a}\nB. {option_b}\nC. {option_c}\nD. {option_d}\nAnswer: '</code>. For more details, please refer to the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/tests/mmlu_test.py">script</a>.</p>
+<p>Given that we have only tested 1,000 cases, which provides only a preliminary judgment, some fluctuations in the results are reasonable. We selected all datasets and shuffled them with a fixed random seed to ensure consistency.</p>
+<h2 id="some-details"><a class="header" href="#some-details">Some Details</a></h2>
+<ul>
+<li>
+<p>The bf16 model of DeepSeek-V3 is available <a href="https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16/tree/main">here</a> (you may convert it to gguf by llama.cpp). The q4km model can be found <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a>.</p>
+</li>
+<li>
+<p>The optimization YAML file is located <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">here</a>. For the GEMM Kernel, you can change <code>KLinearMarlin</code> to <code>KLinearTorch</code>.</p>
+</li>
+<li>
+<p>To switch the MLA Kernel from Triton to Torch, you can check and modify <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py">this file</a>, specifically by using the <code>forward_windows</code> method.</p>
+</li>
+<li>
+<p>When attempting to conduct the bf16 test (both CPU Weight and GPU Weight), you may encounter issues stemming from older versions of g++ and as, particularly when using Ubuntu 20 or earlier versions. To facilitate a smoother experience and enable you to reproduce our results, we have provided a development container. This container offers a pre-configured environment tailored for this purpose. However, please note that the container does not have the ktrans package installed. Therefore, you may still need to manually install certain packages to ensure everything runs smoothly.</p>
+<ul>
+<li>You may config the model mount dir in <code>devcontainer/devcontainer.json</code>, check the <code>"mouts":</code> config.</li>
+</ul>
+</li>
+</ul>
+<h2 id="the-result-table"><a class="header" href="#the-result-table">The Result Table</a></h2>
+<div class="table-wrapper"><table><thead><tr><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>
+<tr><td>DataSet</td><td>CPU Weight Format</td><td>CPU Kernel</td><td>GPU Weight Format</td><td>GEMM Kernel</td><td>MLA Kernel</td><td><a href="https://cloud.siliconflow.cn/models">Siliconflow</a><br></td><td>Ktrans Point</td></tr>
+<tr><td>MMLU<br><br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>1</td><td>bf16</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>torch</td><td>81.6</td><td>81.9</td></tr>
+<tr><td>2</td><td>q8_0</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>torch</td><td>81.6</td><td>83.1</td></tr>
+<tr><td>3</td><td>q4km</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>triton</td><td>81.6</td><td>81.4</td></tr>
+<tr><td>4</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 8</td><td>marlin</td><td>triton</td><td>81.6</td><td>81.1</td></tr>
+<tr><td>5</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>81.6</td><td>81</td></tr>
+<tr><td>6</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>81.6</td><td>81.5</td></tr>
+<tr><td>MMLU-pro</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>1</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>57.7</td><td>57.6</td></tr>
+<tr><td>2</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>57.7</td><td>57.5</td></tr>
+<tr><td>HumanEval</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
+<tr><td>GSM8K</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
+</tbody></table>
+</div>
+<p><strong>The details for each case are listed below</strong>:</p>
+<p>By default, The MLA kernel uses triton in linux and torch in windows. But we need to test torch in linux, so we manually modify the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py#L592">file</a>. Just get rid of all the if branch and force it to use <code>self.forward_windows</code></p>
+<ul>
+<li>MMLU test
+<ol>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a> change all the <code>KLinearMarlin</code> to <code>KLinearTorch</code> (just find all the usage in this file). The source weight comes from <a href="https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16">there</a> (you need to use llama.cpp to convert it to gguf)</li>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122">1</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136">2</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137">3</a> (note in 3, change the path to your local weight file path). The weight file for q8_0 is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q8_0">here</a></li>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122">1</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136">2</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137">3</a> (note in 3, change the path to your local weight file path). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You don't need to change the source code as they both use q4km. But note the yaml file <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29">here</a> and <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18">here</a>, below these lines you need to add <code>num_bits: 8</code> (in other words: add this kwargs to all that use <code>KLinearMarlin</code>). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+<li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
+</ol>
+</li>
+<li>MMLU-pro test
+<ol>
+<li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
+<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+</ol>
+</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../en/V3-success.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../en/V3-success.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
