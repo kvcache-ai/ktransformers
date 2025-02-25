@@ -333,7 +333,7 @@ class TransformersInterface(BackendInterfaceBase):
         for i in range(1, self.args.max_new_tokens):
             
             with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
-                if i > 1 and flashinfer_enabled:
+                if flashinfer_enabled:
                     MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
                                              num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
                                              head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size,
