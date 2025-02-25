@@ -9,7 +9,7 @@
 - [Why KTransformers So Fast](en/deepseek-v2-injection.md)
 - [Injection Tutorial](en/injection_tutorial.md)
 - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md)
-- [Using FP8 GPU Kernel](../merge_tensors/README.md)
+- [Use FP8 GPU Kernel](en/fp8_kernel.md)
 # Server
   - [Server](en/api/server/server.md)
   - [Website](en/api/server/website.md)

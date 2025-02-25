@@ -54,7 +54,7 @@ default_optimize_rules = {
 
 def local_chat(
     model_path: str | None = None,
-    optimize_rule_path: str = None,
+    optimize_config_path: str = None,
     gguf_path: str | None = None,
     max_new_tokens: int = 300,
     cpu_infer: int = Config().cpu_infer,
@@ -95,12 +95,12 @@ def local_chat(
                 config, trust_remote_code=True, attn_implementation="flash_attention_2"
             )
 
-    if optimize_rule_path is None:
+    if optimize_config_path is None:
         if config.architectures[0] in default_optimize_rules:
             print("using default_optimize_rule for", config.architectures[0])
-            optimize_rule_path = default_optimize_rules[config.architectures[0]]
+            optimize_config_path = default_optimize_rules[config.architectures[0]]
         else:
-            optimize_rule_path = input(
+            optimize_config_path = input(
                 "please input the path of your rule file(yaml file containing optimize rules):"
             )
 
@@ -108,7 +108,7 @@ def local_chat(
         gguf_path = input(
             "please input the path of your gguf file(gguf file in the dir containing input gguf file must all belong to current model):"
         )
-    optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config)
+    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
     
     try:
             model.generation_config = GenerationConfig.from_pretrained(model_path)
