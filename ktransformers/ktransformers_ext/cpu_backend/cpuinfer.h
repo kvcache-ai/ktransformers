@@ -17,7 +17,10 @@
 #include <queue>
 #include <thread>
 #include <vector>
-#include "cuda_runtime.h"
+//only include for CUDA backend
+#ifdef __CUDA_ARCH__
+    #include "cuda_runtime.h"
+#endif
 
 #include "backend.h"
 #include "task_queue.h"
@@ -58,10 +61,14 @@ class CPUInfer {
     }
 
     void submit_with_cuda_stream(intptr_t user_cuda_stream, std::pair<intptr_t, intptr_t> params) {
-        void (*func)(void*) = (void (*)(void*))params.first;
-        void* args = (void*)params.second;
-        *((CPUInfer**)args) = this;
-        cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)func, args);
+        #ifdef __CUDA_ARCH__            
+            void (*func)(void*) = (void (*)(void*))params.first;
+            void* args = (void*)params.second;
+            *((CPUInfer**)args) = this;
+            cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)func, args);
+        #else
+            submit(params);
+        #endif
     }
 
     static void sync_(void* cpu_infer_ptr) {
@@ -70,7 +77,11 @@ class CPUInfer {
     }
 
     void sync_with_cuda_stream(intptr_t user_cuda_stream) {
-        cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)this);
+        #ifdef __CUDA_ARCH__
+            cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)this);
+        #else
+            sync();
+        #endif
     }
 
    public:

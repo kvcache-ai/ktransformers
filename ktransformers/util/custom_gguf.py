@@ -24,7 +24,9 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+
+if torch.cuda.is_available():
+    import KTransformersOps
 
 class GGMLQuantizationType(IntEnum):
     F32     = 0
@@ -296,7 +298,7 @@ class GGUFLoader:
             #values = torch.from_numpy(values).to(device = device)
         else:
             values = GGML_DEQUANTIZE[ggml_name](data)
-            values = torch.from_numpy(values)
+            values = torch.from_numpy(values).to(device)
         values = values.view(shape[::-1])
         if "attn_q" in name and self.gguf_file_meta['general.architecture'] in ["llama"]:
             n_head = self.gguf_file_meta['llama.attention.head_count']

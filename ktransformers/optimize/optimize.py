@@ -76,10 +76,12 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "replace" in rule:
             replace_meta = rule["replace"]
             if module_name not in out_data:
+                
                 out_data[module_name]={"key": translated_name,
                                     "class": replace_meta["class"] if "class" in replace_meta else "default",
                                     # "device": replace_meta["device"] if "device" in replace_meta else default_device,
                                     "kwargs": copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict()}
+                print("after:", out_data[module_name])
             else:
                 if out_data[module_name]["class"] == "default":
                     out_data[module_name]["class"] = replace_meta["class"] if "class" in replace_meta else "default"
@@ -96,14 +98,14 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
                        "prefill_device": default_device}
         }
 
-    #print(out_data[module_name])
+    print(out_data[module_name])
     #input()
 
     if recursive:
         for name, child in module._modules.items():
             if child is not None:
                 child_prefix = prefix + name + "."
-                gen_optimize_config(child, out_data, rule_list, child_prefix)
+                gen_optimize_config(child, out_data, rule_list, child_prefix, default_device = default_device)
     
 
 def translate_model_config(model_config: PretrainedConfig):
@@ -115,10 +117,15 @@ def translate_model_config(model_config: PretrainedConfig):
 
 
 def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = "cuda:0"):
+    if 'cuda' in default_device:
+        default_device = "cuda:0"
+    elif 'xpu' in default_device:
+        default_device = "xpu:0"
     with open(rule_file, 'r', encoding='utf-8') as f:
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
     
     optimize_config = dict()
+    print("###########Default device###########", default_device)
     gen_optimize_config(module, optimize_config, rule_list, default_device = default_device)
     
     model_config = translate_model_config(model_config)

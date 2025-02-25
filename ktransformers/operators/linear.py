@@ -14,15 +14,20 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import ctypes
 import torch
 from torch import Tensor, nn
-import KTransformersOps 
+
+if torch.cuda.is_available():
+    import KTransformersOps 
+    
 from ktransformers.util.custom_gguf import GGUFLoader
 from ktransformers.util.utils import InferenceState
-from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
-    MarlinWorkspace,
-    marlin_quantize,
-    GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_MAX_PARALLEL,
-)
+
+if torch.cuda.is_available():
+    from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
+        MarlinWorkspace,
+        marlin_quantize,
+        GPTQ_MARLIN_MIN_THREAD_N,
+        GPTQ_MARLIN_MAX_PARALLEL,
+    )
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig
 from abc import ABC, abstractmethod

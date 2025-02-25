@@ -13,7 +13,7 @@
     kwargs:
       generate_device: "xpu"
       prefill_device: "xpu"
-      generate_op: "KLinearMarlin"
+      generate_op: "KLinearTorch"
       prefill_op: "KLinearTorch"
 - match:
     name: "^model\\.layers\\..*\\.mlp$"

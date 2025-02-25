@@ -68,6 +68,10 @@ def local_chat(
     torch.set_grad_enabled(False)
 
     Config().cpu_infer = cpu_infer
+    
+    if device != "cuda":
+        Warning("cuda graph is only supported on cuda device, please set use_cuda_graph to False")
+        use_cuda_graph = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
@@ -108,7 +112,7 @@ def local_chat(
         gguf_path = input(
             "please input the path of your gguf file(gguf file in the dir containing input gguf file must all belong to current model):"
         )
-    optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config)
+    optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config, default_device=device)
     
     try:
             model.generation_config = GenerationConfig.from_pretrained(model_path)

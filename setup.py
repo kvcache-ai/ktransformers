@@ -129,7 +129,10 @@ class VersionInfo:
 
     def get_package_version(self, full_version=False):
         flash_version = self.get_flash_version()
-        package_version = f"{str(flash_version)}+cu{self.get_cuda_bare_metal_version(CUDA_HOME)}torch{self.get_torch_version()}{self.get_cpu_instruct()}"
+        if torch.cuda.is_available():
+            package_version = f"{str(flash_version)}+cu{self.get_cuda_bare_metal_version(CUDA_HOME)}torch{self.get_torch_version()}{self.get_cpu_instruct()}"
+        elif torch.xpu.is_available():
+            package_version = f"{str(flash_version)}+xpu{self.get_torch_version()}{self.get_cpu_instruct()}"
         if full_version:
             return package_version
         if not VersionInfo.FORCE_BUILD:
@@ -291,17 +294,14 @@ class CMakeBuild(BuildExtension):
             ["cmake", "--build", ".", *build_args], cwd=build_temp, check=True
         )
 
-
-setup(
-    version=VersionInfo().get_package_version(),
-    cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+if torch.cuda.is_available():
     ext_modules=[
         CMakeExtension("cpuinfer_ext"),
         CUDAExtension('KTransformersOps', [
             'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
             'ktransformers/ktransformers_ext/cuda/binding.cpp',
             'ktransformers/ktransformers_ext/cuda/gptq_marlin/gptq_marlin.cu'
-        ],
+        ] ,
         extra_compile_args={
                 'cxx': ['-O3'],
                 'nvcc': [
@@ -312,4 +312,13 @@ setup(
             }
         )
     ]
+elif torch.xpu.is_available():
+    ext_modules=[
+        CMakeExtension("cpuinfer_ext"),
+    ]
+
+setup(
+    version=VersionInfo().get_package_version(),
+    cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+    ext_modules=ext_modules,    
 )
