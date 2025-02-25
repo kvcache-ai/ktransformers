@@ -180,7 +180,7 @@ def local_chat(
             )
         else:
             generated = prefill_and_generate(
-                    model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
+                model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
             )
 
 
