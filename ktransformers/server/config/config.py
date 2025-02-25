@@ -69,6 +69,7 @@ class Config(metaclass=Singleton):
         self.server: dict = cfg.get("server", {})
         self.server_ip = self.server.get("ip", "0.0.0.0")
         self.server_port = self.server.get("port", 9016)
+        self.api_key = self.server.get("api_key", "")
 
         # db configs
         self.db_configs: dict = cfg.get("db", {})
