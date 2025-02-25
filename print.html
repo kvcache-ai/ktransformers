@@ -484,7 +484,12 @@ python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-062
 </li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#how-to-run">How to Run</a>
 <ul>
-<li><a href="en/DeepseekR1_V3_tutorial.html#v022-longer-context">V0.2.2 longer context</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a>
+<ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#longer-context">longer context</a></li>
+<li><a href="en/DeepseekR1_V3_tutorial.html#fp8-kernel">FP8 kernel</a></li>
+</ul>
+</li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a>
 <ul>
 <li><a href="en/DeepseekR1_V3_tutorial.html#single-socket-version-32-cores">Single socket version (32 cores)</a></li>
@@ -643,7 +648,9 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
-<h3 id="v022-longer-context"><a class="header" href="#v022-longer-context">V0.2.2 longer context</a></h3>
+<h3 id="v022-longer-context--fp8-kernel"><a class="header" href="#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a></h3>
+<h4 id="longer-context"><a class="header" href="#longer-context">longer context</a></h4>
+<p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.</p>
 <p>If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:</p>
 <pre><code>- match:
     name: "^model\\.layers\\..*\\.self_attn$"
@@ -654,6 +661,19 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
       prefill_device: "cuda"
       absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
 </code></pre>
+<h4 id="fp8-kernel"><a class="header" href="#fp8-kernel">FP8 kernel</a></h4>
+<p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
+<ul>
+<li><strong>FP8 GPU Kernel Integration</strong>: FP8 linear layer acceleration kernels integrated in KTransformers</li>
+<li><strong>Hybrid Quantization Architecture</strong>:
+<ul>
+<li>Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)</li>
+<li>Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)</li>
+</ul>
+</li>
+</ul>
+<p>So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.</p>
+<p>The detailed guide is <a href="en/./fp8_kernel.html">here</a>.</p>
 <h3 id="v02--v021-showcase"><a class="header" href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>
@@ -1245,7 +1265,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <li>For DeepSeek-R1/V3, each expert moved to the GPU will consume approximately 6GB of VRAM.</li>
 <li>The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="fp8-linear-kernel-for-deepseek-v3"><a class="header" href="#fp8-linear-kernel-for-deepseek-v3">FP8 Linear Kernel for DeepSeek-V3</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="fp8-linear-kernel-for-deepseek-v3r1"><a class="header" href="#fp8-linear-kernel-for-deepseek-v3r1">FP8 Linear Kernel for DeepSeek-V3/R1</a></h1>
 <h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
 <p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
 <ul>
@@ -1264,8 +1284,8 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
 <h3 id="using-pre-merged-weights"><a class="header" href="#using-pre-merged-weights">Using Pre-Merged Weights</a></h3>
 <p>Pre-merged weights are available on Hugging Face:
-<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3</a>
-<a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1</a></p>
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid</a>
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1-GGML-FP8-Hybrid</a></p>
 <blockquote>
 <p>Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.</p>
 </blockquote>
@@ -1275,7 +1295,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 # Optional: Use HF Mirror for faster downloads in special area.
 # export HF_ENDPOINT=https://hf-mirror.com 
 
-huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3 --local-dir &lt;local_dir&gt;
+huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid --local-dir &lt;local_dir&gt;
 </code></pre>
 <h3 id="using-merge-scripts"><a class="header" href="#using-merge-scripts">Using merge scripts</a></h3>
 <p>If you got local DeepSeek-R1/V3 fp8 safetensors and q4km gguf weights, you can merge them using the following scripts.</p>
