@@ -21,7 +21,8 @@ KTransformers 是一个以 Python 为中心的灵活框架，其核心是可扩�
 
 <h2 id="Updates">🔥 更新</h2>
 
-* **2025 年 2 月 15 日**：KTransformers V0.2.1: 长上下文(从4K到8K，24GB VRAM) & 稍快的速度(+15%)(最快 16 Tokens/s)，文档请参见 [这里](./doc/en/DeepseekR1_V3_tutorial.md) 和 [在线指南](https://kvcache-ai.github.io/ktransformers/) 。
+* **2025 年 2 月 15 日**：为DeepSeek-V3/R1支持[FP8 GPU内核](./doc/en/fp8_kernel.md); 支持更长的上下文 (从8K到128K仅用24GB VRAM).
+* **2025 年 2 月 15 日**：长上下文(从4K到8K，24GB VRAM) & 稍快的速度(+15%)(最快 16 Tokens/s)，文档请参见 [这里](./doc/en/DeepseekR1_V3_tutorial.md) 和 [在线指南](https://kvcache-ai.github.io/ktransformers/) 。
 * **2025 年 2 月 10 日**：支持 Deepseek-R1 和 V3 在单个（24GB VRAM）/多 GPU 和 382G DRAM 上运行，速度提升高达 3~28 倍。详细教程请参见 [这里](./doc/en/DeepseekR1_V3_tutorial.md)。
 * **2024 年 8 月 28 日**：支持 InternLM2.5-7B-Chat-1M 模型下的 1M 上下文，使用 24GB 的 VRAM 和 150GB 的 DRAM。详细教程请参见 [这里](./doc/en/long_context_tutorial.md)。
 * **2024 年 8 月 28 日**：将 DeepseekV2 所需的 VRAM 从 21G 降低到 11G。
@@ -68,11 +69,11 @@ https://github.com/user-attachments/assets/4c6a8a38-05aa-497d-8eb1-3a5b3918429c
 
 </p>
 
-<h3>在仅 24GB VRAM 的桌面上进行 1M 上下文本地推理</h3>
-<p align="center">
+<!-- <h3>在仅 24GB VRAM 的桌面上进行 1M 上下文本地推理</h3>
+<p align="center"> -->
 
-https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
-
+<!-- https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12 -->
+<!-- 
 * **1M 上下文 InternLM 2.5 7B**：以全 bf16 精度运行，使用 24GB VRAM 和 150GB DRAM，可在本地桌面设置中实现。在 1M "针在干草堆中" 测试中达到 92.88% 的成功率，在 128K NIAH 测试中达到 100%。
 
 <p align="center">
@@ -89,7 +90,7 @@ https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
 
 * **增强的速度**：使用稀疏注意力，通过 llamafile 内核实现 1M 上下文生成 16.91 tokens/s 的速度。这种方法比 llama.cpp 的全注意力方法快 10 倍以上。
 
-* **灵活的稀疏注意力框架**：提供了一个灵活的块稀疏注意力框架，用于 CPU 卸载解码。与 SnapKV、Quest 和 InfLLm 兼容。更多信息请参见 [这里](./doc/en/long_context_introduction.md)。
+* **灵活的稀疏注意力框架**：提供了一个灵活的块稀疏注意力框架，用于 CPU 卸载解码。与 SnapKV、Quest 和 InfLLm 兼容。更多信息请参见 [这里](./doc/en/long_context_introduction.md)。 -->
 
 <strong>更多高级功能即将推出，敬请期待！</strong>
 
@@ -116,7 +117,7 @@ KTransformers 的核心是一个用户友好的、基于模板的注入框架。
 ```python
 with torch.device("meta"):
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config)
+optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
 ...
 generated = prefill_and_generate(model, tokenizer, input_tensor.cuda(), max_new_tokens=1000)
 ```
@@ -151,7 +152,7 @@ YAML 文件中的每个规则都有两部分：`match` 和 `replace`。`match` �
 
 <h2 id="ack">致谢和贡献者</h2>
 
-KTransformer 的开发基于 Transformers 提供的灵活和多功能框架。我们还受益于 GGUF/GGML、Llamafile 和 Marlin 等高级内核。我们计划通过向上游贡献我们的修改来回馈社区。
+KTransformer 的开发基于 Transformers 提供的灵活和多功能框架。我们还受益于 GGUF/GGML、Llamafile 、 Marlin、sglang和flashinfer 等高级内核。我们计划通过向上游贡献我们的修改来回馈社区。
 
 KTransformer 由清华大学 <a href="https://madsys.cs.tsinghua.edu.cn/">MADSys group</a> 小组的成员以及 <a href="http://approaching.ai/">Approaching.AI</a> 的成员积极维护和开发。我们欢迎新的贡献者加入我们，使 KTransformer 更快、更易于使用。
 
