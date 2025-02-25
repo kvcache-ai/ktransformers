@@ -330,6 +330,8 @@ class GGUFLoader:
             values = GGML_DEQUANTIZE[ggml_name](data)
             values = torch.from_numpy(values.copy())
 
+        if ggml_name == "BF16":
+            values = values.view(torch.bfloat16)
         values = values.view(shape[-2::-1])
 
         return values
