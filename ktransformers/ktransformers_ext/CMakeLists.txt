@@ -207,7 +207,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pybind11 ${CMAKE_
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
-
 if (WIN32)
     include_directories("$ENV{CUDA_PATH}/include")
 elseif (UNIX)
@@ -248,7 +247,6 @@ message(STATUS "ALL_SOURCES: ${ALL_SOURCES}")
 
 pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
 target_link_libraries(${PROJECT_NAME} PRIVATE llama)
-
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{CUDA_PATH}/lib/x64/cudart.lib")#CUDA::cudart
 elseif(UNIX)
