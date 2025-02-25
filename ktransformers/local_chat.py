@@ -30,6 +30,7 @@ from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
 from ktransformers.util.utils import prefill_and_generate
 from ktransformers.server.config.config import Config
+from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
 
 custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
@@ -63,7 +64,6 @@ def local_chat(
     force_think: bool = False,
     device: str = "cuda",
 ):
-
 
     torch.set_grad_enabled(False)
 
@@ -172,12 +172,16 @@ def local_chat(
         if mode == 'long_context':
             assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
             "please change max_seq_len in  ~/.ktransformers/config.yaml"
-        torch.set_default_dtype(
-            torch.bfloat16
-        )  # TODO: Remove this, replace dtype using config
-        generated = prefill_and_generate(
-            model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode, force_think
-        )
+        
+        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or "DeepseekV3ForCausalLM") and flashinfer_enabled:
+            generated = prefill_and_generate(
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
+                use_flashinfer_mla = True, num_heads = config.num_attention_heads, head_dim_ckv = config.kv_lora_rank, head_dim_kpe = config.qk_rope_head_dim, q_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
+            )
+        else:
+            generated = prefill_and_generate(
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
+            )
 
 
 if __name__ == "__main__":

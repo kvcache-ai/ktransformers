@@ -133,6 +133,8 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     gguf_loader=GGUFLoader(gguf_path)
     with torch.device("meta"):
         inject(module, optimize_config, model_config, gguf_loader)
+    # pre load lm_head because its big inter result
+    load_weights(module.lm_head, gguf_loader, "lm_head.")
     load_weights(module, gguf_loader)
     module.gguf_loader = gguf_loader
     del_meta(module)

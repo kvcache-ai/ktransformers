@@ -11,8 +11,7 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
-def permute_rows(q_w: torch.Tensor, w_ref: torch.Tensor, group_size: int):
-    assert q_w.shape == w_ref.shape
+def permute_rows(q_w: torch.Tensor, group_size: int):
 
     orig_device = q_w.device
     k_size, _ = q_w.shape
@@ -26,10 +25,8 @@ def permute_rows(q_w: torch.Tensor, w_ref: torch.Tensor, group_size: int):
 
     g_idx = g_idx[rand_perm].contiguous()
     q_w = q_w[rand_perm, :].contiguous()
-    w_ref = w_ref[rand_perm, :].contiguous()
 
     return (
-        w_ref.to(device=orig_device),
         q_w.to(device=orig_device),
         g_idx.to(device=orig_device),
         rand_perm.to(device=orig_device),
@@ -69,9 +66,6 @@ def quantize_weights(w: torch.Tensor, num_bits: int, group_size: int,
     q_w += half_q_val
     q_w = torch.clamp(q_w, 0, max_q_val)
 
-    # Compute ref (dequantized)
-    w_ref = (q_w - half_q_val).half() * s
-
     # Restore original shapes
     if group_size < size_k:
 
@@ -82,7 +76,6 @@ def quantize_weights(w: torch.Tensor, num_bits: int, group_size: int,
             return w
 
         q_w = reshape_w(q_w)
-        w_ref = reshape_w(w_ref)
 
     s = s.reshape((-1, size_n)).contiguous()
 
@@ -95,10 +88,9 @@ def quantize_weights(w: torch.Tensor, num_bits: int, group_size: int,
         ), "For act_order, groupsize = {} must be less than size_k = {}".format(
             group_size, size_k)
 
-        w_ref, q_w, g_idx, rand_perm = permute_rows(q_w, w_ref, group_size)
+        q_w, g_idx, rand_perm = permute_rows(q_w, group_size)
 
     return (
-        w_ref.to(device=orig_device),
         q_w.to(device=orig_device),
         s.to(device=orig_device),
         g_idx.to(device=orig_device),

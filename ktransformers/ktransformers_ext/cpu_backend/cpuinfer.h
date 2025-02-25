@@ -17,9 +17,10 @@
 #include <queue>
 #include <thread>
 #include <vector>
-//only include for CUDA backend
-#ifdef __CUDA_ARCH__
-    #include "cuda_runtime.h"
+#ifdef KTRANSFORMERS_USE_CUDA
+#include "vendors/cuda.h"
+#elif KTRANSFORMERS_USE_MUSA
+#include "vendors/musa.h"
 #endif
 
 #include "backend.h"
