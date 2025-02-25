@@ -206,20 +206,21 @@ Note KExpertsTorch is untested.</p>
 </li>
 </ol>
 <h3 id="q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them"><a class="header" href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></h3>
-<p>Use the <code>--optimize_rule_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
+<p>Use the <code>--optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
 <blockquote>
 <p>Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.</p>
 </blockquote>
 <h3 id="q-how-to-get-the-best-performance"><a class="header" href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></h3>
 <p>You have to set <code>--cpu_infer</code> to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.</p>
 <h3 id="q-my-deepseek-r1-model-is-not-thinking"><a class="header" href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></h3>
-<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think true </code>.</p>
+<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think True </code>.</p>
 <h3 id="q-loading-gguf-error"><a class="header" href="#q-loading-gguf-error">Q: Loading gguf error</a></h3>
 <p>Make sure you:</p>
 <ol>
 <li>Have the <code>gguf</code> file in the <code>--gguf_path</code> directory.</li>
 <li>The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.</li>
 <li>The folder name it self should not end with <code>.gguf</code>, eg. <code>Deep-gguf</code> is correct, <code>Deep.gguf</code> is wrong.</li>
+<li>The file itself is not corrupted; you can verify this by checking that the sha256sum matches the one from huggingface, modelscope, or hf-mirror.</li>
 </ol>
 <h3 id="q-version-glibcxx_3430-not-found"><a class="header" href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></h3>
 <p>The detailed error:</p>
@@ -227,6 +228,28 @@ Note KExpertsTorch is untested.</p>
 <p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
 </blockquote>
 <p>Running <code>conda install -c conda-forge libstdcxx-ng</code> can solve the problem.</p>
+<h3 id="q-when-running-the-bfloat16-moe-model-the-data-shows-nan"><a class="header" href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></h3>
+<p>The detailed error:</p>
+<pre><code class="language-shell">Traceback (most recent call last):
+  File "/root/ktransformers/ktransformers/local_chat.py", line 183, in &lt;module&gt;
+    fire.Fire(local_chat)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 135, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 468, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 684, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/root/ktransformers/ktransformers/local_chat.py", line 177, in local_chat
+    generated = prefill_and_generate(
+  File "/root/ktransformers/ktransformers/util/utils.py", line 204, in prefill_and_generate
+    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
+  File "/root/ktransformers/ktransformers/util/utils.py", line 128, in decode_one_tokens
+    next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
+RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
+</code></pre>
+<p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
+<h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
+<p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
 
                     </main>
 

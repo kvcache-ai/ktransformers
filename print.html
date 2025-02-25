@@ -174,6 +174,7 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 <h2 id="Updates"><a class="header" href="#Updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Feb 25, 2025</strong>: Support <a href="./doc/en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
 <li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is <a href="./en/DeepseekR1_V3_tutorial.html">here</a>.</li>
 <li><strong>Aug 28, 2024</strong>: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is <a href="./en/long_context_tutorial.html">here</a>.</li>
 <li><strong>Aug 28, 2024</strong>: Decrease DeepseekV2's required VRAM from 21G to 11G.</li>
@@ -330,7 +331,7 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 <p><code>--gguf_path</code> (required): Path of a directory containing GGUF files which could that can be downloaded from <a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">Hugging Face</a>. Note that the directory should only contains GGUF of current model, which means you need one separate directory for each model.</p>
 </li>
 <li>
-<p><code>--optimize_rule_path</code> (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the <a href="en/ktransformers/optimize/optimize_rules">ktransformers/optimize/optimize_rules</a> directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.</p>
+<p><code>--optimize_config_path</code> (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the <a href="en/ktransformers/optimize/optimize_rules">ktransformers/optimize/optimize_rules</a> directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.</p>
 </li>
 <li>
 <p><code>--max_new_tokens</code>: Int (default=1000). Maximum number of new tokens to generate.</p>
@@ -483,6 +484,7 @@ python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-062
 </li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#how-to-run">How to Run</a>
 <ul>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v022-longer-context">V0.2.2 longer context</a></li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a>
 <ul>
 <li><a href="en/DeepseekR1_V3_tutorial.html#single-socket-version-32-cores">Single socket version (32 cores)</a></li>
@@ -641,6 +643,17 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
+<h3 id="v022-longer-context"><a class="header" href="#v022-longer-context">V0.2.2 longer context</a></h3>
+<p>If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:</p>
+<pre><code>- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
+</code></pre>
 <h3 id="v02--v021-showcase"><a class="header" href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>
@@ -906,6 +919,7 @@ From the <code>modeling_deepseek.py</code> file, we can see the specific impleme
 <tr><td>Linear</td><td>KTransformersLinear</td><td>KLinearMarlin</td><td>Marlin as backend</td></tr>
 <tr><td></td><td></td><td>KLinearTorch</td><td>pytorch as backend</td></tr>
 <tr><td></td><td></td><td>KLinearCPUInfer</td><td>llamafile as backend</td></tr>
+<tr><td></td><td></td><td>KLinearFP8</td><td>Triton fp8_gemm kernel. Requires GPU be able to caluculate fp8 data</td></tr>
 <tr><td>experts</td><td>KTransformersExperts</td><td>KExpertsTorch</td><td>pytorch as backend</td></tr>
 <tr><td></td><td></td><td>KExpertsMarlin</td><td>Marlin as backend</td></tr>
 <tr><td></td><td></td><td>KExpertsCPU</td><td>llamafile as backend</td></tr>
@@ -1231,6 +1245,70 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <li>For DeepSeek-R1/V3, each expert moved to the GPU will consume approximately 6GB of VRAM.</li>
 <li>The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.</li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="fp8-linear-kernel-for-deepseek-v3"><a class="header" href="#fp8-linear-kernel-for-deepseek-v3">FP8 Linear Kernel for DeepSeek-V3</a></h1>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
+<ul>
+<li><strong>FP8 GPU Kernel Integration</strong>: FP8 linear layer acceleration kernels integrated in KTransformers</li>
+<li><strong>Hybrid Quantization Architecture</strong>:
+<ul>
+<li>Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)</li>
+<li>Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)</li>
+</ul>
+</li>
+</ul>
+<p>So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.</p>
+<h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
+<p>✅ Hybrid Precision Architecture (FP8 + GGML)
+✅ Memory Optimization (~19GB VRAM usage)</p>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<h3 id="using-pre-merged-weights"><a class="header" href="#using-pre-merged-weights">Using Pre-Merged Weights</a></h3>
+<p>Pre-merged weights are available on Hugging Face:
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3</a>
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1</a></p>
+<blockquote>
+<p>Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.</p>
+</blockquote>
+<p>Download Pre-Merged Weights</p>
+<pre><code class="language-shell">pip install -U huggingface_hub
+
+# Optional: Use HF Mirror for faster downloads in special area.
+# export HF_ENDPOINT=https://hf-mirror.com 
+
+huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3 --local-dir &lt;local_dir&gt;
+</code></pre>
+<h3 id="using-merge-scripts"><a class="header" href="#using-merge-scripts">Using merge scripts</a></h3>
+<p>If you got local DeepSeek-R1/V3 fp8 safetensors and q4km gguf weights, you can merge them using the following scripts.</p>
+<pre><code class="language-shell">python convert_model.py \
+  --safetensor_path &lt;fp8_safetensor_path&gt; \
+  --gguf_path &lt;q4km_gguf_folder_path&gt; \
+  --output_path &lt;merged_output_path&gt;
+</code></pre>
+<ul>
+<li><code>--safetensor_path</code>:	input path of safetensor file(<a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/tree/main">Download</a>).</li>
+<li><code>--gguf_path</code>: input path of gguf folder (<a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">Download</a>).</li>
+<li><code>--output_path</code>: output path of merged file.</li>
+</ul>
+<h3 id="execution-notes"><a class="header" href="#execution-notes">Execution Notes</a></h3>
+<p>Launch local_chat.py with custom quantized experts</p>
+<pre><code class="language-shell">python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-V3 \
+  --gguf_path &lt;merged_weights_folder&gt; \
+  --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-fp8-linear-ggml-experts.yaml \
+  --cpu_infer &lt;cpu_cores + 1&gt;
+</code></pre>
+<h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
+<p>⚠️ Hardware Requirements</p>
+<ul>
+<li>Recommended minimum 19GB available VRAM for FP8 kernel.</li>
+<li>Requires GPU with FP8 support (e.g., 4090)</li>
+</ul>
+<p>⏳ First-Run Optimization
+JIT compilation causes longer initial execution (subsequent runs retain optimized speed).</p>
+<p>🔄 Temporary Interface
+Current weight loading implementation is provisional - will be refined in future versions</p>
+<p>📁 Path Specification
+Despite hybrid quantization, merged weights are stored as .safetensors - pass the containing folder path to <code>--gguf_path</code></p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
 <p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
 <img src="en/api/server/server-arch.png" height="600" alt="Server architecture">
@@ -1389,20 +1467,21 @@ Note KExpertsTorch is untested.</p>
 </li>
 </ol>
 <h3 id="q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them"><a class="header" href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></h3>
-<p>Use the <code>--optimize_rule_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
+<p>Use the <code>--optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
 <blockquote>
 <p>Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.</p>
 </blockquote>
 <h3 id="q-how-to-get-the-best-performance"><a class="header" href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></h3>
 <p>You have to set <code>--cpu_infer</code> to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.</p>
 <h3 id="q-my-deepseek-r1-model-is-not-thinking"><a class="header" href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></h3>
-<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think true </code>.</p>
+<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think True </code>.</p>
 <h3 id="q-loading-gguf-error"><a class="header" href="#q-loading-gguf-error">Q: Loading gguf error</a></h3>
 <p>Make sure you:</p>
 <ol>
 <li>Have the <code>gguf</code> file in the <code>--gguf_path</code> directory.</li>
 <li>The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.</li>
 <li>The folder name it self should not end with <code>.gguf</code>, eg. <code>Deep-gguf</code> is correct, <code>Deep.gguf</code> is wrong.</li>
+<li>The file itself is not corrupted; you can verify this by checking that the sha256sum matches the one from huggingface, modelscope, or hf-mirror.</li>
 </ol>
 <h3 id="q-version-glibcxx_3430-not-found"><a class="header" href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></h3>
 <p>The detailed error:</p>
@@ -1410,6 +1489,28 @@ Note KExpertsTorch is untested.</p>
 <p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
 </blockquote>
 <p>Running <code>conda install -c conda-forge libstdcxx-ng</code> can solve the problem.</p>
+<h3 id="q-when-running-the-bfloat16-moe-model-the-data-shows-nan"><a class="header" href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></h3>
+<p>The detailed error:</p>
+<pre><code class="language-shell">Traceback (most recent call last):
+  File "/root/ktransformers/ktransformers/local_chat.py", line 183, in &lt;module&gt;
+    fire.Fire(local_chat)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 135, in Fire
+    component_trace = _Fire(component, args, parsed_flag_args, context, name)
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 468, in _Fire
+    component, remaining_args = _CallAndUpdateTrace(
+  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 684, in _CallAndUpdateTrace
+    component = fn(*varargs, **kwargs)
+  File "/root/ktransformers/ktransformers/local_chat.py", line 177, in local_chat
+    generated = prefill_and_generate(
+  File "/root/ktransformers/ktransformers/util/utils.py", line 204, in prefill_and_generate
+    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
+  File "/root/ktransformers/ktransformers/util/utils.py", line 128, in decode_one_tokens
+    next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
+RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
+</code></pre>
+<p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
+<h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
+<p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
 <div style="break-before: page; page-break-before: always;"></div><h2 id="hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference"><a class="header" href="#hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference">Hello everyone, here is the successfully reproduced environment configuration for your reference:</a></h2>
 <h3 id="case-1"><a class="header" href="#case-1">Case 1</a></h3>
 <ul>

@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Deepseek-R1/V3 Show Case - Ktransformers</title>
+        <title>Deepseek-R1/V3 Show Case/Tutorial - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -191,6 +191,7 @@
 </li>
 <li><a href="#how-to-run">How to Run</a>
 <ul>
+<li><a href="#v022-longer-context">V0.2.2 longer context</a></li>
 <li><a href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a>
 <ul>
 <li><a href="#single-socket-version-32-cores">Single socket version (32 cores)</a></li>
@@ -349,6 +350,17 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
+<h3 id="v022-longer-context"><a class="header" href="#v022-longer-context">V0.2.2 longer context</a></h3>
+<p>If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:</p>
+<pre><code>- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
+</code></pre>
 <h3 id="v02--v021-showcase"><a class="header" href="#v02--v021-showcase">V0.2 &amp; V0.2.1 Showcase</a></h3>
 <h4 id="single-socket-version-32-cores"><a class="header" href="#single-socket-version-32-cores">Single socket version (32 cores)</a></h4>
 <p>Our local_chat test command is:</p>

@@ -222,6 +222,7 @@ From the <code>modeling_deepseek.py</code> file, we can see the specific impleme
 <tr><td>Linear</td><td>KTransformersLinear</td><td>KLinearMarlin</td><td>Marlin as backend</td></tr>
 <tr><td></td><td></td><td>KLinearTorch</td><td>pytorch as backend</td></tr>
 <tr><td></td><td></td><td>KLinearCPUInfer</td><td>llamafile as backend</td></tr>
+<tr><td></td><td></td><td>KLinearFP8</td><td>Triton fp8_gemm kernel. Requires GPU be able to caluculate fp8 data</td></tr>
 <tr><td>experts</td><td>KTransformersExperts</td><td>KExpertsTorch</td><td>pytorch as backend</td></tr>
 <tr><td></td><td></td><td>KExpertsMarlin</td><td>Marlin as backend</td></tr>
 <tr><td></td><td></td><td>KExpertsCPU</td><td>llamafile as backend</td></tr>

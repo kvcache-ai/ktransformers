@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Server - Ktransformers</title>
+        <title>Use FP8 GPU Kernel - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -12,32 +12,32 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../../../favicon.svg">
-        <link rel="shortcut icon" href="../../../favicon.png">
-        <link rel="stylesheet" href="../../../css/variables.css">
-        <link rel="stylesheet" href="../../../css/general.css">
-        <link rel="stylesheet" href="../../../css/chrome.css">
-        <link rel="stylesheet" href="../../../css/print.css" media="print">
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../../../FontAwesome/css/font-awesome.css">
-        <link rel="stylesheet" href="../../../fonts/fonts.css">
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" href="../../../highlight.css">
-        <link rel="stylesheet" href="../../../tomorrow-night.css">
-        <link rel="stylesheet" href="../../../ayu-highlight.css">
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root to javascript -->
         <script>
-            var path_to_root = "../../../";
+            var path_to_root = "../";
             var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../../../toc.js"></script>
+        <script src="../toc.js"></script>
     </head>
     <body>
     <div id="body-container">
@@ -89,7 +89,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../../../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
             </noscript>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -123,13 +123,13 @@
                     <h1 class="menu-title">Ktransformers</h1>
 
                     <div class="right-buttons">
-                        <a href="../../../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
                             <i id="print-button" class="fa fa-print"></i>
                         </a>
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/api/server/server.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/fp8_kernel.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -158,40 +158,80 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
-<p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
-<img src="server-arch.png" height="600" alt="Server architecture">
-<h2 id="api"><a class="header" href="#api">API</a></h2>
-<p>The Server provides model inference services externally through a RESTful API, with two methods of interaction: ChatCompletion and Assistant.</p>
+                        <h1 id="fp8-linear-kernel-for-deepseek-v3"><a class="header" href="#fp8-linear-kernel-for-deepseek-v3">FP8 Linear Kernel for DeepSeek-V3</a></h1>
+<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
+<p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
 <ul>
-<li>The ChatCompletion interface requires users to provide all historical dialogues at once, after which the model responds. AI service providers (such as <a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a>) and local inference frameworks (such as <a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a>) both offer the ChatCompletion interface. To ensure compatibility with OpenAI and Ollama, the Server offers APIs that are consistent with theirs. Therefore, applications currently using OpenAI and Ollama can seamlessly switch to our Server. For example: <a href="tabby.html">How to use Tabby and ktransformers locally with a 236B model for code completion?</a>.</li>
-<li>The Assistant is suitable for applications that need to reuse a series of resources and call the model. For instance, in educational applications, developers can create an Assistant named "Second Grade Math Teacher" and set an initial prompt ("You are an experienced second-grade math teacher..."), and upload relevant materials (second grade math textbooks). After creating the Assistant, the application needs to create a Thread to store the dialogues between the user and the model (Message). When calling the model, the application creates a Run to obtain the Assistant's response. Compared to ChatCompletion, the Assistant-enabled Server handles the reuse of conversational contexts and multi-turn dialogues, making model calls in complex scenarios more convenient. The <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> introduces such an Assistant interface, and the Server provides a consistent API.</li>
+<li><strong>FP8 GPU Kernel Integration</strong>: FP8 linear layer acceleration kernels integrated in KTransformers</li>
+<li><strong>Hybrid Quantization Architecture</strong>:
+<ul>
+<li>Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)</li>
+<li>Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)</li>
 </ul>
-<p>These API definitions are located in <code>server/api</code>, and their specific usage can be seen <a href="api.html">here</a>.</p>
-<h2 id="integrating-model-inference-frameworks"><a class="header" href="#integrating-model-inference-frameworks">Integrating Model Inference Frameworks</a></h2>
-<p>The Server uses ktransformers for model calling and inference. It also supports other inference frameworks, such as the already supported <a href="https://huggingface.co/docs/transformers/index">transformers</a>, and plans to support <a href="https://github.com/turboderp/exllamav2">exllamav2</a>. These functionalities are implemented in <code>server/backend</code>.</p>
-<p>The model inference functionalities of the frameworks are abstracted into a base class <code>BackendInterfaceBase</code>. This class includes a function: inference. It takes historical dialogue information messages as input and returns the text result from the model. The inference function adopts an async generator design, allowing the Server to return model responses in a streaming manner.</p>
-<pre><code class="language-python">class BackendInterfaceBase:
-  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
-    ...
+</li>
+</ul>
+<p>So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.</p>
+<h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
+<p>✅ Hybrid Precision Architecture (FP8 + GGML)
+✅ Memory Optimization (~19GB VRAM usage)</p>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
+<h3 id="using-pre-merged-weights"><a class="header" href="#using-pre-merged-weights">Using Pre-Merged Weights</a></h3>
+<p>Pre-merged weights are available on Hugging Face:
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3</a>
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1</a></p>
+<blockquote>
+<p>Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.</p>
+</blockquote>
+<p>Download Pre-Merged Weights</p>
+<pre><code class="language-shell">pip install -U huggingface_hub
+
+# Optional: Use HF Mirror for faster downloads in special area.
+# export HF_ENDPOINT=https://hf-mirror.com 
+
+huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3 --local-dir &lt;local_dir&gt;
 </code></pre>
-<p>This inference function naturally implements the functionality of ChatCompletion because its inputs and outputs are historical dialogues and model responses, respectively. Thus, the ChatCompletion API can directly call the inference function to complete model inference.</p>
-<p>Assistant is more complex than ChatCompletion, requiring the Server to store the related state of the Assistant and call the inference function appropriately. The Server maintains a set of Assistant logic in the database, storing the Assistants, Threads, and Messages created by applications. In memory, the Server maintains a <code>ThreadContext</code> for each Thread, gathering information related to each Thread's Assistant, etc. When a user sends a new Message, the Server calls the get_local_messages function of ThreadContext to obtain messages and then calls the inference function to get the inference results.</p>
-<pre><code class="language-python">class MyThreadContext(ThreadContext):
-    def get_local_messages(self):
-      ...
+<h3 id="using-merge-scripts"><a class="header" href="#using-merge-scripts">Using merge scripts</a></h3>
+<p>If you got local DeepSeek-R1/V3 fp8 safetensors and q4km gguf weights, you can merge them using the following scripts.</p>
+<pre><code class="language-shell">python convert_model.py \
+  --safetensor_path &lt;fp8_safetensor_path&gt; \
+  --gguf_path &lt;q4km_gguf_folder_path&gt; \
+  --output_path &lt;merged_output_path&gt;
 </code></pre>
-<p>Since different model inference frameworks have different historical dialogue input formats, <code>ThreadContext</code> and <code>BackendInterface</code> need to be used in pairs. Besides its own ktransformers, the Server also supports transformers. For integrating other model inference frameworks, refer to the implementations of <code>TransformersInterface</code> and <code>TransformersThreadContext</code> in <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a>.</p>
+<ul>
+<li><code>--safetensor_path</code>:	input path of safetensor file(<a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/tree/main">Download</a>).</li>
+<li><code>--gguf_path</code>: input path of gguf folder (<a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">Download</a>).</li>
+<li><code>--output_path</code>: output path of merged file.</li>
+</ul>
+<h3 id="execution-notes"><a class="header" href="#execution-notes">Execution Notes</a></h3>
+<p>Launch local_chat.py with custom quantized experts</p>
+<pre><code class="language-shell">python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-V3 \
+  --gguf_path &lt;merged_weights_folder&gt; \
+  --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-fp8-linear-ggml-experts.yaml \
+  --cpu_infer &lt;cpu_cores + 1&gt;
+</code></pre>
+<h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
+<p>⚠️ Hardware Requirements</p>
+<ul>
+<li>Recommended minimum 19GB available VRAM for FP8 kernel.</li>
+<li>Requires GPU with FP8 support (e.g., 4090)</li>
+</ul>
+<p>⏳ First-Run Optimization
+JIT compilation causes longer initial execution (subsequent runs retain optimized speed).</p>
+<p>🔄 Temporary Interface
+Current weight loading implementation is provisional - will be refined in future versions</p>
+<p>📁 Path Specification
+Despite hybrid quantization, merged weights are stored as .safetensors - pass the containing folder path to <code>--gguf_path</code></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../../../en/fp8_kernel.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../en/multi-gpu-tutorial.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../../../en/api/server/website.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../en/api/server/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -201,11 +241,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../../../en/fp8_kernel.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../en/multi-gpu-tutorial.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../../../en/api/server/website.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../en/api/server/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
@@ -219,19 +259,19 @@
             window.playground_copyable = true;
         </script>
 
-        <script src="../../../ace.js"></script>
-        <script src="../../../editor.js"></script>
-        <script src="../../../mode-rust.js"></script>
-        <script src="../../../theme-dawn.js"></script>
-        <script src="../../../theme-tomorrow_night.js"></script>
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
 
-        <script src="../../../elasticlunr.min.js"></script>
-        <script src="../../../mark.min.js"></script>
-        <script src="../../../searcher.js"></script>
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
 
-        <script src="../../../clipboard.min.js"></script>
-        <script src="../../../highlight.js"></script>
-        <script src="../../../book.js"></script>
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
 
         <!-- Custom JS scripts -->
 
