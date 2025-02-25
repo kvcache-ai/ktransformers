@@ -21,6 +21,18 @@ from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton
 
 warm_uped = False
 
+def get_compute_capability(device:torch.device = None):
+    if torch.cuda.is_available():
+        if device is None:
+            num_gpus = torch.cuda.device_count()
+            min_compute_capability_major = 100
+            for gpu_id in range(num_gpus):
+                gpu_props = torch.cuda.get_device_properties(gpu_id)
+                min_compute_capability_major = min(min_compute_capability_major, gpu_props.major)
+            return min_compute_capability_major
+        else:
+            return torch.cuda.get_device_properties(device)
+
 def set_module(model, submodule_key, module):
     tokens = submodule_key.split('.')
     sub_tokens = tokens[:-1]
@@ -153,6 +165,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             inputs_embeds = model.model.embed_tokens(inputs.to("cpu"))
         else:
             inputs_embeds = model.model.embed_tokens(inputs.to("cpu")).to(torch_device)
+        if use_flashinfer_mla:
+            MLAWrapperSingleton.need_plan_all()
+            
         logits = model(
             inputs_embeds = inputs_embeds, cache_position=cache_position, past_key_values=past_key_values, return_dict=False, use_cache=True
         )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
@@ -175,6 +190,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         else:
             next_token = torch.argmax(next_token_scores, dim=-1)
         first_token_time = time.time() - start_time
+        
+        if use_flashinfer_mla:
+            MLAWrapperSingleton.reset_buffer()
 
         prefill_count = seq_length
         prefill_time = first_token_time
@@ -192,15 +210,15 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             
         start_time = time.time()
         for i in range(1, max_new_tokens):
+            if use_flashinfer_mla:
+                MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,
+                                             num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
+                                             q_head_dim ** (-0.5), torch.bfloat16, torch.bfloat16)
             global warm_uped
             if use_cuda_graph and ( (warm_uped == True and int(i) == 1) or (warm_uped == False and int(i) == 2) ):
                 warm_uped = True
                 cuda_graph_runner = CUDAGraphRunner()
                 cuda_graph_runner.capture(model, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, torch_device, return_dict=False, use_cache=True)
-            if i > 1 and use_flashinfer_mla:
-                MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,
-                                             num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
-                                             q_head_dim ** (-0.5), torch.bfloat16, torch.bfloat16)
             next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
             inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
             generated_ids[:, cache_position] = next_token.int()
