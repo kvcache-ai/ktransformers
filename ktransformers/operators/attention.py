@@ -435,7 +435,6 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                                         q_nope.dtype,
                                         compressed_kv.dtype)
             attn_output = self.mla_wrapper.run(q_nope, q_pe, compressed_kv, k_pe).view(bsz, q_len, self.num_heads, self.kv_lora_rank)
-
             """
             k = (
                 torch.cat([compressed_kv, k_pe], dim=-1)
@@ -465,7 +464,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             
             attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim) # [bsz, q_len, self.num_heads * self.v_head_dim]
             attn_output = self.o_proj(attn_output)
-
+            
             return attn_output, None, past_key_value
         else:
             if past_key_value is not None:

@@ -177,6 +177,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         else:
             inputs_embeds = model.model.embed_tokens(inputs.to("cpu")).to(torch_device)
         if use_flashinfer_mla:
+            MLAWrapperSingleton.update_buffer(past_key_values.max_pages)
             MLAWrapperSingleton.need_plan_all()
             
         logits = model(
