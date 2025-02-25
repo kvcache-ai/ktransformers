@@ -12,11 +12,11 @@ We set the argument `temperature=0.6`, and to simplify the test process, we skip
 
 Given that we have only tested 1,000 cases, which provides only a preliminary judgment, some fluctuations in the results are reasonable. We selected all datasets and shuffled them with a fixed random seed to ensure consistency.
 
-## Some Detail
+## Some Details
 
 - The bf16 model of DeepSeek-V3 is available [here](https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16/tree/main) (you may convert it to gguf by llama.cpp). The q4km model can be found [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M).
     
-- The optimization YAML file is located [here](https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules). For the Matrix MUL Kernel, you can change `KLinearMarlin` to `KLinearTorch`.
+- The optimization YAML file is located [here](https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules). For the GEMM Kernel, you can change `KLinearMarlin` to `KLinearTorch`.
     
 - To switch the MLA Kernel from Triton to Torch, you can check and modify [this file](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py), specifically by using the `forward_windows` method.
     
@@ -29,15 +29,31 @@ Given that we have only tested 1,000 cases, which provides only a preliminary ju
 
 |                          |                   |            |                   |         |            |                                                        |              |
 | ------------------------ | ----------------- | ---------- | ----------------- | ------- | ---------- | ------------------------------------------------------ | ------------ |
-| DataSet                  | CPU Weight Format | CPU Kernel | GPU Weight Format | GEMM    | MLA Kernel | [Siliconflow](https://cloud.siliconflow.cn/models)<br> | Ktrans Point |
-| MMLU<br><br>(shuffle 1k) | bf16              | cpuinfer   | bf16              | torch   | torch      | 81.6                                                   | 81.9         |
-|                          | int8              | cpuinfer   | bf16              | torch   | torch      | 81.6                                                   | 83.1         |
-|                          | q4km              | cpuinfer   | bf16              | torch   | torch      | 81.6                                                   | 82.8         |
-|                          | q4km              | cpuinfer   | bf16              | torch   | triton     | 81.6                                                   | 81.4         |
-|                          | q4km              | cpuinfer   | q4km->marlin 8    | marlin  | triton     | 81.6                                                   | 81.1         |
-|                          | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 81.6                                                   | 81           |
-|                          | q4km              | cpuinfer   | fp8               | marlin  | triton     | 81.6                                                   | 81.5         |
-| MMLU-pro                 | q4km              | cpuinfer   | fp8               | fp8gemm | triton     | 57.7                                                   | 57.6         |
-| MMLU-pro                 | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 57.7                                                   | 57.5         |
+| DataSet                  | CPU Weight Format | CPU Kernel | GPU Weight Format | GEMM Kernel   | MLA Kernel | [Siliconflow](https://cloud.siliconflow.cn/models)<br> | Ktrans Point |
+| MMLU<br><br>(shuffle 1k) |               |    |               |    |       |                                                    |          |
+|          1                | bf16              | cpuinfer   | bf16              | torch   | torch      | 81.6                                                   | 81.9         |
+|           2               | q8_0              | cpuinfer   | bf16              | torch   | torch      | 81.6                                                   | 83.1         |
+|             3             | q4km              | cpuinfer   | bf16              | torch   | triton     | 81.6                                                   | 81.4         |
+|              4            | q4km              | cpuinfer   | q4km->marlin 8    | marlin  | triton     | 81.6                                                   | 81.1         |
+|               5           | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 81.6                                                   | 81           |
+|                6          | q4km              | cpuinfer   | fp8               | fp8gemm  | triton     | 81.6                                                   | 81.5         |
+| MMLU-pro                 |               |    |                |  |      |                                                    |          |
+| 1                 | q4km              | cpuinfer   | fp8               | fp8gemm | triton     | 57.7                                                   | 57.6         |
+|  2             | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 57.7                                                   | 57.5         |
 | HumanEval                | tbd               | tbd        | tbd               | tbd     | tbd        | tbd                                                    | tbd          |
 | GSM8K                    | tbd               | tbd        | tbd               | tbd     | tbd        | tbd                                                    | tbd          |
+
+**The details for each case are listed below**:
+
+By default, The MLA kernel uses triton in linux and torch in windows. But we need to test torch in linux, so we manually modify the [file](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py#L592). Just get rid of all the if branch and force it to use `self.forward_windows`
+
+- MMLU test
+  1. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml) change all the `KLinearMarlin` to `KLinearTorch` (just find all the usage in this file). The source weight comes from [there](https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16) (you need to use llama.cpp to convert it to gguf)
+  2. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: [1](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122), [2](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136), [3](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137) (note in 3, change the path to your local weight file path). The weight file for q8_0 is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q8_0)
+  3. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: [1](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122), [2](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136), [3](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137) (note in 3, change the path to your local weight file path). The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
+  4. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). You don't need to change the source code as they both use q4km. But note the yaml file [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29) and [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18), below these lines you need to add `num_bits: 8` (in other words: add this kwargs to all that use `KLinearMarlin`). The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
+  5. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). No need to change yaml, just use the default. The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
+  6. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case.
+- MMLU-pro test
+  1. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case. 
+  2. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). No need to change yaml, just use the default. The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
