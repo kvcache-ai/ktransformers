@@ -21,7 +21,7 @@ KTransformers 是一个以 Python 为中心的灵活框架，其核心是可扩�
 
 <h2 id="Updates">🔥 更新</h2>
 
-* **2025 年 2 月 15 日**：为DeepSeek-V3/R1支持[FP8 GPU内核](./doc/en/fp8_kernel.md); 支持更长的上下文 (从8K到128K仅用24GB VRAM).
+* **2025 年 2 月 15 日**：为DeepSeek-V3/R1支持[FP8 GPU内核](./doc/en/fp8_kernel.md); 支持更长的上下文([教程](./doc/en/DeepseekR1_V3_tutorial.md#v022-longer-context)).
 * **2025 年 2 月 15 日**：长上下文(从4K到8K，24GB VRAM) & 稍快的速度(+15%)(最快 16 Tokens/s)，文档请参见 [这里](./doc/en/DeepseekR1_V3_tutorial.md) 和 [在线指南](https://kvcache-ai.github.io/ktransformers/) 。
 * **2025 年 2 月 10 日**：支持 Deepseek-R1 和 V3 在单个（24GB VRAM）/多 GPU 和 382G DRAM 上运行，速度提升高达 3~28 倍。详细教程请参见 [这里](./doc/en/DeepseekR1_V3_tutorial.md)。
 * **2024 年 8 月 28 日**：支持 InternLM2.5-7B-Chat-1M 模型下的 1M 上下文，使用 24GB 的 VRAM 和 150GB 的 DRAM。详细教程请参见 [这里](./doc/en/long_context_tutorial.md)。
