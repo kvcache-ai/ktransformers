@@ -93,3 +93,7 @@ Traceback (most recent call last):
 RuntimeError: probability tensor contains either `inf`, `nan` or element < 0
 ```
 **SOLUTION**: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.
+
+### Q: Using fp8 prefill very slow.
+
+The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.
