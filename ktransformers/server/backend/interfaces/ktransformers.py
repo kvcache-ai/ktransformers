@@ -35,9 +35,9 @@ class KTransformersInterface(TransformersInterface):
         with torch.device("meta"):
             self.model = custom_models[config.architectures[0]](config)
         if default_args.optimize_config_path is None:
-            optimize_rule_path = default_optimize_rules[config.architectures[0]]
+            optimize_config_path = default_optimize_rules[config.architectures[0]]
         else:
-            optimize_rule_path = args.optimize_config_path
+            optimize_config_path = args.optimize_config_path
 
         # print(optimize_config)
 
@@ -47,7 +47,7 @@ class KTransformersInterface(TransformersInterface):
                 "please input the path of your gguf file(gguf file in the dir containing input gguf file must all"
                 " belong to current model):"
             )
-        optimize_and_load_gguf(self.model, optimize_rule_path, gguf_path, config)
+        optimize_and_load_gguf(self.model, optimize_config_path, gguf_path, config)
 
         self.device_map = self.model.gguf_loader.tensor_device_map
         # logger.info(f"{args.model_name} loaded from {args.model_dir} to {self.device_map}")
