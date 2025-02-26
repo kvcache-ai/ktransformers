@@ -122,8 +122,6 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     with open(rule_file, 'r', encoding='utf-8') as f:
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
     
-    import pdb
-    pdb.set_trace()
     optimize_config = dict()
     gen_optimize_config(module, optimize_config, rule_list, default_device = default_device)
     
