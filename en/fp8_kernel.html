@@ -172,12 +172,12 @@
 </ul>
 <p>So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.</p>
 <h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
-<p>✅ Hybrid Precision Architecture (FP8 + GGML)
+<p>✅ Hybrid Precision Architecture (FP8 + GGML)<br>
 ✅ Memory Optimization (~19GB VRAM usage)</p>
 <h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
 <h3 id="using-pre-merged-weights"><a class="header" href="#using-pre-merged-weights">Using Pre-Merged Weights</a></h3>
-<p>Pre-merged weights are available on Hugging Face:
-<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid</a>
+<p>Pre-merged weights are available on Hugging Face:<br>
+<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid</a><br>
 <a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1-GGML-FP8-Hybrid</a></p>
 <blockquote>
 <p>Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.</p>
@@ -191,10 +191,10 @@
 huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid --local-dir &lt;local_dir&gt;
 </code></pre>
 <h3 id="using-merge-scripts"><a class="header" href="#using-merge-scripts">Using merge scripts</a></h3>
-<p>If you got local DeepSeek-R1/V3 fp8 safetensors and q4km gguf weights, you can merge them using the following scripts.</p>
-<pre><code class="language-shell">python convert_model.py \
+<p>If you got local DeepSeek-R1/V3 fp8 safetensors and gguf weights(eg.q4km), you can merge them using the following scripts.</p>
+<pre><code class="language-shell">python merge_tensors/merge_safetensor_gguf.py \
   --safetensor_path &lt;fp8_safetensor_path&gt; \
-  --gguf_path &lt;q4km_gguf_folder_path&gt; \
+  --gguf_path &lt;gguf_folder_path&gt; \
   --output_path &lt;merged_output_path&gt;
 </code></pre>
 <ul>
@@ -211,16 +211,16 @@ huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybri
   --cpu_infer &lt;cpu_cores + 1&gt;
 </code></pre>
 <h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
-<p>⚠️ Hardware Requirements</p>
+<p>⚠️ Hardware Requirements<br></p>
 <ul>
 <li>Recommended minimum 19GB available VRAM for FP8 kernel.</li>
 <li>Requires GPU with FP8 support (e.g., 4090)</li>
 </ul>
 <p>⏳ First-Run Optimization
 JIT compilation causes longer initial execution (subsequent runs retain optimized speed).</p>
-<p>🔄 Temporary Interface
+<p>🔄 Temporary Interface<br>
 Current weight loading implementation is provisional - will be refined in future versions</p>
-<p>📁 Path Specification
+<p>📁 Path Specification<br>
 Despite hybrid quantization, merged weights are stored as .safetensors - pass the containing folder path to <code>--gguf_path</code></p>
 
                     </main>
