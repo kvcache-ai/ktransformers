@@ -590,7 +590,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if os.name == 'nt' or get_compute_capability()<8 or torch.xpu.is_available():
+        if os.name == 'nt' or torch.xpu.is_available or get_compute_capability()<8:
             return self.forward_native(
                 hidden_states,
                 attention_mask,

@@ -112,7 +112,7 @@ def local_chat(
         gguf_path = input(
             "please input the path of your gguf file(gguf file in the dir containing input gguf file must all belong to current model):"
         )
-    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
+    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config, default_device=device)
     
     try:
             model.generation_config = GenerationConfig.from_pretrained(model_path)
