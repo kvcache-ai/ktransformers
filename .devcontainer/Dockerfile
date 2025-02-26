@@ -10,7 +10,6 @@ apt update -y &&  apt install -y  --no-install-recommends \
     g++ \
     cmake && 
 rm -rf /var/lib/apt/lists/* &&
-cd ktransformers &&
 pip install ninja pyproject numpy cpufeature &&
 pip install flash-attn &&
 cp /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /opt/conda/lib/
