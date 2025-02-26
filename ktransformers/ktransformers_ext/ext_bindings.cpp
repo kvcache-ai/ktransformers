@@ -9,7 +9,7 @@
  **/
 // Python bindings
 #include "cpu_backend/cpuinfer.h"
-#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA)
+#ifdef __CUDA_ARCH__
     #include "device_launch_parameters.h"
 #endif
 #include "llamafile/flags.h"

@@ -1,7 +1,0 @@
-fire
-transformers==4.43.2
-numpy
-torch>=2.3.0
-packaging
-cpufeature
-protobuf
