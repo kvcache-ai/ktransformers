@@ -91,8 +91,16 @@ class OllamaChatCompletionRequest(BaseModel):
 class OllamaChatCompletionStreamResponse(BaseModel):
     model: str
     created_at: str
-    message: str
+    message: dict
     done: bool = Field(...)
+    total_duration: Optional[int] = Field(None, description="Total time spent in nanoseconds")
+    load_duration: Optional[int] = Field(None, description="Time spent loading model in nanoseconds")
+    prompt_eval_count: Optional[int] = Field(None, description="Number of tokens in prompt")
+    prompt_eval_duration: Optional[int] = Field(None, description="Time spent evaluating prompt in nanoseconds")
+    eval_count: Optional[int] = Field(None, description="Number of tokens generated")
+    eval_duration: Optional[int] = Field(None, description="Time spent generating response in nanoseconds")
+
+
 
 class OllamaChatCompletionResponse(BaseModel):
     pass
@@ -111,19 +119,37 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
 
     if input.stream:
         async def inner():
+            start_time = time()  # 记录开始时间（秒）
+            eval_count = 0  # 统计生成的 token 数量
+            tokens = []
+
             async for token in interface.inference(prompt, id):
                 d = OllamaChatCompletionStreamResponse(
                     model=config.model_name,
                     created_at=str(datetime.now()),
-                    message=token,
+                    message={"role": "assistant", "content": token}, 
                     done=False
                 )
                 yield d.model_dump_json() + '\n'
+            # 计算性能数据
+            end_time = time()
+            total_duration = int((end_time - start_time) * 1_000_000_000)  # 转换为纳秒
+            prompt_eval_count = len(prompt.split())  # 简单估算提示词数量
+            eval_duration = total_duration  # 假设全部时间用于生成（简化）
+            prompt_eval_duration = 0  # 假设无单独提示评估时间
+            load_duration = 0  # 假设加载时间未知
+
             d = OllamaChatCompletionStreamResponse(
                 model=config.model_name,
                 created_at=str(datetime.now()),
-                message='',
-                done=True
+                message={},
+                done=True,
+                total_duration=total_duration,
+                load_duration=load_duration,
+                prompt_eval_count=prompt_eval_count,
+                prompt_eval_duration=prompt_eval_duration,
+                eval_count=eval_count,
+                eval_duration=eval_duration
             )
             yield d.model_dump_json() + '\n'
         return check_link_response(request, inner())
