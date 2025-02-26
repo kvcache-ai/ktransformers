@@ -160,7 +160,7 @@ is speed up which is inspiring. So our showcase makes use of this finding*
 ### V0.2.2 longer context & FP8 kernel
 #### longer context
 To use this feature, [install flashinfer](https://github.com/flashinfer-ai/flashinfer) first.
-
+Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.
 
 If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:
 ```
