@@ -1,0 +1,141 @@
+name: Build Wheels Tests
+on: 
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release? 1 = yes, 0 = no'
+        default: '0'
+        required: true
+        type: string
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} Python=${{ matrix.pyver }} CUDA=${{ matrix.cuda }} CPU_INSTRUCT=${{ matrix.instruct }} Torch=${{ matrix.torch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # Ubuntu
+        - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.5.1', torch: '2.4.0', cudaarch: '8.9;9.0+PTX', instruct: 'FANCY', torch_cu: '124'}
+        - { os: ubuntu-20.04, pyver:  '3.12', cuda: '12.2.2', torch: '2.3.0', cudaarch: '8.9;9.0+PTX', instruct: 'FANCY', torch_cu: '121'}
+        - { os: windows-2022, pyver:  '3.11', cuda: '12.5.1', torch: '2.4.0', cudaarch: '8.9;9.0+PTX', instruct: 'AVX2', torch_cu: '124'}
+        - { os: windows-2022, pyver:  '3.12', cuda: '12.1.1', torch: '2.3.0', cudaarch: '8.9;9.0+PTX', instruct: 'AVX2', torch_cu: '121'}
+
+    defaults:
+      run:
+        shell: pwsh
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        if: runner.os == 'Linux'
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.pyver }}
+
+      - name: check_space
+        run: |
+          if($IsLinux) {df -h}
+          if($IsWindows) {Get-PSDrive -PSProvider 'FileSystem'}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Mamba
+        if: matrix.cuda != ''
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          activate-environment: "ktransformers"
+          python-version: ${{ matrix.pyver }}
+          miniforge-variant: Miniforge3
+          miniforge-version: latest
+          use-mamba: true
+          add-pip-as-python-dependency: true
+          auto-activate-base: false
+
+
+
+      - name: build web
+        run: |
+          cd ktransformers/website/
+          npm install
+          npm run build
+          cd ../../
+
+      - name: build for cuda
+        if: matrix.cuda != ''
+        run: |
+          git submodule init
+          git submodule update
+          if($IsWindows){
+            $originalPath = Get-Location
+            Import-Module 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+            Enter-VsDevShell -VsInstallPath 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise' -DevCmdArguments '-arch=x64 -host_arch=x64'
+            $env:DISTUTILS_USE_SDK=1
+            Set-Location $originalPath
+          }
+          $cudaVersion = '${{ matrix.cuda }}'
+          $env:MAMBA_NO_LOW_SPEED_LIMIT = 1
+          mamba install -y -c nvidia/label/cuda-$cudaVersion cuda-toolkit cuda-runtime
+          $env:CUDA_PATH = $env:CONDA_PREFIX
+          $env:CUDA_HOME = $env:CONDA_PREFIX
+          if ($IsLinux) {
+            $env:LD_LIBRARY_PATH = $env:CONDA_PREFIX + '/lib:' + $env:LD_LIBRARY_PATH
+            $env:LD_LIBRARY_PATH = $env:CONDA_PREFIX + '/lib/python${{ matrix.pyver }}/site-packages/nvidia/nvjitlink/lib:' + $env:LD_LIBRARY_PATH
+            if (!(Test-Path $env:CUDA_HOME/lib64)) {
+              New-Item -ItemType SymbolicLink -Path $env:CUDA_HOME/lib64 -Target $env:CUDA_HOME/lib
+            }
+          }
+          if ($IsWindows) {
+            if (Test-Path -Path "$env:CUDA_PATH/Library/bin/nvcc.exe"){
+              $env:CUDA_PATH = "$env:CUDA_PATH/Library"
+              $env:CUDA_HOME = $env:CUDA_PATH
+            }
+            $env:PATH = "$env:CUDA_PATH/bin;" + $env:PATH
+            $directory = "$env:CUDA_PATH/lib/x64/"
+            if (-not (Test-Path -Path $directory)) {
+              New-Item -ItemType Directory -Path $directory
+              Write-Output "Directory '$directory' created."
+            }
+            cp $env:CUDA_PATH/lib/*.lib $env:CUDA_PATH/lib/x64/
+            $env:INCLUDE =$env:CUDA_PATH + "/include/targets/x64;" + $env:INCLUDE
+            $env:INCLUDE =$env:CONDA_PREFIX + "/include;" + $env:INCLUDE
+          }
+          python -m pip install torch==${{ matrix.torch }} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu${{ matrix.torch_cu }}
+          python -m pip install cpufeature build wheel ninja packaging setuptools
+          $env:KTRANSFORMERS_FORCE_BUILD = "TRUE"
+          $env:CPU_INSTRUCT = '${{ matrix.instruct }}'
+          $env:TORCH_CUDA_ARCH_LIST = '${{ matrix.cudaarch }}'
+          python -m build --no-isolation --verbose
+
+
+      - name: create Rlease dir
+        run: |
+          if ($IsWindows) {
+            $env:date = $(Get-Date -Format "yyyy-MM-dd")
+            New-Item -ItemType Directory -Force -Path "$Env:USERPROFILE\.ssh"
+            $Env:SSH_PATH = "$Env:USERPROFILE\.ssh\id_rsa"
+            Set-Content -Path $Env:SSH_PATH -Value "${{ secrets.SSH_PRIVATE_KEY }}"
+            (Get-Content -Path $Env:SSH_PATH).Replace("`r`n","`n") | Set-Content -Path $Env:SSH_PATH
+            chmod 600 $Env:SSH_PATH
+          }
+          if ($IsLinux) {
+            $env:date = $(date +%Y-%m-%d)
+            mkdir -p ~/.ssh/
+            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+          }
+          
+          ssh -p ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=no root@${{ secrets.SSH_SERVER }} "mkdir -p /mnt/data/release-$env:date"
+          scp -P ${{ secrets.SSH_PORT }} -o StrictHostKeyChecking=no dist/*.whl root@${{ secrets.SSH_SERVER }}:/mnt/data/release-$env:date/

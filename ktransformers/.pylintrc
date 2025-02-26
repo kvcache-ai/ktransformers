@@ -1,0 +1,6 @@
+[MASTER]
+extension-pkg-whitelist=pydantic
+max-line-length=120
+
+[MESSAGES CONTROL]
+disable=missing-function-docstring

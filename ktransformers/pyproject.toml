@@ -1,0 +1,76 @@
+[build-system]
+requires = [
+  "setuptools",
+  "torch >= 2.3.0", 
+  "ninja",
+  "packaging",
+  "cpufeature"
+  ]
+build-backend = "setuptools.build_meta"
+
+[project]
+
+name = "ktransformers"
+
+dynamic = ["version"]
+
+dependencies = [
+  "torch >= 2.3.0",
+  "transformers == 4.43.2",
+  "fastapi >= 0.111.0",
+  "uvicorn >= 0.30.1",
+  "langchain >= 0.2.0",
+  "blessed >= 1.20.0",
+  "accelerate >= 0.31.0",
+  "sentencepiece >= 0.1.97",
+  "setuptools",
+  "ninja",
+  "wheel",
+  "colorlog",
+  "build",
+  "fire",
+  "protobuf"
+]
+
+requires-python = ">=3.10"
+
+authors = [
+  {name = "KVCache.AI", email = "zhang.mingxing@outlook.com"}
+]
+
+maintainers = [
+  {name = "james0zan", email = "zhang.mingxing@outlook.com"},
+  {name = "awake", email = "awake@approaching.ai"},
+  {name = "unicorn chan", email = "nl@approaching.ai"}
+]
+
+description = "KTransformers, pronounced as Quick Transformers, is designed to enhance your Transformers experience with advanced kernel optimizations and placement/parallelism strategies."
+
+readme = "README.md"
+license = {file = "LICENSE"}
+
+keywords = ["ktransformers", "llm"]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12"
+]
+
+[project.urls]
+Homepage = "https://kvcache.ai"
+Repository = "https://github.com/kvcache-ai/ktransformers.git"
+Issues = "https://github.com/kvcache-ai/ktransformers/issues"
+
+
+[project.scripts]
+ktransformers = "ktransformers.server.main:main"
+
+[tool.setuptools.packages.find]
+where = ["./", ]
+include = ["ktransformers"]
+[tool.black]
+line-length = 120
+preview = true
+unstable = true

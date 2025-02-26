@@ -1,0 +1,57 @@
+log:
+  dir: "logs"
+  file: "lexllama.log"
+  #log level: debug, info, warn, error, crit
+  level: "debug"
+  backup_count: -1
+
+server:
+  ip: 0.0.0.0
+  port: 10002
+
+db:
+  type: "sqllite"
+  database: "server.db"
+  host: "./"
+  pool_size: 10
+
+user:
+  secret_key: "981f1dd2a44e27d68759d0252a486568ed43480b4e616a26e3af3709c3a7ce73"
+  algorithm: "HS256"
+
+model:
+  # type: transformers
+  type: ktransformers
+
+  name: DeepSeek-Coder-V2-Instruct
+  path: deepseek-ai/DeepSeek-V2-Lite-Chat
+  gguf_path: ./DeepSeek-V2-Lite-Chat-GGUF
+
+  device: cuda:0
+  cache_lens: 8192
+
+web:
+  mount: False
+  open_cross_domain: True
+
+ext:
+  cpu_infer: 10
+
+long_context:
+  chunk_size: 4096
+  max_seq_len: 32000
+  block_size: 128
+  local_windows_len: 4096
+  second_select_num: 32
+  anchor_type: DYNAMIC
+  kv_type: FP16
+  dense_layer_num: 2
+  anchor_num: 1
+  preselect_block: True
+  head_select_mode: SHARED
+  preselect_block_count: 32
+  layer_step: 1
+  token_step: 
+
+local_chat:
+  prompt_file: ""
