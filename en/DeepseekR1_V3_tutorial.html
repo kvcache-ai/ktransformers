@@ -357,7 +357,8 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
 <h3 id="v022-longer-context--fp8-kernel"><a class="header" href="#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a></h3>
 <h4 id="longer-context"><a class="header" href="#longer-context">longer context</a></h4>
-<p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.</p>
+<p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.
+Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.</p>
 <p>If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:</p>
 <pre><code>- match:
     name: "^model\\.layers\\..*\\.self_attn$"
