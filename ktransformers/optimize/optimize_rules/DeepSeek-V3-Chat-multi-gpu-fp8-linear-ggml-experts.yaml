@@ -31,7 +31,7 @@
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
-      generate_op: "KLinearMarlin"
+      generate_op: "KLinearFP8"
       prefill_op: "KLinearTorch"
 
 - match:
@@ -42,7 +42,7 @@
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
-      generate_op: "KLinearMarlin"
+      generate_op: "KLinearFP8"
       prefill_op: "KLinearTorch"
   
 - match:
@@ -80,24 +80,6 @@
       prefill_device: "cuda:1"
 
 - match:
-    name: "^model\\.layers\\.(0|[1-4])\\.mlp\\.experts$" # inject experts in layer 0~4 as marlin expert
-  replace:
-    class: ktransformers.operators.experts.KTransformersExperts  
-    kwargs:
-      generate_device: "cuda:0" # run in cuda:0
-      generate_op:  "KExpertsMarlin"
-  recursive: False
-
-- match:
-    name: "^model\\.layers\\.([3][0])\\.mlp\\.experts$" # inject experts in layer 30~31 as marlin expert
-  replace:
-    class: ktransformers.operators.experts.KTransformersExperts
-    kwargs:
-      generate_device: "cuda:1"
-      generate_op:  "KExpertsMarlin"
-  recursive: False 
-
-- match:
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\.mlp\\.experts$"
   replace:
     class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
@@ -128,6 +110,8 @@
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
+      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
+
 - match:
     name: "^model\\.layers\\.([3456][0-9])\\.self_attn$"
   replace:
@@ -135,6 +119,8 @@
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
+      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
+
 - match:
     name: "^model$"
   replace:
@@ -156,12 +142,11 @@
     name: "^lm_head"
     class: torch.nn.Linear
   replace:
-    class: ktransformers.operators.linear.KTransformersLinear
+    class: "default"
     kwargs:
-      generate_device: "cuda:0"
-      prefill_device: "cuda:0"
-      generate_op: "KLinearMarlin"
-      prefill_op: "KLinearTorch"
+      generate_device: "cuda:1"
+      prefill_device: "cuda:1"
+
 
 - match:
     name: "(^model\\.layers\\.([3456][0-9])\\.)|(model.norm)"

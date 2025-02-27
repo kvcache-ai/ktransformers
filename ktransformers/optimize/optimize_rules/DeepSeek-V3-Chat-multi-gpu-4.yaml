@@ -293,6 +293,7 @@
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
+      absorb_for_prefill: False
 
 # GPU 1: layers 15–29
 - match:
@@ -302,6 +303,7 @@
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
+      absorb_for_prefill: False
 
 # GPU 2: layers 30–44
 - match:
@@ -311,6 +313,7 @@
     kwargs:
       generate_device: "cuda:2"
       prefill_device: "cuda:2"
+      absorb_for_prefill: False
 
 # GPU 3: layers 45–60
 - match:
@@ -320,6 +323,7 @@
     kwargs:
       generate_device: "cuda:3"
       prefill_device: "cuda:3"
+      absorb_for_prefill: False
 
 # === Overall Model Replacement with Transfer Map ===
 

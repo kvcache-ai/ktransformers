@@ -10,6 +10,7 @@ class ArgumentParser:
         parser = argparse.ArgumentParser(prog="kvcache.ai", description="Ktransformers")
         parser.add_argument("--host", type=str, default=self.cfg.server_ip)
         parser.add_argument("--port", type=int, default=self.cfg.server_port)
+        parser.add_argument("--api_key", type=str, default=self.cfg.api_key)
         parser.add_argument("--ssl_keyfile", type=str)
         parser.add_argument("--ssl_certfile", type=str)
         parser.add_argument("--web", type=bool, default=self.cfg.mount_web)

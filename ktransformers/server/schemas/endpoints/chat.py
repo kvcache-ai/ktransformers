@@ -77,4 +77,4 @@ class ChatCompletionChunk(ChatCompletionBase):
         ]
 
     def to_stream_reply(self):
-        return f"data:{self.model_dump_json()}\n\n"
+        return f"data: {self.model_dump_json()}\n\n"
