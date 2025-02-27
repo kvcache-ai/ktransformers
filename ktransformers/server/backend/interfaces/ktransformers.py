@@ -14,8 +14,8 @@ from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.local_chat import custom_models, default_optimize_rules
 from ktransformers.util.utils import get_device
+from typing import Optional
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled, MLAWrapperSingleton
-
 
 warm_uped = False
 
@@ -128,7 +128,7 @@ class KTransformersInterface(TransformersInterface):
 
 
     @torch.no_grad
-    def prefill(self, input_ids: torch.Tensor, is_new: bool):
+    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float], top_p: Optional[float]):
         input_ids_length = input_ids.shape[-1]
         logger.debug(f"input_ids: {input_ids.shape}")
 
@@ -203,7 +203,7 @@ class KTransformersInterface(TransformersInterface):
 
         if flashinfer_enabled:
             MLAWrapperSingleton.reset_buffer()
-        self.prepare_logits_wrapper(input_ids, device)
+        self.prepare_logits_wrapper(input_ids, device, temperature, top_p)
         next_token = self.logits_to_token(logits[0, -1, :])
         yield self.append_new_tokens(next_token)
 
@@ -212,7 +212,7 @@ class KTransformersInterface(TransformersInterface):
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
         return torch.tensor([self.seq_length - 1], device=device)
     
-    async def inference(self, local_messages, thread_id: str):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float], top_p: Optional[float]):
         async with self._infer_lock:
-            async for v in super().inference(local_messages, thread_id):
+            async for v in super().inference(local_messages, thread_id, temperature, top_p):
                 yield v
