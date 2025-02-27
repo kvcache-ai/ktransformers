@@ -16,6 +16,9 @@
 			- [Memory consumptions:](#memory-consumptions)
 			- [Benchmark results](#benchmark-results-2)
 	- [How to Run](#how-to-run)
+		- [V0.2.2 longer context \& FP8 kernel](#v022-longer-context--fp8-kernel)
+			- [longer context](#longer-context)
+			- [FP8 kernel](#fp8-kernel)
 		- [V0.2 \& V0.2.1 Showcase](#v02--v021-showcase)
 			- [Single socket version (32 cores)](#single-socket-version-32-cores)
 			- [Dual socket version (64 cores)](#dual-socket-version-64-cores)
@@ -154,6 +157,34 @@ the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding*
 
 ## How to Run
+### V0.2.2 longer context & FP8 kernel
+#### longer context
+To use this feature, [install flashinfer](https://github.com/flashinfer-ai/flashinfer) first.
+Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.
+
+If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:
+```
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
+```
+#### FP8 kernel
+
+The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:
+- **FP8 GPU Kernel Integration**: FP8 linear layer acceleration kernels integrated in KTransformers
+- **Hybrid Quantization Architecture**:
+  - Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)
+  - Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)
+
+So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.
+
+The detailed guide is [here](./fp8_kernel.md).
+
 ### V0.2 & V0.2.1 Showcase
 #### Single socket version (32 cores)
 Our local_chat test command is:
