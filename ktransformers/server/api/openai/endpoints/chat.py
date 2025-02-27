@@ -25,6 +25,9 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
 
     input_message = [json.loads(m.model_dump_json()) for m in create.messages]
 
+    if Config().api_key != '':
+        assert request.headers.get('Authorization', '').split()[-1] == Config().api_key
+
     if create.stream:
         async def inner():
             chunk = ChatCompletionChunk(id=id,object='chat.completion.chunk',created=int(time()))
