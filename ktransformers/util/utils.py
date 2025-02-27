@@ -96,7 +96,7 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
                 torch.cuda.empty_cache() # To fit in 16G VRAM. By "wkGCaSS - 知乎 https://zhuanlan.zhihu.com/p/25491611225"
             elif torch.xpu.is_available():
                 torch.xpu.empty_cache()
-            # weights = gguf_loader.load_gguf_tensor(translated_key, device = device).to(dtype = target_dtype)
+            
             weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
             set_param(module, name, weights)
             del weights
