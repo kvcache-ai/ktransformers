@@ -60,6 +60,7 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
+      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
 - match:
     name: "^model$"
   replace:
