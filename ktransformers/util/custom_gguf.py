@@ -27,6 +27,7 @@ import torch
 import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
+import math
 
 class GGMLQuantizationType(IntEnum):
     F32     = 0
@@ -230,7 +231,7 @@ class GGUFLoader:
             shape = [read_value(f, DATA_TYPES["uint64"]) for _ in range(shape_len)]
             ggml_type = read_value(f, DATA_TYPES["uint32"])
             bad_offset = read_value(f, DATA_TYPES["uint64"])
-            n_elems = int(np.prod(shape))
+            n_elems = int(math.prod(shape))
             block_size, type_size = GGML_QUANT_SIZES[ggml_type]
             n_bytes = n_elems * type_size // block_size
             np_dims = tuple(reversed(shape))
