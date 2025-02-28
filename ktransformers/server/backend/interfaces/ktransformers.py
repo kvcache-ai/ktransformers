@@ -131,8 +131,11 @@ class KTransformersInterface(TransformersInterface):
     @torch.no_grad
     def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float], top_p: Optional[float]):
         input_ids_length = input_ids.shape[-1]
+        if(input_ids_length >= self.args.cache_lens):
+            logger.warning(f"input_ids_length {input_ids_length} > cache_lens {self.args.cache_lens}")
+            self.seq_length = input_ids_length
+            return
         logger.debug(f"input_ids: {input_ids.shape}")
-
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
         device = "cuda:0" if device == "cuda" else device
 
