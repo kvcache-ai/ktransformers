@@ -9,6 +9,9 @@
  **/
 
 #include "kvcache.h"
+
+#include <chrono>
+
 void KVCache::load_kvcache(std::string tensor_file_path, Backend *backend) {
     // Timer start
     auto start = std::chrono::high_resolution_clock::now();
