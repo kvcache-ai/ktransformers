@@ -329,6 +329,12 @@ class TransformersInterface(BackendInterfaceBase):
 
     @torch.no_grad
     def generate(self):
+        self.args.max_new_tokens = min(self.args.max_new_tokens, self.args.cache_lens - self.seq_length) 
+        if(self.args.max_new_tokens <= 0):
+            logger.warning("max_new_tokens is less than 0")
+            yield self.streamer.end()
+            return
+        logger.info(f"max_new_tokens: {self.args.max_new_tokens}")
         self.profiler.set_counter("decode", 0)
         for i in range(1, self.args.max_new_tokens):
             
