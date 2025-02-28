@@ -206,8 +206,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             inputs_embeds = inputs_embeds, cache_position=cache_position, past_key_values=past_key_values, return_dict=False, use_cache=True
         )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
         generation_config, model_kwargs = model._prepare_generation_config(
-            None, max_length=max_new_tokens,
-            do_sample=True, top_k=5, top_p=0.85, temperature=0.1 # change this to modify generate config
+            None, do_sample=True
+            # change this to modify generate config
+            #top_k=5, top_p=0.85, temperature=0.1
         )
         try: # transformers==4.43
             logits_warper = (

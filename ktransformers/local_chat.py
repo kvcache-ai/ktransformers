@@ -115,15 +115,15 @@ def local_chat(
     optimize_and_load_gguf(model, optimize_config_path, gguf_path, config, default_device=device)
     
     try:
-            model.generation_config = GenerationConfig.from_pretrained(model_path)
-    except:
-            gen_config = GenerationConfig(
-                max_length=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
-            model.generation_config = gen_config
+        model.generation_config = GenerationConfig.from_pretrained(model_path)
+    except Exception as e:
+        print(f"generation config can't auto create, make default. Message: {e}")
+        gen_config = GenerationConfig(
+            temperature=0.6,
+            top_p=0.95,
+            do_sample=True
+        )
+        model.generation_config = gen_config
     # model.generation_config = GenerationConfig.from_pretrained(model_path)
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
