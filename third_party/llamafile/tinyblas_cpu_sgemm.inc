@@ -327,21 +327,10 @@ bool llamafile_sgemm(long m, long n, long k, const void* A, long lda, const void
  /* 
     moonll
     more Btype accept
-    if (Btype == GGML_TYPE_Q8_K && Ctype == GGML_TYPE_F32) {
-        if (iqk_mul_mat(m, n, k * QK_K, Atype, A,lda,Btype, B,ldb, (float*)C, ldc, ith, nth)) {
-            return true;
-        }
-    }
-    if ((Btype == GGML_TYPE_Q8_0 || Btype == GGML_TYPE_Q8_1) && Ctype == GGML_TYPE_F32) {
-        // assert(QK8_0 == QK8_1 == QK4_0 == QK4_1 == QK5_0 == QK5_1 == 32);
-        assert((QK8_0 == 32) && (QK8_1 == 32) && (QK4_0 == 32) && (QK4_1 == 32) && (QK5_0 == 32) && (QK5_1 == 32));
-        if (iqk_mul_mat(m, n, k * QK8_0, Atype, A,lda,Btype, B,ldb, (float*)C, ldc, ith, nth)) {
-            return true;
-        }
     }*/
-    // if (X86_CHECK(AVX2) && X86_CHECK(FMA)) {
+
       if (Ctype == GGML_TYPE_F32){
-       // printf("typea: %d,qkk: %d, etypeb: %d\n",Atype, ggml_blck_size(ggml_type(Atype)),Btype);
+   
         if (iqk_mul_mat(m, n, k * ggml_blck_size(ggml_type(Atype)), Atype, A,lda,Btype, B,ldb, (float*)C, ldc, ith, nth)) {
             return true;
         }
