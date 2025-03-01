@@ -11,30 +11,49 @@ Some preparation:
   
   ```sh
   # Adding CUDA to PATH
-  export PATH=/usr/local/cuda/bin:$PATH
-  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
-  export CUDA_PATH=/usr/local/cuda
+  if [ -d "/usr/local/cuda/bin" ]; then
+      export PATH=$PATH:/usr/local/cuda/bin
+  fi
+
+  if [ -d "/usr/local/cuda/lib64" ]; then
+      export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+      # Or you can add it to /etc/ld.so.conf and run ldconfig as root:
+      # echo "/usr/local/cuda-12.x/lib64" | sudo tee -a /etc/ld.so.conf
+      # sudo ldconfig
+  fi
+
+  if [ -d "/usr/local/cuda" ]; then
+      export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
+  fi
   ```
 
-- Linux-x86_64 with gcc, g++ and cmake
+- Linux-x86_64 with gcc, g++ and cmake (using Ubuntu as an example)
   
   ```sh
   sudo apt-get update
-  sudo apt-get install gcc g++ cmake ninja-build
+  sudo apt-get install build-essential cmake ninja-build
   ```
 
-- We recommend using [Conda](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) to create a virtual environment with Python=3.11 to run our program.
+- We recommend using [Miniconda3](https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh) or [Anaconda3](https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh) to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is `~/anaconda3`, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes `GLIBCXX-3.4.32`
+
   
   ```sh
   conda create --name ktransformers python=3.11
   conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
+  
+  conda install -c conda-forge libstdcxx-ng # Anaconda provides a package called `libstdcxx-ng` that includes a newer version of `libstdc++`, which can be installed via `conda-forge`.
+
+  strings ~/anaconda3/envs/ktransformers-0.3/lib/libstdc++.so.6 | grep GLIBCXX
   ```
 
-- Make sure that PyTorch, packaging, ninja is installed
+- Make sure that PyTorch, packaging, ninja is installed You can also [install previous versions of PyTorch](https://pytorch.org/get-started/previous-versions/)
   
   ```
-  pip install torch packaging ninja cpufeature numpy
+  pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+  pip3 install packaging ninja cpufeature numpy
   ```
+
+ - At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.
 
 ## Installation
 
@@ -62,7 +81,7 @@ Some preparation:
      git submodule update
      ```
 
-   - [Optional] If you want to run with website, please [compile the website](./doc/en/api/server/website.md) before execute ```bash install.sh```
+   - [Optional] If you want to run with website, please [compile the website](./api/server/website.md) before execute ```bash install.sh```
 
    - For Linux
      - For simple install:
@@ -84,7 +103,7 @@ Some preparation:
      install.bat
      ```
 
-* If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./doc/en/makefile_usage.md) 
+* If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./makefile_usage.md) 
 
 <h3>Local Chat</h3>
 We provide a simple command-line local chat Python script that you can run for testing.
@@ -102,7 +121,7 @@ We provide a simple command-line local chat Python script that you can run for t
 mkdir DeepSeek-V2-Lite-Chat-GGUF
 cd DeepSeek-V2-Lite-Chat-GGUF
 
-wget https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/resolve/main/DeepSeek-V2-Lite-Chat.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
+wget https://huggingface.co/mradermacher/DeepSeek-V2-Lite-GGUF/resolve/main/DeepSeek-V2-Lite.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
 
 cd .. # Move to repo's root dir
 
@@ -122,7 +141,7 @@ It features the following arguments:
 
 - `--gguf_path` (required): Path of a directory containing GGUF files which could that can be downloaded from [Hugging Face](https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main). Note that the directory should only contains GGUF of current model, which means you need one separate directory for each model.
 
-- `--optimize_rule_path` (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.
+- `--optimize_config_path` (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the [ktransformers/optimize/optimize_rules](ktransformers/optimize/optimize_rules) directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.
 
 - `--max_new_tokens`: Int (default=1000). Maximum number of new tokens to generate.
 
@@ -235,7 +254,7 @@ Be aware that you need to be subject to their corresponding model licenses when 
 <!-- pin block for jump -->
 <span id='id_666'> 
 
-<h3>RESTful API and Web UI (deprected) </h3>
+<h3>RESTful API and Web UI  </h3>
 
 
 Start without website:

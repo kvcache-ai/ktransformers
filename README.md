@@ -23,7 +23,8 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
-* **Feb 15, 2025**: KTransformers V0.2.1: Longer Context (from 4K to 8K for 24GB VRAM) & Slightly Faster Speed （+15%) (Up to 16 Tokens/s), update docs [here](./doc/en/DeepseekR1_V3_tutorial.md) and [online books](https://kvcache-ai.github.io/ktransformers/).
+* **Feb 25, 2025**: Support [FP8 GPU kernel](./doc/en/fp8_kernel.md) for DeepSeek-V3 and R1; [Longer Context](./doc/en/DeepseekR1_V3_tutorial.md#v022-longer-context).
+* **Feb 15, 2025**: Longer Context (from 4K to 8K for 24GB VRAM) & Slightly Faster Speed （+15%, up to 16 Tokens/s), update [docs](./doc/en/DeepseekR1_V3_tutorial.md) and [online books](https://kvcache-ai.github.io/ktransformers/).
 * **Feb 10, 2025**: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. For detailed show case and reproduction tutorial, see [here](./doc/en/DeepseekR1_V3_tutorial.md).
 * **Aug 28, 2024**: Decrease DeepseekV2's required VRAM from 21G to 11G.
 * **Aug 15, 2024**: Update detailed [tutorial](doc/en/injection_tutorial.md) for injection and multi-GPU. 
@@ -103,7 +104,7 @@ Getting started with KTransformers is simple! Follow the steps below to set up a
 
 ### 📥 Installation
 
-To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/).
+To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
 
 
 <h2 id="tutorial">📃 Brief Injection Tutorial</h2>
@@ -125,7 +126,7 @@ To utilize the provided kernels, users only need to create a YAML-based injectio
 ```python
 with torch.device("meta"):
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
-optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config)
+optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
 ...
 generated = prefill_and_generate(model, tokenizer, input_tensor.cuda(), max_new_tokens=1000)
 ```

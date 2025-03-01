@@ -16,6 +16,9 @@
 			- [Memory consumptions:](#memory-consumptions)
 			- [Benchmark results](#benchmark-results-2)
 	- [How to Run](#how-to-run)
+		- [V0.2.2 longer context \& FP8 kernel](#v022-longer-context--fp8-kernel)
+			- [longer context](#longer-context)
+			- [FP8 kernel](#fp8-kernel)
 		- [V0.2 \& V0.2.1 Showcase](#v02--v021-showcase)
 			- [Single socket version (32 cores)](#single-socket-version-32-cores)
 			- [Dual socket version (64 cores)](#dual-socket-version-64-cores)
@@ -90,7 +93,7 @@ Integrated the highly efficient Triton MLA Kernel from the fantastic sglang proj
 "6 experts" case is part of V0.3's preview
 
 
-| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | llama.cpp (8 experts) | 
+| Prompt | hi (2) | 1K (969) | 2K (1930) | 4K (3846) | 8K (7678) | 
 | --- | --- | --- | --- | --- | --- | 
 | Output length | 10tokens | 300tokens | 300tokens | 300tokens | 300tokens | 
 | **6 experts V0.2.0** |  |  |  |  |  |
@@ -154,6 +157,37 @@ the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding*
 
 ## How to Run
+### V0.2.2 longer context & FP8 kernel
+#### longer context
+To use this feature, [install flashinfer](https://github.com/flashinfer-ai/flashinfer) first.
+
+Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.
+
+If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:
+```
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.attention.KDeepseekV2Attention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
+```
+
+If the VRAM is still insufficient, try reducing the `chunk_prefill_size` parameter (default is 8192) to further decrease the intermediate results during chunk prefill.
+#### FP8 kernel
+
+The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:
+- **FP8 GPU Kernel Integration**: FP8 linear layer acceleration kernels integrated in KTransformers
+- **Hybrid Quantization Architecture**:
+  - Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)
+  - Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)
+
+So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.
+
+The detailed guide is [here](./fp8_kernel.md).
+
 ### V0.2 & V0.2.1 Showcase
 #### Single socket version (32 cores)
 Our local_chat test command is:
@@ -171,7 +205,7 @@ Attention! If you are testing R1 and it may skip thinking. So you can add arg: `
 
 #### Dual socket version (64 cores)
 
-Make suer before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set). You may check the doc [here](./install.md) for install details. <br>
+Make sure before you install (use install.sh or `make dev_install`), setting the env var `USE_NUMA=1` by `export USE_NUMA=1` (if already installed, reinstall it with this env var set). You may check the doc [here](./install.md) for install details. <br>
 
 Test Command:
 ``` shell
@@ -226,6 +260,7 @@ Intel is currently the only CPU vendor that supports AMX-like instructions, whic
 ### Easier
 * Official Docker images to simplify installation
 * Fix the server integration for web API access
+* Fix the local chat only accepting a single line prompt (currently \n begins generating prompt)
 * Support for more quantization types, including the highly requested dynamic quantization from unsloth
 
 Stay tuned for more updates! 

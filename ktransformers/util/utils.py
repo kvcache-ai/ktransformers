@@ -17,8 +17,21 @@ from ktransformers.operators import base_operator
 from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.util.textstream import TextStreamer
+from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton
 
 warm_uped = False
+
+def get_compute_capability(device:torch.device = None):
+    if torch.cuda.is_available():
+        if device is None:
+            num_gpus = torch.cuda.device_count()
+            min_compute_capability_major = 100
+            for gpu_id in range(num_gpus):
+                gpu_props = torch.cuda.get_device_properties(gpu_id)
+                min_compute_capability_major = min(min_compute_capability_major, gpu_props.major)
+            return min_compute_capability_major
+        else:
+            return torch.cuda.get_device_properties(device)
 
 def set_module(model, submodule_key, module):
     tokens = submodule_key.split('.')
@@ -65,12 +78,22 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
     for name, param in local_state.items():
         key = prefix + name
         translated_key = translate_name_to_gguf(key)
-        if translated_key in gguf_loader.tensor_file_map:
+        
+        # TODO: Merge all loader.
+        # I know this is ugly but lets do it for now.
+        if gguf_loader.safetensor_loader is not None:
+            load_dequantized_tensor = gguf_loader.safetensor_loader.load_dequantized_tensor
+            tensor_file_map = gguf_loader.safetensor_loader.tensor_file_map
+        else:
+            load_dequantized_tensor = gguf_loader.load_gguf_tensor
+            tensor_file_map = gguf_loader.tensor_file_map
+        
+        if translated_key in tensor_file_map:
             target_dtype = torch.get_default_dtype()
             device = get_device(translated_key[:translated_key.rfind(".")], gguf_loader.tensor_device_map)
             print(f"loading {translated_key} to {device}")
-            # device = "cpu" if "embd" in translated_key else "cuda"
-            weights = gguf_loader.load_gguf_tensor(translated_key, device = device).to(dtype = target_dtype)
+            torch.cuda.empty_cache()
+            weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
             set_param(module, name, weights)
             del weights
         else:
@@ -78,7 +101,7 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
             raise Exception(f"can't find {translated_key} in GGUF file!")
         
 def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
-    # print(f"recursively loading weights {prefix},{return_when_injected=}, {only_load_injected=}")
+    #print(f"recursively loading weights {prefix}")
     if not isinstance(module, base_operator.BaseInjectedModule):
         load_cur_state_dict(module, gguf_loader, prefix)
         for name, child in module._modules.items():
@@ -87,7 +110,8 @@ def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
         module.load()
 
 def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cuda_graph: bool = True,
-                         mode = 'normal', force_think: bool = False):
+                         mode = 'normal', force_think: bool = False, chunk_prefill_size = 16384, use_flashinfer_mla = False,
+                         num_heads = None, head_dim_ckv = None, head_dim_kpe = None, q_head_dim = None):
     import os
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch._dynamo.config.suppress_errors = True
@@ -100,7 +124,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
 
     tokens = []
     
-    def decode_one_tokens(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, use_cuda_graph: bool = True):
+    def decode_one_tokens(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph: bool = True):
         if cuda_graph_runner is None:
             use_cuda_graph = False
         if use_cuda_graph:
@@ -128,8 +152,25 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             next_token = torch.argmax(next_token_scores, dim=-1)
         return next_token
     
+    # TODO: use CUDA Graph for chunk prefill, may get small improvement
+    def chunk_prefill(inputs, cache_position, past_key_values):
+        if mode == "long_context":
+            inputs_embeds = model.model.embed_tokens(inputs.to("cpu"))
+        else:
+            inputs_embeds = model.model.embed_tokens(inputs.to("cpu")).to(torch_device)
+        if use_flashinfer_mla:
+            MLAWrapperSingleton.update_buffer(past_key_values.max_pages)
+            MLAWrapperSingleton.need_plan_all()
+            
+        logits = model(
+            inputs_embeds = inputs_embeds, cache_position=cache_position, past_key_values=past_key_values, return_dict=False, use_cache=True
+        )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
+        
+        return logits
+    
     torch.cuda.set_device(torch_device)
     with torch.no_grad():
+        
         stream = TextStreamer(tokenizer)
         if mode != 'long_context':
             past_key_values = StaticCache(
@@ -137,26 +178,11 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             )
         else:
             past_key_values = None
-        cache_position = torch.arange(seq_length, device=torch_device, dtype=torch.long)
-        generated_ids = torch.zeros(
-            batch_size, seq_length + max_new_tokens + 1, dtype=torch.int, device=torch_device
-        )
-        generated_ids[:, cache_position] = inputs.to(torch_device).to(torch.int)
-        if past_key_values != None:
-            past_key_values.cur_idx=cache_position
-        start_time = time.time()
-
-        inputs_embeds = model.model.embed_tokens(inputs.to("cpu")).to(torch_device)
-        if mode == "long_context":
-            inputs_embeds = model.model.embed_tokens(inputs.to("cpu"))
-        else:
-            inputs_embeds = model.model.embed_tokens(inputs.to("cpu")).to(torch_device)
-        logits = model(
-            inputs_embeds = inputs_embeds, cache_position=cache_position, past_key_values=past_key_values, return_dict=False, use_cache=True
-        )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
+        
         generation_config, model_kwargs = model._prepare_generation_config(
-            None, max_length=max_new_tokens,
-            do_sample=True, top_k=5, top_p=0.85, temperature=0.1 # change this to modify generate config
+            None, do_sample=True
+            # change this to modify generate config
+            #top_k=5, top_p=0.85, temperature=0.1
         )
         try: # transformers==4.43
             logits_warper = (
@@ -166,23 +192,43 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             logits_warper = (
                 model._get_logits_warper(generation_config)
             )
+
+        cache_position = torch.arange(seq_length, device=torch_device, dtype=torch.int32)
+        generated_ids = torch.zeros(
+            batch_size, seq_length + max_new_tokens + 1, dtype=torch.int, device=torch_device
+        )
+        generated_ids[:, cache_position] = inputs.to(torch_device).to(torch.int)
+        start_time = time.time()
+
+        chunk_start = 0
+        while chunk_start < seq_length:
+            chunk_end = min(chunk_start + chunk_prefill_size, seq_length)
+            if past_key_values != None:
+                past_key_values.cur_idx=cache_position[chunk_start:chunk_end]
+            logits = chunk_prefill(inputs[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end], past_key_values)
+            chunk_start += chunk_prefill_size
+
         next_token_scores = logits_warper(inputs, logits[:, -1, :])
         if generation_config.do_sample:
             probs = nn.functional.softmax(next_token_scores, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
         else:
             next_token = torch.argmax(next_token_scores, dim=-1)
+
         first_token_time = time.time() - start_time
+        
+        if use_flashinfer_mla:
+            MLAWrapperSingleton.reset_buffer()
 
         prefill_count = seq_length
         prefill_time = first_token_time
         if force_think:
-            print("<think>\n")
+            print("<think>")
         print(stream.put(next_token.item()), end="", flush=True)
         generated_ids[:, seq_length] = next_token
         tokens.append(int(next_token))
         inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
-        cache_position = torch.tensor([seq_length], device=torch_device, dtype=torch.long)
+        cache_position = torch.tensor([seq_length], device=torch_device, dtype=torch.int32)
         position_ids = cache_position.unsqueeze(0)
         seq_length += 1
         
@@ -190,19 +236,22 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             
         start_time = time.time()
         for i in range(1, max_new_tokens):
+            if use_flashinfer_mla:
+                MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,
+                                             num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
+                                             q_head_dim ** (-0.5), torch.bfloat16, torch.bfloat16)
             global warm_uped
             if use_cuda_graph and ( (warm_uped == True and int(i) == 1) or (warm_uped == False and int(i) == 2) ):
                 warm_uped = True
                 cuda_graph_runner = CUDAGraphRunner()
                 cuda_graph_runner.capture(model, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, torch_device, return_dict=False, use_cache=True)
-                
-            next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
+            next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph).to(torch_device)
             inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
             generated_ids[:, cache_position] = next_token.int()
             tokens.append(int(next_token))
             seq_length += 1
             
-            if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token) == '<|im_end|>':
+            if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token.tolist()) == '<|im_end|>':
                 print(stream.end(), end="", flush=True)
                 break
             else:

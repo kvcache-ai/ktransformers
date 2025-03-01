@@ -1699,7 +1699,7 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states.to(self.lm_head.weight.device))
+        logits = self.lm_head(hidden_states[:,-1:,:])
         logits = logits.float()
 
         loss = None

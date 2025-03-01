@@ -28,8 +28,9 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
-from ktransformers.util.utils import prefill_and_generate
+from ktransformers.util.utils import prefill_and_generate, get_compute_capability
 from ktransformers.server.config.config import Config
+from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
 
 custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
@@ -53,7 +54,7 @@ default_optimize_rules = {
 
 def local_chat(
     model_path: str | None = None,
-    optimize_rule_path: str = None,
+    optimize_config_path: str = None,
     gguf_path: str | None = None,
     max_new_tokens: int = 300,
     cpu_infer: int = Config().cpu_infer,
@@ -61,8 +62,8 @@ def local_chat(
     prompt_file : str | None = None,
     mode: str = "normal",
     force_think: bool = False,
+    chunk_prefill_size: int = 8192
 ):
-
 
     torch.set_grad_enabled(False)
 
@@ -94,12 +95,12 @@ def local_chat(
                 config, trust_remote_code=True, attn_implementation="flash_attention_2"
             )
 
-    if optimize_rule_path is None:
+    if optimize_config_path is None:
         if config.architectures[0] in default_optimize_rules:
             print("using default_optimize_rule for", config.architectures[0])
-            optimize_rule_path = default_optimize_rules[config.architectures[0]]
+            optimize_config_path = default_optimize_rules[config.architectures[0]]
         else:
-            optimize_rule_path = input(
+            optimize_config_path = input(
                 "please input the path of your rule file(yaml file containing optimize rules):"
             )
 
@@ -107,18 +108,18 @@ def local_chat(
         gguf_path = input(
             "please input the path of your gguf file(gguf file in the dir containing input gguf file must all belong to current model):"
         )
-    optimize_and_load_gguf(model, optimize_rule_path, gguf_path, config)
+    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
     
     try:
-            model.generation_config = GenerationConfig.from_pretrained(model_path)
-    except:
-            gen_config = GenerationConfig(
-                max_length=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
-            model.generation_config = gen_config
+        model.generation_config = GenerationConfig.from_pretrained(model_path)
+    except Exception as e:
+        print(f"generation config can't auto create, make default. Message: {e}")
+        gen_config = GenerationConfig(
+            temperature=0.6,
+            top_p=0.95,
+            do_sample=True
+        )
+        model.generation_config = gen_config
     # model.generation_config = GenerationConfig.from_pretrained(model_path)
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
@@ -167,12 +168,16 @@ def local_chat(
         if mode == 'long_context':
             assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
             "please change max_seq_len in  ~/.ktransformers/config.yaml"
-        torch.set_default_dtype(
-            torch.bfloat16
-        )  # TODO: Remove this, replace dtype using config
-        generated = prefill_and_generate(
-            model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode, force_think
-        )
+        
+        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8:
+            generated = prefill_and_generate(
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
+                use_flashinfer_mla = True, num_heads = config.num_attention_heads, head_dim_ckv = config.kv_lora_rank, head_dim_kpe = config.qk_rope_head_dim, q_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
+            )
+        else:
+            generated = prefill_and_generate(
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
+            )
 
 
 if __name__ == "__main__":

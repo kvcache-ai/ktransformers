@@ -59,6 +59,7 @@ Supported operators and their corresponding classes are as follows:
 | Linear    | KTransformersLinear    | KLinearMarlin           | Marlin as backend    |
 |           |                        | KLinearTorch            | pytorch as backend   |
 |           |                        | KLinearCPUInfer         | llamafile as backend |
+|           |                        | KLinearFP8         | Triton fp8_gemm kernel. Requires GPU be able to caluculate fp8 data |
 | experts   | KTransformersExperts   | KExpertsTorch           | pytorch as backend   |
 |           |                        | KExpertsMarlin          | Marlin as backend    |
 |           |                        | KExpertsCPU             | llamafile as backend |
