@@ -2,6 +2,8 @@
 set -e  
 
 # clear build dirs
+rm -rf build
+rm -rf *.egg-info
 rm -rf ktransformers/ktransformers_ext/build
 rm -rf ktransformers/ktransformers_ext/cuda/build
 rm -rf ktransformers/ktransformers_ext/cuda/dist

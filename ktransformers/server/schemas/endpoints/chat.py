@@ -25,7 +25,9 @@ class ChatCompletionCreate(BaseModel):
     messages: List[Message]
     model : str
     stream : bool = False
-
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
 
@@ -75,4 +77,4 @@ class ChatCompletionChunk(ChatCompletionBase):
         ]
 
     def to_stream_reply(self):
-        return f"data:{self.model_dump_json()}\n\n"
+        return f"data: {self.model_dump_json()}\n\n"

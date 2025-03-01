@@ -713,9 +713,20 @@
       generate_device: "cuda:7"
       prefill_device: "cuda:7"
 
-# For final modules (model.norm and lm_head), ensure they are on GPU 7 (as in your original config)
 - match:
-    name: "(^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.)|(^model\\.norm)|(^lm_head)"
+    name: "^lm_head"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda:7"
+      prefill_device: "cuda:7"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+# For final modules (model.norm), ensure they are on GPU 7 (as in your original config)
+- match:
+    name: "(^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.)|(^model\\.norm)"
   replace:
     class: "default"
     kwargs:

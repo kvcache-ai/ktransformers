@@ -90,7 +90,7 @@ def marlin_quantize(
     assert group_size <= size_k
 
     # Quantize (and apply act_order if provided)
-    w_ref, q_w, s, g_idx, rand_perm = quantize_weights(w, num_bits, group_size,
+    q_w, s, g_idx, rand_perm = quantize_weights(w, num_bits, group_size,
                                                        act_order)
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
@@ -107,7 +107,7 @@ def marlin_quantize(
                                      marlin_scale_perm_single[num_bits])
 
     # Create result
-    res_list = [w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, rand_perm]
+    res_list = [marlin_q_w, marlin_s, g_idx, sort_indices, rand_perm]
     for i in range(len(res_list)):
         res_list[i] = res_list[i].to(w.device)
 

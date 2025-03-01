@@ -16,14 +16,17 @@ class BaseInjectedModule(nn.Module):
                  gguf_loader : GGUFLoader,
                  config: PretrainedConfig,
                  orig_module: nn.Module,
-                 device: str = "cuda",
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
                  **kwargs):
         nn.Module.__init__(self)
         nn.Module.__setattr__(self, "orig_module", orig_module)
         object.__setattr__(self, "key", key)
         object.__setattr__(self, "gguf_loader", gguf_loader)
         object.__setattr__(self, "config", config)
-        object.__setattr__(self, "device", device)
+        object.__setattr__(self, "prefill_device", prefill_device)
+        object.__setattr__(self, "generate_device", generate_device)
+        object.__setattr__(self, "device", generate_device)
         
     def __getattr__(self, name: str) -> Any:
         # __getattr__ in nn.Module doesn't call super().__getattribute__ when name is not in nn.Module.__dict__,

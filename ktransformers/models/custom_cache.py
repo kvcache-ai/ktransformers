@@ -138,8 +138,6 @@ class StaticCache(transformers.StaticCache):
             page_idx = cache_position // self.page_size
             page_offset = cache_position % self.page_size
             # key shape (self.max_pages, self.page_size, 1, config.kv_lora_rank + config.qk_rope_head_dim)
-            #print("page_idx", page_idx)
-            #print("page_offset", page_offset)
             k_out[page_idx, page_offset, :, :self.kv_lora_rank] = key_states
             k_out[page_idx, page_offset, :, self.kv_lora_rank:] = value_states
             return k_out, self.page_table_list[layer_idx]
@@ -172,7 +170,20 @@ class StaticCache(transformers.StaticCache):
         for layer_idx in range(len(self.key_cache)):
             # In-place ops prevent breaking the static address
             self.key_cache[layer_idx].zero_()
-            self.value_cache[layer_idx].zero_()
+            if self.value_cache[layer_idx] is not None:
+                self.value_cache[layer_idx].zero_()
+            self.past_tokens[layer_idx] = 0
+
+    def remove_suffix(self, start_pos):
+        for layer_idx in range(len(self.key_cache)):
+            # In-place ops prevent breaking the static address
+            if self.is_MLA:
+                k_cache = self.key_cache[layer_idx]
+                k_cache.view(-1, k_cache.shape[-1])[start_pos:].zero_()
+            else:
+                self.key_cache[layer_idx][..., start_pos:, :].zero_()
+                self.value_cache[layer_idx][..., start_pos:, :].zero_()
+            self.past_tokens[layer_idx] = start_pos
     
     def get_max_cache_shape(self) -> Tuple[int, int, int, int]:
         """Returns the maximum shape of the cache."""
