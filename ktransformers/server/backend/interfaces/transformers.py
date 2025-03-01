@@ -13,6 +13,7 @@ from transformers import (
 from ktransformers.server.config.config import Config
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.utils.multi_timer import Profiler
+from torch.nn.attention import SDPBackend
 import torch
 import sys, os
 from ..base import ThreadContext, BackendInterfaceBase
@@ -335,9 +336,9 @@ class TransformersInterface(BackendInterfaceBase):
             return
         logger.info(f"max_new_tokens: {self.args.max_new_tokens}")
         self.profiler.set_counter("decode", 0)
+
         for i in range(1, self.args.max_new_tokens):
-            
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+            with torch.nn.attention.sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION, SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
                 if flashinfer_enabled:
                     MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
                                              num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
