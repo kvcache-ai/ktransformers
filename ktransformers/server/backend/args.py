@@ -23,7 +23,7 @@ class ConfigArgs(BaseModel):
     max_batch_size: int = Field(
         None, description="Max number of batches to run at once, assuming the sequences will fit within total_context"
     )
-    max_chunk_size: int = Field(
+    chunk_prefill_size: int = Field(
         None,
         description=(
             "Max chunk size. Determines the size of prefill operations. Can be reduced to reduce pauses whenever a new"
