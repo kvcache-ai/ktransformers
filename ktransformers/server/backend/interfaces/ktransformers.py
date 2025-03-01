@@ -35,7 +35,7 @@ class KTransformersInterface(TransformersInterface):
             generation_config = GenerationConfig(
                 max_length=args.max_new_tokens,
                 temperature=args.temperature,
-                top_p=args.temperature,
+                top_p=args.top_p,
                 do_sample=True
             )
         
