@@ -323,24 +323,17 @@ bool llamafile_sgemm(long m, long n, long k, const void* A, long lda, const void
 #if QK_K == 256
 #if defined(__x86_64__) || defined(_M_X64)
 #if defined(__AVX2__) && (defined(__FMA__) || (defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__))))
-
- /* 
+    /* 
     moonll
     more Btype accept
     }*/
 
-      if (Ctype == GGML_TYPE_F32){
-   
+    if (Ctype == GGML_TYPE_F32){
         if (iqk_mul_mat(m, n, k * ggml_blck_size(ggml_type(Atype)), Atype, A,lda,Btype, B,ldb, (float*)C, ldc, ith, nth)) {
             return true;
         }
-
     }
 
-
-
-
-    // }
 #endif
 #elif defined __aarch64__ && defined __ARM_FEATURE_DOTPROD && !defined _MSC_VER
     if (Btype == GGML_TYPE_Q8_K && Ctype == GGML_TYPE_F32) {
