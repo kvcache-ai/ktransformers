@@ -357,8 +357,8 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
 <h3 id="v022-longer-context--fp8-kernel"><a class="header" href="#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a></h3>
 <h4 id="longer-context"><a class="header" href="#longer-context">longer context</a></h4>
-<p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.
-Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.</p>
+<p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.</p>
+<p>Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.</p>
 <p>If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:</p>
 <pre><code>- match:
     name: "^model\\.layers\\..*\\.self_attn$"
@@ -369,6 +369,7 @@ Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are
       prefill_device: "cuda"
       absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
 </code></pre>
+<p>If the VRAM is still insufficient, try reducing the <code>chunk_prefill_size</code> parameter (default is 8192) to further decrease the intermediate results during chunk prefill.</p>
 <h4 id="fp8-kernel"><a class="header" href="#fp8-kernel">FP8 kernel</a></h4>
 <p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
 <ul>
