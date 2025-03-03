@@ -347,7 +347,6 @@ class KLinearMarlin(KLinearBase):
             orig_shape[-1] = self.out_features
         if self.has_bias:
             x = x + self.bias
-        orig_shape[-1] = self.n
         return x.reshape(orig_shape).to(orig_dtype)
 
     def unload(self):
