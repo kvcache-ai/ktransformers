@@ -103,7 +103,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         for name, child in module._modules.items():
             if child is not None:
                 child_prefix = prefix + name + "."
-                gen_optimize_config(child, out_data, rule_list, child_prefix)
+                gen_optimize_config(child, out_data, rule_list, child_prefix, default_device = default_device)
     
 
 def translate_model_config(model_config: PretrainedConfig):
@@ -115,6 +115,10 @@ def translate_model_config(model_config: PretrainedConfig):
 
 
 def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = "cuda:0"):
+    if 'cuda' in default_device:
+        default_device = "cuda:0"
+    elif 'xpu' in default_device:
+        default_device = "xpu:0"
     with open(rule_file, 'r', encoding='utf-8') as f:
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
     
@@ -131,4 +135,7 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     load_weights(module, gguf_loader)
     module.gguf_loader = gguf_loader
     del_meta(module)
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.xpu.is_available():
+        torch.xpu.empty_cache()
