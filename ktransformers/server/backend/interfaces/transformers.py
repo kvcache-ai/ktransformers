@@ -13,6 +13,7 @@ from transformers import (
 from ktransformers.server.config.config import Config
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.utils.multi_timer import Profiler
+from torch.nn.attention import SDPBackend
 import torch
 import sys, os
 from ..base import ThreadContext, BackendInterfaceBase
@@ -202,20 +203,23 @@ class TransformersInterface(BackendInterfaceBase):
         self.seq_length += 1
         return self.streamer.put(new_tokens)
 
-    def prepare_logits_wrapper(self, inputs, device):
+    def prepare_logits_wrapper(self, inputs, device, temperature: Optional[float] = None, top_p: Optional[float] = None):
+        if temperature is None or temperature == 0:
+            temperature = self.model.generation_config.temperature
+        if top_p is None:
+            top_p = self.model.generation_config.top_p
         generation_config, model_kwargs = self.model._prepare_generation_config(
             None, max_length=self.args.max_new_tokens,
             do_sample=True, 
             top_k=self.args.top_k, 
-            top_p=self.args.top_p, 
-            temperature=self.args.temperature,
+            top_p=top_p, 
+            temperature=temperature,
             repetition_penalty=self.args.repetition_penalty # change this to modify generate config
         )
         self.inputs = inputs
-        self.generation_config = generation_config
         try: # transformers==4.43
             self.logits_warper = (
-                self.model._get_logits_warper(generation_config,device=device)
+                self.model._get_logits_warper(generation_config, device=device)
             )
         except: 
             self.logits_warper = (
@@ -239,12 +243,10 @@ class TransformersInterface(BackendInterfaceBase):
 
     def decode_one_tokens(self):
         if self.use_static_cache:
-            mask = torch.ones((1, self.seq_length)).to(self.args.device)
             logits = self.model(
                 self.current_ids,
                 cache_position=self.active_cache_position,
                 past_key_values=self.cache,
-                attention_mask=mask,
                 return_dict=False,
                 use_cache=True,
             )[0]
@@ -255,7 +257,7 @@ class TransformersInterface(BackendInterfaceBase):
         return self.logits_to_token(logits)
 
     @torch.no_grad
-    def prefill(self, input_ids: torch.Tensor, is_new: bool):
+    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float] = None, top_p: Optional[float] = None):
         input_ids_length = input_ids.shape[-1]
         logger.debug(f"input_ids: {input_ids.shape}")
 
@@ -306,7 +308,6 @@ class TransformersInterface(BackendInterfaceBase):
         cache_position = torch.arange(former_seq_length, self.seq_length, device=self.args.device)
         self.generated_ids[:, cache_position] = input_ids.to(self.args.device).to(torch.int)
 
-        mask = torch.ones((1, self.seq_length)).to(self.args.device)
         device = input_ids.device
         if not (type(self) is TransformersInterface):
             input_ids = input_ids.to("cpu")
@@ -318,21 +319,26 @@ class TransformersInterface(BackendInterfaceBase):
                 past_key_values=self.cache,
                 return_dict=False,
                 use_cache=True,
-                attention_mask=mask,
             )[0]
         else:
             logits = self.model(inputs_embeds=inputs_embeds, return_dict=False)[0]
 
-        self.prepare_logits_wrapper(input_ids, device)
+        self.prepare_logits_wrapper(input_ids, device, temperature, top_p)
         next_token = self.logits_to_token(logits[0, -1, :])
         yield self.append_new_tokens(next_token)
 
     @torch.no_grad
     def generate(self):
+        self.args.max_new_tokens = min(self.args.max_new_tokens, self.args.cache_lens - self.seq_length) 
+        if(self.args.max_new_tokens <= 0):
+            logger.warning("max_new_tokens is less than 0")
+            yield self.streamer.end()
+            return
+        logger.info(f"max_new_tokens: {self.args.max_new_tokens}")
         self.profiler.set_counter("decode", 0)
+
         for i in range(1, self.args.max_new_tokens):
-            
-            with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+            with torch.nn.attention.sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION, SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
                 if flashinfer_enabled:
                     MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
                                              num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
@@ -359,7 +365,7 @@ class TransformersInterface(BackendInterfaceBase):
                 self.last_request_id = thread_id
                 return True
 
-    async def inference(self, local_messages, thread_id: str):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None):
         self.streamer.reset()
         self.profiler.create_and_start_timer("tokenize")
         if isinstance(local_messages, List):
@@ -386,7 +392,7 @@ class TransformersInterface(BackendInterfaceBase):
             print(think, end="",flush=True)
             yield think
         
-        for t in self.prefill(input_ids, self.check_is_new(thread_id)):
+        for t in self.prefill(input_ids, self.check_is_new(thread_id), temperature, top_p):
             # output think token after prefill done
             if t is not None:
                 print(t, end="",flush=True)

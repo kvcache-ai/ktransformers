@@ -24,13 +24,13 @@ class ArgumentParser:
         parser.add_argument("--optimize_config_path", default=self.cfg.optimize_config_path, type=str, required=False)
         parser.add_argument("--cpu_infer", type=int, default=self.cfg.cpu_infer)
         parser.add_argument("--type", type=str, default=self.cfg.backend_type)
+        parser.add_argument("--chunk_prefill_size", type=int, default=8192)
 
         # model configs
         # parser.add_argument("--model_cache_lens", type=int, default=self.cfg.cache_lens)  # int?
         parser.add_argument("--paged", type=bool, default=self.cfg.paged)
         parser.add_argument("--total_context", type=int, default=self.cfg.total_context)
         parser.add_argument("--max_batch_size", type=int, default=self.cfg.max_batch_size)
-        parser.add_argument("--max_chunk_size", type=int, default=self.cfg.max_chunk_size)
         parser.add_argument("--max_new_tokens", type=int, default=self.cfg.max_new_tokens)
         parser.add_argument("--json_mode", type=bool, default=self.cfg.json_mode)
         parser.add_argument("--healing", type=bool, default=self.cfg.healing)
