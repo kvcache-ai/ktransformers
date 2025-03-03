@@ -37,14 +37,14 @@ jobs:
         if: ${{ inputs.job_to_run == 'create&install'}}
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
-          conda activate KTransformers-dev
+          conda activate ktransformers-dev
           pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
           pip3 install packaging ninja cpufeature numpy
           pip install ~/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
       - name: Install KTransformers
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
-          conda activate KTransformers-dev
+          conda activate ktransformers-dev
           cd ${{ github.workspace }}
           git submodule init
           git submodule update
