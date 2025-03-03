@@ -1,5 +1,5 @@
 flake_find:
-	cd ktransformers && flake8 | grep -Eo '[A-Z][0-9]{3}' | sort | uniq| paste -sd ',' - 
+	cd ktransformers && flake8 | grep -Eo '[A-Z][0-9]{3}' | sort | uniq| paste -sd ',' -
 format:
 	@cd ktransformers && black .
 	@black setup.py
@@ -14,7 +14,11 @@ dev_install:
 
 # install ktransformers
 	echo "Installing python dependencies from requirements.txt"
-	pip install -r requirements-local_chat.txt
+	@if command -v mcc > /dev/null 2>&1; then \
+		bash -c 'pip install -r <(grep -v -E "torch|numpy" requirements-local_chat.txt)'; \
+	else \
+		pip install -r requirements-local_chat.txt; \
+	fi
 
 	echo "Installing ktransformers"
 	KTRANSFORMERS_FORCE_BUILD=TRUE pip install -e . -v --no-build-isolation

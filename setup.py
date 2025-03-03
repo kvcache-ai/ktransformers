@@ -328,6 +328,23 @@ class CMakeBuild(BuildExtension):
             ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
         )
 
+dependencies = [
+    "torch >= 2.3.0",
+    "transformers == 4.43.2",
+    "fastapi >= 0.111.0",
+    "uvicorn >= 0.30.1",
+    "langchain >= 0.2.0",
+    "blessed >= 1.20.0",
+    "accelerate >= 0.31.0",
+    "sentencepiece >= 0.1.97",
+    "setuptools",
+    "ninja",
+    "wheel",
+    "colorlog",
+    "build",
+    "fire",
+    "protobuf"
+]
 if CUDA_HOME is not None:
     ops_module = CUDAExtension('KTransformersOps', [
         'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
@@ -345,6 +362,7 @@ if CUDA_HOME is not None:
         }
     )
 elif MUSA_HOME is not None:
+    dependencies.remove("torch >= 2.3.0")
     SimplePorting(cuda_dir_path="ktransformers/ktransformers_ext/cuda", mapping_rule={
         # Common rules
         "at::cuda": "at::musa",
@@ -372,6 +390,7 @@ else:
 
 setup(
     version=VersionInfo().get_package_version(),
+    install_requires=dependencies,
     cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
     ext_modules=[
         CMakeExtension("cpuinfer_ext"),
