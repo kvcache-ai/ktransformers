@@ -3,6 +3,14 @@ name: DockerHub CI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      choose:
+        description: 'Will you push the image to DockerHub? 0 for No, 1 for Yes'
+        required: true
+        default: '0'
+        type: string
+
   # push:
   #   branches:
   #     - main
