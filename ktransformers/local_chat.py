@@ -62,6 +62,7 @@ def local_chat(
     prompt_file : str | None = None,
     mode: str = "normal",
     force_think: bool = False,
+    chunk_prefill_size: int = 8192
 ):
 
     torch.set_grad_enabled(False)
@@ -110,15 +111,15 @@ def local_chat(
     optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
     
     try:
-            model.generation_config = GenerationConfig.from_pretrained(model_path)
-    except:
-            gen_config = GenerationConfig(
-                max_length=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
-            )
-            model.generation_config = gen_config
+        model.generation_config = GenerationConfig.from_pretrained(model_path)
+    except Exception as e:
+        print(f"generation config can't auto create, make default. Message: {e}")
+        gen_config = GenerationConfig(
+            temperature=0.6,
+            top_p=0.95,
+            do_sample=True
+        )
+        model.generation_config = gen_config
     # model.generation_config = GenerationConfig.from_pretrained(model_path)
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
@@ -168,14 +169,14 @@ def local_chat(
             assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
             "please change max_seq_len in  ~/.ktransformers/config.yaml"
         
-        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8:
+        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8:
             generated = prefill_and_generate(
-                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
                 use_flashinfer_mla = True, num_heads = config.num_attention_heads, head_dim_ckv = config.kv_lora_rank, head_dim_kpe = config.qk_rope_head_dim, q_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
             )
         else:
             generated = prefill_and_generate(
-                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think,
+                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
             )
 
 
