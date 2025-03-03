@@ -25,13 +25,13 @@ jobs:
         if: ${{ inputs.job_to_run == 'create&install'}}
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
-          conda env remove --name KTransformers-dev -y
+          conda env remove --name ktransformers-dev -y
       - name: Create conda environment
         if: ${{ inputs.job_to_run == 'create&install'}}
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
-          conda create --name KTransformers-dev python=3.11
-          conda activate KTransformers-dev
+          conda create --name ktransformers-dev python=3.11
+          conda activate ktransformers-dev
           conda install -c conda-forge libstdcxx-ng -y
       - name: Install dependencies
         if: ${{ inputs.job_to_run == 'create&install'}}
