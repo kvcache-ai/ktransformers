@@ -12,10 +12,15 @@ extern "C" {
 
 struct ggml_tensor;
 struct ggml_compute_params;
+/*moonll old
+add more params typeb...
+*/
 
-bool iqk_mul_mat(long, long, long, int, const void*, const void*, float*, long, int, int);
-bool iqk_mul_mat_zen4(long, long, long, int, const void*, const void*, float*, long, int, int);
-bool iqk_mul_mat_arm82(long, long, long, int, const void*, const void*, float*, long, int, int);
+
+bool iqk_mul_mat(long, long, long,int, const void*, long, int, const void*, long,float*, long, int, int);
+bool iqk_mul_mat_zen4(long, long, long,int, const void*, long, int, const void*, long,float*, long, int, int);
+bool iqk_mul_mat_arm82(long, long, long,int, const void*, long, int, const void*, long,float*, long, int, int);
+
 
 bool iqk_mul_mat_moe(long, long, long, int, int, const void*, const void*, float*, long, long, const void*, int, int);
 bool iqk_mul_mat_moe_zen4(long, long, long, int, int, const void*, const void*, float*, long, long, const void*, int, int);
