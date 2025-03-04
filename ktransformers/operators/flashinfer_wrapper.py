@@ -4,6 +4,7 @@ Author       : Boxin Zhang
 Version      : 0.2.2
 '''
 import torch
+from util.torch_auto_backend import CUDA
 
 flashinfer_enabled = False
 
@@ -11,7 +12,7 @@ try:
     import flashinfer
     flashinfer_enabled = True
     print("found flashinfer")
-    
+
 except ImportError:
     print("flashinfer not found, use triton for linux")
 
@@ -70,7 +71,7 @@ class MLAWrapper():
                  max_batch_size,
                  max_pages,
                  use_cuda_graph = True,
-                 device = "cuda",
+                 device = CUDA,
                  ):
         self.float_workspace_buffer = torch.empty(128*1024*1024, dtype=torch.int8, device=device)
         self.max_batch_size = max_batch_size
@@ -99,7 +100,7 @@ class MLAWrapper():
             kv_len_arr=self.kv_len_arr_buf,
         )
         self.need_plan = True
-    
+
     def plan(self,
              qo_indptr,
              kv_indptr,
@@ -154,7 +155,7 @@ class MLAWrapperSingleton():
         if device not in cls.wrappers:
             cls.make_instance(device, *args, **kwargs)
         return cls.wrappers[device]
-    
+
     @classmethod
     def make_instance(cls, device, *args, **kwargs):
         cls.wrappers[device] = MLAWrapper(*args, **kwargs, device=device)
@@ -185,24 +186,24 @@ class MLAWrapperSingleton():
                 q_data_type,
                 kv_data_type,)
             wrapper.need_plan = False
-            
+
     @classmethod
     def need_plan_all(cls):
         for device, wrapper in cls.wrappers.items():
             wrapper.need_plan = True
-        
+
     @classmethod
     def reset_buffer(cls):
         for device, wrapper in cls.wrappers.items():
             wrapper.qo_indptr_buf[1] = 1 # assert max_batch_size=1 here.
-            
+
     @classmethod
     def update_buffer(cls, max_pages):
         for device, wrapper in cls.wrappers.items():
             wrapper.kv_indptr_buf[1] = max_pages # assert max_batch_size=1 here.
             wrapper.kv_indices_buf = torch.arange(0, max_pages, dtype=torch.int32, device=device)
             wrapper.wrapper._kv_indices_buf = wrapper.kv_indices_buf
-            
+
 
 if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
@@ -213,20 +214,20 @@ if __name__ == "__main__":
 
     kv_len = 4023
     q_len = 1
-    q_nope = torch.randn((q_len, num_heads, 512), dtype=torch.bfloat16, device="cuda")
-    q_pe = torch.randn((q_len, num_heads, 64), dtype=torch.bfloat16, device="cuda")
-    ckv = torch.randn((max_pages, page_size, 512), dtype=torch.bfloat16, device="cuda")
-    k_pe = torch.randn((max_pages, page_size, 64), dtype=torch.bfloat16, device="cuda")
-    
+    q_nope = torch.randn((q_len, num_heads, 512), dtype=torch.bfloat16, device=CUDA)
+    q_pe = torch.randn((q_len, num_heads, 64), dtype=torch.bfloat16, device=CUDA)
+    ckv = torch.randn((max_pages, page_size, 512), dtype=torch.bfloat16, device=CUDA)
+    k_pe = torch.randn((max_pages, page_size, 64), dtype=torch.bfloat16, device=CUDA)
+
 
     wrapper = MLAWrapperSingleton.get_instance(
-        "cuda",
+        CUDA,
         max_batch_size,
         max_pages,
     )
-    
-    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device="cuda")
-    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+
+    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device=CUDA)
+    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=CUDA)
     wrapper.plan(
         qo_indptr,
         None,
@@ -243,14 +244,14 @@ if __name__ == "__main__":
 
     attn_output = wrapper.run(q_nope, q_pe, ckv, k_pe)
     print(attn_output.shape)
-    
+
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         attn_output = wrapper.run(q_nope, q_pe, ckv, k_pe)
-        
+
     kv_len = 6789
-    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device="cuda")
-    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device=CUDA)
+    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=CUDA)
     wrapper.plan(
         qo_indptr,
         None,
@@ -264,7 +265,7 @@ if __name__ == "__main__":
         torch.bfloat16,
         torch.bfloat16,
     )
-    
+
     graph.replay()
 
     k = (
@@ -286,6 +287,6 @@ if __name__ == "__main__":
         192 ** (-0.5)
     )
     print(attn_ref.shape)
-    
+
     torch.testing.assert_close(attn_output, attn_ref, rtol=1e-3, atol=1e-3)
     print("test past")
