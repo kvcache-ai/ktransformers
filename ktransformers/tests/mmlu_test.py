@@ -59,8 +59,8 @@ class DataEvaluator:
         :param text: The raw prediction string.
         :return: Processed prediction string.
         """
-        text = text.lstrip('\n').split('\n')[0]
-        return text[:1]
+        text = text.lstrip('\n').split('\n')[-1]
+        return text[-1:]
 
     def score(self, pred, answers):
         """
