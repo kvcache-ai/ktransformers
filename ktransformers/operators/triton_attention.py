@@ -3,9 +3,11 @@
 # which was originally adapted from
 # https://github.com/ModelTC/lightllm/blob/96353e868a840db4d103138caf15ed9dbea8c186/lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding_stage1.py
 # https://github.com/ModelTC/lightllm/blob/96353e868a840db4d103138caf15ed9dbea8c186/lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding_stage2.py
+# 2025 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 
 import triton
 import triton.language as tl
+IS_MACA_TORCH = "metax" in torch.__version__
 
 @triton.jit
 def tanh(x):
@@ -218,7 +220,11 @@ def _decode_grouped_att_m_fwd(
             "kpack": 2
         }
     """
-    
+    num_warps = 4
+    num_stages =2
+    if IS_MACA_TORCH:
+        num_warps = 2
+        num_stages =1
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -247,8 +253,8 @@ def _decode_grouped_att_m_fwd(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
         **extra_kargs,
@@ -336,7 +342,11 @@ def _decode_softmax_reducev_fwd(
             "kpack": 2
         }
     """
-    
+    num_warps = 4
+    num_stages =2
+    if IS_MACA_TORCH:
+        num_warps = 2
+        num_stages =1
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](
         logits,
@@ -350,8 +360,8 @@ def _decode_softmax_reducev_fwd(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
         **extra_kargs,
     )
 

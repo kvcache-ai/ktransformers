@@ -11,6 +11,7 @@ Adapted from https://github.com/99991/pygguf/blob/main/gguf.py
 Copyright (c) 2023-2024 The ggml authors
 Copyright (c) 2024 Thomas Germer
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 '''
 # copied from llama.cpp/gguf-py/gguf/constants.py to satisfy dependence of gguf
 # GGUF specification
@@ -28,6 +29,7 @@ import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
 import math
+IS_MACA_TORCH = "metax" in torch.__version__
 
 class GGMLQuantizationType(IntEnum):
     F32     = 0
@@ -575,8 +577,13 @@ def dequantize_q4_k_gpu(data, device:str ="cuda", target_dtype = torch.get_defau
     device = torch.device(device)
     # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable, 
     # the best way to fix this is transfer ptr to KTransformersOps instead of Tensor.
-    c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
-    return KTransformersOps.dequantize_q4_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
+    if IS_MACA_TORCH:
+        data = torch.tensor(data)
+        c_pointer = ctypes.addressof(ctypes.cast(data.data_ptr(), ctypes.POINTER(ctypes.c_int8)).contents)
+        return KTransformersOps.dequantize_q4_k(c_pointer, data.numel(), block_size, ele_per_blk, device, target_dtype)
+    else :
+        c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
+        return KTransformersOps.dequantize_q4_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
 
 def dequantize_q5_k(data):
     # C implementation
@@ -698,9 +705,14 @@ def dequantize_q6_k_gpu(data: np.ndarray, device:str = "cuda", target_dtype = to
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q6_K"]
     device = torch.device(device)
     num_blocks = len(data) // block_size
-    data = np.frombuffer(data, dtype=data.dtype)
-    c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
-    return KTransformersOps.dequantize_q6_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
+    if IS_MACA_TORCH:
+        data = torch.tensor(data)
+        c_pointer = ctypes.addressof(ctypes.cast(data.data_ptr(), ctypes.POINTER(ctypes.c_int8)).contents)
+        return KTransformersOps.dequantize_q6_k(c_pointer, data.numel(), block_size, ele_per_blk, device, target_dtype)
+    else :
+        data = np.frombuffer(data, dtype=data.dtype)
+        c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
+        return KTransformersOps.dequantize_q6_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
 
 kvalues_iq4nl = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], dtype=np.int8)
 
@@ -811,7 +823,10 @@ def dequantize_f32(data):
 
 def dequantize_f32_gpu(data, device, target_dtype = torch.get_default_dtype()):
     data = np.frombuffer(data, dtype=np.float32)
-    res = torch.from_numpy(data.copy())
+    if IS_MACA_TORCH:
+        res = torch.tensor(data)
+    else :
+        res = torch.from_numpy(data.copy())
     res_gpu = torch.empty_like(res, device=device, dtype=target_dtype)
     res_gpu.copy_(res)
     return res_gpu

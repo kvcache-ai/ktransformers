@@ -11,6 +11,7 @@ Adapted from:
 https://github.com/Dao-AILab/flash-attention/blob/v2.6.3/setup.py
 Copyright (c) 2023, Tri Dao.
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
+Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 '''
 
 import os
@@ -35,6 +36,7 @@ try:
     from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension, MUSA_HOME
 except ImportError:
     MUSA_HOME=None
+IS_MACA_TORCH = "metax" in torch.__version__
 
 class CpuInstructInfo:
     CPU_INSTRUCT = os.getenv("CPU_INSTRUCT", "NATIVE")
@@ -319,16 +321,36 @@ class CMakeBuild(BuildExtension):
         build_temp = Path(ext.sourcedir) / "build"
         if not build_temp.exists():
             build_temp.mkdir(parents=True)
+        camke_cmd = "cmake"
+        if IS_MACA_TORCH:
+            camke_cmd = "cmake_maca"
         result = subprocess.run(
-            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True
+            [camke_cmd, ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True
         )
         print("Standard output:", result.stdout)
         print("Standard error:", result.stderr)
         subprocess.run(
-            ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
+            [camke_cmd, "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
         )
 
-if CUDA_HOME is not None:
+if IS_MACA_TORCH:
+    if os.path.exists("ktransformers/ktransformers_ext/cuda/binding.cpp"):
+        os.rename("ktransformers/ktransformers_ext/cuda/binding.cpp", "ktransformers/ktransformers_ext/cuda/binding.cu")
+    ops_module = CUDAExtension('KTransformersOps', [
+        'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
+        'ktransformers/ktransformers_ext/cuda/binding.cu',
+        #TODO: More files can be added in the future
+    ],
+    extra_compile_args={
+            'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
+            'cucc': [
+                '-O3',
+                '--use_fast_math',
+                '-Xcompiler', '-fPIC',
+            ]
+        }
+    )
+elif CUDA_HOME is not None:
     ops_module = CUDAExtension('KTransformersOps', [
         'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
         'ktransformers/ktransformers_ext/cuda/binding.cpp',
