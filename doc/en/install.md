@@ -95,7 +95,7 @@ Some preparation:
         # Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
         apt install libnuma-dev
         export USE_NUMA=1
-        make install_numa
+        make dev_install
         ```
 
    - For Windows
