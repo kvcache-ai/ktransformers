@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Description  :  
+Description  :
 Author       : Azure-Tang
 Date         : 2024-07-25 11:25:24
 Version      : 1.0.0
-LastEditors  : Azure 
+LastEditors  : Azure
 LastEditTime : 2024-08-27 07:29:04
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 
 import inspect
@@ -625,7 +625,7 @@ class KDeepseekV2Model(BaseInjectedModule):
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
-        
+
         if inputs_embeds is None:
             org_device = input_ids.device
             # TODO move to embed_tokens's device, not hard code to cpu
@@ -650,7 +650,7 @@ class KDeepseekV2Model(BaseInjectedModule):
             causal_mask = None
         else:
             if os.name == 'nt' or get_compute_capability()<8:
-                print("for Windows or GPU before ampere, use forward_windows")
+                # Windows or GPU before ampere
                 # only use mask in forward windows or can't flash attn
                 causal_mask = self._update_causal_mask(
                     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
