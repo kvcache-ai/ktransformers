@@ -649,14 +649,10 @@ class KDeepseekV2Model(BaseInjectedModule):
         if per_layer_prefill_flag:
             causal_mask = None
         else:
-            if os.name == 'nt' or get_compute_capability()<8:
-                print("for Windows or GPU before ampere, use forward_windows")
-                # only use mask in forward windows or can't flash attn
-                causal_mask = self._update_causal_mask(
-                    attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-                )
-            else:
-                causal_mask = None
+            # only use mask in forward windows or can't flash attn
+            causal_mask = self._update_causal_mask(
+                attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            )
 
         # embed positions
         hidden_states = inputs_embeds
