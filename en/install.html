@@ -158,7 +158,18 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+                        <!-- omit in toc -->
+<h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<ul>
+<li><a href="#preparation">Preparation</a></li>
+<li><a href="#installation">Installation</a>
+<ul>
+<li><a href="#attention">Attention</a></li>
+<li><a href="#supported-models-include">Supported models include:</a></li>
+<li><a href="#support-quantize-format">Support quantize format:</a></li>
+</ul>
+</li>
+</ul>
 <p>In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:</p>
 <ul>
 <li>V0.2 is the current main branch.</li>
@@ -214,6 +225,8 @@ pip3 install packaging ninja cpufeature numpy
 </li>
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="attention"><a class="header" href="#attention">Attention</a></h3>
+<p>If you want to use numa support, not only do you need to set USE_NUMA=1, but you also need to make sure you have installed the libnuma-dev (<code>sudo apt-get install libnuma-dev</code> may help you).</p>
 <!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
    
    >We are working on the latest docker image, please wait for a while.

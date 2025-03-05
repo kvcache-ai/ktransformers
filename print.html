@@ -174,6 +174,7 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 <h2 id="Updates"><a class="header" href="#Updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Mar 5, 2025</strong>: Support unsloth 1.58/2.51 bits weights and <a href="./doc/en/fp8_kernel.html">IQ1_S/FP8 hybrid</a> weights. Support 139K <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a> for DeepSeek-V3 and R1 in 24GB VRAM.</li>
 <li><strong>Feb 25, 2025</strong>: Support <a href="./doc/en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
 <li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is <a href="./en/DeepseekR1_V3_tutorial.html">here</a>.</li>
 <li><strong>Aug 28, 2024</strong>: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is <a href="./en/long_context_tutorial.html">here</a>.</li>
@@ -183,7 +184,18 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 <li><strong>Aug 12, 2024</strong>: Support multiple GPU; Support new model: mixtral 8*7B  and 8*22B; Support q2k, q3k, q5k dequant on gpu.</li>
 <li><strong>Aug 9, 2024</strong>: Support windows native.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
+<h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<ul>
+<li><a href="en/install.html#preparation">Preparation</a></li>
+<li><a href="en/install.html#installation">Installation</a>
+<ul>
+<li><a href="en/install.html#attention">Attention</a></li>
+<li><a href="en/install.html#supported-models-include">Supported models include:</a></li>
+<li><a href="en/install.html#support-quantize-format">Support quantize format:</a></li>
+</ul>
+</li>
+</ul>
 <p>In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:</p>
 <ul>
 <li>V0.2 is the current main branch.</li>
@@ -239,6 +251,8 @@ pip3 install packaging ninja cpufeature numpy
 </li>
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="attention"><a class="header" href="#attention">Attention</a></h3>
+<p>If you want to use numa support, not only do you need to set USE_NUMA=1, but you also need to make sure you have installed the libnuma-dev (<code>sudo apt-get install libnuma-dev</code> may help you).</p>
 <!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
    
    >We are working on the latest docker image, please wait for a while.
@@ -485,7 +499,7 @@ python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-062
 </li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#how-to-run">How to Run</a>
 <ul>
-<li><a href="en/DeepseekR1_V3_tutorial.html#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a>
+<li><a href="en/DeepseekR1_V3_tutorial.html#v022--v023-longer-context--fp8-kernel">v0.2.2 &amp; v0.2.3 longer context &amp; FP8 kernel</a>
 <ul>
 <li><a href="en/DeepseekR1_V3_tutorial.html#longer-context">longer context</a></li>
 <li><a href="en/DeepseekR1_V3_tutorial.html#fp8-kernel">FP8 kernel</a></li>
@@ -649,7 +663,7 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
-<h3 id="v022-longer-context--fp8-kernel"><a class="header" href="#v022-longer-context--fp8-kernel">V0.2.2 longer context &amp; FP8 kernel</a></h3>
+<h3 id="v022--v023-longer-context--fp8-kernel"><a class="header" href="#v022--v023-longer-context--fp8-kernel">v0.2.2 &amp; v0.2.3 longer context &amp; FP8 kernel</a></h3>
 <h4 id="longer-context"><a class="header" href="#longer-context">longer context</a></h4>
 <p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.</p>
 <p>Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.</p>
@@ -1442,7 +1456,29 @@ unstable = true
 <pre><code class="language-bash">make dev_install
 </code></pre>
 <p>install the package in the development mode. It means that the package is installed in the editable mode. So if you modify the code, you don't need to reinstall the package. We recommend the developer to use this method to install the package.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="faq-1"><a class="header" href="#faq-1">FAQ</a></h1>
+<div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
+<h1 id="faq-1"><a class="header" href="#faq-1">FAQ</a></h1>
+<ul>
+<li><a href="en/FAQ.html#install">Install</a>
+<ul>
+<li><a href="en/FAQ.html#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></li>
+<li><a href="en/FAQ.html#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial  token</a></li>
+</ul>
+</li>
+<li><a href="en/FAQ.html#usage">Usage</a>
+<ul>
+<li><a href="en/FAQ.html#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></li>
+<li><a href="en/FAQ.html#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></li>
+<li><a href="en/FAQ.html#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></li>
+<li><a href="en/FAQ.html#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></li>
+<li><a href="en/FAQ.html#q-loading-gguf-error">Q: Loading gguf error</a></li>
+<li><a href="en/FAQ.html#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></li>
+<li><a href="en/FAQ.html#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></li>
+<li><a href="en/FAQ.html#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></li>
+<li><a href="en/FAQ.html#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></li>
+</ul>
+</li>
+</ul>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
 <pre><code>in Ubuntu 22.04 installation need to add the:
@@ -1534,6 +1570,54 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
 <p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
 <h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
 <p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
+<h3 id="q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures"><a class="header" href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></h3>
+<p>From: https://github.com/kvcache-ai/ktransformers/issues/374</p>
+<ol>
+<li>First, download the latest source code using git.</li>
+<li>Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.</li>
+<li>Next, you need to compile from the ktransformer source code until it successfully compiles on your local machine.</li>
+<li>Then, install flash-attn. It won't be used, but not installing it will cause an error.</li>
+<li>Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.</li>
+<li>Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.</li>
+<li>During the running process, check the memory usage. Observe its invocation through the top command. The memory capacity on a single CPU must be greater than the complete size of the model. (For multiple CPUs, it's just a copy.)
+Finally, confirm that the model is fully loaded into memory and specific weight layers are fully loaded into the GPU memory. Then, try to input content in the chat interface and observe if there are any errors.</li>
+</ol>
+<p>Attention, for better perfomance, you can check this <a href="https://github.com/kvcache-ai/ktransformers/issues/374#issuecomment-2667520838">method</a> in the issue</p>
+<blockquote>
+<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L274-L279</p>
+<pre><code class="language-diff">+ original_dtype = query_states.dtype
++ target_dtype = torch.half
++ query_states = query_states.to(target_dtype)
++ compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
++ compressed_kv = compressed_kv.to(target_dtype)
++ attn_output = attn_output.to(target_dtype)
+
+decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
+                            page_table,
+                            position_ids.squeeze(0).to(torch.int32)+1, attn_logits,
+                            4, #num_kv_splits # follow vLLM, fix it TODO
+                            self.softmax_scale,
+                            past_key_value.page_size)
+
++ attn_output = attn_output.to(original_dtype)
+</code></pre>
+<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L320-L326</p>
+<pre><code class="language-diff">- attn_output = flash_attn_func( 
+-     query_states, 
+-     key_states, 
+-     value_states_padded, 
+-     softmax_scale=self.softmax_scale, 
+-     causal=True, 
+- )
++ attn_output = F.scaled_dot_product_attention(
++     query_states.transpose(1, 2),
++     key_states.transpose(1, 2),
++     value_states_padded.transpose(1, 2),
++     scale=self.softmax_scale,
++     is_causal=True
++ ).transpose(1, 2)
+</code></pre>
+</blockquote>
 <div style="break-before: page; page-break-before: always;"></div><h2 id="hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference"><a class="header" href="#hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference">Hello everyone, here is the successfully reproduced environment configuration for your reference:</a></h2>
 <h3 id="case-1"><a class="header" href="#case-1">Case 1</a></h3>
 <ul>
@@ -1575,6 +1659,7 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
 </li>
 </ul>
 <h2 id="the-result-table"><a class="header" href="#the-result-table">The Result Table</a></h2>
+<p>Uses DeepSeek-V3 model (Some specific cases are R1)</p>
 <div class="table-wrapper"><table><thead><tr><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>
 <tr><td>DataSet</td><td>CPU Weight Format</td><td>CPU Kernel</td><td>GPU Weight Format</td><td>GEMM Kernel</td><td>MLA Kernel</td><td><a href="https://cloud.siliconflow.cn/models">Siliconflow</a><br></td><td>Ktrans Point</td></tr>
 <tr><td>MMLU<br><br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
@@ -1584,9 +1669,11 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
 <tr><td>4</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 8</td><td>marlin</td><td>triton</td><td>81.6</td><td>81.1</td></tr>
 <tr><td>5</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>81.6</td><td>81</td></tr>
 <tr><td>6</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>81.6</td><td>81.5</td></tr>
-<tr><td>MMLU-pro</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>7 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>78.6</td><td>83.6</td></tr>
+<tr><td>MMLU-pro<br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr><td>1</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>57.7</td><td>57.6</td></tr>
 <tr><td>2</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>57.7</td><td>57.5</td></tr>
+<tr><td>3 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gem</td><td>triton</td><td>71.9</td><td>tbd</td></tr>
 <tr><td>HumanEval</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
 <tr><td>GSM8K</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
 </tbody></table>
@@ -1602,12 +1689,14 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You don't need to change the source code as they both use q4km. But note the yaml file <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29">here</a> and <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18">here</a>, below these lines you need to add <code>num_bits: 8</code> (in other words: add this kwargs to all that use <code>KLinearMarlin</code>). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
 <li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
+<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 </ol>
 </li>
 <li>MMLU-pro test
 <ol>
 <li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 </ol>
 </li>
 </ul>

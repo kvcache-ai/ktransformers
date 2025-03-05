@@ -158,7 +158,29 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="faq"><a class="header" href="#faq">FAQ</a></h1>
+                        <!-- omit in toc -->
+<h1 id="faq"><a class="header" href="#faq">FAQ</a></h1>
+<ul>
+<li><a href="#install">Install</a>
+<ul>
+<li><a href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></li>
+<li><a href="#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial  token</a></li>
+</ul>
+</li>
+<li><a href="#usage">Usage</a>
+<ul>
+<li><a href="#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></li>
+<li><a href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></li>
+<li><a href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></li>
+<li><a href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></li>
+<li><a href="#q-loading-gguf-error">Q: Loading gguf error</a></li>
+<li><a href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></li>
+<li><a href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></li>
+<li><a href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></li>
+<li><a href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></li>
+</ul>
+</li>
+</ul>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
 <pre><code>in Ubuntu 22.04 installation need to add the:
@@ -250,6 +272,54 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
 <p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
 <h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
 <p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
+<h3 id="q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures"><a class="header" href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></h3>
+<p>From: https://github.com/kvcache-ai/ktransformers/issues/374</p>
+<ol>
+<li>First, download the latest source code using git.</li>
+<li>Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.</li>
+<li>Next, you need to compile from the ktransformer source code until it successfully compiles on your local machine.</li>
+<li>Then, install flash-attn. It won't be used, but not installing it will cause an error.</li>
+<li>Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.</li>
+<li>Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.</li>
+<li>During the running process, check the memory usage. Observe its invocation through the top command. The memory capacity on a single CPU must be greater than the complete size of the model. (For multiple CPUs, it's just a copy.)
+Finally, confirm that the model is fully loaded into memory and specific weight layers are fully loaded into the GPU memory. Then, try to input content in the chat interface and observe if there are any errors.</li>
+</ol>
+<p>Attention, for better perfomance, you can check this <a href="https://github.com/kvcache-ai/ktransformers/issues/374#issuecomment-2667520838">method</a> in the issue</p>
+<blockquote>
+<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L274-L279</p>
+<pre><code class="language-diff">+ original_dtype = query_states.dtype
++ target_dtype = torch.half
++ query_states = query_states.to(target_dtype)
++ compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
++ compressed_kv = compressed_kv.to(target_dtype)
++ attn_output = attn_output.to(target_dtype)
+
+decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
+                            page_table,
+                            position_ids.squeeze(0).to(torch.int32)+1, attn_logits,
+                            4, #num_kv_splits # follow vLLM, fix it TODO
+                            self.softmax_scale,
+                            past_key_value.page_size)
+
++ attn_output = attn_output.to(original_dtype)
+</code></pre>
+<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L320-L326</p>
+<pre><code class="language-diff">- attn_output = flash_attn_func( 
+-     query_states, 
+-     key_states, 
+-     value_states_padded, 
+-     softmax_scale=self.softmax_scale, 
+-     causal=True, 
+- )
++ attn_output = F.scaled_dot_product_attention(
++     query_states.transpose(1, 2),
++     key_states.transpose(1, 2),
++     value_states_padded.transpose(1, 2),
++     scale=self.softmax_scale,
++     is_causal=True
++ ).transpose(1, 2)
+</code></pre>
+</blockquote>
 
                     </main>
 

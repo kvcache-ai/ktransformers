@@ -184,6 +184,7 @@
 </li>
 </ul>
 <h2 id="the-result-table"><a class="header" href="#the-result-table">The Result Table</a></h2>
+<p>Uses DeepSeek-V3 model (Some specific cases are R1)</p>
 <div class="table-wrapper"><table><thead><tr><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>
 <tr><td>DataSet</td><td>CPU Weight Format</td><td>CPU Kernel</td><td>GPU Weight Format</td><td>GEMM Kernel</td><td>MLA Kernel</td><td><a href="https://cloud.siliconflow.cn/models">Siliconflow</a><br></td><td>Ktrans Point</td></tr>
 <tr><td>MMLU<br><br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
@@ -193,9 +194,11 @@
 <tr><td>4</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 8</td><td>marlin</td><td>triton</td><td>81.6</td><td>81.1</td></tr>
 <tr><td>5</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>81.6</td><td>81</td></tr>
 <tr><td>6</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>81.6</td><td>81.5</td></tr>
-<tr><td>MMLU-pro</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+<tr><td>7 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>78.6</td><td>83.6</td></tr>
+<tr><td>MMLU-pro<br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr><td>1</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>57.7</td><td>57.6</td></tr>
 <tr><td>2</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>57.7</td><td>57.5</td></tr>
+<tr><td>3 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gem</td><td>triton</td><td>71.9</td><td>tbd</td></tr>
 <tr><td>HumanEval</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
 <tr><td>GSM8K</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
 </tbody></table>
@@ -211,12 +214,14 @@
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You don't need to change the source code as they both use q4km. But note the yaml file <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29">here</a> and <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18">here</a>, below these lines you need to add <code>num_bits: 8</code> (in other words: add this kwargs to all that use <code>KLinearMarlin</code>). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
 <li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
+<li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 </ol>
 </li>
 <li>MMLU-pro test
 <ol>
 <li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 <li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
+<li>You should check the <a href="./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
 </ol>
 </li>
 </ul>
