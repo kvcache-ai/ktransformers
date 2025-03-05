@@ -1,4 +1,18 @@
+<!-- omit in toc -->
 # FAQ
+- [Install](#install)
+  - [Q: ImportError: /lib/x86\_64-linux-gnu/libstdc++.so.6: version GLIBCXX\_3.4.32' not found](#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found)
+  - [Q: DeepSeek-R1 not outputting initial  token](#q-deepseek-r1-not-outputting-initial--token)
+- [Usage](#usage)
+  - [Q: If I got more VRAM than the model's requirement, how can I fully utilize it?](#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it)
+  - [Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?](#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them)
+  - [Q: How to get the best performance?](#q-how-to-get-the-best-performance)
+  - [Q: My DeepSeek-R1 model is not thinking.](#q-my-deepseek-r1-model-is-not-thinking)
+  - [Q: Loading gguf error](#q-loading-gguf-error)
+  - [Q: Version \`GLIBCXX\_3.4.30' not found](#q-version-glibcxx_3430-not-found)
+  - [Q: When running the bfloat16 moe model, the data shows NaN](#q-when-running-the-bfloat16-moe-model-the-data-shows-nan)
+  - [Q: Using fp8 prefill very slow.](#q-using-fp8-prefill-very-slow)
+  - [Q: Possible ways to run graphics cards using volta and turing architectures](#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures)
 ## Install
 ### Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found
 ```
@@ -97,3 +111,57 @@ RuntimeError: probability tensor contains either `inf`, `nan` or element < 0
 ### Q: Using fp8 prefill very slow.
 
 The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.
+
+### Q: Possible ways to run graphics cards using volta and turing architectures
+
+From: https://github.com/kvcache-ai/ktransformers/issues/374
+
+1. First, download the latest source code using git.
+2. Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.
+3. Next, you need to compile from the ktransformer source code until it successfully compiles on your local machine.
+4. Then, install flash-attn. It won't be used, but not installing it will cause an error.
+5. Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.
+6. Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.
+7. During the running process, check the memory usage. Observe its invocation through the top command. The memory capacity on a single CPU must be greater than the complete size of the model. (For multiple CPUs, it's just a copy.)
+Finally, confirm that the model is fully loaded into memory and specific weight layers are fully loaded into the GPU memory. Then, try to input content in the chat interface and observe if there are any errors.
+
+Attention, for better perfomance, you can check this [method](https://github.com/kvcache-ai/ktransformers/issues/374#issuecomment-2667520838) in the issue
+>
+>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L274-L279
+>
+>```diff
+>+ original_dtype = query_states.dtype
+>+ target_dtype = torch.half
+>+ query_states = query_states.to(target_dtype)
+>+ compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
+>+ compressed_kv = compressed_kv.to(target_dtype)
+>+ attn_output = attn_output.to(target_dtype)
+>
+>decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
+>                             page_table,
+>                             position_ids.squeeze(0).to(torch.int32)+1, attn_logits,
+>                             4, #num_kv_splits # follow vLLM, fix it TODO
+>                             self.softmax_scale,
+>                             past_key_value.page_size)
+>
+>+ attn_output = attn_output.to(original_dtype)
+>```
+>
+>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L320-L326
+>
+>```diff
+>- attn_output = flash_attn_func( 
+>-     query_states, 
+>-     key_states, 
+>-     value_states_padded, 
+>-     softmax_scale=self.softmax_scale, 
+>-     causal=True, 
+>- )
+>+ attn_output = F.scaled_dot_product_attention(
+>+     query_states.transpose(1, 2),
+>+     key_states.transpose(1, 2),
+>+     value_states_padded.transpose(1, 2),
+>+     scale=self.softmax_scale,
+>+     is_causal=True
+>+ ).transpose(1, 2)
+>```
