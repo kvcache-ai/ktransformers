@@ -91,10 +91,11 @@ Some preparation:
         ```
      - For those who have two cpu and 1T RAM:
 
-        ```shell
+       ```shell
         # Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
+        apt install libnuma-dev
         export USE_NUMA=1
-        bash install.sh # or `make dev_install`
+        make dev_install
         ```
 
    - For Windows
