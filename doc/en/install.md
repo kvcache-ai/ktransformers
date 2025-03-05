@@ -1,5 +1,11 @@
-
+<!-- omit in toc -->
 # How to Run DeepSeek-R1
+- [Preparation](#preparation)
+- [Installation](#installation)
+  - [Attention](#attention)
+  - [Supported models include:](#supported-models-include)
+  - [Support quantize format:](#support-quantize-format)
+
 In this document, we will show you how to install and run KTransformers on your local machine. There are two versions: 
 * V0.2 is the current main branch.
 * V0.3 is a preview version only provides binary distribution for now.
@@ -56,6 +62,8 @@ Some preparation:
  - At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.
 
 ## Installation
+### Attention
+If you want to use numa support, not only do you need to set USE_NUMA=1, but you also need to make sure you have installed the libnuma-dev (`sudo apt-get install libnuma-dev` may help you).
 
 <!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
    
