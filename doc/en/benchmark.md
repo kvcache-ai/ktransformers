@@ -26,7 +26,7 @@ Given that we have only tested 1,000 cases, which provides only a preliminary ju
 
 
 ## The Result Table
-
+Uses DeepSeek-V3 model (Some specific cases are R1)
 |                          |                   |            |                   |         |            |                                                        |              |
 | ------------------------ | ----------------- | ---------- | ----------------- | ------- | ---------- | ------------------------------------------------------ | ------------ |
 | DataSet                  | CPU Weight Format | CPU Kernel | GPU Weight Format | GEMM Kernel   | MLA Kernel | [Siliconflow](https://cloud.siliconflow.cn/models)<br> | Ktrans Point |
@@ -37,9 +37,11 @@ Given that we have only tested 1,000 cases, which provides only a preliminary ju
 |              4            | q4km              | cpuinfer   | q4km->marlin 8    | marlin  | triton     | 81.6                                                   | 81.1         |
 |               5           | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 81.6                                                   | 81           |
 |                6          | q4km              | cpuinfer   | fp8               | fp8gemm  | triton     | 81.6                                                   | 81.5         |
-| MMLU-pro                 |               |    |                |  |      |                                                    |          |
+|                7 (DeepSeek-R1)          |  iq1             | cpuinfer   |     fp8           |  fp8gemm | triton     | 78.6                                                   | 83.6         |
+| MMLU-pro<br>(shuffle 1k)                 |               |    |                |  |      |                                                    |          |
 | 1                 | q4km              | cpuinfer   | fp8               | fp8gemm | triton     | 57.7                                                   | 57.6         |
 |  2             | q4km              | cpuinfer   | q4km->marlin 4    | marlin  | triton     | 57.7                                                   | 57.5         |
+|  3 (DeepSeek-R1)             | iq1              | cpuinfer   | fp8    | fp8gem  | triton     | 71.9                                                   | tbd         |
 | HumanEval                | tbd               | tbd        | tbd               | tbd     | tbd        | tbd                                                    | tbd          |
 | GSM8K                    | tbd               | tbd        | tbd               | tbd     | tbd        | tbd                                                    | tbd          |
 
@@ -54,6 +56,8 @@ By default, The MLA kernel uses triton in linux and torch in windows. But we nee
   4. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). You don't need to change the source code as they both use q4km. But note the yaml file [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29) and [here](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18), below these lines you need to add `num_bits: 8` (in other words: add this kwargs to all that use `KLinearMarlin`). The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
   5. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). No need to change yaml, just use the default. The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
   6. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case.
+  7. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case.
 - MMLU-pro test
   1. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case. 
   2. [v3-chat_yaml](https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml). No need to change yaml, just use the default. The weight file for q4km is [here](https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M)
+  3. You should check the [doc](./fp8_kernel.md) to learn how to test this case. This is a mixture tensor case.
