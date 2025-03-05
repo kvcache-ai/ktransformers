@@ -13,7 +13,7 @@ router = APIRouter()
 
 @router.get('/models', tags=['openai'])
 async def list_models():
-    return [{"id": Config().model_name, "name": Config().model_name}]
+    return {"data": [{"id": Config().model_name, "name": Config().model_name}], "object": "list"}
 
 
 @router.post('/chat/completions', tags=['openai'])
