@@ -1881,7 +1881,13 @@ struct DequantizerQ6K final : public BaseDequantizer<block_q6_K> {
     const __m256i mh = _mm256_set1_epi8(0x30);
 };
 
+inline __m256i get_scale_shuffle_8(int i);
 
+inline void set_scales_8(const __m256i& all_scales, int j, __m256i* scales);
+
+inline __m256i get_scale_shuffle_16(int i);
+
+inline void set_scales_16(const __m256i& all_scales, __m256i* scales);
 
 
 template <typename Dequantizer, int nrc_y>
