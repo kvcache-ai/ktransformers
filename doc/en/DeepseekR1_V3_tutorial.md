@@ -16,7 +16,7 @@
 			- [Memory consumptions:](#memory-consumptions)
 			- [Benchmark results](#benchmark-results-2)
 	- [How to Run](#how-to-run)
-		- [V0.2.2 longer context \& FP8 kernel](#v022-longer-context--fp8-kernel)
+		- [v0.2.2 \& v0.2.3 longer context \& FP8 kernel](#v022--v023-longer-context--fp8-kernel)
 			- [longer context](#longer-context)
 			- [FP8 kernel](#fp8-kernel)
 		- [V0.2 \& V0.2.1 Showcase](#v02--v021-showcase)
@@ -157,7 +157,7 @@ the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding*
 
 ## How to Run
-### V0.2.2 longer context & FP8 kernel
+### v0.2.2 & v0.2.3 longer context & FP8 kernel
 #### longer context
 To use this feature, [install flashinfer](https://github.com/flashinfer-ai/flashinfer) first.
 
