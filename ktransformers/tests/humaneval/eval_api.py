@@ -13,7 +13,7 @@ def generate_text(api_url,question , model_name, stream=False, auth_token=None):
         'accept': 'application/json',
         'Content-Type': 'application/json',
         # 添加 API Key
-        'Authorization' : 'Bearer ' + auth_token
+        'Authorization' : 'Bearer ' + auth_token if auth_token else ''
     }
     question = instruct_prompt(question)
     data = {
