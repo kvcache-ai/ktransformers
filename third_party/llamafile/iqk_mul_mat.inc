@@ -1883,6 +1883,35 @@ struct DequantizerQ6K final : public BaseDequantizer<block_q6_K> {
 
 
 
+inline __m256i get_scale_shuffle_16(int i) {
+    static const uint8_t k_shuffle[128] = {
+         0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,     2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
+         4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5,     6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7,
+         8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9,    10,11,10,11,10,11,10,11,10,11,10,11,10,11,10,11,
+        12,13,12,13,12,13,12,13,12,13,12,13,12,13,12,13,    14,15,14,15,14,15,14,15,14,15,14,15,14,15,14,15,
+    };
+    return _mm256_loadu_si256((const __m256i*)k_shuffle + i);
+}
+
+inline __m256i get_scale_shuffle_8(int i) {
+    return _mm256_set1_epi16((2*i) | ((2*i+1) << 8));
+}
+
+inline void set_scales_16(const __m256i& all_scales, __m256i * scales) {
+    scales[0] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(0));
+    scales[1] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(1));
+    scales[2] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(2));
+    scales[3] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(3));
+}
+
+
+inline void set_scales_8(const __m256i& all_scales, int j, __m256i * scales) {
+    scales[0] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+0));
+    scales[1] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+1));
+    scales[2] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+2));
+    scales[3] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+3));
+}
+
 
 template <typename Dequantizer, int nrc_y>
 static void mul_mat_qY_K_q8_K_T(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
@@ -2418,35 +2447,6 @@ get_scale_shuffle_8
 get_scale_shuffle_16
 set_scales_16
 */
-
-inline __m256i get_scale_shuffle_8(int i) {
-    return _mm256_set1_epi16((2*i) | ((2*i+1) << 8));
-}
-
-inline void set_scales_8(const __m256i& all_scales, int j, __m256i * scales) {
-    scales[0] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+0));
-    scales[1] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+1));
-    scales[2] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+2));
-    scales[3] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_8(4*j+3));
-}
-
-
-inline __m256i get_scale_shuffle_16(int i) {
-    static const uint8_t k_shuffle[128] = {
-         0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,     2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3,
-         4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5, 4, 5,     6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7, 6, 7,
-         8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9, 8, 9,    10,11,10,11,10,11,10,11,10,11,10,11,10,11,10,11,
-        12,13,12,13,12,13,12,13,12,13,12,13,12,13,12,13,    14,15,14,15,14,15,14,15,14,15,14,15,14,15,14,15,
-    };
-    return _mm256_loadu_si256((const __m256i*)k_shuffle + i);
-}
-
-inline void set_scales_16(const __m256i& all_scales, __m256i * scales) {
-    scales[0] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(0));
-    scales[1] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(1));
-    scales[2] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(2));
-    scales[3] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(3));
-}
 
 
 template <typename Q8, typename Bits>
