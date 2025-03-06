@@ -2388,7 +2388,7 @@ struct SimpleBits {
 
 
 struct EvenSignHelper {
-    #ifdef HAVE_FANCY_SIMD
+    #if defined(HAVE_FANCY_SIMD) && defined(__AVX512VPOPCNTDQ__)
         union sbits_t {
             __m128i vec;
             __mmask32 mask[4];
