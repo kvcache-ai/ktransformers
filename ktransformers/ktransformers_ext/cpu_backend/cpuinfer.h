@@ -17,6 +17,7 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#include <stdexcept>
 #ifdef KTRANSFORMERS_USE_CUDA
 #include "vendors/cuda.h"
 #elif KTRANSFORMERS_USE_MUSA
