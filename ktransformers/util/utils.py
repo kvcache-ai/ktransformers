@@ -185,8 +185,12 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
         
         return logits
-    
-    torch.cuda.set_device(torch_device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(torch_device)
+    elif torch.xpu.is_available():
+        torch.cuda.set_device(torch_device)
+    else:
+        RuntimeError("The device: {torch_device} is not available")
     with torch.no_grad():
         
         stream = TextStreamer(tokenizer)
