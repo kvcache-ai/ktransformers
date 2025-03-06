@@ -11,7 +11,7 @@ Adapted from https://github.com/99991/pygguf/blob/main/gguf.py
 Copyright (c) 2023-2024 The ggml authors
 Copyright (c) 2024 Thomas Germer
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
-Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd.
 '''
 # copied from llama.cpp/gguf-py/gguf/constants.py to satisfy dependence of gguf
 # GGUF specification
