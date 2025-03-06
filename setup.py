@@ -11,7 +11,7 @@ Adapted from:
 https://github.com/Dao-AILab/flash-attention/blob/v2.6.3/setup.py
 Copyright (c) 2023, Tri Dao.
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
-Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+Copyright (c) 2025 by MetaX Integrated Circuits (Shanghai) Co., Ltd.
 '''
 
 import os
