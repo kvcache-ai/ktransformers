@@ -175,6 +175,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
             list(APPEND ARCH_FLAGS -mavx512bw)
             list(APPEND ARCH_FLAGS -mavx512dq)
             list(APPEND ARCH_FLAGS -mavx512vnni)
+            list(APPEND ARCH_FLAGS -mavx512vpopcntdq)
         endif()
         if (LLAMA_AVX512_BF16)
             list(APPEND ARCH_FLAGS -mavx512bf16)
