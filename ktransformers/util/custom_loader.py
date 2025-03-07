@@ -7,7 +7,8 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+if not torch.xpu.is_available():
+    import KTransformersOps
 from safetensors import safe_open
 from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from safetensors.torch import save_file

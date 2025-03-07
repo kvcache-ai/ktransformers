@@ -92,7 +92,11 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str 
             target_dtype = torch.get_default_dtype()
             device = get_device(translated_key[:translated_key.rfind(".")], gguf_loader.tensor_device_map)
             print(f"loading {translated_key} to {device}")
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache() # To fit in 16G VRAM. By "wkGCaSS - 知乎 https://zhuanlan.zhihu.com/p/25491611225"
+            elif torch.xpu.is_available():
+                torch.xpu.empty_cache()
+            
             weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
             set_param(module, name, weights)
             del weights
@@ -109,6 +113,17 @@ def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
     else:
         module.load()
 
+def sync_all_device(all_device_list):
+    for device in all_device_list:
+        if "cuda" in device.lower():
+            torch.cuda.synchronize(device)
+        elif "xpu" in device.lower():
+            torch.xpu.synchronize(device)
+        else:
+            raise RuntimeError("The device {} is not available".format(device))
+
+torch_device_mapping ={"cuda": "cuda:0", "xpu": "xpu:0"}
+
 def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cuda_graph: bool = True,
                          mode = 'normal', force_think: bool = False, chunk_prefill_size = 16384, use_flashinfer_mla = False,
                          num_heads = None, head_dim_ckv = None, head_dim_kpe = None, q_head_dim = None):
@@ -118,7 +133,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     batch_size, seq_length = inputs.shape
     device_map = model.gguf_loader.tensor_device_map
     torch_device = get_device('blk.0.self_attn', device_map)
-    torch_device = "cuda:0" if torch_device == "cuda" else torch_device
+    torch_device = torch_device_mapping[torch_device] if torch_device in torch_device_mapping else torch_device
     inputs = inputs.to(torch_device)
     all_cuda_device = get_all_used_cuda_device(device_map)
 
@@ -131,7 +146,12 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             logits = cuda_graph_runner(cur_token, position_ids, cache_position)
         else:
             # custom_stream = torch.cuda.Stream()
-            torch.cuda.set_device(torch_device)
+            if torch.cuda.is_available():
+                torch.cuda.set_device(torch_device)
+            elif torch.xpu.is_available():
+                torch.xpu.set_device(torch_device)
+            else:
+                RuntimeError("The device: {torch_device} is not available")
             inputs_embeds = model.model.embed_tokens(cur_token.to("cpu")).to(torch_device)
             # with torch.cuda.stream(custom_stream):
             logits=model(inputs_embeds=inputs_embeds,
@@ -141,8 +161,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                         return_dict=False, use_cache=True)[0]
         if past_key_values != None:
             past_key_values.change_seq_length(1)
-        for device in all_cuda_device:
-            torch.cuda.synchronize(device)
+        sync_all_device(all_cuda_device)
         #print(logits)
         next_token_scores = logits_warper(inputs, logits[:, -1, :])
         if generation_config.do_sample:
@@ -151,7 +170,6 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         else:
             next_token = torch.argmax(next_token_scores, dim=-1)
         return next_token
-    
     # TODO: use CUDA Graph for chunk prefill, may get small improvement
     def chunk_prefill(inputs, cache_position, past_key_values):
         if mode == "long_context":
@@ -167,8 +185,12 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         )[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
         
         return logits
-    
-    torch.cuda.set_device(torch_device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(torch_device)
+    elif torch.xpu.is_available():
+        torch.cuda.set_device(torch_device)
+    else:
+        RuntimeError("The device: {torch_device} is not available")
     with torch.no_grad():
         
         stream = TextStreamer(tokenizer)
