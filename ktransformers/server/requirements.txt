@@ -5,6 +5,7 @@ langchain >= 0.2.0
 blessed >= 1.20.0
 accelerate >= 0.31.0
 sentencepiece >= 0.1.97
+openai
 setuptools
 build
 ninja
