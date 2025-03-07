@@ -85,7 +85,8 @@ def main(output_path, api_url, model_name, auth_token, format_tabs,problem_file,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API Generate Tester")
-    parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
+    #parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
+    parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
     parser.add_argument("--model_name", type=str, default="Pro/deepseek-ai/DeepSeek-V3", help="Model Name")
     parser.add_argument("--out_path", type=str, default="results/api/eval_b.jsonl", help="Output Path")
     parser.add_argument("--auth_token", type=str, default=None, help="Auth Token")
