@@ -13,6 +13,8 @@ from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import check_link_response
 from ktransformers.server.backend.base import BackendInterfaceBase
 
+from ktransformers.server.schemas.endpoints.chat import RawUsage
+
 router = APIRouter(prefix='/api')
 
 # https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-completion
@@ -58,14 +60,18 @@ async def generate(request: Request, input: OllamaGenerateCompletionRequest):
 
     if input.stream:
         async def inner():
-            async for token in interface.inference(input.prompt, id):
-                d = OllamaGenerationStreamResponse(
-                    model=config.model_name,
-                    created_at=str(datetime.now()),
-                    response=token,
-                    done=False
-                )
-                yield d.model_dump_json() + '\n'
+            async for res in interface.inference(input.prompt, id):
+                if isinstance(res, RawUsage):
+                    raw_usage = res
+                else: 
+                    token, finish_reason = res
+                    d = OllamaGenerationStreamResponse(
+                        model=config.model_name,
+                        created_at=str(datetime.now()),
+                        response=token,
+                        done=False
+                    )
+                    yield d.model_dump_json() + '\n'
             d = OllamaGenerationStreamResponse(
                 model=config.model_name,
                 created_at=str(datetime.now()),
@@ -123,14 +129,18 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
             eval_count = 0  # 统计生成的 token 数量
             tokens = []
 
-            async for token in interface.inference(prompt, id):
-                d = OllamaChatCompletionStreamResponse(
-                    model=config.model_name,
-                    created_at=str(datetime.now()),
-                    message={"role": "assistant", "content": token}, 
-                    done=False
-                )
-                yield d.model_dump_json() + '\n'
+            async for res in interface.inference(prompt, id):
+                if isinstance(res, RawUsage):
+                    raw_usage = res
+                else: 
+                    token, finish_reason = res
+                    d = OllamaChatCompletionStreamResponse(
+                        model=config.model_name,
+                        created_at=str(datetime.now()),
+                        message={"role": "assistant", "content": token}, 
+                        done=False
+                    )
+                    yield d.model_dump_json() + '\n'
             # 计算性能数据
             end_time = time()
             total_duration = int((end_time - start_time) * 1_000_000_000)  # 转换为纳秒

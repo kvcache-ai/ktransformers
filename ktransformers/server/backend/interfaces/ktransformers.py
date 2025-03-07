@@ -16,6 +16,7 @@ from ktransformers.local_chat import custom_models, default_optimize_rules
 from ktransformers.util.utils import get_device
 from typing import Optional
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled, MLAWrapperSingleton
+from ktransformers.server.schemas.endpoints.chat import RawUsage
 
 warm_uped = False
 
@@ -231,3 +232,12 @@ class KTransformersInterface(TransformersInterface):
         async with self._infer_lock:
             async for v in super().inference(local_messages, thread_id, temperature, top_p):
                 yield v
+            
+            # return this inference raw usage
+            yield RawUsage(
+                tokenize_time = self.profiler.get_timer_sec('tokenize'),
+                prefill_time = self.profiler.get_timer_sec('prefill'),
+                decode_time = self.profiler.get_timer_sec('decode'),
+                prefill_count = self.profiler.get_counter('prefill'),
+                decode_count = self.profiler.get_counter('decode'),
+            )
