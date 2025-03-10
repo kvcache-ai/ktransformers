@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Description  :  
+Description  :
 Author       : Azure-Tang
 Date         : 2024-07-25 11:25:24
 Version      : 1.0.0
-LastEditors  : Azure 
+LastEditors  : Azure
 LastEditTime : 2024-08-27 07:29:04
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 
 import inspect
@@ -15,6 +15,7 @@ import math
 from typing import List, Optional, Tuple, Union
 import time
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
@@ -189,7 +190,7 @@ class KQwen2MoeModel(BaseInjectedModule):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        device: str = "cuda",
+        device: str = CUDA,
         per_layer_prefill_intput_threshold: int = 30000,  # if None, no per-layer prefill
         transfer_map: dict = None,
         **kwargs,
@@ -281,7 +282,7 @@ class KQwen2MoeModel(BaseInjectedModule):
         if inputs_embeds is None:
             input_ids = input_ids.to("cpu")
             inputs_embeds = self.embed_tokens(input_ids)
-            inputs_embeds = inputs_embeds.to("cuda")
+            inputs_embeds = inputs_embeds.to(CUDA)
 
         if cache_position is None:
             past_seen_tokens = (
@@ -427,7 +428,7 @@ class KQwen2MoeModel(BaseInjectedModule):
         ), "module should be nn.ModuleList of decoder layers"
 
         # TODO Support restore to original device, not only cuda
-        device = "cpu" if target == InferenceState.UNLOAD else "cuda"
+        device = "cpu" if target == InferenceState.UNLOAD else CUDA
 
         # attn
         layer.self_attn.q_proj.set_inference_mode(target)
@@ -539,7 +540,7 @@ class KDeepseekV2Model(BaseInjectedModule):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        device: str = "cuda",
+        device: str = CUDA,
         per_layer_prefill_intput_threshold: int = 30000,  # if None, no per-layer prefill
         transfer_map: dict = None,
         **kwargs,
@@ -625,7 +626,7 @@ class KDeepseekV2Model(BaseInjectedModule):
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
             past_key_values_length = past_key_values.get_usable_length(seq_length)
-        
+
         if inputs_embeds is None:
             org_device = input_ids.device
             # TODO move to embed_tokens's device, not hard code to cpu
@@ -801,7 +802,7 @@ class KDeepseekV2Model(BaseInjectedModule):
         ), "module should be nn.ModuleList of decoder layers"
 
         # TODO Support restore to original device, not only cuda
-        device = "cpu" if target == InferenceState.UNLOAD else "cuda"
+        device = "cpu" if target == InferenceState.UNLOAD else CUDA
 
         # TODO Support DFS to auto use {to, set_inference_mode} according to the module type
 
@@ -961,7 +962,7 @@ class KLlamaModel(BaseInjectedModule):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        device: str = "cuda",
+        device: str = CUDA,
         per_layer_prefill_intput_threshold: int = 30000,  # if None, no per-layer prefill
         transfer_map: dict = None,
         **kwargs,
@@ -985,7 +986,7 @@ class KLlamaModel(BaseInjectedModule):
             max_seq_len=self.long_context_config["max_seq_len"],
             block_size=self.long_context_config["block_size"],
             config=config,
-            device=torch.device("cuda"),
+            device=torch.device(CUDA),
             local_windows_len=self.long_context_config["local_windows_len"],
             topk=self.long_context_config["second_select_num"],
             threads_num=self.ext_config["cpu_infer"],
@@ -1066,7 +1067,7 @@ class KLlamaModel(BaseInjectedModule):
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
-                device="cuda",
+                device=CUDA,
             )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
@@ -1094,7 +1095,7 @@ class KLlamaModel(BaseInjectedModule):
                 return_dict,
             )
         elif q_len <= chunck_size:
-            inputs_embeds = inputs_embeds.to('cuda')
+            inputs_embeds = inputs_embeds.to(CUDA)
             output = self.forward_chunk(
                 inputs_embeds,
                 causal_mask,
@@ -1120,7 +1121,7 @@ class KLlamaModel(BaseInjectedModule):
             print(f'current prefill length: {cur_idx}')
             chunk_mask = None
             if inputs_embeds.device.type == 'cpu':
-                tmp_inputs_embeds = inputs_embeds[:, cur_idx : min(cur_idx + chunck_size, q_len)].to("cuda")
+                tmp_inputs_embeds = inputs_embeds[:, cur_idx : min(cur_idx + chunck_size, q_len)].to(CUDA)
             else:
                 tmp_inputs_embeds = inputs_embeds[:, cur_idx : min(cur_idx + chunck_size, q_len)]
             output_with_past = self.forward_chunk(
@@ -1337,7 +1338,7 @@ class KLlamaModel(BaseInjectedModule):
         if (
             self.config._attn_implementation == "sdpa"
             and attention_mask is not None
-            and attention_mask.device.type == "cuda"
+            and attention_mask.device.type == CUDA
             and not output_attentions
         ):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when

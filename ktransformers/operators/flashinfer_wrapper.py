@@ -6,6 +6,7 @@ Version      : 0.2.3
 import torch
 import os
 from ktransformers.operators.triton_attention import decode_attention_fwd_grouped
+from ktransformers.util.torch_auto_backend import CUDA
 
 flashinfer_enabled = False
 
@@ -13,7 +14,7 @@ try:
     import flashinfer
     flashinfer_enabled = True
     print("found flashinfer")
-    
+
 except ImportError:
     print("flashinfer not found, use triton for linux")
 
@@ -72,7 +73,7 @@ class MLAWrapper():
                  max_batch_size,
                  max_pages,
                  use_cuda_graph = True,
-                 device = "cuda",
+                 device = CUDA,
                  ):
         self.float_workspace_buffer = torch.empty(128*1024*1024, dtype=torch.int8, device=device)
         self.max_batch_size = max_batch_size
@@ -101,7 +102,7 @@ class MLAWrapper():
             kv_len_arr=self.kv_len_arr_buf,
         )
         self.need_plan = True
-    
+
     def plan(self,
              qo_indptr,
              kv_indptr,
@@ -124,7 +125,7 @@ class MLAWrapper():
         if kv_indices is None:
             assert self.max_batch_size == 1
             kv_indices = self.kv_indices_buf
-        
+
         self.wrapper.plan(
             qo_indptr,
             kv_indptr,
@@ -151,7 +152,7 @@ class MLAWrapperSingleton():
         if device not in cls.wrappers:
             cls.make_instance(device, *args, **kwargs)
         return cls.wrappers[device]
-    
+
     @classmethod
     def make_instance(cls, device, *args, **kwargs):
         cls.wrappers[device] = MLAWrapper(*args, **kwargs, device=device)
@@ -182,17 +183,17 @@ class MLAWrapperSingleton():
                 q_data_type,
                 kv_data_type,)
             wrapper.need_plan = False
-            
+
     @classmethod
     def need_plan_all(cls):
         for device, wrapper in cls.wrappers.items():
             wrapper.need_plan = True
-        
+
     @classmethod
     def reset_buffer(cls):
         for device, wrapper in cls.wrappers.items():
             wrapper.qo_indptr_buf[1] = 1 # assert max_batch_size=1 here.
-            
+
     @classmethod
     def update_buffer(cls, max_pages):
         for device, wrapper in cls.wrappers.items():
@@ -205,7 +206,7 @@ def checksame():
     flashinfer_folder = "./kv_cache_flashinfer"
     triton_folder = "./triton_output"
     triton_folder = "./kv_cache_triton"
-    
+
     max_layer_id = 1
     max_forward_id = 2
 
@@ -216,18 +217,18 @@ def checksame():
             #file_name = f"layer_{layer_id}_forward_{forward_id}_attn_output.pt"
             #file_name = f"layer_{layer_id}_forward_{forward_id}_q_pe.pt"
             file_name = f"layer_{layer_id}.pt"
-            
+
             flashinfer_path = os.path.join(flashinfer_folder, file_name)
             triton_path = os.path.join(triton_folder, file_name)
-            
+
             if not os.path.exists(triton_path):
                 print(f"{file_name} not exist in {triton_folder}")
                 continue
             if not os.path.exists(flashinfer_path):
                 print(f"{file_name} not exist in {flashinfer_folder}")
                 continue
-            
-            
+
+
             flashinfer_tensor = torch.load(flashinfer_path)[1:2, :62]#
             triton_tensor = torch.load(triton_path)[1:2, :62]#.squeeze(1)#
             try:
@@ -236,7 +237,7 @@ def checksame():
                 print(e)
 
 if __name__ == "__main__":
-    
+
     #checksame()
     #exit(0)
 
@@ -244,24 +245,24 @@ if __name__ == "__main__":
     max_pages = 64
     page_size = 64
     num_heads = 128
-    
+
     # warm-up
     kv_len = 4023
     q_len = 1
-    q_nope_buf = torch.randn((q_len, num_heads, 512), dtype=torch.bfloat16, device="cuda")
-    q_pe_buf = torch.randn((q_len, num_heads, 64), dtype=torch.bfloat16, device="cuda")
-    kv_buf = torch.randn((max_pages, page_size, 576), dtype=torch.bfloat16, device="cuda")
+    q_nope_buf = torch.randn((q_len, num_heads, 512), dtype=torch.bfloat16, device=CUDA)
+    q_pe_buf = torch.randn((q_len, num_heads, 64), dtype=torch.bfloat16, device=CUDA)
+    kv_buf = torch.randn((max_pages, page_size, 576), dtype=torch.bfloat16, device=CUDA)
     ckv, k_pe = torch.split(kv_buf, [512, 64], dim=-1)
-    
+
 
     wrapper = MLAWrapperSingleton.get_instance(
-        "cuda",
+        CUDA,
         max_batch_size,
         max_pages,
     )
-    
-    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device="cuda")
-    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+
+    kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device=CUDA)
+    qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=CUDA)
     wrapper.plan(
         qo_indptr,
         None,
@@ -278,7 +279,7 @@ if __name__ == "__main__":
 
     attn_output = wrapper.run(q_nope_buf, q_pe_buf, ckv, k_pe)
     print(attn_output.shape)
-    
+
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         attn_output = wrapper.run(q_nope_buf, q_pe_buf, ckv, k_pe)
@@ -298,17 +299,17 @@ if __name__ == "__main__":
             q_len = 1
             kv_len = 126
             file_name = f"layer_{layer_id}_forward_{forward_id}_q_nope.pt"
-            q_nope = torch.load(os.path.join(flashinfer_folder, file_name)).view(q_len,128,512).to(device="cuda")
+            q_nope = torch.load(os.path.join(flashinfer_folder, file_name)).view(q_len,128,512).to(device=CUDA)
             file_name = f"layer_{layer_id}_forward_{forward_id}_q_pe.pt"
-            q_pe = torch.load(os.path.join(flashinfer_folder, file_name)).view(q_len,128,64).to(device="cuda")
+            q_pe = torch.load(os.path.join(flashinfer_folder, file_name)).view(q_len,128,64).to(device=CUDA)
             q = torch.cat([q_nope, q_pe], dim=-1)
-            kv_cache = torch.load(kv_cache_path).to(device="cuda")
+            kv_cache = torch.load(kv_cache_path).to(device=CUDA)
             pages, page_size, _, head_dim = kv_cache.shape
             kv_cache = kv_cache.view(pages, page_size, head_dim)
             ckv, k_pe = torch.split(kv_cache, [512, 64], dim=-1)
-    
-            kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device="cuda")
-            qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device="cuda")
+
+            kv_len_arr = torch.tensor([kv_len], dtype=torch.int32, device=CUDA)
+            qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=CUDA)
             wrapper.plan(
                 None,
                 None,
@@ -322,7 +323,7 @@ if __name__ == "__main__":
                 torch.bfloat16,
                 torch.bfloat16,
             )
-    
+
             q_nope_buf.copy_(q_nope)
             q_pe_buf.copy_(q_pe)
             kv_buf[:pages].copy_(kv_cache)
@@ -347,21 +348,21 @@ if __name__ == "__main__":
                 192 ** (-0.5)
             )
             torch.testing.assert_close(attn_output, attn_ref, rtol=1e-3, atol=1e-3)
-    
+
             # ref_triton
             attn_logits = torch.empty(
                     (
                         max_batch_size,
                         num_heads,
                         4, #num_kv_splits # follow vLLM, fix it TODO
-                        512 + 1, 
+                        512 + 1,
                     ),
                     dtype=torch.float32,
-                    device = "cuda"
+                    device = CUDA
                 )
-            
+
             triton_ref = torch.zeros_like(q_nope)
-            page_table = torch.arange(max_pages, dtype=torch.int32, device="cuda")
+            page_table = torch.arange(max_pages, dtype=torch.int32, device=CUDA)
             ckv_with_pe = torch.cat([ckv, k_pe], dim=-1).contiguous().view(pages, page_size, 1, 576)
             ckv = ckv.view(pages, page_size, 1, 512)
             decode_attention_fwd_grouped(q, ckv_with_pe, ckv, triton_ref,
@@ -372,9 +373,9 @@ if __name__ == "__main__":
                 page_size)
 
             torch.testing.assert_close(attn_output, triton_ref, rtol=1e-3, atol=1e-3)
-            
+
             #file_name = f"./flashinfer_output/layer_{layer_id}_forward_{forward_id}_attn_output.pt"
             #ktrans_output = torch.load(file_name)
             #torch.testing.assert_close(attn_output, ktrans_output.squeeze(1), rtol=1e-3, atol=1e-3)
             print("test past")
-    
+

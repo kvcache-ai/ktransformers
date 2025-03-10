@@ -1,14 +1,14 @@
 # coding=utf-8
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang
 Version      : 0.1.0
-''' 
+'''
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.42.3/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py
 # Copyright 2024 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
-# 
+#
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
 # original forms to accommodate minor architectural differences compared
@@ -32,6 +32,7 @@ import math
 from typing import List, Optional, Tuple, Union
 
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
@@ -636,7 +637,7 @@ class Qwen2MoeFlashAttention2(Qwen2MoeAttention):
                         cache_seqlens=position_ids,
                         softmax_scale=softmax_scale,
                         causal=causal,
-                    )   
+                    )
                 else:
                     attn_output = flash_attn_func(
                         query_states,
@@ -766,7 +767,7 @@ class Qwen2MoeSdpaAttention(Qwen2MoeAttention):
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == CUDA and attention_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
@@ -1314,7 +1315,7 @@ class Qwen2MoeModel(Qwen2MoePreTrainedModel):
         if (
             self.config._attn_implementation == "sdpa"
             and attention_mask is not None
-            and attention_mask.device.type == "cuda"
+            and attention_mask.device.type == CUDA
             and not output_attentions
         ):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when

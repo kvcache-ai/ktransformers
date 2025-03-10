@@ -10,10 +10,11 @@ LastEditTime : 2024-08-12 06:31:14
 """
 import os
 import shutil
+from typing import Optional
 import yaml
 
 from ktransformers.server.config.singleton import Singleton
-from typing import Optional
+from ktransformers.util.torch_auto_backend import CUDA0, CUDA2
 
 
 class Config(metaclass=Singleton):
@@ -93,7 +94,7 @@ class Config(metaclass=Singleton):
         # to make sure it consistent with previous version
         self.model_path: str = self.model_dir
         self.model_name: str = self.model.get("name", "")
-        self.model_device: str = self.model.get("device", "cuda:0")
+        self.model_device: str = self.model.get("device", CUDA0)
         self.gguf_path: Optional[str] = self.model.get("gguf_path", None)
         self.use_cuda_graph = self.model.get("use_cuda_graph", True)
         self.trust_remote_code = self.model.get("trust_remote_code", True)
@@ -148,7 +149,7 @@ class Config(metaclass=Singleton):
         self.amnesia = self.model.get("amnesia", False)
         self.batch_size = self.model.get("batch_size", 1)
         self.cache_lens = self.model.get("cache_lens", 4096)
-        self.device = self.model.get("device", "cuda:2")
+        self.device = self.model.get("device", CUDA2)
 
         # web config
         self.web: dict = cfg.get("web", {})

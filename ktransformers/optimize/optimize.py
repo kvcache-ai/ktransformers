@@ -1,11 +1,12 @@
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang, Azure-Tang
 Version      : 0.1.0
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 from typing import Mapping, List
 import torch
+from ktransformers.util.torch_auto_backend import CUDA0
 import yaml
 import re
 from torch import nn
@@ -52,7 +53,7 @@ def del_meta(module:nn.Module):
     for name, child in module._modules.items():
         del_meta(child)
 
-def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str="", default_device: str = "cuda:0"):
+def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str = "", default_device: str = CUDA0):
     module_name = prefix[:-1]
     translated_name = translate_name_to_gguf(prefix)[:-1]
     #print("gen_optimize_config", prefix, module_name, translated_name)
@@ -87,7 +88,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "recursive" in rule:
             recursive = bool(rule["recursive"])
         break
-            
+
     if module_name not in out_data:
         out_data[module_name]= {
             "class": "default",
@@ -104,23 +105,23 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
             if child is not None:
                 child_prefix = prefix + name + "."
                 gen_optimize_config(child, out_data, rule_list, child_prefix)
-    
+
 
 def translate_model_config(model_config: PretrainedConfig):
-    # for supporting some special model 
+    # for supporting some special model
     if model_config.model_type == "mixtral":
         model_config.moe_intermediate_size = model_config.intermediate_size
-    
+
     return model_config
 
 
-def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = "cuda:0"):
+def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = CUDA0):
     with open(rule_file, 'r', encoding='utf-8') as f:
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
-    
+
     optimize_config = dict()
     gen_optimize_config(module, optimize_config, rule_list, default_device = default_device)
-    
+
     model_config = translate_model_config(model_config)
 
     gguf_loader=GGUFLoader(gguf_path)

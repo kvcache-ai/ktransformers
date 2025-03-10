@@ -1,6 +1,6 @@
 # coding=utf-8
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang
 Version      : 0.1.0
 '''
@@ -8,7 +8,7 @@ Version      : 0.1.0
 # https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628/blob/main/modeling_deepseek.py
 # Copyright 2023 DeepSeek-AI and The HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
-# 
+#
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
 # original forms to accommodate minor architectural differences compared
@@ -31,6 +31,7 @@ import warnings
 from typing import List, Optional, Tuple, Union
 
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
@@ -145,7 +146,7 @@ class DeepseekV2RotaryEmbedding(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)   
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 # Copied from transformers.models.llama.modeling_llama.LlamaLinearScalingRotaryEmbedding with Llama->DeepseekV2
 class DeepseekV2LinearScalingRotaryEmbedding(DeepseekV2RotaryEmbedding):
@@ -322,7 +323,7 @@ class DeepseekV2YarnRotaryEmbedding(DeepseekV2RotaryEmbedding):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()* self._mscale
             sin = emb.sin()* self._mscale
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)  
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x):
@@ -1112,7 +1113,7 @@ class DeepseekV2FlashAttention2(DeepseekV2Attention):
                     cache_seqlens=position_ids,
                     softmax_scale=softmax_scale,
                     causal=causal,
-                )   
+                )
             else:
                 attn_output = flash_attn_func(
                     query_states,
@@ -1557,7 +1558,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
-    
+
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
     def _update_causal_mask(
         self,
@@ -1629,7 +1630,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         if (
             self.config._attn_implementation == "sdpa"
             and attention_mask is not None
-            and attention_mask.device.type == "cuda"
+            and attention_mask.device.type == CUDA
             and not output_attentions
         ):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when

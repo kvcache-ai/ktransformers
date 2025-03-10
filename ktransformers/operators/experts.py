@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 # coding=utf-8
 '''
-Description  :  
+Description  :
 Author       : Azure-Tang, Boxin Zhang, chenht2022
 Date         : 2024-07-25 11:25:24
 Version      : 0.1.0
-LastEditors  : Azure 
+LastEditors  : Azure
 LastEditTime : 2024-08-29 09:41:10
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 
 from typing import Any, Union
@@ -16,6 +16,7 @@ import numpy.typing as npt
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import sys, os
 from ktransformers.operators.base_operator import BaseInjectedModule
 from tqdm import tqdm
@@ -39,13 +40,13 @@ from ktransformers.operators.cpuinfer import CPUInfer
 
 # class Base(BaseInjectedModule, ABC):
 class KExpertsBase(ABC):
-    def __init__(self, key: str, gguf_loader: GGUFLoader, config: PretrainedConfig, orig_module: nn.Module, device: str = "cuda", **kwargs):
+    def __init__(self, key: str, gguf_loader: GGUFLoader, config: PretrainedConfig, orig_module: nn.Module, device: str = CUDA, **kwargs):
         # super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
         self.key = key
         self.gguf_loader = gguf_loader
         self.config = config
         self.device = device
-    
+
     @abstractmethod
     def forward(self, input_tensor, expert_ids, weights):
         pass
@@ -53,7 +54,7 @@ class KExpertsBase(ABC):
     @abstractmethod
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str = "cpu", warmup: bool = False):
         pass
-    
+
     @abstractmethod
     def unload():
         pass
@@ -83,7 +84,7 @@ class KExpertsBase(ABC):
                 up_type = self.gguf_loader.tensor_info[key + ".ffn_up_exps.weight"]["ggml_type"]
                 down_type = self.gguf_loader.tensor_info[key + ".ffn_down_exps.weight"]["ggml_type"]
             elif key + ".ffn_down.0.weight" in self.gguf_loader.tensor_info:
-                # for supporting  Mixtral-8x7B-Instuct  
+                # for supporting  Mixtral-8x7B-Instuct
                 gate = []
                 up = []
                 down = []
@@ -105,7 +106,7 @@ class KExpertsBase(ABC):
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {key:{"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}
         return res
-    
+
     def load_multi(self, key: str, keys: list[str], device: str = "cpu"):
         tensors = {}
         for k in keys:
@@ -129,7 +130,7 @@ class KExpertsCPU(KExpertsBase):
         n_routed_experts: int,
         orig_module: nn.Module = None,
         device: str = "cpu",
-        out_device: str = "cuda", # this device mean which device the output should on. TODO: support cpu.
+        out_device: str = CUDA, # this device mean which device the output should on. TODO: support cpu.
         **kwargs
     ):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
@@ -192,13 +193,13 @@ class KExpertsCPU(KExpertsBase):
             KExpertsCPU.expert_ids_cpu = torch.zeros((num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)
             KExpertsCPU.weights_cpu = torch.zeros((num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True)
             KExpertsCPU.output_cpu = torch.zeros((self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
-            
+
     def submit_for_one_decode(self, input_tensor, expert_ids, weights):
         KExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
         KExpertsCPU.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
         KExpertsCPU.weights_cpu.copy_(weights, non_blocking=True)
         self.cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream(self.out_device).cuda_stream, self.moe.forward(1, expert_ids.size(0), KExpertsCPU.expert_ids_cpu.data_ptr(), KExpertsCPU.weights_cpu.data_ptr(), KExpertsCPU.input_tensor_cpu.data_ptr(), KExpertsCPU.output_cpu.data_ptr()))
-        
+
     def sync_for_one_decode(self):
         self.cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream(self.out_device).cuda_stream)
         KExpertsCPU.output_gpu_map[self.out_device].copy_(KExpertsCPU.output_cpu, non_blocking=True)
@@ -225,7 +226,7 @@ class KExpertsCPU(KExpertsBase):
             self.cpu_infer.submit(self.moe.forward(expert_ids.size(0), expert_ids.size(1), expert_ids.data_ptr(), weights.data_ptr(), input_tensor.data_ptr(), output.data_ptr()))
             self.cpu_infer.sync()
             return output.to(device=object.__getattribute__(self, "out_device"))
-    
+
     def unload(self):
         return
 
@@ -253,7 +254,7 @@ class KExpertsCPU(KExpertsBase):
                 gate_type = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_gate_exps.ggml_type").item()
                 up_type = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_up_exps.ggml_type").item()
                 down_type = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_down_exps.ggml_type").item()
-            
+
             elif key + ".ffn_gate_exps.weight" in self.gguf_loader.tensor_info:
                 gate = self.gguf_loader.get_mmap_tensor(key + ".ffn_gate_exps.weight")
                 up = self.gguf_loader.get_mmap_tensor(key + ".ffn_up_exps.weight")
@@ -262,7 +263,7 @@ class KExpertsCPU(KExpertsBase):
                 up_type = self.gguf_loader.tensor_info[key + ".ffn_up_exps.weight"]["ggml_type"]
                 down_type = self.gguf_loader.tensor_info[key + ".ffn_down_exps.weight"]["ggml_type"]
             elif key + ".ffn_down.0.weight" in self.gguf_loader.tensor_info:
-                # for supporting  Mixtral-8x7B-Instuct  
+                # for supporting  Mixtral-8x7B-Instuct
                 gate = []
                 up = []
                 down = []
@@ -283,7 +284,7 @@ class KExpertsCPU(KExpertsBase):
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {key:{"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}
         return res
-    
+
 class KExpertsMarlin(KExpertsBase):
     expert_num: int
     loaded_experts_idx: list[int]
@@ -294,7 +295,7 @@ class KExpertsMarlin(KExpertsBase):
         config: PretrainedConfig,
         n_routed_experts: int,
         orig_module: nn.Module = None,
-        device: str = "cuda",
+        device: str = CUDA,
         **kwargs
     ):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
@@ -329,7 +330,7 @@ class KExpertsMarlin(KExpertsBase):
                     up_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_up_exps.weight", self.up, i, self.elements_per_tensor, device=self.device)
                     gate_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_gate_exps.weight", self.gate, i, self.elements_per_tensor, device=self.device)
                     down_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_down_exps.weight", self.down, i, self.elements_per_tensor, device=self.device)
-                    
+
                     self.up_projs[i].load(nn.Parameter(up_weights), device=device)
                     self.gate_projs[i].load(nn.Parameter(gate_weights), device=device)
                     self.down_projs[i].load(nn.Parameter(down_weights), device=device)
@@ -344,7 +345,7 @@ class KExpertsMarlin(KExpertsBase):
                     self.gate_projs[i].load(nn.Parameter(self.gate[i,...]), device=device)
                     self.down_projs[i].load(nn.Parameter(self.down[i,...]), device=device)
                     self.loaded_experts_idx.append(i)
-        return 
+        return
 
     def unload(self):
         for i in self.loaded_experts_idx:
@@ -378,7 +379,7 @@ class KExpertsMarlin(KExpertsBase):
         hidden_states_cpu = hidden_states_cpu.to(self.device)
         selected_experts_cpu = selected_experts_cpu.to(self.device)
         routing_weights_cpu = routing_weights_cpu.to(self.device).to(org_dtype)
-        
+
         batch_sequence_length, hidden_dim = hidden_states_cpu.size()
 
         final_hidden_states = torch.zeros(
@@ -405,9 +406,9 @@ class KExpertsMarlin(KExpertsBase):
             # However `index_add_` only support torch tensors for indexing so we'll use
             # the `top_x` tensor here.
             final_hidden_states.index_add_(0, top_x, current_hidden_states)
-        
+
         return final_hidden_states.to(dtype=org_dtype, device=org_device)
-    
+
 # untested, CUDA OOM
 class KExpertsTorch(KExpertsBase):
     expert_num: int
@@ -448,7 +449,7 @@ class KExpertsTorch(KExpertsBase):
                     up_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_up_exps.weight", w["up"], i, self.elements_per_tensor, device=self.device)
                     gate_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_gate_exps.weight", w["gate"], i, self.elements_per_tensor, device=self.device)
                     down_weights = self.gguf_loader.load_expert_tensor(self.key + ".ffn_down_exps.weight", w["down"], i, self.elements_per_tensor, device=self.device)
-                    
+
                     self.up[i] = up_weights
                     self.gate[i] = gate_weights
                     self.down[i] = down_weights
@@ -458,11 +459,11 @@ class KExpertsTorch(KExpertsBase):
                     self.gate[i] = w["gate"][i, ...].to(device=device, dtype=self.dtype)
                     self.up[i] = w["up"][i, ...].to(device=device, dtype=self.dtype)
                     self.down[i] = w["down"][i, ...].to(device=device, dtype=self.dtype)
-        
+
         self.up = torch.stack(self.up, dim=0)
         self.gate = torch.stack(self.gate, dim=0)
         self.down = torch.stack(self.down, dim=0)
-        return 
+        return
 
     def unload(self):
         if self.gate is not None:
@@ -495,7 +496,7 @@ class KExpertsTorch(KExpertsBase):
         hidden_states_cpu = hidden_states_cpu.to(self.device)
         selected_experts_cpu = selected_experts_cpu.to(self.device)
         routing_weights_cpu = routing_weights_cpu.to(self.device)
-        
+
         batch_sequence_length, hidden_dim = hidden_states_cpu.size()
 
         final_hidden_states = torch.zeros(
@@ -540,7 +541,7 @@ class KTransformersExperts(BaseInjectedModule, KExpertsBase):
                  config: PretrainedConfig,
                  orig_module: nn.Module,
                 #  device: str = "cuda",
-                 prefill_device:str = "cuda",
+                 prefill_device:str = CUDA,
                  prefill_op: str | None = "KExpertsTorch",
                  generate_device: str = "cpu",
                  generate_op: str | None = "KExpertsCPU",
@@ -628,7 +629,7 @@ class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
-        
+
         if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode"):
             self.experts.generate_experts.submit_for_one_decode(hidden_states[0], selected_experts[0], routing_weights[0])
             shared_expert_output = self.shared_expert(hidden_states)
@@ -637,7 +638,7 @@ class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
             y += shared_expert_output
             y.resize_(*orig_shape)
             return y, router_logits
-        
+
         hidden_states_expert = hidden_states.to(self.experts.device)  if isinstance(self.experts, KExpertsBase) else hidden_states_expert.cpu()
         selected_experts_expert = selected_experts.to(self.experts.device) if isinstance(self.experts, KExpertsBase) else selected_experts_expert.cpu()
         routing_weights_expert = routing_weights.to(self.experts.device) if isinstance(self.experts, KExpertsBase) else routing_weights_expert.cpu()
@@ -666,7 +667,7 @@ class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
         y += shared_expert_output
         y.resize_(*orig_shape)
         return y, router_logits
-    
+
     @torch.no_grad()
     def moe_kexperts(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         outs = self.experts(x, topk_ids, topk_weight)
@@ -685,11 +686,11 @@ class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
                 expert = self.experts[selected_experts_cpu[token_idx, expert_idx]]
                 outs[token_idx] += expert.forward(hidden_states_cpu[token_idx]) * routing_weights_cpu[token_idx, expert_idx]
         return outs
-    
+
     @torch.no_grad()
     # TODO may bugs here
     def moe_infer(self, hidden_states_cpu: torch.Tensor, selected_experts_cpu: torch.Tensor, routing_weights_cpu: torch.Tensor, orig_shape: tuple) -> torch.Tensor:
-        
+
         batch_size, sequence_length, hidden_dim = orig_shape
 
         final_hidden_states = torch.zeros(
@@ -724,7 +725,7 @@ class KDeepseekV2MoE(BaseInjectedModule, DeepseekV2MoE):
         sequence_length = orig_shape[1]
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        
+
         if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode") and torch.cuda.is_current_stream_capturing():
             self.experts.generate_experts.submit_for_one_decode(hidden_states[0], topk_idx[0], topk_weight[0])
             if self.config.n_shared_experts is not None:
@@ -736,7 +737,7 @@ class KDeepseekV2MoE(BaseInjectedModule, DeepseekV2MoE):
 
         if self.config.n_shared_experts is not None:
             y_ = self.shared_experts(identity).squeeze(0)
-            
+
         if isinstance(self.experts, KExpertsBase):
             y = self.moe_kexperts(hidden_states, topk_idx, topk_weight).view(*orig_shape).to(device=hidden_states.device)
         elif hidden_states.size(0) > 10:
@@ -816,14 +817,14 @@ class KDeepseekV2MoE(BaseInjectedModule, DeepseekV2MoE):
         return final_out
 
 class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
-    
+
     def forward(self, hidden_states):
         identity = hidden_states
         orig_shape = hidden_states.shape
         sequence_length = orig_shape[1]
         topk_idx, topk_weight = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        
+
         # only for generate phase
         if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode") and torch.cuda.is_current_stream_capturing():
             self.experts.generate_experts.submit_for_one_decode(hidden_states[0], topk_idx[0], topk_weight[0])
@@ -836,7 +837,7 @@ class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
 
         if self.config.n_shared_experts is not None:
             y_ = self.shared_experts(identity).squeeze(0)
-            
+
         if isinstance(self.experts, KExpertsBase):
             y = self.moe_kexperts(hidden_states, topk_idx, topk_weight).view(*orig_shape).to(device=hidden_states.device)
         elif hidden_states.size(0) > 10:
@@ -916,7 +917,7 @@ class KDeepseekV3MoE(BaseInjectedModule, DeepseekV3MoE):
         return final_out
 
 class KMistralSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
-    
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
         orig_shape = hidden_states.shape
@@ -932,13 +933,13 @@ class KMistralSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
-        
+
         if sequence_length == 1 and hasattr(self.experts.generate_experts, "submit_for_one_decode"):
             self.experts.generate_experts.submit_for_one_decode(hidden_states[0], selected_experts[0], routing_weights[0])
             y = self.experts.generate_experts.sync_for_one_decode().unsqueeze(0)
             y.resize_(*orig_shape)
             return y, router_logits
-        
+
         hidden_states_expert = hidden_states.to(self.experts.device)  if isinstance(self.experts, KExpertsBase) else hidden_states_expert.cpu()
         selected_experts_expert = selected_experts.to(self.experts.device) if isinstance(self.experts, KExpertsBase) else selected_experts_expert.cpu()
         routing_weights_expert = routing_weights.to(self.experts.device) if isinstance(self.experts, KExpertsBase) else routing_weights_expert.cpu()
@@ -959,10 +960,10 @@ class KMistralSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
             y = self.moe_infer_simple(
                 hidden_states_expert, selected_experts_expert, routing_weights_expert
             ).to(device=hidden_states.device)
-            
+
         y.resize_(*orig_shape)
         return y, router_logits
-    
+
     @torch.no_grad()
     def moe_kexperts(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         outs = self.experts(x, topk_ids, topk_weight)
@@ -981,11 +982,11 @@ class KMistralSparseMoEBlock(BaseInjectedModule, MixtralSparseMoeBlock):
                 expert = self.experts[selected_experts_cpu[token_idx, expert_idx]]
                 outs[token_idx] += expert.forward(hidden_states_cpu[token_idx]) * routing_weights_cpu[token_idx, expert_idx]
         return outs
-    
+
     @torch.no_grad()
     # TODO may bugs here
     def moe_infer(self, hidden_states_cpu: torch.Tensor, selected_experts_cpu: torch.Tensor, routing_weights_cpu: torch.Tensor, orig_shape: tuple) -> torch.Tensor:
-        
+
         batch_size, sequence_length, hidden_dim = orig_shape
 
         final_hidden_states = torch.zeros(

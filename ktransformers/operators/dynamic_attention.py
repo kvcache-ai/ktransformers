@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Description  :  
+Description  :
 Author       : Jianwei Dong
 Date         : 2024-08-26 23:25:24
 Version      : 1.0.0
 LastEditors  : Jianwei Dong
 LastEditTime : 2024-08-26 23:25:24
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 from transformers import AutoConfig
 import sys, os
 import logging
@@ -238,7 +239,7 @@ class DynamicScaledDotProductAttention:
         n_rep = self.q_head_num // self.kv_head_num
         importance = self.cache_importance.view(-1, self.q_head_num)
         importance = importance.narrow(0, batch_idx * max_block_num + offset, width)
-        n_gqa_ = self.q_head_num // self.kv_head_num 
+        n_gqa_ = self.q_head_num // self.kv_head_num
         for head_idx in range(self.q_head_num):
             key_item = key[..., head_idx // n_gqa_, :].view(key.size(0), -1)
             qk = torch.einsum(
@@ -258,7 +259,7 @@ class DynamicScaledDotProductAttention:
                 qk = torch.nn.functional.softmax(
                     qk / math.sqrt(self.head_dim), dim=-1, dtype=torch.float32
                 ).to(torch.float16)
-              
+
             qk = torch.sum(qk, dim=-2)
             importance[...,head_idx] += qk
 
@@ -669,7 +670,7 @@ class DynamicScaledDotProductAttention:
             if layer_idx < self.dense_layer_num:
                 self.block_table_cpu.copy_(self.prefix_block_table, non_blocking=True)
                 self.cpu_infer.submit_with_cuda_stream(
-                    torch.cuda.current_stream("cuda").cuda_stream,
+                    torch.cuda.current_stream(CUDA).cuda_stream,
                     self.local_thread.attn_with_kvcache(
                         q_in=self.q_in_cpu,
                         k_in=self.k_in_cpu,
@@ -706,7 +707,7 @@ class DynamicScaledDotProductAttention:
                         )
                     #                   print("submit_with_cuda_stream")
                     self.cpu_infer.submit_with_cuda_stream(
-                        torch.cuda.current_stream("cuda").cuda_stream,
+                        torch.cuda.current_stream(CUDA).cuda_stream,
                         self.local_thread.attn_with_kvcache(
                             q_in=self.q_in_cpu,
                             k_in=self.k_in_cpu,
@@ -731,7 +732,7 @@ class DynamicScaledDotProductAttention:
                         self.prefix_block_table, non_blocking=True
                     )
                     self.cpu_infer.submit_with_cuda_stream(
-                        torch.cuda.current_stream("cuda").cuda_stream,
+                        torch.cuda.current_stream(CUDA).cuda_stream,
                         self.local_thread.attn_with_kvcache(
                             q_in=self.q_in_cpu,
                             k_in=self.k_in_cpu,
@@ -747,7 +748,7 @@ class DynamicScaledDotProductAttention:
                         ),
                     )
             self.cpu_infer.sync_with_cuda_stream(
-                torch.cuda.current_stream("cuda").cuda_stream
+                torch.cuda.current_stream(CUDA).cuda_stream
             )
             #            print("submit_with_cuda_stream finished\n")
             self.output_cuda.copy_(self.output_cpu, non_blocking=True)

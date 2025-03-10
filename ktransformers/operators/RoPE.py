@@ -1,8 +1,8 @@
 """
-Description  :  
+Description  :
 Author       : Boxin Zhang
 Version      : 0.1.0
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 
 from torch import nn
@@ -27,6 +27,7 @@ from ktransformers.util.custom_gguf import GGUFLoader
 from ktransformers.util.utils import InferenceState
 from transformers.configuration_utils import PretrainedConfig
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 
 # Copied from transformers.models.mixtral.modeling_mixtral.MixtralRotaryEmbedding with Mixtral->Qwen2Moe
 class RotaryEmbedding(BaseInjectedModule, DeepseekV2RotaryEmbedding):
@@ -37,8 +38,8 @@ class RotaryEmbedding(BaseInjectedModule, DeepseekV2RotaryEmbedding):
         config: PretrainedConfig,
         orig_module: nn.Module,
         #  device: str = "cuda",
-        generate_device: str = "cuda",
-        prefill_device: str = "cuda",
+        generate_device: str = CUDA,
+        prefill_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
@@ -67,8 +68,8 @@ class RotaryEmbeddingV3(BaseInjectedModule):
         config: PretrainedConfig,
         orig_module: nn.Module,
         #  device: str = "cuda",
-        generate_device: str = "cuda",
-        prefill_device: str = "cuda",
+        generate_device: str = CUDA,
+        prefill_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
@@ -76,7 +77,7 @@ class RotaryEmbeddingV3(BaseInjectedModule):
         )
         self.generate_device = generate_device
         self.prefill_device = prefill_device
-    
+
     @torch.no_grad()
     def forward(self, x, position_ids):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -91,7 +92,7 @@ class RotaryEmbeddingV3(BaseInjectedModule):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
             sin = emb.sin()
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)   
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
     def load(self):
         self._init(
@@ -117,8 +118,8 @@ class RotaryEmbeddingV2(BaseInjectedModule, LlamaRotaryEmbedding):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        generate_device: str = "cuda",
-        prefill_device: str = "cuda",
+        generate_device: str = CUDA,
+        prefill_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
@@ -155,8 +156,8 @@ class YarnRotaryEmbedding(BaseInjectedModule, DeepseekV2YarnRotaryEmbedding):
         config: PretrainedConfig,
         orig_module: nn.Module,
         #  device: str = "cuda",
-        generate_device: str = "cuda",
-        prefill_device: str = "cuda",
+        generate_device: str = CUDA,
+        prefill_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
@@ -225,8 +226,8 @@ class YarnRotaryEmbeddingV3(BaseInjectedModule):
         config: PretrainedConfig,
         orig_module: nn.Module,
         #  device: str = "cuda",
-        generate_device: str = "cuda",
-        prefill_device: str = "cuda",
+        generate_device: str = CUDA,
+        prefill_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
@@ -234,7 +235,7 @@ class YarnRotaryEmbeddingV3(BaseInjectedModule):
         )
         self.generate_device = generate_device
         self.prefill_device = prefill_device
-    
+
     def load(self):
         kwargs = {
             key: self.config.rope_scaling[key]
@@ -270,7 +271,7 @@ class YarnRotaryEmbeddingV3(BaseInjectedModule):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()* self._mscale
             sin = emb.sin()* self._mscale
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)  
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
     def _init(
         self,
@@ -332,8 +333,8 @@ class DynamicNTKScalingRotaryEmbedding(
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        prefill_device: str = "cuda",
-        generate_device: str = "cuda",
+        prefill_device: str = CUDA,
+        generate_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(
