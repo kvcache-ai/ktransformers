@@ -78,13 +78,15 @@ def run_eval_api(
     format_tabs: bool = False,
     auth_token: str = None,
     problem_file: str = None,
-    append: bool = False
+    append: bool = False,
+    skip: int = 0
 ):
   
     data = load_data(problem_file)
     pbar = tqdm.tqdm(total=len(data) * 1)
-
+    pbar.update(skip)
     for i in range(len(data)):
+        i = i+skip
         data_item = data[i]
         question = data_item['Problem']
         # Start the timer for this evaluation
@@ -97,6 +99,7 @@ def run_eval_api(
             score = get_score(completion, answer)
             elapsed_time = time.time() - start_time
             result = {
+                "index": i,
                 "question_id": data_item["ID"],
                 "answer": answer,
                 "prediction": completion,
@@ -114,9 +117,9 @@ def run_eval_api(
         pbar.update(1)
     
 
-def main(output_path, api_url, model_name, auth_token, format_tabs,problem_file, append):
+def main(output_path, api_url, model_name, auth_token, format_tabs,problem_file, append,skip):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    run_eval_api(api_url, model_name, output_path, format_tabs, auth_token, problem_file,append)
+    run_eval_api(api_url, model_name, output_path, format_tabs, auth_token, problem_file,append,skip)
 
 
 if __name__ == "__main__":
@@ -128,6 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--format_tabs", action="store_true", help="Format Tabs")
     parser.add_argument("--problem_file", type=str, default="Maxwell-Jia/AIME_2024", help="Evalset File")
     parser.add_argument("--no_append", action="store_false", help="Append to existing file")
+    parser.add_argument("--skip", type=int, default=0, help="Skip some tasks")
     args = parser.parse_args()
     # api_url = "https://api.siliconflow.cn/v1/chat/completions"
-    main(args.out_path, args.api_url, args.model_name, args.auth_token, args.format_tabs, args.problem_file, args.no_append)
+    main(args.out_path, args.api_url, args.model_name, args.auth_token, args.format_tabs, args.problem_file, args.no_append, args.skip)

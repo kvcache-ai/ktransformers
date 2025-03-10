@@ -6,6 +6,7 @@ from fastapi.requests import Request
 from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import stream_response
 from ktransformers.server.schemas.legacy.completions import CompletionCreate,CompletionObject
+from ktransformers.server.schemas.endpoints.chat import RawUsage
 
 router = APIRouter()
 
@@ -17,17 +18,24 @@ async def create_completion(request:Request,create:CompletionCreate):
     print(f'COMPLETION INPUT:----\n{create.prompt}\n----')
 
    
-
     if create.stream:
         async def inner():
-            async for token in interface.inference(create.prompt,id,create.temperature,create.top_p):     
-                d = {'choices':[{'delta':{'content':token}}]}
-                yield f"data:{json.dumps(d)}\n\n"
+            async for res in interface.inference(create.prompt,id,create.temperature,create.top_p):     
+                if isinstance(res, RawUsage):
+                    raw_usage = res
+                else: 
+                    token, finish_reason = res
+                    d = {'choices':[{'delta':{'content':token}}]}
+                    yield f"data:{json.dumps(d)}\n\n"
             d = {'choices':[{'delta':{'content':''},'finish_reason':''}]}
             yield f"data:{json.dumps(d)}\n\n"
         return stream_response(request,inner())
     else:
         comp = CompletionObject(id=id,object='text_completion',created=int(time()))
-        async for token in interface.inference(create.prompt,id,create.temperature,create.top_p):     
-            comp.append_token(token)
+        async for res in interface.inference(create.prompt,id,create.temperature,create.top_p):     
+            if isinstance(res, RawUsage):
+                raw_usage = res
+            else: 
+                token, finish_reason = res
+                comp.append_token(token) 
         return comp

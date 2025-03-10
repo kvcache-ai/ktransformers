@@ -25,7 +25,7 @@ from ktransformers.operators.triton_attention import decode_attention_fwd_groupe
 import os
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
 if flashinfer_enabled:
-    from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton, attention_ref
+    from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton
 
 logger = logging.getLogger("attention")
 

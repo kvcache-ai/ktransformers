@@ -8,7 +8,7 @@ def filter_code(completion: str) -> str:
         completion = completion.split('if __name__ == "__main__":')[0]
     if "# Example usage" in completion:
         completion = completion.split("# Example usage")[0]
-    return completion.split("\n\n")[0]
+    return completion
 
 
 def fix_indents(text: str) -> str:
