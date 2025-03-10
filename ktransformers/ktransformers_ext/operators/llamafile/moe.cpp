@@ -14,6 +14,7 @@
 #ifdef USE_NUMA
 #include <numa.h>
 #include <numaif.h>
+#include <sys/mman.h>
 #endif
 
 MOE::MOE(MOEConfig config) {
@@ -27,11 +28,28 @@ MOE::MOE(MOEConfig config) {
     gate_proj_numa_.resize(numa_nodes);
     up_proj_numa_.resize(numa_nodes);
     down_proj_numa_.resize(numa_nodes);
+    size_t hugepage_size = 2 * 1024 * 1024; 
     size_t exp_inter_hidden_mul_ = (size_t)config.expert_num * config.intermediate_size * config.hidden_size;
+
+    size_t size_gate_proj = exp_inter_hidden_mul_ * ggml_type_size(config.gate_type) / ggml_blck_size(config.gate_type);
+    if (size_gate_proj % hugepage_size != 0) {
+        size_gate_proj = (size_gate_proj / hugepage_size + 1) * hugepage_size;
+    }
+
+    size_t size_up_proj = exp_inter_hidden_mul_ * ggml_type_size(config.up_type) / ggml_blck_size(config.up_type);
+    if (size_up_proj % hugepage_size != 0) {
+        size_up_proj = (size_up_proj / hugepage_size + 1) * hugepage_size;
+    }
+
+    size_t size_down_proj = exp_inter_hidden_mul_ * ggml_type_size(config.down_type) / ggml_blck_size(config.down_type);
+    if (size_down_proj % hugepage_size != 0) {
+        size_down_proj = (size_down_proj / hugepage_size + 1) * hugepage_size;
+    }
+
     for (int i = 0; i < numa_nodes; i++) {
-        gate_proj_numa_[i] = numa_alloc_onnode(exp_inter_hidden_mul_* ggml_type_size(config.gate_type) / ggml_blck_size(config.gate_type), i);
-        up_proj_numa_[i] = numa_alloc_onnode(exp_inter_hidden_mul_* ggml_type_size(config.up_type) / ggml_blck_size(config.up_type), i);
-        down_proj_numa_[i] = numa_alloc_onnode(exp_inter_hidden_mul_* ggml_type_size(config.down_type) / ggml_blck_size(config.down_type), i);
+        gate_proj_numa_[i] = numa_alloc_onnode(size_gate_proj, i);
+        up_proj_numa_[i] = numa_alloc_onnode(size_up_proj, i);
+        down_proj_numa_[i] = numa_alloc_onnode(size_down_proj, i);
         if (!gate_proj_numa_[i]) {
             std::cout << "Memory allocation failed for gate_proj_numa_ on node " << i << std::endl;
         }
@@ -40,6 +58,15 @@ MOE::MOE(MOEConfig config) {
         }
         if (!down_proj_numa_[i]) {
             std::cout << "Memory allocation failed for down_proj_numa_ on node " << i << std::endl;
+        }
+        if (madvise(gate_proj_numa_[i], size_gate_proj, MADV_HUGEPAGE) != 0) {
+            perror("madvise on gate_proj failed");
+        }
+        if (madvise(up_proj_numa_[i], size_up_proj, MADV_HUGEPAGE) != 0) {
+            perror("madvise on up_proj failed");
+        }
+        if (madvise(down_proj_numa_[i], size_down_proj, MADV_HUGEPAGE) != 0) {
+            perror("madvise on down_proj failed");
         }
         memcpy(gate_proj_numa_[i], gate_proj_, exp_inter_hidden_mul_* ggml_type_size(config.gate_type) / ggml_blck_size(config.gate_type));
         memcpy(up_proj_numa_[i], up_proj_, exp_inter_hidden_mul_* ggml_type_size(config.up_type) / ggml_blck_size(config.up_type));
@@ -107,10 +134,26 @@ MOE::~MOE() {
 
     #ifdef USE_NUMA
     int numa_nodes = numa_num_configured_nodes();
+    size_t hugepage_size = 2 * 1024 * 1024; 
+    size_t exp_inter_hidden_mul_ = (size_t)config_.expert_num * config_.intermediate_size * config_.hidden_size;
+    size_t size_gate_proj = exp_inter_hidden_mul_ * ggml_type_size(config_.gate_type) / ggml_blck_size(config_.gate_type);
+    if (size_gate_proj % hugepage_size != 0) {
+        size_gate_proj = (size_gate_proj / hugepage_size + 1) * hugepage_size;
+    }
+
+    size_t size_up_proj = exp_inter_hidden_mul_ * ggml_type_size(config_.up_type) / ggml_blck_size(config_.up_type);
+    if (size_up_proj % hugepage_size != 0) {
+        size_up_proj = (size_up_proj / hugepage_size + 1) * hugepage_size;
+    }
+
+    size_t size_down_proj = exp_inter_hidden_mul_ * ggml_type_size(config_.down_type) / ggml_blck_size(config_.down_type);
+    if (size_down_proj % hugepage_size != 0) {
+        size_down_proj = (size_down_proj / hugepage_size + 1) * hugepage_size;
+    }
     for (int i = 0; i < numa_nodes; i++) {
-        numa_free(gate_proj_numa_[i], config_.expert_num * config_.intermediate_size * config_.hidden_size * ggml_type_size(config_.gate_type) / ggml_blck_size(config_.gate_type));
-        numa_free(up_proj_numa_[i], config_.expert_num * config_.intermediate_size * config_.hidden_size * ggml_type_size(config_.up_type) / ggml_blck_size(config_.up_type));
-        numa_free(down_proj_numa_[i], config_.expert_num * config_.hidden_size * config_.intermediate_size * ggml_type_size(config_.down_type) / ggml_blck_size(config_.down_type));
+        numa_free(gate_proj_numa_[i], size_gate_proj);
+        numa_free(up_proj_numa_[i], size_up_proj);
+        numa_free(down_proj_numa_[i], size_down_proj);
     }
     #endif
 }
