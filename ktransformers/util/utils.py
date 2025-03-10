@@ -239,7 +239,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             if use_flashinfer_mla:
                 MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,
                                              num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
-                                             q_head_dim ** (-0.5), torch.bfloat16, torch.bfloat16)
+                                             model.model.layers[0].self_attn.softmax_scale, torch.bfloat16, torch.bfloat16)
             global warm_uped
             if use_cuda_graph and ( (warm_uped == True and int(i) == 1) or (warm_uped == False and int(i) == 2) ):
                 warm_uped = True

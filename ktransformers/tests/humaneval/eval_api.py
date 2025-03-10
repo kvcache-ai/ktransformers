@@ -39,7 +39,8 @@ def run_eval_api(
     format_tabs: bool = False,
     auth_token: str = None,
     problem_file: str = None,
-    append: bool = False
+    append: bool = False,
+    skip: int = 0
 ):
     if(problem_file is None):
         problems = read_problems()
@@ -47,8 +48,14 @@ def run_eval_api(
         problems = read_problems(problem_file)
     samples = []
     pbar = tqdm.tqdm(total=len(problems) * 1)
+    pbar.update(skip)
     try:
         for task_id in problems:
+            # skip some tasks
+            if skip > 0:
+                skip -= 1
+                continue
+
             if format_tabs:
                 prompt = problems[task_id]["prompt"].replace("    ", "\t")
             else:
@@ -67,23 +74,26 @@ def run_eval_api(
         if not append:
             write_jsonl(out_path, samples,append=append)
     except Exception as e:
-        write_jsonl(out_path, samples,append=append)
+        if not append:
+            write_jsonl(out_path, samples,append=append)
         print(f"Error: {e}")
 
-def main(output_path, api_url, model_name, auth_token, format_tabs,problem_file, append):
+def main(output_path, api_url, model_name, auth_token, format_tabs,problem_file, append,skip):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    run_eval_api(api_url, model_name, output_path, format_tabs, auth_token, problem_file,append)
+    run_eval_api(api_url, model_name, output_path, format_tabs, auth_token, problem_file,append,skip)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="API Generate Tester")
-    parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
+    #parser.add_argument("--api_url", type=str, default="https://api.siliconflow.cn/v1/chat/completions", help="API URL")
+    parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
     parser.add_argument("--model_name", type=str, default="Pro/deepseek-ai/DeepSeek-V3", help="Model Name")
-    parser.add_argument("--out_path", type=str, default="results/api/eval.jsonl", help="Output Path")
+    parser.add_argument("--out_path", type=str, default="results/api/eval_b.jsonl", help="Output Path")
     parser.add_argument("--auth_token", type=str, default=None, help="Auth Token")
     parser.add_argument("--format_tabs", action="store_true", help="Format Tabs")
     parser.add_argument("--problem_file", type=str, default=None, help="Evalset File")
     parser.add_argument("--no_append", action="store_false", help="Append to existing file")
+    parser.add_argument("--skip", type=int, default=0, help="Skip first n problems")
     args = parser.parse_args()
     # api_url = "https://api.siliconflow.cn/v1/chat/completions"
-    main(args.out_path, args.api_url, args.model_name, args.auth_token, args.format_tabs, args.problem_file, args.no_append)
+    main(args.out_path, args.api_url, args.model_name, args.auth_token, args.format_tabs, args.problem_file, args.no_append,args.skip)

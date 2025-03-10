@@ -333,7 +333,7 @@ class TransformersInterface(BackendInterfaceBase):
         logger.info(f"args.max_new_tokens: {self.args.max_new_tokens}, cache_lens: {self.args.cache_lens}, seq_length: {self.seq_length}")
         if(self.max_new_tokens <= 0):
             logger.warning("max_new_tokens is less than 0")
-            yield self.streamer.end()
+            yield self.streamer.end(), "length"
             return
         logger.info(f"max_new_tokens: {self.max_new_tokens}")
         self.profiler.set_counter("decode", 0)
@@ -344,14 +344,21 @@ class TransformersInterface(BackendInterfaceBase):
                     MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
                                              num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
                                              head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size,
-                                             sm_scale=(self.model.config.qk_rope_head_dim + self.model.config.qk_nope_head_dim) ** (-0.5), q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
+                                             sm_scale=self.model.model.layers[0].self_attn.softmax_scale, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
                 next_token = self.decode_one_tokens()
                 self.profiler.inc("decode")
                 if next_token == self.tokenizer.eos_token_id or "<|im_end|>" == self.tokenizer.decode(next_token):
+                    yield self.streamer.end(), None
+                    yield "", "stop"
                     assert self.args.batch_size == 1
                     break
-                yield self.append_new_tokens(next_token)
-        yield self.streamer.end()
+                yield self.append_new_tokens(next_token), None
+
+        else:   # for's else, if output get max new tokens
+            yield self.streamer.end(), None
+            yield "", "length"
+        
+        
 
     def check_is_new(self, thread_id: str):
         if not self.use_static_cache:
@@ -391,20 +398,20 @@ class TransformersInterface(BackendInterfaceBase):
         if Config().user_force_think:
             think = '<think>\n'
             print(think, end="",flush=True)
-            yield think
+            yield think, None
         
         for t in self.prefill(input_ids, self.check_is_new(thread_id), temperature, top_p):
             # output think token after prefill done
             if t is not None:
                 print(t, end="",flush=True)
-                yield t
+                yield t, None
         self.profiler.pause_timer("prefill")
 
         self.profiler.create_and_start_timer("decode")
-        for t in self.generate():
+        for t, finish_reason in self.generate():
             if t is not None:
                 print(t, end="",flush=True)
-                yield t 
+                yield t, finish_reason
         print("")
         self.profiler.pause_timer("decode")
         self.report_last_time_performance()
