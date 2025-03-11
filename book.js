@@ -111,11 +111,11 @@ function playground_text(playground, hidden = true) {
         let text = playground_text(code_block);
         let classes = code_block.querySelector('code').classList;
         let edition = "2015";
-        if(classes.contains("edition2018")) {
-            edition = "2018";
-        } else if(classes.contains("edition2021")) {
-            edition = "2021";
-        }
+        classes.forEach(className => {
+            if (className.startsWith("edition")) {
+                edition = className.slice(7);
+            }
+        });
         var params = {
             version: "stable",
             optimize: "0",
@@ -294,9 +294,9 @@ function playground_text(playground, hidden = true) {
         themeIds.push(el.id);
     });
     var stylesheets = {
-        ayuHighlight: document.querySelector("[href$='ayu-highlight.css']"),
-        tomorrowNight: document.querySelector("[href$='tomorrow-night.css']"),
-        highlight: document.querySelector("[href$='highlight.css']"),
+        ayuHighlight: document.querySelector("#ayu-highlight-css"),
+        tomorrowNight: document.querySelector("#tomorrow-night-css"),
+        highlight: document.querySelector("#highlight-css"),
     };
 
     function showThemes() {
