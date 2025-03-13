@@ -21,10 +21,12 @@ from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marl
     MarlinWorkspace,
     marlin_quantize,
     GPTQ_MARLIN_MIN_THREAD_N,
+    GPTQ_MARLIN_MIN_THREAD_K,
     GPTQ_MARLIN_MAX_PARALLEL,
 )
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig
+from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from abc import ABC, abstractmethod
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build"))
@@ -54,15 +56,17 @@ class KLinearBase(ABC):
 
         self.has_bias = False
         self.dtype = torch.get_default_dtype()
-        # if orig_module is not None:
-        #     self.in_features = orig_module.in_features
-        #     self.out_features = orig_module.out_features
-        # else:
-        shape = self.gguf_loader.tensor_info[key + ".weight"]["shape"]
-        if len(shape) == 1:
-            print("Warning: orig_module is not set, but has in_features or out_features equals to 1, can't get in_features and out_features from GGUF")
-        self.in_features  = self.gguf_loader.tensor_info[key + ".weight"]["shape"][0]
-        self.out_features = self.gguf_loader.tensor_info[key + ".weight"]["shape"][1]
+        if orig_module is not None:
+            self.in_features = orig_module.in_features
+            self.out_features = orig_module.out_features
+        else:
+            shape = self.gguf_loader.tensor_info[key + ".weight"]["shape"]
+            if len(shape) == 1:
+                print("Warning: orig_module is not set, but has in_features or out_features equals to 1, can't get in_features and out_features from GGUF")
+            self.in_features  = self.gguf_loader.tensor_info[key + ".weight"]["shape"][0]
+            self.out_features = self.gguf_loader.tensor_info[key + ".weight"]["shape"][1]
+
+        self.loaded = False # for lm_head pre-load, TODO: use new way to do lm_head pre-load when layer wise prefill.
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -75,7 +79,13 @@ class KLinearBase(ABC):
             keys = [self.key]
 
         for key in keys:
-            if key + ".weight" in self.gguf_loader.tensor_file_map:
+            if self.gguf_loader.safetensor_loader is not None:
+                # using safetensor_loader
+                tensor = self.gguf_loader.safetensor_loader.load_tensor(key+'.weight')
+                weight_scale_inv = self.gguf_loader.safetensor_loader.load_tensor(key+'.weight_scale_inv')
+                return nn.Parameter(tensor), nn.Parameter(weight_scale_inv)
+                
+            elif key + ".weight" in self.gguf_loader.tensor_file_map:
                 if key + ".bias" in self.gguf_loader.tensor_file_map:
                     tensors = self.load_multi(key, ["weight", "bias"], device=device)
                     tensor = tensors["weight"]
@@ -119,7 +129,7 @@ class KLinearTorch(KLinearBase):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
         self.has_bias = False
         self.dtype = torch.get_default_dtype()
-        self.w = None
+        self.weight = None
         self.has_bias = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -127,37 +137,100 @@ class KLinearTorch(KLinearBase):
         out_device = x.device
         # TODO: support CUDA Graph when using cpu, but CPUInfer is recommended.
         x = x.to(device=self.device, dtype=self.dtype)
-        x = x @ self.w
+        x = x @ self.weight
         if self.has_bias:
             x = x + self.bias
         x = x.to(dtype=dtype, device=out_device)
         return x
 
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if self.loaded: return
         if device is None: device = self.device
         if w is None: w = self.load_weight(device=device)
+        # else: self.out_features = w.shape[0], self.in_features = w.shape[1]
         
         if isinstance(w, nn.Parameter):
-            self.w = w.to(dtype=self.dtype).T
+            try:
+                self.weight = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            except: 
+                self.weight = w.to(dtype=self.dtype).T
             self.has_bias = False
         elif isinstance(w, tuple):
-            self.w = w[0].to(dtype=self.dtype).T
+            try:
+                self.weight = w[0].to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            except:
+                self.weight = w[0].to(dtype=self.dtype).T
             self.bias = w[1].to(dtype=self.dtype)
             self.has_bias = True
         else:
             raise ValueError("Invalid weight type")
         # self.linear = self.linear.to(device)
-        self.w = self.w.to(device)
+        self.weight = self.weight.to(device)
         if self.has_bias:
             self.bias = self.bias.to(device)
+        self.loaded = True
 
     def unload(self):
-        if self.w is not None:
-            self.w = None
+        if self.weight is not None:
+            self.weight = None
         if self.has_bias:
             self.bias = None
 
-
+class KLinearFP8(KLinearBase):
+    # this kernel requires special handling for weight
+    # Please load the weight file downloaded from KVCache.AI
+    marlin_q_w: torch.Tensor
+    marlin_s: torch.Tensor
+    g_idx: torch.Tensor
+    sort_indices: torch.Tensor
+    has_bias: bool
+    weight: torch.Tensor
+    scale_w: torch.Tensor
+    bias: torch.Tensor
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        device: str = "cuda",
+        block_size: int = 128,
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        self.has_bias = False
+        self.dtype = torch.get_default_dtype()
+        self.block_size = block_size
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.to(self.device)
+        orig_dtype = x.dtype        
+        x_quantized, scale_x = act_quant(x, self.block_size)
+        y = fp8_gemm(x_quantized, scale_x, self.weight, self.weight_scale_inv)
+        return y.to(dtype=orig_dtype)
+    
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if device is None: device = self.device
+        if w is None: 
+            w = self.load_weight(device=device) 
+        ### TODO fit weight_inv format
+        if isinstance(w, tuple):
+            self.weight = w[0].to(device)
+            self.weight_scale_inv = w[1].to(device)
+            self.has_bias = False
+        else:
+            raise ValueError("Invalid weight type")
+        self.weight = self.weight.to(device)
+        if self.has_bias:
+            self.bias = self.bias.to(device)
+        
+    def unload(self):
+        if self.weight is not None:
+            self.weight = None
+        if self.has_bias:
+            self.bias = None
+        
+        
 class KLinearMarlin(KLinearBase):
     marlin_q_w: torch.Tensor
     marlin_s: torch.Tensor
@@ -183,19 +256,36 @@ class KLinearMarlin(KLinearBase):
         self.group_size = group_size
         self.act_order = act_order
         self.is_k_full = is_k_full
+        self.padding = False
+        self.orin_in_features = self.in_features
+        self.orin_out_features = self.out_features
+        if self.in_features%GPTQ_MARLIN_MIN_THREAD_K!=0 or self.out_features%GPTQ_MARLIN_MIN_THREAD_K!=0:
+            #print(f"warning!, in_features={in_features} or out_features={out_features} is undivisible by GPTQ_MARLIN_MIN_THREAD_K={GPTQ_MARLIN_MIN_THREAD_K} and GPTQ_MARLIN_MIN_THREAD_N={GPTQ_MARLIN_MIN_THREAD_N}, padding")
+            self.padding = True
+            self.in_features = (self.in_features+GPTQ_MARLIN_MIN_THREAD_K-1)//GPTQ_MARLIN_MIN_THREAD_K*GPTQ_MARLIN_MIN_THREAD_K
+            self.out_features = (self.out_features+GPTQ_MARLIN_MIN_THREAD_N-1)//GPTQ_MARLIN_MIN_THREAD_N*GPTQ_MARLIN_MIN_THREAD_N
+            #print(f"After padding: in_features={in_features}, out_features={out_features}")
+        
+        self.k = self.in_features
+        self.n = self.out_features
 
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if self.loaded: return
         if device is None: device = self.device
         assert device.lower() != "cpu", "Marlin quantized linear only supports GPU device"
-        if w is None: w = self.load_weight(device=device)
+        
+        #if self.in_features * self.out_features:
+        if w is None: 
+            w = self.load_weight(device=device) 
 
         if isinstance(w, nn.Parameter):
             # pad weight
-            weight = w.view(self.out_features, self.in_features).T
+            weight = w.view(self.orin_out_features, self.orin_in_features).T
             self.has_bias = False
         elif isinstance(w, tuple):
             w = list(w)
-            weight = w[0].view(self.out_features, self.in_features).T
+            weight = w[0].view(self.orin_out_features, self.orin_in_features).T
+            self.bias = w[1].view(self.orin_out_features)
             self.bias = w[1]
             self.has_bias = True
         else:
@@ -203,19 +293,27 @@ class KLinearMarlin(KLinearBase):
         weight = weight.to(device)
         if self.has_bias:
             self.bias = self.bias.to(device)
+            
+        if self.padding:
+            padded_weight = torch.zeros(self.in_features, self.out_features, device=self.device)
+            padded_weight[:self.orin_in_features, :self.orin_out_features] = weight
+            weight = padded_weight
+
         # Pack Marlin linear
-        w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
             weight, self.num_bits, self.group_size, self.act_order
         )
         self.workspace = MarlinWorkspace(
             self.out_features, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL,self.device
         )
+        self.weight = marlin_q_w # modeling_xxx.py may use linear.weight
         self.marlin_q_w = marlin_q_w
         self.marlin_s = marlin_s
         self.g_idx = g_idx
         self.sort_indices = sort_indices
         self.k = weight.shape[0]
         self.n = weight.shape[1]
+        self.loaded = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Only support input x as BF16 and FP16
@@ -223,6 +321,11 @@ class KLinearMarlin(KLinearBase):
         orig_shape = list(x.shape)
         orig_dtype = x.dtype
         x = x.reshape(-1, orig_shape[-1])
+        x = x.reshape(-1, x.shape[-1])
+        if self.padding:
+            padding_input=torch.empty(x.shape[0], self.in_features, device=x.device, dtype=x.dtype)
+            padding_input[:,:self.orin_in_features] = x
+            x = padding_input
         marlin_s = self.marlin_s.to(x.dtype)
         x = KTransformersOps.gptq_marlin_gemm(
             x,
@@ -237,9 +340,13 @@ class KLinearMarlin(KLinearBase):
             x.shape[-1],
             self.is_k_full,
         )
+        if self.padding:
+            x = x[:,:self.orin_out_features]
+            orig_shape[-1] = self.orin_out_features
+        else:
+            orig_shape[-1] = self.out_features
         if self.has_bias:
             x = x + self.bias
-        orig_shape[-1] = self.n
         return x.reshape(orig_shape).to(orig_dtype)
 
     def unload(self):
@@ -357,7 +464,8 @@ class KLinearCPUInfer(KLinearBase):
 LINEAR_MAP = {
     "KLinearMarlin": KLinearMarlin,
     "KLinearTorch": KLinearTorch,
-    "KLinearCPUInfer": KLinearCPUInfer
+    "KLinearCPUInfer": KLinearCPUInfer,
+    "KLinearFP8": KLinearFP8,
 }
 
 class KTransformersLinear(BaseInjectedModule, KLinearBase):
@@ -374,29 +482,18 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
         prefill_op: str| None = "KLinearTorch",
         **kwargs,
     ):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KLinearBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         # build all the linear operators
         if prefill_op is not None:
             assert prefill_op in LINEAR_MAP, f"linear_type {prefill_op} not supported"
-            if prefill_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
-                print(f"module info: key:{key} orig_module:{orig_module}")
-                self.prefill_linear = KLinearTorch(key, gguf_loader, config, orig_module, prefill_device, **kwargs)
-            else:
-                self.prefill_linear = LINEAR_MAP[prefill_op](key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+            self.prefill_linear = LINEAR_MAP[prefill_op](key, gguf_loader, config, orig_module, prefill_device, **kwargs)
         else:
             self.prefill_linear = None
 
         if generate_op is not None:
             assert generate_op in LINEAR_MAP, f"linear_type {generate_op} not supported"
-            if generate_op == "KLinearMarlin" and (orig_module.in_features%GPTQ_MARLIN_MIN_THREAD_N!=0 or orig_module.out_features%GPTQ_MARLIN_MIN_THREAD_N!=0):
-                print(f"This linear module's in_features or out_features is not divisible by GPTQ_MARLIN_MIN_THREAD_N({GPTQ_MARLIN_MIN_THREAD_N}), using KLinearTorch instead.")
-                print(f"module info: key:{key} orig_module:{orig_module}")
-                self.generate_op = "KLinearTorch"
-                self.generate_linear = KLinearTorch(key, gguf_loader, config, orig_module, generate_device, **kwargs)
-            else:
-                self.generate_linear = LINEAR_MAP[generate_op](key, gguf_loader, config, orig_module, generate_device, **kwargs)
+            self.generate_linear = LINEAR_MAP[generate_op](key, gguf_loader, config, orig_module, generate_device, **kwargs)
         else:
             self.generate_linear = None
         self.mode = InferenceState.UNLOAD
@@ -404,10 +501,11 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
     def forward(self, x):
         if self.mode == InferenceState.PREFILL:
             assert self.prefill_linear is not None, "cpu linear is not initialized"
-            return self.prefill_linear.forward(x)
+            y = self.prefill_linear.forward(x)
         else:
             assert self.generate_linear is not None, "gpu linear is not initialized"
-            return self.generate_linear.forward(x)
+            y = self.generate_linear.forward(x)
+        return y
 
     def load(self, w: dict | nn.Parameter | tuple | None = None, mode: InferenceState = InferenceState.GENERATE):
         if not mode:
@@ -416,11 +514,13 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
         if mode == InferenceState.PREFILL:
             self.generate_linear.unload()
             self.prefill_linear.load(w=w)
-            self.device = self.prefill_linear.device 
+            self.device = self.prefill_linear.device
+            self.weight = self.prefill_linear.weight # modeling_xxx.py may use linear.weight
         elif mode == InferenceState.GENERATE:
             self.prefill_linear.unload()
             self.generate_linear.load(w=w)
             self.device = self.generate_linear.device
+            self.weight = self.generate_linear.weight # modeling_xxx.py may use linear.weight
         elif mode == InferenceState.UNLOAD:
             self.prefill_linear.unload()
             self.generate_linear.unload()

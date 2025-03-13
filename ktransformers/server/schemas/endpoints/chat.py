@@ -1,9 +1,14 @@
 from typing import List, Optional
+from typing_extensions import Literal
 from enum import Enum
 
 from pydantic import BaseModel
 
 from ktransformers.server.schemas.base import Object
+
+from openai.types.completion_usage import CompletionUsage
+from openai.types.chat.chat_completion_chunk import Choice
+
 
 class Role(Enum):
     system = 'system'
@@ -25,54 +30,31 @@ class ChatCompletionCreate(BaseModel):
     messages: List[Message]
     model : str
     stream : bool = False
-
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
 
-class FinishReason(Enum):
-    stop = 'stop'
-    length = 'length'
 
-class Choice(BaseModel):
-    index: int
-    message: Message
-    logprobs: Optional[str] = None
-    finish_reason: FinishReason = None
+class ChatCompletionChunk(BaseModel):
+    id: str
+    choices: List[Choice]
+    created: int
+    model: str
+    object: Literal["chat.completion.chunk"]
+    service_tier: Optional[Literal["scale", "default"]] = None
+    system_fingerprint: Optional[str] = None
+    usage: Optional[CompletionUsage] = None
 
-class DeltaChoice(BaseModel):
-    index: int
-    delta: Message
-    logprobs: Optional[str] = None
-    finish_reason: FinishReason = None
-
-
-class Usage(BaseModel):
-    completion_tokens:int
-    prompt_tokens:int
-    total_tokens:int
-
-
-class ChatCompletionBase(Object):
-    created:int
-    model:str = 'not implmented'
-    system_fingerprint:str = 'not implmented'
-    usage: Optional[Usage] = None
-
-class ChatCompletionObject(ChatCompletionBase):
-    choices:List[Choice] = []
-
-    def append_token(self,token:str):
-        if len(self.choices) == 0:
-            self.choices.append(Choice(index=0,message=Message(content='',role=Role.assistant)))
-        self.choices[0].message.content += token
-
-class ChatCompletionChunk(ChatCompletionBase):
-    choices:List[DeltaChoice] = []
-
-    def set_token(self,token:str):
-        self.choices = [
-            DeltaChoice(index=0,delta=Message(content=token,role=Role.assistant))
-        ]
 
     def to_stream_reply(self):
-        return f"data:{self.model_dump_json()}\n\n"
+        return f"data: {self.model_dump_json()}\n\n"
+
+
+class RawUsage(BaseModel):
+    tokenize_time: float
+    prefill_time: float
+    decode_time: float
+    prefill_count: int
+    decode_count: int

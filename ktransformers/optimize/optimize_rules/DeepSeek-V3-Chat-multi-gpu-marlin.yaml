@@ -153,9 +153,20 @@
       prefill_device: "cuda:0"
 
 - match:
-    name: "(^model\\.layers\\.([3456][0-9])\\.)|(model.norm)|(lm_head)"
+    name: "^lm_head"
+    class: torch.nn.Linear
   replace:
-    class: "default"
+    class: ktransformers.operators.linear.KTransformersLinear
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+- match:
+    name: "(^model\\.layers\\.([3456][0-9])\\.)|(model.norm)"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cuda:1"
+      prefill_device: "cuda:1"

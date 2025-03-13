@@ -19,3 +19,14 @@ dev_install:
 	echo "Installing ktransformers"
 	KTRANSFORMERS_FORCE_BUILD=TRUE pip install -e . -v --no-build-isolation
 	echo "Installation completed successfully"
+clean:
+	rm -rf build
+	rm -rf *.egg-info
+	rm -rf ktransformers/ktransformers_ext/build
+	rm -rf ktransformers/ktransformers_ext/cuda/build
+	rm -rf ktransformers/ktransformers_ext/cuda/dist
+	rm -rf ktransformers/ktransformers_ext/cuda/*.egg-info	
+install_numa:
+	USE_NUMA=1 make dev_install
+install_no_numa:
+	env -u USE_NUMA make dev_install

@@ -69,6 +69,7 @@ class Config(metaclass=Singleton):
         self.server: dict = cfg.get("server", {})
         self.server_ip = self.server.get("ip", "0.0.0.0")
         self.server_port = self.server.get("port", 9016)
+        self.api_key = self.server.get("api_key", "")
 
         # db configs
         self.db_configs: dict = cfg.get("db", {})
@@ -104,7 +105,8 @@ class Config(metaclass=Singleton):
 
         self.total_context = self.model.get("total_context", 2**18)
         self.max_batch_size = self.model.get("max_batch_size", 20 if self.paged else 1)
-        self.max_chunk_size = self.model.get("max_chunk_size", 2048)
+        self.chunk_prefill_size = self.model.get("chunk_prefill_size", 8192)
+        
         self.max_new_tokens = self.model.get("max_new_tokens", 2000)
         self.json_mode = self.model.get("json_mode", False)
         self.healing = self.model.get("healing", False)
