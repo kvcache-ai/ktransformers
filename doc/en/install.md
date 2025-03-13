@@ -49,7 +49,7 @@ Some preparation:
   
   conda install -c conda-forge libstdcxx-ng # Anaconda provides a package called `libstdcxx-ng` that includes a newer version of `libstdc++`, which can be installed via `conda-forge`.
 
-  strings ~/anaconda3/envs/ktransformers-0.3/lib/libstdc++.so.6 | grep GLIBCXX
+  strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
   ```
 
 - Make sure that PyTorch, packaging, ninja is installed You can also [install previous versions of PyTorch](https://pytorch.org/get-started/previous-versions/)
