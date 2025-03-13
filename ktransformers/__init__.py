@@ -5,7 +5,7 @@ Description  :
 Author       : kkk1nak0
 Date         : 2024-08-15 07:34:46
 Version      : 1.0.0
-LastEditors  : unicornchan 
-LastEditTime : 2025-02-10 00:59:53
+LastEditors  : chenxl 
+LastEditTime : 2025-02-15 03:53:02
 '''
-__version__ = "0.2.0"
+__version__ = "0.2.3.post1"

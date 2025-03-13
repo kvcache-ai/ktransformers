@@ -67,7 +67,14 @@ class KMoEGateBase(ABC):
 
         for key in keys:
             key = ".".join(key.split(".")[:-1])
-            if key + ".ffn_gate_inp.weight" in self.gguf_loader.tensor_info:
+            if self.gguf_loader.safetensor_loader is not None:
+                targets = [".ffn_gate_inp.weight", ".exp_probs_b.bias"]
+                weight = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_gate_inp.weight") 
+                e_score_correction_bias = self.gguf_loader.safetensor_loader.load_tensor(key + ".exp_probs_b.bias")
+                weight_type = weight.dtype
+                e_score_correction_bias_type = e_score_correction_bias.dtype
+                res = {"weight": weight, "e_score_correction_bias": e_score_correction_bias,  "weight_type": weight_type, "e_score_correction_bias_type": e_score_correction_bias_type}
+            elif key + ".ffn_gate_inp.weight" in self.gguf_loader.tensor_info:
                 targets = [".ffn_gate_inp.weight", ".exp_probs_b.bias"]
                 tensors = self.load_multi(key, targets, device=device)
                 weight = tensors[".ffn_gate_inp.weight"]
@@ -93,11 +100,11 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module = None,
-        generate_device: str = "cuda",
         prefill_device: str = "cuda",
+        generate_device: str = "cuda",
         **kwargs,
     ):
-        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KMoEGateBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         self.generate_device = generate_device
         self.prefill_device = prefill_device
@@ -116,8 +123,8 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
             self.orig_module.e_score_correction_bias = nn.Parameter(w["e_score_correction_bias"])
         else:
             raise ValueError("Invalid weight type")
-        self.orig_module.weight = self.orig_module.weight.to(device)
-        self.orig_module.e_score_correction_bias = self.orig_module.e_score_correction_bias.to(device)
+        self.orig_module.weight = nn.Parameter(self.orig_module.weight.to(device))
+        self.orig_module.e_score_correction_bias = nn.Parameter(self.orig_module.e_score_correction_bias.to(device))
 
     def unload(self):
         if self.weight is not None:

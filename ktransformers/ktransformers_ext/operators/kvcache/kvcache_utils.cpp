@@ -10,6 +10,8 @@
 
 #include "kvcache.h"
 
+#include <chrono>
+
 std::string ggml_type_to_string(ggml_type type) {
     switch (type) {
     case GGML_TYPE_F32:
