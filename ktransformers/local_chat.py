@@ -56,7 +56,7 @@ def local_chat(
     model_path: str | None = None,
     optimize_config_path: str = None,
     gguf_path: str | None = None,
-    max_new_tokens: int = 300,
+    max_new_tokens: int = 1000,
     cpu_infer: int = Config().cpu_infer,
     use_cuda_graph: bool = True,
     prompt_file : str | None = None,
