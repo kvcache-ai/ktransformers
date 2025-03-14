@@ -61,10 +61,10 @@ jobs:
           export CUDA_HOME=/usr/local/cuda-12.4
           cd ${{ github.workspace }}
           echo "Running Local Chat 1"
-          python ktransformers/local_chat.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt > log1.txt
+          python ktransformers/local_chat-test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt > log1.txt
           sed -n '/Prompt:,$p' log1.txt
           echo "Running Local Chat 2"
-          python ktransformers/local_chat.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt > log2.txt
+          python ktransformers/local_chat-test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt > log2.txt
           sed -n '/Prompt:,$p' log2.txt
 
       - run: echo "This job's status is ${{ job.status }}."
