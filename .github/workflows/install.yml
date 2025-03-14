@@ -40,7 +40,8 @@ jobs:
           conda activate ktransformers-dev
           pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
           pip3 install packaging ninja cpufeature numpy
-          pip install ~/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
+          wget 
+          pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.2cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
       - name: Install KTransformers
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
