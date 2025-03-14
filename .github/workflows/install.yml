@@ -9,8 +9,8 @@ on:
         default: "install&test"
         type: choice
         options:
-          - create&install&&test
-          - install&&test
+          - create-install-test
+          - install-test
           - test
 jobs:
   Install-Test-KTransformers:
