@@ -360,7 +360,7 @@ class KLinearMarlin(KLinearBase):
         self.workspace = None
 
 class KLinearCPUInfer(KLinearBase):
-    CPU_INFER = CPUInfer(Config().cpu_infer)
+    CPU_INFER = None
     def __init__(
         self,
         key: str,
@@ -374,6 +374,8 @@ class KLinearCPUInfer(KLinearBase):
         **kwargs,
     ):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        if KLinearCPUInfer.CPU_INFER is None:
+            KLinearCPUInfer.CPU_INFER = CPUInfer(Config().cpu_infer)
         self.has_bias = False
         self.dtype = torch.get_default_dtype()
         self.w = None
