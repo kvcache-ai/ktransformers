@@ -6,7 +6,7 @@ on:
       job_to_run:
         description: "Which job to run?"
         required: true
-        default: "install-test"
+        default: "test"
         type: choice
         options:
           - create-install-test
