@@ -1,5 +1,5 @@
-name: Install and Test KTransformers
-run-name: Install and Test KTransformers
+name: Install / Test KTransformers
+run-name: Install / Test KTransformers
 on:
   workflow_dispatch:
     inputs:
