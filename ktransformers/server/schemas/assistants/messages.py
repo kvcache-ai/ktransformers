@@ -56,13 +56,13 @@ class Text(BaseModel):
 class TextObject(ContentObject):
     text: Text
     delta_index: int = Field(default=0,exclude=True)
-    special_tokens_on: bool = Field(default=False,exclude=True) 
-    last_two: str= Field(default='',exclude=True)  
+    special_tokens_on: bool = Field(default=False,exclude=True)
+    last_two: str = Field(default='',exclude=True)
 
-    def filter_append(self,text:str):     
+    def filter_append(self,text:str):
         self.text.value+=text
         self.delta_index+=1
-        return True  
+        return True
 
 
 
@@ -115,7 +115,7 @@ MessageStreamResponse = ForwardRef('MessageStreamResponse')
 
 class MessageObject(MessageBase, ObjectWithCreatedTime):
     _encoded_content: Optional[torch.Tensor] = PrivateAttr(default=None)
-    
+
 
     def get_text_content(self) -> str:
         text_content = ""
@@ -134,19 +134,19 @@ class MessageObject(MessageBase, ObjectWithCreatedTime):
             for f in self.get_attached_files():
                 logger.info(f'encoding file: {f.filename}')
                 self._encoded_content = torch.cat([self._encoded_content, encode_fn(await f.get_str(),self.role)],dim=-1)
-                yield None 
+                yield None
 
         yield self._encoded_content
 
 
     def get_attached_files(self):
-        raise NotImplementedError # should be replaced 
+        raise NotImplementedError # should be replaced
 
 
 
     def append_message_delta(self,text:str):
-        raise NotImplementedError # should be replaced 
-    
+        raise NotImplementedError # should be replaced
+
     def sync_db(self):
         # raise NotImplementedError # should be replaced
         sql_utils = SQLUtil()
@@ -155,7 +155,7 @@ class MessageObject(MessageBase, ObjectWithCreatedTime):
         )
         with sql_utils.get_db() as db:
             sql_utils.db_merge_commit(db, db_message)
-    
+
 
     def stream_response_with_event(self, event: MessageBase.Status) -> MessageStreamResponse:
         match event:
@@ -164,7 +164,7 @@ class MessageObject(MessageBase, ObjectWithCreatedTime):
             case _:
                 self.status = event
         return MessageStreamResponse(message=self, event=event)
-   
+
 
 class MessageStreamResponse(BaseModel):
     message: MessageObject

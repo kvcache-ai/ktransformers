@@ -1,23 +1,24 @@
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang
 Version      : 0.1.0
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 from typing import Any
 from torch import nn, Tensor
+from ktransformers.util.torch_auto_backend import CUDA
 from ktransformers.util.custom_gguf import GGUFLoader
 from transformers.configuration_utils import PretrainedConfig
 import ktransformers.util.utils as utils
 class BaseInjectedModule(nn.Module):
-    
+
     def __init__(self,
                  key: str,
                  gguf_loader : GGUFLoader,
                  config: PretrainedConfig,
                  orig_module: nn.Module,
-                 prefill_device: str = "cuda",
-                 generate_device: str = "cuda",
+                 prefill_device: str = CUDA,
+                 generate_device: str = CUDA,
                  **kwargs):
         nn.Module.__init__(self)
         nn.Module.__setattr__(self, "orig_module", orig_module)
@@ -27,10 +28,10 @@ class BaseInjectedModule(nn.Module):
         object.__setattr__(self, "prefill_device", prefill_device)
         object.__setattr__(self, "generate_device", generate_device)
         object.__setattr__(self, "device", generate_device)
-        
+
     def __getattr__(self, name: str) -> Any:
         # __getattr__ in nn.Module doesn't call super().__getattribute__ when name is not in nn.Module.__dict__,
-        # but __setattr__ in nn.Module call super().__setattr__ in that case, there may be some attribute set 
+        # but __setattr__ in nn.Module call super().__setattr__ in that case, there may be some attribute set
         # but can't get using __getattr__, typically these attr is build in attr of the class, so class.attr does not
         # call __getattr__.
         # Example:
@@ -54,10 +55,10 @@ class BaseInjectedModule(nn.Module):
         elif hasattr(self, name):
             return object.__setattr__(self, name, value)
         return nn.Module.__getattr__(self, "orig_module").__setattr__(name, value)
-    
+
     def forward(self, *args, **kwargs):
         return self.orig_module.forward(*args, **kwargs)
-    
+
     def load(self):
         for name, child in self._modules.items():
             utils.load_weights(child, self.gguf_loader, self.key+".")

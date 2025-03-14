@@ -5,6 +5,7 @@ import numpy.typing as npt
 from torch import Tensor, nn
 import torch.nn.functional as F
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import sys, os
 from ktransformers.operators.base_operator import BaseInjectedModule
 
@@ -24,12 +25,12 @@ import time
 
 # class Base(BaseInjectedModule, ABC):
 class KMoEGateBase(ABC):
-    def __init__(self, 
-                 key: str, 
-                 gguf_loader: GGUFLoader, 
-                 config: PretrainedConfig, 
-                 orig_module: nn.Module, 
-                 device: str = "cuda", 
+    def __init__(self,
+                 key: str,
+                 gguf_loader: GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 device: str = CUDA,
                  **kwargs):
         # super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
         super().__init__()
@@ -38,7 +39,7 @@ class KMoEGateBase(ABC):
         self.config = config
         self.device = device
         self.orig_module = orig_module
-    
+
     @abstractmethod
     def forward(self, input_tensor, expert_ids, weights):
         pass
@@ -46,7 +47,7 @@ class KMoEGateBase(ABC):
     @abstractmethod
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str = "cpu", warmup: bool = False):
         pass
-    
+
     @abstractmethod
     def unload():
         pass
@@ -69,7 +70,7 @@ class KMoEGateBase(ABC):
             key = ".".join(key.split(".")[:-1])
             if self.gguf_loader.safetensor_loader is not None:
                 targets = [".ffn_gate_inp.weight", ".exp_probs_b.bias"]
-                weight = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_gate_inp.weight") 
+                weight = self.gguf_loader.safetensor_loader.load_tensor(key + ".ffn_gate_inp.weight")
                 e_score_correction_bias = self.gguf_loader.safetensor_loader.load_tensor(key + ".exp_probs_b.bias")
                 weight_type = weight.dtype
                 e_score_correction_bias_type = e_score_correction_bias.dtype
@@ -85,7 +86,7 @@ class KMoEGateBase(ABC):
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {"weight": weight, "e_score_correction_bias": e_score_correction_bias,  "weight_type": weight_type, "e_score_correction_bias_type": e_score_correction_bias_type}
         return res
-    
+
     def load_multi(self, key: str, keys: list[str], device: str = "cpu"):
         tensors = {}
         for k in keys:
@@ -100,8 +101,8 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module = None,
-        prefill_device: str = "cuda",
-        generate_device: str = "cuda",
+        prefill_device: str = CUDA,
+        generate_device: str = CUDA,
         **kwargs,
     ):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
@@ -115,7 +116,7 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
     def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
         if device is None: device = self.device
         if w is None: w = self.load_weights(device=device)
-        
+
         if isinstance(w, dict):
             self.weight_type = w["weight_type"]
             self.e_score_correction_bias_type = w["e_score_correction_bias_type"]

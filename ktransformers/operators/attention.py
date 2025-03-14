@@ -1,10 +1,11 @@
 '''
-Description  :  
+Description  :
 Author       : Boxin Zhang
 Version      : 0.1.0
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 from torch import nn
 import warnings
 import torch.nn.functional as F
@@ -46,8 +47,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                  gguf_loader : GGUFLoader,
                  config: PretrainedConfig,
                  orig_module: nn.Module,
-                 prefill_device: str = "cuda",
-                 generate_device: str = "cuda",
+                 prefill_device: str = CUDA,
+                 generate_device: str = CUDA,
                  chunck_size: int = 1000,
                  absorb_for_prefill: bool = False,
                  **kwargs):
@@ -63,7 +64,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             kv_b_proj = self.kv_b_proj.weight.view(self.num_heads, -1, self.kv_lora_rank)
             self.q_absorb = kv_b_proj[:, :self.qk_nope_head_dim, :].view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank)
             self.out_absorb = kv_b_proj[:, self.qk_nope_head_dim:, :].view(self.num_heads, self.v_head_dim, self.kv_lora_rank)
-            
+
         return self.q_absorb, self.out_absorb
 
     def forward_chunck(
@@ -111,7 +112,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            
+
             # compressed_kv [bsz, q_len, self.kv_lora_rank]
             # k_pe [bsz, 1, q_len, self.qk_rope_head_dim]
             k_pe = k_pe.transpose(1,2)
@@ -122,7 +123,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             )
             # k_pe [pages, page_size, 1, self.qk_rope_head_dim]
             # compressed_kv [pages, page_size, 1, self.kv_lora_rank]
-            
+
         q_absorb, out_absorb = self.get_absorbed()
 
         # q_nope [bsz, self.num_heads, q_len, self.qk_nope_head_dim]
@@ -136,9 +137,9 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         #print(k_pe.shape)
         #print(q_nope.shape)
         #print(compressed_kv.shape)
-        
+
         attn_weights = (torch.matmul(q_pe, k_pe.mT) + torch.matmul(q_nope, compressed_kv.mT)) * self.softmax_scale
-        
+
         #attn_weights [bsz, self.num_heads, q_len, kv_seq_len]
         compressed_kv = compressed_kv.squeeze(1)
         """
@@ -166,10 +167,10 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.attention_dropout, training=self.training
         )
-        
+
         attn_output = torch.einsum('bhql,blc->bhqc', attn_weights, compressed_kv)
-        
-        attn_output = torch.matmul(attn_output, out_absorb.mT) 
+
+        attn_output = torch.matmul(attn_output, out_absorb.mT)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.v_head_dim):
             raise ValueError(
@@ -178,7 +179,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        
+
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim)
 
         attn_output = self.o_proj(attn_output)
@@ -225,11 +226,11 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        
+
         cos, sin = self.rotary_emb(q_pe, position_ids)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, unsqueeze_dim=2)
         # q_pe [bsz, q_len, self.num_heads, self.qk_rope_head_dim] k_pe [bsz, q_len, 1, self.qk_rope_head_dim]
-        
+
         # decode
         if q_len == 1:
             if past_key_value is not None:
@@ -246,20 +247,20 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             q_nope = torch.matmul(q_nope, q_absorb) # batched MM
             q_nope = q_nope.transpose(1, 2)
             #assert q_nope.is_contiguous()
-            
+
             # q_nope [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # q_pe [bsz, q_len, self.num_heads, self.qk_rope_head_dim]
             query_states = torch.cat([q_nope, q_pe], dim=-1)
-            
+
             query_states = query_states.squeeze(1)
             attn_output = torch.zeros_like(q_nope) # [bsz, q_len, self.num_heads, self.kv_lora_rank]
-            
+
             attn_logits = torch.empty(
                     (
                         bsz,
                         self.num_heads,
                         4, #num_kv_splits # follow vLLM, fix it TODO
-                        self.kv_lora_rank + 1, 
+                        self.kv_lora_rank + 1,
                     ),
                     dtype=torch.float32,
                     device = attn_output.device
@@ -280,16 +281,16 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                              4, #num_kv_splits # follow vLLM, fix it TODO
                              self.softmax_scale,
                              past_key_value.page_size)
-            
+
             # attn_output [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # out_absorb [self.num_heads, self.v_head_dim, self.kv_lora_rank]
             attn_output = attn_output.transpose(1, 2)
             attn_output = torch.matmul(attn_output, out_absorb.mT)
             attn_output = attn_output.transpose(1, 2)
-            
+
             attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim)
             attn_output = self.o_proj(attn_output)
-            
+
             #print("attn_output", torch.isnan(attn_output).any())
             return attn_output, None, past_key_value
         else:
@@ -317,7 +318,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             key_states = k_pe.new_empty(bsz, kv_seq_len, self.num_heads, self.q_head_dim)
             key_states[:, :, :, :self.qk_nope_head_dim] = k_nope
             key_states[:, :, :, self.qk_nope_head_dim:] = k_pe.view(bsz, kv_seq_len, 1, -1)
-            
+
             value_states = value_states.view(bsz, kv_seq_len, self.num_heads, self.v_head_dim)
             value_states_padded = torch.nn.functional.pad(value_states, [0, query_states.shape[-1] - value_states.shape[-1]], value=0)
 
@@ -378,11 +379,11 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                     "with a layer index."
                 )
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-        
+
         cos, sin = self.rotary_emb(q_pe, position_ids)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, unsqueeze_dim=2)
         # q_pe [bsz, q_len, self.num_heads, self.qk_rope_head_dim] k_pe [bsz, q_len, 1, self.qk_rope_head_dim]
-        
+
         # decode
         if q_len == 1 or self.absorb_for_prefill:
             if past_key_value is not None:
@@ -401,7 +402,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             q_nope = q_nope.transpose(1, 2)
             q_nope = q_nope.contiguous()
             #assert q_nope.is_contiguous()
-            
+
             # q_nope [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # q_pe [bsz, q_len, self.num_heads, self.qk_rope_head_dim]
             q_nope.squeeze_(0)
@@ -454,17 +455,17 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             )
             attn_output = attn_ref.view(bsz, q_len, self.num_heads, self.kv_lora_rank)
             """
-            
+
             # mla_wrapper run output: [tokens, self.num_heads, self.kv_lora_rank]
             # attn_output [bsz, q_len, self.num_heads, self.kv_lora_rank]
             # out_absorb [self.num_heads, self.v_head_dim, self.kv_lora_rank]
             attn_output = attn_output.transpose(1, 2) # [bsz, self.num_heads, q_len, self.kv_lora_rank]
             attn_output = torch.matmul(attn_output, out_absorb.mT) # [bsz, self.num_heads, q_len, self.v_head_dim]
             attn_output = attn_output.transpose(1, 2).contiguous() # [bsz, q_len, self.num_heads, self.kv_lora_rank]
-            
+
             attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.v_head_dim) # [bsz, q_len, self.num_heads * self.v_head_dim]
             attn_output = self.o_proj(attn_output)
-            
+
             return attn_output, None, past_key_value
         else:
             if past_key_value is not None:
@@ -491,7 +492,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             key_states = k_pe.new_empty(bsz, kv_seq_len, self.num_heads, self.q_head_dim)
             key_states[:, :, :, :self.qk_nope_head_dim] = k_nope
             key_states[:, :, :, self.qk_nope_head_dim:] = k_pe.view(bsz, kv_seq_len, 1, -1)
-            
+
             value_states = value_states.view(bsz, kv_seq_len, self.num_heads, self.v_head_dim)
             value_states_padded = torch.nn.functional.pad(value_states, [0, query_states.shape[-1] - value_states.shape[-1]], value=0)
 
@@ -511,7 +512,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             ).contiguous()
             attn_output = self.o_proj(attn_output)
             return attn_output, None, past_key_value
-        
+
     def forward_windows(
         self,
         hidden_states: torch.Tensor,
@@ -575,7 +576,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                 attn_output = cur_output
             else:
                 attn_output = torch.cat((attn_output, cur_output), dim=-2)
-                
+
         return attn_output, None, past_key_value
 
     def forward(
@@ -634,8 +635,8 @@ class KLlamaAttention(BaseInjectedModule):
                  gguf_loader : GGUFLoader,
                  config: PretrainedConfig,
                  orig_module: nn.Module,
-                 prefill_device: str = "cuda",
-                 generate_device: str = "cuda",
+                 prefill_device: str = CUDA,
+                 generate_device: str = CUDA,
                  **kwargs):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         self.orig_module.__init__(orig_module.config,

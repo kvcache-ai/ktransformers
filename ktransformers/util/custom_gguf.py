@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 '''
-Description  :  
+Description  :
 Author       : Azure-Tang, Boxin Zhang, chenht2022
 Date         : 2024-07-26 08:48:54
 Version      : 1.0.0
@@ -10,7 +10,7 @@ LastEditTime : 2024-08-14 08:20:45
 Adapted from https://github.com/99991/pygguf/blob/main/gguf.py
 Copyright (c) 2023-2024 The ggml authors
 Copyright (c) 2024 Thomas Germer
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 # copied from llama.cpp/gguf-py/gguf/constants.py to satisfy dependence of gguf
 # GGUF specification
@@ -24,6 +24,7 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
@@ -180,7 +181,7 @@ class GGUFLoader:
             gguf_path = os.path.dirname(gguf_path)
 
         self.safetensor_loader = None
-        
+
         self.tensor_info = {}
         self.gguf_path = gguf_path
         self.tensor_file_map = {}
@@ -207,7 +208,7 @@ class GGUFLoader:
                             self.file_data_map[file_name] = np.memmap(file_name, mode = 'r')
         if not found_gguf:
             raise FileNotFoundError(f"Cannot find any .gguf files in: {gguf_path}")
-                            
+
     def load_gguf(self, f):
         f.seek(0)
         assert f.read(4) == b'GGUF'
@@ -235,7 +236,7 @@ class GGUFLoader:
             block_size, type_size = GGML_QUANT_SIZES[ggml_type]
             n_bytes = n_elems * type_size // block_size
             np_dims = tuple(reversed(shape))
-        
+
             item_type: npt.DTypeLike
             if ggml_type == GGMLQuantizationType.F16:
                 item_count = n_elems
@@ -284,12 +285,12 @@ class GGUFLoader:
             offset = start + t["bad_offset"]
             offset += (alignment - offset % alignment) % alignment
             t["offset"] = offset
-            
+
         for name in tensor_info:
             self.tensor_file_map[name] = f.name
         self.tensor_info.update(tensor_info)
         self.gguf_file_meta.update(info)
-    
+
     def get_mmap_tensor(self, name):
         t = self.tensor_info[name]
         mmap_data = self.file_data_map[ self.tensor_file_map[name] ]
@@ -299,7 +300,7 @@ class GGUFLoader:
         item_count = t["item_count"]
         itemsize = int(np.empty([], dtype = item_type).itemsize)
         return mmap_data[offset : offset + itemsize * item_count]
-    
+
     def get_undequanted_tensor_and_ggml_type(self, name):
         t = self.tensor_info[name]
         data = self.get_mmap_tensor(name)
@@ -307,7 +308,7 @@ class GGUFLoader:
         data = torch.from_numpy(data)
         return data, ggml_type
 
-    def load_expert_tensor(self, name, data, expert_id, elements_per_expert, device = "cuda", target_dtype = torch.get_default_dtype())->torch.Tensor:
+    def load_expert_tensor(self, name, data, expert_id, elements_per_expert, device = CUDA, target_dtype = torch.get_default_dtype())->torch.Tensor:
         t = self.tensor_info[name]
         if device.lower() == "cpu":
             print(f"loading expert {expert_id} of {name} with CPU")
@@ -324,8 +325,8 @@ class GGUFLoader:
         block_size = GGML_BLOCK_SIZES[ggml_name]
         offset = expert_id * block_size * blocks_per_experts
         data = data[offset: offset + block_size * blocks_per_experts]
-        
-        if "cuda" in device.lower():
+
+        if CUDA in device.lower():
             values = GGML_DEQUANTIZE_GPU[ggml_name](data, device, target_dtype)
         else:
             values = GGML_DEQUANTIZE[ggml_name](data)
@@ -343,7 +344,7 @@ class GGUFLoader:
             print(f"loading {name} with CPU")
         if target_dtype == None:
             target_dtype = torch.get_default_dtype()
-        
+
         shape = t["shape"]
         ggml_type = t["ggml_type"]
 
@@ -358,33 +359,33 @@ class GGUFLoader:
         elements_per_block = GGML_ELEMENTS_PER_BLOCK[ggml_name]
         num_elements = int(np.prod(shape))
         num_blocks = num_elements // elements_per_block
-        
+
         blocks_per_iter = 16384
         if num_blocks > blocks_per_iter: # dequant large tensor
             values = torch.empty((num_blocks, elements_per_block), dtype=target_dtype, device=device)
             for i in range( (num_blocks + blocks_per_iter - 1) // blocks_per_iter):
                 blocks_begin = i * blocks_per_iter
                 blocks_end = min(blocks_begin + blocks_per_iter, num_blocks)
-                if "cuda" in device.lower():
+                if CUDA in device.lower():
                     cur_values = GGML_DEQUANTIZE_GPU[ggml_name](data[blocks_begin*block_size : blocks_end*block_size], device, target_dtype)
                 else:
                     cur_values = GGML_DEQUANTIZE[ggml_name](data[blocks_begin*block_size : blocks_end*block_size])
                     cur_values = torch.from_numpy(cur_values.copy())
-                
+
                 cur_values = cur_values.view(-1, elements_per_block)
                 if ggml_name == "BF16":
                     cur_values = cur_values.view(torch.bfloat16)
                 values[blocks_begin : blocks_end] = cur_values
         else:
-            if "cuda" in device.lower():
+            if CUDA in device.lower():
                 values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
             else:
                 values = GGML_DEQUANTIZE[ggml_name](data)
                 values = torch.from_numpy(values)
-                
+
         if ggml_name == "BF16":
             values = values.view(torch.bfloat16)
-            
+
 
         values = values.view(shape[::-1])
         if "attn_q" in name and self.gguf_file_meta['general.architecture'] in ["llama"]:
@@ -393,7 +394,7 @@ class GGUFLoader:
             .swapaxes(1, 2)
             .reshape(values.shape))
         elif "attn_k" in name and self.gguf_file_meta['general.architecture'] in ["llama"]:
-            n_head = self.gguf_file_meta['llama.attention.head_count_kv'] 
+            n_head = self.gguf_file_meta['llama.attention.head_count_kv']
             values = (values.reshape(n_head, values.shape[0] // n_head // 2, 2, *values.shape[1:])
             .swapaxes(1, 2)
             .reshape(values.shape))
@@ -484,12 +485,12 @@ def dequantize_q2_k(data):
 
     return d * (scales & 15) * (tmp & 3) - dmin * (scales >> 4)
 
-def dequantize_q2_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q2_k_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q2_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q2_K"]
     data = np.frombuffer(data, dtype=data.dtype)
     device = torch.device(device)
-    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable, 
+    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable,
     # the best way to fix this is transfer ptr to KTransformersOps instead of Tensor.
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q2_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
@@ -536,12 +537,12 @@ def dequantize_q3_k(data):
         (((qs[:, 48:64] >> 6) & 3) - bits[:, 16:, 7])
     ], axis=1)
 
-def dequantize_q3_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q3_k_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q3_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q3_K"]
     data = np.frombuffer(data, dtype=data.dtype)
     device = torch.device(device)
-    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable, 
+    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable,
     # the best way to fix this is transfer ptr to KTransformersOps instead of Tensor.
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q3_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
@@ -568,12 +569,12 @@ def dequantize_q4_k(data):
     # Dequantize final weights using scales and offsets
     return factors * qs2 - offsets
 
-def dequantize_q4_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q4_k_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q4_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q4_K"]
     data = np.frombuffer(data, dtype=data.dtype)
     device = torch.device(device)
-    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable, 
+    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable,
     # the best way to fix this is transfer ptr to KTransformersOps instead of Tensor.
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q4_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
@@ -634,12 +635,12 @@ def dequantize_q5_k(data):
         d8 * (qs_hi_4[:, 3] + (bits[:, :, 7] << 4)) - m8,
     ], axis=1)
 
-def dequantize_q5_k_gpu(data, device:str ="cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q5_k_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q5_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q5_K"]
     data = np.frombuffer(data, dtype=data.dtype)
     device = torch.device(device)
-    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable, 
+    # TODO: this and from_numpy in other functions will cause a warning saying that numpy is not writable,
     # the best way to fix this is transfer ptr to KTransformersOps instead of Tensor.
     c_pointer = ctypes.addressof(ctypes.cast(data.ctypes.data, ctypes.POINTER(ctypes.c_int8)).contents)
     return KTransformersOps.dequantize_q5_k(c_pointer, data.size, block_size, ele_per_blk, device, target_dtype)
@@ -690,10 +691,10 @@ def dequantize_q6_k(data):
         sc[:, 13] * q7[:, 16:],
         sc[:, 14] * q8[:, :16],
         sc[:, 15] * q8[:, 16:],
-    ], axis=1) 
+    ], axis=1)
 
 # @torch.jit.script
-def dequantize_q6_k_gpu(data: np.ndarray, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q6_k_gpu(data: np.ndarray, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["Q6_K"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q6_K"]
     device = torch.device(device)
@@ -734,7 +735,7 @@ def dequantize_iq4_xs(data):
 
     return y.flatten()
 
-def dequantize_iq4_xs_gpu(data: np.ndarray, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_iq4_xs_gpu(data: np.ndarray, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     block_size = GGML_BLOCK_SIZES["IQ4_XS"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["IQ4_XS"]
     device = torch.device(device)
@@ -758,7 +759,7 @@ def dequantize_q4_0(data):
         scales * ((qs >> 4).astype(np.int8) - 8),
     ], axis=1)
 
-def dequantize_q4_0_gpu(data, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q4_0_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     raise NotImplementedError()
 
 def dequantize_q5_0(data):
@@ -782,7 +783,7 @@ def dequantize_q5_0(data):
         scales * x1,
     ], axis=1)
 
-def dequantize_q5_0_gpu(data, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q5_0_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     raise NotImplementedError()
 
 def dequantize_q8_0(data):
@@ -794,10 +795,10 @@ def dequantize_q8_0(data):
     qs = np.frombuffer(data, dtype=np.int8).reshape(num_blocks, 2 + 32)[:, 2:]
     return scales * qs
 
-def dequantize_q8_0_gpu(data, device:str = "cuda", target_dtype = torch.get_default_dtype()):
+def dequantize_q8_0_gpu(data, device:str = CUDA, target_dtype = torch.get_default_dtype()):
     # C struct definition
     # https://github.com/ggerganov/ggml/blob/fca1caafea7de9fbd7efc733b9818f9cf2da3050/src/ggml-quants.h#L43
-    
+
     block_size = GGML_BLOCK_SIZES["Q8_0"]
     ele_per_blk = GGML_ELEMENTS_PER_BLOCK["Q8_0"]
     device = torch.device(device)
@@ -865,12 +866,12 @@ GGML_DEQUANTIZE_GPU = {
 
 
 def translate_name_to_gguf_mixtral(name):
-    
+
     replacement_template = {
         "w1.weight": "ffn_gate",
         "w2.weight": "ffn_down",
         "w3.weight": "ffn_up"
-    }  
+    }
 
     pattern = re.compile(r"model.layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.(w\d\.weight)")
 
@@ -884,7 +885,7 @@ def translate_name_to_gguf_mixtral(name):
             return match.group(0)
 
     new_name = re.sub(pattern, replace_match, name)
-    
+
     return new_name
 
 def translate_name_to_gguf(name):
@@ -894,7 +895,7 @@ def translate_name_to_gguf(name):
     name = name.replace("lm_head.", "output.")
     name = name.replace("model.embed_tokens.", "token_embd.")
     name = name.replace("model.norm.", "output_norm.")
-    
+
     name = name.replace("model.layers.", "blk.")
     name = name.replace(".input_layernorm", ".attn_norm")
     name = name.replace(".mlp.down_proj", ".ffn_down")
@@ -912,11 +913,11 @@ def translate_name_to_gguf(name):
     name = name.replace(".self_attn.q_a_proj", ".attn_q_a")
     name = name.replace(".self_attn.q_a_layernorm", ".attn_q_a_norm")
     name = name.replace(".self_attn.q_b_proj", ".attn_q_b")
-    
+
     name = name.replace(".shared_expert.", ".shared_experts.")
     name = name.replace(".shared_expert_", ".shared_experts_")
     name = name.replace(".gate_up_proj.", ".up_proj")
-    
+
     name = name.replace(".mlp.shared_experts.down_proj", ".ffn_down_shexp")
     name = name.replace(".mlp.gate", ".ffn_gate_inp")
     name = name.replace(".mlp.shared_experts.gate_proj", ".ffn_gate_shexp")
@@ -927,10 +928,10 @@ def translate_name_to_gguf(name):
     name = name.replace(".mlp.experts.ffn_gate_exps", ".ffn_gate_exps")
     name = name.replace(".mlp.experts.ffn_up_exps", ".ffn_up_exps")
 
-    
+
     name = name.replace(".block_sparse_moe.gate.", ".ffn_gate_inp.")
     name = name.replace(".block_sparse_moe.experts", "")
-    
+
     return name
 
 if __name__ == '__main__':

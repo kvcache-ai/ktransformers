@@ -1,6 +1,6 @@
 # coding=utf-8
 '''
-Description  : 
+Description  :
 Author       : kkk1nak0
 Date         : 2024-07-29 02:58:57
 Version      : 1.0.0
@@ -8,7 +8,7 @@ LastEditors  : kkk1nak0
 LastEditTime : 2024-08-02 06:08:34
 '''
 
-# Adapted from 
+# Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
 # Copyright 2023 Mistral AI and the HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
@@ -31,11 +31,12 @@ LastEditTime : 2024-08-02 06:08:34
 # limitations under the License.
 """PyTorch Mixtral model."""
 
-import inspect 
+import inspect
 import math
 from typing import List, Optional, Tuple, Union
 
 import torch
+from ktransformers.util.torch_auto_backend import CUDA
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
@@ -201,7 +202,7 @@ class MixtralRMSNorm(nn.Module):
 class MixtralRotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
         super().__init__()
-        
+
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
@@ -544,7 +545,7 @@ class MixtralFlashAttention2(MixtralAttention):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-    
+
 
     def _flash_attention_forward(
         self,
@@ -575,9 +576,9 @@ class MixtralFlashAttention2(MixtralAttention):
                 position of padding tokens and 1 for the position of non-padding tokens.
             dropout (`float`):
                 Attention dropout
-            
+
         """
-        
+
         # Decide whether to use SWA or not by layer index.
         # if use_sliding_windows and self.layer_idx >= self.config.max_window_layers:
         #     use_sliding_windows = False
@@ -633,7 +634,7 @@ class MixtralFlashAttention2(MixtralAttention):
                         cache_seqlens=position_ids,
                         softmax_scale=softmax_scale,
                         causal=is_causal,
-                    )   
+                    )
                 else:
                     attn_output = flash_attn_func(
                         query_states,
@@ -766,7 +767,7 @@ class MixtralSdpaAttention(MixtralAttention):
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and attention_mask is not None:
+        if query_states.device.type == CUDA and attention_mask is not None:
             query_states = query_states.contiguous()
             key_states = key_states.contiguous()
             value_states = value_states.contiguous()
@@ -1323,7 +1324,7 @@ class MixtralModel(MixtralPreTrainedModel):
         if (
             self.config._attn_implementation == "sdpa"
             and attention_mask is not None
-            and attention_mask.device.type == "cuda"
+            and attention_mask.device.type == CUDA
             and not output_attentions
         ):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
