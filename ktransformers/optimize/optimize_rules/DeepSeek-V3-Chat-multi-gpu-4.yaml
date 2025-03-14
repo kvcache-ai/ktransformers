@@ -147,7 +147,7 @@
     name: "^model\\.layers\\.([0-9]|1[0-4])\\.mlp\\.gate$"
     class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
-    class: ktransformers.operators.gate.KMoEGate
+    class: ktransformers.operators.gate.KMoEGateDeepSeekV3
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
@@ -157,7 +157,7 @@
     name: "^model\\.layers\\.(1[5-9]|2[0-9])\\.mlp\\.gate$"
     class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
-    class: ktransformers.operators.gate.KMoEGate
+    class: ktransformers.operators.gate.KMoEGateDeepSeekV3
     kwargs:
       generate_device: "cuda:1"
       prefill_device: "cuda:1"
@@ -167,7 +167,7 @@
     name: "^model\\.layers\\.(3[0-9]|4[0-4])\\.mlp\\.gate$"
     class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
-    class: ktransformers.operators.gate.KMoEGate
+    class: ktransformers.operators.gate.KMoEGateDeepSeekV3
     kwargs:
       generate_device: "cuda:2"
       prefill_device: "cuda:2"
@@ -177,7 +177,7 @@
     name: "^model\\.layers\\.(4[5-9]|5[0-9]|60)\\.mlp\\.gate$"
     class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
-    class: ktransformers.operators.gate.KMoEGate
+    class: ktransformers.operators.gate.KMoEGateDeepSeekV3
     kwargs:
       generate_device: "cuda:3"
       prefill_device: "cuda:3"

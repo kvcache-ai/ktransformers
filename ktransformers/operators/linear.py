@@ -477,7 +477,6 @@ class KTransformersLinear(BaseInjectedModule, KLinearBase):
         gguf_loader: GGUFLoader,
         config: PretrainedConfig,
         orig_module: nn.Module,
-        # device: str = "cuda",
         generate_device: str = "cuda",
         generate_op: str| None = "KLinearMarlin",
         prefill_device: str = "cuda",
