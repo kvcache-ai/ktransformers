@@ -1,5 +1,5 @@
-name: Install KTransformers
-run-name: Install KTransformers
+name: Install and Test KTransformers
+run-name: Install and Test KTransformers
 on:
   workflow_dispatch:
     inputs:
@@ -13,7 +13,7 @@ on:
           - install&&test
           - test
 jobs:
-  Install-KTransformers:
+  Install-Test-KTransformers:
     runs-on: self-hosted
     steps:
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
