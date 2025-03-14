@@ -53,6 +53,8 @@ jobs:
           git submodule update
           bash install.sh
       - name: Test Local Chat
+        env:
+          TERM: xterm-256color
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
           conda activate ktransformers-dev
