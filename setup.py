@@ -328,22 +328,29 @@ class CMakeBuild(BuildExtension):
             ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
         )
 
+USE_FASTPT_CUDA = os.getenv('USE_FASTPT_CUDA', 'False').lower() == 'true'
 if CUDA_HOME is not None:
-    ops_module = CUDAExtension('KTransformersOps', [
+    extra_nvcc_flags = [
+        '-O3',
+        '--use_fast_math',
+        '-Xcompiler', '-fPIC',
+        '-DKTRANSFORMERS_USE_CUDA',
+    ]
+
+    if USE_FASTPT_CUDA:
+        extra_nvcc_flags.append('-DKTRANSFORMERS_USE_DTK')
+
+    ops_module = CUDAExtension(
+        'KTransformersOps', [
         'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
         'ktransformers/ktransformers_ext/cuda/binding.cpp',
         'ktransformers/ktransformers_ext/cuda/gptq_marlin/gptq_marlin.cu'
     ],
     extra_compile_args={
-            'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
-            'nvcc': [
-                '-O3',
-                '--use_fast_math',
-                '-Xcompiler', '-fPIC',
-                '-DKTRANSFORMERS_USE_CUDA',
-            ]
-        }
-    )
+        'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
+        'nvcc': extra_nvcc_flags
+    }
+  )
 elif MUSA_HOME is not None:
     SimplePorting(cuda_dir_path="ktransformers/ktransformers_ext/cuda", mapping_rule={
         # Common rules
