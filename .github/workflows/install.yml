@@ -65,11 +65,11 @@ jobs:
           cd ${{ github.workspace }}
           echo "Running Local Chat 1...(book.txt)"
           python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt > log1.txt
-          output=$(sed -n '/Prompt:/,$p' log1.txt)
+          output=$(awk '/Prompt:/ {found=1} found' log1.txt) || exit_code=$?
           echo "$output"
           echo "Running Local Chat 2...(chinese.txt)"
           python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt > log2.txt
-          output=$(sed -n '/Prompt:/,$p' log2.txt)
+          output=$(awk '/Prompt:/ {found=1} found' log2.txt) || exit_code=$?
           echo "$output"
 
       - run: echo "This job's status is ${{ job.status }}."
