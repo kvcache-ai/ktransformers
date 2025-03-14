@@ -64,9 +64,7 @@ jobs:
           export CUDA_HOME=/usr/local/cuda-12.4
           cd ${{ github.workspace }}
           echo "Running Local Chat 1...(book.txt)"
-          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt > log1.txt
-          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt > log2.txt
-          output=$(awk '/Prompt:/ {found=1} found' log2.txt) || exit_code=$?
-          echo "$output"
+          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt
+          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt
 
       - run: echo "This job's status is ${{ job.status }}."
