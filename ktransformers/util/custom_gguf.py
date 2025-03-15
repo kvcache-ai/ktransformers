@@ -24,7 +24,8 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+if not torch.xpu.is_available():
+    import KTransformersOps
 from .custom_loader import SafeTensorLoader
 import ctypes
 import math
@@ -380,12 +381,11 @@ class GGUFLoader:
                 values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
             else:
                 values = GGML_DEQUANTIZE[ggml_name](data)
-                values = torch.from_numpy(values)
+                values = torch.from_numpy(values).to(device)
                 
         if ggml_name == "BF16":
             values = values.view(torch.bfloat16)
             
-
         values = values.view(shape[::-1])
         if "attn_q" in name and self.gguf_file_meta['general.architecture'] in ["llama"]:
             n_head = self.gguf_file_meta['llama.attention.head_count']

@@ -20,7 +20,8 @@ from ktransformers.util.utils import get_compute_capability
 import logging
 from transformers.configuration_utils import PretrainedConfig
 from transformers.cache_utils import Cache
-from flash_attn import flash_attn_func
+if not torch.xpu.is_available():
+    from flash_attn import flash_attn_func
 from ktransformers.operators.triton_attention import decode_attention_fwd_grouped
 import os
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
@@ -512,7 +513,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
             attn_output = self.o_proj(attn_output)
             return attn_output, None, past_key_value
         
-    def forward_windows(
+        
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -589,9 +591,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if os.name == 'nt' or get_compute_capability()<8:
-            print("for Windows or GPU before ampere, use forward_windows")
-            return self.forward_windows(
+        if os.name == 'nt' or torch.xpu.is_available() or get_compute_capability()<8:
+            return self.forward_native(
                 hidden_states,
                 attention_mask,
                 position_ids,
