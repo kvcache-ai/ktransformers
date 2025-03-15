@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <c10/cuda/CUDAGuard.h>
 
-#ifdef KTRANSFORMERS_USE_ROCM
+#ifdef __HIP_PLATFORM_AMD__
 typedef hip_bfloat16 nv_bfloat16;
 #endif
 
