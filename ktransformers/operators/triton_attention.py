@@ -6,7 +6,7 @@
 
 import triton
 import triton.language as tl
-
+from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
 @triton.jit
 def tanh(x):
     # Tanh is just a scaled sigmoid
@@ -181,8 +181,8 @@ def _decode_grouped_att_m_fwd(
     # [TODO] work around shmem limit on MI3xx
     
     # TODO: support hip
-    #if is_hip_ and Lk >= 576:
-    #    BLOCK = 16
+    if device_manager.gpu_vendor == GPUVendor.AMD and Lk >= 576:
+       BLOCK = 16
 
     if Lk == 576:
         BLOCK_DMODEL = 512
