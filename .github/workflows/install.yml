@@ -52,9 +52,7 @@ jobs:
           git submodule init
           git submodule update
           bash install.sh
-      - name: Test Local Chat
-        env:
-          TERM: xterm-256color
+      - name: Test Local Chat 1
         run: |
           set -e
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
@@ -65,6 +63,16 @@ jobs:
           cd ${{ github.workspace }}
           echo "Running Local Chat 1...(book.txt)"
           python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt
+      - name: Test Local Chat 2
+        run: |
+          set -e
+          source /home/qujing3/anaconda3/etc/profile.d/conda.sh
+          conda activate ktransformers-dev
+          export PATH=/usr/local/cuda-12.4/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+          export CUDA_HOME=/usr/local/cuda-12.4
+          cd ${{ github.workspace }}
+          echo "Running Local Chat 2...(chinese.txt)"
           python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cache_len 1536 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt
 
       - run: echo "This job's status is ${{ job.status }}."
