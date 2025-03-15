@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>Use FP8 GPU Kernel - Ktransformers</title>
+        <title>Use AMD GPU - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -129,7 +129,7 @@
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <i id="git-repository-button" class="fa fa-github"></i>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/fp8_kernel.md" title="Suggest an edit" aria-label="Suggest an edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/ROCm.md" title="Suggest an edit" aria-label="Suggest an edit">
                             <i id="git-edit-button" class="fa fa-edit"></i>
                         </a>
 
@@ -158,80 +158,104 @@
 
                 <div id="content" class="content">
                     <main>
-                        <h1 id="fp8-linear-kernel-for-deepseek-v3r1"><a class="header" href="#fp8-linear-kernel-for-deepseek-v3r1">FP8 Linear Kernel for DeepSeek-V3/R1</a></h1>
-<h2 id="overview"><a class="header" href="#overview">Overview</a></h2>
-<p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
+                        <h1 id="rocm-support-for-ktransformers-beta"><a class="header" href="#rocm-support-for-ktransformers-beta">ROCm Support for ktransformers (Beta)</a></h1>
+<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<h3 id="overview"><a class="header" href="#overview">Overview</a></h3>
+<p>In our effort to expand GPU architecture support beyond NVIDIA, we are excited to introduce <strong>AMD GPU support through ROCm</strong> in ktransformers (Beta release). This implementation has been tested and developed using EPYC 9274F processors and AMD Radeon 7900xtx GPUs.</p>
+<h2 id="installation-guide"><a class="header" href="#installation-guide">Installation Guide</a></h2>
+<h3 id="1-install-rocm-driver"><a class="header" href="#1-install-rocm-driver">1. Install ROCm Driver</a></h3>
+<p>Begin by installing the ROCm drivers for your AMD GPU:</p>
 <ul>
-<li><strong>FP8 GPU Kernel Integration</strong>: FP8 linear layer acceleration kernels integrated in KTransformers</li>
-<li><strong>Hybrid Quantization Architecture</strong>:
-<ul>
-<li>Attention and Shared-Expert modules use FP8 precision (enhances computational accuracy)</li>
-<li>Experts modules retain GGML quantization (GGUF format, reside in CPU to save GPU memory)</li>
+<li><a href="https://rocm.docs.amd.com/projects/radeon/en/latest/docs/install/native_linux/install-radeon.html">Official ROCm Installation Guide for Radeon GPUs</a></li>
 </ul>
-</li>
-</ul>
-<p>So those who are persuing the best performance can use the FP8 linear kernel for DeepSeek-V3/R1.</p>
-<h2 id="key-features"><a class="header" href="#key-features">Key Features</a></h2>
-<p>✅ Hybrid Precision Architecture (FP8 + GGML)<br>
-✅ Memory Optimization (~19GB VRAM usage)</p>
-<h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
-<h3 id="using-pre-merged-weights"><a class="header" href="#using-pre-merged-weights">Using Pre-Merged Weights</a></h3>
-<p>Pre-merged weights are available on Hugging Face:<br>
-<a href="https://huggingface.co/KVCache-ai/DeepSeek-V3">KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid</a><br>
-<a href="https://huggingface.co/KVCache-ai/DeepSeek-R1">KVCache-ai/DeepSeek-R1-GGML-FP8-Hybrid</a></p>
+<h3 id="2-set-up-conda-environment"><a class="header" href="#2-set-up-conda-environment">2. Set Up Conda Environment</a></h3>
+<p>We recommend using Miniconda3/Anaconda3 for environment management:</p>
+<pre><code class="language-bash"># Download Miniconda
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+
+# Create environment
+conda create --name ktransformers python=3.11
+conda activate ktransformers
+
+# Install required libraries
+conda install -c conda-forge libstdcxx-ng
+
+# Verify GLIBCXX version (should include 3.4.32)
+strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
+</code></pre>
 <blockquote>
-<p>Please confirm the weights are fully uploaded before downloading. The large file size may extend Hugging Face upload time.</p>
+<p><strong>Note:</strong> Adjust the Anaconda path if your installation directory differs from <code>~/anaconda3</code></p>
 </blockquote>
-<p>Download Pre-Merged Weights</p>
-<pre><code class="language-shell">pip install -U huggingface_hub
-
-# Optional: Use HF Mirror for faster downloads in special area.
-# export HF_ENDPOINT=https://hf-mirror.com 
-
-huggingface-cli download --resume-download KVCache-ai/DeepSeek-V3-GGML-FP8-Hybrid --local-dir &lt;local_dir&gt;
+<h3 id="3-install-pytorch-for-rocm"><a class="header" href="#3-install-pytorch-for-rocm">3. Install PyTorch for ROCm</a></h3>
+<p>Install PyTorch with ROCm 6.2.4 support:</p>
+<pre><code class="language-bash">pip3 install torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/rocm6.2.4
+pip3 install packaging ninja cpufeature numpy
 </code></pre>
-<h3 id="using-merge-scripts"><a class="header" href="#using-merge-scripts">Using merge scripts</a></h3>
-<p>If you got local DeepSeek-R1/V3 fp8 safetensors and gguf weights(eg.q4km), you can merge them using the following scripts.</p>
-<pre><code class="language-shell">python merge_tensors/merge_safetensor_gguf.py \
-  --safetensor_path &lt;fp8_safetensor_path&gt; \
-  --gguf_path &lt;gguf_folder_path&gt; \
-  --output_path &lt;merged_output_path&gt;
+<blockquote>
+<p><strong>Tip:</strong> For other ROCm versions, visit <a href="https://pytorch.org/get-started/previous-versions/">PyTorch Previous Versions</a></p>
+</blockquote>
+<h3 id="4-build-ktransformers"><a class="header" href="#4-build-ktransformers">4. Build ktransformers</a></h3>
+<pre><code class="language-bash"># Clone repository
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init
+
+# Optional: Compile web interface
+# See: api/server/website.md
+
+# Install dependencies
+bash install.sh
 </code></pre>
-<ul>
-<li><code>--safetensor_path</code>:	input path of safetensor file(<a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/tree/main">Download</a>).</li>
-<li><code>--gguf_path</code>: input path of gguf folder (<a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">Download</a>).</li>
-<li><code>--output_path</code>: output path of merged file.</li>
-</ul>
-<h3 id="execution-notes"><a class="header" href="#execution-notes">Execution Notes</a></h3>
-<p>Launch local_chat.py with custom quantized experts</p>
-<pre><code class="language-shell">python ktransformers/local_chat.py \
-  --model_path deepseek-ai/DeepSeek-V3 \
-  --gguf_path &lt;merged_weights_folder&gt; \
-  --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-fp8-linear-ggml-experts.yaml \
+<h2 id="running-deepseek-r1-models"><a class="header" href="#running-deepseek-r1-models">Running DeepSeek-R1 Models</a></h2>
+<h3 id="configuration-for-24gb-vram-gpus"><a class="header" href="#configuration-for-24gb-vram-gpus">Configuration for 24GB VRAM GPUs</a></h3>
+<p>Use our optimized configuration for constrained VRAM:</p>
+<pre><code class="language-bash">python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-R1 \
+  --gguf_path &lt;path_to_gguf_files&gt; \
+  --optimize_config_path ktransformers/optimize/optimize_rules/rocm/DeepSeek-V3-Chat.yaml \
   --cpu_infer &lt;cpu_cores + 1&gt;
 </code></pre>
-<h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
-<p>⚠️ Hardware Requirements<br></p>
+<blockquote>
+<p><strong>Beta Note:</strong> Current Q8 linear implementation (Marlin alternative) shows suboptimal performance. Expect optimizations in future releases.</p>
+</blockquote>
+<h3 id="configuration-for-40gb-vram-gpus"><a class="header" href="#configuration-for-40gb-vram-gpus">Configuration for 40GB+ VRAM GPUs</a></h3>
+<p>For better performance on high-VRAM GPUs:</p>
+<ol>
+<li>
+<p>Modify <code>DeepSeek-V3-Chat.yaml</code>:</p>
+<pre><code class="language-yaml"># Replace all instances of:
+KLinearMarlin → KLinearTorch
+</code></pre>
+</li>
+<li>
+<p>Execute with:</p>
+<pre><code class="language-bash">python ktransformers/local_chat.py \
+  --model_path deepseek-ai/DeepSeek-R1 \
+  --gguf_path &lt;path_to_gguf_files&gt; \
+  --optimize_config_path &lt;modified_yaml_path&gt; \
+  --cpu_infer &lt;cpu_cores + 1&gt;
+</code></pre>
+</li>
+</ol>
+<blockquote>
+<p><strong>Tip:</strong> If you got 2 * 24GB AMD GPUS, you may also do the same modify and run <code>ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> instead.</p>
+</blockquote>
+<h2 id="known-limitations"><a class="header" href="#known-limitations">Known Limitations</a></h2>
 <ul>
-<li>Recommended minimum 19GB available VRAM for FP8 kernel.</li>
-<li>Requires GPU with FP8 support (e.g., 4090)</li>
+<li>Marlin operations not supported on ROCm platform</li>
+<li>Current Q8 linear implementation shows reduced performance (Beta limitation)</li>
 </ul>
-<p>⏳ First-Run Optimization
-JIT compilation causes longer initial execution (subsequent runs retain optimized speed).</p>
-<p>🔄 Temporary Interface<br>
-Current weight loading implementation is provisional - will be refined in future versions</p>
-<p>📁 Path Specification<br>
-Despite hybrid quantization, merged weights are stored as .safetensors - pass the containing folder path to <code>--gguf_path</code></p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../en/multi-gpu-tutorial.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../en/fp8_kernel.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../en/ROCm.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../en/api/server/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -241,11 +265,11 @@ Despite hybrid quantization, merged weights are stored as .safetensors - pass th
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../en/multi-gpu-tutorial.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../en/fp8_kernel.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../en/ROCm.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../en/api/server/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>
