@@ -12,7 +12,7 @@
   replace:
     class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     kwargs:
-      generate_device: "cuda"
+      generate_device: "cpu"
       prefill_device: "cuda"
       generate_op: "KLinearCPUInfer"
       prefill_op: "KLinearTorch"
@@ -23,7 +23,7 @@
   replace:
     class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
     kwargs:
-      generate_device: "cpu"
+      generate_device: "cuda"
       prefill_device: "cuda"
       generate_op: "KLinearQ8"
       prefill_op: "KLinearTorch"
