@@ -1,4 +1,4 @@
-# Ktransformer
+# Ktransformers
 
 [Introduction](./README.md)
 # Install
