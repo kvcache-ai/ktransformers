@@ -10,7 +10,7 @@
     name: "^model\\.layers\\.(0|[1-9]|[12][0-9])\\."
     class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
   replace:
-    class: ktransformers.operators.RoPE.KMoEGateDeepSeekV3
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
