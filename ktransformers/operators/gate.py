@@ -125,7 +125,7 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
 
 # adapted from https://github.com/vllm-project/vllm/blob/c77620d22d43daa7e0440e6267cbdd83f849ac64/vllm/model_executor/layers/fused_moe/fused_moe.py#L1071
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(dynamic=True)
+#@torch.compile(dynamic=True)
 def grouped_topk(hidden_states: torch.Tensor,
                  gating_output: torch.Tensor,
                  topk: int,
