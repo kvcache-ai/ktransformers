@@ -120,7 +120,7 @@ class KExpertsCPU(KExpertsBase):
     output_gpu_map:dict = {} # Manage output tensor buffer on different gpu
     #stream_map:dict = {} # Manage cuda stream on different gpu
     #gguf_loader:GGUFLoader = None
-    CPU_INFER = CPUInfer(Config().cpu_infer)
+    CPU_INFER = None
     def __init__(
         self,
         key: str,
@@ -133,6 +133,8 @@ class KExpertsCPU(KExpertsBase):
         **kwargs
     ):
         super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        if KExpertsCPU.CPU_INFER is None:
+            KExpertsCPU.CPU_INFER = CPUInfer(Config().cpu_infer)
         #if KExpertsCPU.gguf_loader is None:
         #    KExpertsCPU.gguf_loader = GGUFLoader("/mnt/data/model/DeepseekV3-q4km-gguf")
         self.gguf_loader = gguf_loader

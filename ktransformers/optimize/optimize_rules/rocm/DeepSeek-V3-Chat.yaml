@@ -5,6 +5,18 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
+
+- match:
+    name: "^lm_head$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cuda"
+      generate_op: "KLinearCPUInfer"
+      prefill_op: "KLinearTorch"
+
 - match:
     name: "^model\\.layers\\.(?!.*self_attn\\.kv_b_proj).*$"  # regular expression 
     class: torch.nn.Linear  # only match modules matching name and class simultaneously
@@ -13,7 +25,7 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
-      generate_op: "KLinearFP8"
+      generate_op: "KLinearQ8"
       prefill_op: "KLinearTorch"
 - match:
     name: "^model\\.layers\\..*\\.mlp$"
@@ -26,7 +38,7 @@
 - match:
     class: ktransformers.models.modeling_deepseek_v3.MoEGate
   replace:
-    class: ktransformers.operators.gate.KMoEGateDeepSeekV3
+    class: ktransformers.operators.gate.KMoEGate
     kwargs:
       generate_device: "cuda:0"
       prefill_device: "cuda:0"
@@ -48,6 +60,7 @@
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
+      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
 - match:
     name: "^model$"
   replace:

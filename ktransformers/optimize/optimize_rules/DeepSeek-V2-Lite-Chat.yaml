@@ -22,7 +22,7 @@
   replace:
     class: ktransformers.operators.linear.KTransformersLinear
     kwargs:
-      generate_device: "cuda"
+      generate_device: "cpu"
       prefill_device: "cuda"
       generate_op: "KLinearMarlin"
       prefill_op: "KLinearTorch"

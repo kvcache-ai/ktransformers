@@ -1,4 +1,4 @@
-# Ktransformer
+# Ktransformers
 
 [Introduction](./README.md)
 # Install
@@ -10,6 +10,7 @@
 - [Injection Tutorial](en/injection_tutorial.md)
 - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md)
 - [Use FP8 GPU Kernel](en/fp8_kernel.md)
+- [Use AMD GPU](en/ROCm.md)
 # Server
   - [Server](en/api/server/server.md)
   - [Website](en/api/server/website.md)
