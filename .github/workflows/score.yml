@@ -19,6 +19,6 @@ jobs:
           export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
           export CUDA_HOME=/usr/local/cuda-12.4
           cd ${{ github.workspace }}
-          python transformers/tests/score.py
+          python ktransformers/tests/score.py
 
       - run: echo "This job's status is ${{ job.status }}."
