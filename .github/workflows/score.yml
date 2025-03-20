@@ -1,8 +1,8 @@
-name: Human Eval Score KTransformers
-run-name: Human Eval Score KTransformers
+name: Human Eval Score
+run-name: Human Eval Score
 on: workflow_dispatch
 jobs:
-  Human-Eval-Score-KTransformers:
+  Human-Eval-Score:
     runs-on: self-hosted
     steps:
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
