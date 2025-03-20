@@ -167,20 +167,21 @@ def to_device(tensor: torch.Tensor, device_id: Union[int, str] = 0) -> torch.Ten
     """
     return device_manager.move_tensor_to_device(tensor, device_id)
 
-# Get devices
-cpu_device = get_device(-1)        # CPU using index -1
-print(f"cpu_device: {cpu_device}")
-cpu_device2 = get_device("cpu")    # CPU using string "cpu"
-print(f"cpu_device2: {cpu_device2}")
-gpu0 = get_device(0)               # First GPU
-print(f"gpu0: {gpu0}")
+if __name__ == "__main__":
+    # Get devices
+    cpu_device = get_device(-1)        # CPU using index -1
+    print(f"cpu_device: {cpu_device}")
+    cpu_device2 = get_device("cpu")    # CPU using string "cpu"
+    print(f"cpu_device2: {cpu_device2}")
+    gpu0 = get_device(0)               # First GPU
+    print(f"gpu0: {gpu0}")
 
-# Move tensors
-x = torch.randn(3, 3)
-print(f"x: {x}")
-x_gpu = to_device(x, 0)            # Move to first GPU
-print(f"x_gpu: {x_gpu}")
-x_cpu1 = to_device(x, -1)          # Move to CPU using index -1
-print(f"x_cpu1: {x_cpu1}")
-x_cpu2 = to_device(x, "cpu")       # Move to CPU using string "cpu"
-print(f"x_cpu2: {x_cpu2}")
+    # Move tensors
+    x = torch.randn(3, 3)
+    print(f"x: {x}")
+    x_gpu = to_device(x, 0)            # Move to first GPU
+    print(f"x_gpu: {x_gpu}")
+    x_cpu1 = to_device(x, -1)          # Move to CPU using index -1
+    print(f"x_cpu1: {x_cpu1}")
+    x_cpu2 = to_device(x, "cpu")       # Move to CPU using string "cpu"
+    print(f"x_cpu2: {x_cpu2}")
