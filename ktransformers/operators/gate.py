@@ -215,7 +215,7 @@ class KMoEGateDeepSeekV3(BaseInjectedModule, KMoEGateBase):
             self.gate_linear = None
 
     def forward(self, hidden_states) -> torch.Tensor:
-        if self.is_windows:
+        if True or self.is_windows:
             return self.orig_module.forward(hidden_states)
         
         bsz, seq_len, h = hidden_states.shape
