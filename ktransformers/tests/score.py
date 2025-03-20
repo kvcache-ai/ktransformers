@@ -26,7 +26,10 @@ server_cmd = [
     "--model_path", "/home/qujing3/models/DeepSeek-R1-Q4_K_M/config",
     "--gguf_path", "/home/qujing3/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M",
     "--port", "10002",
-    "--cpu_infer", "64"
+    "--cpu_infer", "48",
+    "--optimize_config_path", "ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml",
+    "--max_new_tokens", "3000",
+    "--cache_lens", "6000"
 ]
 
 print("Starting ktransformers server...")
@@ -35,7 +38,7 @@ with open("/tmp/server_log.txt", "w") as f:
     server_process = subprocess.Popen(server_cmd, stdout=f, stderr=f, text=True)
 
 try:
-    wait_for_server("http://localhost:10002", timeout=300)
+    wait_for_server("http://localhost:10002", timeout=600)
 
     eval_cmd = ["python", "ktransformers/tests/humaneval/eval_api.py"]
     print("Running eval_api.py...")
