@@ -92,6 +92,7 @@ class ArgumentParser:
         parser.add_argument("--user_secret_key", type=str, default=self.cfg.user_secret_key)
         parser.add_argument("--user_algorithm", type=str, default=self.cfg.user_algorithm)
         parser.add_argument("--force_think", action=argparse.BooleanOptionalAction, type=bool, default=self.cfg.user_force_think)
+        parser.add_argument("--ds_api", action=argparse.BooleanOptionalAction, type=bool, default=self.cfg.user_ds_api)
         parser.add_argument("--use_cuda_graph", action=argparse.BooleanOptionalAction, type=bool, default=self.cfg.use_cuda_graph)
 
         # web config
@@ -125,4 +126,5 @@ class ArgumentParser:
         self.cfg.server_port = args.port
         self.cfg.backend_type = args.type
         self.cfg.user_force_think = args.force_think
+        self.cfg.user_ds_api = args.ds_api
         return args
