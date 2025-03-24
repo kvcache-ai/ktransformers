@@ -90,13 +90,34 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                 content = content + token
                 finish_reason = finish_reason
 
-        choice = Choice(
-            index = 0,
-            finish_reason = finish_reason,
-            message = ChatCompletionMessage(
-                content=content,
-                role="assistant"
-            ))
+        # 使用deepseek的api格式
+        if Config().user_ds_api:
+            # 分割字符串，提取</think>之前的部分
+            split_result = content.split("</think>", 1)
+            reasoning_content = split_result[0]
+
+            # 处理剩余部分，并去除紧接的换行符
+            content = split_result[1].lstrip('\n') if len(split_result) > 1 else ''
+
+            # 删除reasoning_content中的<think>\n
+            reasoning_content = reasoning_content.replace("<think>\n", "")
+
+            choice = Choice(
+                index=0,
+                finish_reason=finish_reason,
+                message=ChatCompletionMessage(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    role="assistant"
+                ))
+        else:
+            choice = Choice(
+                index = 0,
+                finish_reason = finish_reason,
+                message = ChatCompletionMessage(
+                    content=content,
+                    role="assistant"
+                ))
 
         chat_completion = ChatCompletion(
             id = id,
