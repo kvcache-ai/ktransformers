@@ -1,18 +1,19 @@
-name: Install KTransformers
-run-name: Install KTransformers
+name: Install / Test KTransformers
+run-name: Install / Test KTransformers
 on:
   workflow_dispatch:
     inputs:
       job_to_run:
         description: "Which job to run?"
         required: true
-        default: "install"
+        default: "test"
         type: choice
         options:
-          - create&install
-          - install
+          - create-install-test
+          - install-test
+          - test
 jobs:
-  Install-KTransformers:
+  Install-Test-KTransformers:
     runs-on: self-hosted
     steps:
       - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
@@ -22,19 +23,19 @@ jobs:
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - name: Remove old conda environment
         continue-on-error: true
-        if: ${{ inputs.job_to_run == 'create&install'}}
+        if: contains(inputs.job_to_run, 'create')
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
           conda env remove --name ktransformers-dev -y
       - name: Create conda environment
-        if: ${{ inputs.job_to_run == 'create&install'}}
+        if: contains(inputs.job_to_run, 'create')
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
           conda create --name ktransformers-dev python=3.11
           conda activate ktransformers-dev
           conda install -c conda-forge libstdcxx-ng -y
       - name: Install dependencies
-        if: ${{ inputs.job_to_run == 'create&install'}}
+        if: contains(inputs.job_to_run, 'create')
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
           conda activate ktransformers-dev
@@ -42,11 +43,29 @@ jobs:
           pip3 install packaging ninja cpufeature numpy
           pip install ~/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
       - name: Install KTransformers
+        if: contains(inputs.job_to_run, 'install')
         run: |
           source /home/qujing3/anaconda3/etc/profile.d/conda.sh
           conda activate ktransformers-dev
+          pip3 uninstall ktransformers -y
           cd ${{ github.workspace }}
           git submodule init
           git submodule update
-          USE_NUMA=1 bash install.sh
+          bash install.sh
+      - name: Test Local Chat 1
+        run: |
+          set -e
+          source /home/qujing3/anaconda3/etc/profile.d/conda.sh
+          conda activate ktransformers-dev
+          export PATH=/usr/local/cuda-12.4/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+          export CUDA_HOME=/usr/local/cuda-12.4
+          cd ${{ github.workspace }}
+          echo "Running Local Chat 1 (book.txt) ..."
+          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cpu_infer 64 --prompt_file /home/qujing3/prompts/book.txt > log1.txt
+          sed -n '/Prompt:/,$p' log1.txt
+          echo "Running Local Chat 2 [force think] (chinese.txt) ..."
+          python ktransformers/local_chat_test.py --model_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/config --gguf_path /home/qujing3/models/DeepSeek-R1-Q4_K_M/ --max_new_tokens 256 --cpu_infer 64 --prompt_file /home/qujing3/prompts/chinese.txt -f > log2.txt
+          sed -n '/Prompt:/,$p' log2.txt
+
       - run: echo "This job's status is ${{ job.status }}."

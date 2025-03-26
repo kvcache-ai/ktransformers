@@ -17,7 +17,10 @@ import logging
 logger = logging.getLogger("dynamic_attention")
 sys.path.append(os.path.dirname(__file__) + "/../ktransformers_ext/cpu_backend")
 from ktransformers.operators.cpuinfer import CPUInfer, CPUInferKVCache
-from flash_attn import flash_attn_func, flash_attn_with_kvcache
+try:
+    from flash_attn import flash_attn_func, flash_attn_with_kvcache
+except:
+    print("falsh attn not found")
 
 
 import math
@@ -26,6 +29,7 @@ import json
 
 class DynamicScaledDotProductAttention:
     remaining_length: int
+    cpu_infer = None
 
     def __init__(
         self,
@@ -180,7 +184,9 @@ class DynamicScaledDotProductAttention:
             self.preselect_block_num = 0  # block_num before preselect
             self.evict_tokens = 0
 
-        self.cpu_infer = CPUInfer(threads_num)
+        if DynamicScaledDotProductAttention.cpu_infer is None:
+            DynamicScaledDotProductAttention.cpu_infer = CPUInfer(threads_num)
+            self.cpu_infer = DynamicScaledDotProductAttention.cpu_infer
         self.local_thread = CPUInferKVCache(
             self.layer_num,
             self.kv_head_num,

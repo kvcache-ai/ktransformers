@@ -53,6 +53,7 @@ from ktransformers.models.modeling_deepseek import (
     DeepseekV2DecoderLayer,
     DeepseekV2MoE,
 )
+from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
 from transformers.models.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
 from ktransformers.models.configuration_llama import LlamaConfig
 from ktransformers.operators.base_operator import BaseInjectedModule
@@ -649,8 +650,8 @@ class KDeepseekV2Model(BaseInjectedModule):
         if per_layer_prefill_flag:
             causal_mask = None
         else:
-            if os.name == 'nt' or get_compute_capability()<8:
-                print("for Windows or GPU before ampere, use forward_windows")
+            if os.name == 'nt' or get_compute_capability()<8 or device_manager.gpu_vendor != GPUVendor.NVIDIA:
+                # print("for Windows or GPU before ampere, use forward_windows")
                 # only use mask in forward windows or can't flash attn
                 causal_mask = self._update_causal_mask(
                     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
@@ -673,6 +674,7 @@ class KDeepseekV2Model(BaseInjectedModule):
         t_f = 0
 
         for i, decoder_layer in enumerate(self.layers):
+            # print(f"@@@@@@@@@@@@@@@@@layer {i}@@@@@@@@@@@@@@@@@@@@ \n")
             if self.transfer_map is not None and i in self.transfer_map:
                 prev_stream = torch.cuda.current_stream()
                 cur_device = self.transfer_map[i]

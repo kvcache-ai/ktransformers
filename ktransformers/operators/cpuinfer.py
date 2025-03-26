@@ -727,8 +727,13 @@ class CPUInferKVCache:
 
 class CPUInfer:
     cpuinfer = None
+    cur_backend_thread_num = 0
+    
     def __init__(self, thread_num):
-        CPUInfer.cpuinfer = cpuinfer_ext.CPUInfer(thread_num)
+        if thread_num > CPUInfer.cur_backend_thread_num:
+            CPUInfer.cur_backend_thread_num = thread_num
+            del CPUInfer.cpuinfer
+            CPUInfer.cpuinfer = cpuinfer_ext.CPUInfer(thread_num)
 
     def submit(self, task):
         CPUInfer.cpuinfer.submit(task)

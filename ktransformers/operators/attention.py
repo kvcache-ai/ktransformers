@@ -20,8 +20,14 @@ from ktransformers.util.utils import get_compute_capability
 import logging
 from transformers.configuration_utils import PretrainedConfig
 from transformers.cache_utils import Cache
-from flash_attn import flash_attn_func
-from ktransformers.operators.triton_attention import decode_attention_fwd_grouped
+from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
+
+try:
+    from flash_attn import flash_attn_func
+except:
+    pass
+from ktransformers.operators.triton_attention import decode_attention_fwd_grouped 
+from ktransformers.operators.triton_attention_prefill import context_attention_fwd
 import os
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
 if flashinfer_enabled:
@@ -589,8 +595,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if os.name == 'nt' or get_compute_capability()<8:
-            print("for Windows or GPU before ampere, use forward_windows")
+        if os.name == 'nt' or get_compute_capability()<8 or device_manager.gpu_vendor != GPUVendor.NVIDIA:
             return self.forward_windows(
                 hidden_states,
                 attention_mask,

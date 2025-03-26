@@ -16,6 +16,10 @@
 #include <cstdint>
 #include <c10/cuda/CUDAGuard.h>
 
+#ifdef __HIP_PLATFORM_AMD__
+typedef hip_bfloat16 nv_bfloat16;
+#endif
+
 __global__ void dequantize_q8_0_fp32_kernel(const int8_t* data, float* output, const int blk_size, const int ele_per_blk, const int num_blocks) {
     long long global_idx = blockIdx.x * blockDim.x + threadIdx.x;
     for (long long block_id = global_idx; block_id < num_blocks; block_id += blockDim.x * gridDim.x){
