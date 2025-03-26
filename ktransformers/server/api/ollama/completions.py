@@ -85,8 +85,12 @@ async def generate(request: Request, input: OllamaGenerateCompletionRequest):
         return check_link_response(request, inner())
     else:
         complete_response = ""
-        async for token in interface.inference(input.prompt, id):
-            complete_response += token
+        async for res in interface.inference(input.prompt, id):
+            if isinstance(res, RawUsage):
+                raw_usage = res
+            else: 
+                token, finish_reason = res
+                complete_response += token
         response = OllamaGenerationResponse(
             model=config.model_name,
             created_at=str(datetime.now()),
@@ -187,8 +191,12 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
         complete_response = ""
         eval_count = 0 
 
-        async for token in interface.inference(prompt, id):
-            complete_response += token
+        async for res in interface.inference(prompt, id):
+            if isinstance(res, RawUsage):
+                raw_usage = res
+            else: 
+                token, finish_reason = res
+                complete_response += token
             eval_count += 1
 
         end_time = time()
