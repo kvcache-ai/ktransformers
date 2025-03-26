@@ -118,7 +118,7 @@ From: https://github.com/kvcache-ai/ktransformers/issues/374
 
 1. First, download the latest source code using git.
 2. Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.
-3. Next, you need to compile from the ktransformer source code until it successfully compiles on your local machine.
+3. Next, you need to compile from the ktransformers source code until it successfully compiles on your local machine.
 4. Then, install flash-attn. It won't be used, but not installing it will cause an error.
 5. Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.
 6. Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.

@@ -1,0 +1,24 @@
+name: Human Eval Score
+run-name: Human Eval Score
+on: workflow_dispatch
+jobs:
+  Human-Eval-Score:
+    runs-on: self-hosted
+    steps:
+      - run: echo "🎉 The job was automatically triggered by a ${{ github.event_name }} event."
+      - run: echo "🔎 The name of your branch is ${{ github.ref }} and your repository is ${{ github.repository }}."
+      - name: Check out repository code
+        uses: actions/checkout@v4
+      - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
+      - name: Human Eval Run
+        run: |
+          set -e
+          source /home/qujing3/anaconda3/etc/profile.d/conda.sh
+          conda activate ktransformers-dev
+          export PATH=/usr/local/cuda-12.4/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+          export CUDA_HOME=/usr/local/cuda-12.4
+          cd ${{ github.workspace }}
+          python ktransformers/tests/score.py
+
+      - run: echo "This job's status is ${{ job.status }}."

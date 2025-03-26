@@ -31,7 +31,6 @@ from ktransformers.models.modeling_mixtral import MixtralForCausalLM
 from ktransformers.util.utils import prefill_and_generate, get_compute_capability
 from ktransformers.server.config.config import Config
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
-from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
 
 custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
@@ -133,30 +132,17 @@ def local_chat(
     else:
         os.system("clear")
 
-    while True:
-        content = input("Chat: ")
-        if content.startswith('"""'):  # prefix """
-            # multi lines input
-            content = content[3:] + "\n"
-            while True:
-                line = input("")
-                if line.endswith('"""'):
-                    # end multi lines input
-                    line = line[:-3]  # suffix """
-                    if line:
-                        content += line + "\n"
-                    break
-                else:
-                    content += line + "\n"
+    if prompt_file != None:
+        assert os.path.isfile(prompt_file), "prompt file not exist"
+        print(f"prompt file is {prompt_file}")
+        content = open(prompt_file, "r").read()
+    else:
+        content = "Please write a piece of quicksort code in C++."
 
-        if content == "":
-            if prompt_file != None:
-                content = open(prompt_file, "r").read()
-            else:
-                content = "Please write a piece of quicksort code in C++."
-        elif os.path.isfile(content):
-            content = open(content, "r").read()
-            
+    print('Start Testing...(1 round)')
+    print('Prompt:', content)
+
+    while True:
         messages = [{"role": "user", "content": content}]
         input_tensor = tokenizer.apply_chat_template(
             messages, add_generation_prompt=True, return_tensors="pt"
@@ -170,7 +156,7 @@ def local_chat(
             assert Config().long_context_config['max_seq_len'] > input_tensor.shape[1] + max_new_tokens, \
             "please change max_seq_len in  ~/.ktransformers/config.yaml"
         
-        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8 and device_manager.gpu_vendor == GPUVendor.NVIDIA:
+        if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8:
             generated = prefill_and_generate(
                 model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
                 use_flashinfer_mla = True, num_heads = config.num_attention_heads, head_dim_ckv = config.kv_lora_rank, head_dim_kpe = config.qk_rope_head_dim, q_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
@@ -179,7 +165,7 @@ def local_chat(
             generated = prefill_and_generate(
                 model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_prefill_size = chunk_prefill_size,
             )
-
+        break
 
 if __name__ == "__main__":
     fire.Fire(local_chat)
