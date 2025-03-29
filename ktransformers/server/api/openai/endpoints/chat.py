@@ -1,6 +1,9 @@
 import json
 from time import time
 from uuid import uuid4
+from typing import Dict, List, Optional, Any, Literal, Union
+from pydantic import BaseModel, Field
+
 from fastapi import APIRouter
 from fastapi.requests import Request
 from ktransformers.server.utils.create_interface import get_interface
@@ -12,12 +15,47 @@ from ktransformers.server.config.config import Config
 from ktransformers.server.config.log import logger
 
 from ktransformers.server.schemas.endpoints.chat import ChatCompletionChunk
-from openai.types.chat import ChatCompletion
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_tool_call import ChatCompletionMessageToolCall
-from openai.types.chat.chat_completion_message_tool_call_function import ChatCompletionMessageToolCallFunction
-from openai.types.completion_usage import CompletionUsage
 
+# 定义我们自己的数据结构替代 OpenAI 的导入
+class CompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    prompt_tokens_details: Optional[Dict[str, Any]] = None
+    completion_tokens_details: Optional[Dict[str, Any]] = None
+
+class Choice(BaseModel):
+    index: int
+    message: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    logprobs: Optional[Any] = None
+    delta: Optional[Dict[str, Any]] = None
+    content_filter_results: Optional[Dict[str, Any]] = None
+
+class ChatCompletion(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[Choice]
+    usage: Optional[CompletionUsage] = None
+    system_fingerprint: Optional[str] = None
+    prompt_filter_results: Optional[List[Dict[str, Any]]] = None
+
+# 仅用于非流式响应构建
+class ChatCompletionMessageToolCallFunction(BaseModel):
+    name: str
+    arguments: str
+
+class ChatCompletionMessageToolCall(BaseModel):
+    id: str
+    type: str
+    function: ChatCompletionMessageToolCallFunction
+
+class ChatCompletionMessage(BaseModel):
+    role: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 router = APIRouter()
 
@@ -27,11 +65,10 @@ async def list_models():
 
 
 @router.post('/chat/completions', tags=['openai'])
-async def chat_completion(request:Request,create:ChatCompletionCreate):
+async def chat_completion(request:Request, create:ChatCompletionCreate):
     id = str(uuid4())
 
     interface: BackendInterfaceBase = get_interface()
-    # input_ids = interface.format_and_tokenize_input_ids(id,messages=create.get_tokenizer_messages())
 
     input_message = [json.loads(m.model_dump_json()) for m in create.messages]
 
@@ -39,9 +76,21 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
         assert request.headers.get('Authorization', '').split()[-1] == Config().api_key
 
     if create.stream:
-        from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-        from openai.types.chat.chat_completion_chunk_tool_call import ChatCompletionChunkToolCall
-        from openai.types.chat.chat_completion_chunk_tool_call_function import ChatCompletionChunkToolCallFunction
+        # 为流式响应定义辅助类
+        class ChoiceDelta(BaseModel):
+            content: Optional[str] = None
+            role: Optional[str] = None
+            tool_calls: Optional[List[Dict[str, Any]]] = None
+            
+        class ChatCompletionChunkToolCallFunction(BaseModel):
+            name: Optional[str] = None
+            arguments: Optional[str] = None
+            
+        class ChatCompletionChunkToolCall(BaseModel):
+            id: Optional[str] = None
+            type: Optional[str] = None
+            index: Optional[int] = None
+            function: Optional[ChatCompletionChunkToolCallFunction] = None
         
         async def inner():
             chunk = ChatCompletionChunk(
@@ -66,9 +115,9 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                     raw_usage = res
                     chunk.choices = []
                     chunk.usage = CompletionUsage(
-                        prompt_tokens=raw_usage.prefill_count,
-                        completion_tokens=raw_usage.decode_count,
-                        total_tokens=raw_usage.prefill_count + raw_usage.decode_count
+                        prompt_tokens = raw_usage.prefill_count,
+                        completion_tokens = raw_usage.decode_count,
+                        total_tokens = raw_usage.prefill_count + raw_usage.decode_count
                     )
                     yield chunk
                 elif isinstance(res, tuple) and len(res) == 2:
@@ -85,7 +134,7 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                         yield chunk
                     else:
                         # Regular content chunk
-                        delta = ChoiceDelta(content=token, role=None, tool_calls=None)
+                        delta = {"content": token, "role": None, "tool_calls": None}
                         choice = Choice(
                             index=0,
                             delta=delta,
@@ -100,21 +149,21 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                     
                     # First chunk contains the initial tool call info
                     if res.get('first_chunk', False):
-                        delta = ChoiceDelta(
-                            content=None, 
-                            role="assistant",
-                            tool_calls=[
-                                ChatCompletionChunkToolCall(
-                                    index=0,
-                                    id=tool_call_info.get('id', ''),
-                                    type="function",
-                                    function=ChatCompletionChunkToolCallFunction(
-                                        name=tool_call_info.get('function', {}).get('name', ''),
-                                        arguments=""
-                                    )
-                                )
+                        delta = {
+                            "content": None, 
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": tool_call_info.get('id', ''),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_call_info.get('function', {}).get('name', ''),
+                                        "arguments": ""
+                                    }
+                                }
                             ]
-                        )
+                        }
                         choice = Choice(
                             index=0,
                             delta=delta,
@@ -126,16 +175,16 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                     
                     # Argument chunks
                     if 'argument_chunk' in res:
-                        delta = ChoiceDelta(
-                            tool_calls=[
-                                ChatCompletionChunkToolCall(
-                                    function=ChatCompletionChunkToolCallFunction(
-                                        arguments=res['argument_chunk']
-                                    ),
-                                    index=0
-                                )
+                        delta = {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "arguments": res['argument_chunk']
+                                    },
+                                    "index": 0
+                                }
                             ]
-                        )
+                        }
                         choice = Choice(
                             index=0,
                             delta=delta,
@@ -232,7 +281,7 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
         choice = Choice(
             index=0,
             finish_reason=finish_reason,
-            message=message,
+            message=message.model_dump(),
             logprobs=None
         )
 
