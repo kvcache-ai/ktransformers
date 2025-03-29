@@ -70,7 +70,8 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
     
     # 1. 使用system提示让模型了解如何使用工具
     enhanced_messages = list(create.messages)
-    
+    print("-----------------enhanced_messages-----------------------")
+    print(enhanced_messages)
     # 如果有工具，且第一条消息是system，在system提示中添加工具使用指导
     if create.tools and len(create.tools) > 0 and enhanced_messages[0].role == Role.system:
         tool_instructions = "你可以使用以下工具：\n\n"
