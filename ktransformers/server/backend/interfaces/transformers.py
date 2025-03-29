@@ -169,7 +169,7 @@ class TransformersInterface(BackendInterfaceBase):
         #print(messages)
         for m in messages:
             if m["role"] == "system":
-                logger.warning(f'change {m["role"]} to user- disabled')
+                logger.warning(f'change {m["role"]} to user')
                 m["role"] = "user"
 
         new_messages = [messages[0]]
