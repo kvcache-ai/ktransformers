@@ -9,6 +9,10 @@ from ktransformers.server.schemas.base import Object
 from openai.types.completion_usage import CompletionUsage
 from openai.types.chat.chat_completion_chunk import Choice
 
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
 class Role(Enum):
     system = 'system'
     user = 'user'
