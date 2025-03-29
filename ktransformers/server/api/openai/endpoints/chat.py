@@ -73,7 +73,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
     
     # 如果有工具，且第一条消息是system，在system提示中添加工具使用指导
     if create.tools and len(create.tools) > 0 and (enhanced_messages[0].role == Role.system or enhanced_messages[0].role == Role.user):
-        tool_instructions = "你是一个可以使用function_call，函数调用功能的模型，目前，你可以使用以下工具\n\n"
+        tool_instructions = "你可以使用function_call，函数调用功能，目前，你可以使用以下工具\n\n"
         for tool in create.tools:
             tool_instructions += f" \"function\":{{\"name\" : {tool.function.name},\"description\" : {tool.function.description} , \"parameters\" : {tool.function.parameters}}}\n"
         
