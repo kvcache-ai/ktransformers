@@ -184,6 +184,7 @@ class TransformersInterface(BackendInterfaceBase):
         #         new_messages, return_tensors="pt", add_generation_prompt=True
         #     ).to(self.args.device)
         input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
+        print(input_str)
         # drop <think> token in chat template
         if input_str.endswith('<think>\n'):
             input_str = input_str[:-len('<think>\n')]
