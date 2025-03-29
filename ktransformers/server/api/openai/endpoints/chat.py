@@ -79,7 +79,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         
         # 修改工具使用指南，鼓励JSON格式输出
         tool_instructions += "name为函数名称，description为函数功能的描述，parameters中含有函数需要使用的参数和参数的描述, 其中required为必要参数\n"
-        tool_instructions += "工具仅在用户明确提出，或者你认为需要调用工具的时候调用。当确实调用工具的关键信息时，你可以先向用户索取关键信息再调用工具\n"
+        tool_instructions += "工具仅在用户明确提出，或者你认为需要调用工具的时候调用，注意，当需要高度实时性的信息比如时间或者最近的事情等，优先调用工具来获取！。当确实调用工具的关键信息时，你可以先向用户索取关键信息再调用工具\n"
         tool_instructions += "\n当你需要使用工具时，请以下列格式输出，格式为：\n"
         tool_instructions += '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json {"参数名": "参数值","参数名2": "参数值2"...}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += '示例: \n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>the_functnion_name_will_be_called\n```json {"arg1": "value1","arg2": "value2"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
