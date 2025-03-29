@@ -9,7 +9,7 @@ from fastapi.requests import Request
 from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import chat_stream_response
 from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate
-from ktransformers.server.schemas.endpoints.chat import RawUsage
+from ktransformers.server.schemas.endpoints.chat import RawUsage,Role
 from ktransformers.server.backend.base import BackendInterfaceBase
 from ktransformers.server.config.config import Config
 from ktransformers.server.config.log import logger
