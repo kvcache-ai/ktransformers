@@ -80,8 +80,6 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         # 修改工具使用指南，鼓励JSON格式输出
         tool_instructions += "\n当你需要使用工具时，请以JSON格式输出，格式为：\n"
         tool_instructions += '{"function": {"name": "工具名称", "arguments": {"参数名": "参数值"}}}\n'
-        tool_instructions += "或者多个工具时：\n"
-        tool_instructions += '[{"function": {"name": "工具1", "arguments": {"参数名": "参数值"}}}, {"function": {"name": "工具2", "arguments": {"参数名": "参数值"}}}]\n'
         tool_instructions += "不要尝试解释你在做什么，直接输出工具调用即可。注意，不要输出```json这个格式！！！！"
         
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
