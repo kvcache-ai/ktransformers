@@ -1,23 +1,68 @@
 import json
-import re
-import uuid
 from time import time
-from typing import List, Dict, Any, Optional
+from uuid import uuid4
+from typing import Dict, List, Optional, Any, Literal, Union
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter
 from fastapi.requests import Request
 from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import chat_stream_response
-from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate, ChatCompletionChunk, CompletionUsage, RawUsage
+from ktransformers.server.schemas.endpoints.chat import ChatCompletionCreate
+from ktransformers.server.schemas.endpoints.chat import RawUsage
 from ktransformers.server.backend.base import BackendInterfaceBase
 from ktransformers.server.config.config import Config
 from ktransformers.server.config.log import logger
+
+from ktransformers.server.schemas.endpoints.chat import ChatCompletionChunk
+
+# 定义我们自己的数据结构替代 OpenAI 的导入
+class CompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    prompt_tokens_details: Optional[Dict[str, Any]] = None
+    completion_tokens_details: Optional[Dict[str, Any]] = None
+
+class Choice(BaseModel):
+    index: int
+    message: Optional[Dict[str, Any]] = None
+    finish_reason: Optional[str] = None
+    logprobs: Optional[Any] = None
+    delta: Optional[Dict[str, Any]] = None
+    content_filter_results: Optional[Dict[str, Any]] = None
+
+class ChatCompletion(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    choices: List[Choice]
+    usage: Optional[CompletionUsage] = None
+    system_fingerprint: Optional[str] = None
+    prompt_filter_results: Optional[List[Dict[str, Any]]] = None
+
+# 仅用于非流式响应构建
+class ChatCompletionMessageToolCallFunction(BaseModel):
+    name: str
+    arguments: str
+
+class ChatCompletionMessageToolCall(BaseModel):
+    id: str
+    type: str
+    function: ChatCompletionMessageToolCallFunction
+
+class ChatCompletionMessage(BaseModel):
+    role: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 router = APIRouter()
 
 @router.get('/models', tags=['openai'])
 async def list_models():
     return {"data": [{"id": Config().model_name, "name": Config().model_name}], "object": "list"}
+
 
 @router.post('/chat/completions', tags=['openai'])
 async def chat_completion(request: Request, create: ChatCompletionCreate):
