@@ -1,4 +1,5 @@
 import torch
+from typing import Optional, List
 import asyncio
 from transformers import AutoTokenizer, AutoConfig, GenerationConfig
 from ktransformers.server.backend.interfaces.transformers import (
