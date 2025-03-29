@@ -75,12 +75,12 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
     if create.tools and len(create.tools) > 0 and enhanced_messages[0].role == Role.system:
         tool_instructions = "你可以使用以下工具：\n\n"
         for tool in create.tools:
-            tool_instructions += f"name - {tool.function.name}: {tool.function.description} parameters: {tool.function.parameters}\n properties: {tool.function.properties}"
+            tool_instructions += f"name - {tool.function.name}: {tool.function.description} parameters: {tool.function.parameters}"
         
         tool_instructions += "\n当你需要使用工具时，请以JSON格式输出，格式为：\n"
         tool_instructions += '{"function": {"name": "工具名称", "arguments": {"参数名": "参数值"}}}\n'
         tool_instructions += "不要尝试解释你在做什么，直接输出工具调用即可。"
-        print(tool_instructions)
+        print(tool,tool_instructions)
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
     
     # 处理请求
