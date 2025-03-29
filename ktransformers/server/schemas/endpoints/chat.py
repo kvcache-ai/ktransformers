@@ -24,6 +24,7 @@ class Message(BaseModel):
     content: Optional[str] = None
     role: Role
     name: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     
@@ -33,6 +34,8 @@ class Message(BaseModel):
             message['content'] = self.content
         if self.name is not None:
             message['name'] = self.name
+        if self.tools is not None:
+            message['tools'] = self.tools
         if self.tool_calls is not None:
             message['tool_calls'] = self.tool_calls
         if self.tool_call_id is not None:
@@ -62,7 +65,8 @@ class ChatCompletionCreate(BaseModel):
     stream: bool = False
     temperature: Optional[float] = None
     top_p: Optional[float] = None
-    tools: Optional[List[Tool]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     stream_options: Optional[Dict[str, Any]] = None
     frequency_penalty: float = 0
