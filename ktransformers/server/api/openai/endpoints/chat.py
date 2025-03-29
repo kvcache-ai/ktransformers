@@ -73,7 +73,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
     
     # 如果有工具，且第一条消息是system，在system提示中添加工具使用指导
     if create.tools and len(create.tools) > 0 and (enhanced_messages[0].role == Role.system or enhanced_messages[0].role == Role.user):
-        tool_instructions = "你可以使用以下工具\n\n"
+        tool_instructions = "你是一个可以使用function_call，函数调用功能的模型，目前，你可以使用以下工具\n\n"
         for tool in create.tools:
             tool_instructions += f" \"function\":{{\"name\" : {tool.function.name},\"description\" : {tool.function.description} , \"parameters\" : {tool.function.parameters}}}\n"
         
@@ -84,7 +84,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         tool_instructions += '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json {"参数名": "参数值","参数名2": "参数值2"...}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += '示例: \n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>the_functnion_name_will_be_called\n```json {"arg1": "value1","arg2": "value2"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += "这样可以调用名为\"the_functnion_name_will_be_called\",并将value1和value2传入参数arg1,arg2\n"
-        tool_instructions += "尽量不要尝试解释你在做什么，直接输出工具函数调用即可。当你尝试解释时，应该确保函数调用语句格式正确且完整"
+        tool_instructions += "不要尝试解释你在做什么，直接输出工具函数调用即可。确保函数调用语句格式正确且完整"
         
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
     
