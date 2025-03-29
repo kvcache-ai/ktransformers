@@ -108,7 +108,13 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             buffer = ""  # 用于临时存储当前文本块
             tool_call_mode = False  # 标记是否正在处理工具调用
             tool_calls = []  # 存储所有检测到的工具调用
-            brackets_depth = 0  # 跟踪嵌套括号深度
+            
+            # 自定义模型特殊标记
+            tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
+            tool_call_begin_marker = "<｜tool▁call▁begin｜>"
+            tool_sep_marker = "<｜tool▁sep｜>"
+            tool_call_end_marker = "<｜tool▁call▁end｜>"
+            tool_calls_end_marker = "<｜tool▁calls▁end｜>"
             
             async for res in interface.inference(input_message, id, create.temperature, create.top_p):
                 if isinstance(res, RawUsage):
@@ -124,137 +130,127 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                 elif isinstance(res, tuple) and len(res) == 2:
                     token, finish_reason = res
                     
-                    # 只有在非工具调用模式下才添加到full_content
+                    # 检测模型特定格式的工具调用开始
+                    if not tool_call_mode and tool_calls_begin_marker in buffer + token:
+                        tool_call_mode = True
+                        
+                        # 调整full_content，删除工具调用部分
+                        if buffer.endswith(tool_calls_begin_marker):
+                            full_content = full_content[:-len(tool_calls_begin_marker)]
+                        elif tool_calls_begin_marker in (buffer + token):
+                            idx = (buffer + token).find(tool_calls_begin_marker)
+                            full_content = full_content[:-(len(buffer) - idx)]
+                        buffer = ""
+                        
+                        # 发送当前累积的文本内容（如果有的话）
+                        if full_content:
+                            chunk.choices = [{
+                                "index": 0,
+                                "delta": {"content": full_content},
+                                "finish_reason": None
+                            }]
+                            yield chunk
+                            full_content = ""
+                    
+                    # 在非工具调用模式下累积内容
                     if not tool_call_mode:
                         full_content += token
-                    
-                    # 检测工具调用开始
-                    if not tool_call_mode:
                         buffer += token
-                        
-                        # 检查是否进入工具调用
-                        if "{\"function\":" in buffer or "[{\"function\":" in buffer:
-                            tool_call_mode = True
-                            # 重置buffer，只保留可能的JSON部分
-                            start_idx = buffer.find("{\"function\":") if "{\"function\":" in buffer else buffer.find("[{\"function\":")
-                            buffer = buffer[start_idx:]
-                            
-                            # 调整full_content，删除工具调用部分
-                            if len(full_content) > len(buffer):
-                                full_content = full_content[:-len(buffer)]
-                            else:
-                                full_content = ""
-                                
-                            # 发送当前累积的文本内容（如果有的话）
-                            if full_content:
-                                chunk.choices = [{
-                                    "index": 0,
-                                    "delta": {"content": full_content},
-                                    "finish_reason": None
-                                }]
-                                yield chunk
-                                full_content = ""
-                            
-                            # 初始化括号计数
-                            brackets_depth = buffer.count('{') - buffer.count('}')
+                        # 保持缓冲区在合理大小
+                        if len(buffer) > 200:
+                            buffer = buffer[-200:]
                     else:
-                        # 在工具调用模式下，继续收集JSON
+                        # 在工具调用模式下，继续收集工具调用相关文本
                         buffer += token
-                        # 更新括号深度计数
-                        brackets_depth += token.count('{') - token.count('}')
                         
-                        # 如果括号平衡，可能完成了一个工具调用
-                        if brackets_depth == 0:
-                            # 尝试解析收集的JSON
+                        # 如果找到工具调用结束标记
+                        if tool_calls_end_marker in buffer:
                             try:
-                                # 清理buffer，移除markdown代码块标记
-                                cleaned_buffer = buffer.strip()
-                                cleaned_buffer = re.sub(r'```json\s*|\s*```', '', cleaned_buffer)
+                                # 解析调用文本提取工具调用信息
+                                full_tool_call = buffer
                                 
-                                # 确定是单个工具调用还是多个工具调用
-                                if cleaned_buffer.startswith('[') and cleaned_buffer.endswith(']'):
-                                    # 多个工具调用
-                                    tool_data_list = json.loads(cleaned_buffer)
-                                    for i, tool_data in enumerate(tool_data_list):
-                                        if "function" in tool_data and "name" in tool_data["function"]:
-                                            tool_call_id = f"call_{uuid4().hex[:24]}"
-                                            tool_calls.append({
-                                                "id": tool_call_id,
-                                                "index": i,
-                                                "type": "function",
-                                                "function": {
-                                                    "name": tool_data["function"]["name"],
-                                                    "arguments": json.dumps(tool_data["function"].get("arguments", {}))
-                                                }
-                                            })
-                                else:
-                                    # 单个工具调用
-                                    tool_data = json.loads(cleaned_buffer)
-                                    if "function" in tool_data and "name" in tool_data["function"]:
-                                        tool_call_id = f"call_{uuid4().hex[:24]}"
-                                        tool_calls.append({
-                                            "id": tool_call_id,
+                                # 提取函数名称
+                                function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
+                                function_name_end = full_tool_call.find("\n", function_name_start)
+                                function_name = full_tool_call[function_name_start:function_name_end].strip()
+                                
+                                # 提取JSON参数 - 提取```json和```之间的内容
+                                json_pattern = r'```json\s*(.*?)\s*```'
+                                json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
+                                
+                                if json_match:
+                                    arguments_str = json_match.group(1).strip()
+                                    # 生成工具调用ID
+                                    tool_call_id = f"call_{uuid4().hex[:24]}"
+                                    
+                                    # 添加到工具调用列表
+                                    tool_calls.append({
+                                        "id": tool_call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": function_name,
+                                            "arguments": arguments_str
+                                        }
+                                    })
+                                    
+                                    # 重置状态
+                                    tool_call_mode = False
+                                    buffer = ""
+                                    
+                                    # 发送工具调用事件
+                                    for idx, tool_call in enumerate(tool_calls):
+                                        # 首条工具调用消息
+                                        chunk.choices = [{
                                             "index": 0,
-                                            "type": "function",
-                                            "function": {
-                                                "name": tool_data["function"]["name"],
-                                                "arguments": json.dumps(tool_data["function"].get("arguments", {}))
-                                            }
-                                        })
-                                
-                                # 处理完工具调用后，重置状态
-                                tool_call_mode = False
-                                buffer = ""
-                                
-                                # 发送工具调用事件
-                                for idx, tool_call in enumerate(tool_calls):
-                                    # 首条工具调用消息
+                                            "delta": {
+                                                "role": "assistant",
+                                                "content": None,
+                                                "tool_calls": [{
+                                                    "index": idx,
+                                                    "id": tool_call["id"],
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": tool_call["function"]["name"],
+                                                        "arguments": ""
+                                                    }
+                                                }]
+                                            },
+                                            "finish_reason": None
+                                        }]
+                                        yield chunk
+                                        
+                                        # 发送参数
+                                        chunk.choices = [{
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [{
+                                                    "index": idx,
+                                                    "function": {"arguments": tool_call["function"]["arguments"]}
+                                                }]
+                                            },
+                                            "finish_reason": None
+                                        }]
+                                        yield chunk
+                                    
+                                    # 发送完成消息
                                     chunk.choices = [{
                                         "index": 0,
-                                        "delta": {
-                                            "role": "assistant",
-                                            "content": None,
-                                            "tool_calls": [{
-                                                "index": idx,
-                                                "id": tool_call["id"],
-                                                "type": "function",
-                                                "function": {
-                                                    "name": tool_call["function"]["name"],
-                                                    "arguments": ""
-                                                }
-                                            }]
-                                        },
-                                        "finish_reason": None
+                                        "delta": {},
+                                        "finish_reason": "tool_calls"
                                     }]
                                     yield chunk
                                     
-                                    # 发送参数
-                                    chunk.choices = [{
-                                        "index": 0,
-                                        "delta": {
-                                            "tool_calls": [{
-                                                "index": idx,
-                                                "function": {"arguments": tool_call["function"]["arguments"]}
-                                            }]
-                                        },
-                                        "finish_reason": None
-                                    }]
-                                    yield chunk
-                                
-                                # 发送完成消息
-                                chunk.choices = [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": "tool_calls"
-                                }]
-                                yield chunk
-                                
-                                # 返回后，不继续处理
-                                return
-                                
-                            except json.JSONDecodeError as e:
-                                # 如果JSON解析失败，继续收集更多token
-                                logger.debug(f"Still collecting JSON: {e}")
+                                    # 返回后，不继续处理
+                                    return
+                                else:
+                                    # JSON提取失败，可能是格式不完整
+                                    logger.warning("Failed to extract JSON from tool call")
+                                    tool_call_mode = False
+                                    buffer = ""
+                            except Exception as e:
+                                logger.error(f"Error processing tool call: {e}")
+                                tool_call_mode = False
+                                buffer = ""
                     
                     # 正常文本输出 (仅在非工具调用模式下)
                     if not tool_call_mode and token:
@@ -268,12 +264,17 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             yield chunk
                         else:
                             # 正常文本块
-                            chunk.choices = [{
-                                "index": 0,
-                                "delta": {"content": token},
-                                "finish_reason": None
-                            }]
-                            yield chunk
+                            # 检查token中是否包含任何工具调用开始标记的部分
+                            if any(marker in token for marker in [tool_calls_begin_marker, tool_call_begin_marker]):
+                                # 跳过，因为这将在下一个迭代中处理
+                                pass
+                            else:
+                                chunk.choices = [{
+                                    "index": 0,
+                                    "delta": {"content": token},
+                                    "finish_reason": None
+                                }]
+                                yield chunk
             
             # 如果我们已经到了这里而没有返回，说明没有检测到完整的工具调用
             # 发送常规完成消息
@@ -293,7 +294,13 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         tool_calls = []
         buffer = ""
         tool_call_mode = False
-        brackets_depth = 0
+        
+        # 自定义模型特殊标记
+        tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
+        tool_call_begin_marker = "<｜tool▁call▁begin｜>"
+        tool_sep_marker = "<｜tool▁sep｜>"
+        tool_call_end_marker = "<｜tool▁call▁end｜>"
+        tool_calls_end_marker = "<｜tool▁calls▁end｜>"
         
         async for res in interface.inference(input_message, id, create.temperature, create.top_p):
             if isinstance(res, RawUsage):
@@ -306,81 +313,76 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             elif isinstance(res, tuple) and len(res) == 2:
                 token, finish_reason = res
                 
+                # 检测模型特定格式的工具调用开始
+                if not tool_call_mode and tool_calls_begin_marker in buffer + token:
+                    tool_call_mode = True
+                    
+                    # 调整full_content，删除工具调用部分
+                    if buffer.endswith(tool_calls_begin_marker):
+                        full_content = full_content[:-len(tool_calls_begin_marker)]
+                    elif tool_calls_begin_marker in (buffer + token):
+                        idx = (buffer + token).find(tool_calls_begin_marker)
+                        full_content = full_content[:-(len(buffer) - idx)]
+                    buffer = ""
+                
+                # 在非工具调用模式下累积内容
                 if not tool_call_mode:
                     full_content += token
                     buffer += token
-                    
-                    # 检查是否进入工具调用
-                    if "{\"function\":" in buffer or "[{\"function\":" in buffer:
-                        tool_call_mode = True
-                        # 重置buffer，只保留可能的JSON部分
-                        start_idx = buffer.find("{\"function\":") if "{\"function\":" in buffer else buffer.find("[{\"function\":")
-                        buffer = buffer[start_idx:]
-                        
-                        # 调整full_content，删除工具调用部分
-                        if len(full_content) > len(buffer):
-                            full_content = full_content[:-len(buffer)]
-                        else:
-                            full_content = ""
-                            
-                        # 初始化括号计数
-                        brackets_depth = buffer.count('{') - buffer.count('}')
+                    # 保持缓冲区在合理大小
+                    if len(buffer) > 200:
+                        buffer = buffer[-200:]
                 else:
-                    # 在工具调用模式下，继续收集JSON
+                    # 在工具调用模式下，继续收集工具调用相关文本
                     buffer += token
-                    # 更新括号深度计数
-                    brackets_depth += token.count('{') - token.count('}')
                     
-                    # 如果括号平衡，可能完成了一个工具调用
-                    if brackets_depth == 0:
+                    # 如果找到工具调用结束标记
+                    if tool_calls_end_marker in buffer:
                         try:
-                            # 清理buffer，移除markdown代码块标记
-                            cleaned_buffer = buffer.strip()
-                            cleaned_buffer = re.sub(r'```json\s*|\s*```', '', cleaned_buffer)
+                            # 解析调用文本提取工具调用信息
+                            full_tool_call = buffer
                             
-                            # 确定是单个工具调用还是多个工具调用
-                            if cleaned_buffer.startswith('[') and cleaned_buffer.endswith(']'):
-                                # 多个工具调用
-                                tool_data_list = json.loads(cleaned_buffer)
-                                for i, tool_data in enumerate(tool_data_list):
-                                    if "function" in tool_data and "name" in tool_data["function"]:
-                                        tool_call_id = f"call_{uuid4().hex[:24]}"
-                                        tool_calls.append({
-                                            "id": tool_call_id,
-                                            "index": i,
-                                            "type": "function",
-                                            "function": {
-                                                "name": tool_data["function"]["name"],
-                                                "arguments": json.dumps(tool_data["function"].get("arguments", {}))
-                                            }
-                                        })
-                            else:
-                                # 单个工具调用
-                                tool_data = json.loads(cleaned_buffer)
-                                if "function" in tool_data and "name" in tool_data["function"]:
-                                    tool_call_id = f"call_{uuid4().hex[:24]}"
-                                    tool_calls.append({
-                                        "id": tool_call_id,
-                                        "index": 0,
-                                        "type": "function",
-                                        "function": {
-                                            "name": tool_data["function"]["name"],
-                                            "arguments": json.dumps(tool_data["function"].get("arguments", {}))
-                                        }
-                                    })
+                            # 提取函数名称
+                            function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
+                            function_name_end = full_tool_call.find("\n", function_name_start)
+                            function_name = full_tool_call[function_name_start:function_name_end].strip()
                             
-                            # 如果成功解析了工具调用，设置完成原因
-                            if tool_calls:
+                            # 提取JSON参数 - 提取```json和```之间的内容
+                            json_pattern = r'```json\s*(.*?)\s*```'
+                            json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
+                            
+                            if json_match:
+                                arguments_str = json_match.group(1).strip()
+                                # 生成工具调用ID
+                                tool_call_id = f"call_{uuid4().hex[:24]}"
+                                
+                                # 添加到工具调用列表
+                                tool_calls.append({
+                                    "id": tool_call_id,
+                                    "index": 0,
+                                    "type": "function",
+                                    "function": {
+                                        "name": function_name,
+                                        "arguments": arguments_str
+                                    }
+                                })
+                                
+                                # 如果成功解析了工具调用，设置完成原因
                                 finish_reason = "tool_calls"
-                            
-                            # 重置状态
+                                
+                                # 重置状态
+                                tool_call_mode = False
+                                buffer = ""
+                            else:
+                                # JSON提取失败，可能是格式不完整
+                                logger.warning("Failed to extract JSON from tool call")
+                                tool_call_mode = False
+                                buffer = ""
+                        except Exception as e:
+                            logger.error(f"Error processing tool call: {e}")
                             tool_call_mode = False
                             buffer = ""
                             
-                        except json.JSONDecodeError:
-                            # 如果解析失败，继续收集
-                            pass
-        
         # 构建响应
         response = {
             "id": id,
