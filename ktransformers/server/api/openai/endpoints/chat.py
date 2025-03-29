@@ -167,8 +167,11 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                         if brackets_depth == 0:
                             # 尝试解析收集的JSON
                             try:
-                                # 确定是单个工具调用还是多个工具调用
+                                # 清理buffer，移除markdown代码块标记
                                 cleaned_buffer = buffer.strip()
+                                cleaned_buffer = re.sub(r'```json\s*|\s*```', '', cleaned_buffer)
+                                
+                                # 确定是单个工具调用还是多个工具调用
                                 if cleaned_buffer.startswith('[') and cleaned_buffer.endswith(']'):
                                     # 多个工具调用
                                     tool_data_list = json.loads(cleaned_buffer)
@@ -331,8 +334,11 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                     # 如果括号平衡，可能完成了一个工具调用
                     if brackets_depth == 0:
                         try:
-                            # 确定是单个工具调用还是多个工具调用
+                            # 清理buffer，移除markdown代码块标记
                             cleaned_buffer = buffer.strip()
+                            cleaned_buffer = re.sub(r'```json\s*|\s*```', '', cleaned_buffer)
+                            
+                            # 确定是单个工具调用还是多个工具调用
                             if cleaned_buffer.startswith('[') and cleaned_buffer.endswith(']'):
                                 # 多个工具调用
                                 tool_data_list = json.loads(cleaned_buffer)
