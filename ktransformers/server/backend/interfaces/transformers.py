@@ -183,6 +183,7 @@ class TransformersInterface(BackendInterfaceBase):
         #     input_ids = self.tokenizer.apply_chat_template(
         #         new_messages, return_tensors="pt", add_generation_prompt=True
         #     ).to(self.args.device)
+        print(new_messages)
         input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
         print(input_str)
         # drop <think> token in chat template
