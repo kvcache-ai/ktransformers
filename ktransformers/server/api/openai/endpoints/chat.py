@@ -72,7 +72,6 @@ def getTools(buffer):
     extracted_tools = []
     working_buffer = buffer  # 创建工作副本
     
-    logger.info(f"开始提取函数调用，buffer长度: {len(working_buffer)}")
     
     # 循环提取所有函数调用
     while tool_call_begin_marker in working_buffer and tool_call_end_marker in working_buffer:
@@ -81,7 +80,7 @@ def getTools(buffer):
         end_index = working_buffer.find(tool_call_end_marker) + len(tool_call_end_marker)
         
         if start_index == -1 or end_index == -1 or start_index > end_index:
-            logger.warning("无法找到完整的函数调用，结束提取")
+            logger.warning("Not a function")
             break
             
         # 提取完整的函数调用
@@ -114,11 +113,11 @@ def getTools(buffer):
                 }
             })
             
-            logger.info(f"提取函数: {function_name}")
+            logger.info(f"Get Function: {function_name}")
         else:
-            logger.warning(f"无法提取函数参数，函数名: {function_name}")
+            logger.warning(f"Unable to get function，function_name: {function_name}")
     
-    logger.info(f"总共提取了 {len(extracted_tools)} 个函数调用")
+    logger.info(f"Total {len(extracted_tools)} Functions")
     return extracted_tools
 
 @router.post('/chat/completions', tags=['openai'])
