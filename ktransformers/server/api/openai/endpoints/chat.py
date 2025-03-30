@@ -182,7 +182,9 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                         
                                     # 提取完整的函数调用
                                     full_tool_call = buffer[start_index:end_index]
-                                    
+                                    print("--------------------------Debug-------------------------")
+                                    print(full_tool_call)
+                                    print(buffer)
                                     # 从buffer中删除这个函数调用，防止重复处理
                                     buffer = buffer.replace(full_tool_call, "", 1)
                                     
