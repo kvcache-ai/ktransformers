@@ -187,8 +187,9 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                     print("\n\n--------------------------PreBuffer-------------------------")
                                     print(buffer)
                                     # 从buffer中删除这个函数调用，防止重复处理
-                                    buffer = buffer.replace(full_tool_call, "", 1)
                                     print("\n\n--------------------------Delbuffer-------------------------")
+                                    buffer = buffer.replace(full_tool_call, "", 1)
+                                    
                                     # 提取函数名称
                                     function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
                                     function_name_end = full_tool_call.find("\n", function_name_start)
