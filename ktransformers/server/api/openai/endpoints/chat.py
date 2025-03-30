@@ -169,51 +169,31 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                         # 如果找到工具调用结束标记
                         if tool_calls_end_marker in buffer:
                             try:
-                                #logger.info(f"开始处理函数调用，初始buffer长度: {len(buffer)}")
                                 # 解析调用文本提取工具调用信息
                                 full_tool_call = buffer
-                                while tool_calls_end_marker in buffer:
-                                    # 提取当前函数调用的完整内容
-                                    start_index = buffer.find(tool_call_begin_marker)
-                                    end_index = buffer.find(tool_call_end_marker) + len(tool_call_end_marker)
+                                # 提取函数名称
+                                function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
+                                function_name_end = full_tool_call.find("\n", function_name_start)
+                                function_name = full_tool_call[function_name_start:function_name_end].strip()
+                                
+                                # 提取JSON参数 - 提取```json和```之间的内容
+                                json_pattern = r'```json\s*(.*?)\s*```'
+                                json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
+                                
+                                if json_match:
+                                    arguments_str = json_match.group(1).strip()
+                                    # 生成工具调用ID
+                                    tool_call_id = f"call_{uuid4().hex[:24]}"
                                     
-                                    if start_index == -1 or end_index == -1 or start_index > end_index:
-                                        break
-                                        
-                                    # 提取完整的函数调用
-                                    full_tool_call = buffer[start_index:end_index]
-                                    print("\n\n--------------------------Debug-------------------------")
-                                    print(full_tool_call)
-                                    print("\n\n--------------------------PreBuffer-------------------------")
-                                    print(buffer)
-                                    # 从buffer中删除这个函数调用，防止重复处理
-                                    print("\n\n--------------------------Delbuffer-------------------------")
-                                    buffer = buffer.replace(full_tool_call, "", 1)
-                                    
-                                    # 提取函数名称
-                                    function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
-                                    function_name_end = full_tool_call.find("\n", function_name_start)
-                                    function_name = full_tool_call[function_name_start:function_name_end].strip()
-                                    
-                                    # 提取JSON参数 - 提取```json和```之间的内容
-                                    json_pattern = r'```json\s*(.*?)\s*```'
-                                    json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
-                                    
-                                    if json_match:
-                                        arguments_str = json_match.group(1).strip()
-                                        # 生成工具调用ID
-                                        tool_call_id = f"call_{uuid4().hex[:24]}"
-                                        
-                                        # 添加到工具调用列表
-                                        tool_calls.append({
-                                            "id": tool_call_id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": function_name,
-                                                "arguments": arguments_str
-                                            }
-                                        })
-                                        print(tool_calls)
+                                    # 添加到工具调用列表
+                                    tool_calls.append({
+                                        "id": tool_call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": function_name,
+                                            "arguments": arguments_str
+                                        }
+                                    })
                                     
                                     # 重置状态
                                     tool_call_mode = False
