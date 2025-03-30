@@ -63,6 +63,63 @@ router = APIRouter()
 async def list_models():
     return {"data": [{"id": Config().model_name, "name": Config().model_name}], "object": "list"}
 
+def getTools(buffer):
+    tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
+    tool_call_begin_marker = "<｜tool▁call▁begin｜>"
+    tool_sep_marker = "<｜tool▁sep｜>"
+    tool_call_end_marker = "<｜tool▁call▁end｜>"
+    tool_calls_end_marker = "<｜tool▁calls▁end｜>"
+    extracted_tools = []
+    working_buffer = buffer  # 创建工作副本
+    
+    logger.info(f"开始提取函数调用，buffer长度: {len(working_buffer)}")
+    
+    # 循环提取所有函数调用
+    while tool_call_begin_marker in working_buffer and tool_call_end_marker in working_buffer:
+        # 找到一个完整的函数调用
+        start_index = working_buffer.find(tool_call_begin_marker)
+        end_index = working_buffer.find(tool_call_end_marker) + len(tool_call_end_marker)
+        
+        if start_index == -1 or end_index == -1 or start_index > end_index:
+            logger.warning("无法找到完整的函数调用，结束提取")
+            break
+            
+        # 提取完整的函数调用
+        full_tool_call = working_buffer[start_index:end_index]
+        
+        # 从工作buffer中删除这个函数调用，防止重复处理
+        working_buffer = working_buffer.replace(full_tool_call, "", 1)
+        
+        # 提取函数名称
+        function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
+        function_name_end = full_tool_call.find("\n", function_name_start)
+        function_name = full_tool_call[function_name_start:function_name_end].strip()
+        
+        # 提取JSON参数
+        json_pattern = r'```json\s*(.*?)\s*```'
+        json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
+        
+        if json_match:
+            arguments_str = json_match.group(1).strip()
+            # 生成工具调用ID
+            tool_call_id = f"call_{uuid4().hex[:24]}"
+            
+            # 添加到工具调用列表
+            extracted_tools.append({
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "arguments": arguments_str
+                }
+            })
+            
+            logger.info(f"提取函数: {function_name}")
+        else:
+            logger.warning(f"无法提取函数参数，函数名: {function_name}")
+    
+    logger.info(f"总共提取了 {len(extracted_tools)} 个函数调用")
+    return extracted_tools
 
 @router.post('/chat/completions', tags=['openai'])
 async def chat_completion(request: Request, create: ChatCompletionCreate):
@@ -179,22 +236,8 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                 # 提取JSON参数 - 提取```json和```之间的内容
                                 json_pattern = r'```json\s*(.*?)\s*```'
                                 json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
-                                
-                                if json_match:
-                                    arguments_str = json_match.group(1).strip()
-                                    # 生成工具调用ID
-                                    tool_call_id = f"call_{uuid4().hex[:24]}"
-                                    
-                                    # 添加到工具调用列表
-                                    tool_calls.append({
-                                        "id": tool_call_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": function_name,
-                                            "arguments": arguments_str
-                                        }
-                                    })
-                                    
+                                tool_calls = getTools(buffer)
+                                if len(tool_calls):
                                     # 重置状态
                                     tool_call_mode = False
                                     buffer = ""
