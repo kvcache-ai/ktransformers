@@ -84,7 +84,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         tool_instructions += '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json {"参数名": "参数值","参数名2": "参数值2"...}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += '示例: \n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>the_functnion_name_will_be_called\n```json {"arg1": "value1","arg2": "value2"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += "这样可以调用名为\"the_functnion_name_will_be_called\",并将value1和value2传入参数arg1,arg2\n"
-        tool_instructions += "不要尝试解释你在做什么，直接输出工具函数调用即可。确保函数调用语句格式正确且完整。注意，你可以根据需要调用多个函数"
+        tool_instructions += "不要尝试解释你在做什么，直接输出工具函数调用即可。确保函数调用语句格式正确且完整。注意，你每次只能一次调用一个函数"
         
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
     
@@ -110,7 +110,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             full_content = ""
             buffer = ""  # 用于临时存储当前文本块
             tool_call_mode = False  # 标记是否正在处理工具调用
-            all_tool_calls = []  # 存储所有检测到的工具调用
+            tool_calls = []  # 存储所有检测到的工具调用
             
             # 自定义模型特殊标记
             tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
@@ -187,7 +187,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                     tool_call_id = f"call_{uuid4().hex[:24]}"
                                     
                                     # 添加到工具调用列表
-                                    all_tool_calls.append({
+                                    tool_calls.append({
                                         "id": tool_call_id,
                                         "type": "function",
                                         "function": {
@@ -196,9 +196,55 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                         }
                                     })
                                     
-                                    # 重置状态，准备处理下一个可能的工具调用
+                                    # 重置状态
                                     tool_call_mode = False
                                     buffer = ""
+                                    
+                                    # 发送工具调用事件
+                                    for idx, tool_call in enumerate(tool_calls):
+                                        # 首条工具调用消息
+                                        chunk.choices = [{
+                                            "index": 0,
+                                            "delta": {
+                                                "role": "assistant",
+                                                "content": None,
+                                                "tool_calls": [{
+                                                    "index": idx,
+                                                    "id": tool_call["id"],
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": tool_call["function"]["name"],
+                                                        "arguments": ""
+                                                    }
+                                                }]
+                                            },
+                                            "finish_reason": None
+                                        }]
+                                        yield chunk
+                                        
+                                        # 发送参数
+                                        chunk.choices = [{
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [{
+                                                    "index": idx,
+                                                    "function": {"arguments": tool_call["function"]["arguments"]}
+                                                }]
+                                            },
+                                            "finish_reason": None
+                                        }]
+                                        yield chunk
+                                    
+                                    # 发送完成消息
+                                    chunk.choices = [{
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "tool_calls"
+                                    }]
+                                    yield chunk
+                                    
+                                    # 返回后，不继续处理
+                                    return
                                 else:
                                     # JSON提取失败，可能是格式不完整
                                     logger.warning("Failed to extract JSON from tool call")
@@ -233,61 +279,9 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                 }]
                                 yield chunk
             
-            # 如果收集了工具调用，发送它们
-            if all_tool_calls:
-                # 首先发送工具调用的角色
-                chunk.choices = [{
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": None
-                    },
-                    "finish_reason": None
-                }]
-                yield chunk
-                
-                # 然后发送每个工具调用
-                for idx, tool_call in enumerate(all_tool_calls):
-                    # 发送工具调用ID和名称
-                    chunk.choices = [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": idx,
-                                "id": tool_call["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": tool_call["function"]["name"],
-                                    "arguments": ""
-                                }
-                            }]
-                        },
-                        "finish_reason": None
-                    }]
-                    yield chunk
-                    
-                    # 发送参数
-                    chunk.choices = [{
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [{
-                                "index": idx,
-                                "function": {"arguments": tool_call["function"]["arguments"]}
-                            }]
-                        },
-                        "finish_reason": None
-                    }]
-                    yield chunk
-                
-                # 发送完成消息
-                chunk.choices = [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "tool_calls"
-                }]
-                yield chunk
-            # 如果我们已经到了这里而没有工具调用或文本内容，发送常规完成消息
-            elif not tool_call_mode:
+            # 如果我们已经到了这里而没有返回，说明没有检测到完整的工具调用
+            # 发送常规完成消息
+            if not tool_call_mode:
                 chunk.choices = [{
                     "index": 0, 
                     "delta": {}, 
@@ -300,7 +294,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         # 非流式响应处理
         full_content = ""
         finish_reason = None
-        tool_calls = []  # 存储所有工具调用
+        tool_calls = []
         buffer = ""
         tool_call_mode = False
         
@@ -368,6 +362,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                 # 添加到工具调用列表
                                 tool_calls.append({
                                     "id": tool_call_id,
+                                    "index": 0,
                                     "type": "function",
                                     "function": {
                                         "name": function_name,
@@ -375,10 +370,10 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                     }
                                 })
                                 
-                                # 如果收集了工具调用，设置完成原因
+                                # 如果成功解析了工具调用，设置完成原因
                                 finish_reason = "tool_calls"
                                 
-                                # 重置状态，准备处理下一个可能的工具调用
+                                # 重置状态
                                 tool_call_mode = False
                                 buffer = ""
                             else:
@@ -390,7 +385,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             logger.error(f"Error processing tool call: {e}")
                             tool_call_mode = False
                             buffer = ""
-                    
+                            
         # 构建响应
         response = {
             "id": id,
