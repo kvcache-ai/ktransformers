@@ -171,7 +171,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             try:
                                 # 解析调用文本提取工具调用信息
                                 full_tool_call = buffer
-                                
+                                print(buffer)
                                 # 提取函数名称
                                 function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
                                 function_name_end = full_tool_call.find("\n", function_name_start)
