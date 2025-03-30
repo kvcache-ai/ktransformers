@@ -227,15 +227,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                         if tool_calls_end_marker in buffer:
                             try:
                                 # 解析调用文本提取工具调用信息
-                                full_tool_call = buffer
-                                # 提取函数名称
-                                function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
-                                function_name_end = full_tool_call.find("\n", function_name_start)
-                                function_name = full_tool_call[function_name_start:function_name_end].strip()
                                 
-                                # 提取JSON参数 - 提取```json和```之间的内容
-                                json_pattern = r'```json\s*(.*?)\s*```'
-                                json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
                                 tool_calls = getTools(buffer)
                                 if len(tool_calls):
                                     # 重置状态
