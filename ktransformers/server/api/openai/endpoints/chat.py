@@ -140,7 +140,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         tool_instructions += '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>name\n```json {"参数名": "参数值","参数名2": "参数值2"...}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += '示例: \n<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>the_functnion_name_will_be_called\n```json {"arg1": "value1","arg2": "value2"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n'
         tool_instructions += "这样可以调用名为\"the_functnion_name_will_be_called\",并将value1和value2传入参数arg1,arg2\n"
-        tool_instructions += "不要尝试解释你在做什么，直接输出工具函数调用即可。确保函数调用语句格式正确且完整。注意，你每次回复中只能一次调用一个函数，如果需要调用多个函数则需要等之前的函数调用完成返回结果之后再调用下一个函数"
+        tool_instructions += "不要尝试解释你在做什么，直接输出工具函数调用即可。确保函数调用语句格式正确且完整。"
         
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
     
