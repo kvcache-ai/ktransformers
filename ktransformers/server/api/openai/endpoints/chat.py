@@ -210,11 +210,6 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                             }
                                         })
                                         print(tool_calls)
-                                        # 设置完成原因为工具调用
-                                        finish_reason = "tool_calls"
-                                    else:
-                                        # JSON提取失败，继续处理其他函数调用
-                                        logger.warning("Failed to extract JSON from tool call")
                                     
                                     # 重置状态
                                     tool_call_mode = False
