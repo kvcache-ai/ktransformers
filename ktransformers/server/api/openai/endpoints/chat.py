@@ -209,7 +209,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                                 "arguments": arguments_str
                                             }
                                         })
-                                        
+                                        print(tool_calls)
                                         # 设置完成原因为工具调用
                                         finish_reason = "tool_calls"
                                     else:
