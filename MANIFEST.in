@@ -1,6 +1,7 @@
 graft third_party
 graft ktransformers
 graft local_chat.py
+graft csrc
 include LICENSE README.md
 prune ktransformers/website
 prune ktransformers/logs
@@ -9,3 +10,4 @@ prune third_party/llama.cpp/models
 graft ktransformers/website/dist
 global-exclude __pycache__
 include KTransformersOps.*.so
+include cpuinfer_ext.*.so

@@ -2,7 +2,7 @@ from typing import List, Optional
 from typing_extensions import Literal
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ktransformers.server.schemas.base import Object
 
@@ -30,8 +30,8 @@ class ChatCompletionCreate(BaseModel):
     messages: List[Message]
     model : str
     stream : bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[float] = Field(default=1.0)
+    top_p: Optional[float] = Field(default=1.0)
     
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
