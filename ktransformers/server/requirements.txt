@@ -1,4 +1,4 @@
-torch >= 2.3.0,<=2.3.1
+torch >= 2.3.0
 transformers == 4.43.2
 fastapi >= 0.111.0
 langchain >= 0.2.0
@@ -12,3 +12,5 @@ ninja
 wheel
 colorlog
 fire
+zmq
+psutil

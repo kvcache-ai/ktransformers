@@ -211,11 +211,11 @@ class KTransformersInterface(TransformersInterface):
 
         chunk_start = 0
         while chunk_start < input_ids_length:
-            chunk_end = min(chunk_start + self.args.chunk_prefill_size, input_ids_length)
+            chunk_end = min(chunk_start + self.args.chunk_size, input_ids_length)
             if self.cache != None:
                 self.cache.cur_idx=cache_position[chunk_start:chunk_end]
             logits = chunk_prefill(input_ids[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end])
-            chunk_start += self.args.chunk_prefill_size
+            chunk_start += self.args.chunk_size
             
         if flashinfer_enabled:
             MLAWrapperSingleton.reset_buffer()

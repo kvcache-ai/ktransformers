@@ -9,6 +9,7 @@
  **/
 // Python bindings
 #include "cpu_backend/cpuinfer.h"
+#include "device_launch_parameters.h"
 #include "llamafile/flags.h"
 #include "operators/kvcache/kvcache.h"
 #include "operators/llamafile/linear.h"
@@ -535,16 +536,17 @@ class MOEBindings {
             const float *weights;
             const void *input;
             void *output;
+            int *batch_size_tensor;
         };
         static void inner(void *args) {
             Args *args_ = (Args *)args;
             args_->cpuinfer->enqueue(
                 &MOE::forward, args_->moe, args_->qlen, args_->k,
-                args_->expert_ids, args_->weights, args_->input, args_->output);
+                args_->expert_ids, args_->weights, args_->input, args_->output, args_->batch_size_tensor);
         }
         static std::pair<intptr_t, intptr_t>
         cpuinfer_interface(MOE &moe, int qlen, int k, intptr_t expert_ids,
-                           intptr_t weights, intptr_t input, intptr_t output) {
+                           intptr_t weights, intptr_t input, intptr_t output, intptr_t batch_size_tensor) {
             Args *args = new Args{nullptr,
                                   &moe,
                                   qlen,
@@ -552,7 +554,8 @@ class MOEBindings {
                                   (const uint64_t *)expert_ids,
                                   (const float *)weights,
                                   (const void *)input,
-                                  (void *)output};
+                                  (void *)output,
+                                  (int *)batch_size_tensor};
             return std::make_pair((intptr_t)&inner, (intptr_t)args);
         }
     };
