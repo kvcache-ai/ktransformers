@@ -128,6 +128,9 @@ class MLAWrapper():
         if kv_indices is None:
             assert self.max_batch_size == 1
             kv_indices = self.kv_indices_buf
+        if bsz_tensor is None:
+            assert self.max_batch_size == 1
+            bsz_tensor = self.batch_size_tensor_buf
         
         self.wrapper.plan(
             qo_indptr,
@@ -166,6 +169,7 @@ class MLAWrapperSingleton():
              kv_indptr,
              kv_indices,
              kv_len_arr,
+             bsz_tensor,
              num_heads,
              head_dim_ckv,
              head_dim_kpe,
@@ -179,6 +183,7 @@ class MLAWrapperSingleton():
                 kv_indptr,
                 kv_indices,
                 kv_len_arr_cur_device,
+                bsz_tensor,
                 num_heads,
                 head_dim_ckv,
                 head_dim_kpe,
