@@ -75,7 +75,7 @@ class Config(metaclass=Singleton):
         # db configs
         self.db_configs: dict = cfg.get("db", {})
         self.db_type = self.db_configs.get("type", "")
-        self.db_host = Config.to_path(self.db_configs.get("host", ""))
+        self.db_host = self.localstore_path
         self.db_port = self.db_configs.get("port", "")
         self.db_name = self.db_configs.get("database", "")
         self.db_pool_size = self.db_configs.get("pool_size")
