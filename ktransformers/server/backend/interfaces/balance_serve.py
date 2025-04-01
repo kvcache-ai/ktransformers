@@ -368,6 +368,8 @@ class BalanceServeInterface(BackendInterfaceBase):
         stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>")]
         query_add.stop_criteria = stop_criteria
         query_add.sample_options.temperature = temperature
+        if top_p == 0:
+            top_p = 0.0001
         query_add.sample_options.top_p = top_p
         query_add.estimated_length = min(self.args.cache_lens, query_length+self.args.max_new_tokens)
         query_id = self.sched_client.add_query(query_add)

@@ -208,6 +208,8 @@ class TransformersInterface(BackendInterfaceBase):
             temperature = self.model.generation_config.temperature
         if top_p is None:
             top_p = self.model.generation_config.top_p
+        if top_p == 0:
+            top_p = 0.0001
         generation_config, model_kwargs = self.model._prepare_generation_config(
             None, max_length=self.args.max_new_tokens,
             do_sample=True, 
