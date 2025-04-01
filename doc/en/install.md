@@ -2,11 +2,12 @@
 
 # How to Run DeepSeek-R1
 
-- [Preparation](#preparation)
-- [Installation](#installation)
-  - [Attention](#attention)
-  - [Supported models include:](#supported-models-include)
-  - [Support quantize format:](#support-quantize-format)
+- [How to Run DeepSeek-R1](#how-to-run-deepseek-r1)
+  - [Preparation](#preparation)
+  - [Installation](#installation)
+    - [Attention](#attention)
+    - [Supported models include](#supported-models-include)
+    - [Support quantize format](#support-quantize-format)
 
 In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:
 
@@ -87,7 +88,7 @@ sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev l
    for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
 
 
-* Download source code and compile:
+Download source code and compile:
 
   - init source code
 
@@ -122,7 +123,7 @@ sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev l
       ```shell
       sudo env USE_BALANCE_SERVE=1 USE_NUMA=1 PYTHONPATH="\$(which python)" PATH="\$(dirname \$(which python)):\$PATH" bash ./install.sh
       ```
-  - For Windows
+  - For Windows (Windows native temprarily deprecated, please try WSL)
 
     ```shell
     install.bat
@@ -183,7 +184,7 @@ It features the following arguments:
 <details>
 <summary>Supported Models/quantization</summary>
 
-### Supported models include:
+### Supported models include
 
 
 | ✅**Supported Models** | ❌**Deprecated Models**    |
@@ -197,12 +198,14 @@ It features the following arguments:
 | Mixtral-8x7B           |                            |
 | Mixtral-8x22B          |                            |
 
-### Support quantize format:
+### Support quantize format
 
 
 | ✅**Supported Formats** | ❌**Deprecated Formats** |
 | ----------------------- | ------------------------ |
-| Q2_K_L                  | ~~IQ2_XXS~~              |
+| IQ1_S                   | ~~IQ2_XXS~~              |
+| IQ2_XXS                 |                          |
+| Q2_K_L                  |                          |
 | Q2_K_XS                 |                          |
 | Q3_K_M                  |                          |
 | Q4_K_M                  |                          |
