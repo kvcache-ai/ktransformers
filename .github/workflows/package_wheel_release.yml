@@ -163,6 +163,8 @@ jobs:
 
       - name: build for cuda
         if: matrix.cuda != ''
+        env:
+          BALANCE_SERVE: "1"
         run: |
           git submodule init
           git submodule update
