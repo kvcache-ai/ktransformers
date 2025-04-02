@@ -40,7 +40,11 @@ release: bump version v0.2.4 by @Atream @Azure-Tang @ErvinXie  @qiyuxinlin @ovow
 
 
 ## Installation Guide
+⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
 
+⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
+
+⚠️ Please note that installing this project will replace flashinfer in your environment. It is strongly recommended to create a new conda environment!!!
 ### 1. Set Up Conda Environment
 
 We recommend using Miniconda3/Anaconda3 for environment management:
