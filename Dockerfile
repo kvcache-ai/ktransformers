@@ -1,9 +1,5 @@
 FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn9-devel as compile_server
 
-# 设置代理
-ENV http_proxy=http://127.0.0.1:20181
-ENV https_proxy=http://127.0.0.1:20181
-ENV all_proxy=http://127.0.0.1:20181
 
 ARG CPU_INSTRUCT=NATIVE
 
@@ -38,7 +34,6 @@ RUN rm -rf /var/lib/apt/lists/*
 
 # 进入项目目录
 WORKDIR /workspace/ktransformers
-RUN git checkout work-concurrent
 # 初始化子模块
 RUN git submodule update --init --recursive
 
