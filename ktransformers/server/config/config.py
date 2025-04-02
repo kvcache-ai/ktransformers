@@ -11,6 +11,7 @@ LastEditTime : 2024-08-12 06:31:14
 import os
 import shutil
 import yaml
+import psutil
 
 from ktransformers.server.config.singleton import Singleton
 from typing import Optional
@@ -60,7 +61,7 @@ class Config(metaclass=Singleton):
         self.user_path: str = os.path.expanduser("~")
         self.localstore_path: str = os.path.join(self.user_path, ".ktransformers")
         # log configs
-        self.log_dir = os.path.join(self.base_path, Config.to_path(cfg["log"]["dir"]))
+        self.log_dir = os.path.join(self.localstore_path, cfg["log"]["dir"])
         self.log_file = cfg["log"]["file"]
         self.log_level = cfg["log"]["level"]
         self.backup_count = cfg["log"]["backup_count"]
@@ -74,7 +75,7 @@ class Config(metaclass=Singleton):
         # db configs
         self.db_configs: dict = cfg.get("db", {})
         self.db_type = self.db_configs.get("type", "")
-        self.db_host = os.path.join(self.base_path, self.db_configs.get("host", ""))
+        self.db_host = self.localstore_path
         self.db_port = self.db_configs.get("port", "")
         self.db_name = self.db_configs.get("database", "")
         self.db_pool_size = self.db_configs.get("pool_size")
@@ -101,11 +102,6 @@ class Config(metaclass=Singleton):
         self.optimize_config_path: Optional[str] = self.model.get(
             "optimize_config_path", None
         )
-        self.paged = self.model.get("paged", True)
-
-        self.total_context = self.model.get("total_context", 2**18)
-        self.max_batch_size = self.model.get("max_batch_size", 20 if self.paged else 1)
-        self.chunk_prefill_size = self.model.get("chunk_prefill_size", 8192)
         
         self.max_new_tokens = self.model.get("max_new_tokens", 2000)
         self.json_mode = self.model.get("json_mode", False)
@@ -138,7 +134,6 @@ class Config(metaclass=Singleton):
         self.repetition_penalty = self.model.get("repetition_penalty", 1.01)
         self.frequency_penalty = self.model.get("frequency_penalty", 0.0)
         self.presence_penalty = self.model.get("presence_penalty", 0.0)
-        self.max_response_tokens = self.model.get("max_response_tokens", 300)
         self.response_chunk = self.model.get("response_chunk", 250)
         self.no_code_formatting = self.model.get("no_code_formatting", False)
         self.cache_8bit = self.model.get("cache_8bit", False)
@@ -155,8 +150,9 @@ class Config(metaclass=Singleton):
         self.web_cross_domain: bool = self.web.get("open_cross_domain", True)
         self.mount_web: bool = self.web.get("mount", False)
 
+        # ext
         self.ext: dict = cfg.get("ext", {})
-        self.cpu_infer = self.ext.get("cpu_infer", 10)
+        self.cpu_infer = psutil.cpu_count(logical=False) - 3
 
         # file config
         self.local_store_configs: dict = cfg.get("local_store", {})
@@ -169,7 +165,6 @@ class Config(metaclass=Singleton):
 
         # long context config
         self.long_context_config: dict = cfg.get("long_context", {})
-        self.chunk_size = self.long_context_config.get("chunk_size", 4096)
         self.max_seq_len = self.long_context_config.get("max_seq_len", 32000)
         self.block_size = self.long_context_config.get("block_size", 128)
         self.local_windows_len = self.long_context_config.get("local_windows_len", 4096)
@@ -187,3 +182,21 @@ class Config(metaclass=Singleton):
         # local chat
         self.local_chat_config: dict = cfg.get("local_chat", {})
         self.prompt_file = self.local_chat_config.get("prompt_file", None)
+
+        # asyncserver
+        self.sched_strategy = cfg['async_server']['sched_strategy']
+        self.sched_port = cfg['async_server']['sched_port']
+        self.sched_metrics_port = cfg['async_server']['sched_metrics_port']
+        self.kvc2_metrics_port = cfg['async_server']['kvc2_metrics_port']
+        self.max_batch_size = cfg['async_server']['max_batch_size']
+        self.page_size = cfg['attn']['page_size']
+        self.chunk_size = cfg['attn']['chunk_size']
+        self.memory_gpu_only = cfg['kvc2']['gpu_only']
+        self.cache_lens = ((self.cache_lens + self.page_size - 1) // self.page_size) * self.page_size
+        self.gpu_memory_size = 2*576*61*self.cache_lens
+        self.utilization_percentage = 1.0 #cfg['kvc2']['utilization_percentage']
+        self.cpu_memory_size_GB = cfg['kvc2']['cpu_memory_size_GB']
+        # only support 2 prefill task
+        self.max_prefill_batch_size = 2
+        self.max_decode_batch_size = self.max_batch_size - self.max_prefill_batch_size 
+

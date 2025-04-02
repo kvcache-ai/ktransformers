@@ -21,7 +21,8 @@ user:
 
 model:
   # type: transformers
-  type: ktransformers
+  type: balance_serve
+  # type: ktransformers
 
   name: DeepSeek-Coder-V2-Instruct
   path: deepseek-ai/DeepSeek-V2-Lite-Chat
@@ -29,7 +30,7 @@ model:
 
   device: cuda:0
   cache_lens: 8192
-
+  max_new_tokens: 500
 web:
   mount: False
   open_cross_domain: True
@@ -38,7 +39,6 @@ ext:
   cpu_infer: 10
 
 long_context:
-  chunk_size: 4096
   max_seq_len: 32000
   block_size: 128
   local_windows_len: 4096
@@ -55,3 +55,18 @@ long_context:
 
 local_chat:
   prompt_file: ""
+
+async_server:
+  sched_strategy: "FCFS"
+  sched_port: 56441
+  sched_metrics_port: 54321
+  kvc2_metrics_port: 54391
+  max_batch_size: 4  # decode count + prefill count, in one mini batch
+
+attn:
+  page_size: 256
+  chunk_size: 256
+kvc2:
+  gpu_only: true 
+  utilization_percentage: 1.0
+  cpu_memory_size_GB: 500
