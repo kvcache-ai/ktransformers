@@ -31,10 +31,11 @@
         <!-- Custom theme stylesheets -->
 
 
-        <!-- Provide site root to javascript -->
+        <!-- Provide site root and default themes to javascript -->
         <script>
-            var path_to_root = "../";
-            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc.js"></script>
@@ -44,8 +45,8 @@
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
-                var theme = localStorage.getItem('mdbook-theme');
-                var sidebar = localStorage.getItem('mdbook-sidebar');
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
 
                 if (theme.startsWith('"') && theme.endsWith('"')) {
                     localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
@@ -59,7 +60,8 @@
 
         <!-- Set the theme before any content is loaded, prevents flash -->
         <script>
-            var theme;
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
@@ -72,8 +74,8 @@
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
-            var sidebar = null;
-            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
@@ -109,6 +111,7 @@
                             <i class="fa fa-paint-brush"></i>
                         </button>
                         <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
@@ -298,8 +301,8 @@ Integrated the highly efficient Triton MLA Kernel from the fantastic sglang proj
 <tr><td>Prefill token/s</td><td>13</td><td>105</td><td>102</td><td>88</td><td>CUDA OOM</td></tr>
 <tr><td>decode token/s</td><td>16.8</td><td>15.4</td><td>14.2</td><td>13.0</td><td>CUDA OOM</td></tr>
 <tr><td><strong>6 experts V0.2.1</strong></td><td></td><td></td><td></td><td></td><td></td></tr>
-<tr><td>Prefill token/s</td><td>13</td><td>111</td><td>112.5</td><td>102 <strong>(1.16x speedup)</strong></td><td>101</td></tr>
-<tr><td>decode token/s</td><td>16.8</td><td>15.9</td><td>15.4</td><td>14.9 <strong>(1.15x speedup)</strong></td><td>13.9</td></tr>
+<tr><td>Prefill token/s</td><td>13</td><td>111</td><td>112.5</td><td>102**(1.16x speedup)**</td><td>101</td></tr>
+<tr><td>decode token/s</td><td>16.8</td><td>15.9</td><td>15.4</td><td>14.9**(1.15x speedup)**</td><td>13.9</td></tr>
 <tr><td><strong>8 experts V0.2.1</strong></td><td></td><td></td><td></td><td></td><td></td></tr>
 <tr><td>Prefill token/s</td><td>12.2</td><td>88.2</td><td>88.5</td><td>81.9</td><td>80</td></tr>
 <tr><td>Decode token/s</td><td>13.4</td><td>13.5</td><td>13.4</td><td>13.2</td><td>12.4</td></tr>
@@ -355,6 +358,17 @@ when we slightly decrease the activation experts num in inference,
 the output quality doesn't change. But the speed of decoding and prefill
 is speed up which is inspiring. So our showcase makes use of this finding</em></p>
 <h2 id="how-to-run"><a class="header" href="#how-to-run">How to Run</a></h2>
+<h3 id="v024"><a class="header" href="#v024">v0.2.4</a></h3>
+<p>We provide a server script, which supports multi-concurrency functionality in version v0.2.4.</p>
+<pre><code>python ktransformers/server/main.py --model_path /mnt/data/models/DeepSeek-V3 --gguf_path /mnt/data/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M/ --cpu_infer 62 --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
+</code></pre>
+<p>It features the following arguments:</p>
+<ul>
+<li><code>--chunk_size</code>: Maximum number of tokens processed in a single run by the engine.</li>
+<li><code>--cache_lens</code>: Total length of kvcache allocated by the scheduler. All requests share a kvcache space corresponding to 32768 tokens, and the space occupied will be released after the requests are completed.</li>
+<li><code>--backend_type</code>: <code>balance_serve</code> is a multi-concurrency backend engine introduced in version v0.2.4. The original single-concurrency engine is <code>ktransformers</code>.</li>
+<li><code>--max_batch_size</code>: Maximum number of requests (prefill + decode) processed in a single run by the engine. (Supported only by <code>balance_serve</code>)</li>
+</ul>
 <h3 id="v022--v023-longer-context--fp8-kernel"><a class="header" href="#v022--v023-longer-context--fp8-kernel">v0.2.2 &amp; v0.2.3 longer context &amp; FP8 kernel</a></h3>
 <h4 id="longer-context"><a class="header" href="#longer-context">longer context</a></h4>
 <p>To use this feature, <a href="https://github.com/flashinfer-ai/flashinfer">install flashinfer</a> first.</p>
@@ -369,7 +383,7 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
       prefill_device: "cuda"
       absorb_for_prefill: True # change this to True to enable long context(prefill may slower).
 </code></pre>
-<p>If the VRAM is still insufficient, try reducing the <code>chunk_prefill_size</code> parameter (default is 8192) to further decrease the intermediate results during chunk prefill.</p>
+<p>If the VRAM is still insufficient, try reducing the <code>chunk_size</code> parameter (default is 8192) to further decrease the intermediate results during chunk prefill.</p>
 <h4 id="fp8-kernel"><a class="header" href="#fp8-kernel">FP8 kernel</a></h4>
 <p>The DeepSeek-AI team provides FP8 safetensors for DeepSeek-R1/V3 models. We achieve performance optimization through the following works:</p>
 <ul>
@@ -389,7 +403,7 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <pre><code class="language-shell">numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path &lt;your model path&gt; --gguf_path &lt;your gguf path&gt;  --prompt_file &lt;your prompt txt file&gt;  --cpu_infer 33 --max_new_tokens 1000
 &lt;when you see chat, then press enter to load the text prompt_file&gt;
 </code></pre>
-<p><code>&lt;your model path&gt;</code> can be local or set from online hugging face like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
+<p><code>&lt;your model path&gt;</code> can be local or set from online huggingface like deepseek-ai/DeepSeek-V3. If online encounters connection problem, try use mirror (hf-mirror.com) <br>
 <code>&lt;your gguf path&gt;</code> can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
 <code>--max_new_tokens 1000</code> is the max output token length. If you find the answer is truncated, you
 can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).</p>

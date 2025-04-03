@@ -31,10 +31,11 @@
         <!-- Custom theme stylesheets -->
 
 
-        <!-- Provide site root to javascript -->
+        <!-- Provide site root and default themes to javascript -->
         <script>
-            var path_to_root = "../";
-            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc.js"></script>
@@ -44,8 +45,8 @@
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
-                var theme = localStorage.getItem('mdbook-theme');
-                var sidebar = localStorage.getItem('mdbook-sidebar');
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
 
                 if (theme.startsWith('"') && theme.endsWith('"')) {
                     localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
@@ -59,7 +60,8 @@
 
         <!-- Set the theme before any content is loaded, prevents flash -->
         <script>
-            var theme;
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
@@ -72,8 +74,8 @@
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
-            var sidebar = null;
-            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
@@ -109,6 +111,7 @@
                             <i class="fa fa-paint-brush"></i>
                         </button>
                         <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
@@ -161,12 +164,16 @@
                         <!-- omit in toc -->
 <h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
 <ul>
+<li><a href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a>
+<ul>
 <li><a href="#preparation">Preparation</a></li>
 <li><a href="#installation">Installation</a>
 <ul>
 <li><a href="#attention">Attention</a></li>
-<li><a href="#supported-models-include">Supported models include:</a></li>
-<li><a href="#support-quantize-format">Support quantize format:</a></li>
+<li><a href="#supported-models-include">Supported models include</a></li>
+<li><a href="#support-quantize-format">Support quantize format</a></li>
+</ul>
+</li>
 </ul>
 </li>
 </ul>
@@ -200,8 +207,8 @@ fi
 </li>
 <li>
 <p>Linux-x86_64 with gcc, g++ and cmake (using Ubuntu as an example)</p>
-<pre><code class="language-sh">sudo apt-get update
-sudo apt-get install build-essential cmake ninja-build
+<pre><code class="language-sh">sudo apt-get update 
+sudo apt-get install build-essential cmake ninja-build patchelf
 </code></pre>
 </li>
 <li>
@@ -227,6 +234,9 @@ pip3 install packaging ninja cpufeature numpy
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <h3 id="attention"><a class="header" href="#attention">Attention</a></h3>
 <p>If you want to use numa support, not only do you need to set USE_NUMA=1, but you also need to make sure you have installed the libnuma-dev (<code>sudo apt-get install libnuma-dev</code> may help you).</p>
+<p>[Optional] If you want to use the multi-concurrent version, please install the following dependencies.</p>
+<pre><code>sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev libgflags-dev zlib1g-dev libfmt-dev
+</code></pre>
 <!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
    
    >We are working on the latest docker image, please wait for a while.
@@ -239,16 +249,13 @@ pip3 install packaging ninja cpufeature numpy
    ```
    
    for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
-<ul>
-<li>
 <p>Download source code and compile:</p>
 <ul>
 <li>
 <p>init source code</p>
 <pre><code class="language-sh">git clone https://github.com/kvcache-ai/ktransformers.git
 cd ktransformers
-git submodule init
-git submodule update
+git submodule update --init --recursive
 </code></pre>
 </li>
 <li>
@@ -264,24 +271,32 @@ git submodule update
 </li>
 <li>
 <p>For those who have two cpu and 1T RAM:</p>
-<pre><code class="language-shell"> # Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
+<pre><code class="language-shell"># Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
  apt install libnuma-dev
  export USE_NUMA=1
  bash install.sh # or #make dev_install
 </code></pre>
 </li>
-</ul>
+<li>
+<p>For Multi-concurrency with 500G RAM:</p>
+<pre><code class="language-shell">USE_BALANCE_SERVE=1 bash ./install.sh
+</code></pre>
 </li>
 <li>
-<p>For Windows</p>
-<pre><code class="language-shell">install.bat
+<p>For Multi-concurrency with two cpu and 1T RAM:</p>
+<pre><code class="language-shell">USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
 </code></pre>
 </li>
 </ul>
 </li>
 <li>
-<p>If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is <a href="./makefile_usage.html">here</a></p>
+<p>For Windows (Windows native temprarily deprecated, please try WSL)</p>
+<pre><code class="language-shell">install.bat
+</code></pre>
 </li>
+</ul>
+<ul>
+<li>If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is <a href="./makefile_usage.html">here</a></li>
 </ul>
 <h3 id="local-chat"><a class="header" href="#local-chat">Local Chat</a></h3>
 We provide a simple command-line local chat Python script that you can run for testing.
@@ -329,10 +344,21 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 <p><code>--cpu_infer</code>: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).</p>
 </li>
 </ul>
+<h3 id="start-server"><a class="header" href="#start-server">Start Server</a></h3>
+We provide a server script, which supports multi-concurrency functionality in version v0.2.4.
+<pre><code>python ktransformers/server/main.py --model_path /mnt/data/models/DeepSeek-V3 --gguf_path /mnt/data/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M/ --cpu_infer 62 --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
+</code></pre>
+<p>It features the following arguments:</p>
+<ul>
+<li><code>--chunk_size</code>: Maximum number of tokens processed in a single run by the engine.</li>
+<li><code>--cache_lens</code>: Total length of kvcache allocated by the scheduler. All requests share a kvcache space corresponding to 32768 tokens, and the space occupied will be released after the requests are completed.</li>
+<li><code>--backend_type</code>: <code>balance_serve</code> is a multi-concurrency backend engine introduced in version v0.2.4. The original single-concurrency engine is <code>ktransformers</code>.</li>
+<li><code>--max_batch_size</code>: Maximum number of requests (prefill + decode) processed in a single run by the engine. (Supported only by <code>balance_serve</code>)</li>
+</ul>
 <details>
 <summary>Supported Models/quantization</summary>
-<h3 id="supported-models-include"><a class="header" href="#supported-models-include">Supported models include:</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Models</strong></th><th>❌ <strong>Deprecated Models</strong></th></tr></thead><tbody>
+<h3 id="supported-models-include"><a class="header" href="#supported-models-include">Supported models include</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅<strong>Supported Models</strong></th><th>❌<strong>Deprecated Models</strong></th></tr></thead><tbody>
 <tr><td>DeepSeek-R1</td><td><del>InternLM2.5-7B-Chat-1M</del></td></tr>
 <tr><td>DeepSeek-V3</td><td></td></tr>
 <tr><td>DeepSeek-V2</td><td></td></tr>
@@ -343,9 +369,11 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 <tr><td>Mixtral-8x22B</td><td></td></tr>
 </tbody></table>
 </div>
-<h3 id="support-quantize-format"><a class="header" href="#support-quantize-format">Support quantize format:</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>✅ <strong>Supported Formats</strong></th><th>❌ <strong>Deprecated Formats</strong></th></tr></thead><tbody>
-<tr><td>Q2_K_L</td><td><del>IQ2_XXS</del></td></tr>
+<h3 id="support-quantize-format"><a class="header" href="#support-quantize-format">Support quantize format</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>✅<strong>Supported Formats</strong></th><th>❌<strong>Deprecated Formats</strong></th></tr></thead><tbody>
+<tr><td>IQ1_S</td><td><del>IQ2_XXS</del></td></tr>
+<tr><td>IQ2_XXS</td><td></td></tr>
+<tr><td>Q2_K_L</td><td></td></tr>
 <tr><td>Q2_K_XS</td><td></td></tr>
 <tr><td>Q3_K_M</td><td></td></tr>
 <tr><td>Q4_K_M</td><td></td></tr>
@@ -422,7 +450,7 @@ python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-062
 </tbody></table>
 </div></details>
 <!-- pin block for jump -->
-<span id='id_666'> 
+<span id='id_666'>
 <h3 id="restful-api-and-web-ui"><a class="header" href="#restful-api-and-web-ui">RESTful API and Web UI  </a></h3>
 <p>Start without website:</p>
 <pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
