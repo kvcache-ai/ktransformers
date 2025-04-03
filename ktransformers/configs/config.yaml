@@ -21,8 +21,8 @@ user:
 
 model:
   # type: transformers
-  type: balance_serve
-  # type: ktransformers
+  # type: balance_serve
+  type: ktransformers
 
   name: DeepSeek-Coder-V2-Instruct
   path: deepseek-ai/DeepSeek-V2-Lite-Chat
