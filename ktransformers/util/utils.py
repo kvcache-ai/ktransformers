@@ -254,7 +254,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         start_time = time.time()
         for i in range(1, max_new_tokens):
             if use_flashinfer_mla:
-                MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,
+                MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,None,
                                              num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
                                              model.model.layers[0].self_attn.softmax_scale, torch.bfloat16, torch.bfloat16)
             global warm_uped
