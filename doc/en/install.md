@@ -87,47 +87,47 @@ sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev l
    
    for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
 
-
 Download source code and compile:
 
-  - init source code
+- init source code
 
-    ```sh
-    git clone https://github.com/kvcache-ai/ktransformers.git
-    cd ktransformers
-    git submodule update --init --recursive
-    ```
-  - [Optional] If you want to run with website, please [compile the website](./api/server/website.md) before execute ``bash install.sh``
-  - For Linux
+  ```sh
+  git clone https://github.com/kvcache-ai/ktransformers.git
+  cd ktransformers
+  git submodule update --init --recursive
+  ```
+- [Optional] If you want to run with website, please [compile the website](./api/server/website.md) before execute ``bash install.sh``
+- For Linux
 
-    - For simple install:
-
-      ```shell
-      bash install.sh
-      ```
-    - For those who have two cpu and 1T RAM:
-
-      ```shell
-      # Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
-       apt install libnuma-dev
-       export USE_NUMA=1
-       bash install.sh # or #make dev_install
-      ```
-    - For Multi-concurrency with 500G RAM:
-
-      ```shell
-      sudo env USE_BALANCE_SERVE=1 PYTHONPATH="\$(which python)" PATH="\$(dirname \$(which python)):\$PATH" bash ./install.sh
-      ```
-    - For Multi-concurrency with two cpu and 1T RAM:
-
-      ```shell
-      sudo env USE_BALANCE_SERVE=1 USE_NUMA=1 PYTHONPATH="\$(which python)" PATH="\$(dirname \$(which python)):\$PATH" bash ./install.sh
-      ```
-  - For Windows (Windows native temprarily deprecated, please try WSL)
+  - For simple install:
 
     ```shell
-    install.bat
+    bash install.sh
     ```
+  - For those who have two cpu and 1T RAM:
+
+    ```shell
+    # Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
+     apt install libnuma-dev
+     export USE_NUMA=1
+     bash install.sh # or #make dev_install
+    ```
+  - For Multi-concurrency with 500G RAM:
+
+    ```shell
+    USE_BALANCE_SERVE=1 bash ./install.sh
+    ```
+  - For Multi-concurrency with two cpu and 1T RAM:
+
+    ```shell
+    USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
+    ```
+- For Windows (Windows native temprarily deprecated, please try WSL)
+
+  ```shell
+  install.bat
+  ```
+
 * If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is [here](./makefile_usage.md)
 
 <h3>Local Chat</h3>
@@ -157,6 +157,7 @@ python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Cha
 # GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
 # python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
 ```
+
 It features the following arguments:
 
 - `--model_path` (required): Name of the model (such as "deepseek-ai/DeepSeek-V2-Lite-Chat" which will automatically download configs from [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)). Or if you already got local files  you may directly use that path to initialize the model.
@@ -174,6 +175,7 @@ We provide a server script, which supports multi-concurrency functionality in ve
 ```
 python ktransformers/server/main.py --model_path /mnt/data/models/DeepSeek-V3 --gguf_path /mnt/data/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M/ --cpu_infer 62 --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
 ```
+
 It features the following arguments:
 
 - `--chunk_size`: Maximum number of tokens processed in a single run by the engine.
@@ -301,16 +303,19 @@ Start without website:
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
 ```
+
 Start with website:
 
 ```sh
 ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
 ```
+
 Or you want to start server with transformers, the model_path should include safetensors
 
 ```bash
 ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
 ```
+
 Access website with url [http://localhost:10002/web/index.html#/chat](http://localhost:10002/web/index.html#/chat) :
 
 <p align="center">
