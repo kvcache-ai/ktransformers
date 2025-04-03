@@ -120,7 +120,8 @@ python ktransformers/server/main.py \
   --cache_lens 32768 \
   --chunk_size 256 \
   --max_batch_size 4 \
-  --backend_type balance_serve
+  --backend_type balance_serve \
+  --force_think # useful for R1
 ```
 
 It features the following arguments:
@@ -131,6 +132,9 @@ It features the following arguments:
   corresponding to 32768 tokens, and the space occupied will be released after the requests are completed.
 - `--max_batch_size`: Maximum number of requests (prefill + decode) processed in a single run by the engine. (Supported only by `balance_serve`)
 - `--backend_type`: `balance_serve` is a multi-concurrency backend engine introduced in version v0.2.4. The original single-concurrency engine is `ktransformers`.
+- `--model_path`: Path to safetensor config path (only config required, not model safetensors).  
+  Please note that, since `ver 0.2.4`, the last segment of `${model_path}` directory name **MUST** be one of the model names defined in `ktransformers/configs/model_configs.json`.
+- `--force_think`: Force responding the reasoning tag of `DeepSeek R1`.
 
 ### 2. access server
 
