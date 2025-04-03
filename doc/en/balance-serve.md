@@ -74,6 +74,9 @@ strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
 
 ```bash
 sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev libfmt-dev libgflags-dev zlib1g-dev patchelf
+pip3 install packaging ninja cpufeature numpy openai
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
 ```
 
 ### 3. Build ktransformers
@@ -87,7 +90,7 @@ git submodule update --init --recursive
 
 # Install single NUMA dependencies
 USE_BALANCE_SERVE=1  bash ./install.sh
-# Or Install Dual NUMA dependencies
+# For those who have two cpu and 1T RAM（Dual NUMA）:
 USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
 ```
 
