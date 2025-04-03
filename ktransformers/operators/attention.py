@@ -422,6 +422,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                 if q_len == 1:
                     self.mla_wrapper.plan(None,None,None,
                                         position_ids.squeeze(1)+1,
+                                        None,
                                         self.num_heads,
                                         self.kv_lora_rank,
                                         self.qk_rope_head_dim,
