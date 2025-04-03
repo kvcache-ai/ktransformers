@@ -184,18 +184,18 @@ class Config(metaclass=Singleton):
         self.prompt_file = self.local_chat_config.get("prompt_file", None)
 
         # asyncserver
-        self.sched_strategy = cfg['async_server']['sched_strategy']
-        self.sched_port = cfg['async_server']['sched_port']
-        self.sched_metrics_port = cfg['async_server']['sched_metrics_port']
-        self.kvc2_metrics_port = cfg['async_server']['kvc2_metrics_port']
-        self.max_batch_size = cfg['async_server']['max_batch_size']
-        self.page_size = cfg['attn']['page_size']
-        self.chunk_size = cfg['attn']['chunk_size']
-        self.memory_gpu_only = cfg['kvc2']['gpu_only']
+        self.sched_strategy = cfg["async_server"]["sched_strategy"]
+        self.sched_port = cfg["async_server"]["sched_port"]
+        self.sched_metrics_port = cfg["async_server"]["sched_metrics_port"]
+        self.kvc2_metrics_port = cfg["async_server"]["kvc2_metrics_port"]
+        self.max_batch_size = cfg["async_server"]["max_batch_size"]
+        self.page_size = cfg["attn"]["page_size"]
+        self.chunk_size = cfg["attn"]["chunk_size"]
+        self.memory_gpu_only = cfg["kvc2"]["gpu_only"]
         self.cache_lens = ((self.cache_lens + self.page_size - 1) // self.page_size) * self.page_size
         self.gpu_memory_size = 2*576*61*self.cache_lens
-        self.utilization_percentage = 1.0 #cfg['kvc2']['utilization_percentage']
-        self.cpu_memory_size_GB = cfg['kvc2']['cpu_memory_size_GB']
+        self.utilization_percentage = 1.0 #cfg["kvc2"]["utilization_percentage"]
+        self.cpu_memory_size_GB = cfg["kvc2"]["cpu_memory_size_GB"]
         # only support 2 prefill task
         self.max_prefill_batch_size = 2
         self.max_decode_batch_size = self.max_batch_size - self.max_prefill_batch_size 
