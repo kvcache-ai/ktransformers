@@ -12,33 +12,38 @@ from time import sleep
 decodesz = 128
 # Server URL (replace with your server URL)
 decodesz_list = [128]
-ktansformer_prompt1024="""在遥远的翡翠森林里，住着各种各样的神奇生物。其中，有一只名叫露露的小狐狸，她与其他狐狸不同，天生长着一双晶莹剔透的翅膀。然而，这双翅膀却从未带她飞翔过。
-    一天，森林里传来一个惊人的消息：藏在森林深处的魔法泉水干涸了，所有生物赖以生存的泉水即将枯竭。他们说，只有传说中的“天空之羽”才能唤醒泉水，让它重新流淌。然而，“天空之羽”藏在一座高耸入云的山峰上，没有任何动物能抵达那里。
-    露露听到这个消息后，决定亲自去寻找“天空之羽”，即便她的翅膀无法飞翔，她也要尝试。最终，露露来到了传说中的高峰脚下，根本无法攀爬。她望着天空，心里充满了不甘：“如果我能飞起来，就不会被这座山挡住了……”
-    正当她感到迷茫时，一只年迈的白鹰出现在她面前。
-    “孩子，你为什么到这里来？”白鹰用苍老但慈祥的声音问道。
-    露露将森林的困境告诉了白鹰，并说自己愿意付出一切，只要能拯救森林。
-    白鹰沉思了一会儿，缓缓说道：“你的翅膀并不是没有力量，而是你一直害怕它们不能飞翔。相信自己，勇敢跳下去。”
-    露露听后，心跳加速，她望着万丈深渊，犹豫不决就在那一瞬间，她竟然真的飞了起来！露露兴奋极了，她终于看到了“天空之羽”——一根散发着金光的羽毛，轻盈地悬浮在空中。露露小心翼翼地将“天空之羽”叼住，振翅返回森林。
-    当她将羽毛放入干涸的泉水中时，一道金光闪耀。整个森林恢复了生机，花草重新绽放，动物们欢欣鼓舞。从那以后，露露成为了森林的英雄，她是翱翔天空的勇士。她让所有动物都明白：只要相信自己，勇敢前行，就能实现自己的梦想。
-    请简述这个故事的内涵 写10000个字。
-    在遥远的翡翠森林里，住着各种各样的神奇生物。其中，有一只名叫露露的小狐狸，她与其他狐狸不同，天生长着一双晶莹剔透的翅膀。然而，这双翅膀却从未带她飞翔过。
-    一天，森林里传来一个惊人的消息：藏在森林深处的魔法泉水干涸了，所有生物赖以生存的泉水即将枯竭。他们说，只有传说中的“天空之羽”才能唤醒泉水，让它重新流淌。然而，“天空之羽”藏在一座高耸入云的山峰上，没有任何动物能抵达那里。
-    露露听到这个消息后，决定亲自去寻找“天空之羽”，即便她的翅膀无法飞翔，她也要尝试。最终，露露来到了传说中的高峰脚下，根本无法攀爬。她望着天空，心里充满了不甘：“如果我能飞起来，就不会被这座山挡住了……”
-    正当她感到迷茫时，一只年迈的白鹰出现在她面前。
-    “孩子，你为什么到这里来？”白鹰用苍老但慈祥的声音问道。
-    露露将森林的困境告诉了白鹰，并说自己愿意付出一切，只要能拯救森林。
-    白鹰沉思了一会儿，缓缓说道：“你的翅膀并不是没有力量，而是你一直害怕它们不能飞翔。相信自己，勇敢跳下去。”
-    露露听后，心跳加速，她望着万丈深渊，犹豫不决就在那一瞬间，她竟然真的飞了起来！露露兴奋极了，她终于看到了“天空之羽”——一根散发着金光的羽毛，轻盈地悬浮在空中。露露小心翼翼地将“天空之羽”叼住，振翅返回森林。
-    当她将羽毛放入干涸的泉水中时，一道金光闪耀。整个森林恢复了生机，花草重新绽放，动物们欢欣鼓舞。从那以后，露露成为了森林的英雄，她是翱翔天空的勇士。她让所有动物都明白：只要相信自己，勇敢前行，就能实现自己的梦想。
-    请简述这个故事的内涵 写10000个字。
-        露露将森林的困境告诉了白鹰，并说自己愿意付出一切，只要能拯救森林。
-    白鹰沉思了一会儿，缓缓说道：“你的翅膀并不是没有力量，而是你一直害怕它们不能飞翔。相信自己，勇敢跳下去。”
-    露露听后，心跳加速，她望着万丈深渊，犹豫不决就在那一瞬间，她竟然真的飞了起来！露露兴奋极了，她终于看到了“天空之羽”——一根散发着金光的羽毛，轻盈地悬浮在空中。露露小心翼翼地将“天空之羽”叼住，振翅返回森林。
-    当她将羽毛放入干涸的泉水中时，一道金光闪耀。整个森林恢复了生机，花草重新绽放，动物们欢欣鼓舞。从那以后，露露成为了森林的英雄，她是翱翔天空的勇士。她让所有动物都明白：只要相信自己，勇敢前行，就能实现自己的梦想。
-    请简述这个故事的内涵 写10000个字。想。
-    请简述这个故事的内涵 故事的内涵这个故事的内涵写10000个字"""
-async def fetch_event_stream(session, request_id , prompt):
+ktansformer_prompt1024="""Mr. and Mrs. Dursley, of number four, Privet Drive, were proud to say that they were perfectly normal, thank you very much. 
+They were the last people you'd expect to be involved in anything strange or mysterious, because they just didn't hold with such nonsense.Mr. Dursley was the director of a firm called Grunnings, which made drills. 
+He was a big, beefy man with hardly any neck, although he did have a very large mustache. Mrs. 
+Dursley was thin and blonde and had nearly twice the usual amount of neck, which came in very useful as she spent so much of her time craning over garden fences, spying on the neighbors. 
+The Dursleys had a small son called Dudley and in their opinion there was no finer boy anywhere.
+The Dursleys had everything they wanted, but they also had a secret, and their greatest fear was that somebody would discover it. 
+They didn't think they could bear it if anyone found out about the Potters. Mrs. Potter was Mrs. Dursley's sister, but they hadn't met for several years; in fact, Mrs. 
+Dursley pretended she didn't have a sister, because her sister and her good-for-nothing husband were as unDursleyish as it was possible to be. 
+The Dursleys shuddered to think what the neighbors would say if the Potters arrived in the street. 
+The Dursleys knew that the Potters had a small son, too, but they had never even seen him. 
+This boy was another good reason for keeping the Potters away; they didn't want Dudley mixing with a child like that.When Mr. and Mrs. 
+Dursley woke up on the dull, gray Tuesday our story starts, there was nothing about the cloudy sky outside to suggest that strange and mysterious things would soon be happening all over the country. 
+Mr. Dursley hummed as he picked out his most boring tie for work, and Mrs. Dursley gossiped away happily as she wrestled a screaming Dudley into his high chair.None of them noticed a large, tawny owl flutter past the window.
+At half past eight, Mr. Dursley picked up his briefcase, pecked Mrs. Dursley on the cheek, and tried to kiss Dudley good-bye but missed, because Dudley was now having a tantrum and throwing his cereal at the walls.
+“Little tyke,” chortled Mr. Dursley as he left the house. He got into his car and backed out of number four's drive.
+It was on the corner of the street that he noticed the first sign of something peculiar — a cat reading a map. 
+For a second, Mr. Dursley didn't realize what he had seen — then he jerked his head around to look again. 
+There was a tabby cat standing on the corner of Privet Drive, but there wasn't a map in sight. 
+What could he have been thinking of? It must have been a trick of the light. 
+Mr. Dursley blinked and stared at the cat. It stared back. As Mr. Dursley drove around the corner and up the road, he watched the cat in his mirror. 
+It was now reading the sign that said Privet Drive — no, looking at the sign; cats couldn't read maps or signs. 
+Mr. Dursley gave himself a little shake and put the cat out of his mind. 
+As he drove toward town he thought of nothing except a large order of drills he was hoping to get that day.
+But on the edge of town, drills were driven out of his mind by something else. 
+As he sat in the usual morning traffic jam, he couldn't help noticing that there seemed to be a lot of strangely dressed people about. 
+People in cloaks. Mr. Dursley couldn't bear people who dressed in funny clothes — the getups you saw on young people! 
+He supposed this was some stupid new fashion. He drummed his fingers on the steering wheel and his eyes fell on a huddle of these weirdos standing quite close by. 
+They were whispering excitedly together. Mr. Dursley was enraged to see that a couple of them weren't young at all; why, that man had to be older than he was, and wearing an emerald-green cloak! 
+The nerve of him! But then it struck Mr. Dursley that this was probably some silly stunt — these people were obviously collecting for something… yes, that would be it. 
+The traffic moved on and a few minutes later, Mr. Dursley arrived in the Grunnings parking lot, his mind back on drills.
+Mr. Dursley always sat with his back to the window in his office on the ninth floor."""
+async def fetch_event_stream(session, request_id, prompt):
     try:
         payload = {
             "messages": [
@@ -47,8 +52,8 @@ async def fetch_event_stream(session, request_id , prompt):
             ],
             "model": "DeepSeek-V3",
             "temperature": 0.3,
-            "top_p": 1.0,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
-            "stream": True  # 开启流式输出
+            "top_p": 1.0,
+            "stream": True
         }
 
         headers = {
@@ -57,34 +62,26 @@ async def fetch_event_stream(session, request_id , prompt):
         }
 
         async with session.post(SERVER_URL, json=payload, headers=headers, timeout=500000) as response:
-            print(f"Request {request_id}: Connected, status {response.status}")
-
             if response.status != 200:
-                print(f"Request {request_id}: Error, status {response.status}")
+                print(f"[Request {request_id}] Error: Status {response.status}")
                 return
 
-            output_text = ""  # 存储当前 response 的所有 token
-            total_tokens = 0  # 统计总 tokens 数
-            decode_start_time = None  # 记录 decode 阶段开始时间
-            decode_end_time = None  # 记录 decode 结束时间
+            buffer = ""  
+            total_tokens = 0
+            decode_start_time = None
+            decode_end_time = None
 
             async for line in response.content:
                 try:
                     decoded_line = line.decode("utf-8").strip()
-
-                    # 过滤空行
                     if not decoded_line or not decoded_line.startswith("data: "):
                         continue
 
-                    decoded_line = decoded_line[6:].strip()  # 去掉 `data: `
-
-                    # 确保 JSON 数据是合法的
+                    decoded_line = decoded_line[6:].strip()
                     if not decoded_line:
                         continue
 
-                    response_data = json.loads(decoded_line)  # 解析 JSON
-
-                    # 确保 choices 存在
+                    response_data = json.loads(decoded_line)
                     choices = response_data.get("choices", [])
                     if not choices:
                         continue
@@ -94,36 +91,33 @@ async def fetch_event_stream(session, request_id , prompt):
 
                     if token:
                         if decode_start_time is None:
-                            decode_start_time = time.time()  # 记录 decode 开始时间
-                        
-                        output_text += token  # 追加 token
-                        sys.stdout.write(str(request_id)) 
-                        sys.stdout.write(token)  # 直接输出 token
-                        sys.stdout.flush()  # 立即刷新，确保 token 立刻出现在终端
-                        total_tokens += 1  # 增加 token 计数
-                        decode_end_time = time.time()  # 每次收到 token，更新 decode 结束时间
+                            decode_start_time = time.time()
+                        buffer += token
+                        total_tokens += 1
+                        decode_end_time = time.time()
 
-                    # 检查是否完成
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            print(f"[Request {request_id}] {line}")
+
                     finish_reason = choices[0].get("finish_reason", None)
                     if finish_reason:
-                        # print(f"\nRequest {request_id}: Done")
-                        break  # 结束流式处理
+                        break
 
-                except json.JSONDecodeError as e:
-                    print(f"\nRequest {request_id}: JSON Decode Error - {e}")
-                except IndexError:
-                    print(f"\nRequest {request_id}: List Index Error - choices is empty")
                 except Exception as e:
-                    print(f"\nRequest {request_id}: Error parsing stream - {e}")
+                    print(f"[Request {request_id}] Stream Error: {e}")
 
-            # 计算 decode 速度
+
+            if buffer.strip():
+                print(f"[Request {request_id}] {buffer.strip()}")
+
             if decode_start_time and decode_end_time and total_tokens > 0:
                 decode_time = decode_end_time - decode_start_time
                 decode_speed = total_tokens / decode_time if decode_time > 0 else 0
-                # print(f"Request {request_id}: Decode Speed = {decode_speed:.2f} tokens/s")
+                print(f"[Request {request_id}] Speed: {decode_speed:.2f} tokens/s")
 
     except Exception as e:
-        print(f"\nRequest {request_id}: Exception - {e}")
+        print(f"[Request {request_id}] Exception: {e}")
 
 async def main(concurrent_requests , prompt ):
     async with aiohttp.ClientSession() as session:
