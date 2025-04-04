@@ -17,10 +17,10 @@ echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 pip install third_party/custom_flashinfer/
 
-SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
-echo "Copying thirdparty libs to $SITE_PACKAGES"
-cp -a csrc/balance_serve/build/third_party/prometheus-cpp/lib/libprometheus-cpp-*.so* $SITE_PACKAGES/
-patchelf --set-rpath '$ORIGIN' $SITE_PACKAGES/sched_ext.cpython*
+# SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+# echo "Copying thirdparty libs to $SITE_PACKAGES"
+# cp -a csrc/balance_serve/build/third_party/prometheus-cpp/lib/libprometheus-cpp-*.so* $SITE_PACKAGES/
+# patchelf --set-rpath '$ORIGIN' $SITE_PACKAGES/sched_ext.cpython*
 
 
 echo "Installation completed successfully"
