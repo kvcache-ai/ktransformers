@@ -38,7 +38,8 @@ Some preparation:
       export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
   fi
   ```
-- Linux-x86_64 with gcc, g++ and cmake (using Ubuntu as an example)
+- Linux-x86_64 with gcc, g++>=11 and cmake>=3.25 (using Ubuntu as an example)
+- **Note**: The default CMake version in Ubuntu 22.04 LTS or higher may not support newer CUDA language dialects (e.g., CUDA 20). This can cause errors such as Target "cmTC_xxxxxx" requires the language dialect "CUDA20", but CMake does not know the compile flags to use to enable it. To resolve this, install a newer CMake version, for instance, by adding the Kitware APT repository.
 
   ```sh
   sudo apt-get update 
