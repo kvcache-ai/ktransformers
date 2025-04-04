@@ -43,10 +43,10 @@ class KDeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
     def init_wrapper(self, use_cuda_graph, device, max_batch_size, max_pages):
         self.use_cuda_graph = use_cuda_graph
         self.workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8).to(0)
-        self.qo_indptr_buf = torch.empty((max_batch_size+1,), dtype=torch.int32, device=device)
-        self.paged_kv_indptr_buf = torch.empty((max_batch_size+1,), dtype=torch.int32, device=device)
+        self.qo_indptr_buf = torch.empty((max_batch_size+2,), dtype=torch.int32, device=device)
+        self.paged_kv_indptr_buf = torch.empty((max_batch_size+2,), dtype=torch.int32, device=device)
         self.paged_kv_indices_buf = torch.empty((max_pages,), dtype=torch.int32, device=device)
-        self.paged_kv_len_buf = torch.empty((max_batch_size,), dtype=torch.int32, device=device)
+        self.paged_kv_len_buf = torch.empty((max_batch_size+1,), dtype=torch.int32, device=device)
         self.bsz_tensor_buf = torch.empty((1, ), dtype=torch.int32, device=device)
 		
 
