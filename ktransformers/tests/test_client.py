@@ -14,7 +14,7 @@ decodesz = 128
 SERVER_URL = "http://localhost:10002/v1/chat/completions"
 bf_list = [1]
 decodesz_list = [128]
-prompt_list = ['请你介绍下秦始皇', '3.9 和 3.11 哪个大', '抗衰老有何妙招', '给我讲个故事']
+prompt_list = ['Please elaborate on modern world history.', 'Please introduce Harry Potter.', 'I want to learn Python. Please give me some advice.', 'Please tell me a joke ']
 async def fetch_event_stream(session, request_id):
     try:
         payload = {
