@@ -206,7 +206,10 @@ fi
 </code></pre>
 </li>
 <li>
-<p>Linux-x86_64 with gcc, g++ and cmake (using Ubuntu as an example)</p>
+<p>Linux-x86_64 with gcc, g++&gt;=11 and cmake&gt;=3.25 (using Ubuntu as an example)</p>
+</li>
+<li>
+<p><strong>Note</strong>: The default CMake version in Ubuntu 22.04 LTS or higher may not support newer CUDA language dialects (e.g., CUDA 20). This can cause errors such as Target "cmTC_xxxxxx" requires the language dialect "CUDA20", but CMake does not know the compile flags to use to enable it. To resolve this, install a newer CMake version, for instance, by adding the Kitware APT repository.</p>
 <pre><code class="language-sh">sudo apt-get update 
 sudo apt-get install build-essential cmake ninja-build patchelf
 </code></pre>
