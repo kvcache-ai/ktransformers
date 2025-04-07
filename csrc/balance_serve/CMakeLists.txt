@@ -26,9 +26,6 @@ add_custom_target(
     COMMENT "Running clang-format on all source files"
 )
 
-
-
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
 set(BUILD_SHARED_LIBS ON)
 set(ENABLE_PUSH OFF)
 set(ENABLE_COMPRESSION OFF)
