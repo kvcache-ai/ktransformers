@@ -17,8 +17,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(BUILD_TEST OFF)
 set(BUILD_PYTHON_EXT OFF)
 
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
-
 # set(USE_IO_URING ON)
 if(USE_IO_URING)
     message(STATUS "Using io_uring")
