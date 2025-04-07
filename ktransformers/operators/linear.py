@@ -699,7 +699,7 @@ class KLinearCPUInfer(KLinearBase):
         self.group_max_len = group_max_len
         self.out_device = out_device
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, bsz_tensor: torch.Tensor = None) -> torch.Tensor:
         origin_shape = x.shape # [batch_size, q_len, hidden_size]
         if origin_shape[1] == 1 and torch.cuda.is_current_stream_capturing():
             out_device = x.device
