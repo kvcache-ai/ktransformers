@@ -112,7 +112,7 @@ Use our optimized configuration for constrained VRAM:
 
 ```bash
 python ktransformers/server/main.py \
-  --port 10002
+  --port 10002 \
   --model_path <path_to_safetensor_config> \
   --gguf_path <path_to_gguf_files> \
   --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml \
