@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD 20)
 # set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
 # set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
 set(CMAKE_BUILD_TYPE "Release")
 
 file(GLOB_RECURSE FMT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
