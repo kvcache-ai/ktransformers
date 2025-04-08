@@ -25,6 +25,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from packaging.version import parse
+import torch
 import torch.version
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools import setup, Extension
@@ -281,6 +282,13 @@ class CMakeExtension(Extension):
         print(name, sourcedir)
         self.sourcedir = sourcedir
 
+def get_cmake_abi_args(cmake_args):
+    if torch.compiled_with_cxx11_abi():
+        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+    else:
+        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=0")
+    return cmake_args
+
 class CMakeBuild(BuildExtension):
 
     def build_extension(self, ext) -> None:
@@ -318,6 +326,8 @@ class CMakeBuild(BuildExtension):
             cmake_args += ["-DKTRANSFORMERS_USE_ROCM=ON"]
         else:
             raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set.")
+        
+        cmake_args = get_cmake_abi_args(cmake_args)
         # log cmake_args
         print("CMake args:", cmake_args)
 
