@@ -14,7 +14,7 @@ int main(int argc, char* argv[]) {
   qw25_7B_gpu_config.v_cache_on = false;
   config.gpu_cache_config = qw25_7B_gpu_config;
   config.v_cache_on = false;
-  
+
   init(argc, argv);
   spdlog::set_level(spdlog::level::debug);
   auto kvc2 = kvc2::create_kvc2(config);

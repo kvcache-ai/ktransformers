@@ -1,12 +1,12 @@
 #pragma once
 
-#include <algorithm>  // std::sort
-#include <cstddef>    // size_t
-#include <mutex>      // std::mutex
-#include <vector>
 #include <assert.h>
-#include <bitset>
+#include <algorithm>  // std::sort
 #include <atomic>
+#include <bitset>
+#include <cstddef>  // size_t
+#include <mutex>    // std::mutex
+#include <vector>
 
 constexpr size_t PageSize = 4096;
 
@@ -18,7 +18,7 @@ struct PageAlignedMemoryPool {
   void* data = nullptr;
 
   size_t total_size = 0, total_pages = 0;
-  
+
   std::atomic_size_t now_block = 0;
   std::atomic_size_t allocated = 0;  // allocated_size
   std::atomic_size_t alloc_count = 0;
@@ -26,10 +26,11 @@ struct PageAlignedMemoryPool {
 
   std::mutex lock[Blocks];
   size_t page_per_block = 0;
-  void *first_page[Blocks];
+  void* first_page[Blocks];
   size_t count_page[Blocks];
   std::vector<int8_t> bitmap[Blocks];
   void* alloc_in_block(size_t block_index, size_t alloc_size);
+
  public:
   /// 构造函数和析构函数
   explicit PageAlignedMemoryPool(size_t size_in_bytes);

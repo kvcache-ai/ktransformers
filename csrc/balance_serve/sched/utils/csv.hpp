@@ -19,7 +19,7 @@ namespace csv {
  * @param line The CSV line to parse.
  * @return A vector of strings, each representing a field in the CSV line.
  */
-inline std::vector<std::string> parse_csv_line(const std::string& line) {
+inline std::vector<std::string> parse_csv_line(const std::string &line) {
   std::vector<std::string> result;
   std::string field;
   bool in_quotes = false;
@@ -57,7 +57,8 @@ inline std::vector<std::string> parse_csv_line(const std::string& line) {
  * @return A vector of pairs, each containing a column name and a vector of data
  * for that column.
  */
-inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(const std::string& filename) {
+inline std::vector<std::pair<std::string, std::vector<std::string>>>
+read_csv(const std::string &filename) {
   std::cout << "Reading CSV file: " << filename << std::endl;
   // Open the file
   std::ifstream file(filename);
@@ -72,7 +73,7 @@ inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(co
 
   // Prepare the result vector with column names
   std::vector<std::pair<std::string, std::vector<std::string>>> result;
-  for (const auto& name : column_names) {
+  for (const auto &name : column_names) {
     result.emplace_back(name, std::vector<std::string>());
   }
 
@@ -84,7 +85,7 @@ inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(co
   // Determine the number of threads to use
   unsigned int num_threads = std::thread::hardware_concurrency();
   if (num_threads == 0)
-    num_threads = 4;  // Default to 4 threads if hardware_concurrency returns 0
+    num_threads = 4; // Default to 4 threads if hardware_concurrency returns 0
 
   // Calculate chunk start positions based on content size
   std::vector<size_t> chunk_starts;
@@ -100,14 +101,15 @@ inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(co
       ++pos;
     }
     if (pos < content_size) {
-      ++pos;  // Skip the newline character
+      ++pos; // Skip the newline character
     }
     chunk_starts.push_back(pos);
   }
   chunk_starts.push_back(content_size);
 
   // Create threads to parse each chunk
-  std::vector<std::vector<std::vector<std::string>>> thread_results(num_threads);
+  std::vector<std::vector<std::vector<std::string>>> thread_results(
+      num_threads);
   std::vector<std::thread> threads;
 
   for (unsigned int i = 0; i < num_threads; ++i) {
@@ -133,13 +135,13 @@ inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(co
   }
 
   // Wait for all threads to finish
-  for (auto& t : threads) {
+  for (auto &t : threads) {
     t.join();
   }
 
   // Combine the results from all threads into the final result
-  for (const auto& local_result : thread_results) {
-    for (const auto& row : local_result) {
+  for (const auto &local_result : thread_results) {
+    for (const auto &row : local_result) {
       for (size_t i = 0; i < row.size(); ++i) {
         if (i < result.size()) {
           result[i].second.push_back(row[i]);
@@ -158,8 +160,9 @@ inline std::vector<std::pair<std::string, std::vector<std::string>>> read_csv(co
  * @param data A vector of pairs, each containing a column name and a vector of
  * data for that column.
  */
-inline void write_csv(const std::string& filename,
-                      const std::vector<std::pair<std::string, std::vector<std::string>>>& data) {
+inline void write_csv(
+    const std::string &filename,
+    const std::vector<std::pair<std::string, std::vector<std::string>>> &data) {
   std::cout << "Writing CSV file: " << filename << std::endl;
 
   // Open the file for writing
@@ -170,10 +173,10 @@ inline void write_csv(const std::string& filename,
 
   // Check that all columns have the same number of rows
   if (data.empty()) {
-    return;  // Nothing to write
+    return; // Nothing to write
   }
   size_t num_rows = data[0].second.size();
-  for (const auto& column : data) {
+  for (const auto &column : data) {
     if (column.second.size() != num_rows) {
       throw std::runtime_error("All columns must have the same number of rows");
     }
@@ -191,7 +194,7 @@ inline void write_csv(const std::string& filename,
   // Write the data rows
   for (size_t row = 0; row < num_rows; ++row) {
     for (size_t col = 0; col < data.size(); ++col) {
-      const std::string& field = data[col].second[row];
+      const std::string &field = data[col].second[row];
       // Handle CSV escaping
       std::string escaped_field = field;
       bool needs_quotes = false;
@@ -204,7 +207,8 @@ inline void write_csv(const std::string& filename,
           pos += 2;
         }
       }
-      if (escaped_field.find(',') != std::string::npos || escaped_field.find('\n') != std::string::npos) {
+      if (escaped_field.find(',') != std::string::npos ||
+          escaped_field.find('\n') != std::string::npos) {
         needs_quotes = true;
       }
       if (needs_quotes) {
@@ -220,6 +224,6 @@ inline void write_csv(const std::string& filename,
   }
 }
 
-}  // namespace csv
+} // namespace csv
 
-#endif  // CSV_READER_HPP
+#endif // CSV_READER_HPP
