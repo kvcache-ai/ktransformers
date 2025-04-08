@@ -7,9 +7,7 @@ import sys, os
 import yaml, json
 from time import sleep
 
-current_dir = os.path.dirname(__file__)
-# sched_path = os.path.abspath(os.path.join(current_dir, '../../../build/balance_serve/sched'))
-# sys.path.insert(0, sched_path)
+
 import sched_ext
 from transformers import AutoConfig
 
@@ -52,8 +50,7 @@ def create_sched_settings(args):
     settings.v_cache_on = False
 
     settings.kvc2_root_path = '/mnt/data/persist-kvc'
-    settings.kvc2_config_path = os.path.join(current_dir, "..", "..", "configs")
-    print(os.path.join(current_dir, "..", "..", "configs"))
+    settings.kvc2_config_path = args.kvc2_config_dir
     settings.memory_pool_size_GB = args.cpu_memory_size_GB
     settings.evict_count = 40
     settings.kvc2_metrics_port = args.kvc2_metrics_port

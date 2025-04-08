@@ -77,7 +77,6 @@ GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
     gpu_only_occupations.resize(config.total_kvcache_pages, false);
   }
 
-
   num_free_pages = config.total_kvcache_pages;
   for (size_t i = 0; i < config.layer_count; i++) {
     if (config.k_cache_on)
@@ -248,18 +247,19 @@ void GPUPageCache::append_col_to_request(std::vector<std::shared_ptr<CudaStreamM
   auto gpu_block_idx = k_handles[0][at]->gpu_block_idx.value();
   for (size_t layer = 0; layer < config.layer_count; layer++) {
     for (size_t which_gpu = 0; which_gpu < config.gpu_devices_id.size(); which_gpu++) {
-
       if (config.k_cache_on) {
         assert(k_handles[layer][at]->data != nullptr);
         reqs[which_gpu]->sizes.push_back(tp_size[which_gpu]);
-        reqs[which_gpu]->host_mem_addresses.push_back(offset_by_bytes(k_handles[layer][at]->data, tp_offset[which_gpu]));
+        reqs[which_gpu]->host_mem_addresses.push_back(
+            offset_by_bytes(k_handles[layer][at]->data, tp_offset[which_gpu]));
         reqs[which_gpu]->device_mem_addresses.push_back(k_cache[which_gpu][layer][gpu_block_idx].data_ptr());
       }
-      
+
       if (config.v_cache_on) {
         assert(v_handles[layer][at]->data != nullptr);
         reqs[which_gpu]->sizes.push_back(tp_size[which_gpu]);
-        reqs[which_gpu]->host_mem_addresses.push_back(offset_by_bytes(v_handles[layer][at]->data, tp_offset[which_gpu]));
+        reqs[which_gpu]->host_mem_addresses.push_back(
+            offset_by_bytes(v_handles[layer][at]->data, tp_offset[which_gpu]));
         reqs[which_gpu]->device_mem_addresses.push_back(v_cache[which_gpu][layer][gpu_block_idx].data_ptr());
       }
     }
