@@ -34,12 +34,15 @@ class Config(metaclass=Singleton):
 
         user_path: str = os.path.expanduser("~")
         localstore_path: str = os.path.join(user_path, ".ktransformers")
+        kvc2_config_dir = os.path.join(localstore_path, "kvc2")
         config_path: str = os.path.join(localstore_path, Config.CONFIG_FILE_NAME)
         if not os.path.exists(config_yaml):
             print(f"Can't find config file, {config_yaml}")
             exit(-1)
         if not os.path.exists(localstore_path):
             os.mkdir(localstore_path)
+        if not os.path.exists(kvc2_config_dir):
+            os.mkdir(kvc2_config_dir)
         if not os.path.exists(config_path):
             shutil.copyfile(config_yaml, config_path)
         with open(config_path, "r", encoding="utf-8") as fp:
@@ -62,10 +65,13 @@ class Config(metaclass=Singleton):
         self.localstore_path: str = os.path.join(self.user_path, ".ktransformers")
         # log configs
         self.log_dir = os.path.join(self.localstore_path, cfg["log"]["dir"])
+        if not os.path.exists(self.log_dir):
+            os.mkdir(self.log_dir)
         self.log_file = cfg["log"]["file"]
         self.log_level = cfg["log"]["level"]
         self.backup_count = cfg["log"]["backup_count"]
 
+        self.kvc2_config_dir = os.path.join(self.localstore_path, "kvc2")
         # server configs
         self.server: dict = cfg.get("server", {})
         self.server_ip = self.server.get("ip", "0.0.0.0")

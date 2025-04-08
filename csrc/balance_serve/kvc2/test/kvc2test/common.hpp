@@ -139,18 +139,18 @@ std::vector<Token> random_ids(size_t length, std::mt19937& gen) {
   return re;
 }
 
-std::vector<layer_data> slice(std::vector<layer_data>& h1,size_t start,size_t end){
+std::vector<layer_data> slice(std::vector<layer_data>& h1, size_t start, size_t end) {
   std::vector<layer_data> re;
-  for(auto&l:h1){
+  for (auto& l : h1) {
     layer_data new_layer;
-    new_layer.insert(new_layer.end(),l.begin()+start,l.begin()+end);
+    new_layer.insert(new_layer.end(), l.begin() + start, l.begin() + end);
     re.push_back(new_layer);
   }
   return re;
 }
 
 void cmp_handle_data(std::vector<layer_data> h1, std::vector<layer_data> h2,
-                         std::optional<size_t> blocks = std::nullopt) {
+                     std::optional<size_t> blocks = std::nullopt) {
   assert(h1.size() == h2.size());
 
   for (size_t i = 0; i < h1.size(); i++) {

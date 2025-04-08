@@ -1,4 +1,5 @@
 #pragma once
+#include "readable_number.hpp"
 #include <cassert>
 #include <chrono>
 #include <iomanip>
@@ -6,7 +7,6 @@
 #include <map>
 #include <sstream>
 #include <string>
-#include "readable_number.hpp"
 
 inline std::string doubleToStringR2(double value) {
   std::stringstream stream;
@@ -15,7 +15,7 @@ inline std::string doubleToStringR2(double value) {
 }
 
 class Timer {
- public:
+public:
   std::string name;
   bool tmp_timer = false;
 
@@ -49,10 +49,14 @@ class Timer {
       endTime = m_endTime;
     }
 
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - m_startTime).count();
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(endTime -
+                                                                m_startTime)
+        .count();
   }
 
-  void printElapsedMilliseconds() { std::cout << elapsedNs() / 1e6 << " ms" << std::endl; }
+  void printElapsedMilliseconds() {
+    std::cout << elapsedNs() / 1e6 << " ms" << std::endl;
+  }
 
   static std::string ns_to_string(double duration) {
     auto nano_sec = duration;
@@ -100,13 +104,13 @@ class Timer {
     return readable_number(ops) + "op/s";
   }
 
-  void merge(Timer& other) {
+  void merge(Timer &other) {
     assert(m_isRunning == false);
     assert(other.m_isRunning == false);
     m_runningNs += other.runningTimeNs();
   }
 
- private:
+private:
   std::chrono::time_point<std::chrono::high_resolution_clock> m_startTime;
   std::chrono::time_point<std::chrono::high_resolution_clock> m_endTime;
   bool m_isRunning = false;
@@ -114,14 +118,14 @@ class Timer {
 };
 
 class Counter {
- public:
+public:
   Counter() {}
 
   std::map<std::string, size_t> counters;
 
-  void inc(const char* name, size_t num) { counters[name] += num; };
+  void inc(const char *name, size_t num) { counters[name] += num; };
   void print() {
-    for (auto& p : counters) {
+    for (auto &p : counters) {
       std::cout << p.first << " : " << p.second << std::endl;
     }
   };

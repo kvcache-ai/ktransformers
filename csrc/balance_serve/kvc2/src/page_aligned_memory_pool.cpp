@@ -17,13 +17,14 @@ PageAlignedMemoryPool::PageAlignedMemoryPool(size_t size_in_bytes) {
   assert(total_pages >= Blocks);
   page_per_block = total_pages / Blocks;
 
-  for (size_t block_index = 0; block_index < Blocks; block_index ++) {
-    first_page[block_index] = reinterpret_cast<void*>(reinterpret_cast<intptr_t>(data) + static_cast<intptr_t>(block_index) * page_per_block * PageSize);
+  for (size_t block_index = 0; block_index < Blocks; block_index++) {
+    first_page[block_index] = reinterpret_cast<void*>(reinterpret_cast<intptr_t>(data) +
+                                                      static_cast<intptr_t>(block_index) * page_per_block * PageSize);
     count_page[block_index] =
-    block_index == Blocks - 1 ? (total_pages - page_per_block * (Blocks - 1)) : page_per_block;
-    SPDLOG_DEBUG("first_page[{}] = {}, count_page[{}] = {}",
-      block_index, reinterpret_cast<intptr_t>(first_page[block_index]) - reinterpret_cast<intptr_t>(data),
-      block_index, count_page[block_index]);
+        block_index == Blocks - 1 ? (total_pages - page_per_block * (Blocks - 1)) : page_per_block;
+    SPDLOG_DEBUG("first_page[{}] = {}, count_page[{}] = {}", block_index,
+                 reinterpret_cast<intptr_t>(first_page[block_index]) - reinterpret_cast<intptr_t>(data), block_index,
+                 count_page[block_index]);
     bitmap[block_index].resize(count_page[block_index], 0);
   }
   SPDLOG_INFO("PageAlignedMemoryPool with size {} Mbytes, {} pages", total_size / (1 << 20), page_count());
@@ -53,7 +54,7 @@ void* PageAlignedMemoryPool::alloc_in_block(size_t block_index, size_t alloc_siz
   size_t free_pages = 0;
   for (size_t i = 0; i < count_page[block_index]; i++) {
     if (bitmap[block_index][i] == 0) {
-      free_pages ++;
+      free_pages++;
       if (free_pages == alloc_size) {
         size_t page_index = i + 1 - free_pages;
         for (size_t page = page_index; page < page_index + alloc_size; page++) {
@@ -73,7 +74,7 @@ void* PageAlignedMemoryPool::alloc_in_block(size_t block_index, size_t alloc_siz
 void* PageAlignedMemoryPool::alloc(size_t size) {
   size_t alloc_size = div_up(size, PageSize);
   auto cnt = now_block.fetch_add(1, std::memory_order_relaxed);
-  for (size_t i = 0; i < Blocks; i ++) {
+  for (size_t i = 0; i < Blocks; i++) {
     auto result = alloc_in_block((i + cnt) % Blocks, alloc_size);
     if (result != nullptr) {
       allocated.fetch_add(alloc_size * PageSize, std::memory_order_relaxed);
@@ -119,5 +120,6 @@ void PageAlignedMemoryPool::defragment() {}
 /// 调试打印
 std::string PageAlignedMemoryPool::debug() {
   return fmt::format("PageAlignedMemoryPool: total_size: {}MB, allocated: {}, alloc/free count: {}/{}\n",
-                     readable_number(total_size), readable_number(size_t(allocated)), size_t(alloc_count), size_t(free_count));
+                     readable_number(total_size), readable_number(size_t(allocated)), size_t(alloc_count),
+                     size_t(free_count));
 }
