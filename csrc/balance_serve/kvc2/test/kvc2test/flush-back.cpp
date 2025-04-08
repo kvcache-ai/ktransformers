@@ -7,9 +7,9 @@ int main(int argc, char* argv[]) {
   config.gpu_cache_config->total_kvcache_pages = 12;
   auto kvc2 = kvc2::create_kvc2(config);
 
-// #pragma omp parallel for
+  // #pragma omp parallel for
   for (size_t ti = 0; ti < 2; ti++) {
-    SPDLOG_WARN("Test {}",ti);
+    SPDLOG_WARN("Test {}", ti);
     auto [kcache, vcache] = kvc2->get_kvcache();
     std::mt19937 gen(ti + 123);
     size_t total_page = 10;

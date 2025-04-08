@@ -1,8 +1,8 @@
 #ifndef __MODEL_CONFIG_HPP_
 #define __MODEL_CONFIG_HPP_
 
-#include <iostream>
 #include "nlohmann/json.hpp"
+#include <iostream>
 
 #include <filesystem>
 #include <fstream>
@@ -13,7 +13,7 @@ using ModelName = std::string;
 
 // We must assure this can be load by config.json
 class ModelConfig {
- public:
+public:
   DimSize hidden_size;
   DimSize intermediate_size;
   size_t max_position_embeddings;
@@ -23,10 +23,13 @@ class ModelConfig {
   size_t num_key_value_heads;
   size_t vocab_size;
 
-  NLOHMANN_DEFINE_TYPE_INTRUSIVE(ModelConfig, hidden_size, intermediate_size, max_position_embeddings, model_type,
-                                 num_attention_heads, num_hidden_layers, num_key_value_heads, vocab_size);
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE(ModelConfig, hidden_size, intermediate_size,
+                                 max_position_embeddings, model_type,
+                                 num_attention_heads, num_hidden_layers,
+                                 num_key_value_heads, vocab_size);
 
   void load_from(std::filesystem::path path) {
+    std::cout << "Load from " << path << std::endl;
     std::ifstream i(path);
     nlohmann::json j;
     i >> j;
@@ -38,12 +41,14 @@ using QuantType = std::string;
 static const QuantType NoQuantType = "";
 
 class QuantConfig {
- public:
+public:
   QuantType name;
 
   // For GEMV
   QuantType type_of_dot_vector = NoQuantType;
-  inline bool can_be_used_as_matrix() { return type_of_dot_vector != NoQuantType; }
+  inline bool can_be_used_as_matrix() {
+    return type_of_dot_vector != NoQuantType;
+  }
 
   bool can_be_used_as_vector;
 
@@ -56,8 +61,11 @@ class QuantConfig {
 
   URL reference = "";
 
-  NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(QuantConfig, name, type_of_dot_vector, can_be_used_as_vector,
-                                              bytes_per_element, has_scale, has_min, block_element_count,
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE_WITH_DEFAULT(QuantConfig, name,
+                                              type_of_dot_vector,
+                                              can_be_used_as_vector,
+                                              bytes_per_element, has_scale,
+                                              has_min, block_element_count,
                                               block_element_size, reference);
 };
 
@@ -65,14 +73,18 @@ inline std::map<QuantType, QuantConfig> quant_configs;
 inline std::map<ModelName, ModelConfig> model_configs;
 
 inline void load_quant_configs(std::filesystem::path path) {
-  std::cout << __FUNCTION__ << " from " << path << std::endl;
-  std::ifstream i(path);
   nlohmann::json j;
-  i >> j;
-  quant_configs = j.get<std::map<QuantType, QuantConfig>>();
-  std::cout << "Loaded Quant Configs" << std::endl;
-  for (auto& [k, v] : quant_configs) {
-    std::cout << " - " << k << std::endl;
+  if (std::filesystem::exists(path)) {
+    std::cout << __FUNCTION__ << " from " << path << std::endl;
+    std::ifstream i(path);
+    i >> j;
+    quant_configs = j.get<std::map<QuantType, QuantConfig>>();
+    std::cout << "Loaded Quant Configs" << std::endl;
+    for (auto &[k, v] : quant_configs) {
+      std::cout << " - " << k << std::endl;
+    }
+  } else {
+    std::cout << __FUNCTION__ << " no file at " << path << std::endl;
   }
 }
 
@@ -83,14 +95,18 @@ inline void dump_quant_configs(std::filesystem::path path) {
 }
 
 inline void load_model_configs(std::filesystem::path path) {
-  std::cout << __FUNCTION__ << " from " << path << std::endl;
-  std::ifstream i(path);
   nlohmann::json j;
-  i >> j;
-  model_configs = j.get<std::map<ModelName, ModelConfig>>();
-  std::cout << "Loaded Model Configs" << std::endl;
-  for (auto& [k, v] : model_configs) {
-    std::cout << " - " << k << std::endl;
+  if (std::filesystem::exists(path)) {
+    std::cout << __FUNCTION__ << " from " << path << std::endl;
+    std::ifstream i(path);
+    i >> j;
+    model_configs = j.get<std::map<ModelName, ModelConfig>>();
+    std::cout << "Loaded Model Configs" << std::endl;
+    for (auto &[k, v] : model_configs) {
+      std::cout << " - " << k << std::endl;
+    }
+  } else {
+    std::cout << __FUNCTION__ << " no file at " << path << std::endl;
   }
 }
 
