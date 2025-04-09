@@ -39,8 +39,7 @@ from ktransformers.models.modeling_llama4 import Llama4TextMoe
 
 def deduplicate_and_sort(lst):
     return sorted(set(lst))
-cuda_graphs = deduplicate_and_sort([1, 2, Config().chunk_size])
-#cuda_graphs = deduplicate_and_sort([1, 2, 3, Config().max_batch_size, 64, Config().chunk_size])
+cuda_graphs = deduplicate_and_sort([1, 2, 3, Config().max_batch_size, 64, Config().chunk_size])
 # class Base(BaseInjectedModule, ABC):
 class KExpertsBase(ABC):
     def __init__(self, key: str, gguf_loader: GGUFLoader, config: PretrainedConfig, orig_module: nn.Module, device: str = "cuda", **kwargs):

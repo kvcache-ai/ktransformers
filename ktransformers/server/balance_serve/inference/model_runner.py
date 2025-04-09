@@ -56,8 +56,7 @@ class ModelRunner:
         self.features_buf = None
         self.output = None
         self.graph_memory_pool = None
-        self.cuda_graphs = deduplicate_and_sort([1, 2, Config().chunk_size])
-        # self.cuda_graphs = deduplicate_and_sort([1, 2, 3, Config().max_batch_size, 64, Config().chunk_size])
+        self.cuda_graphs = deduplicate_and_sort([1, 2, 3, Config().max_batch_size, 64, Config().chunk_size])
         self.use_cuda_graph = use_cuda_graph
         self.model_time = 0
         self.page_size = page_size

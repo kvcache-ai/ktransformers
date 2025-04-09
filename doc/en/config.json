@@ -1,0 +1,54 @@
+{
+  "architectures": [
+    "Llama4ForConditionalGeneration"
+  ],
+  "boi_token_index": 200080,
+  "eoi_token_index": 200081,
+  "image_token_index": 200092,
+  "model_type": "llama4",
+  "_attn_implementation_autoset": true,
+  "attention_bias": false,
+  "attention_chunk_size": 8192,
+  "attention_dropout": 0.0,
+  "bos_token_id": 200000,
+  "eos_token_id": [
+    200001,
+    200007,
+    200008
+  ],
+  "for_llm_compressor": false,
+  "head_dim": 128,
+  "hidden_act": "silu",
+  "hidden_size": 5120,
+  "initializer_range": 0.02,
+  "interleave_moe_layer_step": 1,
+  "intermediate_size": 8192,
+  "intermediate_size_mlp": 16384,
+  "max_position_embeddings": 10485760,
+
+  "no_rope_layers": [],
+  "num_attention_heads": 40,
+  "num_experts_per_tok": 1,
+  "num_hidden_layers": 48,
+  "num_key_value_heads": 8,
+  "num_local_experts": 16,
+  "output_router_logits": false,
+  "pad_token_id": 200018,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": {
+    "factor": 8.0,
+    "high_freq_factor": 4.0,
+    "low_freq_factor": 1.0,
+    "original_max_position_embeddings": 8192,
+    "rope_type": "llama3"
+  },
+  "rope_theta": 500000.0,
+  "router_aux_loss_coef": 0.001,
+  "router_jitter_noise": 0.0,
+
+  "use_cache": true,
+  "use_qk_norm": true,
+  "vocab_size": 202048,
+  "torch_dtype": "bfloat16",
+  "transformers_version": "4.51.0.dev0"
+}
