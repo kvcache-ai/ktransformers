@@ -25,6 +25,12 @@ https://github.com/user-attachments/assets/449706f1-784b-4931-b2ba-07687c1aca54
 
 ------
 
+## Resource Requirements
+
+The Scout model running with 16 Experts requires approximately 65 GB of memory and 10 GB of GPU memory, while the Maverick model with 128 Experts requires approximately 270 GB of memory and 12 GB of GPU memory.
+
+------
+
 ## ⚙️ Usage Instructions
 
 ### 1. Clone `support-llama4` Branch
