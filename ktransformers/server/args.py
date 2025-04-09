@@ -138,11 +138,10 @@ class ArgumentParser:
         self.cfg.server_port = args.port
         self.cfg.user_force_think = args.force_think
         
-        args.gpu_memory_size = args.cache_lens*2*576*61
-        args.gpu_memory_size = 4*1024*1024*1024
+        args.gpu_memory_size = args.cache_lens * 8 * 128 * 48 
         # TODO: remove hard code
         self.cfg.gpu_memory_size = args.gpu_memory_size
-        self.cfg.gpu_memory_size = 4*1024*1024*1024
+
         free_ports = get_free_ports(3, [args.port])
         args.sched_port = free_ports[0]
         args.sched_metrics_port = free_ports[1]
