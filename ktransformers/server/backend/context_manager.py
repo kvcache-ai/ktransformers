@@ -9,9 +9,11 @@ from ktransformers.server.backend.interfaces.transformers import TransformersThr
 from ktransformers.server.backend.interfaces.ktransformers import KTransformersThreadContext
 from ktransformers.server.backend.interfaces.exllamav2 import ExllamaThreadContext
 
+
 from ktransformers.server.backend.interfaces.exllamav2 import ExllamaInterface
 from ktransformers.server.backend.interfaces.transformers import TransformersInterface
 from ktransformers.server.backend.interfaces.ktransformers import KTransformersInterface
+
 class ThreadContextManager:
     lock: Lock
     threads_context: Dict[ObjectID, ThreadContext]
@@ -36,7 +38,16 @@ class ThreadContextManager:
                 elif isinstance(self.interface, TransformersInterface):
                     new_context = TransformersThreadContext(run, self.interface)
                 else:
-                    raise NotImplementedError
+                    from ktransformers.server.backend.interfaces.balance_serve import BalanceServeThreadContext
+                    from ktransformers.server.backend.interfaces.balance_serve import BalanceServeInterface
+                    if isinstance(self.interface, BalanceServeInterface):
+                        new_context = BalanceServeThreadContext(run, self.interface)
+                    else:
+                        raise NotImplementedError
+                # elif isinstance(self.interface, BalanceServeInterface):
+                #     new_context = BalanceServeThreadContext(run, self.interface)
+                # else:
+                #     raise NotImplementedError
                 self.threads_context[run.thread_id] = new_context
                 # self.threads_context[run.thread_id] = ExllamaInferenceContext(run)
             re = self.threads_context[run.thread_id]
