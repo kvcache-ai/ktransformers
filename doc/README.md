@@ -22,6 +22,7 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
+* **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./en/llama4.md)).
 * **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./en/balance-serve.md)).
 * **Mar 27, 2025**: Support Multi-concurrency.
 * **Mar 15, 2025**: Support ROCm on AMD GPU ([Tutorial](./en/ROCm.md)).
