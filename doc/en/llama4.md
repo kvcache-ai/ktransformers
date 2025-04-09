@@ -66,7 +66,11 @@ USE_BALANCE_SERVE=1  bash ./install.sh
 USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
 ```
 
-### 4. Run LLaMA 4 Inference Server
+### 4. Use our custom config.json
+
+Currently, it's needed to use our custom config.json(https://github.com/kvcache-ai/ktransformers/blob/support-llama4/doc/en/config.json) to replace your config.json in your `--model_path`.
+
+### 5. Run LLaMA 4 Inference Server
 
 Make sure you have:
 
