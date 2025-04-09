@@ -64,6 +64,7 @@ class ForwardBatchInput:
                     self.temperatures = torch.concat((self.temperatures, torch.tensor([prefill_query_info.temperature], device=device, dtype=torch.float32)), dim=0)
                     self.top_ps = torch.concat((self.top_ps, torch.tensor([prefill_query_info.top_p], device=device, dtype=torch.float32)), dim=0)
 
+
             for decode_query_info in decode_querys_info:
                 decode_kv_block_len = (decode_query_info.active_position + 1 + page_size - 1) // page_size
                 self.q_indptr = torch.concat((self.q_indptr, torch.tensor([1 + self.q_indptr[-1]], device=device, dtype=torch.int32)), dim=0)
@@ -281,4 +282,5 @@ class ForwardBatchOutput:
         self.generated_tokens_num = []
         self.top_ps = []
         self.temperatures = []
+        self.num_batchs = 1
         pass

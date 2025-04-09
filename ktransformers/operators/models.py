@@ -1350,3 +1350,23 @@ class KLlamaModel(BaseInjectedModule):
             )
 
         return causal_mask
+
+class KLlama4Model(BaseInjectedModule):
+
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module,
+        device: str = "cuda",
+        per_layer_prefill_intput_threshold: int = 30000,  # if None, no per-layer prefill
+        transfer_map: dict = None,
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, device, **kwargs
+        )
+        self.per_layer_prefill_intput_threshold = per_layer_prefill_intput_threshold
+        self.transfer_map = transfer_map
+        self.stream_device_map = dict()

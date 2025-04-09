@@ -412,3 +412,48 @@ class RotaryEmbeddingV4(BaseInjectedModule):
         # self.register_buffer("inv_freq", inv_freq, persistent=False)
         # For BC we register cos and sin cached
         self.max_seq_len_cached = max_position_embeddings
+    
+
+class KLlama4RotaryEmbedding(BaseInjectedModule, DeepseekV2RotaryEmbedding):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module,
+        #  device: str = "cuda",
+        generate_device: str = "cuda",
+        prefill_device: str = "cuda",
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs
+        )
+        self.orig_module.__init__(
+            config
+        )
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
+
+    def load(self):
+        self.orig_module.__init__(
+            self.orig_module.config,
+            device = self.generate_device,
+        )
+        
+    @torch.no_grad()
+    def forward(self, x, position_ids):
+        if "dynamic" in self.rope_type:
+            self._dynamic_frequency_update(position_ids, device=x.device)
+        # Core RoPE block
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        # print(inv_freq_expanded.device)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.to(x.device) @ position_ids_expanded).transpose(1, 2)
+            freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        freqs_cis = freqs_cis * self.attention_scaling
+        return freqs_cis

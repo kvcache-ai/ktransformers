@@ -21,16 +21,16 @@ user:
 
 model:
   # type: transformers
-  # type: balance_serve
-  type: ktransformers
+  type: balance_serve
+  # type: ktransformers
 
-  name: DeepSeek-Coder-V2-Instruct
-  path: deepseek-ai/DeepSeek-V2-Lite-Chat
-  gguf_path: ./DeepSeek-V2-Lite-Chat-GGUF
+  name: Llama4ForConditionalGeneration
+  path: /mnt/data/models/Llama-4-Scout-17B-16E-Instruct
+  gguf_path: /mnt/data/models/Llama-4-Scout-17B-16E-Q4_K_M-GGUF
 
   device: cuda:0
   cache_lens: 8192
-  max_new_tokens: 500
+  max_new_tokens: 50
 web:
   mount: False
   open_cross_domain: True

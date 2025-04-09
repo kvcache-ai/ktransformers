@@ -35,7 +35,7 @@
         "max_position_embeddings": 163840,
         "model_type": "deepseek_v3",
         "num_attention_heads": 128,
-        "num_hidden_layers": 3,
+        "num_hidden_layers": 61,
         "num_key_value_heads": 128,
         "vocab_size": 129280
     },
@@ -59,6 +59,16 @@
         "num_key_value_heads": 32,
         "vocab_size": 32000
     },
+    "Llama-4-Scout-17B-16E-Instruct": {
+        "hidden_size": 5120,
+        "intermediate_size": 8192,
+        "max_position_embeddings": 10485760,
+        "model_type": "llama4",
+        "num_attention_heads": 40,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 8,
+        "vocab_size": 202048
+    },
     "Moonlight-16B-A3B-Instruct": {
         "hidden_size": 2048,
         "intermediate_size": 11264,
@@ -68,6 +78,16 @@
         "num_hidden_layers": 27,
         "num_key_value_heads": 16,
         "vocab_size": 163840
+    },
+    "Qwen2-57B-A14B-Instruct": {
+        "hidden_size": 3584,
+        "intermediate_size": 18944,
+        "max_position_embeddings": 32768,
+        "model_type": "qwen2_moe",
+        "num_attention_heads": 28,
+        "num_hidden_layers": 28,
+        "num_key_value_heads": 4,
+        "vocab_size": 151936
     },
     "Qwen2.5-32B-Instruct": {
         "hidden_size": 5120,

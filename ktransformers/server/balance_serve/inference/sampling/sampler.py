@@ -65,7 +65,7 @@ class Sampler(nn.Module):
 
 		logits = logits.contiguous()
 		origin_logits = logits.clone()
-		if sampling_config.is_all_greedy:
+		if True or sampling_config.is_all_greedy:
 			# Use torch.argmax if all requests use greedy sampling
 			probs = logits
 			batch_next_token_ids = torch.argmax(logits, -1)
