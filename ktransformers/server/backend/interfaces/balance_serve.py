@@ -387,6 +387,8 @@ class BalanceServeInterface(BackendInterfaceBase):
         stop_criteria = [[self.tokenizer.eos_token_id]]
         print("stop_criteria", stop_criteria)
         query_add.stop_criteria = stop_criteria
+        if temperature == 0:
+            temperature = 0.0001
         query_add.sample_options.temperature = temperature
         if top_p == 0:
             top_p = 0.0001

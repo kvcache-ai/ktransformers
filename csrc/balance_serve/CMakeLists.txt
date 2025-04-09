@@ -1,6 +1,6 @@
 
 cmake_minimum_required(VERSION 3.21)
-find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 REQUIRED)
+find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 g++ REQUIRED)
 set(CMAKE_CXX_COMPILER ${GCC_COMPILER})
 
 # 显示选定的编译器
@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD 20)
 # set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
 # set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
 set(CMAKE_BUILD_TYPE "Release")
 
 file(GLOB_RECURSE FMT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
@@ -26,9 +27,6 @@ add_custom_target(
     COMMENT "Running clang-format on all source files"
 )
 
-
-
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
 set(BUILD_SHARED_LIBS ON)
 set(ENABLE_PUSH OFF)
 set(ENABLE_COMPRESSION OFF)

@@ -1,16 +1,16 @@
 #pragma once
 
-#include "prometheus/counter.h"
-#include "prometheus/exposer.h"
-#include "prometheus/gauge.h"
-#include "prometheus/histogram.h"
-#include "prometheus/registry.h"
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+#include "prometheus/counter.h"
+#include "prometheus/exposer.h"
+#include "prometheus/gauge.h"
+#include "prometheus/histogram.h"
+#include "prometheus/registry.h"
 
 #include "utils/timer.hpp"
 

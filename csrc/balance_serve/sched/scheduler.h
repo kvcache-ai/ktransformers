@@ -1,10 +1,10 @@
 #pragma once
-#include <torch/torch.h>
+#include "model_config.h"
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <torch/torch.h>
 #include <vector>
-#include "model_config.h"
 
 namespace scheduler {
 
@@ -28,7 +28,9 @@ struct ModelSettings {
   double bytes_per_kv_cache_element;
 
   inline size_t params_nbytes() { return params_count * bytes_per_params; }
-  inline size_t bytes_per_token_kv_cache() { return bytes_per_kv_cache_element * num_k_heads * k_head_dim; }
+  inline size_t bytes_per_token_kv_cache() {
+    return bytes_per_kv_cache_element * num_k_heads * k_head_dim;
+  }
 };
 
 struct SampleOptions {
@@ -37,15 +39,16 @@ struct SampleOptions {
 };
 
 struct Settings {
-  // something is aukward here, kvc2 only use model_name and quant_type to get model infos.
+  // something is aukward here, kvc2 only use model_name and quant_type to get
+  // model infos.
   ModelName model_name;
   QuantType quant_type;
   // model_setting is ignore by kvc2
   ModelSettings model_settings;
 
-  size_t page_size = 256;             // how many token in a page
-  std::vector<size_t> gpu_device_id;  //
-  size_t gpu_memory_size;             // memory size in bytes of each GPU, each
+  size_t page_size = 256;            // how many token in a page
+  std::vector<size_t> gpu_device_id; //
+  size_t gpu_memory_size;            // memory size in bytes of each GPU, each
   double memory_utilization_percentage;
 
   size_t max_batch_size = 256;
@@ -79,14 +82,16 @@ struct Settings {
   void auto_derive();
 };
 
-using PrefillTask = std::tuple<QueryID, TokenLength, TokenLength>;  // id, start, length
+using PrefillTask =
+    std::tuple<QueryID, TokenLength, TokenLength>; // id, start, length
 
 struct BatchQueryTodo {
   // query
   std::vector<QueryID> query_ids;
   std::vector<torch::Tensor> query_tokens;
   std::vector<TokenLength> query_lengths;
-  std::vector<torch::Tensor> block_indexes;  // (max_num_blocks_per_seq), dtype torch.int32.
+  std::vector<torch::Tensor>
+      block_indexes; // (max_num_blocks_per_seq), dtype torch.int32.
   std::optional<torch::Tensor> attn_masks;
   std::optional<torch::Tensor> rope_ranges;
   std::vector<SampleOptions> sample_options;
@@ -94,8 +99,10 @@ struct BatchQueryTodo {
 
   // mini batches, adjacent two mini batches are executed together
   // tasks count must be <=2, because of flash infer attention
-  std::vector<PrefillTask> prefill_mini_batches;          // prefill minibatch only has 1 prefill
-  std::vector<std::vector<QueryID>> decode_mini_batches;  // decode minibatch has multiple decode
+  std::vector<PrefillTask>
+      prefill_mini_batches; // prefill minibatch only has 1 prefill
+  std::vector<std::vector<QueryID>>
+      decode_mini_batches; // decode minibatch has multiple decode
 
   std::string debug();
   bool empty();
@@ -105,9 +112,9 @@ struct QueryUpdate {
   QueryID id;
   bool ok;
   bool is_prefill;
-  bool decode_done;             // no use for now
-  TokenLength active_position;  // the position where no kvcache now,
-                                // kvcache[active_position] == None
+  bool decode_done;            // no use for now
+  TokenLength active_position; // the position where no kvcache now,
+                               // kvcache[active_position] == None
 
   Token generated_token;
 
@@ -117,8 +124,8 @@ struct QueryUpdate {
 using BatchQueryUpdate = std::vector<QueryUpdate>;
 
 struct InferenceContext {
-  std::vector<torch::Tensor> k_cache;  // [gpu num] (layer_count, num blocks,
-                                       // page size, kheadnum, head_dim)
+  std::vector<torch::Tensor> k_cache; // [gpu num] (layer_count, num blocks,
+                                      // page size, kheadnum, head_dim)
   std::vector<torch::Tensor> v_cache;
 };
 
@@ -127,7 +134,7 @@ constexpr UserID NoUser = -1;
 const int MAX_SLO_TIME = 1e9;
 
 struct QueryAdd {
-  std::vector<Token> query_token;  // int here
+  std::vector<Token> query_token; // int here
   // torch::Tensor attn_mask;
   TokenLength query_length;
   TokenLength estimated_length;
@@ -141,11 +148,11 @@ struct QueryAdd {
   int SLO_TBT_ms = MAX_SLO_TIME;
 
   std::string serialize();
-  static QueryAdd deserialize(const std::string& input);
+  static QueryAdd deserialize(const std::string &input);
 };
 
 class Scheduler {
- public:
+public:
   virtual void init(Settings settings) = 0;
 
   virtual void run() = 0;
@@ -156,7 +163,8 @@ class Scheduler {
   virtual void cancel_query(QueryID id) = 0;
 
   // inference loop call this
-  virtual std::shared_ptr<BatchQueryTodo> update_last_batch(BatchQueryUpdate updates) = 0;
+  virtual std::shared_ptr<BatchQueryTodo>
+  update_last_batch(BatchQueryUpdate updates) = 0;
   virtual InferenceContext get_inference_context() = 0;
 
   virtual ~Scheduler() = default;
@@ -164,4 +172,4 @@ class Scheduler {
 
 std::shared_ptr<Scheduler> create_scheduler(Settings settings);
 
-};  // namespace scheduler
+}; // namespace scheduler

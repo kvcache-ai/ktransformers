@@ -35,23 +35,23 @@ struct ArrayStore {
     if (to <= size) {
       return;
     }
-    //TODO: extend file
+    // TODO: extend file
     size = to;
-    //LOG_INFO("Extend file to `, size `", to, size_in_bytes());
+    // LOG_INFO("Extend file to `, size `", to, size_in_bytes());
   }
 
   ArrayStore(size_t element_size, size_t size, std::filesystem::path data_path)
       : element_size(element_size),
         element_size_aligned((element_size + DeviceBlockSize - 1) / DeviceBlockSize),
         data_path(data_path) {
-    //TODO: prefix cache
+    // TODO: prefix cache
   }
 
   void read(size_t index, void* buffer) {
-    //TODO: read from file
+    // TODO: read from file
   }
   void write(size_t index, void* buffer) {
-    //TODO: write to file
+    // TODO: write to file
   }
 };
 
@@ -98,15 +98,15 @@ struct IODealerImpl {
   IODealerImpl(bool use_io_uring, int IO_DEPTH) : use_io_uring(use_io_uring), IO_DEPTH(IO_DEPTH) {}
 
   void queue_consumer() {
-    //TODO:
+    // TODO:
   }
 
   void io_perf() {
-    //TODO:
+    // TODO:
   }
 
   void io_dealer() {
-    //TODO:
+    // TODO:
   }
 };
 
@@ -130,7 +130,7 @@ void IODealer::stop() {
   if (io_impl->stop) {
     return;
   }
-  //LOG_INFO("Stopping IO Dealer");
+  // LOG_INFO("Stopping IO Dealer");
   io_impl->stop = true;
 }
 

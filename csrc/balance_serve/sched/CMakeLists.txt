@@ -1,5 +1,6 @@
 set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
 # set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
 
 set(UTILS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 

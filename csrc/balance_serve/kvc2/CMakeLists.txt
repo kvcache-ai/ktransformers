@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 REQUIRED)
+find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 g++ REQUIRED)
 set(CMAKE_CXX_COMPILER ${GCC_COMPILER})
 
 project(kvcache-manager VERSION 0.1.0)
@@ -11,13 +11,12 @@ set(CMAKE_CXX_STANDARD 20)
 # set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -Wpedantic -g -fsanitize=address")
 # set(CMAKE_CXX_FLAGS "-march=native -Wall -Wextra -Wpedantic -g")
 # set(CMAKE_CXX_FLAGS "-fPIC -O3 -ffast-math -march=native -Wall -Wextra -g")
-# set(CMAKE_BUILD_TYPE "Release")
-set(CMAKE_BUILD_TYPE "Debug")
+set(CMAKE_BUILD_TYPE "Release")
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
+# set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(BUILD_TEST OFF)
 set(BUILD_PYTHON_EXT OFF)
-
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
 
 # set(USE_IO_URING ON)
 if(USE_IO_URING)

@@ -71,6 +71,9 @@ class ArgumentParser:
         parser.add_argument("--batch_size", type=int, default=self.cfg.batch_size)
         parser.add_argument("--cache_lens", type=int, default=self.cfg.cache_lens)
 
+        # kvc2 config
+        parser.add_argument("--kvc2_config_dir", type=str, default=self.cfg.kvc2_config_dir)
+
         # log configs
         # log level: debug, info, warn, error, crit
         parser.add_argument("--log_dir", type=str, default=self.cfg.log_dir)

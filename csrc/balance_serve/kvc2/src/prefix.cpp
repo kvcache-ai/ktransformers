@@ -339,7 +339,7 @@ struct Prefix {
 
   void update_location(CacheInfo info, Location location) { locations.location_map[info] = location; }
 
-  Prefix* to_first_prefix_without_disk_locations(CacheInfo k_info/*, CacheInfo v_info*/) { // just k_info
+  Prefix* to_first_prefix_without_disk_locations(CacheInfo k_info /*, CacheInfo v_info*/) {  // just k_info
     auto now_prefix = this;
     while (now_prefix->prev != nullptr) {
       auto& prev = now_prefix->prev;
@@ -561,7 +561,7 @@ struct PrefixTree {
     if (need_lock) {
       sl = std::shared_lock<std::shared_mutex>(rw_lock);
     }
-    //TODO: prefix cache
+    // TODO: prefix cache
   }
 
   PrefixMatch look_up_or_insert(Token* data, TokenLength length) {
@@ -578,7 +578,6 @@ struct PrefixTree {
     re.match_length = length;
     return re;
   }
-
 
   std::shared_ptr<Prefix> new_prefix_node(Prefix* prev, TokenLength prev_match_length, Token* data, TokenLength length,
                                           bool need_lock = true) {
@@ -700,9 +699,7 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
       }
     }
   }
-  std::vector<MatchStatus> matched_status() override {
-    assert(false);
-  }
+  std::vector<MatchStatus> matched_status() override { assert(false); }
 
   bool any_match() {
     if (enable_alt) {
@@ -1066,7 +1063,6 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
 };
 
 struct KVC2 : KVC2Interface {
-
   KVC2Config config;
   std::shared_ptr<Metrics> met;
 
@@ -1194,7 +1190,7 @@ struct KVC2 : KVC2Interface {
         auto v_loc = disk_cache->allocate(h->v_info(), div_up(new_length, NumTokenPerBlock));
         h->k_seg_locs.add_location(now_prefix->start_length / NumTokenPerBlock, k_loc);
         h->v_seg_locs.add_location(now_prefix->start_length / NumTokenPerBlock, v_loc);
-  
+
         // split it to prefix trees
         for (auto tail = h->match.prefix; tail != now_prefix->prev; tail = tail->prev) {
           TokenLength local_ids_length = tail->local_length();
@@ -1207,7 +1203,7 @@ struct KVC2 : KVC2Interface {
         // allocate a big space on disk
         auto k_loc = disk_cache->allocate(h->k_info(), div_up(new_length, NumTokenPerBlock));
         h->k_seg_locs.add_location(now_prefix->start_length / NumTokenPerBlock, k_loc);
-  
+
         // split it to prefix trees
         for (auto tail = h->match.prefix; tail != now_prefix->prev; tail = tail->prev) {
           TokenLength local_ids_length = tail->local_length();
@@ -1231,7 +1227,7 @@ struct KVC2 : KVC2Interface {
     h->kvc2_top = this;
     h->set_cache_info(model_name, quant_type, config.k_cache_on, config.v_cache_on);
     h->ids = Tokens(id, id + length);
-    
+
     if (config.k_cache_on)
       h->set_raw_handles(true, k_cache);
     if (config.v_cache_on)
@@ -1261,7 +1257,7 @@ struct KVC2 : KVC2Interface {
     re->kvc2_top = this;
     SPDLOG_DEBUG("Lookup TokenLength {}", length);
     if (config.gpu_only == false) {
-      //TODO:
+      // TODO:
     }
     return re;
   };
@@ -1694,9 +1690,11 @@ void GPUPageCache::gpu_background_flush() {
         if (col_uls.empty())
           continue;
         for (size_t l = 0; l < config.layer_count; l++) {
-          if (config.k_cache_on && (occupations[l][i]->gpu_cc.dirty.load() == false || occupations[l][i]->cpu_cc.dirty.load()))
+          if (config.k_cache_on &&
+              (occupations[l][i]->gpu_cc.dirty.load() == false || occupations[l][i]->cpu_cc.dirty.load()))
             goto next_gpu_page;
-          if (config.v_cache_on && (v_occupations[l][i]->gpu_cc.dirty.load() == false || v_occupations[l][i]->cpu_cc.dirty.load()))
+          if (config.v_cache_on &&
+              (v_occupations[l][i]->gpu_cc.dirty.load() == false || v_occupations[l][i]->cpu_cc.dirty.load()))
             goto next_gpu_page;
         }
 
