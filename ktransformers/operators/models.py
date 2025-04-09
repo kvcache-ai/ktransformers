@@ -650,7 +650,10 @@ class KDeepseekV2Model(BaseInjectedModule):
         if per_layer_prefill_flag:
             causal_mask = None
         else:
-            if os.name == 'nt' or get_compute_capability()<8 or device_manager.gpu_vendor != GPUVendor.NVIDIA:
+            if (os.name == 'nt'
+                or get_compute_capability() < 8
+                or (self.transfer_map is not None and 'cpu' in self.transfer_map.values())
+                or device_manager.gpu_vendor != GPUVendor.NVIDIA):
                 # print("for Windows or GPU before ampere, use forward_windows")
                 # only use mask in forward windows or can't flash attn
                 causal_mask = self._update_causal_mask(
