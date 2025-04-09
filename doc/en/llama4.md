@@ -71,7 +71,7 @@ USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
 Make sure you have:
 
 - `--model_path` pointing to a local config directory (not a Hugging Face name).
-- `--gguf_path` pointing to quantized `.gguf` weights.
+- `--gguf_path` pointing to the folder containing quantized `.gguf` weights.
 
 ```bash
 python ktransformers/server/main.py \
