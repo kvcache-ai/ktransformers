@@ -435,6 +435,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
                     kv_len_arr = torch.tensor([position_ids[0, -1].item()+1], dtype=torch.int32, device=self.device)
                     self.mla_wrapper.plan(qo_indptr,None,None,
                                         kv_len_arr,
+                                        None,
                                         self.num_heads,
                                         self.kv_lora_rank,
                                         self.qk_rope_head_dim,
