@@ -1,6 +1,6 @@
 
 cmake_minimum_required(VERSION 3.21)
-find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 REQUIRED)
+find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 g++ REQUIRED)
 set(CMAKE_CXX_COMPILER ${GCC_COMPILER})
 
 # 显示选定的编译器
