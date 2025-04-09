@@ -12,18 +12,10 @@ class ConfigArgs(BaseModel):
     class Config:
         protected_namespaces = ()
 
-    paged: bool = Field(None, description="Whether to use paged attention kv cache")
-    total_context: int = Field(
-        None,
-        description=(
-            "Total number of tokens to allocate space for. This is not the max_seq_len supported by the model but the"
-            " total to distribute dynamically over however many jobs are active at once"
-        ),
-    )
     max_batch_size: int = Field(
         None, description="Max number of batches to run at once, assuming the sequences will fit within total_context"
     )
-    chunk_prefill_size: int = Field(
+    chunk_size: int = Field(
         None,
         description=(
             "Max chunk size. Determines the size of prefill operations. Can be reduced to reduce pauses whenever a new"
@@ -70,7 +62,6 @@ class ConfigArgs(BaseModel):
     repetition_penalty: float = Field(None, description="Sampler repetition penalty, default = 1.01 (1 to disable)")
     frequency_penalty: float = Field(None, description="Sampler frequency penalty, default = 0.0 (0 to disable)")
     presence_penalty: float = Field(None, description="Sampler presence penalty, default = 0.0 (0 to disable)")
-    max_response_tokens: int = Field(None, description="Max tokens per response, default = 1000")
     response_chunk: int = Field(None, description="Space to reserve in context for reply, default = 250")
     no_code_formatting: bool = Field(None, description="Disable code formatting/syntax highlighting")
     cache_8bit: bool = Field(None, description="Use 8-bit (FP8) cache")

@@ -114,6 +114,44 @@ def marlin_quantize(
     return res_list
 
 
+def vllm_marlin_quantize(
+    w: torch.Tensor,
+    num_bits: int,
+    group_size: int,
+    act_order: bool,
+):
+    size_k, size_n = w.shape
+
+    # Normalize group_size
+    if group_size == -1:
+        group_size = size_k
+    assert group_size <= size_k
+
+    # Quantize (and apply act_order if provided)
+    w_ref, q_w, s, g_idx, rand_perm = quantize_weights(w, num_bits, group_size,
+                                                       act_order)
+
+    # For act_order, sort the "weights" and "g_idx" so that group ids are
+    # increasing
+    sort_indices = torch.empty(0, dtype=torch.int, device=w.device)
+    if act_order:
+        q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
+
+    # Reformat to marlin
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits,
+                                marlin_perm[num_bits])
+    marlin_s = marlin_permute_scales(s, size_k, size_n, group_size,
+                                     marlin_scale_perm[num_bits],
+                                     marlin_scale_perm_single[num_bits])
+
+    # Create result
+    res_list = [w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, rand_perm]
+    for i in range(len(res_list)):
+        res_list[i] = res_list[i].to(w.device)
+
+    return res_list
+
+
 def inject_24(w, size_k, size_n):
     assert w.shape == (size_k, size_n)
 

@@ -1,0 +1,57 @@
+{
+    "BF16": {
+        "block_element_count": 1,
+        "block_element_size": 2,
+        "bytes_per_element": 2.0,
+        "can_be_used_as_vector": true,
+        "has_min": false,
+        "has_scale": false,
+        "name": "BF16",
+        "reference": "",
+        "type_of_dot_vector": "BF16"
+    },
+    "FP16": {
+        "block_element_count": 1,
+        "block_element_size": 2,
+        "bytes_per_element": 2.0,
+        "can_be_used_as_vector": true,
+        "has_min": false,
+        "has_scale": false,
+        "name": "FP16",
+        "reference": "",
+        "type_of_dot_vector": "FP16"
+    },
+    "FP32": {
+        "block_element_count": 1,
+        "block_element_size": 4,
+        "bytes_per_element": 4.0,
+        "can_be_used_as_vector": true,
+        "has_min": false,
+        "has_scale": false,
+        "name": "FP32",
+        "reference": "",
+        "type_of_dot_vector": "FP32"
+    },
+    "Q4_0": {
+        "block_element_count": 32,
+        "block_element_size": 18,
+        "bytes_per_element": 0.5625,
+        "can_be_used_as_vector": false,
+        "has_min": false,
+        "has_scale": true,
+        "name": "Q4_0",
+        "reference": "https://huggingface.co/docs/hub/gguf",
+        "type_of_dot_vector": "Q8_0"
+    },
+    "Q8_0": {
+        "block_element_count": 32,
+        "block_element_size": 34,
+        "bytes_per_element": 1.0625,
+        "can_be_used_as_vector": true,
+        "has_min": false,
+        "has_scale": true,
+        "name": "Q8_0",
+        "reference": "https://huggingface.co/docs/hub/gguf",
+        "type_of_dot_vector": "Q8_0"
+    }
+}

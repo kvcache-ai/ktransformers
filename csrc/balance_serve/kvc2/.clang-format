@@ -1,0 +1,25 @@
+Language:        Cpp
+# 格式化风格，可以是LLVM, Google, Chromium, Mozilla, WebKit等，或者自定义
+BasedOnStyle:  Google
+
+# 缩进设置
+IndentWidth:        2
+TabWidth:           2
+UseTab:             Never
+
+# 换行相关设置
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortLoopsOnASingleLine: false
+
+# 类与结构体
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# 包含文件的排序和分组
+IncludeBlocks:   Preserve
+SortIncludes:    true
+
+# 控制最大行宽
+ColumnLimit:     120
