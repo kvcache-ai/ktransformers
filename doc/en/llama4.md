@@ -15,7 +15,7 @@ We are pleased to announce that **KTransformers** now provides **experimental su
 - 🔥 Official LLaMA 4 Release: https://huggingface.co/meta-llama/Llama-4-Scout-17B-16E-Instruct
    (Note: LLaMA 4 models are served through the Meta repository. Make sure to **agree to terms** before downloading.)
 - 🧠 GGUF Format (quantized models):
-  - https://huggingface.co/mradermacher/Llama-4-Scout-17B-16E-Instruct-GGUF
+  - https://huggingface.co/unsloth/Llama-4-Scout-17B-16E-Instruct-GGUF
 
 ------
 
