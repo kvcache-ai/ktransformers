@@ -403,11 +403,9 @@ class CMakeBuild(BuildExtension):
 
         if not build_temp.exists():
             build_temp.mkdir(parents=True)
-        result = subprocess.run(
-            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True, text=True
+        subprocess.run(
+            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True
         )
-        print("Standard output:", result.stdout)
-        print("Standard error:", result.stderr)
         subprocess.run(
             ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
         )
