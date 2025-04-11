@@ -1225,7 +1225,7 @@ struct BaseDequantizer {
     float d;
 };
 
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1698
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1698
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 __m128i inline load_iq4nl_values_128() {
     static const uint8_t kvalues_iq4nl[16] = {1, 24, 45, 63, 79, 93, 106, 118, 129, 141, 153, 166, 181, 197, 217, 241};
@@ -1309,7 +1309,7 @@ struct DequantizerQ4K final : public BaseDequantizer<block_q4_K> {
 moonll DequantizerIQ4XS
 */
 
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1775
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1775
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 __m512i inline load_iq4nl_values_512() {
     auto val256 = load_iq4nl_values_256();
@@ -1320,7 +1320,7 @@ __m512i inline load_iq4nl_values_512() {
 // Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1781
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct DequantizerIQ4XS final : public BaseDequantizer<block_iq4_xs> {
-    // Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1782
+    // Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1782
     DequantizerIQ4XS(const void * vx, size_t bx) : BaseDequantizer(vx, bx), values(load_iq4nl_values_512()) {}
     template <typename Q8>
     inline void new_block(int i, const Q8& q8, __m256 * accd, __m512i * scales) {
@@ -1535,7 +1535,7 @@ static void mul_mat_qX_K_q8_K_T(int n, const void * vx, size_t bx, const DataInf
 
     }
 }
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L2408
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L2408
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <typename Q8>
 inline void compute_block(int iy, int i, float d, const Q8& q8, const __m512i * values, const __m512i * scales, __m512 * accd) {
@@ -2096,7 +2096,7 @@ struct ScaleHelperQ_0 {
     template <typename Q> inline float prepare1(const Q * y) const { return GGML_FP16_TO_FP32(y->d); }
     template <typename Q> inline float prepare1(float d, const Q * y) const { return d*prepare1(y); }
 };
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8187
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8187
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <int min_value>
 struct ScaleHelperQ_0_1 {
@@ -2288,7 +2288,7 @@ struct Q8_0_1_Dequantizer {
         return _mm256_add_epi8(_mm256_set1_epi8(127), _mm256_loadu_si256((const __m256i *)x->qs));
     }
 };
-// end coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8455
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8455
 
 struct Q4_0_Dequantizer {
     Dequantizer4bit b4;
@@ -2375,7 +2375,7 @@ struct Q8_0_Unpacker final : public Q_Unpacker<block_q8_0, ScaleHelperQ_0, Q8_0_
     Q8_0_Unpacker(const void * vx, size_t bx) : Q_Unpacker(vx, bx) {}
     inline static int block_size() { return QK4_0; }
 };
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8574
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8574
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct Q8_0_1_Unpacker final : public Q_Unpacker<block_q8_0, ScaleHelperQ_0_1<127>, Q8_0_1_Dequantizer> {
     Q8_0_1_Unpacker(const void * vx, size_t bx) : Q_Unpacker(vx, bx) {}
@@ -2436,7 +2436,7 @@ struct SimpleBits {
 #define HAVE_AVX512_POPCNT 0
 #endif
 
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7736
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7736
 // with the addition of a branch that handles a missing _mm256_popcnt_epi32 instruction
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct EvenSignHelper {
@@ -2494,7 +2494,7 @@ get_scale_shuffle_16
 set_scales_16
 */
 
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1578
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1578
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 inline __m256i get_scale_shuffle_8(int i) {
     return _mm256_set1_epi16((2*i) | ((2*i+1) << 8));
@@ -2640,7 +2640,7 @@ inline void set_scales_16_iq(const __m256i& all_scales, __m256i * scales) {
     }
 // end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7278
     
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <typename Dequantizer>
 static void mul_mat_qX_K_q8_K_IQ_1(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
@@ -2737,7 +2737,7 @@ static void mul_mat_qX_K_q8_K_IQ(int n, const void * vx, size_t bx, const DataIn
     mul_mat_qX_K_q8_K_IQ_N<Dequantizer, nrc_y>(n, vx, bx, info, nrc_x);
 #endif
 }
-// end coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
 
 /*
 moonll iq1s
@@ -2828,7 +2828,7 @@ DequantizerIQ2XXS
 DequantizerIQ2XXS is important Dequantizer for DequantizerIQ1_S
 */
 
-// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8035
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8035
 // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct DequantizerIQ2XXS final : public BaseDequantizer<block_iq2_xxs> {
     DequantizerIQ2XXS(const void * vx, size_t bx) : BaseDequantizer(vx, bx) {}
