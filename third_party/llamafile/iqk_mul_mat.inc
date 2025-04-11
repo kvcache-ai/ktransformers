@@ -1,6 +1,9 @@
 // Adapted from
 // https://github.com/Mozilla-Ocho/llamafile/blob/0.8.8/llamafile/iqk_mul_mat.inc
-// Copyrigth 2024 Iwan Kawrakow.
+// Copyrigth 2024 Iwan Kawrakow - Apache 2.0 Licens
+// with additions from
+// https://github.com/ikawrakow/ik_llama.cpp/blob/main/ggml/src/iqk/iqk_mul_mat.cpp
+// Copyrigth 2024-2025 Iwan Kawrakow - MIT Licens
 // Copyright(c) 2024 by KVCache.AI, All Rights Reserved.
 
 // -*- mode:c++;indent-tabs-mode:nil;c-basic-offset:4;coding:utf-8 -*-
@@ -19,6 +22,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+//
+// Copyright (C) 2024-2025 Iwan Kawrakow
+// MIT license
+// SPDX-License-Identifier: MIT
+//
 
 #include <cstring>
 #include <type_traits>
@@ -125,6 +134,8 @@ struct MulMat {
     IQK_NOINLINE void mul_mat_NxM(int n, const void * vx, size_t bx, DataInfo& info, int nrc_x, int nrc_y) {
         constexpr int k_x_step = 64; // This works best on my Ryzen-7950X and M2 Max CPUs (but differences to other tile size are small)
 
+        // copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L162
+        // MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
         if (func16 && nrc_y >= 16) {
             int n_step = (nrc_y - info.cur_y)/16;
             for (int ix = 0; ix < nrc_x; ix += k_x_step) {
@@ -139,6 +150,7 @@ struct MulMat {
             info.cur_y += 16 * n_step;
             if (info.cur_y == nrc_y) return;
         }
+        // end copy
 
         int n_step = (nrc_y - info.cur_y)/funcs.size();
         if (n_step > 0) {
@@ -178,6 +190,8 @@ inline void make_q4_scales(const uint8_t * scales8, uint32_t * aux32) {
 moonll
 decoding tables
 */
+// copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L570
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 #ifdef __AVX2__
 static const uint64_t iq1s_grid_us[2048] = {
     0x0000000000000000, 0x0000000000000002, 0x0000000000000101, 0x0000000000000200,
@@ -953,6 +967,7 @@ static const uint32_t iq1s_grid_us[2048] = {
     0x22202022, 0x22202220, 0x22202222, 0x22212121, 0x22222020, 0x22222022, 0x22222220, 0x22222222,
 };
 #endif
+// end copy https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L570
 
 #ifndef HAVE_FANCY_SIMD
 const uint64_t keven_signs[128] = {
@@ -997,6 +1012,8 @@ const uint64_t keven_signs[128] = {
 add typeB and strideB
 }*/
 
+// Adapted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L406
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 bool iqk_mul_mat(long Nx, long Ny, long ne00,
     int typeA, const void * A, long strideA,
     int typeB, const void * B, long strideB,
@@ -1022,6 +1039,7 @@ bool iqk_mul_mat(long Nx, long Ny, long ne00,
 
         return true;
 }
+// end adapted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L406
 
 
 bool iqk_mul_mat_moe(long Nx, long Ny, long ne00, int ne11, int typeA, const void * A, const void * B,
@@ -1173,6 +1191,8 @@ struct ScaleIQ4XS {
     const __m128i m32 = _mm_set1_epi16(-32);
 };
 
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1455
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct Scales8KBase {
     template <typename Q8>
     inline void accum_mins(const __m128i& mins128, const Q8& q8, int i, float c, __m256 * accd) const {
@@ -1189,6 +1209,7 @@ struct Scales8KBase {
     const __m128i shuffles[2] = {_mm_set_epi32(0x07060706, 0x05040504, 0x03020302, 0x01000100),
                                  _mm_set_epi32(0x0f0e0f0e, 0x0d0c0d0c, 0x0b0a0b0a, 0x09080908)};
 };
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1455
 
 template <typename Block>
 struct BaseDequantizer {
@@ -1204,6 +1225,8 @@ struct BaseDequantizer {
     float d;
 };
 
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1698
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 __m128i inline load_iq4nl_values_128() {
     static const uint8_t kvalues_iq4nl[16] = {1, 24, 45, 63, 79, 93, 106, 118, 129, 141, 153, 166, 181, 197, 217, 241};
     return _mm_loadu_si128((const __m128i *)kvalues_iq4nl);
@@ -1213,6 +1236,7 @@ __m256i inline load_iq4nl_values_256() {
     auto val128 = load_iq4nl_values_128();
     return MM256_SET_M128I(val128, val128);
 }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1698
 
 #ifdef HAVE_FANCY_SIMD
 //====================================== Zen4 ==================================================
@@ -1285,12 +1309,18 @@ struct DequantizerQ4K final : public BaseDequantizer<block_q4_K> {
 moonll DequantizerIQ4XS
 */
 
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1775
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 __m512i inline load_iq4nl_values_512() {
     auto val256 = load_iq4nl_values_256();
     return _mm512_inserti32x8(_mm512_castsi256_si512(val256), val256, 1);
 }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1775
 
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1781
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct DequantizerIQ4XS final : public BaseDequantizer<block_iq4_xs> {
+    // Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1782
     DequantizerIQ4XS(const void * vx, size_t bx) : BaseDequantizer(vx, bx), values(load_iq4nl_values_512()) {}
     template <typename Q8>
     inline void new_block(int i, const Q8& q8, __m256 * accd, __m512i * scales) {
@@ -1331,6 +1361,7 @@ struct DequantizerIQ4XS final : public BaseDequantizer<block_iq4_xs> {
         _mm512_inserti32x8(_mm512_set1_epi16(0x0d0c), _mm256_set1_epi16(0x0f0e), 1),
     };
 };
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1781
 
 struct HighBit5 {
     inline void apply(const uint8_t * h, Q4Bits& bits) {
@@ -1504,6 +1535,8 @@ static void mul_mat_qX_K_q8_K_T(int n, const void * vx, size_t bx, const DataInf
 
     }
 }
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L2408
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <typename Q8>
 inline void compute_block(int iy, int i, float d, const Q8& q8, const __m512i * values, const __m512i * scales, __m512 * accd) {
     const __m512i p1 = _mm512_dpbusd_epi32(_mm512_setzero_si512(), values[0], q8.load_quants64(iy, i, 0));
@@ -1647,6 +1680,7 @@ static void mul_mat_qX_K_q8_K_AVX512_1(int n, const void * vx, size_t bx, const 
         info.store(ix, 0, hsum_float_8(_mm256_add_ps(accm, sum256)));
     }
 }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L2408
 
 #else
 // ===================================== Vanilla AVX2 =====================================
@@ -1881,6 +1915,7 @@ struct DequantizerQ6K final : public BaseDequantizer<block_q6_K> {
     const __m256i mh = _mm256_set1_epi8(0x30);
 };
 
+
 inline __m256i get_scale_shuffle_8(int i);
 
 inline void set_scales_8(const __m256i& all_scales, int j, __m256i* scales);
@@ -2061,6 +2096,8 @@ struct ScaleHelperQ_0 {
     template <typename Q> inline float prepare1(const Q * y) const { return GGML_FP16_TO_FP32(y->d); }
     template <typename Q> inline float prepare1(float d, const Q * y) const { return d*prepare1(y); }
 };
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8187
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <int min_value>
 struct ScaleHelperQ_0_1 {
     ggml_half scales8[4];
@@ -2083,6 +2120,7 @@ struct ScaleHelperQ_0_1 {
     }
     const __m128 min = _mm_set1_ps(float(-min_value));
 };
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8187
 
 struct ScaleHelperQ_1 {
     uint32_t scales8[4];
@@ -2243,11 +2281,14 @@ struct Q8_0_Dequantizer {
     }
 };
 
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8455
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct Q8_0_1_Dequantizer {
     inline __m256i dequant(const block_q8_0 * x) const {
         return _mm256_add_epi8(_mm256_set1_epi8(127), _mm256_loadu_si256((const __m256i *)x->qs));
     }
 };
+// end coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8455
 
 struct Q4_0_Dequantizer {
     Dequantizer4bit b4;
@@ -2334,11 +2375,14 @@ struct Q8_0_Unpacker final : public Q_Unpacker<block_q8_0, ScaleHelperQ_0, Q8_0_
     Q8_0_Unpacker(const void * vx, size_t bx) : Q_Unpacker(vx, bx) {}
     inline static int block_size() { return QK4_0; }
 };
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8574
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct Q8_0_1_Unpacker final : public Q_Unpacker<block_q8_0, ScaleHelperQ_0_1<127>, Q8_0_1_Dequantizer> {
     Q8_0_1_Unpacker(const void * vx, size_t bx) : Q_Unpacker(vx, bx) {}
 //    using Sum4T = Sum4TypeQ81;
     inline static int block_size() { return QK8_0; }
 };
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8574
 struct Q4_0_Unpacker final : public Q_Unpacker<block_q4_0, ScaleHelperQ_0, Q4_0_Dequantizer> {
     Q4_0_Unpacker(const void * vx, size_t bx) : Q_Unpacker(vx, bx) {}
     inline static int block_size() { return QK4_0; }
@@ -2392,6 +2436,9 @@ struct SimpleBits {
 #define HAVE_AVX512_POPCNT 0
 #endif
 
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7736
+// with the addition of a branch that handles a missing _mm256_popcnt_epi32 instruction
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct EvenSignHelper {
     #if defined HAVE_FANCY_SIMD
     // #pragma message("Using AVX512VPOPCNTDQ in even sign helper")
@@ -2447,6 +2494,8 @@ get_scale_shuffle_16
 set_scales_16
 */
 
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1578
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 inline __m256i get_scale_shuffle_8(int i) {
     return _mm256_set1_epi16((2*i) | ((2*i+1) << 8));
 }
@@ -2475,7 +2524,6 @@ inline void set_scales_16(const __m256i& all_scales, __m256i * scales) {
     scales[2] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(2));
     scales[3] = _mm256_shuffle_epi8(all_scales, get_scale_shuffle_16(3));
 }
-
 
 template <typename Q8, typename Bits>
 inline void multiply_add(const Bits& bits, const __m256i * scales, int j, int i, const Q8& q8, __m256i * sumi) {
@@ -2565,8 +2613,11 @@ inline void multiply_add_1(int j, const Bits& bits, const __m256i * scales, cons
 #endif
     }
 }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L1578
 
 
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7278
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 inline void set_scales_8_iq(int j, const __m256i& all_scales, __m256i * scales) {
     //#ifdef HAVE_FANCY_SIMD
         auto shuffle = j == 0 ? _mm256_set_epi64x(0x0302030203020302, 0x0100010001000100, 0x0302030203020302, 0x0100010001000100)
@@ -2587,7 +2638,10 @@ inline void set_scales_16_iq(const __m256i& all_scales, __m256i * scales) {
         set_scales_16(all_scales, scales);
     #endif
     }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7278
     
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <typename Dequantizer>
 static void mul_mat_qX_K_q8_K_IQ_1(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
         const int nb = n / QK_K;
@@ -2683,13 +2737,15 @@ static void mul_mat_qX_K_q8_K_IQ(int n, const void * vx, size_t bx, const DataIn
     mul_mat_qX_K_q8_K_IQ_N<Dequantizer, nrc_y>(n, vx, bx, info, nrc_x);
 #endif
 }
+// end coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L7299
 
 /*
 moonll iq1s
 core func for iq1s mul_mat_iq1_s_q8_K
 
 */
-
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L3813
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <int nrc_y>
 static void mul_mat_iq1_s_q8_K(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
     GGML_ASSERT(n%QK_K == 0);
@@ -2764,6 +2820,7 @@ static void mul_mat_iq1_s_q8_K(int n, const void * vx, size_t bx, const DataInfo
         }
     }
 }
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L3813
 
 /*
 moonll iq1s
@@ -2771,6 +2828,8 @@ DequantizerIQ2XXS
 DequantizerIQ2XXS is important Dequantizer for DequantizerIQ1_S
 */
 
+// Coped from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8035
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct DequantizerIQ2XXS final : public BaseDequantizer<block_iq2_xxs> {
     DequantizerIQ2XXS(const void * vx, size_t bx) : BaseDequantizer(vx, bx) {}
 
@@ -2851,6 +2910,8 @@ add Q8_0_Unpacker && DequantizerIQ2XXS support
 add func mul_mat_qX_K_q8_K_IQ
 */
 
+// Copied/adapted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L9092
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 template <typename Dequantizer> void MulMat::set_functions(MulMat& m) {
     if constexpr (std::is_same_v<Dequantizer, Q4_0_Unpacker> || std::is_same_v<Dequantizer, Q5_0_Unpacker> ||
         std::is_same_v<Dequantizer, Q8_0_Unpacker>) {
@@ -2929,7 +2990,10 @@ template <typename Dequantizer> void MulMat::set_functions(MulMat& m) {
 #endif
         }
 }
+// end copied/adapted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L9092
 
+// Copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8622
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 struct QFBase {
     #ifdef __AVX512F__
         constexpr static int k_step = 16;
@@ -3169,8 +3233,7 @@ void set_mul_mat_f(MulMat& mm) {
     mm.funcs[5] = mul_mat_fX_fY_T<6, FloatX, FloatY>;
 #endif
 }
-
-
+// end copied from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L8622
 
 /*
 moonll
@@ -3180,6 +3243,8 @@ add IQ1_S
 add GGML_TYPE_IQ4_XS
 */
 
+// Modifications extracted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L9231
+// MIT licensed, Copyright (c) 2024-2025 Iwan Kawrakow
 bool MulMat::set_mul_mat(int typeA, int typeB, int ne00, MulMat& mm, int Ny) {
     (void)Ny;
 
@@ -3272,6 +3337,7 @@ bool MulMat::set_mul_mat(int typeA, int typeB, int ne00, MulMat& mm, int Ny) {
     return ggml_type(typeB) == expected_typeB;
 
 }
+// end extracted from https://github.com/ikawrakow/ik_llama.cpp/blob/474435f58b6a26bc549589966482207fee94aa60/ggml/src/iqk/iqk_mul_mat.cpp#L9231
 
 } // namespace
 
