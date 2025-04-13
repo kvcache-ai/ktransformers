@@ -60,8 +60,8 @@ class ChatCompletionCreate(BaseModel):
     messages: List[Message]
     model: str
     stream: bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[float] = Field(default=0.6)
+    top_p: Optional[float] = Field(default=1.0)
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     stream_options: Optional[Dict[str, Any]] = None

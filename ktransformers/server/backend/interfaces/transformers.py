@@ -211,6 +211,8 @@ class TransformersInterface(BackendInterfaceBase):
             temperature = self.model.generation_config.temperature
         if top_p is None:
             top_p = self.model.generation_config.top_p
+        if top_p == 0:
+            top_p = 0.0001
         generation_config, model_kwargs = self.model._prepare_generation_config(
             None, max_length=self.args.max_new_tokens,
             do_sample=True, 
@@ -344,7 +346,7 @@ class TransformersInterface(BackendInterfaceBase):
         for i in range(1, self.max_new_tokens):
             with torch.nn.attention.sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION, SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
                 if flashinfer_enabled:
-                    MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1,
+                    MLAWrapperSingleton.plan_all(None,None,None,self.active_cache_position.to(torch.int32)+1, None,
                                              num_heads=self.model.config.num_attention_heads, head_dim_ckv=self.model.config.kv_lora_rank, 
                                              head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size,
                                              sm_scale=self.model.model.layers[0].self_attn.softmax_scale, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)

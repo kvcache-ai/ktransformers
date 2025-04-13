@@ -1,0 +1,26 @@
+
+set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fopenmp")
+
+function(add_kvc2_test source_file)
+    get_filename_component(target_name ${source_file} NAME_WE) # 获取不带扩展名的文件名作为目标名
+    add_executable(${target_name} ${source_file})
+    # target_compile_options(${target_name} PRIVATE -fopenmp  -fno-strict-aliasing)
+    target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+    target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/nlohmann/single_include)
+    target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/spdlog/include)
+    target_link_libraries(${target_name} PRIVATE kvc2 async_store)
+endfunction()
+
+add_kvc2_test(raw_insert_read.cpp)
+add_kvc2_test(lookup.cpp)
+add_kvc2_test(lookup-alt.cpp)
+add_kvc2_test(lookup-alt-gpu.cpp)
+add_kvc2_test(lookup-mt.cpp)
+add_kvc2_test(lookup-gpu.cpp)
+add_kvc2_test(lookup-gpu-mt.cpp)
+add_kvc2_test(lookup-gpu-async.cpp)
+add_kvc2_test(append-tokens.cpp)
+add_kvc2_test(flush-back.cpp)
+add_kvc2_test(check-flush-back.cpp)
+add_kvc2_test(lookup-without-vcache.cpp)
+add_kvc2_test(lookup-gpu-mt-without-vcache.cpp)

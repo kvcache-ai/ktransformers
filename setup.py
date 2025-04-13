@@ -25,6 +25,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from packaging.version import parse
+import torch
 import torch.version
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools import setup, Extension
@@ -35,6 +36,8 @@ try:
     from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension, MUSA_HOME
 except ImportError:
     MUSA_HOME=None
+    
+with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
 class CpuInstructInfo:
     CPU_INSTRUCT = os.getenv("CPU_INSTRUCT", "NATIVE")
@@ -67,17 +70,17 @@ class VersionInfo:
     def get_rocm_bare_metal_version(self, rocm_dir):
         """
         Get the ROCm version from the ROCm installation directory.
-        
+
         Args:
             rocm_dir: Path to the ROCm installation directory
-        
+
         Returns:
             A string representation of the ROCm version (e.g., "63" for ROCm 6.3)
         """
         try:
             # Try using rocm_agent_enumerator to get version info
             raw_output = subprocess.check_output(
-                [rocm_dir + "/bin/rocminfo", "--version"], 
+                [rocm_dir + "/bin/rocminfo", "--version"],
                 universal_newlines=True,
                 stderr=subprocess.STDOUT)
             # Extract version number from output
@@ -90,7 +93,7 @@ class VersionInfo:
         except (subprocess.CalledProcessError, FileNotFoundError):
             # If rocminfo --version fails, try alternative methods
             pass
-        
+
         try:
             # Try reading version from release file
             with open(os.path.join(rocm_dir, "share/doc/hip/version.txt"), "r") as f:
@@ -100,7 +103,7 @@ class VersionInfo:
                 return rocm_version
         except (FileNotFoundError, IOError):
             pass
-        
+
         # If all else fails, try to extract from directory name
         dir_name = os.path.basename(os.path.normpath(rocm_dir))
         match = re.search(r'rocm-(\d+\.\d+)', dir_name)
@@ -109,7 +112,7 @@ class VersionInfo:
             version = parse(version_str)
             rocm_version = f"{version.major}{version.minor}"
             return rocm_version
-        
+
         # Fallback to extracting from hipcc version
         try:
             raw_output = subprocess.check_output(
@@ -124,7 +127,7 @@ class VersionInfo:
                 return rocm_version
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
-        
+
         # If we still can't determine the version, raise an error
         raise ValueError(f"Could not determine ROCm version from directory: {rocm_dir}")
 
@@ -212,7 +215,7 @@ class VersionInfo:
         cpu_instruct = self.get_cpu_instruct()
         backend_version = ""
         if CUDA_HOME is not None:
-            backend_version = f""
+            backend_version = f"cu{self.get_cuda_bare_metal_version(CUDA_HOME)}"
         elif MUSA_HOME is not None:
             backend_version = f"mu{self.get_musa_bare_metal_version(MUSA_HOME)}"
         elif ROCM_HOME is not None:
@@ -274,11 +277,17 @@ PLAT_TO_CMAKE = {
 
 
 class CMakeExtension(Extension):
-    def __init__(self, name: str, sourcedir: str = "") -> None:
+    def __init__(self, name: str, sourcedir: str) -> None:
         super().__init__(name, sources=[])
-        self.sourcedir = os.fspath(
-            Path(sourcedir).resolve() / "ktransformers" / "ktransformers_ext")
+        print(name, sourcedir)
+        self.sourcedir = sourcedir
 
+def get_cmake_abi_args(cmake_args):
+    if torch.compiled_with_cxx11_abi():
+        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+    else:
+        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=0")
+    return cmake_args
 
 class CMakeBuild(BuildExtension):
 
@@ -316,10 +325,12 @@ class CMakeBuild(BuildExtension):
         elif ROCM_HOME is not None:
             cmake_args += ["-DKTRANSFORMERS_USE_ROCM=ON"]
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set.")
+        
+        cmake_args = get_cmake_abi_args(cmake_args)
         # log cmake_args
         print("CMake args:", cmake_args)
-        
+
         build_args = []
         if "CMAKE_ARGS" in os.environ:
             cmake_args += [
@@ -342,16 +353,17 @@ class CMakeBuild(BuildExtension):
             f"-DEXAMPLE_VERSION_INFO={self.distribution.get_version()}"]
         if self.compiler.compiler_type != "msvc":
             if not cmake_generator or cmake_generator == "Ninja":
-                try:
-                    import ninja
+                pass
+                # try:
+                #     import ninja
 
-                    ninja_executable_path = Path(ninja.BIN_DIR) / "ninja"
-                    cmake_args += [
-                        "-GNinja",
-                        f"-DCMAKE_MAKE_PROGRAM:FILEPATH={ninja_executable_path}",
-                    ]
-                except ImportError:
-                    pass
+                #     ninja_executable_path = Path(ninja.BIN_DIR) / "ninja"
+                #     cmake_args += [
+                #         "-GNinja",
+                #         f"-DCMAKE_MAKE_PROGRAM:FILEPATH={ninja_executable_path}",
+                #     ]
+                # except ImportError:
+                #     pass
 
         else:
             # Single config generators are handled "normally"
@@ -387,10 +399,12 @@ class CMakeBuild(BuildExtension):
                 build_args += [f"--parallel={cpu_count}"]
         print("CMake args:", cmake_args)
         build_temp = Path(ext.sourcedir) / "build"
+        print("build_temp:", build_temp)
+
         if not build_temp.exists():
             build_temp.mkdir(parents=True)
         result = subprocess.run(
-            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True
+            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True , capture_output=True, text=True
         )
         print("Standard output:", result.stdout)
         print("Standard error:", result.stderr)
@@ -400,9 +414,9 @@ class CMakeBuild(BuildExtension):
 
 if CUDA_HOME is not None or ROCM_HOME is not None:
     ops_module = CUDAExtension('KTransformersOps', [
-        'ktransformers/ktransformers_ext/cuda/custom_gguf/dequant.cu',
-        'ktransformers/ktransformers_ext/cuda/binding.cpp',
-        'ktransformers/ktransformers_ext/cuda/gptq_marlin/gptq_marlin.cu'
+        'csrc/ktransformers_ext/cuda/custom_gguf/dequant.cu',
+        'csrc/ktransformers_ext/cuda/binding.cpp',
+        'csrc/ktransformers_ext/cuda/gptq_marlin/gptq_marlin.cu'
     ],
     extra_compile_args={
             'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
@@ -415,7 +429,7 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
         }
     )
 elif MUSA_HOME is not None:
-    SimplePorting(cuda_dir_path="ktransformers/ktransformers_ext/cuda", mapping_rule={
+    SimplePorting(cuda_dir_path="csrc/ktransformers_ext/cuda", mapping_rule={
         # Common rules
         "at::cuda": "at::musa",
         "#include <ATen/cuda/CUDAContext.h>": "#include \"torch_musa/csrc/aten/musa/MUSAContext.h\"",
@@ -423,10 +437,10 @@ elif MUSA_HOME is not None:
         "nv_bfloat16": "mt_bfloat16",
         }).run()
     ops_module = MUSAExtension('KTransformersOps', [
-        'ktransformers/ktransformers_ext/cuda_musa/custom_gguf/dequant.mu',
-        'ktransformers/ktransformers_ext/cuda_musa/binding.cpp',
+        'csrc/ktransformers_ext/cuda_musa/custom_gguf/dequant.mu',
+        'csrc/ktransformers_ext/cuda_musa/binding.cpp',
         # TODO: Add Marlin support for MUSA.
-        # 'ktransformers/ktransformers_ext/cuda_musa/gptq_marlin/gptq_marlin.mu'
+        # 'csrc/ktransformers_ext/cuda_musa/gptq_marlin/gptq_marlin.mu'
     ],
     extra_compile_args={
             'cxx': ['force_mcc'],
@@ -440,12 +454,30 @@ elif MUSA_HOME is not None:
 else:
     raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
 
+ext_modules = [
+    CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+    ops_module,
+    CUDAExtension(
+        'vLLMMarlin', [
+            'csrc/custom_marlin/binding.cpp',
+            'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
+            'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
+        ],
+        extra_compile_args={
+            'cxx': ['-O3'],
+            'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+        },
+    )
+]
+if with_balance:
+    print("using balance_serve")
+    ext_modules.append(
+        CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
+    )
+
 setup(
     name=VersionInfo.PACKAGE_NAME,
     version=VersionInfo().get_package_version(),
     cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
-    ext_modules=[
-        CMakeExtension("cpuinfer_ext"),
-        ops_module,
-    ]
+    ext_modules=ext_modules
 )
