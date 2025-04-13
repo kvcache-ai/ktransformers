@@ -165,8 +165,6 @@ class TransformersInterface(BackendInterfaceBase):
         return input_ids
 
     def format_and_tokenize_input_ids(self, thread_id: ObjectID, messages: List):
-        #print("-----------------messages-----------------------")
-        #print(messages)
         for m in messages:
             if m["role"] == "system":
                 logger.warning(f'change {m["role"]} to user')
@@ -185,11 +183,7 @@ class TransformersInterface(BackendInterfaceBase):
         #     input_ids = self.tokenizer.apply_chat_template(
         #         new_messages, return_tensors="pt", add_generation_prompt=True
         #     ).to(self.args.device)
-        #print("-----------------new messages-----------------------")
-        #print(new_messages)
         input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
-        #print("-----------------input str-----------------------")
-        #print(input_str)
         # drop <think> token in chat template
         if input_str.endswith('<think>\n'):
             input_str = input_str[:-len('<think>\n')]
