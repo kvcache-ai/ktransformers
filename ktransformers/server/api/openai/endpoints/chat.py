@@ -16,7 +16,7 @@ from ktransformers.server.config.log import logger
 
 from ktransformers.server.schemas.endpoints.chat import ChatCompletionChunk
 
-# 定义我们自己的数据结构替代 OpenAI 的导入
+# Define own data structure instead of importing from OpenAI
 class CompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
@@ -42,7 +42,7 @@ class ChatCompletion(BaseModel):
     system_fingerprint: Optional[str] = None
     prompt_filter_results: Optional[List[Dict[str, Any]]] = None
 
-# 仅用于非流式响应构建
+# Only for non-streaming response construction
 class ChatCompletionMessageToolCallFunction(BaseModel):
     name: str
     arguments: str
@@ -70,12 +70,12 @@ def getTools(buffer):
     tool_call_end_marker = "<｜tool▁call▁end｜>"
     tool_calls_end_marker = "<｜tool▁calls▁end｜>"
     extracted_tools = []
-    working_buffer = buffer  # 创建工作副本
+    working_buffer = buffer
     
     
-    # 循环提取所有函数调用
+    # Iterate over all function calls
     while tool_call_begin_marker in working_buffer and tool_call_end_marker in working_buffer:
-        # 找到一个完整的函数调用
+        # Find a complete function call
         start_index = working_buffer.find(tool_call_begin_marker)
         end_index = working_buffer.find(tool_call_end_marker) + len(tool_call_end_marker)
         
@@ -83,27 +83,27 @@ def getTools(buffer):
             logger.warning("Not a function")
             break
             
-        # 提取完整的函数调用
+        # Extract the full function call
         full_tool_call = working_buffer[start_index:end_index]
         
-        # 从工作buffer中删除这个函数调用，防止重复处理
+        # Remove this function call from the working buffer to prevent duplicate processing
         working_buffer = working_buffer.replace(full_tool_call, "", 1)
         
-        # 提取函数名称
+        # Extract the function name
         function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
         function_name_end = full_tool_call.find("\n", function_name_start)
         function_name = full_tool_call[function_name_start:function_name_end].strip()
         
-        # 提取JSON参数
+        # Extract JSON parameters
         json_pattern = r'```json\s*(.*?)\s*```'
         json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
         
         if json_match:
             arguments_str = json_match.group(1).strip()
-            # 生成工具调用ID
+            # Generate tool call IDs
             tool_call_id = f"call_{uuid4().hex[:24]}"
             
-            # 添加到工具调用列表
+            # Add to tool call list
             extracted_tools.append({
                 "id": tool_call_id,
                 "type": "function",
@@ -124,16 +124,16 @@ def getTools(buffer):
 async def chat_completion(request: Request, create: ChatCompletionCreate):
     id = str(uuid4().hex)
     
-    # 1. 使用system提示让模型了解如何使用工具
+    # 1. Use system prompts to let models know how to use tools
     enhanced_messages = list(create.messages)
     
-    # 如果有工具，且第一条消息是system，在system提示中添加工具使用指导
+    # If there is a tool and the first message is system, add instructions on how to use the tool in the system tip
     if create.tools and len(create.tools) > 0 and (enhanced_messages[0].role == Role.system or enhanced_messages[0].role == Role.user):
         tool_instructions = "你可以使用function_call，函数调用功能，目前，你可以使用以下工具\n\n"
         for tool in create.tools:
             tool_instructions += f" \"function\":{{\"name\" : {tool.function.name},\"description\" : {tool.function.description} , \"parameters\" : {tool.function.parameters}}}\n"
         
-        # 修改工具使用指南，鼓励JSON格式输出
+        # Modify tool usage guidelines to encourage JSON output
         tool_instructions += "name为函数名称，description为函数功能的描述，parameters中含有函数需要使用的参数和参数的描述, 其中required为必要参数\n"
         tool_instructions += "工具仅在用户明确提出，或者你认为需要调用工具的时候调用，注意，当需要高度实时性的信息比如时间或者最近的事情等，优先调用工具来获取！。当确实调用工具的关键信息时，你可以先向用户索取关键信息再调用工具\n"
         tool_instructions += "\n当你需要使用工具时，请以下列格式输出，格式为：\n"
@@ -144,7 +144,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         
         enhanced_messages[0].content = enhanced_messages[0].content + "\n\n" + tool_instructions
     
-    # 处理请求
+    # Requests processed
     interface: BackendInterfaceBase = get_interface()
     input_message = [json.loads(m.model_dump_json()) for m in enhanced_messages]
     
@@ -162,13 +162,13 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                 system_fingerprint=f"fp_{uuid4().hex[:12]}",
             )
             
-            # 收集模型完整输出，但专门处理工具调用
+            # Collect the full output of the model, but specialize in processing tool calls
             full_content = ""
-            buffer = ""  # 用于临时存储当前文本块
-            tool_call_mode = False  # 标记是否正在处理工具调用
-            tool_calls = []  # 存储所有检测到的工具调用
+            buffer = ""  # Used to temporarily store the current block of text
+            tool_call_mode = False  # Mark if a tool call is being processed
+            tool_calls = []  # Store all detected tool calls
             
-            # 自定义模型特殊标记
+            # Customize model special tokens
             tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
             tool_call_begin_marker = "<｜tool▁call▁begin｜>"
             tool_sep_marker = "<｜tool▁sep｜>"
@@ -177,7 +177,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             
             async for res in interface.inference(input_message, id, create.temperature, create.top_p):
                 if isinstance(res, RawUsage):
-                    # 最后返回使用情况
+                    # Final return on utilization
                     raw_usage = res
                     chunk.choices = []
                     chunk.usage = CompletionUsage(
@@ -189,11 +189,11 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                 elif isinstance(res, tuple) and len(res) == 2:
                     token, finish_reason = res
                     
-                    # 检测模型特定格式的工具调用开始
+                    # Detecting model-specific formatting tool call starts
                     if not tool_call_mode and tool_calls_begin_marker in buffer + token:
                         tool_call_mode = True
                         
-                        # 调整full_content，删除工具调用部分
+                        # Adjust full_content to remove tool call section
                         if buffer.endswith(tool_calls_begin_marker):
                             full_content = full_content[:-len(tool_calls_begin_marker)]
                         elif tool_calls_begin_marker in (buffer + token):
@@ -201,7 +201,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             full_content = full_content[:-(len(buffer) - idx)]
                         buffer = ""
                         
-                        # 发送当前累积的文本内容（如果有的话）
+                        # Send the current cumulative text content (if any)
                         if full_content:
                             chunk.choices = [{
                                 "index": 0,
@@ -211,31 +211,31 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             yield chunk
                             full_content = ""
                     
-                    # 在非工具调用模式下累积内容
+                    # Accumulation of content in non-tool call mode
                     if not tool_call_mode:
                         full_content += token
                         buffer += token
-                        # 保持缓冲区在合理大小
+                        # Keep the buffer at a reasonable size
                         if len(buffer) > 200:
                             buffer = buffer[-200:]
                     else:
-                        # 在工具调用模式下，继续收集工具调用相关文本
+                        # In tool call mode, continue to collect tool call related text
                         buffer += token
                         
-                        # 如果找到工具调用结束标记
+                        # If the tool call end marker is found
                         if tool_calls_end_marker in buffer:
                             try:
-                                # 解析调用文本提取工具调用信息
+                                # Parsing Calling Text Extraction Tool Calling Information
                                 
                                 tool_calls = getTools(buffer)
                                 if len(tool_calls):
-                                    # 重置状态
+                                    # reset state
                                     tool_call_mode = False
                                     buffer = ""
                                     
-                                    # 发送工具调用事件
+                                    # Send tool call events
                                     for idx, tool_call in enumerate(tool_calls):
-                                        # 首条工具调用消息
+                                        # First tool call message
                                         chunk.choices = [{
                                             "index": 0,
                                             "delta": {
@@ -255,7 +255,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                         }]
                                         yield chunk
                                         
-                                        # 发送参数
+                                        # Sending Parameters
                                         chunk.choices = [{
                                             "index": 0,
                                             "delta": {
@@ -268,7 +268,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                         }]
                                         yield chunk
                                     
-                                    # 发送完成消息
+                                    # Send Completion Message
                                     chunk.choices = [{
                                         "index": 0,
                                         "delta": {},
@@ -276,10 +276,10 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                     }]
                                     yield chunk
                                     
-                                    # 返回后，不继续处理
+                                    # No further processing after return
                                     return
                                 else:
-                                    # JSON提取失败，可能是格式不完整
+                                    # JSON extraction failed, probably incomplete formatting
                                     logger.warning("Failed to extract JSON from tool call")
                                     tool_call_mode = False
                                     buffer = ""
@@ -288,10 +288,9 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                 tool_call_mode = False
                                 buffer = ""
                     
-                    # 正常文本输出 (仅在非工具调用模式下)
+                    # Normal text output (only in non-tool call mode)
                     if not tool_call_mode and token:
                         if finish_reason is not None:
-                            # 最终消息
                             chunk.choices = [{
                                 "index": 0,
                                 "delta": {},
@@ -299,10 +298,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             }]
                             yield chunk
                         else:
-                            # 正常文本块
-                            # 检查token中是否包含任何工具调用开始标记的部分
                             if any(marker in token for marker in [tool_calls_begin_marker, tool_call_begin_marker]):
-                                # 跳过，因为这将在下一个迭代中处理
                                 pass
                             else:
                                 chunk.choices = [{
@@ -312,8 +308,8 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                 }]
                                 yield chunk
             
-            # 如果我们已经到了这里而没有返回，说明没有检测到完整的工具调用
-            # 发送常规完成消息
+            # If gotten this far without returning, it means that the full tool call was not detected
+            # Send Routine Completion Message
             if not tool_call_mode:
                 chunk.choices = [{
                     "index": 0, 
@@ -324,14 +320,14 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         
         return chat_stream_response(request, inner())
     else:
-        # 非流式响应处理
+        # non streaming response processing
         full_content = ""
         finish_reason = None
         tool_calls = []
         buffer = ""
         tool_call_mode = False
         
-        # 自定义模型特殊标记
+        # Custom model special markers
         tool_calls_begin_marker = "<｜tool▁calls▁begin｜>"
         tool_call_begin_marker = "<｜tool▁call▁begin｜>"
         tool_sep_marker = "<｜tool▁sep｜>"
@@ -349,11 +345,11 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             elif isinstance(res, tuple) and len(res) == 2:
                 token, finish_reason = res
                 
-                # 检测模型特定格式的工具调用开始
+                # Detecting the start of model-specific formatting tool calls
                 if not tool_call_mode and tool_calls_begin_marker in buffer + token:
                     tool_call_mode = True
                     
-                    # 调整full_content，删除工具调用部分
+                    # Adjust full_content to remove tool call section
                     if buffer.endswith(tool_calls_begin_marker):
                         full_content = full_content[:-len(tool_calls_begin_marker)]
                     elif tool_calls_begin_marker in (buffer + token):
@@ -361,38 +357,38 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                         full_content = full_content[:-(len(buffer) - idx)]
                     buffer = ""
                 
-                # 在非工具调用模式下累积内容
+                # Accumulation of content in non-tool call mode
                 if not tool_call_mode:
                     full_content += token
                     buffer += token
-                    # 保持缓冲区在合理大小
+                    # Keep the buffer at a reasonable size
                     if len(buffer) > 200:
                         buffer = buffer[-200:]
                 else:
-                    # 在工具调用模式下，继续收集工具调用相关文本
+                    # In tool call mode, continue to collect tool call related text
                     buffer += token
                     
-                    # 如果找到工具调用结束标记
+                    # If the tool call end marker is found
                     if tool_calls_end_marker in buffer:
                         try:
-                            # 解析调用文本提取工具调用信息
+                            # Parsing Calling Text Extraction Tool Calling Information
                             full_tool_call = buffer
                             
-                            # 提取函数名称
+                            # Extract function name
                             function_name_start = full_tool_call.find(tool_sep_marker) + len(tool_sep_marker)
                             function_name_end = full_tool_call.find("\n", function_name_start)
                             function_name = full_tool_call[function_name_start:function_name_end].strip()
                             
-                            # 提取JSON参数 - 提取```json和```之间的内容
+                            # Extract JSON Parameters - Extracts the content between ```json and ```.
                             json_pattern = r'```json\s*(.*?)\s*```'
                             json_match = re.search(json_pattern, full_tool_call, re.DOTALL)
                             
                             if json_match:
                                 arguments_str = json_match.group(1).strip()
-                                # 生成工具调用ID
+                                # Generate tool call IDs
                                 tool_call_id = f"call_{uuid4().hex[:24]}"
                                 
-                                # 添加到工具调用列表
+                                # Add to tool call list
                                 tool_calls.append({
                                     "id": tool_call_id,
                                     "index": 0,
@@ -403,14 +399,14 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                                     }
                                 })
                                 
-                                # 如果成功解析了工具调用，设置完成原因
+                                # If the tool call is successfully parsed, set the reason for completion
                                 finish_reason = "tool_calls"
                                 
-                                # 重置状态
+                                # reset state
                                 tool_call_mode = False
                                 buffer = ""
                             else:
-                                # JSON提取失败，可能是格式不完整
+                                # JSON extraction failed, probably incomplete formatting
                                 logger.warning("Failed to extract JSON from tool call")
                                 tool_call_mode = False
                                 buffer = ""
@@ -419,7 +415,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                             tool_call_mode = False
                             buffer = ""
                             
-        # 构建响应
+        # Build Response
         response = {
             "id": id,
             "object": "chat.completion",
