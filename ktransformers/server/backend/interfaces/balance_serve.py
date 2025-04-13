@@ -374,6 +374,10 @@ class BalanceServeInterface(BackendInterfaceBase):
             top_p = 0.0001
         query_add.sample_options.top_p = top_p
         query_add.estimated_length = min(self.args.cache_lens, query_length+self.args.max_new_tokens)
+
+        if query_add.estimated_length < query_add.query_length:
+            raise Exception(f'query too long: estimated_length={query_add.estimated_length} < query_length={query_add.query_length}')
+
         query_id = self.sched_client.add_query(query_add)
         queue = asyncio.Queue(maxsize=self.args.max_new_tokens)
         self.queue_map[query_id] = queue
