@@ -1,4 +1,5 @@
 import torch
+from typing import Optional, List
 import asyncio
 from transformers import AutoTokenizer, AutoConfig, GenerationConfig
 from ktransformers.server.backend.interfaces.transformers import (
@@ -228,9 +229,9 @@ class KTransformersInterface(TransformersInterface):
         device = self.device_map.get("blk.0.self_attn", {}).get("generate_device", "cuda:0")
         return torch.tensor([self.seq_length - 1], device=device)
     
-    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None, tools: Optional[List] = None):
         async with self._infer_lock:
-            async for v in super().inference(local_messages, thread_id, temperature, top_p):
+            async for v in super().inference(local_messages, thread_id, temperature, top_p, tools):
                 yield v
             
             # return this inference raw usage
