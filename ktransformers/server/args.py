@@ -138,7 +138,7 @@ class ArgumentParser:
         self.cfg.server_port = args.port
         self.cfg.user_force_think = args.force_think
         
-        args.gpu_memory_size = args.cache_lens * 8 * 128 * 48 
+        args.gpu_memory_size = args.cache_lens * 8 * 128 * 48 * 4
         # TODO: remove hard code
         self.cfg.gpu_memory_size = args.gpu_memory_size
 
