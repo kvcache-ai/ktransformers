@@ -17,9 +17,13 @@ import os
 import sys
 import re
 import ast
+from collections import deque
 import subprocess
+import select
+import time
 import platform
 import shutil
+from typing import List, Optional, Literal
 import http.client
 import urllib.request
 import urllib.error
@@ -267,6 +271,172 @@ class BuildWheelsCommand(_bdist_wheel):
             super().run()
 
 
+ANSI_ESCAPE = re.compile(
+    r'\033[@-Z\\-_\[\]P]|\033\[[0-?]*[ -/]*[@-~]|\033][^\007\033]*\007|[\000-\037]'
+)
+
+def colored(text, color=None, bold=False):
+    fmt = []
+    if color== 'red':
+        fmt.append('31')
+    elif color == 'green':
+        fmt.append('32')
+    if bold:
+        fmt.append('1')
+
+    return f"\033[{';'.join(fmt)}m{text}\033[0m"
+
+
+def split_line(text: str) -> List[str]:
+    """Split text into lines based on terminal width."""
+    term_width = shutil.get_terminal_size().columns or 80
+    if not text.strip():
+        return []
+    # Split by explicit newlines and wrap long lines
+    lines = []
+    for line in text.split('\n'):
+        while len(line) > term_width:
+            lines.append(line[:term_width])
+            line = line[term_width:]
+        if line:
+            lines.append(line)
+    return lines
+
+
+
+ANSI_ESCAPE = re.compile(
+    r'\033[@-Z\\-_\[\]P]|\033\[[0-?]*[ -/]*[@-~]|\033][^\007\033]*\007|[\000-\037]'
+)
+
+def colored(text, color=None, bold=False):
+    fmt = []
+    if color== 'red':
+        fmt.append('31')
+    elif color == 'green':
+        fmt.append('32')
+    if bold:
+        fmt.append('1')
+
+    return f"\033[{';'.join(fmt)}m{text}\033[0m"
+
+
+def split_line(text: str) -> List[str]:
+    """Split text into lines based on terminal width."""
+    term_width = shutil.get_terminal_size().columns or 80
+    if not text.strip():
+        return []
+    # Split by explicit newlines and wrap long lines
+    lines = []
+    for line in text.split('\n'):
+        while len(line) > term_width:
+            lines.append(line[:term_width])
+            line = line[term_width:]
+        if line:
+            lines.append(line)
+    return lines
+
+
+def run_command_with_live_tail(ext: str, command: List[str], output_lines: int = 20,
+                               refresh_rate: float = 0.1, cwd: Optional[str] = None):
+    """
+    Execute a script-like command with real-time output of the last `output_lines` lines.
+
+    - during execution: displays the last `output_lines` lines of output in real-time.
+    - On success: Clears the displayed output.
+    - On failure: Prints the full command output.
+
+    Args:
+        ext (str): the name of the native extension currently building.
+        command (List[str]): The command to execute, as a list of arguments.
+        output_lines (int, optional): Number of terminal lines to display during live output. Defaults to 20.
+        refresh_rate (float, optional): Time in seconds between output refreshes. Defaults to 0.1.
+        cwd (Optional[str], optional): Working directory to run the command in. Defaults to current directory.
+    """
+    # Dump all subprocess output without any buffering if stdout is not a terminal
+    if not sys.stdout.isatty():
+        return subprocess.run(command, cwd=cwd, check=True)
+    # Start time for elapsed time calculation
+    start = time.time()
+    # Buffer for all output
+    all_output = []
+    write_buffer = deque(maxlen=output_lines)
+    # Current number of lines from sub process displayed
+    current_lines = 0
+
+    # ANSI escape codes for terminal control
+    CLEAR_LINE = '\033[K'
+    MOVE_UP = '\033[1A'
+    SAVE_CURSOR = '\0337'
+    RESTORE_CURSOR = '\0338'
+    CLEAR_REMAINING = '\033[J'
+
+    def write_progress(status: Literal['RUNNING', 'SUCCEED', 'FAILED'] = 'RUNNING',
+                       new_line: Optional[str] = None):
+        """Update terminal display with latest output"""
+        nonlocal current_lines, process
+        sys.stdout.write(SAVE_CURSOR)
+        sys.stdout.write(MOVE_UP * current_lines)
+        banner = f"ext={ext} pid={process.pid} status={status.upper()} elapsed=({time.time()-start:.2f}S)\n"
+        if status != 'FAILED':
+            banner = colored(banner, 'green', bold=True)
+        else:
+            banner = colored(banner, 'red', bold=True)
+        sys.stdout.write(CLEAR_LINE + banner)
+        if new_line is not None:
+            all_output.append(new_line)
+            write_buffer.extend(split_line(ANSI_ESCAPE.sub('', new_line).rstrip()))
+        elif status == 'RUNNING':
+            sys.stdout.write(RESTORE_CURSOR)
+            sys.stdout.flush()
+            return
+
+        sys.stdout.write(CLEAR_REMAINING)
+        if status == 'RUNNING':
+            current_lines = 1 + len(write_buffer)
+            for text in write_buffer:
+                sys.stdout.write(text + '\n')
+        elif status == 'FAILED':
+            for text in all_output:
+                sys.stdout.write(text)
+        sys.stdout.flush()
+
+    # Start subprocess
+    sys.stdout.write(colored(f'ext={ext} command={" ".join(str(c) for c in command)}\n', bold=True))
+    sys.stdout.flush()
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=cwd,
+        text=True,
+        bufsize=1
+    )
+
+    try:
+        write_progress()
+        poll_obj = select.poll()
+        poll_obj.register(process.stdout, select.POLLIN)
+        while process.poll() is None:
+            poll_result = poll_obj.poll(refresh_rate * 1000)
+            if poll_result:
+                write_progress(new_line=process.stdout.readline())
+            else:
+                write_progress()
+
+        # Get any remaining output
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            write_progress(new_line=line)
+    except BaseException as e:
+        process.terminate()
+        raise e
+    finally:
+        exit_code = process.wait()
+        write_progress(status='SUCCEED' if exit_code == 0 else 'FAILED')
+
+
 # Convert distutils Windows platform specifiers to CMake -A arguments
 PLAT_TO_CMAKE = {
     "win32": "Win32",
@@ -403,11 +573,11 @@ class CMakeBuild(BuildExtension):
 
         if not build_temp.exists():
             build_temp.mkdir(parents=True)
-        subprocess.run(
-            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True
+        run_command_with_live_tail(ext.name,
+            ["cmake", ext.sourcedir, *cmake_args], cwd=build_temp
         )
-        subprocess.run(
-            ["cmake", "--build", ".", "--verbose", *build_args], cwd=build_temp, check=True
+        run_command_with_live_tail(ext.name,
+            ["cmake", "--build", build_temp, "--verbose", *build_args], cwd=build_temp
         )
 
 if CUDA_HOME is not None or ROCM_HOME is not None:
