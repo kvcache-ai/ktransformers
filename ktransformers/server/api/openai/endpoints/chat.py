@@ -128,7 +128,7 @@ def get_tool_instructions():
 {"param1": "value1", "param2": "value2"}
 ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
 
-Only use functions when needed. Ensure proper JSON formatting with appropriate parameters."""
+Use functions when needed. Ensure proper JSON formatting with appropriate parameters."""
 
 @router.post('/chat/completions', tags=['openai'])
 async def chat_completion(request: Request, create: ChatCompletionCreate):
