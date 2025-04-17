@@ -9,7 +9,9 @@
  **/
 // Python bindings
 #include "cpu_backend/cpuinfer.h"
+#ifndef KTRANSFORMERS_USE_ROCM
 #include "device_launch_parameters.h"
+#endif
 #include "llamafile/flags.h"
 #include "operators/kvcache/kvcache.h"
 #include "operators/llamafile/linear.h"
