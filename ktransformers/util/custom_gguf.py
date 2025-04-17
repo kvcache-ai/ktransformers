@@ -939,6 +939,10 @@ def translate_name_to_gguf(name):
     name = name.replace(".feed_forward.shared_experts.gate_proj", ".ffn_gate_shexp")
     name = name.replace(".feed_forward.shared_experts.up_proj", ".ffn_up_shexp")
 
+    name = name.replace(".feed_forward.down_proj", ".ffn_down")
+    name = name.replace(".feed_forward.gate_proj", ".ffn_gate")
+    name = name.replace(".feed_forward.up_proj", ".ffn_up")
+
     return name
 
 if __name__ == '__main__':
