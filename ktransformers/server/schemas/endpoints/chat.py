@@ -24,7 +24,7 @@ class Message(BaseModel):
     content: Optional[str] = None
     role: Role
     name: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = {}
     tool_call_id: Optional[str] = None
     
     def to_tokenizer_message(self):
@@ -33,7 +33,7 @@ class Message(BaseModel):
             message['content'] = self.content
         if self.name is not None:
             message['name'] = self.name
-        if self.tool_calls is not None:
+        if self.tool_calls is not {}:
             message['tool_calls'] = self.tool_calls
         if self.tool_call_id is not None:
             message['tool_call_id'] = self.tool_call_id
