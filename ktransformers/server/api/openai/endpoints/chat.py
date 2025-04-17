@@ -154,7 +154,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             tools_description += f"Function: {tool.function.name}\nDescription: {tool.function.description}\nParameters: {tool.function.parameters}\n\n"
 
         # If first message is system, add concise tool instructions
-        if enhanced_messages[0].role == Role.system:
+        if enhanced_messages[0].role == Role.system or enhanced_messages[0].role == Role.user:
             if "function calls" not in enhanced_messages[0].content.lower():
                 enhanced_messages[0].content += "\n\n" + get_tool_instructions()
 
