@@ -399,6 +399,12 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                         buffer = ""
 
         # Build Response
+        message = {
+            "role": "assistant",
+            "content": None if tool_calls else full_content
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
         response = {
             "id": id,
             "object": "chat.completion",
@@ -406,11 +412,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             "model": Config().model_name,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": None if tool_calls else full_content,
-                    "tool_calls": tool_calls if tool_calls else None
-                },
+                "message": message,
                 "finish_reason": finish_reason or "stop"
             }],
             "usage": usage.__dict__ if 'usage' in locals() else None,
