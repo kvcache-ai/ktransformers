@@ -115,6 +115,7 @@ class OllamaChatCompletionStreamResponse(BaseModel):
     created_at: str
     message: dict
     done: bool = Field(...)
+    done_reason: Optional[str] = Field("", description="done_reason")
     total_duration: Optional[int] = Field(None, description="Total time spent in nanoseconds")
     load_duration: Optional[int] = Field(None, description="Time spent loading model in nanoseconds")
     prompt_eval_count: Optional[int] = Field(None, description="Number of tokens in prompt")
@@ -127,6 +128,7 @@ class OllamaChatCompletionResponse(BaseModel):
     created_at: str
     message: dict
     done: bool
+    done_reason: Optional[str] = Field("", description="done_reason")
     total_duration: Optional[int] = Field(None, description="Total time spent in nanoseconds")
     load_duration: Optional[int] = Field(None, description="Time spent loading model in nanoseconds")
     prompt_eval_count: Optional[int] = Field(None, description="Number of tokens in prompt")
@@ -140,19 +142,14 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
     interface: BackendInterfaceBase = get_interface()
     config = Config()
 
-    # 将消息转换为提示字符串
-    prompt = ""
-    for msg in input.messages:
-        prompt += f"{msg.role}: {msg.content}\n"
-    prompt += "assistant:"
+    input_message = [json.loads(m.model_dump_json()) for m in input.messages]
 
     if input.stream:
         async def inner():
             start_time = time()  # 记录开始时间（秒）
-            eval_count = 0  # 统计生成的 token 数量
             tokens = []
 
-            async for res in interface.inference(prompt, id):
+            async for res in interface.inference(input_message, id):
                 if isinstance(res, RawUsage):
                     raw_usage = res
                 else: 
@@ -166,11 +163,13 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
                     yield d.model_dump_json() + '\n'
             # 计算性能数据
             end_time = time()
-            total_duration = int((end_time - start_time) * 1_000_000_000)  # 转换为纳秒
-            prompt_eval_count = len(prompt.split())  # 简单估算提示词数量
-            eval_duration = total_duration  # 假设全部时间用于生成（简化）
-            prompt_eval_duration = 0  # 假设无单独提示评估时间
-            load_duration = 0  # 假设加载时间未知
+            total_duration = int((end_time - start_time) * 1_000_000_000) # unit: ns
+            prompt_eval_count = raw_usage.prefill_count
+            eval_count = raw_usage.decode_count
+            eval_duration = int(raw_usage.decode_time * 1_000_000_000)
+            prompt_eval_duration = int(raw_usage.prefill_time * 1_000_000_000)
+            load_duration = int(raw_usage.tokenize_time * 1_000_000_000)
+            done_reason = finish_reason
 
             d = OllamaChatCompletionStreamResponse(
                 model=config.model_name,
@@ -182,7 +181,8 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
                 prompt_eval_count=prompt_eval_count,
                 prompt_eval_duration=prompt_eval_duration,
                 eval_count=eval_count,
-                eval_duration=eval_duration
+                eval_duration=eval_duration,
+                done_reason=done_reason
             )
             yield d.model_dump_json() + '\n'
         return check_link_response(request, inner())
@@ -191,20 +191,22 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
         complete_response = ""
         eval_count = 0 
 
-        async for res in interface.inference(prompt, id):
+        async for res in interface.inference(input_message, id):
             if isinstance(res, RawUsage):
                 raw_usage = res
             else: 
                 token, finish_reason = res
                 complete_response += token
-            eval_count += 1
 
         end_time = time()
-        total_duration = int((end_time - start_time) * 1_000_000_000)
-        prompt_eval_count = len(prompt.split())
-        eval_duration = total_duration
-        prompt_eval_duration = 0
-        load_duration = 0
+        total_duration = int((end_time - start_time) * 1_000_000_000) # unit: ns
+        prompt_eval_count = raw_usage.prefill_count
+        eval_count = raw_usage.decode_count
+        eval_duration = int(raw_usage.decode_time * 1_000_000_000)
+        prompt_eval_duration = int(raw_usage.prefill_time * 1_000_000_000)
+        load_duration = int(raw_usage.tokenize_time * 1_000_000_000)
+        done_reason = finish_reason
+
 
         response = OllamaChatCompletionResponse(
             model=config.model_name,
@@ -216,7 +218,8 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
             prompt_eval_count=prompt_eval_count,
             prompt_eval_duration=prompt_eval_duration,
             eval_count=eval_count,
-            eval_duration=eval_duration
+            eval_duration=eval_duration,
+            done_reason=done_reason
         )
         return response
     
