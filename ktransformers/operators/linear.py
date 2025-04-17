@@ -138,7 +138,7 @@ class KLinearTorch(KLinearBase):
         self.weight = None
         self.has_bias = False
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, bsz_tensor: torch.Tensor=None, **kwargs) -> torch.Tensor:
         dtype = x.dtype
         out_device = x.device
         # TODO: support CUDA Graph when using cpu, but CPUInfer is recommended.
@@ -201,7 +201,7 @@ class KLinearQ8(KLinearBase):
         self.bias = None
         self.loaded = False
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, bsz_tensor: torch.Tensor=None) -> torch.Tensor:
         orig_dtype = x.dtype
         out_device = x.device
         
