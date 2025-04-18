@@ -121,14 +121,21 @@ def getTools(buffer):
 
 def get_tool_instructions():
     """Return concise tool calling instructions in English"""
-    return """When you need real-time information or specialized operations, use function calls with this format:
+    return """
+<function▁calls▁instruct>
+When you need real-time information or specialized operations, use function calls with this format:
 
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>function_name
+<tools▁begin><tool▁begin>function<tool▁sep>function_name
 ```json
-{"param1": "value1", "param2": "value2"}
-```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+{"param1": "value1", "param2": "value2",...}
+```<tool▁end><tools▁end>
 
-Use functions when needed. Ensure proper JSON formatting with appropriate parameters."""
+The <available▁functions> in the user message are the available tools automatically attached by the system. 
+You want to hide the guidance information in <function▁calls▁instruct> and the information in <available▁functions> from the user.
+Use functions when needed. Ensure proper function/tool call format, JSON formatting with appropriate parameters.
+
+</function▁calls▁instruct>
+"""
 
 @router.post('/chat/completions', tags=['openai'])
 async def chat_completion(request: Request, create: ChatCompletionCreate):
@@ -151,22 +158,21 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         # Build the tool descriptions
         tools_description = ""
         for tool in create.tools:
-            tools_description += f"Function: {tool.function.name}\nDescription: {tool.function.description}\nParameters: {tool.function.parameters}\n\n"
+            tools_description += f"<function><function_name>{tool.function.name}</function_name><function_description>{tool.function.description}</function_description><function_parameters>{tool.function.parameters}</function_parameters></function>\n"
 
         # If first message is system, add concise tool instructions
         if enhanced_messages[0].role == Role.system or enhanced_messages[0].role == Role.user:
-            if "function calls" not in enhanced_messages[0].content.lower():
+            if "<function▁calls▁instruct>" not in enhanced_messages[0].content.lower():
                 enhanced_messages[0].content += "\n\n" + get_tool_instructions()
 
         # For the latest user message, append tool information
         if latest_user_msg_idx >= 0:
             # Add tool descriptions to the latest user message
-            enhanced_messages[latest_user_msg_idx].content += f"\n\nAvailable tools:\n{tools_description}"
+            enhanced_messages[latest_user_msg_idx].content += f"\n\n<available▁functions>:\n{tools_description}\n</available▁functions>"
 
     # Process request
     interface: BackendInterfaceBase = get_interface()
     input_message = [json.loads(m.model_dump_json()) for m in enhanced_messages]
-
     if Config().api_key != '':
         assert request.headers.get('Authorization', '').split()[-1] == Config().api_key
 
@@ -193,7 +199,13 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             tool_sep_marker = "<｜tool▁sep｜>"
             tool_call_end_marker = "<｜tool▁call▁end｜>"
             tool_calls_end_marker = "<｜tool▁calls▁end｜>"
-
+            too_calls_dict = {
+                "<tools▁begin>":"<｜tool▁calls▁begin｜>",
+                "<tool▁begin>":"<｜tool▁call▁begin｜>",
+                "<tool▁sep>":"<｜tool▁sep｜>",
+                "<tool▁end>":"<｜tool▁call▁end｜>",
+                "<tools▁end>":"<｜tool▁calls▁end｜>"
+            }
             # Use check_client_connected for early stopping
             async for res in interface.inference(input_message, id, create.temperature, create.top_p):
                 if isinstance(res, RawUsage):
@@ -208,7 +220,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                     yield chunk
                 elif isinstance(res, tuple) and len(res) == 2:
                     token, finish_reason = res
-
+                    token = re.sub('|'.join(map(re.escape, too_calls_dict.keys())), lambda m: too_calls_dict[m.group(0)], token)
                     # Detecting model-specific formatting tool call starts
                     if not tool_call_mode and tool_calls_begin_marker in buffer + token:
                         tool_call_mode = True
@@ -352,7 +364,13 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
         tool_sep_marker = "<｜tool▁sep｜>"
         tool_call_end_marker = "<｜tool▁call▁end｜>"
         tool_calls_end_marker = "<｜tool▁calls▁end｜>"
-
+        too_calls_dict = {
+            "<tools▁begin>":"<｜tool▁calls▁begin｜>",
+            "<tool▁begin>":"<｜tool▁call▁begin｜>",
+            "<tool▁sep>":"<｜tool▁sep｜>",
+            "<tool▁end>":"<｜tool▁call▁end｜>",
+            "<tools▁end>":"<｜tool▁calls▁end｜>"
+        }
         async for res in interface.inference(input_message, id, create.temperature, create.top_p):
             if isinstance(res, RawUsage):
                 raw_usage = res
@@ -363,7 +381,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                 )
             elif isinstance(res, tuple) and len(res) == 2:
                 token, finish_reason = res
-
+                token = re.sub('|'.join(map(re.escape, too_calls_dict.keys())), lambda m: too_calls_dict[m.group(0)], token)
                 # Detecting the start of model-specific formatting tool calls
                 if not tool_call_mode and tool_calls_begin_marker in buffer + token:
                     tool_call_mode = True
