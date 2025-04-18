@@ -285,6 +285,7 @@ elseif (UNIX)
         message(STATUS "enabling CUDA")
         enable_language(CUDA)
         add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
+    endif()
 endif()
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
@@ -327,6 +328,7 @@ elseif(UNIX)
         target_link_libraries(${PROJECT_NAME} PRIVATE MUSA::musart)
     else()
         target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
+    endif()
 endif()
 
 # Define the USE_NUMA option
