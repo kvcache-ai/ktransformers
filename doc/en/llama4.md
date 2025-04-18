@@ -74,7 +74,11 @@ USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
 
 ### 4. Use our custom config.json
 
-Currently, it's needed to use our custom config.json(https://github.com/kvcache-ai/ktransformers/blob/support-llama4/doc/en/config.json) to replace your config.json in your `--model_path`.
+Currently, you need to copy the content of our custom config file into the `config.json` under your `--model_path`.  
+- Use [scout_config.json](https://github.com/kvcache-ai/ktransformers/blob/support-llama4/doc/en/scout_config.json) for the Llama-4-Scout-17B-16E model  
+- Use [maverick_config.json](https://github.com/kvcache-ai/ktransformers/blob/support-llama4/doc/en/maverick_config.json) for the Llama-4-Maverick-17B-128E model  
+
+Please make sure to replace the content of `config.json` with the appropriate one accordingly.
 
 ### 5. Run LLaMA 4 Inference Server
 
