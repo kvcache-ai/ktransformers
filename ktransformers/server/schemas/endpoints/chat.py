@@ -1,7 +1,6 @@
 from typing import List, Optional, Union, Dict, Any
 from typing_extensions import Literal
 from enum import Enum
-
 from pydantic import BaseModel, Field
 
 from ktransformers.server.schemas.base import Object
@@ -11,7 +10,6 @@ from openai.types.chat.chat_completion_chunk import Choice
 
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
 
 class Role(Enum):
     system = 'system'
@@ -67,7 +65,9 @@ class ChatCompletionCreate(BaseModel):
     stream_options: Optional[Dict[str, Any]] = None
     frequency_penalty: float = 0
     presence_penalty: float = 0
-    
+    max_tokens: Optional[int] = Field(default=50)
+    max_completion_tokens: Optional[int] = Field(default=50)
+
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
 

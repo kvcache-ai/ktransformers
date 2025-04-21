@@ -207,7 +207,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
                 "<tools▁end>":"<｜tool▁calls▁end｜>"
             }
             # Use check_client_connected for early stopping
-            async for res in interface.inference(input_message, id, create.temperature, create.top_p):
+            async for res in interface.inference(input_message, id, create.temperature, create.top_p, create.max_tokens, create.max_completion_tokens):
                 if isinstance(res, RawUsage):
                     # Final return on utilization
                     raw_usage = res
@@ -371,7 +371,7 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
             "<tool▁end>":"<｜tool▁call▁end｜>",
             "<tools▁end>":"<｜tool▁calls▁end｜>"
         }
-        async for res in interface.inference(input_message, id, create.temperature, create.top_p):
+        async for res in interface.inference(input_message, id, create.temperature, create.top_p, create.max_tokens, create.max_completion_tokens):
             if isinstance(res, RawUsage):
                 raw_usage = res
                 usage = CompletionUsage(
