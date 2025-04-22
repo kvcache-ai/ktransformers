@@ -11,7 +11,7 @@ from ktransformers.server.schemas.endpoints.chat import RawUsage
 router = APIRouter()
 
 @router.post("/completions",tags=['openai'])
-async def create_completion(request:Request,create:CompletionCreate):
+async def create_completion(request:Request, create:CompletionCreate):
     id = str(uuid4())
 
     interface = get_interface()
@@ -20,7 +20,7 @@ async def create_completion(request:Request,create:CompletionCreate):
    
     if create.stream:
         async def inner():
-            async for res in interface.inference(create.prompt,id,create.temperature,create.top_p):     
+            async for res in interface.inference(create.prompt, id, create.temperature, create.top_p, create.max_tokens, create.max_completion_tokens):     
                 if isinstance(res, RawUsage):
                     raw_usage = res
                 else: 
@@ -32,7 +32,7 @@ async def create_completion(request:Request,create:CompletionCreate):
         return stream_response(request,inner())
     else:
         comp = CompletionObject(id=id,object='text_completion',created=int(time()))
-        async for res in interface.inference(create.prompt,id,create.temperature,create.top_p):     
+        async for res in interface.inference(create.prompt,id,create.temperature,create.top_p, create.max_tokens, create.max_completion_tokens):     
             if isinstance(res, RawUsage):
                 raw_usage = res
             else: 
