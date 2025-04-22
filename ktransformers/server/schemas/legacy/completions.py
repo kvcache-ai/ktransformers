@@ -1,7 +1,6 @@
 from typing import List, Optional
 from enum import Enum
-
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..base import Object
 
@@ -9,9 +8,11 @@ class CompletionCreate(BaseModel):
     model: str
     prompt: str | List[str]
     stream: bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-
+    temperature: Optional[float] = Field(default=0.6)
+    top_p: Optional[float] = Field(default=1)
+    max_tokens: Optional[int] = Field(default=50)
+    max_completion_tokens: Optional[int] = Field(default=50)
+    
     def get_tokenizer_messages(self):
         if isinstance(self.prompt,List):
             self.get_tokenizer_messages('\n'.join(self.prompt))

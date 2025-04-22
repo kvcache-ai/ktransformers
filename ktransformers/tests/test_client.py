@@ -15,18 +15,9 @@ SERVER_URL = "http://localhost:10002/v1/chat/completions"
 bf_list = [1]
 decodesz_list = [128]
 prompt_list = ['Please elaborate on modern world history.', 'Please introduce Harry Potter.', 'I want to learn Python. Please give me some advice.', 'Please tell me a joke ']
-async def fetch_event_stream(session, request_id):
+async def fetch_event_stream(session, payload, request_id):
     try:
-        payload = {
-            "messages": [
-                {"role": "system", "content": ""},
-                {"role": "user", "content": prompt_list[request_id]}
-            ],
-            "model": "DeepSeek-V3",
-            "temperature": 0.3,
-            "top_p": 1.0,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
-            "stream": True  # 开启流式输出
-        }
+        
 
         headers = {
             'accept': 'application/json',
@@ -103,7 +94,35 @@ async def fetch_event_stream(session, request_id):
 
 async def main(prompt_id):
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_event_stream(session, prompt_id)]
+        payload = {
+            "messages": [
+                {"role": "system", "content": ""},
+                {"role": "user", "content": prompt_list[prompt_id]}
+            ],
+            "model": "DeepSeek-V3",
+            "stream": True,
+            "max_completion_tokens": 2,
+            # "temperature": 0.3,
+            # "top_p": 1.0,     
+            # "max_tokens" : 20,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
+        }
+        tasks = [fetch_event_stream(session, payload, prompt_id)]
+        await asyncio.gather(*tasks)
+
+        payload["temperature"] = 0.3
+        tasks = [fetch_event_stream(session, payload, prompt_id)]
+        await asyncio.gather(*tasks)
+
+        payload["top_p"] = 1
+        tasks = [fetch_event_stream(session, payload, prompt_id)]
+        await asyncio.gather(*tasks)
+
+        payload["max_tokens"] = 200
+        tasks = [fetch_event_stream(session, payload, prompt_id)]
+        await asyncio.gather(*tasks)
+        
+        payload["stream"] = False
+        tasks = [fetch_event_stream(session, payload, prompt_id)]
         await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
