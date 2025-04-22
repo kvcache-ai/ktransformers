@@ -45,14 +45,14 @@ They were whispering excitedly together. Mr. Dursley was enraged to see that a c
 The nerve of him! But then it struck Mr. Dursley that this was probably some silly stunt — these people were obviously collecting for something… yes, that would be it. 
 The traffic moved on and a few minutes later, Mr. Dursley arrived in the Grunnings parking lot, his mind back on drills.
 Mr. Dursley always sat with his back to the window in his office on the ninth floor."""
-async def fetch_event_stream(session, request_id, prompt, max_tokens):
+async def fetch_event_stream(session, request_id, prompt, max_tokens, model):
     try:
         payload = {
             "messages": [
                 {"role": "system", "content": ""},
                 {"role": "user", "content": prompt}
             ],
-            "model": "DeepSeek-V3",
+            "model": model,
             "temperature": 0.3,
             "top_p": 1.0,
             "stream": True,
@@ -134,17 +134,19 @@ async def fetch_event_stream(session, request_id, prompt, max_tokens):
     except Exception as e:
         print(f"[Request {request_id}] Exception: {e}")
 
-async def main(concurrent_requests , prompt, max_tokens):
+async def main(concurrent_requests , prompt, max_tokens, model):
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_event_stream(session, i , prompt, max_tokens) for i in range(concurrent_requests)]
+        tasks = [fetch_event_stream(session, i , prompt, max_tokens, model) for i in range(concurrent_requests)]
         await asyncio.gather(*tasks)
     if len(prefill_speeds) != 0:
         import numpy as np
-        print(f"average prefill speed: {np.average(prefill_speeds)}\naverage decode speed: {np.average(decode_speeds)}")
+        print(f"concurrency: {len(prefill_speeds)}")
+        print(f"total prefill speed: {np.sum(prefill_speeds)}\n total decode speed: {np.sum(decode_speeds)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Event Stream Request Tester")
     parser.add_argument("--concurrent", type=int, default=1, help="Number of concurrent requests")
+    parser.add_argument("--model", type=str, default="DeepSeek-V3", help="Model name", required=True)
     parser.add_argument("--prompt_lens", type=int, default=1024, help="prefill prompt lens, 1024 or 2048")
     parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
     parser.add_argument("--max_tokens", type=int, default=50, help="max decode tokens")
@@ -152,9 +154,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     SERVER_URL = args.api_url
     max_tokens = args.max_tokens
+    model = args.model
     if args.prompt_lens == 1024:
         prompt = ktansformer_prompt1024
     elif args.prompt_lens == 2048:
         prompt = ktansformer_prompt1024 * 2
-    asyncio.run(main(args.concurrent, prompt, max_tokens))
+    asyncio.run(main(args.concurrent, prompt, max_tokens, model))
 
