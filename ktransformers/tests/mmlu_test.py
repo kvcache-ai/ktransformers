@@ -25,19 +25,10 @@ class DataEvaluator:
         """
         # 读取 Parquet 文件
         # dataset = load_dataset('parquet', data_files=file_path)
-        ds = load_dataset(file_path,"all")
-        df = pd.DataFrame(ds['test'])
-        # print(ds)
-        # # ds_1 =  ds['train']
-        # ds_2 =  ds['validation']
-        # ds_3 =  ds['test']
-        # # 将数据集转换为 Pandas DataFrame
-        # df_test = pd.DataFrame(ds['test'])
-        # df_val = pd.DataFrame(ds['validation'])
-
-        # for _, row in df.iterrows():
-        #     self.data.append(row.to_dict())
-        # df = pd.read_parquet(file_path)
+        splits = {'test': 'all/test-00000-of-00001.parquet', 'validation': 'all/validation-00000-of-00001.parquet',
+                  'dev': 'all/dev-00000-of-00001.parquet',
+                  'auxiliary_train': 'all/auxiliary_train-00000-of-00001.parquet'}
+        df = pd.read_parquet("hf://datasets/cais/mmlu/" + splits["test"])
 
         for _, row in df.iterrows():
             self.data.append(row.to_dict())
