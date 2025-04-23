@@ -12,6 +12,8 @@ from time import sleep
 decodesz = 128
 # Server URL (replace with your server URL)
 decodesz_list = [128]
+prefill_speeds = []
+decode_speeds = []
 ktansformer_prompt1024="""Mr. and Mrs. Dursley, of number four, Privet Drive, were proud to say that they were perfectly normal, thank you very much. 
 They were the last people you'd expect to be involved in anything strange or mysterious, because they just didn't hold with such nonsense.Mr. Dursley was the director of a firm called Grunnings, which made drills. 
 He was a big, beefy man with hardly any neck, although he did have a very large mustache. Mrs. 
@@ -43,17 +45,19 @@ They were whispering excitedly together. Mr. Dursley was enraged to see that a c
 The nerve of him! But then it struck Mr. Dursley that this was probably some silly stunt — these people were obviously collecting for something… yes, that would be it. 
 The traffic moved on and a few minutes later, Mr. Dursley arrived in the Grunnings parking lot, his mind back on drills.
 Mr. Dursley always sat with his back to the window in his office on the ninth floor."""
-async def fetch_event_stream(session, request_id, prompt):
+async def fetch_event_stream(session, request_id, prompt, max_tokens, model):
     try:
         payload = {
             "messages": [
                 {"role": "system", "content": ""},
                 {"role": "user", "content": prompt}
             ],
-            "model": "DeepSeek-V3",
+            "model": model,
             "temperature": 0.3,
             "top_p": 1.0,
-            "stream": True
+            "stream": True,
+            "return_speed": True,
+            "max_tokens": max_tokens,
         }
 
         headers = {
@@ -70,6 +74,7 @@ async def fetch_event_stream(session, request_id, prompt):
             total_tokens = 0
             decode_start_time = None
             decode_end_time = None
+            usage_info = None  
 
             async for line in response.content:
                 try:
@@ -82,6 +87,10 @@ async def fetch_event_stream(session, request_id, prompt):
                         continue
 
                     response_data = json.loads(decoded_line)
+                    
+                    if "usage" in response_data:
+                        usage_info = response_data["usage"]
+                    
                     choices = response_data.get("choices", [])
                     if not choices:
                         continue
@@ -107,34 +116,48 @@ async def fetch_event_stream(session, request_id, prompt):
                 except Exception as e:
                     print(f"[Request {request_id}] Stream Error: {e}")
 
-
             if buffer.strip():
                 print(f"[Request {request_id}] {buffer.strip()}")
 
-            if decode_start_time and decode_end_time and total_tokens > 0:
-                decode_time = decode_end_time - decode_start_time
-                decode_speed = total_tokens / decode_time if decode_time > 0 else 0
-                print(f"[Request {request_id}] Speed: {decode_speed:.2f} tokens/s")
+            if usage_info:
+                if "prefill_time" in usage_info:
+                    # print(f"[Request {request_id}] Usage:")
+                    # for key, value in usage_info.items():
+                    #     print(f"  {key}: {value}")
+                    prefill_speed = usage_info["prompt_tokens"] / usage_info["prefill_time"]
+                    decode_speed = usage_info["completion_tokens"] / usage_info["decode_time"]
+                    prefill_speeds.append(prefill_speed)
+                    decode_speeds.append(decode_speed)
+                    print(f'[Request {request_id}] prefill speed: {prefill_speed}')
+                    print(f'[Request {request_id}] decode speed: {decode_speed}')
 
     except Exception as e:
         print(f"[Request {request_id}] Exception: {e}")
 
-async def main(concurrent_requests , prompt ):
+async def main(concurrent_requests , prompt, max_tokens, model):
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_event_stream(session, i , prompt) for i in range(concurrent_requests)]
+        tasks = [fetch_event_stream(session, i , prompt, max_tokens, model) for i in range(concurrent_requests)]
         await asyncio.gather(*tasks)
+    if len(prefill_speeds) != 0:
+        import numpy as np
+        print(f"concurrency: {len(prefill_speeds)}")
+        print(f"total prefill speed: {np.sum(prefill_speeds)}\n total decode speed: {np.sum(decode_speeds)}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Event Stream Request Tester")
     parser.add_argument("--concurrent", type=int, default=1, help="Number of concurrent requests")
+    parser.add_argument("--model", type=str, default="DeepSeek-V3", help="Model name", required=True)
     parser.add_argument("--prompt_lens", type=int, default=1024, help="prefill prompt lens, 1024 or 2048")
     parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
+    parser.add_argument("--max_tokens", type=int, default=50, help="max decode tokens")
     
     args = parser.parse_args()
     SERVER_URL = args.api_url
+    max_tokens = args.max_tokens
+    model = args.model
     if args.prompt_lens == 1024:
         prompt = ktansformer_prompt1024
     elif args.prompt_lens == 2048:
         prompt = ktansformer_prompt1024 * 2
-    asyncio.run(main(args.concurrent, prompt))
+    asyncio.run(main(args.concurrent, prompt, max_tokens, model))
 
