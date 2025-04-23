@@ -2,14 +2,22 @@ from typing import List, Optional, Union, Dict, Any
 from typing_extensions import Literal
 from enum import Enum
 from pydantic import BaseModel, Field
-
+from ktransformers.server.config.config import Config
 from ktransformers.server.schemas.base import Object
 
-from openai.types.completion_usage import CompletionUsage
+
 from openai.types.chat.chat_completion_chunk import Choice
 
 from uuid import uuid4
 
+class CompletionUsage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    prompt_tokens_details: Optional[Dict[str, Any]] = None
+    completion_tokens_details: Optional[Dict[str, Any]] = None
+    prefill_time: Optional[float] = None
+    decode_time: Optional[float] = None
 
 class Role(Enum):
     system = 'system'
@@ -58,16 +66,16 @@ class ChatCompletionCreate(BaseModel):
     messages: List[Message]
     model: str
     stream: bool = False
-    temperature: Optional[float] = Field(default=0.6)
-    top_p: Optional[float] = Field(default=1.0)
+    temperature: Optional[float] = Field(default=Config().temperature)
+    top_p: Optional[float] = Field(default=Config().top_p)
     tools: Optional[List[Tool]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     stream_options: Optional[Dict[str, Any]] = None
     frequency_penalty: float = 0
     presence_penalty: float = 0
-    max_tokens: Optional[int] = Field(default=50)
-    max_completion_tokens: Optional[int] = Field(default=50)
-
+    max_tokens: Optional[int] = Field(default=Config().max_new_tokens)
+    max_completion_tokens: Optional[int] = Field(default=Config().max_new_tokens)
+    return_speed: Optional[bool] = Field(default=False)
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
 
