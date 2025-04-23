@@ -13,6 +13,7 @@ from ktransformers.server.schemas.endpoints.chat import RawUsage, Role
 from ktransformers.server.backend.base import BackendInterfaceBase
 from ktransformers.server.config.config import Config
 from ktransformers.server.config.log import logger
+from fastapi.responses import JSONResponse
 from ktransformers.server.schemas.endpoints.chat import ChatCompletionChunk, CompletionUsage
 
 # Define own data structure instead of importing from OpenAI
@@ -137,7 +138,57 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
 
     # Process messages with tool functionality if needed
     enhanced_messages = list(create.messages)
-
+    if create.max_tokens<0 or create.max_completion_tokens<0:
+        return JSONResponse(
+            status_code=400,
+            content={
+            "object": "error",
+            "message": f"max_new_tokens must be at least 0, got {create.max_tokens}.",
+            "type": "BadRequestError",
+            "param": None,
+            "code": 400
+        })
+        
+    if create.temperature<0 or create.temperature>2:
+        return JSONResponse(
+            status_code=400,
+            content={
+            "object": "error",
+            "message": f"temperature must be in [0, 2], got {create.temperature}.",
+            "type": "BadRequestError",
+            "param": None,
+            "code": 400
+            })
+    if create.top_p<=0 or create.top_p>1:
+        return JSONResponse(
+            status_code=400,
+            content={
+            "object": "error",
+            "message": f"top_p must be in (0, 1], got {create.top_p}.",
+            "type": "BadRequestError",
+            "param": None,
+            "code": 400
+        })
+    if  create.frequency_penalty<-2 or create.frequency_penalty>2:
+        return JSONResponse(
+            status_code=400,
+            content={
+            "object": "error",
+            "message": f"frequency_penalty must be in [-2, 2], got {create.frequency_penalty}.",
+            "type": "BadRequestError",
+            "param": None,
+            "code": 400
+        })
+    if  create.presence_penalty<-2 or create.presence_penalty>2:
+        return JSONResponse(
+            status_code=400,
+            content={
+            "object": "error",
+            "message": f"presence_penalty must be in [-2, 2], got {create.presence_penalty}.",
+            "type": "BadRequestError",
+            "param": None,
+            "code": 400
+        })
     # Check if tools are present
     has_tools = create.tools and len(create.tools) > 0
 
