@@ -54,6 +54,7 @@ git submodule update --init
 # See: api/server/website.md
 
 # Install dependencies
+export ROCM_HOME=/opt/rocm
 bash install.sh
 ```
 
