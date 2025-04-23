@@ -14,16 +14,6 @@ router = APIRouter()
 @router.post("/completions",tags=['openai'])
 async def create_completion(request:Request, create:CompletionCreate):
     id = str(uuid4())
-    if create.model != Config().model_name:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "message": "Model not found",
-                    "code": 404,
-                    "type": "NotFound"                
-                }
-            })
     if create.max_tokens<0:
         return JSONResponse(
             status_code=400,

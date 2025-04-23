@@ -143,16 +143,6 @@ async def chat_completion(request: Request, create: ChatCompletionCreate):
 
     # Process messages with tool functionality if needed
     enhanced_messages = list(create.messages)
-    if create.model != Config().model_name:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": {
-                    "message": "Model not found",
-                    "code": 404,
-                    "type": "NotFound"                
-                }
-            })
     if create.max_tokens<0 or create.max_completion_tokens<0:
         return JSONResponse(
             status_code=400,
