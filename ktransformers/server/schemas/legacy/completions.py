@@ -10,8 +10,8 @@ class CompletionCreate(BaseModel):
     stream: bool = False
     temperature: Optional[float] = Field(default=Config().temperature)
     top_p: Optional[float] = Field(default=Config().top_p)
-    max_tokens: Optional[int] = Field(default=Config().max_new_tokens)
-    max_completion_tokens: Optional[int] = Field(default=Config().max_new_tokens)
+    max_tokens: Optional[int] = Field(default=None)
+    max_completion_tokens: Optional[int] = Field(default=None)
     
     def get_tokenizer_messages(self):
         if isinstance(self.prompt,List):
