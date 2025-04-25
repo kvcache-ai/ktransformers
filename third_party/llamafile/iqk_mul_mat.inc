@@ -2429,7 +2429,7 @@ struct SimpleBits {
     __m256i values[4];
 };
 
-// fix for #829: 添加对 AVX512VPOPCNTDQ 的检测
+// fix for #829: Add checks of AVX512VPOPCNTDQ
 #if defined(HAVE_FANCY_SIMD) && defined(__AVX512VPOPCNTDQ__)
 #define HAVE_AVX512_POPCNT 1
 #else
