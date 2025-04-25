@@ -73,8 +73,8 @@ class ChatCompletionCreate(BaseModel):
     stream_options: Optional[Dict[str, Any]] = None
     frequency_penalty: float = 0
     presence_penalty: float = 0
-    max_tokens: Optional[int] = Field(default=Config().max_new_tokens)
-    max_completion_tokens: Optional[int] = Field(default=Config().max_new_tokens)
+    max_tokens: Optional[int] = Field(default=None)
+    max_completion_tokens: Optional[int] = Field(default=None)
     return_speed: Optional[bool] = Field(default=False)
     def get_tokenizer_messages(self):
         return [m.to_tokenizer_message() for m in self.messages]
