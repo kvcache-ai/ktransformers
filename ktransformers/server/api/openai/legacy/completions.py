@@ -14,22 +14,22 @@ router = APIRouter()
 @router.post("/completions",tags=['openai'])
 async def create_completion(request:Request, create:CompletionCreate):
     id = str(uuid4())
-    if create.max_tokens<0:
+    if create.max_tokens is not None and create.max_tokens<0:
         return JSONResponse(
             status_code=400,
             content={
             "object": "error",
-            "message": f"max_new_tokens must be at least 0, got {create.max_tokens}.",
+            "message": f"max_tokens must be at least 0, got {create.max_tokens}.",
             "type": "BadRequestError",
             "param": None,
             "code": 400
         })
-    if create.max_completion_tokens<0:
+    if create.max_completion_tokens is not None and create.max_completion_tokens<0:
         return JSONResponse(
             status_code=400,
             content={
             "object": "error",
-            "message": f"max_new_tokens must be at least 0, got {create.max_completion_tokens}.",
+            "message": f"max_completion_tokens must be at least 0, got {create.max_completion_tokens}.",
             "type": "BadRequestError",
             "param": None,
             "code": 400
