@@ -2429,7 +2429,7 @@ struct SimpleBits {
     __m256i values[4];
 };
 
-// fix for #829: 添加对 AVX512VPOPCNTDQ 的检测
+// fix for #829: Add checks of AVX512VPOPCNTDQ
 #if defined(HAVE_FANCY_SIMD) && defined(__AVX512VPOPCNTDQ__)
 #define HAVE_AVX512_POPCNT 1
 #else
@@ -2449,19 +2449,20 @@ struct EvenSignHelper {
         IQK_ALWAYS_INLINE void sign_2_values(__m256i aux, __m256i * values) const {
             aux = _mm256_and_si256(_mm256_srlv_epi32(aux, shifts), mask);
             
-            // fix for #829: 兼容Intel Cascade Lake架构的CPU，如果不支持AVX512VPOPCNTDQ扩展，则使用替代实现
+            // fix for #829: Compatibility with processors using Intel Cascade Lake architecture
+            // If AVX512VPOPCNTDQ extension is not supported, use alternative implementation
             #if HAVE_AVX512_POPCNT
                 auto pcnt = _mm256_popcnt_epi32(aux);
                 
             #else
-                // 提供替代实现，使用标准的位计数方法
+                // Alternative implementation: Using standard bit counting method
                 __m256i pcnt;
                 int* pcnt_ptr = reinterpret_cast<int*>(&pcnt);
-                int* aux_ptr = reinterpret_cast<int*>(&aux); // 直接获取 aux 的地址，避免不必要的复制
+                int* aux_ptr = reinterpret_cast<int*>(&aux); // Get address of aux directly, avoid unnecessary copies
                 
-                #pragma unroll 8  // 提示编译器展开循环，提高 SIMD 计算吞吐量
+                #pragma unroll 8  // Hint compiler to unroll loops, increasing throughput of SIMD computing
                 for (int i = 0; i < 8; i++) {
-                    pcnt_ptr[i] = __builtin_popcount(aux_ptr[i]); // 使用编译器内置 popcount
+                    pcnt_ptr[i] = __builtin_popcount(aux_ptr[i]); // Use compiler builtin popcount
                 }
             #endif
             
