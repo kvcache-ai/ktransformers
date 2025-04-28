@@ -30,7 +30,8 @@ void SharedMemBuffer::alloc(void* object, std::vector<std::pair<void**, uint64_t
         if (buffer_) {
             free(buffer_);
         }
-        buffer_ = malloc(size);
+        buffer_ = std::aligned_alloc(64, size);
+
         size_ = size;
         for (auto& obj_requests : hist_requests_) {
             for (auto& requests : obj_requests.second) {

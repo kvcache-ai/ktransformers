@@ -20,6 +20,7 @@ class ArgumentParser:
         parser.add_argument(
             "--device", type=str, default=self.cfg.model_device, help="Warning: Abandoning this parameter"
         )
+        parser.add_argument("--architectures", type=str, default=self.cfg.model_name)
         parser.add_argument("--gguf_path", type=str, default=self.cfg.gguf_path)
         parser.add_argument("--optimize_config_path", default=None, type=str, required=False)
         parser.add_argument("--cpu_infer", type=int, default=self.cfg.cpu_infer)
@@ -137,7 +138,7 @@ class ArgumentParser:
         self.cfg.server_port = args.port
         self.cfg.user_force_think = args.force_think
         
-        args.gpu_memory_size = args.cache_lens*2*576*61
+        args.gpu_memory_size = 4*1024*1024*1024 # TODO: set this to the actual GPU memory size
         self.cfg.gpu_memory_size = args.gpu_memory_size
         free_ports = get_free_ports(3, [args.port])
         args.sched_port = free_ports[0]
