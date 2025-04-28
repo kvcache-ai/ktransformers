@@ -10,7 +10,7 @@ current_file_path = os.path.abspath(__file__)
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import pickle
 import argparse
-from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings
+from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe
 
 
 
@@ -209,5 +209,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
     with open(args.config, "rb") as f:
         main_args = pickle.load(f)
-    settings = create_sched_settings(main_args)
+    if main_args.architectures == "Qwen2MoeForCausalLM": 
+        settings = create_sched_settings_qwen2moe(main_args)
+    elif main_args.architectures == "Qwen3MoeForCausalLM":
+        settings = create_sched_settings_qwen3moe(main_args)
+    else:
+        settings = create_sched_settings(main_args)
     start_server(settings, main_args)
