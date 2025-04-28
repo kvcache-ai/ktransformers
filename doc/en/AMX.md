@@ -16,6 +16,15 @@ https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
 
 You can see that, thanks to the AMX instruction optimizations, we achieve up to 347 tokens/s prefill performance in the workstation scenario. On consumer-grade CPUs, we’re able to run the large model (235B-A22) and deliver smooth performance on the smaller 30B-A3B. Even in terms of resource overhead, it appears that a high-end gaming laptop can handle 30B-A3B smoothly. After talking about the concept of AIPC for so long, we can finally see its feasibility.
 
+Here is the Qwen3MoE startup command:
+
+``` python
+python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_path <model_dir> --gguf_path <gguf_dir> --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve.yaml # llamafile backend
+python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_path <model_dir> --gguf_path <gguf_dir> --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve-amx.yaml # AMX backend
+```
+
+**Note: At present, Qwen3MoE running with AMX can only read BF16 GGUF; support for loading from safetensor will be added later.**
+
 To make it easier for everyone to understand the AMX optimizations we’ve open-sourced, we’ve prepared a brief document. We also extend our gratitude to Intel for their assistance.
 
 # Introduction to AMX Instruction Set
@@ -53,7 +62,7 @@ Taking INT8 as an example, AMX can perform the multiplication of two 16×64 sub-
 
 <p align="center">
   <picture>
-    <img alt="amx_intro" src="../assets/amx_intro.png" width=60%>
+    <img alt="amx_intro" src="https://github.com/kvcache-ai/ktransformers/tree/main/doc/assets/amx_intro.png" width=60%>
   </picture>
 </p>
 
@@ -78,7 +87,7 @@ During inference, we designed around the CPU’s multi-level cache hierarchy to 
 
 <p align="center">
   <picture>
-    <img alt="amx" src="../assets/amx.png" width=60%>
+    <img alt="amx" src="https://github.com/kvcache-ai/ktransformers/tree/main/doc/assets/amx.png" width=60%>
   </picture>
 </p>
 
@@ -95,7 +104,7 @@ Although AMX is highly efficient for large-scale matrix multiplication, it perfo
 
 <p align="center">
   <picture>
-    <img alt="amx_avx" src="../assets/amx_avx.png" width=60%>
+    <img alt="amx_avx" src="https://github.com/kvcache-ai/ktransformers/tree/main/doc/assets/amx_avx.png" width=60%>
   </picture>
 </p>
 
@@ -115,7 +124,7 @@ Thanks to these optimizations, our kernel can achieve 21 TFLOPS of BF16 throughp
 
 <p align="center">
   <picture>
-    <img alt="onednn_1" src="../assets/onednn_1.png" width=60%>
+    <img alt="onednn_1" src="https://github.com/kvcache-ai/ktransformers/tree/main/doc/assets/onednn_1.png" width=60%>
   </picture>
 </p>
 
