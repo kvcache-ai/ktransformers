@@ -7,3 +7,4 @@ cpufeature; sys_platform == 'win32' or sys_platform == 'Windows'
 protobuf
 tiktoken
 blobfile
+triton==3.3

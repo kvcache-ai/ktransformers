@@ -25,7 +25,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build", "Debug"))
 import cpuinfer_ext
 from cpuinfer_ext.moe import MOEConfig, MOE
-from cpuinfer_ext.moe import AMX_MOEConfig, AMXBF16_MOE, AMXInt8_MOE
 import ctypes
 from ktransformers.util.custom_gguf import GGMLQuantizationType, GGUFLoader
 from ktransformers.util.utils import InferenceState
@@ -186,6 +185,7 @@ class KExpertsCPU(KExpertsBase):
             )
             self.moe = MOE(moe_config)
         elif self.backend == "AMXBF16":
+            from cpuinfer_ext.moe import AMX_MOEConfig, AMXBF16_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
             assert self.down_type == GGMLQuantizationType.BF16
@@ -203,6 +203,7 @@ class KExpertsCPU(KExpertsBase):
             self.cpu_infer.submit(self.moe.load_weights())
             self.cpu_infer.sync()
         elif self.backend == "AMXInt8":
+            from cpuinfer_ext.moe import AMX_MOEConfig, AMXInt8_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
             assert self.down_type == GGMLQuantizationType.BF16
