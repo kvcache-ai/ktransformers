@@ -151,7 +151,6 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         message(STATUS "Compiler and/or CPU do NOT support AVX512F")
         set(HAS_AVX512 False)
     endif()
-    set(HAS_AVX512 False)
 
     # check AMX
     string(FIND "${LSCPU_OUTPUT}" "amx" COMPILER_SUPPORTS_AMX)
