@@ -9,17 +9,10 @@ Consumer-grade CPU (Core i9-14900KF + dual-channel DDR4-4000 MT/s) + RTX 4090
 
 The results are as follows:
 
-<p align="center">
-  <video src="[202504290023-4.mov](https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2)" controls width="640"></video>
-</p>
+https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
 
 
-| Machine | Model | GPU Memory | RAM Usage | Prefill (tokens/s) | Decode (tokens/s) | 
-| Workstation (Xeon 4 + RTX 4090) | Qwen3-30B-A3B (8-bit) | 8.6 GB | 44 GB | 313 | 33 (single) → 50 (4-way) |
-| Workstation (Xeon 4 + RTX 4090) | Qwen3-30B-A3B (4-bit) | 8.6 GB | 20 GB | 347.7 | 49.8 (single) → 98.8 (4-way) |
-| Workstation (Xeon 4 + RTX 4090) | Qwen3-235B-A22B (4-bit) | 13 GB | 160 GB | 114.9 | 13.8 (single) → 24.4 (4-way) |
-| Personal PC (Core i9-14900KF + RTX 4090) | Qwen3-30B-A3B (4-bit) | 8.6 GB | 20 GB | 240.0 | 12.0 (single) → 26.4 (4-way) |
-| Personal PC (Core i9-14900KF + RTX 4090) | Qwen3-235B-A22B (4-bit) | 13 GB | 160 GB | 45 | 2.5 (single) → 6.0 (4-way) |
+![Image](https://github.com/user-attachments/assets/62567aad-353b-4c6f-ab87-2ea283ff2ba2)
 
 You can see that, thanks to the AMX instruction optimizations, we achieve up to 347 tokens/s prefill performance in the workstation scenario. On consumer-grade CPUs, we’re able to run the large model (235B-A22) and deliver smooth performance on the smaller 30B-A3B. Even in terms of resource overhead, it appears that a high-end gaming laptop can handle 30B-A3B smoothly. After talking about the concept of AIPC for so long, we can finally see its feasibility.
 
