@@ -9,7 +9,10 @@ Consumer-grade CPU (Core i9-14900KF + dual-channel DDR4-4000 MT/s) + RTX 4090
 
 The results are as follows:
 
-https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
+<p align="center">
+  📹 <a href="[202504290023-4.mov](https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2)">Qwen3MoE+AMX</a>
+</p>
+
 
 | Machine | Model | GPU Memory | RAM Usage | Prefill (tokens/s) | Decode (tokens/s) | 
 | Workstation (Xeon 4 + RTX 4090) | Qwen3-30B-A3B (8-bit) | 8.6 GB | 44 GB | 313 | 33 (single) → 50 (4-way) |
