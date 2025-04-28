@@ -146,7 +146,7 @@ async def main(concurrent_requests , prompt, max_tokens, model):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Event Stream Request Tester")
     parser.add_argument("--concurrent", type=int, default=1, help="Number of concurrent requests")
-    parser.add_argument("--model", type=str, default="DeepSeek-V3", help="Model name", required=True)
+    parser.add_argument("--model", type=str, default="DeepSeek-V3", help="Model name")
     parser.add_argument("--prompt_lens", type=int, default=1024, help="prefill prompt lens, 1024 or 2048")
     parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
     parser.add_argument("--max_tokens", type=int, default=50, help="max decode tokens")

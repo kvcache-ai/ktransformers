@@ -17,12 +17,12 @@
 #include <vector>
 
 #include "../../cpu_backend/backend.h"
+#include "../../cpu_backend/shared_mem_buffer.h"
 #include "conversion.h"
 #include "llama.cpp/ggml-impl.h"
 #include "llama.cpp/ggml-quants.h"
 #include "llama.cpp/ggml.h"
 #include "llamafile/sgemm.h"
-#include "shared_mem_buffer.h"
 
 struct MLPConfig {
     int hidden_size;

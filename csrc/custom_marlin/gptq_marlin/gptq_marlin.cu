@@ -1420,6 +1420,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
             int* locks      // extra global storage for barrier synchronization
         ) {
         int prob_m = *prob_m_ptr;
+        prob_m = min(prob_m, 1024);
         const int thread_m_blocks = min(div_ceil(prob_m, 16), template_thread_m_blocks);
         if(prob_m > 16 * thread_m_blocks)
             prob_m = (16 * thread_m_blocks) * div_ceil(prob_m, (16 * thread_m_blocks));
