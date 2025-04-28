@@ -1,0 +1,5 @@
+---
+BasedOnStyle: LLVM
+ColumnLimit: 120  # 设置最大行宽为 100
+IndentWidth: 2
+---
