@@ -85,7 +85,7 @@ class ModelRunner:
         elif isinstance(self.model, KQwen2MoeForCausalLM) or isinstance(self.model, KQwen3MoeForCausalLM):
             self.model.flash_infer_attn_plan(batch, self.bsz_tensor_buf, self.num_tokens_tensor_buf,
                                              num_q_heads=self.model.config.num_attention_heads, num_kv_heads=self.model.config.num_key_value_heads,
-                                             head_dim=self.model.config.head_dim if hasattr(self.model.config, 'head_num') else self.model.config.hidden_size // self.model.config.num_attention_heads, 
+                                             head_dim=self.model.config.head_dim if hasattr(self.model.config, 'head_dim') else self.model.config.hidden_size // self.model.config.num_attention_heads, 
                                              page_size=self.model.cache.page_size, causal=True,
                                              q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16, cuda_graph_idx=cuda_graph_idx)
         else:
