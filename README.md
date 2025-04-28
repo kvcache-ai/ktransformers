@@ -23,8 +23,11 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 * **Apr 29, 2025**: Support AMX-Int8 and AMX-BF16([Tutorial](./doc/en/AMX.md)). Support Qwen3MoE
-  
-https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
+
+<p align="center">
+  📹 <a href="[202504290023-4.mov](https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2)">Qwen3MoE+AMX</a>
+</p>
+
 
 * **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./doc/en/llama4.md)).
 * **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./doc/en/balance-serve.md)).
