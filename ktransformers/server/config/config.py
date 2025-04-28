@@ -100,6 +100,7 @@ class Config(metaclass=Singleton):
         # to make sure it consistent with previous version
         self.model_path: str = self.model_dir
         self.model_name: str = self.model.get("name", "")
+        self.architectures: str = self.model.get("name", "")
         self.model_device: str = self.model.get("device", "cuda:0")
         self.gguf_path: Optional[str] = self.model.get("gguf_path", None)
         self.use_cuda_graph = self.model.get("use_cuda_graph", True)

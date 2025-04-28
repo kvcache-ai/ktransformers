@@ -912,6 +912,9 @@ def translate_name_to_gguf(name):
     name = name.replace(".self_attn.q_a_proj", ".attn_q_a")
     name = name.replace(".self_attn.q_a_layernorm", ".attn_q_a_norm")
     name = name.replace(".self_attn.q_b_proj", ".attn_q_b")
+
+    name = name.replace(".self_attn.q_norm", ".attn_q_norm")
+    name = name.replace(".self_attn.k_norm", ".attn_k_norm")
     
     name = name.replace(".shared_expert.", ".shared_experts.")
     name = name.replace(".shared_expert_", ".shared_experts_")
@@ -922,16 +925,22 @@ def translate_name_to_gguf(name):
     name = name.replace(".mlp.shared_experts.gate_proj", ".ffn_gate_shexp")
     name = name.replace(".mlp.shared_experts.up_proj", ".ffn_up_shexp")
     name = name.replace(".mlp.shared_experts_gate", ".ffn_gate_inp_shexp")
+
+
     name = name.replace(".mlp.experts", "")
-    name = name.replace(".mlp.experts.ffn_down_exps", ".ffn_down_exps")
-    name = name.replace(".mlp.experts.ffn_gate_exps", ".ffn_gate_exps")
-    name = name.replace(".mlp.experts.ffn_up_exps", ".ffn_up_exps")
 
     
     name = name.replace(".block_sparse_moe.gate.", ".ffn_gate_inp.")
     name = name.replace(".block_sparse_moe.experts", "")
     
+    name = name.replace(".feed_forward.experts", "")
+    name = name.replace(".feed_forward.router", ".ffn_gate_inp")
+    name = name.replace(".feed_forward.shared_experts.down_proj", ".ffn_down_shexp")
+    name = name.replace(".feed_forward.shared_experts.gate_proj", ".ffn_gate_shexp")
+    name = name.replace(".feed_forward.shared_experts.up_proj", ".ffn_up_shexp")
+
     return name
+
 
 if __name__ == '__main__':
     gguf_path = '/mnt/data/model/DeepSeek-Coder-V2-GGUF-WJH'
