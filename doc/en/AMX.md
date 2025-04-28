@@ -1,7 +1,7 @@
-# Qwen 3 + KTransformers 0.3 (+AMX) = AI 工作站/PC
+# Qwen 3 + KTransformers 0.3 (+AMX) = AI Workstation/PC
 Following DeepSeek-V3/R1, LLaMa-4, and Kimi-VL, Qwen has also released an impressive MoE model—undoubtedly, this year belongs to MoE. As a low-barrier inference system for running MoE models in local heterogeneous environments, KTransformers naturally joins the party. Thanks to the support of the Qwen team, we completed Day 0 support for the entire Qwen 3 series of MoE models. At the same time, we took this opportunity to open-source the long-awaited preliminary version of our AMX high-performance operators (BF16, Int8; an int4 variant is coming soon), officially advancing to version 0.3.
 
-What excites me most about Qwen3MoE is that, unlike the 671 B “giant” model, its two configurations—235 B-A22 and 30 B-A3B—hit the performance sweet spots for both local workstations and consumer-grade PCs. Accordingly, we ran benchmarks in two typical setups:
+What excites me most about Qwen3MoE is that, unlike the 671 B “giant” model, its two configurations: 235B-A22 and 30B-A3B, **hit the performance sweet spots for both local workstations and consumer-grade PCs**. Accordingly, we ran benchmarks in two typical setups:
 
 Server CPU (Xeon 4) + RTX 4090
 
@@ -9,14 +9,10 @@ Consumer-grade CPU (Core i9-14900KF + dual-channel DDR4-4000 MT/s) + RTX 4090
 
 The results are as follows:
 
-https://github.com/user-attachments/assets/14992126-5203-4855-acf3-d250acead6b2
+https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
 
-Machine | Model | GPU Memory | RAM Usage | Prefill (tokens/s) | Decode (tokens/s)
-Workstation (Xeon 4 + RTX 4090) | Qwen3-30B-A3B (8-bit) | 8.6 GB | 44 GB | 313 | 33 (single) → 50 (4-way)
-Workstation (Xeon 4 + RTX 4090) | Qwen3-30B-A3B (4-bit) | 8.6 GB | 20 GB | 347.7 | 49.8 (single) → 98.8 (4-way)
-Workstation (Xeon 4 + RTX 4090) | Qwen3-235B-A22B (4-bit) | 13 GB | 160 GB | 114.9 | 13.8 (single) → 24.4 (4-way)
-Personal PC (Core i9-14900KF + RTX 4090) | Qwen3-30B-A3B (4-bit) | 8.6 GB | 20 GB | 240.0 | 12.0 (single) → 26.4 (4-way)
-Personal PC (Core i9-14900KF + RTX 4090) | Qwen3-235B-A22B (4-bit) | 13 GB | 160 GB | 45 | 2.5 (single) → 6.0 (4-way)
+
+![Image](https://github.com/user-attachments/assets/62567aad-353b-4c6f-ab87-2ea283ff2ba2)
 
 You can see that, thanks to the AMX instruction optimizations, we achieve up to 347 tokens/s prefill performance in the workstation scenario. On consumer-grade CPUs, we’re able to run the large model (235B-A22) and deliver smooth performance on the smaller 30B-A3B. Even in terms of resource overhead, it appears that a high-end gaming laptop can handle 30B-A3B smoothly. After talking about the concept of AIPC for so long, we can finally see its feasibility.
 
