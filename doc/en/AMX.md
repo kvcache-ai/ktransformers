@@ -16,6 +16,17 @@ https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
 
 You can see that, thanks to the AMX instruction optimizations, we achieve up to 347 tokens/s prefill performance in the workstation scenario. On consumer-grade CPUs, we’re able to run the large model (235B-A22) and deliver smooth performance on the smaller 30B-A3B. Even in terms of resource overhead, it appears that a high-end gaming laptop can handle 30B-A3B smoothly. After talking about the concept of AIPC for so long, we can finally see its feasibility.
 
+Here is the Qwen3MoE startup command:
+
+``` python
+# llamafile backend
+python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_path <model_dir> --gguf_path <gguf_dir> --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve.yaml 
+# AMX backend
+python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_path <model_dir> --gguf_path <gguf_dir> --optimize_config_path ktransformers/optimize/optimize_rules/Qwen3Moe-serve-amx.yaml 
+```
+
+**Note: At present, Qwen3MoE running with AMX can only read BF16 GGUF; support for loading from safetensor will be added later.**
+
 To make it easier for everyone to understand the AMX optimizations we’ve open-sourced, we’ve prepared a brief document. We also extend our gratitude to Intel for their assistance.
 
 # Introduction to AMX Instruction Set
