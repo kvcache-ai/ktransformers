@@ -22,11 +22,11 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
 <h2 id="Updates">🔥 Updates</h2>
-* **Apr 29, 2025**: Support AMX-Int8 and AMX-BF16([Tutorial](./doc/en/AMX.md)). Support Qwen3MoE
 
-<p align="center">
-  <video src="[202504290023-4.mov](https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2)" controls width="640"></video>
-</p>
+* **Apr 9, 2025**: Support AMX-Int8、 AMX-BF16 and Qwen3MoE ([Tutorial](./doc/en/AMX.md))
+
+https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
+
 
 
 
