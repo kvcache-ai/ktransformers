@@ -132,7 +132,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
     message(STATUS "x86 detected")
     set(HOST_IS_X86 TRUE)
     set(HAS_AVX512 TRUE)
-    set(HAS_AMX TRUE)
+    set(__HAS_AMX__ TRUE)
     add_compile_definitions(__x86_64__)
     # check AVX512
     execute_process(
@@ -157,7 +157,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
     
     if(COMPILER_SUPPORTS_AMX GREATER -1)
         message(STATUS "Compiler supports AMX")
-        add_compile_definitions(HAS_AMX)
+        add_compile_definitions(__HAS_AMX__)
     else()
         message(STATUS "Compiler does NOT support AMX")
     endif()
@@ -340,7 +340,7 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 
-if (HOST_IS_X86 AND HAS_AVX512 AND HAS_AMX)
+if (HOST_IS_X86 AND HAS_AVX512 AND __HAS_AMX__)
     aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/amx SOURCE_DIR6)
 endif()
 
