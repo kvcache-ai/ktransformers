@@ -22,7 +22,8 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
 <h2 id="Updates">🔥 Updates</h2>
-
+* **Apr 29, 2025**: Support AMX-Int8 and AMX-BF16([Tutorial](./doc/en/AMX.md)). Support Qwen3MoE
+https://github.com/user-attachments/assets/14992126-5203-4855-acf3-d250acead6b2
 * **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./doc/en/llama4.md)).
 * **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./doc/en/balance-serve.md)).
 
