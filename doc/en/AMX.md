@@ -10,7 +10,9 @@ Consumer-grade CPU (Core i9-14900KF + dual-channel DDR4-4000 MT/s) + RTX 4090
 The results are as follows:
 
 <p align="center">
-  📹 <a href="[202504290023-4.mov](https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2)">Qwen3MoE+AMX</a>
+  📹 <a href="https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2/202504290023-4.mov">
+    Qwen3MoE+AMX
+  </a>
 </p>
 
 
