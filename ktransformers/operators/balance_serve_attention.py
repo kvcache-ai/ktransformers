@@ -255,8 +255,11 @@ class KQwen3MoeAttention(BaseInjectedModule, Qwen3MoeAttention):
                 ):
         q_len, _ = hidden_states.size()
 
-        query_states = self.q_norm(self.q_proj(hidden_states, bsz_tensors), bsz_tensors)
-        key_states = self.k_norm(self.k_proj(hidden_states, bsz_tensors), bsz_tensors)
+        bsz_tensors_q = bsz_tensors * self.num_heads
+        bsz_tensors_kv = bsz_tensors * self.num_key_value_heads
+
+        query_states = self.q_norm(self.q_proj(hidden_states, bsz_tensors), bsz_tensors_q)
+        key_states = self.k_norm(self.k_proj(hidden_states, bsz_tensors), bsz_tensors_kv)
         value_states = self.v_proj(hidden_states, bsz_tensors)
 
 
