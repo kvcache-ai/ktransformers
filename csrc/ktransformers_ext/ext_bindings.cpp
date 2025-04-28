@@ -17,7 +17,11 @@
 #include "operators/llamafile/linear.h"
 #include "operators/llamafile/mlp.h"
 #include "operators/llamafile/moe.h"
+
+#if defined(__x86_64__) && defined(__HAS_AVX512F__) && defined(__HAS_AMX__)
 #include "operators/amx/moe.hpp"
+#endif
+
 #include "pybind11/functional.h"
 #include "pybind11/operators.h"
 #include "pybind11/pybind11.h"
@@ -564,6 +568,8 @@ class MOEBindings {
     };
 };
 
+
+#if defined(__x86_64__) && defined(__HAS_AVX512F__) && defined(__HAS_AMX__)
 template<class T>
 class AMX_MOEBindings {
   public:
@@ -632,6 +638,7 @@ class AMX_MOEBindings {
         }
     };
 };
+#endif
 
 PYBIND11_MODULE(cpuinfer_ext, m) {
     py::class_<CPUInfer>(m, "CPUInfer")
@@ -691,6 +698,8 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
         .def("warm_up", &MOEBindings::WarmUpBindinds::cpuinfer_interface)
         .def("forward", &MOEBindings::ForwardBindings::cpuinfer_interface);
 
+
+    #if defined(__x86_64__) && defined(__HAS_AVX512F__) && defined(__HAS_AMX__)
     py::class_<AMX_MOEConfig>(moe_module, "AMX_MOEConfig")
         .def(py::init([](int expert_num, int routed_expert_num, int hidden_size,
                          int intermediate_size,
@@ -701,6 +710,7 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
                                  max_len, (void *)gate_proj,
                                  (void *)up_proj, (void *)down_proj);
         }));
+
     py::class_<AMX_MOE<amx::GemmKernel224BF>>(moe_module, "AMXBF16_MOE")
         .def(py::init<AMX_MOEConfig>())
         .def("warm_up", &AMX_MOEBindings<amx::GemmKernel224BF>::WarmUpBindings::cpuinfer_interface)
@@ -711,6 +721,8 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
         .def("warm_up", &AMX_MOEBindings<amx::GemmKernel224Int8>::WarmUpBindings::cpuinfer_interface)
         .def("load_weights", &AMX_MOEBindings<amx::GemmKernel224Int8>::LoadWeightsBindings::cpuinfer_interface)
         .def("forward", &AMX_MOEBindings<amx::GemmKernel224Int8>::ForwardBindings::cpuinfer_interface);
+
+    #endif
 
     auto kvcache_module = m.def_submodule("kvcache");
 
