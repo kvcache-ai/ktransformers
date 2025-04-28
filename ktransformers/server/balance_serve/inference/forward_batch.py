@@ -281,4 +281,4 @@ class ForwardBatchOutput:
         self.generated_tokens_num = []
         self.top_ps = []
         self.temperatures = []
-        pass
+        self.num_batchs = 1

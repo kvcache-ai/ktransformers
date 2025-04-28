@@ -412,3 +412,29 @@ class RotaryEmbeddingV4(BaseInjectedModule):
         # self.register_buffer("inv_freq", inv_freq, persistent=False)
         # For BC we register cos and sin cached
         self.max_seq_len_cached = max_position_embeddings
+
+class KQwen3MoeRotaryEmbedding(BaseInjectedModule, DeepseekV2RotaryEmbedding):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module,
+        #  device: str = "cuda",
+        generate_device: str = "cuda",
+        prefill_device: str = "cuda",
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs
+        )
+        self.orig_module.__init__(
+            config,
+        )
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
+
+    def load(self):
+        self.orig_module.__init__(
+            self.orig_module.config
+        )
