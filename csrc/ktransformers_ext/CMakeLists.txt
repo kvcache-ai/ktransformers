@@ -53,6 +53,21 @@ else ()
     set(CMAKE_GENERATOR_PLATFORM_LWR "")
 endif ()
 
+if(NOT DEFINED _GLIBCXX_USE_CXX11_ABI)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c
+        "import torch; print('1' if torch.compiled_with_cxx11_abi() else '0')"
+        OUTPUT_VARIABLE ABI_FLAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    set(_GLIBCXX_USE_CXX11_ABI ${ABI_FLAG} CACHE STRING "C++11 ABI setting from PyTorch" FORCE)
+endif()
+
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
+
 if (NOT MSVC)
     if (LLAMA_STATIC)
         add_link_options(-static)
@@ -115,6 +130,38 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         (NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_GENERATOR_PLATFORM_LWR AND
          CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|i686|AMD64)$"))
     message(STATUS "x86 detected")
+    set(HOST_IS_X86 TRUE)
+    set(HAS_AVX512 TRUE)
+    set(HAS_AMX TRUE)
+    add_compile_definitions(__x86_64__)
+    # check AVX512
+    execute_process(
+        COMMAND lscpu
+        OUTPUT_VARIABLE LSCPU_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    # message(STATUS "LSCPU_OUTPUT: ${LSCPU_OUTPUT}")
+
+    string(FIND "${LSCPU_OUTPUT}" "avx512" COMPILER_SUPPORTS_AVX512F)
+    
+    if (COMPILER_SUPPORTS_AVX512F GREATER -1)
+        message(STATUS "Compiler and CPU support AVX512F (tested by compiling a program)")
+        add_compile_definitions(__HAS_AVX512F__)
+    else()
+        message(STATUS "Compiler and/or CPU do NOT support AVX512F")
+        set(HAS_AVX512 False)
+    endif()
+    set(HAS_AVX512 False)
+
+    # check AMX
+    string(FIND "${LSCPU_OUTPUT}" "amx" COMPILER_SUPPORTS_AMX)
+    
+    if(COMPILER_SUPPORTS_AMX GREATER -1)
+        message(STATUS "Compiler supports AMX")
+        add_compile_definitions(HAS_AMX)
+    else()
+        message(STATUS "Compiler does NOT support AMX")
+    endif()
     if (MSVC)
         # instruction set detection for MSVC only
         if (LLAMA_NATIVE)
@@ -293,7 +340,10 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/amx SOURCE_DIR6)
+
+if (HOST_IS_X86 AND HAS_AVX512 AND HAS_AMX)
+    aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/amx SOURCE_DIR6)
+endif()
 
 
 set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6})
