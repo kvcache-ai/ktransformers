@@ -5,7 +5,7 @@ What excites me most about Qwen3MoE is that, unlike the 671 B “giant” model,
 
 Server CPU (Xeon 4) + RTX 4090
 
-Consumer-grade CPU (Core i9-14900KF + dual-channel DDR4-4000 MT/s) + RTX 4090
+Consumer-grade CPU (Core i9-14900KF + dual-channel DDR5-4000 MT/s) + RTX 4090
 
 The results are as follows:
 
