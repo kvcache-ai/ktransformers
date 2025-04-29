@@ -7,6 +7,8 @@ Server CPU (Xeon 4) + RTX 4090
 
 Consumer-grade CPU (Core i9-14900KF + dual-channel DDR5-4000 MT/s) + RTX 4090
 
+Note: Because the PC's memory has a low frequency, large capacity, and multiple sticks, it downclocks severely and only operates at 4000MT. Using higher - frequency memory can boost performance.
+
 The results are as follows:
 
 https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
