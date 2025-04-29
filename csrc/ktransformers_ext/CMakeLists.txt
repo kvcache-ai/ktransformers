@@ -53,21 +53,6 @@ else ()
     set(CMAKE_GENERATOR_PLATFORM_LWR "")
 endif ()
 
-if(NOT DEFINED _GLIBCXX_USE_CXX11_ABI)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-    execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c
-        "import torch; print('1' if torch.compiled_with_cxx11_abi() else '0')"
-        OUTPUT_VARIABLE ABI_FLAG
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-
-    set(_GLIBCXX_USE_CXX11_ABI ${ABI_FLAG} CACHE STRING "C++11 ABI setting from PyTorch" FORCE)
-endif()
-
-add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
-
 if (NOT MSVC)
     if (LLAMA_STATIC)
         add_link_options(-static)
