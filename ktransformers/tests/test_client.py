@@ -93,12 +93,12 @@ async def main(prompt_id, model, stream, max_tokens, temperature, top_p):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Event Stream Request Tester")
     parser.add_argument("--question_id", type=int, default=0)
-    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--model", type=str, default="DeepSeek-V3")
     parser.add_argument("--stream", type=bool, default=True)  
     parser.add_argument("--max_tokens", type=int, default=500)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top_p", type=float, default=1)
-    parser.add_argument("--api_url", type=str, default="http://localhost:10006/v1/chat/completions", help="API URL")
+    parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
 
     args = parser.parse_args()
     SERVER_URL = args.api_url
