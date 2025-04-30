@@ -9,6 +9,7 @@
  **/
 #include "shared_mem_buffer.h"
 #include <cstdio>
+#include <new>
 
 SharedMemBuffer::SharedMemBuffer() {
     buffer_ = nullptr;
@@ -17,7 +18,7 @@ SharedMemBuffer::SharedMemBuffer() {
 
 SharedMemBuffer::~SharedMemBuffer() {
     if (buffer_) {
-        free(buffer_);
+        ::operator delete(buffer_, std::align_val_t(64));
     }
 }
 
@@ -28,9 +29,9 @@ void SharedMemBuffer::alloc(void* object, std::vector<std::pair<void**, uint64_t
     }
     if (size > size_) {
         if (buffer_) {
-            free(buffer_);
+            ::operator delete(buffer_, std::align_val_t(64));
         }
-        buffer_ = std::aligned_alloc(64, size);
+        buffer_ = ::operator new(size, std::align_val_t(64));
 
         size_ = size;
         for (auto& obj_requests : hist_requests_) {
