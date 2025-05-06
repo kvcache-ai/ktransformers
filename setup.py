@@ -168,32 +168,48 @@ class VersionInfo:
             return "avx2"
         else:
             print("Using native cpu instruct")
+
         if sys.platform.startswith("linux"):
             with open('/proc/cpuinfo', 'r', encoding="utf-8") as cpu_f:
                 cpuinfo = cpu_f.read()
-            flags_line = [line for line in cpuinfo.split(
-                '\n') if line.startswith('flags')][0]
-            flags = flags_line.split(':')[1].strip().split(' ')
-            # fancy with AVX512-VL, AVX512-BW, AVX512-DQ, AVX512-VNNI
-            for flag in flags:
-                if 'avx512bw' in flag:
-                    return 'fancy'
-            for flag in flags:
-                if 'avx512' in flag:
-                    return 'avx512'
-            for flag in flags:
-                if 'avx2' in flag:
-                    return 'avx2'
-            raise ValueError(
-                "Unsupported cpu Instructions: {}".format(flags_line))
+            if platform.machine() == "aarch64":
+                # Adapt this part based on GH200's /proc/cpuinfo
+                for line in cpuinfo.split('\n'):
+                    if line.startswith('Features'):
+                        features_line = line
+                        features = features_line.split(':')[1].strip().split(' ')
+                        if 'sve' in features: # Example: Scalable Vector Extension
+                            return 'sve' # Or a custom label
+                        elif 'neon' in features:
+                            return 'neon'
+                        else:
+                            print("Using generic Arm CPU instructions")
+                            return 'native_arm' # Or a default Arm label
+                print("Warning: Could not find 'Features' line in /proc/cpuinfo on aarch64. Using native.")
+                return 'native' # Fallback for aarch64 if 'Features' not found
+            else: # Assume x86-like if not aarch64
+                for line in cpuinfo.split('\n'):
+                    if line.startswith('flags'):
+                        flags_line = line
+                        flags = flags_line.split(':')[1].strip().split(' ')
+                        if 'avx512bw' in flags:
+                            return 'fancy'
+                        elif 'avx512' in flags:
+                            return 'avx512'
+                        elif 'avx2' in flags:
+                            return 'avx2'
+                        raise ValueError(
+                            "Unsupported cpu Instructions: {}".format(flags_line))
+                print("Warning: Could not find 'flags' line in /proc/cpuinfo on x86-like. Using native.")
+                return 'native' # Fallback for x86-like if 'flags' not found
+
         elif sys.platform == "win32":
             from cpufeature.extension import CPUFeature
-
             if CPUFeature.get("AVX512bw", False):
                 return 'fancy'
-            if CPUFeature.get("AVX512f", False):
+            elif CPUFeature.get("AVX512f", False):
                 return 'avx512'
-            if CPUFeature.get("AVX2", False):
+            elif CPUFeature.get("AVX2", False):
                 return 'avx2'
             raise ValueError(
                 "Unsupported cpu Instructions: {}".format(str(CPUFeature)))
