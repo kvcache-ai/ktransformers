@@ -3,7 +3,7 @@
 /* global Mark, elasticlunr, path_to_root */
 
 window.search = window.search || {};
-(function search(search) {
+(function search() {
     // Search functionality
     //
     // You can use !hasFocus() to prevent keyhandling in your key
@@ -29,7 +29,8 @@ window.search = window.search || {};
         searchicon = document.getElementById('search-toggle'),
         content = document.getElementById('content'),
 
-        mark_exclude = [],
+        // SVG text elements don't render if inside a <mark> tag.
+        mark_exclude = ['text'],
         marker = new Mark(content),
         URL_SEARCH_PARAM = 'search',
         URL_MARK_PARAM = 'highlight',
@@ -288,6 +289,9 @@ window.search = window.search || {};
 
         // If reloaded, do the search or mark again, depending on the current url parameters
         doSearchOrMarkFromUrl();
+
+        // Exported functions
+        config.hasFocus = hasFocus;
     }
 
     function unfocusSearchbar() {
@@ -521,6 +525,4 @@ window.search = window.search || {};
 
     loadScript(path_to_root + 'searchindex.js', 'search-index');
 
-    // Exported functions
-    search.hasFocus = hasFocus;
 })(window.search);
