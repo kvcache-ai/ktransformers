@@ -272,8 +272,8 @@ public:
 
   void forward(int qlen, int k, const uint64_t *expert_ids, const float *weights, const void *input, void *output,
                int *batch_size_tensor, Backend *backend) {
-    bool use_amx = (qlen > 4 * config_.expert_num / config_.routed_expert_num);
     qlen = batch_size_tensor[0];
+    bool use_amx = (qlen > 4 * config_.expert_num / config_.routed_expert_num);
     int activated_expert = 0;
     for (int i = 0; i < config_.expert_num; i++) {
       m_local_num_[i] = 0;
