@@ -1,7 +1,7 @@
 import os
 import sys
 sys.path.insert(0,"/home/zbx/ktransformers")
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 import torch
 
 gguf_loader_1 = GGUFLoader("/mnt/data/model/DeepseekV3-q4km-gguf")

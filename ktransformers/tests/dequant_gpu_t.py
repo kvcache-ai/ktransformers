@@ -9,7 +9,7 @@ from pycuda.compiler import SourceModule
 import numpy as np
 from ktransformers.operators.linear import KTransformersLinear, KLinearMarlin
 from ktransformers.operators.experts import KTransformersExperts, KExpertsTorch
-from ktransformers.util.custom_gguf import GGUFLoader, dequantize_q4_k_gpu, dequantize_q4_k
+from ktransformers.util.custom_loader import GGUFLoader, dequantize_q4_k_gpu, dequantize_q4_k
 import torch
 import KTransformersOps
 torch.set_default_dtype(torch.bfloat16)
