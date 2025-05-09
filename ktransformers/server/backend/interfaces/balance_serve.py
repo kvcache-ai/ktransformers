@@ -197,7 +197,7 @@ class Engine:
         self.block_num = inference_context.k_cache[0].size(1)
         #@TODO add config
         if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM":
-            self.model.init_wrapper(self.args.use_cuda_graph, self.device, 1024 ,args.max_batch_size, self.block_num) # TODO: 1024 is a magic number(max_batch_tokens)
+            self.model.init_wrapper(self.args.use_cuda_graph, self.device, Config().chunk_size, args.max_batch_size, self.block_num) # TODO: 1024 is a magic number(max_batch_tokens)
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)
 

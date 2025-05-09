@@ -23,7 +23,7 @@ from ktransformers.models.modeling_deepseek import (
     yarn_find_correction_range
 )
 from ktransformers.operators.base_operator import BaseInjectedModule
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.utils import InferenceState
 from transformers.configuration_utils import PretrainedConfig
 import torch

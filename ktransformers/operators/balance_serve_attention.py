@@ -11,7 +11,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeAttention
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeAttention
 from typing import Optional, Tuple
 from ktransformers.operators.base_operator import BaseInjectedModule
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 import logging
 from transformers.configuration_utils import PretrainedConfig
 from flashinfer import BatchMLAPagedAttentionWrapper

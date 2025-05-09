@@ -7,7 +7,7 @@ sys.path.append(current_path+"/../..")
 import numpy as np
 # from ktransformers.operators.linear import KTransformersLinear, KLinearMarlin
 # from ktransformers.operators.experts import KTransformersExperts, KExpertsTorch
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 import torch
 import KTransformersOps
 torch.set_default_dtype(torch.bfloat16)
