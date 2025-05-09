@@ -159,5 +159,7 @@ if __name__ == "__main__":
         prompt = ktansformer_prompt1024
     elif args.prompt_lens == 2048:
         prompt = ktansformer_prompt1024 * 2
+    elif args.prompt_lens == 4096:
+        prompt = ktansformer_prompt1024 * 4
     asyncio.run(main(args.concurrent, prompt, max_tokens, model))
 

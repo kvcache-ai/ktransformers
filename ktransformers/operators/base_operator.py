@@ -6,7 +6,7 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 from typing import Any
 from torch import nn, Tensor
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from transformers.configuration_utils import PretrainedConfig
 import ktransformers.util.utils as utils
 class BaseInjectedModule(nn.Module):

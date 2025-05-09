@@ -1,6 +1,6 @@
 
 from ktransformers.operators.base_operator import BaseInjectedModule
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from transformers import PretrainedConfig
 import torch.nn as nn
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3MLP
