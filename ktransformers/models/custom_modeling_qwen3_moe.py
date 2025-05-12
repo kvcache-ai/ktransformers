@@ -39,7 +39,7 @@ class KQwen3MoeForCausalLM(Qwen3MoePreTrainedModel):
         self.cache = cache
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.attn = [None] * 10
+        self.attn = [None] * 100
         
     def init_wrapper(self, use_cuda_graph, device, max_batch_token, max_batch_size, max_pages, cuda_graph_idx = 0):
         self.attn[cuda_graph_idx] = flashInferAttn(use_cuda_graph=use_cuda_graph, max_batch_token=max_batch_token, max_batch_size=max_batch_size, max_pages=max_pages, device=device)

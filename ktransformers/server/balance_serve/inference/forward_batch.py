@@ -200,7 +200,7 @@ class ForwardBatchInput:
         device=None,
         tokens: torch.Tensor = None,
         num_mini_batches: int = 1,
-        max_seq_length: int = 1024, # TODO: add to yaml
+        max_seq_length: int = 4096, # TODO: add to yaml
         prefill_query_length: int = (Config().chunk_size - Config().max_decode_batch_size) // Config().max_prefill_batch_size, # TODO: use config
         prefill_active_length: int = (Config().chunk_size - Config().max_decode_batch_size) // Config().max_prefill_batch_size,
         gen_prefill: bool = True,
@@ -223,12 +223,12 @@ class ForwardBatchInput:
 
         decode_querys_info = []
         for i in range(min(decode_batch_size, cuda_lens)):
-            query_info = QueryInfo(i+Config().max_prefill_batch_size, prefill_query_length, max_seq_length, page_size, device, is_prefill=False, offset=offset)
+            query_info = QueryInfo(i+Config().max_prefill_batch_size, prefill_query_length, 256, page_size, device, is_prefill=False, offset=offset)
             offset += max_seq_length // page_size
             if tokens is not None:
                 query_info.query_tokens[prefill_active_length:prefill_active_length + 1].copy_(tokens)            
             if decode_active_position is None:
-                query_info.active_position = prefill_active_length
+                query_info.active_position = 255
             else: 
                 query_info.active_position = decode_active_position[i]
 
