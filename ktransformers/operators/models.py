@@ -65,7 +65,7 @@ from ktransformers.models.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
-
+from ktransformers.models.modeling_qwen3_moe import Qwen3MoeRotaryEmbedding
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
@@ -1350,3 +1350,289 @@ class KLlamaModel(BaseInjectedModule):
             )
 
         return causal_mask
+
+class KQwen3MoeModel(BaseInjectedModule):
+    """
+    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2MoeDecoderLayer`]
+
+    Args:
+        config: Qwen2MoeConfig
+    """
+
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module,
+        device: str = "cuda",
+        per_layer_prefill_intput_threshold: int = 30000,  # if None, no per-layer prefill
+        transfer_map: dict = None,
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, device, **kwargs
+        )
+        self.per_layer_prefill_intput_threshold = per_layer_prefill_intput_threshold
+        self.transfer_map = transfer_map
+        self.stream_device_map = dict()
+        self.rotary_emb = Qwen3MoeRotaryEmbedding(config=config)
+
+
+    @add_start_docstrings_to_model_forward(QWEN2MOE_INPUTS_DOCSTRING)
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        output_router_logits: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        per_layer_prefill_intput_threshold: (
+            int | None
+        ) = None,  # if None or 0, close per-layer prefill
+    ) -> Union[Tuple, MoeModelOutputWithPast]:
+        # print(f'Total length of input_ids: {input_ids.size(1)}, {input_ids.size()}')
+
+        if per_layer_prefill_intput_threshold is None:
+            per_layer_prefill_intput_threshold = self.per_layer_prefill_intput_threshold
+        per_layer_prefill_flag = False
+        seq_lenth = (
+            inputs_embeds.size(1) if inputs_embeds is not None else input_ids.size(1)
+        )
+        if (
+            per_layer_prefill_intput_threshold
+            and per_layer_prefill_intput_threshold < seq_lenth
+        ):
+            per_layer_prefill_flag = True
+            for layer in self.layers:
+                self.load_layer_to(layer, InferenceState.UNLOAD)
+        else:
+            pass
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
+        output_router_logits = (
+            output_router_logits
+            if output_router_logits is not None
+            else self.config.output_router_logits
+        )
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
+            )
+
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+                
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+        # use_legacy_cache = False
+        # if use_cache and not isinstance(past_key_values, Cache):
+        #     use_legacy_cache = True
+        #     past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+        #     logger.warning_once(
+        #         "We detected that you are passing `past_key_values` as a tuple and this is deprecated and will be removed in v4.43. "
+        #         "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
+        #     )
+
+        if inputs_embeds is None:
+            input_ids = input_ids.to("cpu")
+            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = inputs_embeds.to("cuda")
+
+        if cache_position is None:
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
+        )
+
+        hidden_states = inputs_embeds
+
+        # position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        all_router_logits = () if output_router_logits else None
+        # next_decoder_cache = None
+
+        for i, decoder_layer in enumerate(self.layers):
+            # if self.transfer_map is not None and i in self.transfer_map:
+            #     prev_stream = torch.cuda.current_stream()
+            #     cur_device = self.transfer_map[i]
+            #     if cur_device not in self.stream_device_map:
+            #         self.stream_device_map[cur_device] = torch.cuda.Stream(cur_device)
+            #     torch.cuda.set_device(cur_device)
+            #     self.stream_device_map[cur_device].wait_stream(prev_stream)
+            #     torch.cuda.set_stream(self.stream_device_map[cur_device])
+            #     hidden_states = hidden_states.to(
+            #         self.transfer_map[i], non_blocking=True
+            #     )
+            #     causal_mask = (
+            #         causal_mask.to(self.transfer_map[i], non_blocking=True)
+            #         if causal_mask is not None
+            #         else None
+            #     )
+            #     position_ids = (
+            #         position_ids.to(self.transfer_map[i], non_blocking=True)
+            #         if position_ids is not None
+            #         else None
+            #     )
+            #     cache_position = (
+            #         cache_position.to(self.transfer_map[i], non_blocking=True)
+            #         if cache_position is not None
+            #         else None
+            #     )
+
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    hidden_states,
+                    causal_mask,
+                    position_ids,
+                    past_key_values,
+                    output_attentions,
+                    output_router_logits,
+                    use_cache,
+                    cache_position,
+                    # position_embeddings,
+                )
+            else:
+                if per_layer_prefill_flag:
+                    # print(f"to gpu")
+                    self.load_layer_to(decoder_layer, InferenceState.PREFILL)
+                    torch.cuda.empty_cache()
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    output_router_logits=output_router_logits,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    # position_embeddings=position_embeddings,
+                )
+                if per_layer_prefill_flag:
+                    # print(f"to cpu")
+                    self.load_layer_to(decoder_layer, InferenceState.UNLOAD)
+                    torch.cuda.empty_cache()
+            hidden_states = layer_outputs[0]
+            # use_cache=False
+            # if use_cache:
+            #     next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+            if output_router_logits and layer_outputs[-1] is not None:
+                all_router_logits += (layer_outputs[-1],)
+
+        hidden_states = self.norm(hidden_states)
+
+        if per_layer_prefill_flag:
+            per_layer_prefill_flag = False
+            for layer in self.layers:
+                self.load_layer_to(layer, InferenceState.GENERATE)
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        # next_cache = None
+        # if use_cache:
+        #     next_cache = (
+        #         next_decoder_cache.to_legacy_cache()
+        #         if use_legacy_cache
+        #         else next_decoder_cache
+        #     )
+
+        if not return_dict:
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    past_key_values,
+                    all_hidden_states,
+                    all_self_attns,
+                    all_router_logits,
+                ]
+                if v is not None
+            )
+        return MoeModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+            router_logits=all_router_logits,
+        )
+
+    def load_layer_to(self, layer: Qwen2MoeDecoderLayer, target: InferenceState):
+        assert isinstance(
+            layer, Qwen2MoeDecoderLayer
+        ), "module should be nn.ModuleList of decoder layers"
+
+        # TODO Support restore to original device, not only cuda
+        device = "cpu" if target == InferenceState.UNLOAD else "cuda"
+
+        # attn
+        layer.self_attn.q_proj.set_inference_mode(target)
+        layer.self_attn.k_proj.set_inference_mode(target)
+        layer.self_attn.v_proj.set_inference_mode(target)
+        layer.self_attn.o_proj.set_inference_mode(target)
+        layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(device)
+
+        # mlp
+        if isinstance(layer.mlp, Qwen2MoeSparseMoeBlock):
+            layer.mlp.gate.set_inference_mode(target)
+            layer.mlp.experts.set_inference_mode(target)
+            layer.mlp.shared_expert.gate_proj.set_inference_mode(target)
+            layer.mlp.shared_expert.up_proj.set_inference_mode(target)
+            layer.mlp.shared_expert.down_proj.set_inference_mode(target)
+            layer.mlp.shared_expert.act_fn.to(device)
+            layer.mlp.shared_expert_gate.to(device)
+        else:
+            layer.mlp.gate_proj.set_inference_mode(target)
+            layer.mlp.up_proj.set_inference_mode(target)
+            layer.mlp.down_proj.set_inference_mode(target)
+            layer.mlp.act_fn.to(device)
+        # layer norm
+        layer.input_layernorm.to(device)
+        layer.post_attention_layernorm.to(device)

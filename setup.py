@@ -625,18 +625,18 @@ else:
 
 ext_modules = [
     CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
-    ops_module,
-    CUDAExtension(
-        'vLLMMarlin', [
-            'csrc/custom_marlin/binding.cpp',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
-        ],
-        extra_compile_args={
-            'cxx': ['-O3'],
-            'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
-        },
-    )
+    # ops_module,
+    # CUDAExtension(
+    #     'vLLMMarlin', [
+    #         'csrc/custom_marlin/binding.cpp',
+    #         'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
+    #         'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
+    #     ],
+    #     extra_compile_args={
+    #         'cxx': ['-O3'],
+    #         'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+    #     },
+    # )
 ]
 if with_balance:
     print("using balance_serve")

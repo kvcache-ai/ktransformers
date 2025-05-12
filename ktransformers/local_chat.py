@@ -25,6 +25,7 @@ import fire
 from ktransformers.optimize.optimize import optimize_and_load_gguf
 from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
 from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
+from ktransformers.models.modeling_qwen3_moe import Qwen3MoeForCausalLM
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
@@ -37,6 +38,7 @@ custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
     "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
     "Qwen2MoeForCausalLM": Qwen2MoeForCausalLM,
+    "Qwen3MoeForCausalLM": Qwen3MoeForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "MixtralForCausalLM": MixtralForCausalLM,
 }
@@ -182,4 +184,10 @@ def local_chat(
 
 
 if __name__ == "__main__":
-    fire.Fire(local_chat)
+    # fire.Fire(local_chat)
+    local_chat(
+        model_path="/mnt/data/models/Qwen3-30B-A3B-250425/",
+        optimize_config_path="ktransformers/optimize/optimize_rules/Qwen3-30B-A3B.yaml",
+        gguf_path="/mnt/data/models/Qwen3-30B-A3B-GGUF/",
+        use_cuda_graph=False
+    )
