@@ -67,9 +67,11 @@ pip3 install torch torchvision torchaudio --index-url https://download.pytorch.o
 
 ```bash
 # Install single NUMA dependencies
-USE_BALANCE_SERVE=1  bash ./install.sh
+USE_BALANCE_SERVE=1  bash ./
+pip install third_party/custom_flashinfer/
 # For those who have two cpu and 1T RAM（Dual NUMA）:
 USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
+pip install third_party/custom_flashinfer/
 ```
 
 ### 4. Use our custom config.json
