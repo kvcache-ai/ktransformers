@@ -183,3 +183,33 @@ class KMoEGateQwen2Moe(BaseInjectedModule, KMoEGateBase):
             self.weight = None
         if self.e_score_correction_bias is not None:
             self.e_score_correction_bias = None
+
+
+class KMoEGateIPEXLLM(KMoEGate):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "xpu",
+        prefill_device: str = "xpu",
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
+        KMoEGate.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
+
+    def forward(self, hidden_states) -> torch.Tensor:
+        x = hidden_states.view(-1, hidden_states.size(-1))
+        logits = torch.nn.functional.linear(
+            x.type(torch.float32), self.orig_module.weight.type(torch.float32), None
+        )
+        scores = logits.sigmoid()
+
+        from ipex_llm.transformers.models.common import moe_group_topk
+        topk_idx, topk_weight = moe_group_topk(scores, self.orig_module.e_score_correction_bias,
+                                               self.n_group, self.topk_group, self.top_k,
+                                               self.norm_topk_prob, self.routed_scaling_factor)
+        return topk_idx, topk_weight.to(x.dtype)

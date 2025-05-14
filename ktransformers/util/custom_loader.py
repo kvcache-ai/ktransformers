@@ -7,7 +7,8 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+if not torch.xpu.is_available():
+    import KTransformersOps
 from safetensors import safe_open
 from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from ktransformers.util.custom_gguf import *
@@ -459,7 +460,7 @@ class GGUFLoader(ModelLoader):
                 values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
             else:
                 values = GGML_DEQUANTIZE[ggml_name](data)
-                values = torch.from_numpy(values)
+                values = torch.from_numpy(values).to(device)
                 
         if ggml_name == "BF16":
             values = values.view(torch.bfloat16)

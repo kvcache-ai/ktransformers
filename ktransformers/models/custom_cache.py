@@ -213,7 +213,7 @@ class KDeepSeekV3Cache(nn.Module):
         self.v_caches = []
         
 
-    def load(self, inference_context: "sched_ext.InferenceContext"): 
+    def load(self, inference_context: "sched_ext.InferenceContext"):
         
         for i in range(self.config.num_hidden_layers):
             self.k_caches.append(
@@ -293,7 +293,7 @@ class KGQACache(nn.Module):
         self.v_caches = []
         
 
-    def load(self, inference_context: sched_ext.InferenceContext): 
+    def load(self, inference_context: "sched_ext.InferenceContext"): 
         print(self.config.num_hidden_layers)
         for i in range(self.config.num_hidden_layers):
             self.k_caches.append(
