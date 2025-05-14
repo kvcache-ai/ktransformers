@@ -103,7 +103,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         for name, child in module._modules.items():
             if child is not None:
                 child_prefix = prefix + name + "."
-                gen_optimize_config(child, out_data, rule_list, child_prefix)
+                gen_optimize_config(child, out_data, rule_list, child_prefix, default_device = default_device)
     
 
 def translate_model_config(model_config: PretrainedConfig):
@@ -127,8 +127,11 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     with torch.device("meta"):
         inject(module, optimize_config, model_config, weights_loader)
     # pre load lm_head because its big inter result
-    load_weights(module.lm_head, weights_loader, "lm_head.")
-    load_weights(module, weights_loader)
+    load_weights(module.lm_head, weights_loader, "lm_head.", device=default_device)
+    load_weights(module, weights_loader, device=default_device)
     module.gguf_loader = weights_loader
     del_meta(module)
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.xpu.is_available():
+        torch.xpu.empty_cache()

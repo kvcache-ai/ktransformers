@@ -647,6 +647,13 @@ class KDeepseekV2Model(BaseInjectedModule):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        if inputs_embeds.device.type == "xpu" and position_ids is not None:
+            cos, sin = self.layers[0].self_attn.rotary_emb(inputs_embeds,
+                                                           position_ids)
+            position_embeddings = (cos, sin)
+        else:
+            position_embeddings = None
+
         if per_layer_prefill_flag:
             causal_mask = None
         else:
@@ -737,6 +744,7 @@ class KDeepseekV2Model(BaseInjectedModule):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
                 t5 = time.time()
                 if per_layer_prefill_flag:

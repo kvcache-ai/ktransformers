@@ -24,7 +24,8 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-import KTransformersOps
+if not torch.xpu.is_available():
+    import KTransformersOps
 import ctypes
 import math
 

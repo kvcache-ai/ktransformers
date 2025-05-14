@@ -30,10 +30,11 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeRMSNorm
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeRMSNorm
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
-from flashinfer.norm import (
-    fused_add_rmsnorm,
-    rmsnorm,
-)
+if not torch.xpu.is_available():
+    from flashinfer.norm import (
+        fused_add_rmsnorm,
+        rmsnorm,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -194,3 +195,28 @@ class DeepseekV3RMSNormTorch(DeepseekV3RMSNorm, BaseInjectedModule):
         if residual is not None:
             return self.weight * x.to(input_dtype), residual
         return self.weight * x.to(input_dtype)
+
+
+class KDeepseekRMSNormIPEXLLM(DeepseekV3RMSNorm, BaseInjectedModule):
+    def __init__(self,
+                 key: str,
+                 gguf_loader : GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "xpu",
+                 generate_device: str = "xpu",
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.hidden_size,
+            orig_module.variance_epsilon)
+        self.eps = orig_module.variance_epsilon
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from ipex_llm.transformers.models.common import rms_norm_forward
+        output = rms_norm_forward(self, x.float())
+        return output.to(x.dtype)
+
+    def load(self):
+        BaseInjectedModule.load(self)
+        if self.weight.dtype != torch.float32:
+            self.weight = self.weight.float()
