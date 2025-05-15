@@ -45,7 +45,7 @@ def generate_cuda_graphs(chunk_size: int) -> list:
     base_list = [1, 2, 3, Config().max_batch_size, 64, 256, 512, chunk_size]
 
     if chunk_size <= 1024:
-        return base_list
+        return deduplicate_and_sort(base_list)
 
     multiples = [i for i in range(1024, chunk_size + 1, 1024)]
 
