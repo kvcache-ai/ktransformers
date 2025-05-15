@@ -246,7 +246,7 @@ sudo apt-get install build-essential cmake ninja-build patchelf
 </code></pre>
 </li>
 <li>
-<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Miniconda3</a> or <a href="https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh">Anaconda3</a> to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is <code>~/anaconda3</code>, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes <code>GLIBCXX-3.4.32</code></p>
+<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Miniconda3</a> or <a href="https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh">Anaconda3</a> to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is <code>~/anaconda3</code>, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes <code>GLIBCXX_3.4.32</code></p>
 <pre><code class="language-sh">conda create --name ktransformers python=3.11
 conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
 
