@@ -11,6 +11,15 @@ We are excited to introduce **Intel GPU support** in KTransformers (Beta release
 Begin by installing the GPU drivers for your Intel GPU:
 - [Official GPU Installation Guide for Intel GPUs](https://dgpu-docs.intel.com/driver/overview.html)
 
+To verify that the kernel and compute drivers are installed and functional:
+
+```bash
+clinfo --list | grep Device
+ `-- Device #0: 13th Gen Intel(R) Core(TM) i9-13900K
+ `-- Device #0: Intel(R) Arc(TM) A770 Graphics
+ `-- Device #0: Intel(R) UHD Graphics 770
+```
+
 > [!Important]
 > Ensure that **Resizable BAR** is enabled in your system's BIOS before proceeding. This is essential for optimal GPU performance and to avoid potential issues such as `Bus error (core dumped)`. For detailed steps, please refer to the official guidance [here](https://www.intel.com/content/www/us/en/support/articles/000090831/graphics.html).
 
@@ -113,4 +122,12 @@ Installing Triton causes pytorch-triton-xpu to stop working. You can resolve the
 pip uninstall triton pytorch-triton-xpu
 # Reinstall correct version of pytorch-triton-xpu
 pip install pytorch-triton-xpu==3.3.0 --index-url  https://download.pytorch.org/whl/xpu
+```
+
+4. `ValueError: Unsupported backend: CUDA_HOME ROCM_HOME MUSA_HOME are not set and XPU is not available.`
+
+Ensure you have permissions to access /dev/dri/renderD*. This typically requires your user to be in the render group:
+```bash
+sudo gpasswd -a ${USER} render
+newgrp render
 ```
