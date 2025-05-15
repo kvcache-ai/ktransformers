@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e  
 
+# default backend
+DEV="cuda"
+
+# parse --dev argument
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --dev) DEV="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+export DEV_BACKEND="$DEV"
+echo "Selected backend: $DEV_BACKEND"
+
 # clear build dirs
 rm -rf build
 rm -rf *.egg-info
@@ -13,6 +27,14 @@ rm -rf ~/.ktransformers
 echo "Installing python dependencies from requirements.txt"
 pip install -r requirements-local_chat.txt
 pip install -r ktransformers/server/requirements.txt
+
+# XPU-specific fix for triton
+if [[ "$DEV_BACKEND" == "xpu" ]]; then
+    echo "Replacing triton for XPU backend"
+    pip uninstall -y triton pytorch-triton-xpu || true
+    pip install pytorch-triton-xpu==3.3.0 --extra-index-url https://download.pytorch.org/whl/xpu
+fi
+
 echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 
