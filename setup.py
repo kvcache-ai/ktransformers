@@ -229,7 +229,7 @@ class VersionInfo:
         elif torch.xpu.is_available():
             backend_version = f"xpu"
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME MUSA_HOME ROCM_HOME all not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME MUSA_HOME ROCM_HOME all not set and XPU is not available.")
         package_version = f"{flash_version}+{backend_version}torch{torch_version}{cpu_instruct}"
         if full_version:
             return package_version
@@ -501,7 +501,7 @@ class CMakeBuild(BuildExtension):
         elif KTRANSFORMERS_BUILD_XPU:
             cmake_args += ["-DKTRANSFORMERS_USE_XPU=ON", "-DKTRANSFORMERS_USE_CUDA=OFF"]
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set and XPU is not available.")
         
         cmake_args = get_cmake_abi_args(cmake_args)
         # log cmake_args
@@ -628,7 +628,7 @@ elif MUSA_HOME is not None:
 elif torch.xpu.is_available(): #XPUExtension is not available now.
     ops_module = None
 else:
-    raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
+    raise ValueError("Unsupported backend: CUDA_HOME ROCM_HOME MUSA_HOME are not set and XPU is not available.")
 
 if not torch.xpu.is_available():
     ext_modules = [
