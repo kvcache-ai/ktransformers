@@ -38,6 +38,10 @@ fi
 echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 
+if [[ "$DEV_BACKEND" == "cuda" ]]; then
+    echo "Installing custom_flashinfer for CUDA backend"
+    pip install third_party/custom_flashinfer/
+fi
 # SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
 # echo "Copying thirdparty libs to $SITE_PACKAGES"
 # cp -a csrc/balance_serve/build/third_party/prometheus-cpp/lib/libprometheus-cpp-*.so* $SITE_PACKAGES/
