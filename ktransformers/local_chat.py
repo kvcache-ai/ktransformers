@@ -184,10 +184,4 @@ def local_chat(
 
 
 if __name__ == "__main__":
-    # fire.Fire(local_chat)
-    local_chat(
-        model_path="/mnt/data/models/Qwen3-30B-A3B-250425/",
-        optimize_config_path="ktransformers/optimize/optimize_rules/Qwen3-30B-A3B.yaml",
-        gguf_path="/mnt/data/models/Qwen3-30B-A3B-GGUF/",
-        use_cuda_graph=False
-    )
+    fire.Fire(local_chat)
