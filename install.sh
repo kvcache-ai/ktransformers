@@ -31,13 +31,6 @@ pip install -r ktransformers/server/requirements.txt
 echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 
-# XPU-specific fix for triton
-if [[ "$DEV_BACKEND" == "xpu" ]]; then
-    echo "Replacing triton for XPU backend"
-    pip uninstall -y triton pytorch-triton-xpu || true
-    pip install pytorch-triton-xpu==3.3.0 --extra-index-url https://download.pytorch.org/whl/xpu
-fi
-
 if [[ "$DEV_BACKEND" == "cuda" ]]; then
     echo "Installing custom_flashinfer for CUDA backend"
     pip install third_party/custom_flashinfer/
@@ -46,6 +39,5 @@ fi
 # echo "Copying thirdparty libs to $SITE_PACKAGES"
 # cp -a csrc/balance_serve/build/third_party/prometheus-cpp/lib/libprometheus-cpp-*.so* $SITE_PACKAGES/
 # patchelf --set-rpath '$ORIGIN' $SITE_PACKAGES/sched_ext.cpython*
-
 
 echo "Installation completed successfully"
