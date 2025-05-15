@@ -28,15 +28,15 @@ echo "Installing python dependencies from requirements.txt"
 pip install -r requirements-local_chat.txt
 pip install -r ktransformers/server/requirements.txt
 
+echo "Installing ktransformers"
+KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
+
 # XPU-specific fix for triton
 if [[ "$DEV_BACKEND" == "xpu" ]]; then
     echo "Replacing triton for XPU backend"
     pip uninstall -y triton pytorch-triton-xpu || true
     pip install pytorch-triton-xpu==3.3.0 --extra-index-url https://download.pytorch.org/whl/xpu
 fi
-
-echo "Installing ktransformers"
-KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 
 if [[ "$DEV_BACKEND" == "cuda" ]]; then
     echo "Installing custom_flashinfer for CUDA backend"
