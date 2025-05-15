@@ -21,6 +21,7 @@ interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified 
 Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
 
 <h2 id="Updates">🔥 Updates</h2>
+
 * **May 14, 2025**: Support Intel Arc GPU ([Tutorial](./en/xpu.md)).
 * **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./en/llama4.md)).
 * **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./en/balance-serve.md)).
