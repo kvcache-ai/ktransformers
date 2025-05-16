@@ -3,7 +3,7 @@
 ## Introduction
 
 ### Overview
-We are excited to introduce **Intel GPU support** in KTransformers (Beta release). This implementation has been tested and developed using Intel Xeon Scalable processors and Intel Arc GPU's (such as A770 and B580).
+We are excited to introduce **Intel GPU support** in KTransformers (Beta release). This implementation has been tested and developed using Intel Xeon Scalable processors and Intel Arc GPUs (such as A770 and B580).
 
 ## Installation Guide
 
@@ -92,7 +92,7 @@ python ktransformers/local_chat.py \
 ## Troubleshooting
 1. Best Known Config (BKC) to obtain best performance
 
-To obtain best performance on Intel GPU platform, we recommand to lock GPU frequency and set CPU to performance mode by below settings.
+To obtain best performance on Intel GPU platform, we recommend to lock GPU frequency and set CPU to performance mode by below settings.
 ```bash
 echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 echo 0 | sudo tee /sys/devices/system/cpu/cpu*/power/energy_perf_bias
@@ -104,7 +104,7 @@ sudo xpu-smi config -d 0 -t 0 --frequencyrange 2400,2400
 
 2. Runtime error like `xpu/sycl/TensorCompareKernels.cpp:163: xxx. Aborted (core dumped)`
 
-This error is mostly realted to GPU driver. If you meet such error, you could update your `intel-level-zero-gpu` to `1.3.29735.27-914~22.04` (which is a verified version by us) by below command.
+This error is mostly related to GPU driver. If you meet such error, you could update your `intel-level-zero-gpu` to `1.3.29735.27-914~22.04` (which is a verified version by us) by below command.
 ```bash
 wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | \
 sudo gpg --dearmor --output /usr/share/keyrings/intel-graphics.gpg
