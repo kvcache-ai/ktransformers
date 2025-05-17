@@ -127,10 +127,8 @@ cd ktransformers
 git submodule update --init --recursive
 # 如果使用双 numa 版本
 USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
-pip install third_party/custom_flashinfer/
 # 如果使用单 numa 版本
 USE_BALANCE_SERVE=1 bash ./install.sh
-pip install third_party/custom_flashinfer/
 # 启动命令
 python ktransformers/server/main.py --model_path <your model path> --gguf_path <your gguf path> --cpu_infer 62 --optimize_config_path <inject rule path> --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
 ```
