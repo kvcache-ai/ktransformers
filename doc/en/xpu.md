@@ -62,9 +62,7 @@ cd ktransformers
 git submodule update --init
 
 # Install dependencies
-bash install.sh
-pip uninstall triton pytorch-triton-xpu
-pip install pytorch-triton-xpu==3.3.0 --extra-index-url https://download.pytorch.org/whl/xpu # to avoid potential triton import error
+bash install.sh --dev xpu
 ```
 
 ## Running DeepSeek-R1 Models

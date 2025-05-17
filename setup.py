@@ -41,6 +41,15 @@ except ImportError:
     MUSA_HOME=None
 KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
 
+# 检测 DEV_BACKEND 环境变量
+dev_backend = os.environ.get("DEV_BACKEND", "").lower()
+if dev_backend == "xpu":
+    triton_dep = [
+        "pytorch-triton-xpu==3.3.0"
+    ]
+else:
+    triton_dep = ["triton>=3.2"]
+
 with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
 class CpuInstructInfo:
@@ -659,6 +668,7 @@ else:
 setup(
     name=VersionInfo.PACKAGE_NAME,
     version=VersionInfo().get_package_version(),
+    install_requires=triton_dep,
     cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
     ext_modules=ext_modules
 )
