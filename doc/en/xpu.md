@@ -47,7 +47,7 @@ strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
 Install PyTorch with XPU backend support and [IPEX-LLM](https://github.com/intel/ipex-llm):
 
 ```bash
-pip install ipex-llm[xpu_2.6]==2.3.0rc1 --extra-index-url https://download.pytorch.org/whl/xpu
+pip install ipex-llm[xpu_2.6]==2.3.0b20250518 --extra-index-url https://download.pytorch.org/whl/xpu
 pip uninstall torch torchvision torchaudio
 pip install torch==2.7+xpu torchvision torchaudio --index-url https://download.pytorch.org/whl/test/xpu # install torch2.7
 pip uninstall intel-opencl-rt dpcpp-cpp-rt

@@ -459,9 +459,10 @@ class GGUFLoader(ModelLoader):
             if "cuda" in device.lower():
                 values = GGML_DEQUANTIZE_GPU[ggml_name](data, device)
             else:
-                values = GGML_DEQUANTIZE[ggml_name](data)
-                values = torch.from_numpy(values).to(device)
-                
+                np_values = np.copy(GGML_DEQUANTIZE[ggml_name](data))
+                values = torch.from_numpy(np_values).to(device)
+                del np_values
+
         if ggml_name == "BF16":
             values = values.view(torch.bfloat16)
             
