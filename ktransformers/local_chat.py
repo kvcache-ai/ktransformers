@@ -70,6 +70,7 @@ def local_chat(
     torch.set_grad_enabled(False)
 
     Config().cpu_infer = cpu_infer
+    Config().chunk_size = chunk_size
     if torch.xpu.is_available():
         use_cuda_graph = False
 
