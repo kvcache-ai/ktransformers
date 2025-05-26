@@ -129,3 +129,6 @@ Ensure you have permissions to access /dev/dri/renderD*. This typically requires
 sudo gpasswd -a ${USER} render
 newgrp render
 ```
+
+## Additional Information
+To run KTransformers on XPU with Docker, please refer to [Docker_xpu.md](./Docker_xpu.md).
