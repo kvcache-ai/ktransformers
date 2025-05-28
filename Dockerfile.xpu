@@ -1,0 +1,68 @@
+# Base image
+FROM intel/oneapi-basekit:2025.0.1-0-devel-ubuntu22.04
+
+ARG http_proxy
+ARG https_proxy
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CONDA_DIR=/opt/conda
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    bash \
+    git \
+    vim \
+    ca-certificates \
+    binutils \
+    cmake \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniforge
+RUN wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh && \
+    bash /tmp/miniforge.sh -b -p $CONDA_DIR && \
+    rm /tmp/miniforge.sh && \
+    $CONDA_DIR/bin/conda clean -afy
+
+# Add conda to PATH
+ENV PATH=$CONDA_DIR/bin:$PATH
+
+RUN bash -c "\
+    source /opt/conda/etc/profile.d/conda.sh && \
+    conda create --name ktransformers python=3.11 -y && \
+    conda activate ktransformers && \
+    conda env list && \
+    conda install -c conda-forge libstdcxx-ng -y && \
+    strings \$(find /opt/conda/envs/ktransformers/lib -name 'libstdc++.so.6') | grep GLIBCXX | grep 3.4.32 \
+"
+
+RUN bash -c "\
+    source /opt/conda/etc/profile.d/conda.sh && \
+    conda activate ktransformers && \
+    pip install ipex-llm[xpu_2.6]==2.3.0b20250518 --extra-index-url https://download.pytorch.org/whl/xpu && \
+    pip uninstall -y torch torchvision torchaudio && \
+    pip install torch==2.7+xpu torchvision torchaudio --index-url https://download.pytorch.org/whl/test/xpu && \
+    pip uninstall -y intel-opencl-rt dpcpp-cpp-rt && \
+    pip list \
+"
+
+# Clone and set up ktransformers repo
+RUN bash -c "\
+    source $CONDA_DIR/etc/profile.d/conda.sh && \
+    conda activate ktransformers && \
+    git clone https://github.com/kvcache-ai/ktransformers.git && \
+    cd ktransformers && \
+    git submodule update --init && \
+    sed -i 's/torch\.xpu\.is_available()/True/g' setup.py && \
+    bash install.sh --dev xpu \
+"
+
+# Init conda and prepare bashrc
+RUN conda init bash && \
+    echo "source $CONDA_DIR/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate ktransformers" >> ~/.bashrc
+
+WORKDIR /ktransformers/
+CMD ["bash"]
