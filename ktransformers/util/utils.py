@@ -243,7 +243,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             elif torch.xpu.is_available():
                 torch.xpu.set_device(torch_device)
             else:
-                RuntimeError("The device: {torch_device} is not available")
+                raise RuntimeError(f"The device: {torch_device} is not available")
             inputs_embeds = model.model.embed_tokens(cur_token.to("cpu")).to(torch_device)
             # with torch.cuda.stream(custom_stream):
             logits=model(inputs_embeds=inputs_embeds,
@@ -284,7 +284,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     elif torch.xpu.is_available():
         torch.xpu.set_device(torch_device)
     else:
-        RuntimeError("The device: {torch_device} is not available")
+        raise RuntimeError(f"The device: {torch_device} is not available")
     with torch.no_grad():
         
         stream = TextStreamer(tokenizer)
