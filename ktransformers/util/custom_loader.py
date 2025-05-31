@@ -446,7 +446,11 @@ class GGUFLoader(ModelLoader):
                 blocks_begin = i * blocks_per_iter
                 blocks_end = min(blocks_begin + blocks_per_iter, num_blocks)
                 if "cuda" in device.lower():
-                    cur_values = GGML_DEQUANTIZE_GPU[ggml_name](data[blocks_begin*block_size : blocks_end*block_size], device, target_dtype)
+                    try:
+                        cur_values = GGML_DEQUANTIZE_GPU[ggml_name](data[blocks_begin*block_size : blocks_end*block_size], device, target_dtype)
+                    except:
+                        cur_values = GGML_DEQUANTIZE[ggml_name](data[blocks_begin*block_size : blocks_end*block_size])
+                        cur_values = torch.from_numpy(cur_values.copy()).to(device)
                 else:
                     cur_values = GGML_DEQUANTIZE[ggml_name](data[blocks_begin*block_size : blocks_end*block_size])
                     cur_values = torch.from_numpy(cur_values.copy())
