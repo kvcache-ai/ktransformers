@@ -465,12 +465,12 @@ class CMakeExtension(Extension):
         print(name, sourcedir)
         self.sourcedir = sourcedir
 
-def get_cmake_abi_args(cmake_args):
+def get_compile_abi_args(compile_args):
     if torch.compiled_with_cxx11_abi():
-        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=1")
+        compile_args.append("-D_GLIBCXX_USE_CXX11_ABI=1")
     else:
-        cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=0")
-    return cmake_args
+        compile_args.append("-D_GLIBCXX_USE_CXX11_ABI=0")
+    return compile_args
 
 class CMakeBuild(BuildExtension):
 
@@ -512,7 +512,7 @@ class CMakeBuild(BuildExtension):
         else:
             raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set and XPU is not available.")
         
-        cmake_args = get_cmake_abi_args(cmake_args)
+        cmake_args = get_compile_abi_args(cmake_args)
         # log cmake_args
         print("CMake args:", cmake_args)
 
@@ -603,12 +603,12 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
     ],
     extra_compile_args={
             'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
-            'nvcc': [
+            'nvcc': get_compile_abi_args([
                 '-O3',
                 # '--use_fast_math',
                 '-Xcompiler', '-fPIC',
                 '-DKTRANSFORMERS_USE_CUDA',
-            ]
+            ])
         }
     )
 elif MUSA_HOME is not None:
@@ -627,11 +627,11 @@ elif MUSA_HOME is not None:
     ],
     extra_compile_args={
             'cxx': ['force_mcc'],
-            'mcc': [
+            'mcc': get_compile_abi_args([
                 '-O3',
                 '-DKTRANSFORMERS_USE_MUSA',
                 '-DTHRUST_IGNORE_CUB_VERSION_CHECK',
-            ]
+            ])
         }
     )
 elif torch.xpu.is_available(): #XPUExtension is not available now.
