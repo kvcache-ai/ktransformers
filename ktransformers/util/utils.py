@@ -129,7 +129,7 @@ def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str
                 attn_k_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_k_b"), device=device).to(dtype=target_dtype)
                 attn_k_b = attn_k_b.transpose(1, 2).contiguous()
                 attn_v_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_v_b"), device=device).to(dtype=target_dtype)
-                kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1)
+                kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1).contiguous()
                 set_param(module, name, kv_b_proj)
                 del attn_k_b
                 del attn_v_b
