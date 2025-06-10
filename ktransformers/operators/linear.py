@@ -93,7 +93,7 @@ class KLinearBase(ABC):
                     return nn.Parameter(tensor), nn.Parameter(weight_scale_inv)
                 return nn.Parameter(tensor)
                 
-            elif self.gguf_loader.has_tensor(key + ".weight"):
+            elif self.gguf_loader.has_tensor(key + ".weight") or "kv_b_proj" in key:
                 if key + ".bias" in self.gguf_loader.tensor_file_map:
                     tensors = self.load_multi(key, ["weight", "bias"], device=device)
                     tensor = tensors["weight"]
@@ -101,6 +101,19 @@ class KLinearBase(ABC):
                     # self.qtype = GGML_TYPE_QTYPE_MAP[tensorinfo[key + ".weight"]["ggml_type"]]
                     # print(torch.isinf(tensor).any(), torch.isinf(bias).any())
                     return nn.Parameter(tensor), nn.Parameter(bias)
+                elif "kv_b_proj" in key and not self.gguf_loader.has_tensor(key + ".weight"):
+                    attn_k_b_tensors = self.load_multi(key.replace("self_attn.kv_b_proj", "attn_k_b"), ["weight"], device=device)
+                    attn_k_b = attn_k_b_tensors["weight"]
+                    del attn_k_b_tensors
+                    attn_k_b = attn_k_b.transpose(1, 2).contiguous()
+                    attn_v_b_tensors = self.load_multi(key.replace("self_attn.kv_b_proj", "attn_v_b"), ["weight"], device=device)
+                    attn_v_b = attn_v_b_tensors["weight"]
+                    del attn_v_b_tensors
+                    kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1)
+                    kv_b_proj = kv_b_proj.contiguous() if kv_b_proj.ndim == 2 else kv_b_proj.flatten(0, 1).contiguous()
+                    del attn_k_b
+                    del attn_v_b
+                    return nn.Parameter(kv_b_proj)
                 else:
                     tensors = self.load_multi(key, ["weight"], device=device)
                     tensor = tensors["weight"]
