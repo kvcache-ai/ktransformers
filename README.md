@@ -121,7 +121,7 @@ Getting started with KTransformers is simple! Follow the steps below to set up a
 we have already supported vendors:
 
 - Metax
-- ZTE (Zhu Feng v1.0)
+- Sanechips (ZhuFeng V1.0)
 - Intel
 - Ascend
 - Kunpeng
