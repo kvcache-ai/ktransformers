@@ -118,6 +118,16 @@ https://github.com/user-attachments/assets/a865e5e4-bca3-401e-94b8-af3c080e6c12
 
 Getting started with KTransformers is simple! Follow the steps below to set up and start using it.
 
+we have already supported vendors:
+
+- Metax
+- ZTE (Zhu Feng v1.0)
+- Intel
+- Ascend
+- Kunpeng
+- AMD
+
+
 ### 📥 Installation
 
 To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
