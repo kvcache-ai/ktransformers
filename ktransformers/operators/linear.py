@@ -14,18 +14,20 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import ctypes
 import torch
 from torch import Tensor, nn
-import KTransformersOps 
-import vLLMMarlin
-from ktransformers.util.custom_gguf import GGUFLoader
+if not torch.xpu.is_available():
+    import KTransformersOps
+    import vLLMMarlin
+from ktransformers.util.custom_loader import GGUFLoader, SafeTensorLoader
 from ktransformers.util.utils import InferenceState
-from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
-    MarlinWorkspace,
-    marlin_quantize, 
-    GPTQ_MARLIN_MIN_THREAD_N,
-    GPTQ_MARLIN_MIN_THREAD_K,
-    GPTQ_MARLIN_MAX_PARALLEL,
-    vllm_marlin_quantize
-)
+if not torch.xpu.is_available():
+    from ktransformers.ktransformers_ext.operators.custom_marlin.quantize.utils.marlin_utils import (
+        MarlinWorkspace,
+        marlin_quantize,
+        GPTQ_MARLIN_MIN_THREAD_N,
+        GPTQ_MARLIN_MIN_THREAD_K,
+        GPTQ_MARLIN_MAX_PARALLEL,
+        vllm_marlin_quantize
+    )
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig
 from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
@@ -83,15 +85,15 @@ class KLinearBase(ABC):
             keys = [self.key]
 
         for key in keys:
-            if self.gguf_loader.safetensor_loader is not None:
+            if isinstance(self.gguf_loader, SafeTensorLoader):
                 # using safetensor_loader
-                tensor = self.gguf_loader.safetensor_loader.load_tensor(key+'.weight')
-                if key+'.weight_scale_inv' in self.gguf_loader.safetensor_loader.tensor_file_map:
-                    weight_scale_inv = self.gguf_loader.safetensor_loader.load_tensor(key+'.weight_scale_inv')
+                tensor = self.gguf_loader.load_tensor(key+'.weight')
+                if self.gguf_loader.has_tensor(key+'.weight_scale_inv'):
+                    weight_scale_inv = self.gguf_loader.load_tensor(key+'.weight_scale_inv')
                     return nn.Parameter(tensor), nn.Parameter(weight_scale_inv)
                 return nn.Parameter(tensor)
                 
-            elif key + ".weight" in self.gguf_loader.tensor_file_map:
+            elif self.gguf_loader.has_tensor(key + ".weight") or "kv_b_proj" in key:
                 if key + ".bias" in self.gguf_loader.tensor_file_map:
                     tensors = self.load_multi(key, ["weight", "bias"], device=device)
                     tensor = tensors["weight"]
@@ -99,6 +101,19 @@ class KLinearBase(ABC):
                     # self.qtype = GGML_TYPE_QTYPE_MAP[tensorinfo[key + ".weight"]["ggml_type"]]
                     # print(torch.isinf(tensor).any(), torch.isinf(bias).any())
                     return nn.Parameter(tensor), nn.Parameter(bias)
+                elif "kv_b_proj" in key and not self.gguf_loader.has_tensor(key + ".weight"):
+                    attn_k_b_tensors = self.load_multi(key.replace("self_attn.kv_b_proj", "attn_k_b"), ["weight"], device=device)
+                    attn_k_b = attn_k_b_tensors["weight"]
+                    del attn_k_b_tensors
+                    attn_k_b = attn_k_b.transpose(1, 2).contiguous()
+                    attn_v_b_tensors = self.load_multi(key.replace("self_attn.kv_b_proj", "attn_v_b"), ["weight"], device=device)
+                    attn_v_b = attn_v_b_tensors["weight"]
+                    del attn_v_b_tensors
+                    kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1)
+                    kv_b_proj = kv_b_proj.contiguous() if kv_b_proj.ndim == 2 else kv_b_proj.flatten(0, 1).contiguous()
+                    del attn_k_b
+                    del attn_v_b
+                    return nn.Parameter(kv_b_proj)
                 else:
                     tensors = self.load_multi(key, ["weight"], device=device)
                     tensor = tensors["weight"]
@@ -502,6 +517,9 @@ class VLinearMarlin(KLinearBase):
         marlin_s = self.marlin_s.to(x.dtype)
         sms = -1
 
+        # padding x.shape[0] to avoid CUDA illegal memory access error
+        x, orig_size_m = self._pad_input(x)
+
         x = vLLMMarlin.gptq_marlin_gemm(
             x,
             self.marlin_q_w,
@@ -511,26 +529,15 @@ class VLinearMarlin(KLinearBase):
             self.workspace.scratch,
             self.num_bits,
             bsz_tensor,
-            # torch.tensor([x.shape[0]], dtype=torch.int32, device=self.device),
             x.shape[0],
             self.n,
             x.shape[-1],
             sms,
             self.is_k_full,
         )
-        # x = KTransformersOps.gptq_marlin_gemm(
-        #     x,
-        #     self.marlin_q_w,
-        #     marlin_s,
-        #     self.g_idx,
-        #     self.sort_indices,
-        #     self.workspace.scratch,
-        #     self.num_bits,
-        #     x.shape[0],
-        #     self.n,
-        #     x.shape[-1],
-        #     self.is_k_full,
-        # )
+
+        x = x[:orig_size_m]
+
         if self.has_bias:
             x = x + self.bias
         orig_shape[-1] = self.n
@@ -545,6 +552,27 @@ class VLinearMarlin(KLinearBase):
         self.g_idx = None
         self.sort_indices = None
         self.workspace = None  
+
+    def _pad_input(self, x):
+
+        size_m = x.shape[0]
+        size_k = x.shape[1]
+
+        # size_m and align value depends on VLinearMarlin implementation
+        if size_m > 1024:
+            align = 1024
+        elif size_m > 64:
+            align = 64
+        else:
+            align = 1
+
+        padded_size_m = ((size_m + align - 1) // align) * align
+
+        if padded_size_m > size_m:
+            pad_len = padded_size_m - size_m
+            pad_tensor = torch.zeros((pad_len, size_k), dtype=x.dtype, device=x.device)
+            x = torch.cat([x, pad_tensor], dim = 0).contiguous()
+        return x, size_m
 
 class KLinearMarlin(KLinearBase):
     marlin_q_w: torch.Tensor
@@ -760,7 +788,7 @@ class KLinearCPUInfer(KLinearBase):
         self.output_gpu = torch.zeros((1, 1, self.out_features), device=self.out_device)
 
     def load_weights(self, w: dict | nn.Parameter | tuple | None = None, device: str = "cpu"):
-        if self.key + ".weight" in self.gguf_loader.tensor_info:
+        if self.gguf_loader.has_tensor(self.key + ".weight"):
             if self.key + ".bias" in self.gguf_loader.tensor_file_map:
                 self.weight = self.gguf_loader.get_mmap_tensor(self.key + ".weight")
                 self.weight_type = self.gguf_loader.tensor_info[self.key + ".weight"]["ggml_type"]
@@ -778,6 +806,75 @@ class KLinearCPUInfer(KLinearBase):
         if self.has_bias:
             self.bias = None       
 
+class KLinearIPEXLLM(KLinearBase):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        device: str = "xpu",
+        precision: str = "sym_int4",
+        **kwargs,
+    ):
+        super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        self.has_bias = False
+        self.dtype = torch.get_default_dtype()
+        self.weight = None
+        self.has_bias = False
+        self.precision = precision
+        self.qtype = None
+
+    def forward(self, x: torch.Tensor, bsz_tensor: torch.Tensor = None) -> torch.Tensor:
+        dtype = x.dtype
+        out_device = x.device
+        from ipex_llm.transformers.models.common import linear_forward
+        x = linear_forward(x.half(), self.weight, self.qtype, self.out_features)
+
+        if self.has_bias:
+            x = x + self.bias
+        x = x.to(dtype=dtype, device=out_device)
+        return x
+
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if self.loaded: return
+        if device is None: device = self.device
+        assert device.lower()[:3] == "xpu", "IPEX-LLM quantized linear only supports XPU device"
+        if w is None: w = self.load_weight(device=device)
+
+        if isinstance(w, nn.Parameter):
+            try:
+                weight = w.to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            except:
+                weight = w.to(dtype=self.dtype).T
+            self.has_bias = False
+        elif isinstance(w, tuple):
+            try:
+                weight = w[0].to(dtype=self.dtype).view(self.out_features, self.in_features).T
+            except:
+                weight = w[0].to(dtype=self.dtype).T
+            self.bias = w[1].to(dtype=self.dtype)
+            self.has_bias = True
+        else:
+            raise ValueError("Invalid weight type")
+        weight = weight.to("cpu").float().transpose(0, 1).contiguous()
+
+        if self.has_bias:
+            self.bias = self.bias.to(device)
+
+        # quantize linear weight
+        from ipex_llm.transformers.models.common import quantize_linear
+        paramsLowBit, qtype = quantize_linear(weight, self.in_features, self.precision)
+        self.weight = paramsLowBit.to(device)
+        self.qtype = qtype
+        self.loaded = True
+
+    def unload(self):
+        if self.weight is not None:
+            self.weight = None
+        if self.has_bias:
+            self.bias = None
+
 LINEAR_MAP = {
     "KLinearMarlin": KLinearMarlin,
     "KLinearTorch": KLinearTorch,
@@ -785,6 +882,7 @@ LINEAR_MAP = {
     "VLinearMarlin": VLinearMarlin,
     "KLinearFP8": KLinearFP8,
     "KLinearQ8": KLinearQ8,
+    "KLinearIPEXLLM": KLinearIPEXLLM,
 }
 
 class KTransformersLinear(BaseInjectedModule, KLinearBase):

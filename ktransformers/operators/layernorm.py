@@ -29,11 +29,12 @@ from ktransformers.models.modeling_deepseek_v3 import DeepseekV3RMSNorm
 from ktransformers.models.modeling_qwen2_moe import Qwen2MoeRMSNorm
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeRMSNorm
 from ktransformers.operators.base_operator import BaseInjectedModule
-from ktransformers.util.custom_gguf import GGUFLoader
-from flashinfer.norm import (
-    fused_add_rmsnorm,
-    rmsnorm,
-)
+from ktransformers.util.custom_loader import GGUFLoader
+if not torch.xpu.is_available():
+    from flashinfer.norm import (
+        fused_add_rmsnorm,
+        rmsnorm,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -163,3 +164,62 @@ class KQwen3MoeRMSNorm(Qwen3MoeRMSNorm, BaseInjectedModule):
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
+
+class DeepseekV3RMSNormTorch(DeepseekV3RMSNorm, BaseInjectedModule):
+    def __init__(self,
+                key: str,
+                gguf_loader : GGUFLoader,
+                config: PretrainedConfig,
+                orig_module: nn.Module,
+                prefill_device: str = "cuda",
+                generate_device: str = "cuda",
+                **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.hidden_size,
+            orig_module.variance_epsilon)
+
+    def forward(
+        self, 
+        x,
+        batch_size_tensor: torch.Tensor = None,
+        residual: Optional[torch.Tensor] = None,
+    )-> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x = x + residual
+            residual = x
+        # range batch_size_tensor for x
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        if residual is not None:
+            return self.weight * x.to(input_dtype), residual
+        return self.weight * x.to(input_dtype)
+
+
+class KDeepseekRMSNormIPEXLLM(DeepseekV3RMSNorm, BaseInjectedModule):
+    def __init__(self,
+                 key: str,
+                 gguf_loader : GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "xpu",
+                 generate_device: str = "xpu",
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.weight.shape[0],
+            orig_module.variance_epsilon)
+        self.eps = orig_module.variance_epsilon
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from ipex_llm.transformers.models.common import rms_norm_forward
+        if x.dtype not in [torch.float32, torch.float16]:
+            output = rms_norm_forward(self, x.float())
+        else:
+            output = rms_norm_forward(self, x)
+        return output.to(x.dtype)
+
+    def load(self):
+        BaseInjectedModule.load(self)
+        if self.weight.dtype not in [torch.float32, torch.float16]:
+            self.weight = self.weight.float()

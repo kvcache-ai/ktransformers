@@ -843,7 +843,7 @@ inline void mat_mul(int m, int n, int k, std::shared_ptr<GemmKernel224BF::Buffer
         if (!use_amx) {
           __m512 *c512 = (__m512 *)c;
           if (k_block_begin == 0) {
-            for (int m_i = 0; m_i < m; m_i++) {
+            for (int m_i = 0; m_i < m && m_i < K::M_STEP; m_i++) {
               c512[m_i * 2] = _mm512_setzero_ps();
               c512[m_i * 2 + 1] = _mm512_setzero_ps();
             }
@@ -852,7 +852,7 @@ inline void mat_mul(int m, int n, int k, std::shared_ptr<GemmKernel224BF::Buffer
           for (int k_begin = 0; k_begin < K::K_BLOCK && k_block_begin + k_begin < k; k_begin += K::K_STEP) {
             int32_t *a32 = (int32_t *)ba->get_submat(m, k, m_begin, k_block_begin + k_begin);
             __m512bh *b512 = (__m512bh *)bb->get_submat(n, k, n_begin, k_block_begin + k_begin);
-            for (int m_i = 0; m_i < m; m_i++) {
+            for (int m_i = 0; m_i < m && m_i < K::M_STEP; m_i++) {
               for (int k_i = 0; k_i < 16; k_i++) {
                 __m512bh ma = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i]);
                 for (int n_i = 0; n_i < 2; n_i++) {
@@ -914,7 +914,7 @@ inline void mat_mul(int m, int n, int k, std::shared_ptr<GemmKernel224Int8::Buff
         if (!use_amx) {
           __m512i *c512 = (__m512i *)c;
           if (k_block_begin == 0) {
-            for (int m_i = 0; m_i < m; m_i++) {
+            for (int m_i = 0; m_i < m && m_i < K::M_STEP; m_i++) {
               c512[m_i * 2] = _mm512_setzero_si512();
               c512[m_i * 2 + 1] = _mm512_setzero_si512();
             }
@@ -926,7 +926,7 @@ inline void mat_mul(int m, int n, int k, std::shared_ptr<GemmKernel224Int8::Buff
 
             int32_t *a32 = (int32_t *)ba->get_submat(m, k, m_begin, k_block_begin + k_begin);
             __m512i *b512 = (__m512i *)bb->get_submat(n, k, n_begin, k_block_begin + k_begin);
-            for (int m_i = 0; m_i < m; m_i++) {
+            for (int m_i = 0; m_i < m && m_i < K::M_STEP; m_i++) {
               for (int k_i = 0; k_i < 16; k_i++) {
                 __m512i ma = _mm512_set1_epi32(a32[m_i * 16 + k_i]);
                 for (int n_i = 0; n_i < 2; n_i++) {

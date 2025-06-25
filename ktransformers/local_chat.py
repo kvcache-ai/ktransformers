@@ -28,7 +28,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
-from ktransformers.util.utils import prefill_and_generate, get_compute_capability
+from ktransformers.util.utils import prefill_and_generate, get_compute_capability, xpu_fp16_model
 from ktransformers.server.config.config import Config
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
 from ktransformers.util.vendors import device_manager, get_device, to_device, GPUVendor
@@ -63,17 +63,23 @@ def local_chat(
     prompt_file : str | None = None,
     mode: str = "normal",
     force_think: bool = False,
-    chunk_size: int = 8192
+    chunk_size: int = 8192,
+    device: str = "cuda"
 ):
 
     torch.set_grad_enabled(False)
 
     Config().cpu_infer = cpu_infer
+    Config().chunk_size = chunk_size
+    if torch.xpu.is_available():
+        use_cuda_graph = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     if mode == 'long_context':
         assert config.architectures[0] == "LlamaForCausalLM", "only LlamaForCausalLM support long_context mode"
+        torch.set_default_dtype(torch.float16)
+    elif xpu_fp16_model(config):
         torch.set_default_dtype(torch.float16)
     else:
         torch.set_default_dtype(config.torch_dtype)
@@ -89,11 +95,16 @@ def local_chat(
                 config._attn_implementation = "eager"
             if "Mixtral" in config.architectures[0]:
                 config._attn_implementation = "flash_attention_2"
-
+            if torch.xpu.is_available():
+                config._attn_implementation = "eager"
             model = custom_models[config.architectures[0]](config)
         else:
+            if torch.xpu.is_available():
+                attn_implementation = "eager"
+            else:
+                attn_implementation = "flash_attention_2"
             model = AutoModelForCausalLM.from_config(
-                config, trust_remote_code=True, attn_implementation="flash_attention_2"
+                config, trust_remote_code=True, attn_implementation=attn_implementation
             )
 
     if optimize_config_path is None:
@@ -109,7 +120,7 @@ def local_chat(
         gguf_path = input(
             "please input the path of your gguf file(gguf file in the dir containing input gguf file must all belong to current model):"
         )
-    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config)
+    optimize_and_load_gguf(model, optimize_config_path, gguf_path, config, default_device=device)
     
     try:
         model.generation_config = GenerationConfig.from_pretrained(model_path)
@@ -172,12 +183,12 @@ def local_chat(
         
         if system != "Windows" and (config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM") and flashinfer_enabled and get_compute_capability() >= 8 and device_manager.gpu_vendor == GPUVendor.NVIDIA:
             generated = prefill_and_generate(
-                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_size = chunk_size,
+                model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_size = chunk_size,
                 use_flashinfer_mla = True, num_heads = config.num_attention_heads, head_dim_ckv = config.kv_lora_rank, head_dim_kpe = config.qk_rope_head_dim, q_head_dim = config.qk_rope_head_dim + config.qk_nope_head_dim
             )
         else:
             generated = prefill_and_generate(
-                model, tokenizer, input_tensor.cuda(), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_size = chunk_size,
+                model, tokenizer, input_tensor.to(device), max_new_tokens, use_cuda_graph, mode = mode, force_think = force_think, chunk_size = chunk_size,
             )
 
 

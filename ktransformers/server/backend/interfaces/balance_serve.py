@@ -195,13 +195,13 @@ class Engine:
         
 
         self.block_num = inference_context.k_cache[0].size(1)
+        self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
         #@TODO add config
         if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM":
-            self.model.init_wrapper(self.args.use_cuda_graph, self.device, 1024 ,args.max_batch_size, self.block_num) # TODO: 1024 is a magic number(max_batch_tokens)
+            self.model.init_wrapper(self.args.use_cuda_graph, self.device, max(self.model_runner.cuda_graphs), args.max_batch_size, self.block_num) 
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)
 
-        self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
         self.sampler = Sampler()
         self.query_manager = QueryManager(device = self.device, page_size = args.page_size)
 

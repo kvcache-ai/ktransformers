@@ -11,13 +11,24 @@ from torch import nn
 import itertools
 import time
 import enum
-from ktransformers.util.custom_gguf import translate_name_to_gguf
-from ktransformers.util.custom_gguf import GGUFLoader
+from transformers import (
+    LogitsProcessorList,
+    TemperatureLogitsWarper,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
+    MinPLogitsWarper,
+    TypicalLogitsWarper,
+    EpsilonLogitsWarper,
+    EtaLogitsWarper,
+)
+
+from ktransformers.util.custom_loader import ModelLoaderFactory, ModelLoader, SafeTensorLoader, GGUFLoader, translate_name_to_gguf
 from ktransformers.operators import base_operator
 from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.util.textstream import TextStreamer
-from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton
+if not torch.xpu.is_available():
+    from ktransformers.operators.flashinfer_wrapper import MLAWrapperSingleton
 import socket
 
 warm_uped = False
@@ -49,6 +60,8 @@ def get_compute_capability(device:torch.device = None):
             return min_compute_capability_major
         else:
             return torch.cuda.get_device_properties(device)
+    else:
+        return 0
 
 def set_module(model, submodule_key, module):
     tokens = submodule_key.split('.')
@@ -87,44 +100,131 @@ def get_all_used_cuda_device(device_map:dict):
     all_device_list = list(all_device_list)
     return all_device_list
 
-def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str = ""):
+def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="cuda"):
     prefix = prefix.replace("orig_module.", "")
     persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
     local_name_params = itertools.chain(module._parameters.items(), persistent_buffers.items())
     local_state = {k: v for k, v in local_name_params if v is not None}
     for name, param in local_state.items():
         key = prefix + name
-        translated_key = translate_name_to_gguf(key)
+        translated_key = key
         
         # TODO: Merge all loader.
         # I know this is ugly but lets do it for now.
-        if gguf_loader.safetensor_loader is not None:
-            load_dequantized_tensor = gguf_loader.safetensor_loader.load_dequantized_tensor
-            tensor_file_map = gguf_loader.safetensor_loader.tensor_file_map
+        if isinstance(gguf_loader, SafeTensorLoader):
+            load_dequantized_tensor = gguf_loader.load_dequantized_tensor
         else:
             load_dequantized_tensor = gguf_loader.load_gguf_tensor
             tensor_file_map = gguf_loader.tensor_file_map
         
-        if translated_key in tensor_file_map:
+        if gguf_loader.has_tensor(translated_key) or "kv_b_proj" in translated_key:
             target_dtype = torch.get_default_dtype()
             device = get_device(translated_key[:translated_key.rfind(".")], gguf_loader.tensor_device_map)
             print(f"loading {translated_key} to {device}")
-            torch.cuda.empty_cache()
-            weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
-            set_param(module, name, weights)
-            del weights
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.xpu.is_available():
+                torch.xpu.empty_cache()
+            if "kv_b_proj" in translated_key and not gguf_loader.has_tensor(translated_key):
+                attn_k_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_k_b"), device=device).to(dtype=target_dtype)
+                attn_k_b = attn_k_b.transpose(1, 2).contiguous()
+                attn_v_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_v_b"), device=device).to(dtype=target_dtype)
+                kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1)
+                kv_b_proj = kv_b_proj.contiguous() if kv_b_proj.ndim == 2 else kv_b_proj.flatten(0, 1).contiguous()
+                set_param(module, name, kv_b_proj)
+                del attn_k_b
+                del attn_v_b
+            else:
+                weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
+                set_param(module, name, weights)
+                del weights
         else:
             #print(load_config.tensor_file_map.keys())
             raise Exception(f"can't find {translated_key} in GGUF file!")
         
-def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
+
+def sync_all_device(all_device_list):
+    for device in all_device_list:
+        if "cuda" in device.lower():
+            torch.cuda.synchronize(device)
+        elif "xpu" in device.lower():
+            torch.xpu.synchronize(device)
+        else:
+            raise RuntimeError("The device {} is not available".format(device))
+
+torch_device_mapping ={"cuda": "cuda:0", "xpu": "xpu:0"}
+
+def xpu_fp16_model(config):
+    # This function is to check if we run this model on XPU with FP16 dtype
+    if not torch.xpu.is_available():
+        return False
+    if config.architectures[0] == "DeepseekV3ForCausalLM":
+        return True
+    if config.architectures[0] == "Qwen3MoeForCausalLM" and config.hidden_size == 4096:
+        # Qwen3-30B seems have precision issue with FP16
+        # so we only use FP16 for Qwen3-235B now
+        return True
+    return False
+
+def load_weights(module:nn.Module, gguf_loader:ModelLoader, prefix='', device="cuda"):
     #print(f"recursively loading weights {prefix}")
     if not isinstance(module, base_operator.BaseInjectedModule):
-        load_cur_state_dict(module, gguf_loader, prefix)
+        load_cur_state_dict(module, gguf_loader, prefix, device=device)
         for name, child in module._modules.items():
-            load_weights(child, gguf_loader, prefix+name+".")
+            load_weights(child, gguf_loader, prefix+name+".", device=device)
     else:
         module.load()
+
+def tf_logits_warper(generation_config):
+        """
+        This class returns a [`LogitsProcessorList`] list object that contains all relevant [`LogitsWarper`] instances
+        used for multinomial sampling.
+        """
+
+        # instantiate warpers list
+        warpers = LogitsProcessorList()
+
+        # In beam methods, we need to keep at least one non-eos token to explore continuations that might have a
+        # better score (i.e. keep len(list(generation_config._eos_token_tensor)) + 1)
+        if generation_config.num_beams > 1:
+            if isinstance(generation_config._eos_token_tensor, list):
+                min_tokens_to_keep = len(generation_config._eos_token_tensor) + 1
+            elif isinstance(generation_config._eos_token_tensor, torch.Tensor):
+                min_tokens_to_keep = generation_config._eos_token_tensor.shape[0] + 1
+            else:
+                min_tokens_to_keep = 2
+        else:
+            min_tokens_to_keep = 1
+
+        # the following idea is largely copied from this PR: https://github.com/huggingface/transformers/pull/5420/files
+        # all samplers can be found in `generation_utils_samplers.py`
+        if generation_config.temperature is not None and generation_config.temperature != 1.0:
+            warpers.append(TemperatureLogitsWarper(generation_config.temperature))
+        if generation_config.top_k is not None and generation_config.top_k != 0:
+            warpers.append(TopKLogitsWarper(top_k=generation_config.top_k, min_tokens_to_keep=min_tokens_to_keep))
+        if generation_config.top_p is not None and generation_config.top_p < 1.0:
+            warpers.append(TopPLogitsWarper(top_p=generation_config.top_p, min_tokens_to_keep=min_tokens_to_keep))
+        if generation_config.min_p is not None:
+            # Applied after temperature scaling (see https://github.com/ggerganov/llama.cpp/pull/3841#issuecomment-2073826084)
+            warpers.append(MinPLogitsWarper(min_p=generation_config.min_p, min_tokens_to_keep=min_tokens_to_keep))
+        if generation_config.typical_p is not None and generation_config.typical_p < 1.0:
+            warpers.append(
+                TypicalLogitsWarper(mass=generation_config.typical_p, min_tokens_to_keep=min_tokens_to_keep)
+            )
+        if generation_config.epsilon_cutoff is not None and 0.0 < generation_config.epsilon_cutoff < 1.0:
+            warpers.append(
+                EpsilonLogitsWarper(epsilon=generation_config.epsilon_cutoff, min_tokens_to_keep=min_tokens_to_keep)
+            )
+        if generation_config.eta_cutoff is not None and 0.0 < generation_config.eta_cutoff < 1.0:
+            warpers.append(
+               EtaLogitsWarper(
+                    epsilon=generation_config.eta_cutoff, min_tokens_to_keep=min_tokens_to_keep, device=device
+                )
+            )
+        # `LogitNormalization` should always be the last logit processor, when present
+        if generation_config.renormalize_logits is True:
+            warpers.append(LogitNormalization())
+        return warpers
 
 def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cuda_graph: bool = True,
                          mode = 'normal', force_think: bool = False, chunk_size = 16384, use_flashinfer_mla = False,
@@ -134,8 +234,8 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     torch._dynamo.config.suppress_errors = True
     batch_size, seq_length = inputs.shape
     device_map = model.gguf_loader.tensor_device_map
-    torch_device = get_device('blk.0.self_attn', device_map)
-    torch_device = "cuda:0" if torch_device == "cuda" else torch_device
+    torch_device = get_device('model.layers.0.self_attn', device_map)
+    torch_device = torch_device_mapping[torch_device] if torch_device in torch_device_mapping else torch_device
     inputs = inputs.to(torch_device)
     all_cuda_device = get_all_used_cuda_device(device_map)
 
@@ -148,7 +248,12 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             logits = cuda_graph_runner(cur_token, position_ids, cache_position)
         else:
             # custom_stream = torch.cuda.Stream()
-            torch.cuda.set_device(torch_device)
+            if torch.cuda.is_available():
+                torch.cuda.set_device(torch_device)
+            elif torch.xpu.is_available():
+                torch.xpu.set_device(torch_device)
+            else:
+                raise RuntimeError(f"The device: {torch_device} is not available")
             inputs_embeds = model.model.embed_tokens(cur_token.to("cpu")).to(torch_device)
             # with torch.cuda.stream(custom_stream):
             logits=model(inputs_embeds=inputs_embeds,
@@ -156,10 +261,9 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                         cache_position=cache_position,
                         past_key_values=past_key_values,
                         return_dict=False, use_cache=True)[0]
-        if past_key_values != None:
+        if past_key_values != None and isinstance(past_key_values, StaticCache):
             past_key_values.change_seq_length(1)
-        for device in all_cuda_device:
-            torch.cuda.synchronize(device)
+        sync_all_device(all_cuda_device)
         #print(logits)
         next_token_scores = logits_warper(inputs, logits[:, -1, :])
         if generation_config.do_sample:
@@ -185,11 +289,22 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         
         return logits
     
-    torch.cuda.set_device(torch_device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(torch_device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(torch_device)
+    else:
+        raise RuntimeError(f"The device: {torch_device} is not available")
     with torch.no_grad():
         
         stream = TextStreamer(tokenizer)
-        if mode != 'long_context':
+        if torch.xpu.is_available():
+            from ipex_llm.transformers.kv import DynamicUnbalancedFp8Cache, DynamicNormalCache
+            if model.config.architectures[0] in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"]:
+                past_key_values = DynamicUnbalancedFp8Cache.from_legacy_cache(None)
+            else:
+                past_key_values = DynamicNormalCache.from_legacy_cache(None)
+        elif mode != 'long_context':
             past_key_values = StaticCache(
                 config = model.config, max_batch_size = 1, max_cache_len = seq_length + max_new_tokens, device = device_map, dtype = model.dtype
             )
@@ -201,14 +316,8 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             # change this to modify generate config
             #top_k=5, top_p=0.85, temperature=0.1
         )
-        try: # transformers==4.43
-            logits_warper = (
-                model._get_logits_warper(generation_config,device=inputs.device)
-            )
-        except: 
-            logits_warper = (
-                model._get_logits_warper(generation_config)
-            )
+
+        logits_warper = tf_logits_warper(generation_config)
 
         cache_position = torch.arange(seq_length, device=torch_device, dtype=torch.int32)
         generated_ids = torch.zeros(

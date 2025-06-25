@@ -58,7 +58,7 @@ from transformers.models.qwen2_moe.configuration_qwen2_moe import Qwen2MoeConfig
 from ktransformers.models.configuration_llama import LlamaConfig
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.utils import InferenceState, get_compute_capability
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from transformers.configuration_utils import PretrainedConfig
 from ktransformers.models.modeling_llama import (
     LlamaDecoderLayer,
@@ -306,6 +306,12 @@ class KQwen2MoeModel(BaseInjectedModule):
 
         hidden_states = inputs_embeds
 
+        # create position embeddings to be shared across the decoder layers
+        if torch.xpu.is_available() and inputs_embeds.device.type == "xpu":
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        else:
+            position_embeddings = None
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -369,6 +375,7 @@ class KQwen2MoeModel(BaseInjectedModule):
                     output_router_logits=output_router_logits,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
                 if per_layer_prefill_flag:
                     # print(f"to cpu")
@@ -376,8 +383,10 @@ class KQwen2MoeModel(BaseInjectedModule):
                     torch.cuda.empty_cache()
             hidden_states = layer_outputs[0]
 
-            if use_cache:
+            if use_cache and len(layer_outputs) > 1:
                 next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+            else:
+                next_decoder_cache = None
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -396,11 +405,14 @@ class KQwen2MoeModel(BaseInjectedModule):
 
         next_cache = None
         if use_cache:
-            next_cache = (
-                next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
-                else next_decoder_cache
-            )
+            if next_decoder_cache is not None:
+                next_cache = (
+                    next_decoder_cache.to_legacy_cache()
+                    if use_legacy_cache
+                    else next_decoder_cache
+                )
+            else:
+                next_cache = past_key_values
 
         if not return_dict:
             return tuple(
@@ -647,10 +659,20 @@ class KDeepseekV2Model(BaseInjectedModule):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        if inputs_embeds.device.type == "xpu" and position_ids is not None:
+            cos, sin = self.layers[0].self_attn.rotary_emb(inputs_embeds,
+                                                           position_ids)
+            position_embeddings = (cos, sin)
+        else:
+            position_embeddings = None
+
         if per_layer_prefill_flag:
             causal_mask = None
         else:
-            if os.name == 'nt' or get_compute_capability()<8 or device_manager.gpu_vendor != GPUVendor.NVIDIA:
+            if (os.name == 'nt'
+                or get_compute_capability() < 8
+                or (self.transfer_map is not None and 'cpu' in self.transfer_map.values())
+                or device_manager.gpu_vendor != GPUVendor.NVIDIA):
                 # print("for Windows or GPU before ampere, use forward_windows")
                 # only use mask in forward windows or can't flash attn
                 causal_mask = self._update_causal_mask(
@@ -734,6 +756,7 @@ class KDeepseekV2Model(BaseInjectedModule):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    position_embeddings=position_embeddings,
                 )
                 t5 = time.time()
                 if per_layer_prefill_flag:

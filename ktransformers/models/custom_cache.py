@@ -66,7 +66,7 @@ class StaticCache(transformers.StaticCache):
             self.page_table_list = []
             for idx in range(config.num_hidden_layers):
                 if isinstance(device, dict):
-                    target_device = device[f"blk.{idx}.self_attn"]["generate_device"]
+                    target_device = device[f"model.layers.{idx}.self_attn"]["generate_device"]
                 else:
                     target_device = device
                 
@@ -91,7 +91,7 @@ class StaticCache(transformers.StaticCache):
             # Note: `mark_static_address` is used to tag the cache as an fixed data pointer, preventing cuda graph
             # breaks when updating the cache.
             if isinstance(device, dict):
-                target_device = device[f"blk.{idx}.self_attn"]["generate_device"]
+                target_device = device[f"model.layers.{idx}.self_attn"]["generate_device"]
             else:
                 target_device = device
             
@@ -213,7 +213,7 @@ class KDeepSeekV3Cache(nn.Module):
         self.v_caches = []
         
 
-    def load(self, inference_context: "sched_ext.InferenceContext"): 
+    def load(self, inference_context: "sched_ext.InferenceContext"):
         
         for i in range(self.config.num_hidden_layers):
             self.k_caches.append(
@@ -293,7 +293,7 @@ class KGQACache(nn.Module):
         self.v_caches = []
         
 
-    def load(self, inference_context: sched_ext.InferenceContext): 
+    def load(self, inference_context: "sched_ext.InferenceContext"):
         print(self.config.num_hidden_layers)
         for i in range(self.config.num_hidden_layers):
             self.k_caches.append(

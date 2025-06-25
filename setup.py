@@ -39,7 +39,17 @@ try:
     from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension, MUSA_HOME
 except ImportError:
     MUSA_HOME=None
-    
+KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
+
+# 检测 DEV_BACKEND 环境变量
+dev_backend = os.environ.get("DEV_BACKEND", "").lower()
+if dev_backend == "xpu":
+    triton_dep = [
+        "pytorch-triton-xpu==3.3.0"
+    ]
+else:
+    triton_dep = ["triton>=3.2"]
+
 with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
 class CpuInstructInfo:
@@ -241,8 +251,10 @@ class VersionInfo:
             backend_version = f"mu{self.get_musa_bare_metal_version(MUSA_HOME)}"
         elif ROCM_HOME is not None:
             backend_version = f"rocm{self.get_rocm_bare_metal_version(ROCM_HOME)}"
+        elif torch.xpu.is_available():
+            backend_version = f"xpu"
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME MUSA_HOME ROCM_HOME all not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME MUSA_HOME ROCM_HOME all not set and XPU is not available.")
         package_version = f"{flash_version}+{backend_version}torch{torch_version}{cpu_instruct}"
         if full_version:
             return package_version
@@ -511,8 +523,10 @@ class CMakeBuild(BuildExtension):
             cmake_args += ["-DKTRANSFORMERS_USE_MUSA=ON"]
         elif ROCM_HOME is not None:
             cmake_args += ["-DKTRANSFORMERS_USE_ROCM=ON"]
+        elif KTRANSFORMERS_BUILD_XPU:
+            cmake_args += ["-DKTRANSFORMERS_USE_XPU=ON", "-DKTRANSFORMERS_USE_CUDA=OFF"]
         else:
-            raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set.")
+            raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set and XPU is not available.")
         
         cmake_args = get_cmake_abi_args(cmake_args)
         # log cmake_args
@@ -636,33 +650,41 @@ elif MUSA_HOME is not None:
             ]
         }
     )
+elif torch.xpu.is_available(): #XPUExtension is not available now.
+    ops_module = None
 else:
-    raise ValueError("Unsupported backend: CUDA_HOME and MUSA_HOME are not set.")
+    raise ValueError("Unsupported backend: CUDA_HOME ROCM_HOME MUSA_HOME are not set and XPU is not available.")
 
-ext_modules = [
-    CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
-    ops_module,
-    CUDAExtension(
-        'vLLMMarlin', [
-            'csrc/custom_marlin/binding.cpp',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
-            'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
-        ],
-        extra_compile_args={
-            'cxx': ['-O3'],
-            'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
-        },
-    )
-]
-if with_balance:
-    print("using balance_serve")
-    ext_modules.append(
-        CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
-    )
+if not torch.xpu.is_available():
+    ext_modules = [
+        CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+        ops_module,
+        CUDAExtension(
+            'vLLMMarlin', [
+                'csrc/custom_marlin/binding.cpp',
+                'csrc/custom_marlin/gptq_marlin/gptq_marlin.cu',
+                'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
+            ],
+            extra_compile_args={
+                'cxx': ['-O3'],
+                'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+            },
+        )
+    ]
+    if with_balance:
+        print("using balance_serve")
+        ext_modules.append(
+            CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
+        )
+else:
+    ext_modules = [
+        CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+    ]
 
 setup(
     name=VersionInfo.PACKAGE_NAME,
     version=VersionInfo().get_package_version(),
+    install_requires=triton_dep,
     cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
     ext_modules=ext_modules
 )
