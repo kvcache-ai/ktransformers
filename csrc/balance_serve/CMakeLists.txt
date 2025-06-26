@@ -10,9 +10,9 @@ message(STATUS "Using compiler: ${CMAKE_CXX_COMPILER}")
 project(balance_serve VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
+# set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
 # set(CMAKE_BUILD_TYPE "Debug")
-# set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
 set(CMAKE_BUILD_TYPE "Release")
 
 

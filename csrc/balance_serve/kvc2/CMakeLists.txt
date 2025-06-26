@@ -11,8 +11,8 @@ set(CMAKE_CXX_STANDARD 20)
 # set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -Wpedantic -g -fsanitize=address")
 # set(CMAKE_CXX_FLAGS "-march=native -Wall -Wextra -Wpedantic -g")
 # set(CMAKE_CXX_FLAGS "-fPIC -O3 -ffast-math -march=native -Wall -Wextra -g")
-set(CMAKE_BUILD_TYPE "Release")
-# set(CMAKE_BUILD_TYPE "Debug")
+# set(CMAKE_BUILD_TYPE "Release")
+set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(BUILD_TEST OFF)
 set(BUILD_PYTHON_EXT OFF)
@@ -71,6 +71,8 @@ find_package(Torch REQUIRED PATHS "${TORCH_INSTALL_PREFIX}/share/cmake/Torch" NO
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
 
+# include_directories(/usr/include/tbb)
+# link_directories(/usr/lib64)
 find_package(TBB REQUIRED)
 find_package(CUDA REQUIRED)
 
@@ -123,7 +125,7 @@ if(USE_IO_URING)
 endif()
 
 set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error")
+
 set(CMAKE_CXX_FLAGS "-O3 -march=native")
 message(STATUS "CMAKE_CXX_FLAGS of PhotonLibOS: ${CMAKE_CXX_FLAGS}")
 
