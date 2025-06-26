@@ -1,6 +1,7 @@
 #ifndef __DEFS_H_
 #define __DEFS_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -27,7 +28,7 @@ struct CacheInfo {
   size_t hidden_layer_count();
   std::filesystem::path path(std::optional<size_t> which_layer = std::nullopt);
   bool operator==(const CacheInfo& other) const;
-  size_t element_size(size_t block_length);
+  size_t element_size(size_t block_length, size_t head_dim);
   size_t hash_value() const;
 };
 
