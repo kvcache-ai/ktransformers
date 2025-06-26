@@ -62,10 +62,13 @@ bool CacheInfo::operator==(const CacheInfo& other) const {
   return model_name == other.model_name && is_key_cache == other.is_key_cache && quant_type == other.quant_type;
 }
 
-size_t CacheInfo::element_size(size_t block_length) {
-  size_t count = model_configs[model_name].hidden_size * block_length;
+size_t CacheInfo::element_size(size_t block_length, size_t head_dim) {
+  size_t count = head_dim * block_length;
   auto& q = quant_configs[quant_type];
-  return count / q.block_element_count * q.block_element_size;
+  if (q.block_element_count == 0 || q.block_element_size == 0)
+    return count * 4;  // default to FP32
+  else
+    return count / q.block_element_count * q.block_element_size;
 }
 
 size_t CacheInfo::hash_value() const {
@@ -220,7 +223,7 @@ struct DiskCacheAllocator {
     return re;
   }
 
-  DiskCacheAllocator(std::filesystem::path path, CacheInfo info) : path(path), info(info) {
+  DiskCacheAllocator(std::filesystem::path path, CacheInfo info, size_t head_dim) : path(path), info(info) {
     // SPDLOG_DEBUG("Create DiskCacheAllocator {}", path.c_str());
     auto allocator_path = path / info.path();
     if (std::filesystem::exists(allocator_path) == false) {
@@ -231,7 +234,7 @@ struct DiskCacheAllocator {
 
     for (size_t i = 0; i < info.hidden_layer_count(); i++) {
       // SPDLOG_DEBUG("Create store {} for {}", (path / info.path(i)).c_str(),i);
-      auto store = async_store::create_or_open_store(info.element_size(NumTokenPerBlock), 1000, path / info.path(i));
+      auto store = async_store::create_or_open_store(info.element_size(NumTokenPerBlock, head_dim), 1000, path / info.path(i));
       stores.push_back(store);
     }
     update_capacity();
@@ -263,7 +266,9 @@ struct DiskCacheManager {
       // SPDLOG_DEBUG("Make Allocator {}",allocator_json.dump());
       CacheInfo info;
       allocator_json.at("info").get_to(info);
-      auto allocator = std::make_shared<DiskCacheAllocator>(nlohmann_json_t.config.path, info);
+      assert(nlohmann_json_t.config.gpu_cache_config.has_value());
+      size_t head_dim = nlohmann_json_t.config.gpu_cache_config.value().k_head_dim;
+      auto allocator = std::make_shared<DiskCacheAllocator>(nlohmann_json_t.config.path, info, head_dim);
       allocator_json.at("allocator").get_to(*allocator);
       nlohmann_json_t.allocators[info] = allocator;
     }
@@ -280,7 +285,9 @@ struct DiskCacheManager {
     {
       std::lock_guard<std::mutex> lg(lock);
       if (allocators.count(info) == 0) {
-        allocators.emplace(info, std::make_shared<DiskCacheAllocator>(config.path, info));
+        assert(config.gpu_cache_config.has_value());
+        size_t head_dim = config.gpu_cache_config.value().k_head_dim;
+        allocators.emplace(info, std::make_shared<DiskCacheAllocator>(config.path, info, head_dim));
       }
     }
     return allocators.at(info);
@@ -561,7 +568,39 @@ struct PrefixTree {
     if (need_lock) {
       sl = std::shared_lock<std::shared_mutex>(rw_lock);
     }
-    // TODO: prefix cache
+
+    // We disable full seq match because this is awful when we try to maintain the flush back.
+    // auto full_seq_hash = TokensHasher::hash(data, length);
+    // SPDLOG_DEBUG("Look up prefix with hash {:016x} length: {}", full_seq_hash, length);
+    // // debug();
+    // if (prefix_map.count(full_seq_hash)) {
+    //   SPDLOG_DEBUG("Full Match", full_seq_hash);
+    //   return {prefix_map.at(full_seq_hash), length};
+    // }
+
+    TokenLength block_length = length / NumTokenPerBlock;  // do not need the tail
+    TokenLength l = 0, r = block_length + 1;
+    while (l + 1 < r) {
+      TokenLength mid = (l + r) / 2;  // [1,block_length]
+      auto hash = TokensHasher::hash(data, mid * NumTokenPerBlock);
+      if (prefix_map.count(hash)) {
+        SPDLOG_DEBUG("Binary Prefix Search: Found prefix with hash {:016x}", hash);
+        l = mid;
+      } else {
+        SPDLOG_DEBUG("Binary Prefix Search: Not Found prefix with hash {:016x}", hash);
+        r = mid;
+      }
+    }
+
+    met->lookup_prefixmatch_length->Observe(l * NumTokenPerBlock);
+    met->matched_length_percentage->Observe(l * NumTokenPerBlock * 100.0 / length);
+
+    if (l == 0)
+      return {nullptr, 0};
+
+    auto hash = TokensHasher::hash(data, l * NumTokenPerBlock);
+
+    return {prefix_map.at(hash).first.get(), l * NumTokenPerBlock};
   }
 
   PrefixMatch look_up_or_insert(Token* data, TokenLength length) {
@@ -699,7 +738,18 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
       }
     }
   }
-  std::vector<MatchStatus> matched_status() override { assert(false); }
+  std::vector<MatchStatus> matched_status() override {
+    // if (enable_alt == false) {
+    //   SPDLOG_ERROR("Matched Status is not available when enable_alt is false");
+    //   assert(0);
+    // }
+    // std::vector<MatchStatus> re;
+    // for (auto& [p, idx, status] : match_by_blocks.matches) {
+    //   re.push_back(status);
+    // }
+    // return re;
+    assert(false);
+  }
 
   bool any_match() {
     if (enable_alt) {
@@ -988,30 +1038,7 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
   //   set_raw_handles(true, k);
   //   set_raw_handles(false, v);
   // }
-  void set_raw_handles(bool is_key_cache, const std::vector<layer_data>& layer_data) {
-    auto single_set_raw_handles = [layer_data](CacheInfo info,
-                                               std::vector<std::vector<std::shared_ptr<CacheBlockEntry>>>& handles) {
-      handles.resize(layer_data.size());
-      for (size_t i = 0; i < info.hidden_layer_count(); i++) {
-        auto& layer = layer_data[i];
-        handles[i].clear();
-        for (auto& block_data : layer) {
-          auto handle = std::make_shared<CacheBlockEntry>();
-          handle->data = reinterpret_cast<void*>(block_data);
-          handle->size = info.element_size(NumTokenPerBlock);
-          handles[i].push_back(handle);
-        }
-      }
-    };
-
-    if (is_key_cache) {
-      is_k_cache_on = true;
-      single_set_raw_handles(k_info(), k_cache_handles);
-    } else {
-      is_v_cache_on = true;
-      single_set_raw_handles(v_info(), v_cache_handles);
-    }
-  }
+  
 
   std::vector<layer_data> export_raw_pointers(bool is_key_cache) {
     std::vector<layer_data> re;
@@ -1042,6 +1069,7 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
     return re;
   }
 
+  void set_raw_handles(bool is_key_cache, const std::vector<layer_data>& layer_data);
   void get_handles();
   void get_empty_handles();
 
@@ -1257,7 +1285,23 @@ struct KVC2 : KVC2Interface {
     re->kvc2_top = this;
     SPDLOG_DEBUG("Lookup TokenLength {}", length);
     if (config.gpu_only == false) {
-      // TODO:
+      re->match = tree->look_up(id, length);
+      re->get_handles();
+      if (re->alloc_on_cpu() == false) {
+        return nullptr;
+      }
+
+      SPDLOG_DEBUG("Found {}, Prompt Length {}, Estimated Length {}", re->match.match_length, length, estimated_length);
+      if (re->match.prefix) {
+        re->collect_locations();
+        auto disk_io_helper = re->segment_io(io_dealer.get(), disk_cache.get(), 0,
+                                             div_up(re->match.match_length, NumTokenPerBlock), IO_Read);
+        // TODO: async is break here, do something later
+        disk_io_helper->wait();
+        SPDLOG_INFO("Loaded to mem");
+      } else {
+        SPDLOG_INFO("No Match, No need to load");
+      }
     }
     return re;
   };
@@ -1408,11 +1452,37 @@ DoubleCacheHandle::~DoubleCacheHandle() {
   }
 };
 
+void DoubleCacheHandle::set_raw_handles(bool is_key_cache, const std::vector<layer_data>& layer_data) {
+    auto single_set_raw_handles = [layer_data](CacheInfo info, size_t head_dim,
+                                               std::vector<std::vector<std::shared_ptr<CacheBlockEntry>>>& handles) {
+      handles.resize(layer_data.size());
+      for (size_t i = 0; i < info.hidden_layer_count(); i++) {
+        auto& layer = layer_data[i];
+        handles[i].clear();
+        for (auto& block_data : layer) {
+          auto handle = std::make_shared<CacheBlockEntry>();
+          handle->data = reinterpret_cast<void*>(block_data);
+          handle->size = info.element_size(NumTokenPerBlock, head_dim);
+          handles[i].push_back(handle);
+        }
+      }
+    };
+
+    if (is_key_cache) {
+      is_k_cache_on = true;
+      single_set_raw_handles(k_info(), kvc2_top->config.gpu_cache_config.value().k_head_dim, k_cache_handles);
+    } else {
+      is_v_cache_on = true;
+      single_set_raw_handles(v_info(), kvc2_top->config.gpu_cache_config.value().k_head_dim, v_cache_handles);
+    }
+  }
+
 void DoubleCacheHandle::get_handles() {
   size_t new_count = 0, total_count = 0;
   auto get_info_handles = [this, &new_count, &total_count](
                               CacheInfo info, std::vector<std::vector<std::shared_ptr<CacheBlockEntry>>>& layers) {
     auto total_block_count = div_up(estimated_length, NumTokenPerBlock);
+    size_t head_dim = kvc2_top->config.gpu_cache_config.value().k_head_dim;
     for (size_t l = 0; l < info.hidden_layer_count(); l++) {
       auto hashes = match.matched_hashes(info, l);
       layers[l].resize(total_block_count, nullptr);
@@ -1422,7 +1492,7 @@ void DoubleCacheHandle::get_handles() {
           key = hashes[i];
         bool is_new;
         total_count += 1;
-        layers[l][i] = this->kvc2_top->cache_manager->get(is_new, info.element_size(NumTokenPerBlock), key);
+        layers[l][i] = this->kvc2_top->cache_manager->get(is_new, info.element_size(NumTokenPerBlock, head_dim), key);
         if (is_new)
           new_count += 1;
         layers[l][i]->cache_info = info;
