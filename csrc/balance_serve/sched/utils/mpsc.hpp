@@ -55,6 +55,18 @@ public:
     return std::nullopt;
   }
 
+  // 忙等待 dequeue
+  std::optional<T> busy_wait_dequeue() {
+    while (true) {
+      std::optional<T> re = dequeue();
+      if (re.has_value()) {
+        return re;
+      }
+      // std::this_thread::yield();
+    }
+    throw std::runtime_error("Should not be here");
+  }
+
   size_t size() { return enqueue_count.load() - dequeue_count; }
 };
 
@@ -84,7 +96,7 @@ public:
       return re.value();
     }
     sema.acquire();
-    return queue.dequeue().value();
+    return queue.busy_wait_dequeue().value();
   }
 
   template <typename Rep, typename Period>
@@ -102,7 +114,7 @@ public:
     }
 
     if (sema.try_acquire_for(dur)) {
-      return queue.dequeue().value();
+      return queue.busy_wait_dequeue().value();
     } else {
       return std::nullopt;
     }
