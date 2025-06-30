@@ -23,6 +23,8 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
+* **June 30, 2025**: Prefix Cache Reuse Support. ([Tutorial](./doc/en/prefix_cache.md)).
+
 * **May 14, 2025**: Support Intel Arc GPU ([Tutorial](./doc/en/xpu.md)).
 
 * **Apr 29, 2025**: Support AMX-Int8、 AMX-BF16 and Qwen3MoE ([Tutorial](./doc/en/AMX.md))
