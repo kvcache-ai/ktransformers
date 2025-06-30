@@ -14,6 +14,7 @@ kvc2:
   gpu_only: false # Set to false to enable prefix cache mode (Disk + CPU + GPU KV storage)
   utilization_percentage: 1.0
   cpu_memory_size_GB: 500 # Amount of CPU memory allocated for KV Cache
+  disk_path: /mnt/data/kvc # Path to store KV Cache on disk
 ```
 
 ### Step 2: Update Submodules and Recompile

@@ -203,6 +203,7 @@ class Config(metaclass=Singleton):
         self.gpu_memory_size = 2*576*61*self.cache_lens
         self.utilization_percentage = 1.0 #cfg["kvc2"]["utilization_percentage"]
         self.cpu_memory_size_GB = cfg["kvc2"]["cpu_memory_size_GB"]
+        self.kvc2_disk_path = cfg["kvc2"]["disk_path"]
         # only support 2 prefill task
         self.max_prefill_batch_size = 2
         self.max_decode_batch_size = self.max_batch_size - self.max_prefill_batch_size 
