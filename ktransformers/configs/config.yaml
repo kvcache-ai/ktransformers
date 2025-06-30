@@ -67,6 +67,6 @@ attn:
   page_size: 256
   chunk_size: 256
 kvc2:
-  gpu_only: true 
+  gpu_only: false 
   utilization_percentage: 1.0
   cpu_memory_size_GB: 500

@@ -17,3 +17,6 @@
 [submodule "third_party/prometheus-cpp"]
 	path = third_party/prometheus-cpp
 	url = https://github.com/jupp0r/prometheus-cpp
+[submodule "third_party/PhotonLibOS"]
+	path = third_party/PhotonLibOS
+	url = https://github.com/alibaba/PhotonLibOS.git
