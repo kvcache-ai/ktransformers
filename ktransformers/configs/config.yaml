@@ -70,3 +70,4 @@ kvc2:
   gpu_only: false 
   utilization_percentage: 1.0
   cpu_memory_size_GB: 500
+  disk_path: /mnt/data/kvc

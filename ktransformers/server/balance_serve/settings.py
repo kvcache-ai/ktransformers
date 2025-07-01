@@ -51,7 +51,7 @@ def create_sched_settings(args):
     settings.k_cache_on = True
     settings.v_cache_on = False
 
-    settings.kvc2_root_path = '/mnt/data/persist-kvc'
+    settings.kvc2_root_path = args.kvc2_disk_path
     settings.kvc2_config_path = args.kvc2_config_dir
     settings.memory_pool_size_GB = args.cpu_memory_size_GB
     settings.evict_count = 40
@@ -104,7 +104,7 @@ def create_sched_settings_qwen2moe(args):
     settings.k_cache_on = True
     settings.v_cache_on = True
 
-    settings.kvc2_root_path = '/mnt/data/persist-kvc'
+    settings.kvc2_root_path = args.kvc2_disk_path
     settings.kvc2_config_path = args.kvc2_config_dir
     settings.memory_pool_size_GB = args.cpu_memory_size_GB
     settings.evict_count = 40
@@ -158,7 +158,7 @@ def create_sched_settings_qwen3moe(args):
     settings.k_cache_on = True
     settings.v_cache_on = True
 
-    settings.kvc2_root_path = '/mnt/data/persist-kvc'
+    settings.kvc2_root_path = args.kvc2_disk_path
     settings.kvc2_config_path = args.kvc2_config_dir
     settings.memory_pool_size_GB = args.cpu_memory_size_GB
     settings.evict_count = 40
