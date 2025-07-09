@@ -670,6 +670,7 @@ class KLinearMarlin(KLinearBase):
             padding_input[:,:self.orin_in_features] = x
             x = padding_input
         marlin_s = self.marlin_s.to(x.dtype)
+        x = x.contiguous()
         x = KTransformersOps.gptq_marlin_gemm(
             x,
             self.marlin_q_w,

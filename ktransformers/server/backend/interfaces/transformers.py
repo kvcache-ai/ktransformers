@@ -141,6 +141,7 @@ class TransformersInterface(BackendInterfaceBase):
     # thread_related
     last_request_id: Optional[str] = None
     ever_generated_ids: Set[int] = set()
+    attention_mask: torch.Tensor
 
     def __init__(self, args: ConfigArgs = default_args):
         self.args = args
