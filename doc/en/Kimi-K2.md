@@ -8,7 +8,7 @@ We are very pleased to announce that Ktransformers now supports Kimi-K2.
 ### Model & Resource Links
 
 - Official Kimi-K2 Release: 
-  - http://xxx.com
+  - Coming soon
 - GGUF Format(quantized models):
   - Coming soon
 
