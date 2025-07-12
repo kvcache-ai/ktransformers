@@ -5,6 +5,9 @@
 ### Overview
 We are very pleased to announce that Ktransformers now supports Kimi-K2.
 
+On a single-socket CPU with one consumer-grade GPU, running the Q4_K_M model yields roughly 10 TPS and requires about 600 GB of VRAM.  
+With a dual-socket CPU and sufficient system memory, enabling NUMA optimizations increases performance to about 14 TPS.
+
 ### Model & Resource Links
 
 - Official Kimi-K2 Release: 
