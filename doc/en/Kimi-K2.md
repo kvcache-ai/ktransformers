@@ -10,7 +10,7 @@ We are very pleased to announce that Ktransformers now supports Kimi-K2.
 - Official Kimi-K2 Release: 
   - https://huggingface.co/collections/moonshotai/kimi-k2-6871243b990f2af5ba60617d
 - GGUF Format(quantized models):
-  - Coming soon
+  - https://huggingface.co/KVCache-ai/Kimi-K2-Instruct-GGUF
 
 ## Installation Guide
 
