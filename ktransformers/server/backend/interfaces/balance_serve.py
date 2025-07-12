@@ -445,7 +445,7 @@ class BalanceServeInterface(BackendInterfaceBase):
         query_add.query_length = query_length
         profiler.set_counter("prefill", query_length)
         #@TODO add server
-        stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>")]
+        stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>", add_special_tokens=True)]
         query_add.stop_criteria = stop_criteria
         
         temperature, top_p, max_new_tokens = self.get_params(temperature, top_p, max_tokens, max_completion_tokens)
