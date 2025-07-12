@@ -19,20 +19,13 @@ With a dual-socket CPU and sufficient system memory, enabling NUMA optimizations
 
 ### 1. Resource Requirements
 
-The model running with 384 Experts requires approximately 2 TB of memory and 14 GB of GPU memory.
+The model running with 384 Experts requires approximately 600 GB of memory and 14 GB of GPU memory.
 
 ### 2. Prepare Models
 
-You can convert the fp8 to bf16.
-
 ```bash
-# download fp8
-huggingface-cli download --resume-download xxx
-
-# convert fp8 to bf16
-git clone https://github.com/deepseek-ai/DeepSeek-V3.git
-cd inference
-python fp8_cast_bf16.py --input-fp8-hf-path <path_to_fp8> --output-bf16-hf-path  <path_to_bf16>
+# download gguf
+huggingface-cli download --resume-download KVCache-ai/Kimi-K2-Instruct-GGUF
 
 ```
 
@@ -46,7 +39,7 @@ To install KTransformers, follow the official [Installation Guide](https://kvcac
 python ktransformers/server/main.py \
   --port 10002 \
   --model_path <path_to_safetensor_config> \
-  --gguf_path <path_to_bf16_files> \
+  --gguf_path <path_to_gguf_files> \
   --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml \
   --max_new_tokens 1024 \
   --cache_lens 32768 \
