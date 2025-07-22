@@ -9,7 +9,7 @@ static constexpr int repack_threads = 256;
 static constexpr int tile_k_size = tile_size;
 static constexpr int tile_n_size = tile_k_size * 4;
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+#if (defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800) || defined(__HIP_PLATFORM_AMD__)
 
 template <int const num_threads, int const num_bits, bool const has_perm>
 __global__ void marlin_repack_kernel(
