@@ -49,7 +49,7 @@
 - match:
     name: "^model\\.layers\\..*\\.block_sparse_moe\\.experts$"
   replace:
-    class: ktransformers.operators.experts.KTransformersExpertsV2     # custom MoE Kernel with expert paralleism
+    class: ktransformers.operators.experts.KSmallthinkerExperts     # custom MoE Kernel with expert paralleism
     kwargs:
       prefill_device: "cuda"
       prefill_op: None
