@@ -588,7 +588,7 @@ class KSmallthinkerAttention(BaseInjectedModule, SmallthinkerAttention):
         print(cos.shape)
         print(sin.shape)
         """
-        if freqs_cis:  
+        if freqs_cis is not None:  
             query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
 
 

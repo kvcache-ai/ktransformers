@@ -382,8 +382,7 @@ class Glm4MoeDecoderLayer(GradientCheckpointingLayer):
             past_key_value=past_key_value,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            **kwargs,
+            position_embeddings=position_embeddings
         )
         hidden_states = residual + hidden_states
 
@@ -539,7 +538,6 @@ class Glm4MoeModel(Glm4MoePreTrainedModel):
                 past_key_value=past_key_values,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
-                **kwargs,
             )
 
         hidden_states = self.norm(hidden_states)
