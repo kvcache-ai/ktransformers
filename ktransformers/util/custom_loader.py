@@ -139,7 +139,7 @@ class SafeTensorLoader(ModelLoader):
             experts_count = 0
             
             key_no_proj = False
-            if self.has_tensor(f"{base_key}.{experts_count}.up_proj.weight") or self.has_tensor(f"{base_key}.{experts_count}.up.weight"):
+            if self.has_tensor(f"{base_key}.{experts_count}.up.weight"):
                 key_no_proj = True
 
             # First, count how many experts we have by checking for expert 0's up_proj
