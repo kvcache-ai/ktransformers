@@ -19,8 +19,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ...configuration_utils import PretrainedConfig
-from ...modeling_rope_utils import rope_config_validation
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_rope_utils import rope_config_validation
 
 
 class Glm4MoeConfig(PretrainedConfig):

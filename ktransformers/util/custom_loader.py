@@ -138,8 +138,12 @@ class SafeTensorLoader(ModelLoader):
             base_key = key  # e.g. "model.layers.3.mlp.experts"
             experts_count = 0
             
+            key_no_proj = False
+            if self.has_tensor(f"{base_key}.{experts_count}.up_proj.weight") or self.has_tensor(f"{base_key}.{experts_count}.up.weight"):
+                key_no_proj = True
+
             # First, count how many experts we have by checking for expert 0's up_proj
-            while self.has_tensor(f"{base_key}.{experts_count}.up_proj.weight"):
+            while self.has_tensor(f"{base_key}.{experts_count}.up_proj.weight") or self.has_tensor(f"{base_key}.{experts_count}.up.weight"):
                 experts_count += 1
             
             if experts_count == 0:
@@ -152,9 +156,15 @@ class SafeTensorLoader(ModelLoader):
             
             # Load all expert weights
             for expert_id in range(experts_count):
-                up_key = f"{base_key}.{expert_id}.up_proj.weight"
-                gate_key = f"{base_key}.{expert_id}.gate_proj.weight"
-                down_key = f"{base_key}.{expert_id}.down_proj.weight"
+
+                if key_no_proj:
+                    up_key = f"{base_key}.{expert_id}.up.weight"
+                    gate_key = f"{base_key}.{expert_id}.gate.weight"
+                    down_key = f"{base_key}.{expert_id}.down.weight"
+                else:
+                    up_key = f"{base_key}.{expert_id}.up_proj.weight"
+                    gate_key = f"{base_key}.{expert_id}.gate_proj.weight"
+                    down_key = f"{base_key}.{expert_id}.down_proj.weight"
                 
                 up_tensor = self.load_tensor(up_key, device)
                 gate_tensor = self.load_tensor(gate_key, device)

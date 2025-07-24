@@ -154,6 +154,8 @@ class SmallthinkerConfig(PretrainedConfig):
         self.moe_num_primary_experts = moe_num_primary_experts
         self.moe_shared_primary_experts = moe_shared_primary_experts
         self.moe_ffn_hidden_size = moe_ffn_hidden_size
+        self.num_experts_per_tok = moe_num_active_primary_experts
+        self.moe_intermediate_size = moe_ffn_hidden_size
         self.moe_enable_early_router = moe_enable_early_router
         self.moe_primary_router_apply_softmax = moe_primary_router_apply_softmax
         self.moe_num_active_primary_experts = moe_num_active_primary_experts
