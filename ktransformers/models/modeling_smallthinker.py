@@ -839,7 +839,7 @@ def load_balancing_loss_func(
 
 
 # @auto_docstring
-class SmallthinkerForCausalLM(SmallthinkerPreTrainedModel, GenerationMixin):
+class SmallThinkerForCausalLM(SmallthinkerPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     def __init__(self, config):
         super().__init__(config)
@@ -897,9 +897,9 @@ class SmallthinkerForCausalLM(SmallthinkerPreTrainedModel, GenerationMixin):
         Example:
 
         ```python
-        >>> from transformers import AutoTokenizer, SmallthinkerForCausalLM
+        >>> from transformers import AutoTokenizer, SmallThinkerForCausalLM
 
-        >>> model = SmallthinkerForCausalLM.from_pretrained("mistralai/Smallthinker-8x7B-v0.1")
+        >>> model = SmallThinkerForCausalLM.from_pretrained("mistralai/Smallthinker-8x7B-v0.1")
         >>> tokenizer = AutoTokenizer.from_pretrained("mistralai/Smallthinker-8x7B-v0.1")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
@@ -1212,7 +1212,7 @@ class SmallthinkerForCausalLM(SmallthinkerPreTrainedModel, GenerationMixin):
 
 
 __all__ = [
-    "SmallthinkerForCausalLM",
+    "SmallThinkerForCausalLM",
     "SmallthinkerForQuestionAnswering",
     "SmallthinkerModel",
     "SmallthinkerPreTrainedModel",

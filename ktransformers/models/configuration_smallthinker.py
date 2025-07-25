@@ -97,6 +97,7 @@ class SmallthinkerConfig(PretrainedConfig):
         initializer_range=0.02,
         **kwargs,
     ):
+        moe_layer_layout = [1]*num_hidden_layers
         # Configuration sanitizers
         assert num_attention_heads % num_key_value_heads == 0,      "[Smallthinker config sanitizer] num_attention_heads must be divisible by num_key_value_heads"
         assert len(rope_layout) == num_hidden_layers,               "[Smallthinker config sanitizer] rope_layout must have the same length as num_hidden_layers"

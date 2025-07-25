@@ -215,7 +215,7 @@ if __name__ == '__main__':
         settings = create_sched_settings_qwen3moe(main_args)
     elif main_args.architectures == "Glm4MoeForCausalLM":
         settings = create_sched_settings_glm4moe(main_args)
-    elif main_args.architectures == "SmallthinkerForCausalLM":
+    elif main_args.architectures == "SmallThinkerForCausalLM":
         settings = create_sched_settings_smallthinker(main_args)
     else:
         settings = create_sched_settings(main_args)
