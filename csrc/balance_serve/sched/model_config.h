@@ -15,16 +15,14 @@ using ModelName = std::string;
 class ModelConfig {
 public:
   DimSize hidden_size;
-  DimSize intermediate_size;
   size_t max_position_embeddings;
-  std::string model_type;
   size_t num_attention_heads;
   size_t num_hidden_layers;
   size_t num_key_value_heads;
   size_t vocab_size;
 
-  NLOHMANN_DEFINE_TYPE_INTRUSIVE(ModelConfig, hidden_size, intermediate_size,
-                                 max_position_embeddings, model_type,
+  NLOHMANN_DEFINE_TYPE_INTRUSIVE(ModelConfig, hidden_size,
+                                 max_position_embeddings,
                                  num_attention_heads, num_hidden_layers,
                                  num_key_value_heads, vocab_size);
 

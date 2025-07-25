@@ -10,6 +10,7 @@
 #include "moe.h"
 #include <iostream>
 #include <cstdint>
+#include <math.h>
 
 #ifdef USE_NUMA
 #include <numa.h>
@@ -134,6 +135,14 @@ static float act_fn(float x) {
     return x / (1.0f + expf(-x));
 }
 
+static float act_fn_relu(float x) {
+    if(x > 0.0){
+        return x;
+    } else {
+        return 0.0;
+    }
+}
+
 void MOE::forward_one(int k, const uint64_t* expert_ids, const float* weights, const void* input, void* output, Backend* backend) {
     const void* gate_input_ptr;
     const void* up_input_ptr;
@@ -182,8 +191,16 @@ void MOE::forward_one(int k, const uint64_t* expert_ids, const float* weights, c
 
         float* up_output_ptr = s_up_output_[expert_idx] + ith * config_.stride;
         llamafile_sgemm(config_.stride, 1, config_.hidden_size / ggml_blck_size(config_.up_type), up_proj_ptr, config_.hidden_size / ggml_blck_size(config_.up_type), up_input_ptr, config_.hidden_size / ggml_blck_size(config_.up_type), up_output_ptr, config_.stride, 0, 1, GGML_TASK_TYPE_COMPUTE, config_.up_type, ggml_internal_get_type_traits(config_.up_type).vec_dot_type, GGML_TYPE_F32, GGML_PREC_DEFAULT);
-        for (int i = ith * config_.stride; i < (ith + 1) * config_.stride; i++) {
-            s_intermediate_fp32_[expert_idx][i] = act_fn(s_gate_output_[expert_idx][i]) * s_up_output_[expert_idx][i];
+        if(config_.use_silu){
+            // use silu as act fn
+            for (int i = ith * config_.stride; i < (ith + 1) * config_.stride; i++) {
+                s_intermediate_fp32_[expert_idx][i] = act_fn(s_gate_output_[expert_idx][i]) * s_up_output_[expert_idx][i];
+            }
+        } else {
+            // use relu as act fn
+            for (int i = ith * config_.stride; i < (ith + 1) * config_.stride; i++) {
+                s_intermediate_fp32_[expert_idx][i] = act_fn_relu(s_gate_output_[expert_idx][i]) * s_up_output_[expert_idx][i];
+            }
         }
         if (config_.stride % ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) == 0) {
             float* intermediate_fp32_ptr = s_intermediate_fp32_[expert_idx] + ith * config_.stride;
@@ -304,8 +321,14 @@ void MOE::forward_many(int qlen, int k, const uint64_t* expert_ids, const float*
         float* up_output_ptr = m_local_up_output_ptr_[expert_idx] + ith * stride;
         llamafile_sgemm(stride, m_local_num_[expert_idx], config_.hidden_size / ggml_blck_size(config_.up_type), up_proj_ptr, config_.hidden_size / ggml_blck_size(config_.up_type), up_input_ptr, config_.hidden_size / ggml_blck_size(config_.up_type), up_output_ptr, config_.intermediate_size, 0, 1, GGML_TASK_TYPE_COMPUTE, config_.up_type, ggml_internal_get_type_traits(config_.up_type).vec_dot_type, GGML_TYPE_F32, GGML_PREC_DEFAULT);
         for (int i = 0; i < m_local_num_[expert_idx]; i++) {
-            for (int j = ith * stride; j < (ith + 1) * stride; j++) {
-                m_local_intermediate_fp32_ptr_[expert_idx][i * config_.intermediate_size + j] = act_fn(m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size + j]) * m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size + j];
+            if(config_.use_silu){
+                for (int j = ith * stride; j < (ith + 1) * stride; j++) {
+                    m_local_intermediate_fp32_ptr_[expert_idx][i * config_.intermediate_size + j] = act_fn(m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size + j]) * m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size + j];
+                }
+            } else {
+                for (int j = ith * stride; j < (ith + 1) * stride; j++) {
+                    m_local_intermediate_fp32_ptr_[expert_idx][i * config_.intermediate_size + j] = act_fn_relu(m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size + j]) * m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size + j];
+                }
             }
             float* intermediate_fp32_ptr = m_local_intermediate_fp32_ptr_[expert_idx] + i * config_.intermediate_size + ith * stride;
             void* down_input_ptr = m_local_down_input_ptr_[expert_idx] + i * config_.intermediate_size * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) + ith * stride * ggml_type_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(config_.down_type).vec_dot_type);

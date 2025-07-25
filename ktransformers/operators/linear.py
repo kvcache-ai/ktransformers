@@ -88,10 +88,17 @@ class KLinearBase(ABC):
             if isinstance(self.gguf_loader, SafeTensorLoader):
                 # using safetensor_loader
                 tensor = self.gguf_loader.load_tensor(key+'.weight')
+                try:
+                    bias = self.gguf_loader.load_tensor(key+'.bias')
+                except:
+                    bias = None
                 if self.gguf_loader.has_tensor(key+'.weight_scale_inv'):
                     weight_scale_inv = self.gguf_loader.load_tensor(key+'.weight_scale_inv')
                     return nn.Parameter(tensor), nn.Parameter(weight_scale_inv)
-                return nn.Parameter(tensor)
+                if bias is not None:
+                    return nn.Parameter(tensor), nn.Parameter(bias)
+                else:
+                    return nn.Parameter(tensor)
                 
             elif self.gguf_loader.has_tensor(key + ".weight") or "kv_b_proj" in key:
                 if key + ".bias" in self.gguf_loader.tensor_file_map:

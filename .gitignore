@@ -27,3 +27,7 @@ mmlu_result*
 ktransformers/ktransformers_ext/cuda_musa/
 test_prompt.txt
 csrc/demo
+build*
+CMakeFiles/
+kvc2/
+sched/
