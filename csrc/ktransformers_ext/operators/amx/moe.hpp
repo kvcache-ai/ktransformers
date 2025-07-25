@@ -75,16 +75,17 @@ struct AMX_MOEConfig {
   int hidden_size;
   int intermediate_size;
   int max_len;
+  bool use_silu;
   void *gate_proj;
   void *up_proj;
   void *down_proj;
 
   AMX_MOEConfig() {}
 
-  AMX_MOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int max_len,
+  AMX_MOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int max_len, bool use_silu,
                 void *gate_proj, void *up_proj, void *down_proj)
       : expert_num(expert_num), routed_expert_num(routed_expert_num), hidden_size(hidden_size),
-        intermediate_size(intermediate_size), max_len(max_len), gate_proj(gate_proj), up_proj(up_proj),
+        intermediate_size(intermediate_size), max_len(max_len), use_silu(use_silu), gate_proj(gate_proj), up_proj(up_proj),
         down_proj(down_proj) {}
 };
 
