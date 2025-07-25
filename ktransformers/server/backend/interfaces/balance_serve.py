@@ -129,13 +129,13 @@ class Engine:
         self.sched_client = SchedulerClient(args.sched_port)
         self.updates = []
 
-        print(f"args.model_name: {args.model_name}")
+        print(f"args.architectures: {args.architectures}")
 
-        if args.model_name == "Qwen3MoeForCausalLM": 
+        if args.architectures == "Qwen3MoeForCausalLM": 
             config = Qwen3MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-        elif args.model_name == "Glm4MoeForCausalLM":
+        elif args.architectures == "Glm4MoeForCausalLM":
             config = Glm4MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-        elif args.model_name == "SmallThinkerForCausalLM":
+        elif args.architectures == "SmallThinkerForCausalLM":
             config = SmallthinkerConfig.from_pretrained(args.model_dir, trust_remote_code=True)
             config._attn_implementation = "eager"  
             config.moe_intermediate_size = config.moe_ffn_hidden_size
@@ -143,7 +143,7 @@ class Engine:
             try:
                 config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
             except:
-                raise ValueError(f"Model {args.model_name} not supported. Please check your model directory or model name.")
+                raise ValueError(f"Model {args.architectures} not supported. Please check your model directory or model name.")
 
 
          
@@ -463,8 +463,6 @@ class BalanceServeInterface(BackendInterfaceBase):
         profiler.create_and_start_timer("prefill")
         
         query_add = sched_ext.QueryAdd()
-        # input_ids = torch.tensor([[151331, 151333,  98964, 117392, 103408,  99668,   3837,  99073,  99444,
-        #   99052, 101052,  11314]], device='cuda')
         query_add.query_token =  input_ids[0].tolist()
         query_length = input_ids[0].shape[0]
         query_add.query_length = query_length
