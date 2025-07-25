@@ -462,6 +462,8 @@ class BalanceServeInterface(BackendInterfaceBase):
         profiler.create_and_start_timer("prefill")
         
         query_add = sched_ext.QueryAdd()
+        input_ids = torch.tensor([[151331, 151333,  98964, 117392, 103408,  99668,   3837,  99073,  99444,
+          99052, 101052,  11314]], device='cuda')
         query_add.query_token =  input_ids[0].tolist()
         query_length = input_ids[0].shape[0]
         query_add.query_length = query_length

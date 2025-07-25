@@ -149,7 +149,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="DeepSeek-V3", help="Model name")
     parser.add_argument("--prompt_lens", type=int, default=1024, help="prefill prompt lens, 1024 or 2048")
     parser.add_argument("--api_url", type=str, default="http://localhost:10002/v1/chat/completions", help="API URL")
-    parser.add_argument("--max_tokens", type=int, default=50, help="max decode tokens")
+    parser.add_argument("--max_tokens", type=int, default=500, help="max decode tokens")
     
     args = parser.parse_args()
     SERVER_URL = args.api_url
@@ -161,5 +161,8 @@ if __name__ == "__main__":
         prompt = ktansformer_prompt1024 * 2
     elif args.prompt_lens == 4096:
         prompt = ktansformer_prompt1024 * 4
+
+    prompt = "介绍秦始皇"
+
     asyncio.run(main(args.concurrent, prompt, max_tokens, model))
 

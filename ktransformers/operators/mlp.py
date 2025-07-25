@@ -64,7 +64,7 @@ class KGlm4MoeMLP(Glm4MoeMLP, BaseInjectedModule):
                  generate_device: str = "cuda",
                  **kwargs):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
-        self.orig_module.__init__(orig_module.config)
+        self.orig_module.__init__(orig_module.config, orig_module.hidden_size, orig_module.intermediate_size)
     def forward(self, x, bsz_tensor):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x, bsz_tensor)) * self.up_proj(x, bsz_tensor), bsz_tensor)
         return down_proj

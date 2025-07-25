@@ -625,7 +625,7 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel, GenerationMixin):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
-            **kwargs,
+            # **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state
@@ -635,7 +635,7 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size)
 
         return CausalLMOutputWithPast(
             loss=loss,
