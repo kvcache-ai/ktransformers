@@ -138,17 +138,11 @@ class ArgumentParser:
         self.cfg.server_ip = args.host
         self.cfg.server_port = args.port
         self.cfg.user_force_think = args.force_think
-        
-        if args.model_name == "Qwen3MoeForCausalLM": 
-            model_config = Qwen3MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-        elif args.model_name == "Glm4MoeForCausalLM":
-            model_config = Glm4MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-        elif args.model_name == "SmallThinkerForCausalLM":
-            model_config = SmallthinkerConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-            model_config._attn_implementation = "eager"  
-        else:
+        try:
+            model_config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
+        except:
             try:
-                model_config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
+                model_config = Glm4MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
             except:
                 raise ValueError(f"Model {args.model_name} not supported. Please check your model directory or model name.")
 
