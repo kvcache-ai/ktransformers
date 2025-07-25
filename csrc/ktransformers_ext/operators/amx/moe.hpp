@@ -69,22 +69,29 @@ static inline __m512 act_fn(__m512 gate_val, __m512 up_val) {
   return _mm512_mul_ps(act_val, up_val);
 }
 
+static inline __m512 relu_act_fn(__m512 gate_val, __m512 up_val) {
+  __m512 zero_vec = _mm512_setzero_ps();
+  __m512 act_val = _mm512_max_ps(zero_vec, gate_val);
+  return _mm512_mul_ps(act_val, up_val);
+}
+
 struct AMX_MOEConfig {
   int expert_num;
   int routed_expert_num;
   int hidden_size;
   int intermediate_size;
   int max_len;
+  bool use_silu;
   void *gate_proj;
   void *up_proj;
   void *down_proj;
 
   AMX_MOEConfig() {}
 
-  AMX_MOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int max_len,
+  AMX_MOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int max_len, bool use_silu,
                 void *gate_proj, void *up_proj, void *down_proj)
       : expert_num(expert_num), routed_expert_num(routed_expert_num), hidden_size(hidden_size),
-        intermediate_size(intermediate_size), max_len(max_len), gate_proj(gate_proj), up_proj(up_proj),
+        intermediate_size(intermediate_size), max_len(max_len), use_silu(use_silu), gate_proj(gate_proj), up_proj(up_proj),
         down_proj(down_proj) {}
 };
 
@@ -336,18 +343,35 @@ public:
           gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
           up_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_up_output_ptr_[expert_idx], ith, nth);
           auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
-          for (int i = 0; i < m_local_num_[expert_idx]; i++) {
-            ggml_bf16_t *gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
-            ggml_bf16_t *up_output_ptr = &m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size];
-            for (int j = n_start; j < n_end; j += 32) {
-              __m512 gate_val0, gate_val1, up_val0, up_val1;
-              avx512_32xbf16_to_32xfp32((__m512i *)(gate_output_ptr + j), &gate_val0, &gate_val1);
-              avx512_32xbf16_to_32xfp32((__m512i *)(up_output_ptr + j), &up_val0, &up_val1);
-              __m512 result0 = act_fn(gate_val0, up_val0);
-              __m512 result1 = act_fn(gate_val1, up_val1);
-              avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i *)(gate_output_ptr + j));
-            }
+          if (config_.use_silu) {
+            for (int i = 0; i < m_local_num_[expert_idx]; i++) {
+                ggml_bf16_t *gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
+                ggml_bf16_t *up_output_ptr = &m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size];
+                for (int j = n_start; j < n_end; j += 32) {
+                  __m512 gate_val0, gate_val1, up_val0, up_val1;
+                  avx512_32xbf16_to_32xfp32((__m512i *)(gate_output_ptr + j), &gate_val0, &gate_val1);
+                  avx512_32xbf16_to_32xfp32((__m512i *)(up_output_ptr + j), &up_val0, &up_val1);
+                  __m512 result0 = act_fn(gate_val0, up_val0);
+                  __m512 result1 = act_fn(gate_val1, up_val1);
+                  avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i *)(gate_output_ptr + j));
+                }
+              }
           }
+          else {
+              for (int i = 0; i < m_local_num_[expert_idx]; i++) {
+                ggml_bf16_t *gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
+                ggml_bf16_t *up_output_ptr = &m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size];
+                for (int j = n_start; j < n_end; j += 32) {
+                  __m512 gate_val0, gate_val1, up_val0, up_val1;
+                  avx512_32xbf16_to_32xfp32((__m512i *)(gate_output_ptr + j), &gate_val0, &gate_val1);
+                  avx512_32xbf16_to_32xfp32((__m512i *)(up_output_ptr + j), &up_val0, &up_val1);
+                  __m512 result0 = relu_act_fn(gate_val0, up_val0);
+                  __m512 result1 = relu_act_fn(gate_val1, up_val1);
+                  avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i *)(gate_output_ptr + j));
+                }
+              }
+          }
+          
         },
         nullptr);
     backend->do_work_stealing_job(

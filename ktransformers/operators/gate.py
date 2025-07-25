@@ -213,3 +213,4 @@ class KMoEGateIPEXLLM(KMoEGate):
                                                self.n_group, self.topk_group, self.top_k,
                                                self.norm_topk_prob, self.routed_scaling_factor)
         return topk_idx, topk_weight.to(x.dtype)
+
