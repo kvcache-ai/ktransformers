@@ -83,7 +83,7 @@ class KSmallthinkerForCausalLM(SmallthinkerPreTrainedModel):
         with torch.cuda.stream(current_stream):
             residual = torch.zeros_like(hidden_states)
             for i, decode_layer in enumerate(self.model.layers):
-                router_input = hidden_states.clone()
+                router_input = hidden_states
                 hidden_states, residual = decode_layer.input_layernorm(hidden_states, num_tokens_tensors, residual)
                 hidden_states = decode_layer.self_attn(hidden_states, self.cache, 
                                                        freqs_cis if self.model.rope_layout[i] else None, 
