@@ -5,8 +5,9 @@
 ### Overview
 We are excited to announce that **KTransformers now supports both SmallThinker and GLM-4-MoE**.
 
-- **SmallThinker-21B (bf16)**: ~26 TPS **on a dual-socket CPU with one consumer-grade GPU**, requiring ~42 GB DRAM.  
-- **GLM-4-MoE 110B (bf16)**: ~11 TPS **on a dual-socket CPU with one consumer-grade GPU**, requiring ~220 GB DRAM.
+- **SmallThinker-21B (bf16)**: ~26 TPS **on a dual-socket CPU with one consumer-grade GPU**, requiring ~84 GB DRAM.  
+- **GLM-4-MoE 110B (bf16)**: ~11 TPS **on a dual-socket CPU with one consumer-grade GPU**, requiring ~440 GB DRAM.
+- **GLM-4-MoE 110B (AMX INT8)**: prefill ~309 TPS / decode ~16 TPS **on a dual-socket CPU with one consumer-grade GPU**, requiring ~220 GB DRAM.
 
 ### Model & Resource Links
 - **SmallThinker-21B**
@@ -20,10 +21,12 @@ We are excited to announce that **KTransformers now supports both SmallThinker a
 
 ### 1. Resource Requirements
 
-| Model                 | Precision | Experts | DRAM Needed | GPU Memory Needed* | TPS (approx.) | 
-|-----------------------|-----------|---------|-------------|--------------------|---------------|
-| SmallThinker-21B      | bf16      | 32      | ~42 GB      | 14GB               | ~26 TPS       | 
-| GLM-4-MoE 110B        | bf16      | 128     | ~220 GB     | 14GB               | ~11 TPS       | 
+| Model                     | Precision  | Experts | DRAM Needed | GPU Memory Needed\* | TPS (approx.)                   |
+| ------------------------- | ---------- | ------- | ----------- | ------------------- | --------------------------------------- |
+| SmallThinker-21B          | bf16       | 32      | \~42 GB     | 14 GB               | \~26 TPS                    |
+| GLM-4-MoE 110B            | bf16       | 128     | \~220 GB    | 14 GB               | \~11 TPS                    |
+| GLM-4-MoE 110B (AMX INT8) | int8       | 128     | \~220 GB    | 14 GB               |  \~16 TPS
+
 
 \* Exact GPU memory depends on sequence length, batch size, and kernels used.  
 
