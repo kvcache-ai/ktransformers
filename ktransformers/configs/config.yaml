@@ -24,7 +24,7 @@ model:
   type: balance_serve
   # type: ktransformers
 
-  name: SmallthinkerForCausalLM
+  name: SmallThinkerForCausalLM
   path: /mnt/data/models/Smallthinker-21B
   gguf_path: /mnt/data/models/Smallthinker-21B
 

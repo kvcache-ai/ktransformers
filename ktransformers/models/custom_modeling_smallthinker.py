@@ -24,7 +24,7 @@ torch.set_grad_enabled(False)
 torch.set_default_dtype(torch.bfloat16)
 import flashinfer
 
-class KSmallthinkerForCausalLM(SmallthinkerPreTrainedModel):
+class KSmallThinkerForCausalLM(SmallthinkerPreTrainedModel):
 
     cache: KGQACache
     use_cuda_graph = False
