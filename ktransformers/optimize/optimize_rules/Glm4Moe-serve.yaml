@@ -1,0 +1,90 @@
+- match:
+    class: ktransformers.models.modeling_glm4_moe.Glm4MoeRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.KGlm4MoeRotaryEmbedding
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^lm_head$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "VLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+# - match:
+#     name: "^model\\.layers\\..*$"  # regular expression 
+#     class: torch.nn.Linear  # only match modules matching name and class simultaneously
+#   replace:
+#     class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+#     kwargs:
+#       generate_device: "cuda"
+#       prefill_device: "cuda"
+#       generate_op: "VLinearMarlin"
+#       prefill_op: "KLinearTorch"
+- match:
+    name: "^model\\.layers\\.(?!.*mlp\\.shared_expert_gate).*$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_glm4_moe.Glm4MoeMoE
+  replace:
+    class: ktransformers.operators.experts.KGlm4MoeMoE
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KGlm4Experts     # custom MoE Kernel with expert paralleism
+    kwargs:
+      prefill_device: "cuda"
+      prefill_op: None
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda"
+  recursive: False # don't recursively inject submodules of this module
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.balance_serve_attention.KGlm4MoeAttention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cpu"
+
+- match:
+    class: ktransformers.models.modeling_glm4_moe.Glm4MoeRMSNorm
+  replace:
+    class: ktransformers.operators.layernorm.KGlm4MoeRMSNorm
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    class: ktransformers.models.modeling_glm4_moe.Glm4MoeMLP
+  replace:
+    class:  ktransformers.operators.mlp.KGlm4MoeMLP
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
