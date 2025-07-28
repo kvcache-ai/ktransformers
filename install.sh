@@ -25,15 +25,15 @@ rm -rf csrc/ktransformers_ext/cuda/dist
 rm -rf csrc/ktransformers_ext/cuda/*.egg-info
 rm -rf ~/.ktransformers
 echo "Installing python dependencies from requirements.txt"
-pip install -r requirements-local_chat.txt
-pip install -r ktransformers/server/requirements.txt
+pip install --resume-retries 9 -r requirements-local_chat.txt
+pip install --resume-retries 9 -r ktransformers/server/requirements.txt
 
 echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 
 if [[ "$DEV_BACKEND" == "cuda" ]]; then
     echo "Installing custom_flashinfer for CUDA backend"
-    pip install third_party/custom_flashinfer/
+    pip install --resume-retries 9 third_party/custom_flashinfer/
 fi
 # SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
 # echo "Copying thirdparty libs to $SITE_PACKAGES"
