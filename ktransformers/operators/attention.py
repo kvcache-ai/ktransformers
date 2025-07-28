@@ -693,6 +693,7 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        from ktransformers.server.backend.interfaces.ktransformers import multi_batch_enabled
         if torch.xpu.is_available():
             return self.forward_xpu(
                 hidden_states,
@@ -707,7 +708,8 @@ class KDeepseekV2Attention(BaseInjectedModule, DeepseekV2Attention):
         elif (os.name == 'nt'
               or get_compute_capability() < 8
               or hidden_states.device.type == 'cpu'
-              or device_manager.gpu_vendor != GPUVendor.NVIDIA):
+              or device_manager.gpu_vendor != GPUVendor.NVIDIA
+              or multi_batch_enabled):
             return self.forward_windows(
                 hidden_states,
                 attention_mask,
