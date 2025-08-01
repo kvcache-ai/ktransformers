@@ -1426,7 +1426,7 @@ class Qwen2MoeForCausalLM(Qwen2MoePreTrainedModel):
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states)
+        logits = self.lm_head(hidden_states[:,-1:,:])
         logits = logits.float()
 
         loss = None

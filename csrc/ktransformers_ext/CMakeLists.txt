@@ -2,11 +2,11 @@ cmake_minimum_required(VERSION 3.16)
 project(cpuinfer_ext VERSION 0.1.0)
 
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math -fopenmp")
-add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
 set(CMAKE_BUILD_TYPE "Release")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -ffast-math -fopenmp")
 # set(CMAKE_BUILD_TYPE "Debug")
@@ -53,6 +53,21 @@ if (MSVC)
 else ()
     set(CMAKE_GENERATOR_PLATFORM_LWR "")
 endif ()
+
+if(NOT DEFINED _GLIBCXX_USE_CXX11_ABI)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c
+        "import torch; print('1' if torch.compiled_with_cxx11_abi() else '0')"
+        OUTPUT_VARIABLE ABI_FLAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    set(_GLIBCXX_USE_CXX11_ABI ${ABI_FLAG} CACHE STRING "C++11 ABI setting from PyTorch" FORCE)
+endif()
+
+add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
 
 if (NOT MSVC)
     if (LLAMA_STATIC)
@@ -111,6 +126,17 @@ if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM_LWR STR
             # Raspberry Pi 3, 4, Zero 2 (32-bit)
             list(APPEND ARCH_FLAGS -mno-unaligned-access)
         endif()
+        # add_compile_definitions(__ARM_NEON)
+        # list(APPEND ARCH_FLAGS -march=armv8.2-a+fp16+dotprod)
+        # add_compile_definitions(__ARM_FEATURE_DOTPROD)
+        # add_compile_definitions(__aarch64__)
+
+        add_compile_definitions(__ARM_NEON)
+        list(APPEND ARCH_FLAGS -march=armv8.2-a+fp16+dotprod+sve)
+        add_compile_definitions(__ARM_FEATURE_DOTPROD)
+        add_compile_definitions(__ARM_FEATURE_SVE)
+        add_compile_definitions(__ARM_FEATURE_MATMUL_INT8)
+        add_compile_definitions(__aarch64__)
     endif()
 elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR MATCHES "^(x86_64|i686|amd64|x64|win32)$" OR
         (NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_GENERATOR_PLATFORM_LWR AND
@@ -118,7 +144,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
     message(STATUS "x86 detected")
     set(HOST_IS_X86 TRUE)
     set(HAS_AVX512 TRUE)
-    set(__HAS_AMX__ TRUE)
+    set(HAS_AMX TRUE)
     add_compile_definitions(__x86_64__)
     # check AVX512
     execute_process(
@@ -126,7 +152,6 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         OUTPUT_VARIABLE LSCPU_OUTPUT
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    # message(STATUS "LSCPU_OUTPUT: ${LSCPU_OUTPUT}")
 
     string(FIND "${LSCPU_OUTPUT}" "avx512" COMPILER_SUPPORTS_AVX512F)
     
@@ -137,6 +162,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         message(STATUS "Compiler and/or CPU do NOT support AVX512F")
         set(HAS_AVX512 False)
     endif()
+    
 
     # check AMX
     string(FIND "${LSCPU_OUTPUT}" "amx" COMPILER_SUPPORTS_AMX)
@@ -147,6 +173,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
     else()
         message(STATUS "Compiler does NOT support AMX")
     endif()
+
     if (MSVC)
         # instruction set detection for MSVC only
         if (LLAMA_NATIVE)
@@ -328,7 +355,7 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 
-if (HOST_IS_X86 AND HAS_AVX512 AND __HAS_AMX__)
+if (HOST_IS_X86 AND HAS_AVX512 AND HAS_AMX)
     aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/amx SOURCE_DIR6)
 endif()
 
@@ -346,13 +373,20 @@ add_custom_target(
     COMMENT "Running clang-format on all source files"
 )
 
+include(FindPkgConfig)
+if(PKG_CONFIG_FOUND)
+  pkg_search_module(HWLOC REQUIRED IMPORTED_TARGET hwloc)
+else(PKG_CONFIG_FOUND)
+  message(FATAL_ERROR "FindHWLOC needs pkg-config program and PKG_CONFIG_PATH must contain the path to hwloc.pc file.")
+endif(PKG_CONFIG_FOUND)
+
 
 add_library(llamafile STATIC ${SOURCE_DIR4})
 
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
 pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
-target_link_libraries(${PROJECT_NAME} PRIVATE llama)
+target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC)
 
 
 if(WIN32)
@@ -370,30 +404,13 @@ elseif(UNIX)
     endif()
 endif()
 
-# Define the USE_NUMA option
-option(USE_NUMA "Disable NUMA support" OFF)
-
-# Check if the USE_NUMA environment variable is set
-if(DEFINED ENV{USE_NUMA})
-    set(USE_NUMA ON)
-endif()
-
-if(USE_NUMA)
-    message(STATUS "NUMA support is enabled")
-else()
-    message(STATUS "NUMA support is disabled")
-endif()
 
 find_library(NUMA_LIBRARY NAMES numa)
-
-if(NUMA_LIBRARY AND USE_NUMA)
+if (NUMA_LIBRARY)
     message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
     target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
-    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_NUMA)
 else()
-    if(USE_NUMA)
-        message(FATAL_ERROR "NUMA library not found - maybe sudo apt install libnuma-dev")
-    else()
-        message(STATUS "NUMA library not found or user not set USE_NUMA - disabling NUMA support")
-    endif()
+    message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
+
+target_link_libraries(cpuinfer_ext PRIVATE m)

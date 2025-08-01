@@ -1,0 +1,500 @@
+{"idx": 0, "completion": "def remove_Occ(string, char):\n    string = string.replace(char, '', 1).replace(char, '', -2)\n    return string\n[DONE]"}
+{"idx": 1, "completion": "def sort_matrix(matrix):\n    return sorted(matrix, key=lambda row: sum(row))\n[DONE]"}
+{"idx": 2, "completion": "from collections import Counter\ndef count_common(words):\n    most_common = Counter(words).most_common()\n    return most_common\n[DONE]"}
+{"idx": 3, "completion": "def find_Volume(base, height, length):\n    return base * height * length / 2\n[DONE]"}
+{"idx": 4, "completion": "def split_lowerstring(string):\n    return [string[i] for i in range(1,len(string)) if string[i].islower()]\n[DONE]"}
+{"idx": 5, "completion": "import re\ndef text_lowercase_underscore(text):\n    pattern = r'\\b[a-z]+_[a-z]+\\b'\n    if re.search(pattern, text):\n        return 'Found a match!'\n    else:\n        return 'Not matched!'\n[DONE]"}
+{"idx": 6, "completion": "def square_perimeter(side):\n    return 4 * side\n[DONE]"}
+{"idx": 7, "completion": "def remove_dirty_chars(str1, str2):\n    return ''.join([char for char in str1 if char not in str2])\n[DONE]"}
+{"idx": 8, "completion": "def test_duplicate(nums):\n    return len(nums) != len(set(nums))\n[DONE]"}
+{"idx": 9, "completion": "def is_woodall(n):\n    return n == 2**n - 1\n[DONE]"}
+{"idx": 10, "completion": "def multiples_of_num(n, m):\n    return [n * i for i in range(1, m + 1)]\n[DONE]"}
+{"idx": 11, "completion": "def find_first_duplicate(nums):\n    seen = set()\n    for num in nums:\n        if num in seen:\n            return num\n        seen.add(num)\n    return -1\n[DONE]"}
+{"idx": 12, "completion": "def maximum_Sum(list_of_lists):\n    max_sum = 0\n    for lst in list_of_lists:\n        max_sum = max(max_sum, sum(lst))\n    return max_sum\n[DONE]"}
+{"idx": 13, "completion": "def binary_to_decimal(binary):\n    decimal = 0\n    for digit in str(binary):\n        decimal = decimal*2 + int(digit)\n    return decimal\n[DONE]"}
+{"idx": 14, "completion": "def find_Product(arr, n):\n    product = 1\n    for i in range(n):\n        if arr.count(arr[i]) == 1:\n            product *= arr[i]\n    return product\n[DONE]"}
+{"idx": 15, "completion": "def check_k_elements(tuples_list, k):\n    for t in tuples_list:\n        if len(t) != k:\n            return False\n    return True\n[DONE]"}
+{"idx": 16, "completion": "def remove_digits(lst):\n    return [s for s in lst if not any(c.isdigit() for c in s)]\n[DONE]"}
+{"idx": 17, "completion": "def binomial_Coeff(n, k):\n    res = 1\n    if (k > n - k):\n        k = n - k\n    for i in range(k):\n        res = res * (n - i)\n        res = res // (i + 1)\n    return res\n[DONE]"}
+{"idx": 18, "completion": "def get_Odd_Occurrence(arr, max_num):\n    from collections import Counter\n    dict = Counter(arr)\n    for key in dict:\n        if dict[key]%2 != 0:\n            return key\n    return max_num\n[DONE]"}
+{"idx": 19, "completion": "def count_Substring_With_Equal_Ends(s):\n    count = 0\n    for i in range(len(s)):\n        for j in range(i+1, len(s)+1):\n            if s[i] == s[j-1]:\n                count += 1\n    return count\n[DONE]"}
+{"idx": 20, "completion": "import heapq\nfrom collections import Counter\ndef func(lists, k):\n    freq = Counter()\n    for l in lists:\n        for num in l:\n            freq[num] += 1\n    heap = []\n    for num, count in freq.items():\n        if len(heap) < k:\n            heapq.heappush(heap, (count, num))\n        else:\n            heapq.heappushpop(heap, (count, num))\n    return [num for _, num in heapq.nlargest(k, heap)]\n[DONE]"}
+{"idx": 21, "completion": "def max_Prime_Factors(n):\n    i = 2\n    while i * i <= n:\n        if n % i:\n            i += 1\n        else:\n            n //= i\n    if n > 1:\n        return n\n    return i\n[DONE]"}
+{"idx": 22, "completion": "def decimal_To_Binary(num):\n    return bin(num).replace(\"0b\", \"\")\n[DONE]"}
+{"idx": 23, "completion": "def find_missing(arr, n):\n    for i in range(len(arr)):\n        if arr[i] != n:\n            return n\n        n += 1\n    return None\n[DONE]"}
+{"idx": 24, "completion": "def find_rect_num(n):\n    return n * (n + 1) * (n + 2) // 6\n[DONE]"}
+{"idx": 25, "completion": "def find_Nth_Digit(numerator,denominator,n):\n    return int(str(numerator/denominator)[n-1])\n[DONE]"}
+{"idx": 26, "completion": "def sort_mixed_list(mixed_list):\n    return sorted(mixed_list, key=lambda x: (isinstance(x, str), x))\n[DONE]"}
+{"idx": 27, "completion": "def div_even_odd(lst):\n    even = [x for x in lst if x % 2 == 0]\n    odd = [x for x in lst if x % 2 != 0]\n    return even[0] / odd[0]\n[DONE]"}
+{"idx": 28, "completion": "def rearrange_string(s):\n    s = list(s)\n    for i in range(len(s)-1):\n        while s[i] == s[i+1]:\n            s[i], s[i+1] = s[i+1], s[i]\n    return ''.join(s)\n[DONE]"}
+{"idx": 29, "completion": "import collections\ndef freq_element(lists):\n    freq = collections.Counter()\n    for l in lists:\n        freq.update(l)\n    return dict(freq)\n[DONE]"}
+{"idx": 30, "completion": "def filter_evennumbers(n):\n    even_numbers = list(filter(lambda x: x % 2 == 0, n))\n    return even_numbers\n[DONE]"}
+{"idx": 31, "completion": "def find_Sum(arr, n):\n    sum = 0\n    for i in range(n):\n        for j in range(i + 1, n):\n            if arr[i] == arr[j]:\n                sum += arr[i]\n    return sum\n[DONE]"}
+{"idx": 32, "completion": "import re\ndef text_match(text):\n    pattern = r\"[a-z]+_[a-z]+\"\n    if re.search(pattern, text):\n        return \"Found a match!\"\n    else:\n        return \"Not matched!\"\n[DONE]"}
+{"idx": 33, "completion": "def text_match_string(text):\n    pattern = r'^python'\n    if re.match(pattern, text):\n        return 'Found a match!'\n    else:\n        return 'Not matched!'\n[DONE]"}
+{"idx": 34, "completion": "from math import gcd\ndef get_gcd(nums):\n    result = nums[0]\n    for num in nums[1:]:\n        result = gcd(result, num)\n    return result\n[DONE]"}
+{"idx": 35, "completion": "def test_distinct(nums):\n    return len(nums) == len(set(nums))\n[DONE]"}
+{"idx": 36, "completion": "def compute_Last_Digit(a, b):\n    return (b/a)%10\n[DONE]"}
+{"idx": 37, "completion": "def odd_bit_set_number(n):\n    odd_bit_set = 0\n    for i in range(0, 32, 2):\n        odd_bit_set |= (1 << i)\n    return n | odd_bit_set\n[DONE]"}
+{"idx": 38, "completion": "def specified_element(two_d_list, index):\n    return [item[index] for item in two_d_list]\n[DONE]"}
+{"idx": 39, "completion": "def min_length_list(lists):\n    min_length = min(map(len, lists))\n    return (min_length, [lst for lst in lists if len(lst) == min_length])\n[DONE]"}
+{"idx": 40, "completion": "def check_equilateral(a, b, c):\n    if a == b == c:\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 41, "completion": "def parallelogram_area(base, height):\n    return base * height\n[DONE]"}
+{"idx": 42, "completion": "def check_Equality(string):\n    if string[0] == string[-1]:\n        return \"Equal\"\n    else:\n        return \"Not Equal\"\n[DONE]"}
+{"idx": 43, "completion": "def counting_sort(arr):\n    max_val = max(arr)\n    count = [0] * (max_val + 1)\n    for num in arr:\n        count[num] += 1\n    sorted_arr = []\n    for i, cnt in enumerate(count):\n        sorted_arr.extend([i] * cnt)\n    return sorted_arr\n[DONE]"}
+{"idx": 44, "completion": "def tn_gp(a,r,n):\n    return a*(r**(n-1))\n[DONE]"}
+{"idx": 45, "completion": "def check(n):\n    rev = int(str(n)[::-1])\n    return 2*rev - 1 == n\n[DONE]"}
+{"idx": 46, "completion": "def find_Max_Num(nums, n):\n    nums.sort(reverse=True)\n    result = 0\n    for i in range(n):\n        result += nums[i] * pow(10, n - i - 1)\n    return result\n[DONE]"}
+{"idx": 47, "completion": "def opposite_Signs(num1, num2):\n    return num1 * num2 < 0\n[DONE]"}
+{"idx": 48, "completion": "def is_octagonal(n):\n    return n * (3 * n - 2)\n[DONE]"}
+{"idx": 49, "completion": "def max_len_sub(nums, diff):\n    dp = [0] * len(nums)\n    dp[0] = 1\n    for i in range(1, len(nums)):\n        dp[i] = 1\n        for j in range(i):\n            if nums[i] - nums[j] <= diff:\n                dp[i] = max(dp[i], dp[j] + 1)\n    return max(dp)\n[DONE]"}
+{"idx": 50, "completion": "def count_Substrings(s, n):\n    count = 0\n    for i in range(n):\n        sum = 0\n        for j in range(i, n):\n            sum += int(s[j])\n            if (sum == j - i + 1):\n                count += 1\n    return count\n[DONE]"}
+{"idx": 51, "completion": "def smallest_num(nums):\n    return min(nums)\n[DONE]"}
+{"idx": 52, "completion": "def max_difference(pairs):\n    return max(b - a for a, b in pairs)\n[DONE]"}
+{"idx": 53, "completion": "def subject_marks(lst):\n    return sorted(lst, key=lambda x: x[1])\n[DONE]"}
+{"idx": 54, "completion": "def recursive_list_sum(lst):\n    total = 0\n    for element in lst:\n        if isinstance(element, list):\n            total += recursive_list_sum(element)\n        else:\n            total += element\n    return total\n[DONE]"}
+{"idx": 55, "completion": "def pos_count(nums):\n    return len([num for num in nums if num > 0])\n[DONE]"}
+{"idx": 56, "completion": "def bell_number(n):\n    bell = [[0 for i in range(n+1)] for j in range(n+1)]\n    bell[0][0] = 1\n    for i in range(1, n+1):\n        bell[i][0] = bell[i-1][i-1]\n        for j in range(1, i+1):\n            bell[i][j] = bell[i-1][j-1] + bell[i][j-1]\n    return bell[n][0]\n[DONE]"}
+{"idx": 57, "completion": "def is_Monotonic(A):\n    return (all(A[i] <= A[i+1] for i in range(len(A) - 1)) or\n            all(A[i] >= A[i+1] for i in range(len(A) - 1)))\n[DONE]"}
+{"idx": 58, "completion": "def is_sublist(list1, sublist):\n    for i in range(len(list1)):\n        if list1[i] == sublist[0]:\n            if list1[i:i+len(sublist)] == sublist:\n                return True\n    return False\n[DONE]"}
+{"idx": 59, "completion": "def get_equal(tuples, length):\n    for tup in tuples:\n        if len(tup) != length:\n            return 'All tuples do not have same length'\n    return 'All tuples have same length'\n[DONE]"}
+{"idx": 60, "completion": "def comb_sort(arr):\n    gap = len(arr)\n    shrink = 1.3\n    sorted = False\n    while sorted == False:\n        gap = int(gap / shrink)\n        if gap <= 1:\n            gap = 1\n            sorted = True\n        i = 0\n        while i + gap < len(arr):\n            if arr[i] > arr[i + gap]:\n                arr[i], arr[i + gap] = arr[i + gap], arr[i]\n                sorted = False\n            i += 1\n    return arr\n[DONE]"}
+{"idx": 61, "completion": "def dif_Square(n):\n    for i in range(100000):\n        for j in range(i,100000):\n            if (i*i) - (j*j) == n:\n                return True\n            elif (j*j) - (i*i) == n:\n                return True\n    return False\n[DONE]"}
+{"idx": 62, "completion": "import re\ndef multiple_split(string):\n    delimiters = ['\\n', '*', ' ']\n    regex_pattern = '|'.join(map(re.escape, delimiters))\n    result = re.split(regex_pattern, string)\n    return [i for i in result if i]\n[DONE]"}
+{"idx": 63, "completion": "def is_samepatterns(patterns, arr):\n    if len(patterns) != len(arr):\n        return False\n    for i in range(len(patterns)):\n        if patterns[i] != arr[i]:\n            return False\n    return True\n[DONE]"}
+{"idx": 64, "completion": "def find_tuples(lst, k):\n    result = [str(i) for i in lst if all(j % k == 0 for j in i)]\n    return '[' + ', '.join(result) + ']'\n[DONE]"}
+{"idx": 65, "completion": "def count_Squares(m, n):\n    return (m*(m+1)*(2*m+1))//6 + (n*(n+1)*(2*n+1))//6 - (m*n*(m+n+1))//2\n[DONE]"}
+{"idx": 66, "completion": "def is_Diff(n):\n    even_sum = 0\n    odd_sum = 0\n    for i in str(n):\n        if int(i) % 2 == 0:\n            even_sum += int(i)\n        else:\n            odd_sum += int(i)\n    return even_sum - odd_sum\n[DONE]"}
+{"idx": 67, "completion": "def count_With_Odd_SetBits(n):\n    count = 0\n    for i in range(n+1):\n        if bin(i).count('1')%2!=0:\n            count+=1\n    return count\n[DONE]"}
+{"idx": 68, "completion": "def word_len(word):\n    return len(word) % 2 != 0\n[DONE]"}
+{"idx": 69, "completion": "def tetrahedral_number(n):\n    return sum([i for i in range(1, n+1)])\n[DONE]"}
+{"idx": 70, "completion": "def zip_tuples(t1, t2):\n    return list(zip(t1, t2))\n[DONE]"}
+{"idx": 71, "completion": "import math\ndef volume_sphere(r):\n    volume = (4/3) * math.pi * (r**3)\n    return volume\n[DONE]"}
+{"idx": 72, "completion": "def get_Char(s):\n    res = 0\n    for i in s:\n        res += ord(i)\n    return chr(res)\n[DONE]"}
+{"idx": 73, "completion": "def sequence(n):\n    a = [0, 1, 1]\n    for i in range(3, n + 1):\n        a.append(a[a[i - 1]] + a[i - a[i - 1]])\n    return a[n]\n[DONE]"}
+{"idx": 74, "completion": "import math\ndef surfacearea_sphere(r):\n    surface_area = 4 * math.pi * r**2\n    return surface_area\n[DONE]"}
+{"idx": 75, "completion": "def centered_hexagonal_number(n):\n    return n * (2 * n - 1) * (2 * n - 2) // 3\n[DONE]"}
+{"idx": 76, "completion": "def merge_dictionaries_three(dict1, dict2, dict3):\n    return {**dict1, **dict2, **dict3}\n[DONE]"}
+{"idx": 77, "completion": "def freq_count(nums):\n    return {num: nums.count(num) for num in nums}\n[DONE]"}
+{"idx": 78, "completion": "def closest_num(n):\n    return n - 1\n[DONE]"}
+{"idx": 79, "completion": "def len_log(words):\n    return max(len(word) for word in words)\n[DONE]"}
+{"idx": 80, "completion": "def find_substring(lst, word):\n    return any(word in s for s in lst)\n[DONE]"}
+{"idx": 81, "completion": "def is_undulating(n):\n    s = str(n)\n    return s[::2] in s[1::2] and s[1::2] in s[::2]\n[DONE]"}
+{"idx": 82, "completion": "def power(a, b):\n    if b == 0:\n        return 1\n    if b == 1:\n        return a\n    return a * power(a, b - 1)\n[DONE]"}
+{"idx": 83, "completion": "def index_minimum(tuples):\n    return min(tuples, key=lambda x: x[1])[0]\n[DONE]"}
+{"idx": 84, "completion": "def Find_Min_Length(lists):\n    min_length = len(lists[0])\n    for lst in lists:\n        if len(lst) < min_length:\n            min_length = len(lst)\n    return min_length\n[DONE]"}
+{"idx": 85, "completion": "def divisor(n):\n    count = 0\n    for i in range(1, n + 1):\n        if n % i == 0:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 86, "completion": "def frequency_lists(lists):\n    freq = {}\n    for sublist in lists:\n        for item in sublist:\n            if item in freq:\n                freq[item] += 1\n            else:\n                freq[item] = 1\n    return freq\n[DONE]"}
+{"idx": 87, "completion": "def multiply_num(nums):\n    product = 1\n    for num in nums:\n        product *= num\n    return product / len(nums)\n[DONE]"}
+{"idx": 88, "completion": "def decimal_to_binary(n):\n    return bin(n).replace(\"0b\", \"\")\n[DONE]"}
+{"idx": 89, "completion": "def next_smallest_palindrome(n):\n    num_str = str(n)\n    length = len(num_str)\n    if length % 2 == 0:\n        mid = length // 2\n    else:\n        mid = length // 2 + 1\n    left_half = num_str[:mid]\n    increment = 1\n    while True:\n        num_str = str(int(left_half) * (10 ** increment) + int(left_half[::-1]))\n        if len(num_str) == length:\n            return int(num_str)\n        increment += 1\n[DONE]"}
+{"idx": 90, "completion": "def kth_element(arr, n, k):\n    arr.sort()\n    return arr[k-1]\n[DONE]"}
+{"idx": 91, "completion": "def snake_to_camel(snake_str):\n    components = snake_str.split('_')\n    return ''.join(x.title() for x in components)\n[DONE]"}
+{"idx": 92, "completion": "def eulerian_num(n, m):\n    if m == 0 or m == n: return 1\n    return (m + 1) * eulerian_num(n - 1, m) + (n - m) * eulerian_num(n - 1, m - 1)\n[DONE]"}
+{"idx": 93, "completion": "def sort_sublists(lists):\n    return [sorted(sublist, key=lambda x: x.lower()) for sublist in lists]\n[DONE]"}
+{"idx": 94, "completion": "def count(lst):\n    return sum(lst)\n[DONE]"}
+{"idx": 95, "completion": "def add_lists(list1, tuple1):\n    return tuple1 + tuple(list1)\n[DONE]"}
+{"idx": 96, "completion": "def count_Hexadecimal(start, end):\n    count = 0\n    for num in range(start, end + 1):\n        if num > 0 and num < 16:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 97, "completion": "import heapq\ndef merge_sorted_list(*lists):\n    return list(heapq.merge(*lists))\n[DONE]"}
+{"idx": 98, "completion": "def odd_Equivalent(binary_string, length):\n    count = 0\n    for i in range(length):\n        rotated_string = binary_string[i:] + binary_string[:i]\n        if rotated_string.count('1') % 2 != 0:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 99, "completion": "def extract_missing(ranges, start, end):\n    ranges.sort()\n    missing = []\n    prev_end = start\n    for r in ranges:\n        if r[0] > prev_end + 1:\n            missing.append((prev_end + 1, r[0] - 1))\n        prev_end = max(prev_end, r[1])\n    if end > prev_end:\n        missing.append((prev_end + 1, end))\n    return missing\n[DONE]"}
+{"idx": 100, "completion": "def common_in_nested_lists(lists):\n    common = set.intersection(*map(set, lists))\n    return list(common)\n[DONE]"}
+{"idx": 101, "completion": "import math\ndef perimeter(radius, height):\n    return 2 * math.pi * radius + 2 * math.pi * height\n[DONE]"}
+{"idx": 102, "completion": "def check_integer(string):\n    try:\n        int(string)\n        return True\n    except ValueError:\n        return False\n[DONE]"}
+{"idx": 103, "completion": "def assign_freq(tup_list):\n    freq_list = []\n    for tup in tup_list:\n        freq = tup_list.count(tup)\n        freq_list.append(tup + (freq,))\n    return str(freq_list)\n[DONE]"}
+{"idx": 104, "completion": "def empty_dit(lst):\n    return all(not d for d in lst)\n[DONE]"}
+{"idx": 105, "completion": "def tuple_to_int(nums):\n    return int(''.join(map(str, nums)))\n[DONE]"}
+{"idx": 106, "completion": "def list_to_float(list):\n    return [(float(x), float(y)) for x, y in list]\n[DONE]"}
+{"idx": 107, "completion": "def string_to_list(string):\n    return string.split()\n[DONE]"}
+{"idx": 108, "completion": "def search(arr, n):\n    for i in range(0, n, 2):\n        if (i == n - 1 or arr[i] != arr[i + 1]):\n            return arr[i]\n[DONE]"}
+{"idx": 109, "completion": "def max_product_tuple(lst):\n    max_product = float('-inf')\n    for pair in lst:\n        product = pair[0] * pair[1]\n        if product > max_product:\n            max_product = product\n    return max_product\n[DONE]"}
+{"idx": 110, "completion": "def check_triplet(arr, x, y, z):\n    arr.sort()\n    for i in range(0, len(arr) - 2):\n        l = i + 1\n        r = len(arr) - 1\n        while (l < r):\n            if (arr[i] + arr[l] + arr[r] == 0):\n                return True\n            elif (arr[i] + arr[l] + arr[r] < 0):\n                l += 1\n            else:\n                r -= 1\n    return False\n[DONE]"}
+{"idx": 111, "completion": "def smartNumber(n):\n    count = 0\n    num = 0\n    while count < n:\n        num += 1\n        if isSmart(num):\n            count += 1\n    return num\ndef isSmart(num):\n    for i in range(2, num):\n        if num % i == 0:\n            return False\n    return True\n[DONE]"}
+{"idx": 112, "completion": "def amicable_numbers_sum(n):\n    def sum_of_proper_divisors(x):\n        divisors = [1]\n        for i in range(2, int(x**0.5) + 1):\n            if x % i == 0:\n                divisors.append(i)\n                if i != x // i:\n                    divisors.append(x // i)\n        return sum(divisors)\n    amicable_sum = 0\n    for i in range(2, n + 1):\n        if i == sum_of_proper_divisors(sum_of_proper_divisors(i)) and i != sum_of_proper_divisors(i):\n            amicable_sum += i\n    return amicable_sum\n[DONE]"}
+{"idx": 113, "completion": "import cmath\ndef angle_complex(x, y):\n    return cmath.phase(complex(x, y))\n[DONE]"}
+{"idx": 114, "completion": "def find_length(str, n):\n    count_0 = 0\n    count_1 = 0\n    max_diff = 0\n    for i in range(n):\n        if str[i] == '0':\n            count_0 += 1\n        else:\n            count_1 += 1\n        diff = abs(count_0 - count_1)\n        if max_diff < diff:\n            max_diff = diff\n    return max_diff\n[DONE]"}
+{"idx": 115, "completion": "def sum(x, y):\n    lcm = x * y // math.gcd(x,y)\n    sum = 0\n    for i in range(1, min(x, y) + 1):\n        if x % i == 0 and y % i == 0:\n            sum += i\n    return sum\n[DONE]"}
+{"idx": 116, "completion": "def multiply_int(a, b):\n    result = 0\n    for i in range(abs(b)):\n        result += abs(a)\n    if (a < 0 and b < 0) or (a > 0 and b > 0):\n        return result\n    else:\n        return -result\n[DONE]"}
+{"idx": 117, "completion": "def long_words(n,words):\n    long_words_list = [word for word in words.split() if len(word)>n]\n    return long_words_list\n[DONE]"}
+{"idx": 118, "completion": "def magic_square_test(mat):\n    n = len(mat)\n    if n != len(mat[0]):\n        return False\n    magic_sum = sum(mat[0])\n    for i in range(1, n):\n        if sum(mat[i]) != magic_sum:\n            return False\n    for i in range(n):\n        col_sum = 0\n        for j in range(n):\n            col_sum += mat[j][i]\n        if col_sum != magic_sum:\n            return False\n    diag_sum1 = 0\n    diag_sum2 = 0\n    for i in range(n):\n        diag_sum1 += mat[i][i]\n        diag_sum2 += mat[i][n - i - 1]\n    if diag_sum1 != magic_sum or diag_sum2 != magic_sum:\n        return False\n    return True\n[DONE]"}
+{"idx": 119, "completion": "def max_occurrences(lst):\n    return max((x, lst.count(x)) for x in set(lst))[0], max((x, lst.count(x)) for x in set(lst))[1]\n[DONE]"}
+{"idx": 120, "completion": "def reverse_vowels(s):\n    vowels = 'aeiouAEIOU'\n    s = list(s)\n    i, j = 0, len(s) - 1\n    while i < j:\n        if s[i] not in vowels:\n            i += 1\n        elif s[j] not in vowels:\n            j -= 1\n        else:\n            s[i], s[j] = s[j], s[i]\n            i += 1\n            j -= 1\n    return ''.join(s)\n[DONE]"}
+{"idx": 121, "completion": "def tup_string(tup):\n    str = ''.join(tup)\n    return str\n[DONE]"}
+{"idx": 122, "completion": "def sum_negativenum(nums):\n    return sum(list(filter(lambda x: x < 0, nums)))\n[DONE]"}
+{"idx": 123, "completion": "def check_last(arr, p, x):\n    arr[-1] += x\n    for i in range(1, p):\n        arr[0] += 1\n        arr[-1] -= 1\n    return \"EVEN\" if arr[-1] % 2 == 0 else \"ODD\"\n[DONE]"}
+{"idx": 124, "completion": "def hexagonal_num(n):\n    return n * (2 * n - 1)\n[DONE]"}
+{"idx": 125, "completion": "def cal_electbill(unit):\n    if unit <= 100:\n        bill = unit * 2.475\n    elif unit <= 200:\n        bill = 100 * 2.475 + (unit - 100) * 3.475\n    else:\n        bill = 100 * 2.475 + 100 * 3.475 + (unit - 200) * 4.475\n    return bill\n[DONE]"}
+{"idx": 126, "completion": "def zero_count(nums):\n    count = nums.count(0)\n    return count / len(nums)\n[DONE]"}
+{"idx": 127, "completion": "def is_Sum_Of_Powers_Of_Two(n):\n    if n == 0:\n        return False\n    while n > 0:\n        if n % 2 == 0:\n            n //= 2\n        else:\n            n -= 1\n    return n == 0\n[DONE]"}
+{"idx": 128, "completion": "import math\ndef circle_circumference(radius):\n    circumference = 2 * math.pi * radius\n    return round(circumference, 5)\n[DONE]"}
+{"idx": 129, "completion": "def extract_singly(tuples):\n    singly = []\n    for tup in tuples:\n        for num in tup:\n            if tup.count(num) == 1:\n                singly.append(num)\n    return singly\n[DONE]"}
+{"idx": 130, "completion": "def pancake_sort(arr):\n    for i in range(len(arr), 1, -1):\n        max_index = arr[:i].index(max(arr[:i]))\n        arr[:max_index+1] = reversed(arr[:max_index+1])\n        arr[:i] = reversed(arr[:i])\n    return arr\n[DONE]"}
+{"idx": 131, "completion": "def count_samepair(list1, list2, list3):\n    count = 0\n    for i in list1:\n        if i in list2 and i in list3:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 132, "completion": "def find_lists(t):\n    return len([x for x in t if isinstance(x, list)])\n[DONE]"}
+{"idx": 133, "completion": "def sum_Pairs(nums, target):\n    nums.sort()\n    left, right = 0, len(nums) - 1\n    result = 0\n    while left < right:\n        if nums[left] + nums[right] < target:\n            result += nums[left] * (right - left)\n            left += 1\n        else:\n            result += nums[right] * (right - left)\n            right -= 1\n    return result\n[DONE]"}
+{"idx": 134, "completion": "def max_Abs_Diff(arr, n):\n    max_diff = arr[1] - arr[0]\n    for i in range(0, n):\n        for j in range(i + 1, n):\n            if abs(arr[i] - arr[j]) > max_diff:\n                max_diff = abs(arr[i] - arr[j])\n    return max_diff\n[DONE]"}
+{"idx": 135, "completion": "def ascii_value_string(string):\n    ascii_value = 0\n    for char in string:\n        ascii_value += ord(char)\n    return ascii_value\n[DONE]"}
+{"idx": 136, "completion": "def max_path_sum(triangle, rows, cols):\n    for i in range(rows-1, -1, -1):\n        for j in range(0, i):\n            triangle[i-1][j] += max(triangle[i][j], triangle[i][j+1])\n    return triangle[0][0]\n[DONE]"}
+{"idx": 137, "completion": "def sum_digits_twoparts(n):\n    n = str(n)\n    n = list(map(int, n))\n    if len(n) == 1:\n        return n[0]\n    else:\n        mid = len(n) // 2\n        return sum(n[mid:]) + sum_digits_twoparts(int(''.join(map(str, n[:mid]))))\n[DONE]"}
+{"idx": 138, "completion": "def longest_subseq_with_diff_one(arr, n):\n    dp = [1] * n\n    for i in range(1, n):\n        for j in range(i):\n            if abs(arr[i] - arr[j]) == 1:\n                dp[i] = max(dp[i], dp[j] + 1)\n    return max(dp)\n[DONE]"}
+{"idx": 139, "completion": "def does_Contain_B(a, b, c):\n    if a > c or b > c:\n        return False\n    if a <= b:\n        return a <= c <= b\n    return a <= c or c <= b\n[DONE]"}
+{"idx": 140, "completion": "def is_coprime(x,y):\n    while y:\n        x, y = y, x % y\n    return x == 1\n[DONE]"}
+{"idx": 141, "completion": "def merge_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    left_half = arr[:mid]\n    right_half = arr[mid:]\n    return merge(merge_sort(left_half), merge_sort(right_half))\ndef merge(left, right):\n    result = []\n    left_index = 0\n    right_index = 0\n    while left_index < len(left) and right_index < len(right):\n        if left[left_index] < right[right_index]:\n            result.append(left[left_index])\n            left_index += 1\n        else:\n            result.append(right[right_index])\n            right_index += 1\n    result.extend(left[left_index:])\n    result.extend(right[right_index:])\n    return result\n[DONE]"}
+{"idx": 142, "completion": "import math\ndef parabola_vertex(a, b, c):\n    vertex_x = -b / (2 * a)\n    vertex_y = a * vertex_x ** 2 + b * vertex_x + c\n    return (vertex_x, vertex_y)\n[DONE]"}
+{"idx": 143, "completion": "def specified_element(two_d_list, specified_num):\n    result = [sublist[specified_num] for sublist in two_d_list]\n    return result\n[DONE]"}
+{"idx": 144, "completion": "def even_bit_toggle_number(num):\n    even_bit_mask = 0xAAAAAAAA\n    return num ^ even_bit_mask\n[DONE]"}
+{"idx": 145, "completion": "def tuple_int_str(tup):\n    return tuple(tuple(int(num) for num in s) for s in tup)\n[DONE]"}
+{"idx": 146, "completion": "def encode_list(lst):\n    if not lst:\n        return []\n    else:\n        last = lst[0]\n        count = 1\n        result = []\n        for i in range(1, len(lst)):\n            if lst[i] == last:\n                count += 1\n            else:\n                result.append([count, last])\n                last = lst[i]\n                count = 1\n        result.append([count, last])\n        return result\n[DONE]"}
+{"idx": 147, "completion": "def min_Ops(arr, n, k):\n    arr.sort()\n    if arr[-1] - arr[0] > k:\n        return -1\n    else:\n        return k - (arr[-1] - arr[0])\n[DONE]"}
+{"idx": 148, "completion": "def month_season(month,day):\n    if month in ['December','January','February']:\n        return 'winter'\n    elif month in ['March','April','May']:\n        return 'spring'\n    elif month in ['June','July','August']:\n        return 'summer'\n    elif month in ['September','October','November']:\n        return 'autumn'\n[DONE]"}
+{"idx": 149, "completion": "def solution(a, b, n):\n    for x in range(100):\n        for y in range(100):\n            if a * x + b * y == n:\n                return 'x = ', x, ', y = ', y\n    return 'No solution'\n[DONE]"}
+{"idx": 150, "completion": "def remove_elements(list1, list2):\n    return [i for i in list1 if i not in list2]\n[DONE]"}
+{"idx": 151, "completion": "def sum_series(n):\n    sum = 0\n    for i in range(n,0,-2):\n        sum += i\n    return sum\n[DONE]"}
+{"idx": 152, "completion": "import math\ndef area_polygon(n, s):\n    area = (0.25 * n * s ** 2) / math.tan(math.pi / n)\n    return area\n[DONE]"}
+{"idx": 153, "completion": "def areEquivalent(n1, n2):\n    sum1 = 0\n    sum2 = 0\n    for i in range(1, n1):\n        if n1 % i == 0:\n            sum1 += i\n    for j in range(1, n2):\n        if n2 % j == 0:\n            sum2 += j\n    return sum1 == sum2\n[DONE]"}
+{"idx": 154, "completion": "def count_char_position(input_string):\n    count = 0\n    for i in range(len(input_string)):\n        if i < 26:\n            if input_string[i].lower() == chr(97 + i):\n                count += 1\n        else:\n            if input_string[i].lower() == chr(103 + (i - 26)):\n                count += 1\n    return count\n[DONE]"}
+{"idx": 155, "completion": "def find_even_Pair(arr, n):\n    count = 0\n    for i in range(0, n):\n        for j in range(i + 1, n):\n            if (arr[i] ^ arr[j]) % 2 == 0:\n                count += 1\n    return count\n[DONE]"}
+{"idx": 156, "completion": "def next_Power_Of_2(n):\n    power = 1\n    while power < n:\n        power *= 2\n    return power\n[DONE]"}
+{"idx": 157, "completion": "def frequency(arr, num):\n    return arr.count(num)\n[DONE]"}
+{"idx": 158, "completion": "def get_pell(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, 2*b + a\n    return a\n[DONE]"}
+{"idx": 159, "completion": "def sum_range_list(nums, start, end):\n    return sum(nums[start:end+1])\n[DONE]"}
+{"idx": 160, "completion": "def perimeter_pentagon(side):\n    return 5 * side\n[DONE]"}
+{"idx": 161, "completion": "def count_occurance(string):\n    return string.count('std')\n[DONE]"}
+{"idx": 162, "completion": "import re\ndef remove_splchar(string):\n    return re.sub('[^A-Za-z0-9 ]+', '', string)\n[DONE]"}
+{"idx": 163, "completion": "def group_keyvalue(pairs):\n    result = {}\n    for key, value in pairs:\n        if key not in result:\n            result[key] = []\n        result[key].append(value)\n    return result\n[DONE]"}
+{"idx": 164, "completion": "def is_valid_parenthese(s):\n    stack = []\n    for char in s:\n        if char in ['(', '{', '[']:\n            stack.append(char)\n        else:\n            if not stack:\n                return False\n            current_char = stack.pop()\n            if current_char == '(':\n                if char != ')':\n                    return False\n            if current_char == '{':\n                if char != '}':\n                    return False\n            if current_char == '[':\n                if char != ']':\n                    return False\n    if stack:\n        return False\n    return True\n[DONE]"}
+{"idx": 165, "completion": "def perimeter_triangle(a, b, c):\n    return a + b + c\n[DONE]"}
+{"idx": 166, "completion": "from math import gcd\ndef answer(a, b):\n    lcm = a * b // gcd(a, b)\n    while not (a <= lcm <= b):\n        if lcm < a:\n            lcm = lcm * b // gcd(lcm, b)\n        else:\n            lcm = lcm * a // gcd(lcm, a)\n    return (a, b)\n[DONE]"}
+{"idx": 167, "completion": "def string_literals(literals, string):\n    for literal in literals:\n        if literal not in string:\n            return 'Not Matched!'\n    return 'Matched!'\n[DONE]"}
+{"idx": 168, "completion": "def is_num_keith(num):\n    num_str = str(num)\n    num_list = [int(digit) for digit in num_str]\n    while num_list[-1] < num:\n        next_num = sum(num_list)\n        if next_num == num:\n            return True\n        num_list.append(next_num)\n        num_list.pop(0)\n    return False\n[DONE]"}
+{"idx": 169, "completion": "import math\ndef distance_lat_long(lat1, long1, lat2, long2):\n    dLat = math.radians(lat2-lat1)\n    dLon = math.radians(long2-long1)\n    lat1 = math.radians(lat1)\n    lat2 = math.radians(lat2)\n    a = math.sin(dLat/2) * math.sin(dLat/2) + math.sin(dLon/2) * math.sin(dLon/2) * math.cos(lat1) * math.cos(lat2) \n    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a)) \n    distance = 6371 * c\n    return distance\n[DONE]"}
+{"idx": 170, "completion": "def common_prefix(strs, n):\n    prefix = \"\"\n    for i in zip(*strs):\n        if len(set(i)) == 1:\n            prefix += i[0]\n        else:\n            break\n    return prefix[:n]\n[DONE]"}
+{"idx": 171, "completion": "import re\ndef find_character(string):\n    uppercase = re.findall(r'[A-Z]', string)\n    lowercase = re.findall(r'[a-z]', string)\n    special_char = re.findall(r'[^A-Za-z0-9]', string)\n    numeric_val = re.findall(r'[0-9]', string)\n    return (uppercase, lowercase, special_char, numeric_val)\n[DONE]"}
+{"idx": 172, "completion": "def count_pairs(arr, k, m):\n    count = 0\n    for i in range(len(arr)):\n        for j in range(i+1, len(arr)):\n            if abs(arr[i] - arr[j]) == m:\n                count += 1\n    return count\n[DONE]"}
+{"idx": 173, "completion": "def greater_specificnum(nums, num):\n    return any(i > num for i in nums)\n[DONE]"}
+{"idx": 174, "completion": "import math\ndef parabola_focus(a, b, c):\n    h = -b / (2 * a)\n    k = c - (b ** 2) / (4 * a)\n    return (h, k)\n[DONE]"}
+{"idx": 175, "completion": "import re\ndef check_literals(string, literals):\n    for literal in literals:\n        if re.search(literal, string):\n            return 'Matched!'\n    return 'Not Matched!'\n[DONE]"}
+{"idx": 176, "completion": "def longest_common_subsequence(X, Y, m, n):\n    dp = [[0 for x in range(n+1)] for x in range(m+1)]\n    for i in range(m+1):\n        for j in range(n+1):\n            if i == 0 or j == 0:\n                dp[i][j] = 0\n            elif X[i-1] == Y[j-1]:\n                dp[i][j] = dp[i-1][j-1] + 1\n            else:\n                dp[i][j] = max(dp[i-1][j], dp[i][j-1])\n    return dp[m][n]\n[DONE]"}
+{"idx": 177, "completion": "def prod_Square(n):\n    for i in range(1, int(n**0.5) + 1):\n        for j in range(i, int(n**0.5) + 1):\n            if i*i * j*j == n:\n                return True\n    return False\n[DONE]"}
+{"idx": 178, "completion": "def first_Missing_Positive(nums, n):\n    nums = set(nums)\n    for i in range(1, n+1):\n        if i not in nums:\n            return i\n    return n+1\n[DONE]"}
+{"idx": 179, "completion": "def count_Intgral_Points(x1, y1, x2, y2):\n    x = abs(x2 - x1)\n    y = abs(y2 - y1)\n    return x * y\n[DONE]"}
+{"idx": 180, "completion": "def check_monthnumber(month):\n    month_days = {\"January\":31, \"February\":28, \"March\":31, \"April\":30, \"May\":31, \"June\":30, \"July\":31, \"August\":31, \"September\":30, \"October\":31, \"November\":30, \"December\":31}\n    return month_days[month] == 30\n[DONE]"}
+{"idx": 181, "completion": "def check_String(s):\n    return any(c.isalpha() for c in s) and any(c.isdigit() for c in s)\n[DONE]"}
+{"idx": 182, "completion": "def remove_tuple(tup):\n    return tuple(set(tup))\n[DONE]"}
+{"idx": 183, "completion": "def octal_To_Decimal(num):\n    decimal = 0\n    base = 1\n    while (num):\n        last_digit = num % 10\n        num = int(num / 10)\n        decimal += last_digit * base\n        base = base * 8\n    return decimal\n[DONE]"}
+{"idx": 184, "completion": "def first(arr, target, start):\n    low = 0\n    high = len(arr) - 1\n    result = -1\n    while low <= high:\n        mid = (low + high) // 2\n        if arr[mid] == target:\n            result = mid\n            high = mid - 1\n        elif arr[mid] < target:\n            low = mid + 1\n        else:\n            high = mid - 1\n    return result + start\n[DONE]"}
+{"idx": 185, "completion": "def remove_tuples(tuples_list, k):\n    return [t for t in tuples_list if len(t) != k]\n[DONE]"}
+{"idx": 186, "completion": "def find_exponentio(t1, t2):\n    return tuple(x**y for x, y in zip(t1, t2))\n[DONE]"}
+{"idx": 187, "completion": "import math\ndef largest_triangle(a, b):\n    h = math.sqrt(a**2 - b**2)\n    return a + b + h\n[DONE]"}
+{"idx": 188, "completion": "def highest_Power_of_2(n):\n    power = 1\n    while power <= n:\n        power *= 2\n    return power//2\n[DONE]"}
+{"idx": 189, "completion": "def position_max(nums):\n    max_num = max(nums)\n    return [i for i, num in enumerate(nums) if num == max_num]\n[DONE]"}
+{"idx": 190, "completion": "def chkList(list):\n    return len(set(list)) == 1\n[DONE]"}
+{"idx": 191, "completion": "def remove_even(string):\n    result = \"\"\n    for i in range(len(string)):\n        if i % 2 == 0:\n            result += string[i]\n    return result\n[DONE]"}
+{"idx": 192, "completion": "def hamming_Distance(x, y):\n    xor_result = x ^ y\n    distance = 0\n    while xor_result:\n        distance += 1\n        xor_result &= xor_result - 1\n    return distance\n[DONE]"}
+{"idx": 193, "completion": "def count(string, char):\n    return string.count(char)\n[DONE]"}
+{"idx": 194, "completion": "def inversion_elements(tup):\n    return tuple(-x for x in tup)\n[DONE]"}
+{"idx": 195, "completion": "def concatenate_elements(tup):\n    return tuple(''.join(tup[i:i+2]) for i in range(0, len(tup), 1))\n[DONE]"}
+{"idx": 196, "completion": "def find_longest_repeating_subseq(str):\n    n = len(str)\n    dp = [[0 for x in range(n + 1)] for x in range(n + 1)]\n    res = 0\n    for i in range(1, n + 1):\n        for j in range(1, n + 1):\n            if (str[i - 1] == str[j - 1] and i != j):\n                dp[i][j] = 1 + dp[i - 1][j - 1]\n            else:\n                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])\n            res = max(res, dp[i][j])\n    return res\n[DONE]"}
+{"idx": 197, "completion": "import re\ndef is_decimal(decimal):\n    regex = r'^-?\\d+(\\.\\d{2})?$'\n    if re.match(regex, decimal):\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 198, "completion": "def heap_replace(heap, new_item):\n    heap[heap.index(min(heap))] = new_item\n    return heap\n[DONE]"}
+{"idx": 199, "completion": "import re\ndef is_allowed_specific_char(string):\n    regex = re.compile('^[a-z A-Z 0-9]*$')\n    if regex.match(string):\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 200, "completion": "def count_Num(n):\n    count = 0\n    while n:\n        count += n & 1\n        n >>= 1\n        count += n & 1\n    return count\n[DONE]"}
+{"idx": 201, "completion": "def fourth_Power_Sum(n):\n    sum = 0\n    for i in range(1, n+1):\n        sum += i**4\n    return sum\n[DONE]"}
+{"idx": 202, "completion": "def concatenate_strings(tup1, tup2):\n    return tuple(x + y for x, y in zip(tup1, tup2))\n[DONE]"}
+{"idx": 203, "completion": "import math\ndef degree_radian(radian):\n    degree = radian * 180 / math.pi\n    return degree\n[DONE]"}
+{"idx": 204, "completion": "def decode_list(lst):\n    decoded_list = []\n    for item in lst:\n        if isinstance(item, list):\n            count = item[0]\n            value = item[1]\n            decoded_list.extend([value] * count)\n        else:\n            decoded_list.append(item)\n    return decoded_list\n[DONE]"}
+{"idx": 205, "completion": "def check_subset_list(list1, list2):\n    for sublist in list2:\n        if sublist not in list1:\n            return False\n    return True\n[DONE]"}
+{"idx": 206, "completion": "def first_Repeated_Char(string):\n    for i in string:\n        if string.count(i) > 1:\n            return i\n    return '\\0'\n[DONE]"}
+{"idx": 207, "completion": "def min_Operations(a, b):\n    return abs(a-b)\n[DONE]"}
+{"idx": 208, "completion": "def extract_min_max(tup, k):\n    sorted_tuple = sorted(tup)\n    min_k = tuple(sorted_tuple[:k])\n    max_k = tuple(sorted_tuple[-k:])\n    return min_k + max_k\n[DONE]"}
+{"idx": 209, "completion": "import re\ndef replace_max_specialchar(string, n):\n    return re.sub('[ ,.]', ':', string, count=n)\n[DONE]"}
+{"idx": 210, "completion": "def first_even(nums):\n    for num in nums:\n        if num % 2 == 0:\n            return num\n[DONE]"}
+{"idx": 211, "completion": "def check_type(tup):\n    return all(isinstance(i, type(tup[0])) for i in tup)\n[DONE]"}
+{"idx": 212, "completion": "def is_majority(arr, n, x):\n    count = 0\n    for i in range(n):\n        if arr[i] == x:\n            count += 1\n    if count > n//2:\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 213, "completion": "def count_Set_Bits(n):\n    count = 0\n    while n:\n        count += n & 1\n        n >>= 1\n    return count\n[DONE]"}
+{"idx": 214, "completion": "def find_Min(arr,low,high):\n    if high < low:\n        return arr[0]\n    if high == low:\n        return arr[low]\n    mid = (low + high)//2\n    if mid < high and arr[mid+1] < arr[mid]:\n        return arr[mid+1]\n    if mid > low and arr[mid] < arr[mid - 1]:\n        return arr[mid]\n    if arr[high] > arr[mid]:\n        return find_Min(arr, low, mid-1)\n    return find_Min(arr, mid+1, high)\n[DONE]"}
+{"idx": 215, "completion": "def odd_values_string(str):\n    result = \"\"\n    for i in range(len(str)):\n        if i % 2 == 0:\n            result += str[i]\n    return result\n[DONE]"}
+{"idx": 216, "completion": "def min_of_three(a, b, c):\n    return min(a, b, c)\n[DONE]"}
+{"idx": 217, "completion": "def all_Bits_Set_In_The_Given_Range(n, l, r):\n    mask = ((1 << (r - l + 1)) - 1) << (l - 1)\n    return (n & mask) == mask\n[DONE]"}
+{"idx": 218, "completion": "def re_arrange_array(arr, n):\n    j = 0\n    for i in range(0, n):\n        if (arr[i] < 0):\n            arr[i], arr[j] = arr[j], arr[i]\n            j += 1\n    return arr\n[DONE]"}
+{"idx": 219, "completion": "def replace_blank(string, character):\n    return string.replace(\" \", character)\n[DONE]"}
+{"idx": 220, "completion": "def max_sum(triangle, n):\n    for i in range(n-1, 0, -1):\n        for j in range(0, n-i):\n            triangle[i-1][j] += max(triangle[i][j], triangle[i][j+1])\n    return triangle[0][0]\n[DONE]"}
+{"idx": 221, "completion": "def larg_nnum(nums, n):\n    return sorted(nums, reverse=True)[:n]\n[DONE]"}
+{"idx": 222, "completion": "import math\ndef lateralsuface_cylinder(radius, height):\n    return 2 * math.pi * radius * height\n[DONE]"}
+{"idx": 223, "completion": "def volume_cube(side):\n    return side ** 3\n[DONE]"}
+{"idx": 224, "completion": "def even_bit_set_number(n):\n    return n | 0xAAAAAAAA\n[DONE]"}
+{"idx": 225, "completion": "def No_of_Triangle(n, k):\n    if n < 2*k:\n        return -1\n    else:\n        return (n-k)*(n-k+1)//2 + k\n[DONE]"}
+{"idx": 226, "completion": "def check_occurences(tuples):\n    from collections import Counter\n    counts = Counter(tuples)\n    return {t: c for t, c in counts.items() if c > 1}\n[DONE]"}
+{"idx": 227, "completion": "def number_of_substrings(s):\n    n = len(s)\n    return sum(range(1, n + 1))\n[DONE]"}
+{"idx": 228, "completion": "def get_total_number_of_sequences(n, m):\n    if n == 0:\n        return 1\n    total = 0\n    for i in range(1, m + 1):\n        total += get_total_number_of_sequences(n - 1, i * 2)\n    return total\n[DONE]"}
+{"idx": 229, "completion": "def replace_list(lst1, lst2):\n    lst1[-1:] = lst2\n    return lst1\n[DONE]"}
+{"idx": 230, "completion": "def array_3d(x,y,z):\n    array_3d = []\n    for i in range(x):\n        array_2d = []\n        for j in range(y):\n            array_1d = []\n            for k in range(z):\n                array_1d.append('*')\n            array_2d.append(array_1d)\n        array_3d.append(array_2d)\n    return array_3d\n[DONE]"}
+{"idx": 231, "completion": "def count_charac(string):\n    return len(string)\n[DONE]"}
+{"idx": 232, "completion": "def sort_on_occurence(lst):\n    return sorted(lst, key=lambda x: lst.count(x[0]), reverse=True)\n[DONE]"}
+{"idx": 233, "completion": "def next_Perfect_Square(n):\n    return (n + 1 + n % 2) ** 2\n[DONE]"}
+{"idx": 234, "completion": "def max_sum(arr, n):\n    max_left = [0]*n\n    max_right = [0]*n\n    max_left[0] = arr[0]\n    for i in range(1, n):\n        max_left[i] = max(max_left[i-1], arr[i])\n    max_right[n-1] = arr[n-1]\n    for j in range(n-2, -1, -1):\n        max_right[j] = max(max_right[j+1], arr[j])\n    max_sum = 0\n    for i in range(1, n-1):\n        max_sum = max(max_sum, max_left[i-1] + max_right[i+1])\n    return max_sum\n[DONE]"}
+{"idx": 235, "completion": "def babylonian_squareroot(n):\n    x = n\n    y = 1\n    e = 0.000001\n    while (x - y > e):\n        x = (x + y)/2\n        y = n/x\n    return x\n[DONE]"}
+{"idx": 236, "completion": "def lps(s):\n    n = len(s)\n    dp = [[0 for x in range(n)]for y in range(n)]\n    for i in range(n):\n        dp[i][i] = 1\n    for cl in range(2, n+1):\n        for i in range(n-cl+1):\n            j = i+cl-1\n            if s[i] == s[j] and cl == 2:\n                dp[i][j] = 2\n            elif s[i] == s[j]:\n                dp[i][j] = dp[i+1][j-1] + 2\n            else:\n                dp[i][j] = max(dp[i][j-1], dp[i+1][j])\n    return dp[0][n-1]\n[DONE]"}
+{"idx": 237, "completion": "import math\ndef harmonic_sum(n):\n    sum = 0\n    for i in range(1,n):\n        sum += 1/i\n    return sum\n[DONE]"}
+{"idx": 238, "completion": "def intersection_array(arr1, arr2):\n    return list(filter(lambda x: x in arr1, arr2))\n[DONE]"}
+{"idx": 239, "completion": "def count_X(tup, x):\n    return tup.count(x)\n[DONE]"}
+{"idx": 240, "completion": "def insert_element(lst, element):\n    return [element] + lst\n[DONE]"}
+{"idx": 241, "completion": "import cmath\ndef convert(num):\n    return cmath.polar(num)\n[DONE]"}
+{"idx": 242, "completion": "def count_integer(lst):\n    return len([x for x in lst if isinstance(x, int)])\n[DONE]"}
+{"idx": 243, "completion": "import re\ndef words_ae(string):\n    return re.findall(r'\\b[a|e]\\w+', string)\n[DONE]"}
+{"idx": 244, "completion": "def combinations_colors(colors, n):\n    if n == 0:\n        return [()]\n    sub_combinations = combinations_colors(colors, n-1)\n    combinations = []\n    for color in colors:\n        for sub_combination in sub_combinations:\n            combinations.append((color,) + sub_combination)\n    return combinations\n[DONE]"}
+{"idx": 245, "completion": "def count_Primes_nums(n):\n    count = 0\n    for num in range(2, n):\n        if all(num % i != 0 for i in range(2, int(num**0.5) + 1)):\n            count += 1\n    return count\n[DONE]"}
+{"idx": 246, "completion": "def swap_numbers(a, b):\n    a, b = b, a\n    return a, b\n[DONE]"}
+{"idx": 247, "completion": "def count_odd(nums):\n    return len(list(filter(lambda x: x % 2 != 0, nums)))\n[DONE]"}
+{"idx": 248, "completion": "def maximize_elements(tup1, tup2):\n    res = tuple(tuple(map(max, zip(*t))) for t in zip(tup1, tup2))\n    return res\n[DONE]"}
+{"idx": 249, "completion": "def newman_prime(n):\n    def is_prime(num):\n        if num < 2:\n            return False\n        for i in range(2, int(num**0.5) + 1):\n            if num % i == 0:\n                return False\n        return True\n\n    count = 0\n    num = 2\n    while True:\n        if is_prime(num):\n            count += 1\n            if count == n:\n                return num\n        num += 1\n[DONE]"}
+{"idx": 250, "completion": "def division_elements(tup1, tup2):\n    return tuple(map(lambda x, y: x / y, tup1, tup2))\n[DONE]"}
+{"idx": 251, "completion": "def split_two_parts(lst, length):\n    return (lst[:length], lst[length:])\n[DONE]"}
+{"idx": 252, "completion": "def merge_dict(dict1, dict2):\n    return {**dict1, **dict2}\n[DONE]"}
+{"idx": 253, "completion": "def dog_age(age):\n    if age <= 2:\n        return age * 10.5\n    else:\n        return 21 + (age - 2) * 4\n[DONE]"}
+{"idx": 254, "completion": "def list_split(list1,n):\n    return [list1[i::n] for i in range(n)]\n[DONE]"}
+{"idx": 255, "completion": "def lateralsurface_cube(side):\n    return 4 * side ** 2\n[DONE]"}
+{"idx": 256, "completion": "def square_Sum(n):\n    sum = 0\n    for i in range(1,2*n,2):\n        sum += i**2\n    return sum\n[DONE]"}
+{"idx": 257, "completion": "def find_star_num(n):\n    return n * (12 * n - 10) // 2\n[DONE]"}
+{"idx": 258, "completion": "def ascii_value(char):\n    return ord(char)\n[DONE]"}
+{"idx": 259, "completion": "def sum_even_and_even_index(lst, n):\n    sum = 0\n    for i in range(0, n, 2):\n        if lst[i] % 2 == 0:\n            sum += lst[i]\n    return sum\n[DONE]"}
+{"idx": 260, "completion": "def even_Power_Sum(n):\n    sum = 0\n    for i in range(1,n+1):\n        sum += (2*i)**5\n    return sum\n[DONE]"}
+{"idx": 261, "completion": "def rear_extract(tuples):\n    return [t[-1] for t in tuples]\n[DONE]"}
+{"idx": 262, "completion": "def substract_elements(tuple1, tuple2):\n    return tuple(x - y for x, y in zip(tuple1, tuple2))\n[DONE]"}
+{"idx": 263, "completion": "def even_binomial_Coeff_Sum(n):\n    sum = 0\n    for i in range(0, n+1, 2):\n        sum += math.comb(n, i)\n    return sum\n[DONE]"}
+{"idx": 264, "completion": "def get_Position(arr, n, k):\n    arr.remove(n)\n    return arr.index(k) + 1\n[DONE]"}
+{"idx": 265, "completion": "import math\ndef volume_cylinder(radius, height):\n    volume = math.pi * radius**2 * height\n    return volume\n[DONE]"}
+{"idx": 266, "completion": "def dict_filter(dict, value):\n    return {k: v for k, v in dict.items() if v >= value}\n[DONE]"}
+{"idx": 267, "completion": "def count_first_elements(tup):\n    count = 0\n    for i in tup:\n        if isinstance(i, tuple):\n            break\n        count += 1\n    return count\n[DONE]"}
+{"idx": 268, "completion": "def is_num_decagonal(n):\n    return n * (4 * n - 3)\n[DONE]"}
+{"idx": 269, "completion": "def sequential_search(arr,ele):\n    for i in range(len(arr)):\n        if arr[i] == ele:\n            return (True, i)\n    return (False, -1)\n[DONE]"}
+{"idx": 270, "completion": "def all_unique(lst):\n    return len(lst) == len(set(lst))\n[DONE]"}
+{"idx": 271, "completion": "def sub_list(list1, list2):\n    return list(map(lambda x, y: x - y, list1, list2))\n[DONE]"}
+{"idx": 272, "completion": "def validate(n):\n    digits = [int(d) for d in str(n)]\n    for i, digit in enumerate(digits):\n        if digit > i:\n            return False\n    return True\n[DONE]"}
+{"idx": 273, "completion": "def check_element(lst,element):\n    return all(x == element for x in lst)\n[DONE]"}
+{"idx": 274, "completion": "import re\ndef text_match_two_three(text):\n    pattern = 'ab{2,3}b'\n    if re.search(pattern, text):\n        return 'Found a match!'\n    else:\n        return 'Not matched!'\n[DONE]"}
+{"idx": 275, "completion": "def max_sub_array_sum_repeated(arr, n, k):\n    max_sum = float('-inf')\n    for i in range(n):\n        sum = 0\n        for j in range(i, i + n * k, n):\n            sum += arr[j % n]\n        max_sum = max(max_sum, sum)\n    return max_sum\n[DONE]"}
+{"idx": 276, "completion": "def square_Sum(n):\n    sum = 0\n    for i in range(1,n+1):\n        sum += (2*i)**2\n    return sum\n[DONE]"}
+{"idx": 277, "completion": "def modular_inverse(arr, n, p):\n    count = 0\n    for i in range(n):\n        flag = 0\n        for j in range(1, p):\n            if (j * arr[i]) % p == 1:\n                flag = 1\n                break\n        if flag == 0:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 278, "completion": "def odd_Days(year):\n    if year % 400 == 0 or (year % 4 == 0 and year % 100 != 0):\n        leap_year = 1\n    else:\n        leap_year = 0\n    odd_days = (year - 1) % 7 + leap_year\n    return odd_days\n[DONE]"}
+{"idx": 279, "completion": "def max_length(lists):\n    max_len = max(len(sublist) for sublist in lists)\n    max_list = [sublist for sublist in lists if len(sublist) == max_len]\n    return (max_len, max_list)\n[DONE]"}
+{"idx": 280, "completion": "def count_no_of_ways(n, k):\n    if n <= 1:\n        return k\n    same = k\n    diff = k * (k - 1)\n    for i in range(3, n + 1):\n        temp = diff\n        diff = (same + diff) * (k - 1)\n        same = temp\n    return same + diff\n[DONE]"}
+{"idx": 281, "completion": "def find(num1,num2):\n    return num1 // num2\n[DONE]"}
+{"idx": 282, "completion": "import math\ndef otherside_rightangle(a, b):\n    c = math.sqrt(a**2 + b**2)\n    return c\n[DONE]"}
+{"idx": 283, "completion": "def max_val(lst):\n    return max(lst)\n[DONE]"}
+{"idx": 284, "completion": "def sum_div(n):\n    divisors = [1]\n    for i in range(2, n):\n        if n % i == 0:\n            divisors.append(i)\n    return sum(divisors)\n[DONE]"}
+{"idx": 285, "completion": "def get_Inv_Count(arr, n):\n    inv_count = 0\n    for i in range(n):\n        for j in range(i + 1, n):\n            if arr[i] > arr[j]:\n                inv_count += 1\n    return inv_count\n[DONE]"}
+{"idx": 286, "completion": "def flatten_list(nested_list):\n    flat_list = []\n    for i in nested_list:\n        if isinstance(i, list):\n            flat_list.extend(flatten_list(i))\n        else:\n            flat_list.append(i)\n    return flat_list\n[DONE]"}
+{"idx": 287, "completion": "def intersection_nested_lists(list1, list2):\n    result = []\n    for sublist in list2:\n        common_elements = [element for element in sublist if element in list1]\n        result.append(common_elements)\n    return result\n[DONE]"}
+{"idx": 288, "completion": "def max_aggregate(students):\n    return max(students, key=lambda x: x[1])\n[DONE]"}
+{"idx": 289, "completion": "def count_binary_seq(n):\n    if n == 0:\n        return 1.0\n    result = 0.0\n    for i in range(0, n + 1):\n        result += (math.comb(n, i) * math.comb(n, n - i))\n    return result * 2.0\n[DONE]"}
+{"idx": 290, "completion": "def dict_depth(d):\n    depth = 1\n    while any(isinstance(v, dict) for v in d.values()):\n        depth += 1\n        d = {k: v for v_dict in d.values() for k, v in v_dict.items()}\n    return depth\n[DONE]"}
+{"idx": 291, "completion": "def set_Bit_Number(n):\n    while n & (n-1):\n        n &= n-1\n    return n\n[DONE]"}
+{"idx": 292, "completion": "def solve(nums, n):\n    count1 = 0\n    count2 = 0\n    for i in range(n):\n        for j in range(i+1, n):\n            if nums[i] > nums[j] and nums[i] % 2 == 1:\n                count1 += 1\n            if nums[i] > nums[j] and nums[i] % 2 == 0:\n                count2 += 1\n    return count1 == count2\n[DONE]"}
+{"idx": 293, "completion": "def find_Element(lst, rotations, index, shift):\n    for i in range(shift):\n        lst = rotations[0][0] + rotations[0][1] + rotations[1][0] + rotations[1][1]\n    return lst[index]\n[DONE]"}
+{"idx": 294, "completion": "def start_withp(words):\n    result = []\n    for word in words:\n        if word.startswith('p') or word.startswith('P'):\n            result.append(word.split(' ')[0])\n    return tuple(result)\n[DONE]"}
+{"idx": 295, "completion": "def max_sum_increasing_subseq(arr, n, k, i):\n    dp = [0] * n\n    dp[i] = arr[i]\n    for j in range(i + 1, n):\n        if i < k and j > k and arr[j] > arr[k]:\n            dp[j] = max(dp[j], dp[i] + arr[j])\n        else:\n            dp[j] = max(dp[j], arr[j])\n    for j in range(i - 1, -1, -1):\n        if i < k and j < k and arr[j] > arr[k]:\n            dp[j] = max(dp[j], dp[i] + arr[j])\n        else:\n            dp[j] = max(dp[j], arr[j])\n    return max(dp)\n[DONE]"}
+{"idx": 296, "completion": "def colon_tuplex(tuplex, start, end):\n    listx = list(tuplex)\n    listx[start] = end\n    return tuple(listx)\n[DONE]"}
+{"idx": 297, "completion": "def large_product(list1, list2, num):\n    list1.sort()\n    list2.sort()\n    result = []\n    for i in range(num):\n        result.append(list1[-1] * list2[-1])\n        list1.pop()\n        list2.pop()\n    return result\n[DONE]"}
+{"idx": 298, "completion": "def maximum(a, b):\n    if a > b:\n        return a\n    else:\n        return b\n[DONE]"}
+{"idx": 299, "completion": "def string_to_tuple(s):\n    return tuple(s)\n[DONE]"}
+{"idx": 300, "completion": "def set_left_most_unset_bit(n):\n    if n == 0:\n        return 1\n    else:\n        return n | (n + 1)\n[DONE]"}
+{"idx": 301, "completion": "import math\ndef volume_cone(radius, height):\n    volume = (1/3) * math.pi * (radius**2) * height\n    return volume\n[DONE]"}
+{"idx": 302, "completion": "def pos_nos(nums):\n    return [num for num in nums if num > 0]\n[DONE]"}
+{"idx": 303, "completion": "def max_sum_rectangular_grid(grid, n):\n    if n == 1:\n        return grid[0][0] + grid[1][0]\n    dp = [[0 for _ in range(n)] for _ in range(2)]\n    dp[0][0] = grid[0][0]\n    dp[1][0] = grid[1][0]\n    for i in range(1, n):\n        dp[0][i] = grid[0][i] + max(dp[1][i-1], dp[0][i-2] if i > 1 else 0)\n        dp[1][i] = grid[1][i] + max(dp[0][i-1], dp[1][i-2] if i > 1 else 0)\n    return max(dp[0][n-1], dp[1][n-1])\n[DONE]"}
+{"idx": 304, "completion": "def find_Max_Len_Even(s):\n    words = s.split()\n    max_len = -1\n    for word in words:\n        if len(word) % 2 == 0:\n            max_len = max(max_len, len(word))\n    if max_len == 0:\n        return -1\n    return max_len\n[DONE]"}
+{"idx": 305, "completion": "def find_last_occurrence(arr, target):\n    left, right = 0, len(arr) - 1\n    result = -1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            result = mid\n            left = mid + 1\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return result\n[DONE]"}
+{"idx": 306, "completion": "def modified_encode(data):\n    result = []\n    i = 0\n    while i < len(data):\n        count = 1\n        while i + 1 < len(data) and data[i] == data[i + 1]:\n            i += 1\n            count += 1\n        if count > 1:\n            result.append([count, data[i]])\n        else:\n            result.append(data[i])\n        i += 1\n    return result\n[DONE]"}
+{"idx": 307, "completion": "def max_volume(s):\n    for i in range(1, s//3+1):\n        for j in range(i, (s-i)//2+1):\n            k = s-i-j\n            if i+j>k and i+k>j and j+k>i:\n                return i*j*k\n[DONE]"}
+{"idx": 308, "completion": "import re\ndef find_long_word(string):\n    return re.findall(r'\\b\\w{5}\\b', string)\n[DONE]"}
+{"idx": 309, "completion": "def sum_difference(n):\n    sum1=sum(range(1,n+1))\n    sum2=sum([i**2 for i in range(1,n+1)])\n    return (sum1**2)-sum2\n[DONE]"}
+{"idx": 310, "completion": "def find_demlo(num):\n    num = int(num)\n    num_str = str(num)\n    length = len(num_str)\n    result = ''\n    for i in range(1, length + 1):\n        result += num_str[:i]\n    for i in range(length - 1, 0, -1):\n        result += num_str[:i][::-1]\n    return result\n[DONE]"}
+{"idx": 311, "completion": "def position_min(lst):\n    min_val = min(lst)\n    return [i for i, x in enumerate(lst) if x == min_val]\n[DONE]"}
+{"idx": 312, "completion": "def re_arrange(arr, n):\n    arr.sort()\n    j = n - 1\n    for i in range(n):\n        if arr[i] < 0:\n            arr[i], arr[j] = arr[j], arr[i]\n            j -= 1\n    return arr\n[DONE]"}
+{"idx": 313, "completion": "def sum_of_alternates(tup):\n    a = sum(tup[::2])\n    b = sum(tup[1::2])\n    return (a, b)\n[DONE]"}
+{"idx": 314, "completion": "def get_Min_Squares(n):\n    dp = [0] * (n + 1)\n    for i in range(1, n + 1):\n        dp[i] = i\n        for x in range(1, int(i ** 0.5) + 1):\n            dp[i] = min(dp[i], 1 + dp[i - x * x])\n    return dp[n]\n[DONE]"}
+{"idx": 315, "completion": "from collections import Counter\ndef most_occurrences(strings):\n    words = ' '.join(strings).split()\n    most_common = Counter(words).most_common(1)[0][0]\n    return most_common\n[DONE]"}
+{"idx": 316, "completion": "def check_isosceles(a, b, c):\n    if a == b or b == c or a == c:\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 317, "completion": "def rotate_left(lst, n, m):\n    return lst[n:m+n]\n[DONE]"}
+{"idx": 318, "completion": "def neg_count(nums):\n    return len([x for x in nums if x < 0])\n[DONE]"}
+{"idx": 319, "completion": "import re\ndef find_char(string):\n    return re.findall(r'\\b\\w{3,5}\\b', string)\n[DONE]"}
+{"idx": 320, "completion": "def count_unset_bits(n):\n    count = 0\n    while n:\n        count += 1 if n & 1 == 0 else 0\n        n >>= 1\n    return count\n[DONE]"}
+{"idx": 321, "completion": "def char_frequency(str1):\n    dict = {}\n    for n in str1:\n        keys = dict.keys()\n        if n in keys:\n            dict[n] += 1\n        else:\n            dict[n] = 1\n    return dict\n[DONE]"}
+{"idx": 322, "completion": "def Sort(sub_li):\n    sub_li.sort(key = lambda x: x[1])\n    return sub_li\n[DONE]"}
+{"idx": 323, "completion": "def check_Validity(a, b, c):\n    if a + b <= c or a + c <= b or b + c <= a:\n        return False\n    else:\n        return True\n[DONE]"}
+{"idx": 324, "completion": "def ap_sum(a, n, d):\n    return n/2 * (2*a + (n-1)*d)\n[DONE]"}
+{"idx": 325, "completion": "def check_monthnum(month):\n    month_days = {\"January\":31, \"February\":28, \"March\":31, \"April\":30, \"May\":31, \"June\":30, \"July\":31, \"August\":31, \"September\":30, \"October\":31, \"November\":30, \"December\":31}\n    return month_days[month] == 28\n[DONE]"}
+{"idx": 326, "completion": "import re\ndef text_match_word(text):\n    pattern = r'\\b\\w+\\b[.,!?]?'\n    result = re.search(pattern, text)\n    if result:\n        return 'Found a match!'\n    else:\n        return 'Not matched!'\n[DONE]"}
+{"idx": 327, "completion": "def count_Substring_With_Equal_Ends(s):\n    count = 0\n    for i in range(len(s)):\n        for j in range(i+1,len(s)+1):\n            if s[i] == s[j-1]:\n                count += 1\n    return count\n[DONE]"}
+{"idx": 328, "completion": "def find_Divisor(a, b):\n    max_divisor = 1\n    for i in range(2, min(a, b) + 1):\n        if a % i == 0 and b % i == 0:\n            max_divisor = i\n    return max_divisor\n[DONE]"}
+{"idx": 329, "completion": "def sum_three_smallest_nums(lst):\n    return sum(sorted(lst)[:3])\n[DONE]"}
+{"idx": 330, "completion": "def set_to_tuple(s):\n    return tuple(sorted(s))\n[DONE]"}
+{"idx": 331, "completion": "from heapq import heappush, heappop\ndef find_minimum_range( lists):\n    min_val = min([min(lst) for lst in lists])\n    max_val = max([max(lst) for lst in lists])\n    result = (min_val, max_val)\n    min_heap = []\n    for i in range(len(lists)):\n        heappush(min_heap, (lists[i][0], i, 0))\n    while min_heap:\n        val, list_idx, element_idx = heappop(min_heap)\n        if max_val - min_val > result[1] - result[0]:\n            result = (min_val, max_val)\n        if max_val - min_val + 1 == len(lists):\n            return result\n        if element_idx + 1 < len(lists[list_idx]):\n            next_val = lists[list_idx][element_idx + 1]\n            max_val = max(max_val, next_val)\n            heappush(min_heap, (next_val, list_idx, element_idx + 1))\n        else:\n            return result\n    return result\n[DONE]"}
+{"idx": 332, "completion": "def dig_let(s):\n    digits = sum(c.isdigit() for c in s)\n    letters = sum(c.isalpha() for c in s)\n    return (letters, digits)\n[DONE]"}
+{"idx": 333, "completion": "def count_Odd_Squares(start, end):\n    count = 0\n    for i in range(start, end+1):\n        if len([j for j in range(1, i+1) if i % j == 0 and j % 2 != 0]) % 2 != 0:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 334, "completion": "def diff_consecutivenums(nums):\n    return [nums[i+1] - nums[i] for i in range(len(nums)-1)]\n[DONE]"}
+{"idx": 335, "completion": "def zigzag(n, k):\n    if n == 0:\n        return 0\n    elif n == 1:\n        return 1\n    elif n == 2:\n        return 1\n    elif n == 3:\n        return 2\n    elif n == 4:\n        return 2\n    elif n == 5:\n        return 3\n    elif n == 6:\n        return 3\n    elif n == 7:\n        return 4\n    elif n == 8:\n        return 4\n    elif n == 9:\n        return 5\n    elif n == 10:\n        return 5\n    elif n == 11:\n        return 6\n    elif n == 12:\n        return 6\n    elif n == 13:\n        return 7\n    elif n == 14:\n        return 7\n    elif n == 15:\n        return 8\n    elif n == 16:\n        return 8\n    elif n == 17:\n        return 9\n    elif n == 18:\n        return 9\n    elif n == 19:\n        return 10\n    elif n == 20:\n        return 10\n    elif n == 21:\n        return 11\n    elif n == 22:\n        return 11\n    elif n == 23:\n        return 12\n    elif n == 24:\n        return 12\n    elif n == 25:\n        return 13\n    elif n == 26:\n        return 13\n    elif n == 27:\n        return 14\n    elif n == 28:\n        return 14\n    elif n == 29:\n        return 15\n    elif n == 30:\n        return 15\n    elif n == 31:\n        return 16\n    elif n == 32:\n        return 16\n    elif n == 33:\n        return 17\n    elif n == 34:\n        return 17\n    elif n == 35:\n        return 18\n    elif n == 36:\n        return 18\n    elif n == 37:\n        return 19\n    elif"}
+{"idx": 336, "completion": "def count_Squares(m, n):\n    return m * n * (m + n - 1) // 2\n[DONE]"}
+{"idx": 337, "completion": "def find_ways(n):\n    a, b = 1, 0\n    for i in range(n):\n        a, b = a + b, a\n    return a\n[DONE]"}
+{"idx": 338, "completion": "def check(string):\n    for i in string:\n        if i not in \"01\":\n            return \"No\"\n    return \"Yes\"\n[DONE]"}
+{"idx": 339, "completion": "def minimum_Length(s):\n    i = 0\n    count = 0\n    while i < len(s)-1:\n        if s[i] == s[i+1]:\n            count += 1\n            i += 2\n        else:\n            i += 1\n    return len(s) - count\n[DONE]"}
+{"idx": 340, "completion": "def first_Element(arr, k, n):\n    for i in range(n):\n        if arr.count(arr[i]) == k:\n            return arr[i]\n[DONE]"}
+{"idx": 341, "completion": "def unique_Characters(string):\n    return len(string) == len(set(string))\n[DONE]"}
+{"idx": 342, "completion": "def remove_column(nested_list, column_index):\n    return [[row[i] for i in range(len(row)) if i != column_index] for row in nested_list]\n[DONE]"}
+{"idx": 343, "completion": "def tn_ap(n,a,d):\n    return a + (n-1)*d\n[DONE]"}
+{"idx": 344, "completion": "import math\ndef count_Rectangles(r):\n    return math.pi * r**2\n[DONE]"}
+{"idx": 345, "completion": "def find_angle(a, b):\n    return 180 - a - b\n[DONE]"}
+{"idx": 346, "completion": "def find_max(tuples):\n    return max(t[1] for t in tuples)\n[DONE]"}
+{"idx": 347, "completion": "def moddiv_list(list1, list2):\n    return list(map(lambda x, y: x % y, list1, list2))\n[DONE]"}
+{"idx": 348, "completion": "import math\ndef Check_Solution(a,b,c):\n    discriminant = b**2 - 4*a*c\n    if discriminant < 0:\n        return \"No\"\n    root1 = (-b + math.sqrt(discriminant)) / (2*a)\n    root2 = (-b - math.sqrt(discriminant)) / (2*a)\n    if root1 == 2*root2 or root2 == 2*root1:\n        return \"Yes\"\n    else:\n        return \"No\"\n[DONE]"}
+{"idx": 349, "completion": "def get_carol(n):\n    return 2 ** n * (2 ** n - 1) - 1\n[DONE]"}
+{"idx": 350, "completion": "def remove_empty(lst):\n    return [i for i in lst if i]\n[DONE]"}
+{"idx": 351, "completion": "from collections import Counter\ndef max_occurrences(lst):\n    return Counter(lst).most_common(1)[0][0]\n[DONE]"}
+{"idx": 352, "completion": "def add_K_element(tuples, k):\n    return tuple([tuple(i + k for i in tup) for tup in tuples])\n[DONE]"}
+{"idx": 353, "completion": "def min_flip_to_make_string_alternate(s):\n    flips = 0\n    for i in range(1, len(s)):\n        if s[i] == s[i-1]:\n            flips += 1\n    return flips\n[DONE]"}
+{"idx": 354, "completion": "def count_Digit(n):\n    return len(str(n))\n[DONE]"}
+{"idx": 355, "completion": "def adjacent_num_product(nums):\n    max_product = 0\n    for i in range(len(nums)-1):\n        product = nums[i] * nums[i+1]\n        if product > max_product:\n            max_product = product\n    return max_product\n[DONE]"}
+{"idx": 356, "completion": "class TreeNode:\n    def __init__(self, val=0, left=None, right=None):\n        self.val = val\n        self.left = left\n        self.right = right\n\ndef is_tree_balanced(root):\n    def check(root):\n        if root is None:\n            return 0\n        left = check(root.left)\n        right = check(root.right)\n        if left == -1 or right == -1 or abs(left - right) > 1:\n            return -1\n        return 1 + max(left, right)\n    return check(root) != -1\n[DONE]"}
+{"idx": 357, "completion": "def repeat_tuples(tup, n):\n    return tup * n\n[DONE]"}
+{"idx": 358, "completion": "def lateralsurface_cuboid(l,b,h):\n    return 2*(l+b)*h\n[DONE]"}
+{"idx": 359, "completion": "def float_sort(tup):\n    return sorted(tup, key=lambda x: float(x[1]))\n[DONE]"}
+{"idx": 360, "completion": "def smallest_missing(arr, start, end):\n    while start <= end:\n        mid = start + (end - start) // 2\n        if arr[mid] != mid:\n            end = mid - 1\n        else:\n            start = mid + 1\n    return start\n[DONE]"}
+{"idx": 361, "completion": "import heapq\ndef heap_assending(nums):\n    heapq.heapify(nums)\n    return [heapq.heappop(nums) for _ in range(len(nums))]\n[DONE]"}
+{"idx": 362, "completion": "def volume_cuboid(l,b,h):\n    return l*b*h\n[DONE]"}
+{"idx": 363, "completion": "from itertools import permutations\ndef permute_string(s):\n    return [''.join(p) for p in permutations(s)]\n[DONE]"}
+{"idx": 364, "completion": "def round_num(num, multiple):\n    return round(num / multiple) * multiple\n[DONE]"}
+{"idx": 365, "completion": "def remove_replica(tup):\n    new_tup = []\n    for i in tup:\n        if i not in new_tup:\n            new_tup.append(i)\n        else:\n            new_tup.append('MSP')\n    return tuple(new_tup)\n[DONE]"}
+{"idx": 366, "completion": "def remove_Char(string, char):\n    return string.replace(char, '')\n[DONE]"}
+{"idx": 367, "completion": "def move_first(nums):\n    nums.append(nums.pop())\n    return nums\n[DONE]"}
+{"idx": 368, "completion": "def surfacearea_cuboid(l,b,h):\n    surface_area = 2 * (l * b + b * h + l * h)\n    return surface_area\n[DONE]"}
+{"idx": 369, "completion": "def multi_list(rows, cols):\n    return [[(i * cols) + j for j in range(cols)] for i in range(rows)]\n[DONE]"}
+{"idx": 370, "completion": "def index_on_inner_list(lists, index):\n    return sorted(lists, key=lambda x: x[index])\n[DONE]"}
+{"idx": 371, "completion": "def find_rotation_count(arr):\n    low = 0\n    high = len(arr) - 1\n    while low <= high:\n        mid = (low + high) // 2\n        if arr[low] <= arr[high]:\n            return low\n        if arr[mid] >= arr[low]:\n            low = mid + 1\n        else:\n            high = mid\n    return low\n[DONE]"}
+{"idx": 372, "completion": "def even_bit_toggle_number(n):\n    even_bits = n & 0xAAAAAAAA\n    odd_bits = n & 0x55555555\n    odd_bits = (odd_bits + 1) & 0x55555555\n    return even_bits | odd_bits\n[DONE]"}
+{"idx": 373, "completion": "def frequency_Of_Smallest(n, array):\n    smallest = min(array)\n    return array.count(smallest)\n[DONE]"}
+{"idx": 374, "completion": "def get_perrin(n):\n    if n == 0 or n == 1:\n        return 3\n    elif n == 2:\n        return 2\n    else:\n        return get_perrin(n-2) + get_perrin(n-3)\n[DONE]"}
+{"idx": 375, "completion": "def swap_count(bracket_string):\n    open_bracket = 0\n    close_bracket = 0\n    swap = 0\n    for bracket in bracket_string:\n        if bracket == '[':\n            open_bracket += 1\n        else:\n            close_bracket += 1\n        if close_bracket > open_bracket:\n            swap += 1\n            open_bracket += 2\n    return swap\n[DONE]"}
+{"idx": 376, "completion": "def even_or_odd(hex_num):\n    return \"Even\" if int(hex_num, 16) % 2 == 0 else \"Odd\"\n[DONE]"}
+{"idx": 377, "completion": "def highest_Power_of_2(n):\n    p = 1\n    while p <= n:\n        p *= 2\n    return p//2\n[DONE]"}
+{"idx": 378, "completion": "def find_lucas(n):\n    a, b = 2, 1\n    for _ in range(n - 1):\n        a, b = b, a + b\n    return a\n[DONE]"}
+{"idx": 379, "completion": "def add_string(lst, str1):\n    return [str1.format(i) for i in lst]\n[DONE]"}
+{"idx": 380, "completion": "def convert_list_dictionary(keys, values, scores):\n    return [{k: {v: s}} for k, v, s in zip(keys, values, scores)]\n[DONE]"}
+{"idx": 381, "completion": "def get_max_sum(n):\n    if n <= 1:\n        return n\n    return max(n, get_max_sum(n/2) + get_max_sum(n/3) + get_max_sum(n/4) + get_max_sum(n/5))\n[DONE]"}
+{"idx": 382, "completion": "def max_length_list(lists):\n    return max(list(map(lambda x: (len(x), x), lists)))\n[DONE]"}
+{"idx": 383, "completion": "def check_distinct(test_tuple):\n    return len(test_tuple) == len(set(test_tuple))\n[DONE]"}
+{"idx": 384, "completion": "def first_non_repeating_character(str):\n    for i in str:\n        if str.count(i) == 1:\n            return i\n    return None\n[DONE]"}
+{"idx": 385, "completion": "import re\ndef check_char(s):\n    return \"Valid\" if re.match(r\"^(.).*\\1$\", s) else \"Invalid\"\n[DONE]"}
+{"idx": 386, "completion": "def median_numbers(num1, num2, num3):\n    return sorted([num1, num2, num3])[1]\n[DONE]"}
+{"idx": 387, "completion": "def sum_of_digits(lst):\n    sum = 0\n    for i in lst:\n        if isinstance(i, int):\n            while i > 0:\n                digit = i % 10\n                sum += digit\n                i //= 10\n    return sum\n[DONE]"}
+{"idx": 388, "completion": "def bitwise_xor(t1, t2):\n    return tuple(x ^ y for x, y in zip(t1, t2))\n[DONE]"}
+{"idx": 389, "completion": "def extract_freq(lst):\n    return len(set(lst))\n[DONE]"}
+{"idx": 390, "completion": "def add_nested_tuples(t1, t2):\n    result = tuple(tuple(map(lambda x, y: x + y, t1[i], t2[i])) for i in range(len(t1)))\n    return result\n[DONE]"}
+{"idx": 391, "completion": "def ncr_modp(n, r, p):\n    num = 1\n    for i in range(r):\n        num = num * (n - i) % p\n    den = 1\n    for i in range(1, r + 1):\n        den = den * i % p\n    return (num * pow(den, p - 2, p)) % p\n[DONE]"}
+{"idx": 392, "completion": "import re\ndef is_valid_URL(url):\n    regex = re.compile(\n        r'^(?:http|ftp)s?://'  # http:// or https://\n        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\\.)+(?:[A-Z]{2,6}\\.?|[A-Z0-9-]{2,}\\.?)|'  # domain...\n        r'localhost|'  # localhost...\n        r'\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})'  # ...or ip\n        r'(?::\\d+)?'  # optional port\n        r'(?:/?|[/?]\\S+)$', re.IGNORECASE)\n    return re.match(regex, url) is not None\n[DONE]"}
+{"idx": 393, "completion": "def minimum(a, b):\n    if a < b:\n        return a\n    else:\n        return b\n[DONE]"}
+{"idx": 394, "completion": "def check_tuplex(tuplex, el):\n    return el in tuplex\n[DONE]"}
+{"idx": 395, "completion": "def find_Parity(n):\n    binary = bin(n)\n    count = 0\n    for i in binary:\n        if i == '1':\n            count += 1\n    if count % 2 == 0:\n        return \"Even Parity\"\n    else:\n        return \"Odd Parity\"\n[DONE]"}
+{"idx": 396, "completion": "def rearrange_bigger(n):\n    digits = list(str(n))\n    for i in range(len(digits) - 2, -1, -1):\n        if digits[i] < digits[i + 1]:\n            digits[i], digits[-1] = digits[-1], digits[i]\n            return int(''.join(digits[:i+1] + sorted(digits[i+1:-1])))\n    return False\n[DONE]"}
+{"idx": 397, "completion": "def k_smallest_pairs(nums1, nums2, k):\n    pairs = []\n    heap = []\n    def push(i, j):\n        if i < len(nums1) and j < len(nums2):\n            heapq.heappush(heap, [nums1[i] + nums2[j], i, j])\n    push(0, 0)\n    while heap and len(pairs) < k:\n        _, i, j = heapq.heappop(heap)\n        pairs.append([nums1[i], nums2[j]])\n        push(i, j + 1)\n        if j == 0:\n            push(i + 1, 0)\n    return pairs\n[DONE]"}
+{"idx": 398, "completion": "def min_product_tuple(lst):\n    min_product = float('inf')\n    for pair in lst:\n        product = pair[0] * pair[1]\n        if product < min_product:\n            min_product = product\n    return min_product\n[DONE]"}
+{"idx": 399, "completion": "def min_val(lst):\n    return min(lst)\n[DONE]"}
+{"idx": 400, "completion": "import re\ndef snake_to_camel(snake_str):\n    components = snake_str.split('_')\n    return ''.join(x.title() for x in components)\n[DONE]"}
+{"idx": 401, "completion": "def remove_odd(nums):\n    return [num for num in nums if num % 2 == 0]\n[DONE]"}
+{"idx": 402, "completion": "def extract_nth_element(tuples_list, n):\n    return [t[n] for t in tuples_list]\n[DONE]"}
+{"idx": 403, "completion": "def overlapping(list1, list2):\n    return set(list1) & set(list2)\n[DONE]"}
+{"idx": 404, "completion": "def max_Product(nums):\n    nums.sort()\n    return (nums[-1], nums[-2])\n[DONE]"}
+{"idx": 405, "completion": "def breakSum(n):\n    if n <= 3:\n        return n\n    return max(n, breakSum(n // 2) + breakSum(n // 3) + breakSum(n // 4))\n[DONE]"}
+{"idx": 406, "completion": "def group_tuples(tuples):\n    common = set(tuples[0])\n    for tup in tuples[1:]:\n        common.intersection_update(tup)\n    return [tuple(sorted(list(common)))] + [tup for tup in tuples if set(tup) & common]\n[DONE]"}
+{"idx": 407, "completion": "def Find_Max(list1):\n    max_length = 0\n    max_list = []\n    for sublist in list1:\n        if len(sublist) > max_length:\n            max_length = len(sublist)\n            max_list = sublist\n    return max_list\n[DONE]"}
+{"idx": 408, "completion": "def round_and_sum(nums):\n    rounded_nums = [round(num) for num in nums]\n    total_sum = sum(rounded_nums) * len(nums)\n    return total_sum\n[DONE]"}
+{"idx": 409, "completion": "def cube_Sum(n):\n    sum = 0\n    for i in range(1,n+1):\n        sum = sum + (2*i)**3\n    return sum\n[DONE]"}
+{"idx": 410, "completion": "def concatenate_tuple(tuple1):\n    delimiter = '-'\n    result = delimiter.join(tuple1)\n    return result\n[DONE]"}
+{"idx": 411, "completion": "def find_Average_Of_Cube(n):\n    sum_of_cubes = sum([i**3 for i in range(1, n+1)])\n    average_of_cubes = sum_of_cubes / n\n    return average_of_cubes\n[DONE]"}
+{"idx": 412, "completion": "def get_maxgold(gold,rows,cols):\n    dp = [[0 for i in range(cols)] for j in range(rows)]\n    dp[0][0] = gold[0][0]\n    for i in range(1,cols):\n        dp[0][i] = dp[0][i-1] + gold[0][i]\n    for i in range(1,rows):\n        for j in range(cols):\n            if j == 0:\n                dp[i][j] = dp[i-1][j] + gold[i][j]\n            elif j == cols-1:\n                dp[i][j] = dp[i-1][j-1] + gold[i][j]\n            else:\n                dp[i][j] = max(dp[i-1][j],dp[i-1][j-1]) + gold[i][j]\n    return dp[rows-1][cols-1]\n[DONE]"}
+{"idx": 413, "completion": "def extract_rear(tup):\n    return [i[-1] for i in tup]\n[DONE]"}
+{"idx": 414, "completion": "def count_element_in_list(lists, element):\n    count = 0\n    for sublist in lists:\n        if element in sublist:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 415, "completion": "def filter_oddnumbers(list):\n    odd_numbers = list(filter(lambda x: x % 2 != 0, list))\n    return odd_numbers\n[DONE]"}
+{"idx": 416, "completion": "import re\ndef change_date_format(date):\n    return re.sub(r'(\\d{4})-(\\d{2})-(\\d{2})', r'\\3-\\2-\\1', date)\n[DONE]"}
+{"idx": 417, "completion": "def shell_sort(arr):\n    n = len(arr)\n    gap = n // 2\n    while gap > 0:\n        for i in range(gap, n):\n            temp = arr[i]\n            j = i\n            while j >= gap and arr[j - gap] > temp:\n                arr[j] = arr[j - gap]\n                j -= gap\n            arr[j] = temp\n        gap //= 2\n    return arr\n[DONE]"}
+{"idx": 418, "completion": "def and_tuples(tuple1, tuple2):\n    result = tuple(x & y for x, y in zip(tuple1, tuple2))\n    return result\n[DONE]"}
+{"idx": 419, "completion": "import math\ndef parabola_directrix(a, b, c):\n    d = -1 * (b ** 2 + 1) / (4 * a)\n    return d\n[DONE]"}
+{"idx": 420, "completion": "def common_element(list1, list2):\n    return bool(set(list1) & set(list2))\n[DONE]"}
+{"idx": 421, "completion": "def median_trapezium(a, b, c):\n    median = (a + b + c) / 3\n    return median\n[DONE]"}
+{"idx": 422, "completion": "def check_greater(arr, num):\n    if num > max(arr):\n        return 'Yes, the entered number is greater than those in the array'\n    else:\n        return 'No, entered number is less than those in the array'\n[DONE]"}
+{"idx": 423, "completion": "import re\ndef text_match_one(text):\n    pattern = r\"ab+\"\n    if re.search(pattern, text):\n        return \"Found a match!\"\n    else:\n        return \"Not matched!\"\n[DONE]"}
+{"idx": 424, "completion": "def last_Digit(num):\n    return num % 10\n[DONE]"}
+{"idx": 425, "completion": "def neg_nos(nums):\n    return [num for num in nums if num < 0]\n[DONE]"}
+{"idx": 426, "completion": "def remove_odd(string):\n    result = \"\"\n    for i in range(len(string)):\n        if i % 2 == 0:\n            result += string[i]\n    return result\n[DONE]"}
+{"idx": 427, "completion": "def count_bidirectional(tuples):\n    count = 0\n    for i in range(len(tuples)):\n        for j in range(i+1, len(tuples)):\n            if tuples[i] == tuples[j][::-1]:\n                count += 1\n    return str(count)\n[DONE]"}
+{"idx": 428, "completion": "def multiple_to_single(nums):\n    single_num = int(''.join(map(str, nums)))\n    return single_num\n[DONE]"}
+{"idx": 429, "completion": "import re\ndef find_adverb_position(sentence):\n    adverbs = ['clearly', 'seriously', 'unfortunately', 'fortunately', 'immediately', 'naturally', 'obviously', 'probably', 'quickly', 'quietly', 'readily', 'regularly', 'suddenly', 'therefore', 'today', 'totally', 'virtually', 'wholly']\n    for adverb in adverbs:\n        if re.search(adverb, sentence):\n            return (sentence.index(adverb), sentence.index(adverb) + len(adverb), adverb)\n[DONE]"}
+{"idx": 430, "completion": "def surfacearea_cube(side):\n    return 6 * side ** 2\n[DONE]"}
+{"idx": 431, "completion": "def positive_count(nums):\n    positive_nums = [num for num in nums if num > 0]\n    return len(positive_nums) / len(nums)\n[DONE]"}
+{"idx": 432, "completion": "def largest_neg(nums):\n    return max(x for x in nums if x < 0)\n[DONE]"}
+{"idx": 433, "completion": "def trim_tuple(tuples_list, k):\n    trimmed_tuples = ['({})'.format(', '.join(map(str, t[k:-k]))) for t in tuples_list]\n    return ', '.join(trimmed_tuples)\n[DONE]"}
+{"idx": 434, "completion": "def index_multiplication(t1, t2):\n    return tuple(tuple(map(lambda x, y: x * y, i, j)) for i, j in zip(t1, t2))\n[DONE]"}
+{"idx": 435, "completion": "def count_Occurrence(tup, lst):\n    return sum(tup.count(i) for i in lst)\n[DONE]"}
+{"idx": 436, "completion": "def cube_nums(nums):\n    cube_nums = list(map(lambda x: x ** 3, nums))\n    return cube_nums\n[DONE]"}
+{"idx": 437, "completion": "def cal_sum(n):\n    a, b, c = 3, 0, 2\n    sum = 5\n    for i in range(2, n):\n        sum += c\n        a, b, c = b, c, a + b\n    return sum\n[DONE]"}
+{"idx": 438, "completion": "def check_Triangle(x1, y1, x2, y2, x3, y3):\n    a = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5\n    b = ((x2 - x3) ** 2 + (y2 - y3) ** 2) ** 0.5\n    c = ((x3 - x1) ** 2 + (y3 - y1) ** 2) ** 0.5\n    if a + b > c and a + c > b and b + c > a:\n        return 'Yes'\n    else:\n        return 'No'\n[DONE]"}
+{"idx": 439, "completion": "def extract_string(lst, n):\n    return [i for i in lst if len(i) >= n]\n[DONE]"}
+{"idx": 440, "completion": "import re\ndef remove_whitespaces(string):\n    return re.sub(r'\\s+', '', string)\n[DONE]"}
+{"idx": 441, "completion": "def loss_amount(amount,purchase_amount):\n    if amount < purchase_amount:\n        return purchase_amount - amount\n    else:\n        return None\n[DONE]"}
+{"idx": 442, "completion": "def sumofFactors(n): \n    result = 0\n    for i in range(2, n + 1): \n        if n % i == 0: \n            if i % 2 == 0: \n                result += i \n    return result\n[DONE]"}
+{"idx": 443, "completion": "import re\ndef text_match_wordz(text):\n    pattern = r\"\\b\\w*z\\w*\\b\"\n    result = re.search(pattern, text)\n    if result:\n        return \"Found a match!\"\n    else:\n        return \"Not matched!\"\n[DONE]"}
+{"idx": 444, "completion": "def check_monthnumb_number(month):\n    if month in [1, 3, 5, 7, 8, 10, 12]:\n        return True\n    else:\n        return False\n[DONE]"}
+{"idx": 445, "completion": "def reverse_string_list(lst):\n    return [i[::-1] for i in lst]\n[DONE]"}
+{"idx": 446, "completion": "def Find_Min(lists):\n    min_length = min(len(sublist) for sublist in lists)\n    return [sublist for sublist in lists if len(sublist) == min_length]\n[DONE]"}
+{"idx": 447, "completion": "def rectangle_area(length, width):\n    return length * width\n[DONE]"}
+{"idx": 448, "completion": "import re\ndef remove_uppercase(text):\n    return re.sub(r'[A-Z]', '', text)\n[DONE]"}
+{"idx": 449, "completion": "def Extract(lst):\n    return [sub[0] for sub in lst]\n[DONE]"}
+{"idx": 450, "completion": "def upper_ctr(string):\n    return sum(1 for c in string if c.isupper())\n[DONE]"}
+{"idx": 451, "completion": "from itertools import combinations\ndef combinations_list(lst):\n    return [list(x) for i in range(len(lst) + 1) for x in combinations(lst, i)]\n[DONE]"}
+{"idx": 452, "completion": "def max_subarray_product(nums):\n    if not nums:\n        return 0\n    max_product = float('-inf')\n    current_max, current_min = 1, 1\n    for num in nums:\n        if num == 0:\n            current_max, current_min = 1, 1\n            continue\n        temp = current_max * num\n        current_max = max(num * current_max, num * current_min, num)\n        current_min = min(temp, num * current_min, num)\n        max_product = max(max_product, current_max)\n    return max_product\n[DONE]"}
+{"idx": 453, "completion": "def check_value(d, val):\n    return all(v == val for v in d.values())\n[DONE]"}
+{"idx": 454, "completion": "def drop_empty(dictionary):\n    return {k: v for k, v in dictionary.items() if v is not None}\n[DONE]"}
+{"idx": 455, "completion": "def find_peak(arr, n):\n    for i in range(1, n - 1):\n        if arr[i - 1] < arr[i] > arr[i + 1]:\n            return i\n    return -1\n[DONE]"}
+{"idx": 456, "completion": "def decimal_to_Octal(decimal):\n    octal = oct(decimal)\n    return octal\n[DONE]"}
+{"idx": 457, "completion": "def max_product(nums, n):\n    dp = [[nums[i]] for i in range(n)]\n    for i in range(1, n):\n        for j in range(i):\n            if nums[i] > nums[j]:\n                dp[i] = max(dp[i], [nums[i]] + dp[j], key=lambda x: reduce(mul, x))\n    return reduce(mul, max(dp, key=lambda x: reduce(mul, x)))\n[DONE]"}
+{"idx": 458, "completion": "def max_profit(prices, k):\n    n = len(prices)\n    if k >= n // 2:\n        return sum(max(0, prices[i + 1] - prices[i]) for i in range(n - 1))\n    dp = [[0] * n for _ in range(k + 1)]\n    for i in range(1, k + 1):\n        max_diff = -prices[0]\n        for j in range(1, n):\n            dp[i][j] = max(dp[i][j - 1], prices[j] + max_diff)\n            max_diff = max(max_diff, dp[i - 1][j] - prices[j])\n    return dp[k][n - 1]\n[DONE]"}
+{"idx": 459, "completion": "def add_pairwise(nums):\n    return tuple(map(lambda x, y: x + y, nums, nums[1:]))\n[DONE]"}
+{"idx": 460, "completion": "def find_remainder(arr, m, n):\n    result = 1\n    for i in arr:\n        result = (result * i) % m\n    return (result * pow(result, n - 2, m)) % m\n[DONE]"}
+{"idx": 461, "completion": "def check_Consecutive(nums):\n    return sorted(nums) == list(range(min(nums), max(nums)+1))\n[DONE]"}
+{"idx": 462, "completion": "def tuple_intersection(tup_list1, tup_list2):\n    set1 = set(tup_list1)\n    set2 = set(tup_list2)\n    return set1 & set2\n[DONE]"}
+{"idx": 463, "completion": "def replace_char(string, char_to_replace, new_char):\n    return string.replace(char_to_replace, new_char)\n[DONE]"}
+{"idx": 464, "completion": "from collections import Counter\ndef sort_counter(counter):\n    return sorted(counter.items(), key=lambda x: x[1], reverse=True)\n[DONE]"}
+{"idx": 465, "completion": "def big_sum(arr):\n    return max(arr) + min(arr)\n[DONE]"}
+{"idx": 466, "completion": "def is_lower(string):\n    return string.lower()\n[DONE]"}
+{"idx": 467, "completion": "def remove_lowercase(s):\n    return ''.join([char for char in s if char.isupper()])\n[DONE]"}
+{"idx": 468, "completion": "def first_Digit(num):\n    str_num = str(num)\n    return int(str_num[0])\n[DONE]"}
+{"idx": 469, "completion": "def get_max_occuring_char(str1):\n    ASCII_SIZE = 256\n    ctr = [0] * ASCII_SIZE\n    max = -1\n    ch = ''\n    for i in str1:\n        ctr[ord(i)]+=1;\n        if(ctr[ord(i)] > max):\n            max = ctr[ord(i)]\n            ch = i\n    return ch\n[DONE]"}
+{"idx": 470, "completion": "def is_subset_sum(nums, n, sum):\n    if sum == 0:\n        return True\n    if n == 0 and sum != 0:\n        return False\n\n    if nums[n - 1] > sum:\n        return is_subset_sum(nums, n - 1, sum)\n\n    return is_subset_sum(nums, n - 1, sum) or is_subset_sum(nums, n - 1, sum - nums[n - 1])\n[DONE]"}
+{"idx": 471, "completion": "import re\ndef match(string):\n    pattern = r\"[A-Z][a-z]*\"\n    if re.match(pattern, string):\n        return 'Yes'\n    else:\n        return 'No'\n[DONE]"}
+{"idx": 472, "completion": "def first_Factorial_Divisible_Number(x):\n    n = 1\n    factorial = 1\n    while True:\n        factorial *= n\n        if factorial % x == 0:\n            return n\n        n += 1\n[DONE]"}
+{"idx": 473, "completion": "def remove_matching_tuple(tuple1, tuple2):\n    return tuple(set(tuple1) - set(tuple2))\n[DONE]"}
+{"idx": 474, "completion": "def largest_palindrome(arr, n):\n    largest = 0\n    for i in range(n):\n        if str(arr[i]) == str(arr[i])[::-1]:\n            largest = max(largest, arr[i])\n    return largest\n[DONE]"}
+{"idx": 475, "completion": "import math\ndef binomial_probability(n, k, p):\n    return (math.factorial(n) / (math.factorial(k) * math.factorial(n - k))) * (p ** k) * ((1 - p) ** (n - k))\n[DONE]"}
+{"idx": 476, "completion": "def sort_tuple(lst):\n    return sorted(lst, key=lambda x: x[1])\n[DONE]"}
+{"idx": 477, "completion": "import math\ndef area_pentagon(side):\n    return (5/2) * side * math.sin(math.pi/5)\n[DONE]"}
+{"idx": 478, "completion": "def frequency_Of_Largest(n, nums):\n    largest = max(nums)\n    return nums.count(largest)\n[DONE]"}
+{"idx": 479, "completion": "def extract_symmetric(tuples):\n    symmetric_pairs = set()\n    for pair in tuples:\n        if pair[::-1] in tuples:\n            symmetric_pairs.add(pair)\n    return symmetric_pairs\n[DONE]"}
+{"idx": 480, "completion": "def sum_gp(a, r, n):\n    return a * (r**n - 1) // (r - 1)\n[DONE]"}
+{"idx": 481, "completion": "def binary_search(arr, target):\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return True\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return False\n[DONE]"}
+{"idx": 482, "completion": "import math\ndef calculate_polygons(rows, cols, start_x, start_y, size):\n    polygons = []\n    for i in range(rows):\n        row = []\n        for j in range(cols):\n            x = start_x + j * size\n            y = start_y + i * size * math.sqrt(3) / 2\n            row.append((x, y))\n        polygons.append(row)\n    return polygons\n[DONE]"}
+{"idx": 483, "completion": "def binary_to_integer(binary_tuple):\n    return int(''.join(map(str, binary_tuple)), 2)\n[DONE]"}
+{"idx": 484, "completion": "import re\ndef remove_lowercase(s):\n    return re.sub(r'[a-z]+', '', s)\n[DONE]"}
+{"idx": 485, "completion": "import heapq\ndef heap_queue_smallest(nums, k):\n    return heapq.nsmallest(k, nums)\n[DONE]"}
+{"idx": 486, "completion": "import math\ndef surfacearea_cone(r, h):\n    l = math.sqrt(r**2 + h**2)\n    return math.pi * r * (r + l)\n[DONE]"}
+{"idx": 487, "completion": "def gcd(a, b):\n    while b:\n        a, b = b, a % b\n    return a\n[DONE]"}
+{"idx": 488, "completion": "import math\ndef diameter_circle(radius):\n    diameter = radius * 2\n    return diameter\n[DONE]"}
+{"idx": 489, "completion": "def concatenate_elements(elements):\n    return ' '.join(elements)\n[DONE]"}
+{"idx": 490, "completion": "def num_comm_div(a, b):\n    n = min(a, b)\n    count = 0\n    for i in range(1, n+1):\n        if a % i == 0 and b % i == 0:\n            count += 1\n    return count\n[DONE]"}
+{"idx": 491, "completion": "def find(num1,num2):\n    return num1 % num2\n[DONE]"}
+{"idx": 492, "completion": "def add_consecutive_nums(nums):\n    result = []\n    temp = nums[0]\n    for i in range(1, len(nums)):\n        if nums[i] == nums[i-1]:\n            temp += nums[i]\n        else:\n            result.append(temp)\n            temp = nums[i]\n    result.append(temp)\n    return result\n[DONE]"}
+{"idx": 493, "completion": "def sum_Of_Series(n):\n    return (n * (n + 1) // 2) ** 2\n[DONE]"}
+{"idx": 494, "completion": "def re_order(arr):\n    non_zero = [num for num in arr if num != 0]\n    zeroes = [num for num in arr if num == 0]\n    return non_zero + zeroes\n[DONE]"}
+{"idx": 495, "completion": "def permutation_coefficient(n, k):\n    return math.factorial(n) // math.factorial(n - k)\n[DONE]"}
+{"idx": 496, "completion": "def remove_words(words_list, words_to_remove):\n    return [word for word in words_list if word not in words_to_remove]\n[DONE]"}
+{"idx": 497, "completion": "def same_order(list1, list2):\n    return all(x in list2 for x in list1) and all(list1.index(x) <= list1.index(y) for x, y in zip(list1, list2))\n[DONE]"}
+{"idx": 498, "completion": "def average_Odd(n):\n    sum = 0\n    count = 0\n    for i in range(1, n+1, 2):\n        sum += i\n        count += 1\n    return sum / count\n[DONE]"}
+{"idx": 499, "completion": "def no_of_subsequences(nums, k):\n    nums.sort()\n    n = len(nums)\n    dp = [1] * n\n    for i in range(n):\n        for j in range(i):\n            if nums[i] * nums[j] < k:\n                dp[i] += dp[j]\n    return dp[n-1]\n[DONE]"}

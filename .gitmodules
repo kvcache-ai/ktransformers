@@ -20,3 +20,6 @@
 [submodule "third_party/PhotonLibOS"]
 	path = third_party/PhotonLibOS
 	url = https://github.com/alibaba/PhotonLibOS.git
+[submodule "sosp25-ae/baseline-custom-llama.cpp"]
+	path = sosp25-ae/baseline-custom-llama.cpp
+	url = https://github.com/chenht2022/custom-llama.cpp.git

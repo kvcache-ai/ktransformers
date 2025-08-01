@@ -19,6 +19,7 @@ echo "Selected backend: $DEV_BACKEND"
 rm -rf build
 rm -rf *.egg-info
 rm -rf csrc/build
+rm -rf csrc/balance_serve/build
 rm -rf csrc/ktransformers_ext/build
 rm -rf csrc/ktransformers_ext/cuda/build
 rm -rf csrc/ktransformers_ext/cuda/dist
@@ -27,6 +28,7 @@ rm -rf ~/.ktransformers
 echo "Installing python dependencies from requirements.txt"
 pip install -r requirements-local_chat.txt
 pip install -r ktransformers/server/requirements.txt
+pip install -r sosp25-ae/requirements.txt
 
 echo "Installing ktransformers"
 KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation

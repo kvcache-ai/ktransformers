@@ -8,60 +8,56 @@
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 #include "task_queue.h"
+#include <chrono>
+#include <iostream>
+#include <pthread.h>
+#include <sched.h>
+#include <thread>
 
-TaskQueue::TaskQueue() {
-    worker = std::thread(&TaskQueue::processTasks, this);
-    sync_flag.store(true, std::memory_order_seq_cst);
-    exit_flag.store(false, std::memory_order_seq_cst);
+TaskQueue::TaskQueue() : done(false), pending(0) {
+  Node *dummy = new Node();
+  head.store(dummy, std::memory_order_relaxed);
+  tail.store(dummy, std::memory_order_relaxed);
+  workerThread = std::thread(&TaskQueue::worker, this);
 }
 
 TaskQueue::~TaskQueue() {
-    {
-        mutex.lock();
-        exit_flag.store(true, std::memory_order_seq_cst);
-        mutex.unlock();
-    }
-    cv.notify_all();
-    if (worker.joinable()) {
-        worker.join();
-    }
+  done.store(true, std::memory_order_release);
+  if (workerThread.joinable())
+    workerThread.join();
+
+  Node *node = head.load(std::memory_order_relaxed);
+  while (node) {
+    Node *next = node->next.load(std::memory_order_relaxed);
+    delete node;
+    node = next;
+  }
 }
 
 void TaskQueue::enqueue(std::function<void()> task) {
-    {
-        mutex.lock();
-        tasks.push(task);
-        sync_flag.store(false, std::memory_order_seq_cst);
-        mutex.unlock();
-    }
-    cv.notify_one();
+  pending.fetch_add(1, std::memory_order_acq_rel);
+  Node *node = new Node(task);
+  Node *prev = tail.exchange(node, std::memory_order_acq_rel);
+  prev->next.store(node, std::memory_order_release);
 }
 
-void TaskQueue::sync() {
-    while (!sync_flag.load(std::memory_order_seq_cst))
-        ;
+void TaskQueue::sync(size_t n) {
+  while (pending.load(std::memory_order_acquire) > n)
+    ;
 }
 
-void TaskQueue::processTasks() {
-    while (true) {
-        std::function<void()> task;
-        {
-            mutex.lock();
-            cv.wait(mutex, [this]() { return !tasks.empty() || exit_flag.load(std::memory_order_seq_cst); });
-            if (exit_flag.load(std::memory_order_seq_cst) && tasks.empty()) {
-                return;
-            }
-            task = tasks.front();
-            tasks.pop();
-            mutex.unlock();
-        }
-        task();
-        {
-            mutex.lock();
-            if (tasks.empty()) {
-                sync_flag.store(true, std::memory_order_seq_cst);
-            }
-            mutex.unlock();
-        }
+void TaskQueue::worker() {
+  Node *curr = head.load(std::memory_order_relaxed);
+  while (!done.load(std::memory_order_acquire)) {
+    Node *next = curr->next.load(std::memory_order_acquire);
+    if (next) {
+      if (next->task) {
+        next->task();
+      }
+      delete curr;
+      curr = next;
+      head.store(curr, std::memory_order_release);
+      pending.fetch_sub(1, std::memory_order_acq_rel);
     }
+  }
 }

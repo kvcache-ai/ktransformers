@@ -14,7 +14,7 @@ echo "Installing python dependencies from requirements.txt"
 pip install -r requirements-local_chat.txt
 pip install -r ktransformers/server/requirements.txt
 echo "Installing ktransformers"
-KTRANSFORMERS_FORCE_BUILD=TRUE USE_BALANCE_SERVE=1 pip install -v . --no-build-isolation
+KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
 pip install third_party/custom_flashinfer/ -v
 
 # SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")

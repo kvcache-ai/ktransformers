@@ -115,6 +115,65 @@ class KMoEGate(BaseInjectedModule, KMoEGateBase):
         if self.e_score_correction_bias is not None:
             self.e_score_correction_bias = None
 
+class KMoEGateGreedy(BaseInjectedModule, KMoEGateBase):
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module = None,
+        generate_device: str = "cuda",
+        prefill_device: str = "cuda",
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
+        KMoEGateBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
+
+    def forward(self, hidden_states) -> torch.Tensor:
+        bsz, seq_len, h = hidden_states.shape
+        ### compute gating score
+        hidden_states = hidden_states.view(-1, h)
+        logits = F.linear(
+            hidden_states.type(torch.float32), self.orig_module.weight.type(torch.float32), None
+        )
+        if self.orig_module.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1, dtype=torch.float32)
+        elif self.orig_module.scoring_func == "sigmoid":
+            scores = logits.sigmoid()
+        else:
+            raise NotImplementedError(
+                f"insupportable scoring function for MoE gating: {self.orig_module.scoring_func}"
+            )
+        
+        topk_weight, topk_idx = torch.topk(scores, self.orig_module.top_k, dim=-1)
+
+        ### norm gate to sum 1
+        if self.orig_module.top_k > 1 and self.orig_module.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / denominator
+        topk_weight = topk_weight * self.orig_module.routed_scaling_factor # must multiply the scaling factor
+
+        return topk_idx, topk_weight
+
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str|None = None):
+        if device is None: device = self.device
+        if w is None: w = self.load_weights(device=device)
+        
+        if isinstance(w, dict):
+            self.orig_module.weight = nn.Parameter(w["weight"])
+            self.orig_module.e_score_correction_bias = nn.Parameter(w["e_score_correction_bias"])
+        else:
+            raise ValueError("Invalid weight type")
+        self.orig_module.weight = nn.Parameter(self.orig_module.weight.to(device))
+        self.orig_module.e_score_correction_bias = nn.Parameter(self.orig_module.e_score_correction_bias.to(device))
+
+    def unload(self):
+        if self.weight is not None:
+            self.weight = None
+        if self.e_score_correction_bias is not None:
+            self.e_score_correction_bias = None
 
 class KMoEGateQwen2Moe(BaseInjectedModule, KMoEGateBase):
     def __init__(

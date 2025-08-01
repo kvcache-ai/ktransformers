@@ -727,13 +727,12 @@ class CPUInferKVCache:
 
 class CPUInfer:
     cpuinfer = None
-    cur_backend_thread_num = 0
-    
-    def __init__(self, thread_num):
-        if thread_num > CPUInfer.cur_backend_thread_num:
-            CPUInfer.cur_backend_thread_num = thread_num
-            del CPUInfer.cpuinfer
-            CPUInfer.cpuinfer = cpuinfer_ext.CPUInfer(thread_num)
+
+    def __init__(self, thread_num: int|cpuinfer_ext.WorkerPoolConfig):
+        # print(thread_num.subpool_count)
+        # print(thread_num.subpool_numa_map)
+        CPUInfer.cpuinfer = cpuinfer_ext.CPUInfer(thread_num)
+
 
     def submit(self, task):
         CPUInfer.cpuinfer.submit(task)
@@ -741,11 +740,11 @@ class CPUInfer:
     def submit_with_cuda_stream(self, current_cuda_stream, task):
         CPUInfer.cpuinfer.submit_with_cuda_stream(current_cuda_stream, task)
 
-    def sync(self):
-        CPUInfer.cpuinfer.sync()
+    def sync(self, n: int = 0):
+        CPUInfer.cpuinfer.sync(n)
 
-    def sync_with_cuda_stream(self, current_cuda_stream):
-        CPUInfer.cpuinfer.sync_with_cuda_stream(current_cuda_stream)
+    def sync_with_cuda_stream(self, current_cuda_stream, n: int = 0):
+        CPUInfer.cpuinfer.sync_with_cuda_stream(current_cuda_stream, n)
 
 
         

@@ -16,8 +16,8 @@
 #include <mutex>
 #include <vector>
 
-#include "../../cpu_backend/backend.h"
 #include "../../cpu_backend/shared_mem_buffer.h"
+#include "../../cpu_backend/worker_pool.h"
 #include "conversion.h"
 #include "llama.cpp/ggml-impl.h"
 #include "llama.cpp/ggml-quants.h"
@@ -25,46 +25,55 @@
 #include "llamafile/sgemm.h"
 
 struct MLPConfig {
-    int hidden_size;
-    int intermediate_size;
-    int stride;
-    int group_max_len;
-    void* gate_proj;
-    void* up_proj;
-    void* down_proj;
-    ggml_type gate_type;
-    ggml_type up_type;
-    ggml_type down_type;
-    ggml_type hidden_type;
+  int hidden_size;
+  int intermediate_size;
+  int stride;
+  int group_max_len;
+  void *gate_proj;
+  void *up_proj;
+  void *down_proj;
+  ggml_type gate_type;
+  ggml_type up_type;
+  ggml_type down_type;
+  ggml_type hidden_type;
 
-    MLPConfig() {}
+  MLPConfig() {}
 
-    MLPConfig(int hidden_size, int intermediate_size, int stride, int group_max_len, void* gate_proj, void* up_proj, void* down_proj, ggml_type gate_type, ggml_type up_type, ggml_type down_type, ggml_type hidden_type)
-        : hidden_size(hidden_size), intermediate_size(intermediate_size), stride(stride), group_max_len(group_max_len), gate_proj(gate_proj), up_proj(up_proj), down_proj(down_proj), gate_type(gate_type), up_type(up_type), down_type(down_type), hidden_type(hidden_type) {}
+  MLPConfig(int hidden_size, int intermediate_size, int stride, int group_max_len, void *gate_proj, void *up_proj,
+            void *down_proj, ggml_type gate_type, ggml_type up_type, ggml_type down_type, ggml_type hidden_type)
+      : hidden_size(hidden_size), intermediate_size(intermediate_size), stride(stride), group_max_len(group_max_len),
+        gate_proj(gate_proj), up_proj(up_proj), down_proj(down_proj), gate_type(gate_type), up_type(up_type),
+        down_type(down_type), hidden_type(hidden_type) {}
 };
 
 class MLP {
-   public:
-    MLP(MLPConfig);
-    ~MLP();
-    void warm_up(Backend* backend);
-    void forward_many(int qlen, const void* input, void* output, Backend* backend);
-    void forward(int qlen, const void* input, void* output, Backend* backend);
+public:
+  MLP(MLPConfig);
+  ~MLP();
+  void warm_up(WorkerPool *backend);
+  void forward_many(int qlen, const void *input, void *output, WorkerPool *backend);
+  void forward(int qlen, const void *input, void *output, WorkerPool *backend);
 
-   private:
-    MLPConfig config_;
-    void* gate_proj_;  // [intermediate_size * hidden_size ( /32 if quantized)]
-    void* up_proj_;    // [intermediate_size * hidden_size ( /32 if quantized)]
-    void* down_proj_;  // [hidden_size * intermediate_size ( /32 if quantized)]
+private:
+  MLPConfig config_;
+  void *gate_proj_; // [intermediate_size * hidden_size ( /32 if quantized)]
+  void *up_proj_;   // [intermediate_size * hidden_size ( /32 if quantized)]
+  void *down_proj_; // [hidden_size * intermediate_size ( /32 if quantized)]
 
-    float* input_fp32_;         // [group_max_len * hidden_size]
-    uint8_t* gate_input_;       // [group_max_len * hidden_size * ggml_type_size(ggml_internal_get_type_traits(gate_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(gate_type).vec_dot_type)]
-    uint8_t* up_input_;         // [group_max_len * hidden_size * ggml_type_size(ggml_internal_get_type_traits(up_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(up_type).vec_dot_type)]
-    float* gate_output_;        // [group_max_len * intermediate_size]
-    float* up_output_;          // [group_max_len * intermediate_size]
-    float* intermediate_fp32_;  // [group_max_len * intermediate_size]
-    uint8_t* down_input_;       // [group_max_len * intermediate_size * ggml_type_size(ggml_internal_get_type_traits(down_type).vec_dot_type) / ggml_blck_size(ggml_internal_get_type_traits(down_type).vec_dot_type)]
-    float* down_output_;        // [group_max_len * hidden_size]
+  float *input_fp32_;   // [group_max_len * hidden_size]
+  uint8_t *gate_input_; // [group_max_len * hidden_size *
+                        // ggml_type_size(ggml_internal_get_type_traits(gate_type).vec_dot_type) /
+                        // ggml_blck_size(ggml_internal_get_type_traits(gate_type).vec_dot_type)]
+  uint8_t
+      *up_input_; // [group_max_len * hidden_size * ggml_type_size(ggml_internal_get_type_traits(up_type).vec_dot_type)
+                  // / ggml_blck_size(ggml_internal_get_type_traits(up_type).vec_dot_type)]
+  float *gate_output_;       // [group_max_len * intermediate_size]
+  float *up_output_;         // [group_max_len * intermediate_size]
+  float *intermediate_fp32_; // [group_max_len * intermediate_size]
+  uint8_t *down_input_;      // [group_max_len * intermediate_size *
+                             // ggml_type_size(ggml_internal_get_type_traits(down_type).vec_dot_type) /
+                             // ggml_blck_size(ggml_internal_get_type_traits(down_type).vec_dot_type)]
+  float *down_output_;       // [group_max_len * hidden_size]
 };
 
 #endif

@@ -1,0 +1,7 @@
+{"config_id":"ktransformers_qw2_bf16_8+0","result":22.88}
+{"config_id":"ktransformers_qw2_bf16_6+2","result":25.73}
+{"config_id":"ktransformers_qw2_int8_8+0","result":36.99}
+{"config_id":"ktransformers_qw2_int8_4+4","result":44.08}
+{"config_id":"fiddler_qw2_bf16","result":5.59}
+{"config_id":"llama.cpp_qw2_fp16","result":13.01}
+{"config_id":"llama.cpp_qw2_int8","result":19.17}

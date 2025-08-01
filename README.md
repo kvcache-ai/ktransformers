@@ -12,6 +12,16 @@
   <strong><a href="#show-cases">🌟 Show Cases</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#tutorial">📃 Tutorial</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬  Discussion </a>|<a href="#FAQ"> 🙋 FAQ</a> </strong>
 </div>
 
+---
+
+## 📄 SOSP'25 Artifact Evaluation
+
+This repository contains the open-source code for the paper **[SOSP'25] KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models**. This branch is for artifact evaluation only.
+
+**For artifact evaluation materials, please visit: [`sosp25-ae/`](./sosp25-ae)**
+
+---
+
 <h2 id="intro">🎉 Introduction</h2>
 KTransformers, pronounced as Quick Transformers, is designed to enhance your 🤗 <a href="https://github.com/huggingface/transformers">Transformers</a> experience with advanced kernel optimizations and placement/parallelism strategies.
 <br/><br/>
