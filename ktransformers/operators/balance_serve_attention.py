@@ -11,6 +11,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeAttention
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeAttention
 from ktransformers.models.modeling_smallthinker import SmallthinkerAttention
 from ktransformers.models.modeling_glm4_moe import Glm4MoeAttention
+from ktransformers.models.modeling_hunyuan import HunYuanAttention
 from typing import Optional, Tuple
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
@@ -18,7 +19,7 @@ import logging
 from transformers.configuration_utils import PretrainedConfig
 from flashinfer import BatchMLAPagedAttentionWrapper
 from ktransformers.operators.flashinfer_batch_prefill_wrapper import flashInferAttn
-from ktransformers.models.custom_cache import KDeepSeekV3Cache, KGQACache
+from ktransformers.models.custom_cache import KDeepSeekV3Cache, KGQACache, KHunYuanCache
 logger = logging.getLogger("attention")
 
 # Copied from transformers.models.llama.modeling_llama.rotate_half
@@ -644,3 +645,160 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
         attn_output = self.o_proj(attn_output.view(q_len, self.config.num_attention_heads * self.head_dim), bsz_tensors)
 
         return attn_output
+
+
+class KHunYuanAttention(BaseInjectedModule, HunYuanAttention):
+    """HunYuan attention for balance serve mode with GQA and CLA support
+    
+    Key features:
+    1. GQA (Grouped Query Attention): 32 query heads, 8 KV heads
+       - Flashinfer handles the repeat internally for memory efficiency
+       - KV cache stores only 8 heads, expanded during attention computation
+    2. CLA (Cross-Layer Attention): Some layers reuse KV from previous layers
+       - Reduces computation by sharing KV states across layers
+    """
+    
+    def __init__(self,
+                 key: str,
+                 gguf_loader: GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
+                 **kwargs):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs
+        )
+        # Store layer_idx before calling HunYuanAttention init
+        layer_idx = orig_module.layer_idx
+        # Initialize HunYuanAttention components manually to avoid __setattr__ conflicts
+        self.config = config
+        self.layer_idx = layer_idx
+        self.prefill_device = prefill_device
+        self.generate_device = generate_device
+        
+        # Initialize attention parameters from config
+        # HunYuan uses 32 attention heads and 8 KV heads (GQA with 4x groups)
+        self.attention_dropout = config.attention_dropout
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads  # 32 for HunYuan
+        self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
+        self.num_key_value_heads = config.num_key_value_heads  # 8 for HunYuan
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads  # 4 groups
+        self.max_position_embeddings = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
+        self.is_causal = True
+        
+        # Cross-Layer Attention (CLA) configuration
+        self.use_cla = getattr(config, "use_cla", False)
+        self.cla_share_factor = getattr(config, "cla_share_factor", 1)
+        # Determine attention type based on CLA configuration
+        if self.use_cla and layer_idx is not None and layer_idx % self.cla_share_factor != 0:
+            self.attention_type = 'cross'
+        else:
+            self.attention_type = 'self'
+        
+        if getattr(config, "use_qk_norm", False):
+            self.use_qk_norm = True
+        else:
+            self.use_qk_norm = False
+
+    # Copied from transformers.models.mistral.modeling_mistral.apply_rotary_pos_emb
+    def apply_rotary_pos_emb(self, q, k, cos, sin, position_ids, unsqueeze_dim=1):
+        """Applies Rotary Position Embedding to the query and key tensors.
+        Following original Hunyuan implementation pattern.
+        """
+        # Use original Hunyuan pattern: cos/sin indexed by position_ids then unsqueezed
+        cos = cos[position_ids].unsqueeze(unsqueeze_dim)
+        sin = sin[position_ids].unsqueeze(unsqueeze_dim)
+        q_embed = (q * cos) + (self.rotate_half(q) * sin)
+        k_embed = (k * cos) + (self.rotate_half(k) * sin)
+        return q_embed, k_embed
+
+    def rotate_half(self, x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+        
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: KHunYuanCache,
+        position_ids: torch.Tensor,
+        wrapper: flashInferAttn,
+        bsz_tensors: torch.Tensor,
+        page_idx: torch.Tensor,
+        page_offset: torch.Tensor, 
+        kv_states: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Balance serve forward implementation for HunYuan attention with CLA support
+        
+        Args:
+            hidden_states: Input hidden states
+            kv_cache: KV cache for current layer
+            position_ids: Position IDs for RoPE
+            wrapper: FlashInfer attention wrapper
+            bsz_tensors: Batch size tensors
+            page_idx: Page indices for paged attention
+            page_offset: Page offsets for paged attention
+            kv_states: Optional pre-computed KV states from previous layers (for CLA)
+        """
+        q_len, _ = hidden_states.size()
+        
+        # Compute query projections (always from current hidden_states)
+        query_states = self.q_proj(hidden_states, bsz_tensors)
+        
+        # Handle Cross-Layer Attention (CLA)
+        if self.attention_type == "cross" and kv_states is not None:
+            # Use pre-computed KV states from a previous layer
+            key_states, value_states = kv_states
+        else:
+            key_states = self.k_proj(hidden_states, bsz_tensors)
+            value_states = self.v_proj(hidden_states, bsz_tensors)
+        
+        # Reshape for attention heads
+        query_states = query_states.view(q_len, self.num_heads, self.head_dim)
+        # Only reshape if we computed new KV (not using CLA)
+        if self.attention_type != "cross" or kv_states is None:
+            key_states = key_states.view(q_len, self.num_key_value_heads, self.head_dim)
+            value_states = value_states.view(q_len, self.num_key_value_heads, self.head_dim)
+        
+        # Apply RoPE following KTransformers pattern - avoid .item() for CUDA Graph compatibility
+        if hasattr(self, 'rotary_emb'):
+            # Pass position_ids directly to rotary_emb like other models (Qwen, DeepSeek)
+            cos, sin = self.rotary_emb(value_states.unsqueeze(0), position_ids.unsqueeze(0))
+            # Apply RoPE with proper unsqueeze for dimension compatibility
+            query_states, key_states = self.apply_rotary_pos_emb(
+                query_states.unsqueeze(0), 
+                key_states.unsqueeze(0), 
+                cos, 
+                sin, 
+                position_ids.unsqueeze(0),
+                unsqueeze_dim=2
+            )
+            query_states = query_states.squeeze(0)
+            key_states = key_states.squeeze(0)
+        
+        # Apply QK normalization if configured
+        if self.use_qk_norm:
+            query_states = self.query_layernorm(query_states)
+            key_states = self.key_layernorm(key_states)
+        
+        # Store original KV states for CLA sharing
+        orig_key_states = key_states
+        orig_value_states = value_states
+        
+        # Get k_cache and v_cache for current layer
+        k_cache = kv_cache.get_k_cache(self.layer_idx)
+        v_cache = kv_cache.get_v_cache(self.layer_idx)
+        
+        # It expects key_states and value_states with original num_kv_heads (8)
+        # Query_states with num_heads (32)
+        attn_output = wrapper.forward(query_states, k_cache, v_cache, key_states, value_states)
+        
+        attn_output = attn_output.view(q_len, self.num_heads * self.head_dim)
+        attn_output = self.o_proj(attn_output, bsz_tensors)
+        
+        return attn_output, (orig_key_states, orig_value_states)

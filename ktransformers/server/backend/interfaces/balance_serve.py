@@ -1,5 +1,5 @@
 from typing import Any, AsyncIterator, List, Optional, Set
-from ktransformers.models.custom_cache import KDeepSeekV3Cache, KGQACache
+from ktransformers.models.custom_cache import KDeepSeekV3Cache, KGQACache, KHunYuanCache
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -26,6 +26,7 @@ from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
 from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
+from ktransformers.models.custom_modeling_hunyuan import KHunYuanMoEV1ForCausalLM
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
@@ -66,6 +67,7 @@ default_optimize_rules = {
     "Qwen3MoeForCausalLM": ktransformer_rules_dir + "Qwen3Moe-serve.yaml",
     "SmallThinkerForCausalLM": ktransformer_rules_dir + "Smallthinker-serve.yaml",
     "Glm4MoeForCausalLM": ktransformer_rules_dir + "Glm4Moe-serve.yaml",
+    "HunYuanMoEV1ForCausalLM": ktransformer_rules_dir + "Hunyuan-serve.yaml",
 }
 
 
@@ -116,7 +118,7 @@ class Engine:
     model_runner: ModelRunner
     sampler: Sampler
     query_manager: QueryManager
-    cache: KDeepSeekV3Cache | KGQACache
+    cache: KDeepSeekV3Cache | KGQACache | KHunYuanCache
     def __init__(self, args: ConfigArgs = default_args, generated_token_queue:Queue = None, broadcast_endpoint: str = None, kvcache_event: Event = None):
         self.args = args
 
@@ -170,6 +172,9 @@ class Engine:
                 self.cache = KGQACache(config, self.args.page_size)
                 self.model = KGlm4MoeForCausalLM(config, self.cache)
 
+            elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+                self.cache = KHunYuanCache(config, self.args.page_size)
+                self.model = KHunYuanMoEV1ForCausalLM(config, self.cache)
 
 
         context = zmq.Context()
@@ -220,7 +225,7 @@ class Engine:
         self.block_num = inference_context.k_cache[0].size(1)
         self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
         #@TODO add config
-        if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM" or config.architectures[0] == "Glm4MoeForCausalLM" or config.architectures[0] == "SmallThinkerForCausalLM":
+        if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM" or config.architectures[0] == "HunYuanMoEV1ForCausalLM" or config.architectures[0] == "Glm4MoeForCausalLM" or config.architectures[0] == "SmallThinkerForCausalLM":
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, max(self.model_runner.cuda_graphs), args.max_batch_size, self.block_num) 
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)
