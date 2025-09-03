@@ -29,7 +29,7 @@ pip install -r requirements-local_chat.txt
 pip install -r ktransformers/server/requirements.txt
 
 echo "Installing ktransformers"
-KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
+KTRANSFORMERS_FORCE_BUILD=TRUE USE_BALANCE_SERVE=1 pip install -vvv . --no-build-isolation
 
 if [[ "$DEV_BACKEND" == "cuda" ]]; then
     echo "Installing custom_flashinfer for CUDA backend"

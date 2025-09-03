@@ -1,0 +1,27 @@
+global_args:
+  8k1k: &8k1k /home/prompts/8k1k.txt
+
+settings:
+  max_retries: 3
+  stop_on_failure: false
+  is_print_lines: true
+  sleep_time: 8
+
+stat_keys:
+  - 'prompt eval count'
+  - 'prompt eval duration'
+  - 'prompt eval rate'
+  - 'eval count'  # 'eval count' belong to 'prompt eval count', but it is shorter,
+  - 'eval duration'  # put shorter before longer, so match longer failure than match shorter
+  - 'eval rate'
+
+scripts:
+  - name: 'test_cpuinfer37.sh'
+    path: 'test_cpuinfer37.sh'
+    test_input: *8k1k
+    timeout: 20000
+
+  - name: 'test_cpuinfer49.sh'
+    path: 'test_cpuinfer49.sh'
+    test_input: *8k1k
+    timeout: 20000
