@@ -7,12 +7,15 @@ import torch
 from ktransformers.server.balance_serve.settings import sched_ext
 import random
 import time
+from ktransformers.server.config.config import Config
+from ktransformers.server.utils.serve_profiling import PROF_TIME_STAT
 
 class QueryInfo:
     id: int
     active_position: int
     query_length: int
     is_prefill: int
+    is_first_token: int
     block_index: torch.Tensor
     query_tokens: torch.Tensor
     stop_criteria: list[torch.Tensor]
@@ -20,14 +23,19 @@ class QueryInfo:
     temperature: float
     top_p: float
 
-    max_length: int 
+    max_length: int
+
+    pos_status: torch.Tensor
+    probs: list[torch.Tensor]
+    acc_position: int 
 
     def __init__(self, id, query_length: int, max_length: int, page_size: int, device: torch.device, is_prefill: bool = True, offset: int = 0, active_position: int = 0, temperature: float = 0.01, top_p: float = 1.0):
         self.id = id
         self.is_prefill = is_prefill
+        self.is_first_token = False
         self.active_position = active_position
         self.max_length = max_length - 1
-        self.query_tokens = torch.zeros((max_length,), dtype=torch.int, device = device)
+        self.query_tokens = torch.zeros((max_length + 2,), dtype=torch.int, device = device)
         self.stop_criteria = []
         self.block_index = torch.arange(offset, offset + (max_length + active_position + page_size - 1) // page_size, dtype=torch.int, device = device)
         self.query_length = query_length
@@ -35,11 +43,23 @@ class QueryInfo:
         self.decode_start_time = None
         self.speculative_token = {} # {position: (accept, token)}
 
+        self.pos_status = torch.zeros((max_length + 2,), dtype=torch.int, device = device)
+        self.probs = [None] * (max_length + 2)
+
+        self.acc_tokens_num = 0
+        self.rej_tokens_num = 0
+        self.round = 0
+        self.acc_length = 0
+        self.acc_position = 0
+
         self.temperature = temperature
         self.top_p = top_p
 
     def check_stop(self):
         if self.active_position >= self.max_length - 2:
+            if PROF_TIME_STAT.on:
+                PROF_TIME_STAT.print_all()
+                # PROF_TIME_STAT.reset_all()
             return True
 
         # 遍历每个停止条件
@@ -57,6 +77,13 @@ class QueryInfo:
                 self.decode_duration_time = time.time() - self.decode_start_time
                 self.decode_tps = (self.active_position -  self.query_length) / self.decode_duration_time
                 print(f"prefill length: {self.query_length}, prefill time: {self.prefill_duration_time}, prefill tps {self.prefill_tps}, decode length: {self.active_position -  self.query_length}, decode time: {self.decode_duration_time}, decode tps {self.decode_tps}")
+                
+                if self.acc_tokens_num + self.rej_tokens_num != 0:
+                    verify_counts = self.acc_tokens_num + self.rej_tokens_num
+                    print(f"mtp accept rate: {self.acc_tokens_num}/{verify_counts} = {self.acc_tokens_num * 100 / verify_counts} %")
+                if PROF_TIME_STAT.on:
+                    PROF_TIME_STAT.print_all()
+                    # PROF_TIME_STAT.reset_all()
                 return True  # 找到匹配的停止条件
                 
         
@@ -66,25 +93,41 @@ class QueryInfo:
     def print(self):
         print(f"active_position: {self.active_position}, query_length: {self.query_length}, is_prefill: {self.is_prefill}")
         print(f"block_index_shape: {self.block_index.shape}, query_tokens_shape: {self.query_tokens.shape}")
+        print(f"query_tokens_shape: {self.query_tokens}, is_first_token: {self.is_first_token}" )
+        print(f"pos_status: {self.pos_status}, acc_position: ", self.acc_position)
+        print(f"probs: {self.probs}")
 
 
 class QueryManager:
 
+    max_length: int = 65536
     page_size: int = 256
     device: torch.device
     query_map : dict[int, QueryInfo]
 
-    def __init__(self, page_size = 256, device = torch.device('cuda')):
+    def __init__(self, max_length = 65536, page_size = 256, device = torch.device('cuda')):
+        self.max_length = max_length
         self.page_size = page_size
         self.device = device
         self.query_map = {}
+
+    def print(self, hint: str = ""):
+        print(hint," query_manager: ", self.query_map)
+        for key in self.query_map: 
+            query_info = self.query_map[key]
+            print(">>> query: ", key)
+            print("query_info: ")
+            query_info.print()
 
     def add_query(self, batch: sched_ext.BatchQueryTodo):
 
         for i in range(len(batch.query_ids)):
             id = batch.query_ids[i]
             if id not in self.query_map:
-                print(f"add query id: {id}, batch.query_lengths: {batch.query_lengths[i]}, batch_query_tokens: {batch.query_tokens[i].shape}, batch.block_indexes: {batch.block_indexes[i]}")
+                print(f"add query id: {id}, batch.query_lengths: {batch.query_lengths[i]}, "
+                      f"batch_query_tokens: {batch.query_tokens[i].shape}, "
+                      f"batch.block_indexes: {batch.block_indexes[i]}") if torch.distributed.get_rank() == 0 else None
+                assert batch.query_tokens[i].size(0) < self.max_length, "query max length in batchquerytodo exceeds internal max_length"
                 query_info = QueryInfo(id=id, query_length=batch.query_lengths[i], max_length=batch.query_tokens[i].size(0) + 1, page_size=self.page_size, device=self.device, temperature=batch.sample_options[i].temperature, top_p=batch.sample_options[i].top_p)
                 query_info.query_tokens[:query_info.query_length].copy_(batch.query_tokens[i][:query_info.query_length].to(self.device))
                 
@@ -118,6 +161,7 @@ class QueryManager:
 
             if query_info.active_position >= query_info.query_length and query_info.is_prefill:
                 query_info.is_prefill = False
+                query_info.is_first_token = True
                 query_info.prefill_duration_time = time.time() - query_info.enqueue_time
                 query_info.prefill_tps = query_info.query_length / query_info.prefill_duration_time
                 
@@ -140,6 +184,7 @@ class QueryManager:
                     assert False, f"query id {id} not found in query_map"
 
                 query_info = self.query_map[id]
+                query_info.is_first_token = False
                 query_info.active_position += 1
 
                 query_update = sched_ext.QueryUpdate()
