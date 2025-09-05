@@ -331,3 +331,96 @@ class KGQACache(nn.Module):
 
     def get_v_cache(self, layer_idx):
         return self.v_caches[layer_idx]
+
+
+class KHunYuanCache(nn.Module):
+    """
+    HunYuan-specific cache implementation for GQA with flashinfer compatibility.
+    Handles KV cache with proper reshaping for paged attention format.
+    """
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        page_size: int = 256,
+        dtype=torch.bfloat16,
+        device=torch.device("cuda:0"),
+    ):
+        super().__init__()
+        self.config = config
+        self.dtype = dtype
+        self.device = device
+        self.page_size = page_size
+        self.k_caches = []
+        self.v_caches = []
+        
+        # HunYuan specific parameters
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        
+
+    def load(self, inference_context: "sched_ext.InferenceContext"):
+        """
+        Load and reshape KV caches from inference context to match flashinfer format.
+        HunYuan uses GQA with 32 attention heads and 8 KV heads.
+        """
+        print(f"Loading HunYuan cache for {self.config.num_hidden_layers} layers")
+        
+        for i in range(self.config.num_hidden_layers):
+            k_cache_raw = inference_context.k_cache[0][i]
+            v_cache_raw = inference_context.v_cache[0][i]
+            
+            # Check if reshaping is needed based on tensor dimensions
+            if k_cache_raw.ndim == 2:
+                total_tokens = k_cache_raw.shape[0]
+                num_pages = total_tokens // self.page_size
+                
+                # Reshape k_cache: [total_tokens, kv_dim] -> [num_pages, page_size, num_kv_heads, head_dim]
+                k_cache = k_cache_raw.view(num_pages, self.page_size, self.num_kv_heads, self.head_dim)
+                v_cache = v_cache_raw.view(num_pages, self.page_size, self.num_kv_heads, self.head_dim)
+            elif k_cache_raw.ndim == 3:
+                num_pages = k_cache_raw.shape[0]
+                k_cache = k_cache_raw.view(num_pages, self.page_size, self.num_kv_heads, self.head_dim)
+                v_cache = v_cache_raw.view(num_pages, self.page_size, self.num_kv_heads, self.head_dim)
+            elif k_cache_raw.ndim == 4:
+                k_cache = k_cache_raw
+                v_cache = v_cache_raw
+            else:
+                raise ValueError(f"Unexpected cache dimension: k_cache has {k_cache_raw.ndim} dimensions")
+            
+            self.k_caches.append(k_cache)
+            self.v_caches.append(v_cache)
+        
+        if len(self.k_caches) > 0:
+            self.max_cache_len = self.k_caches[0].shape[0] * self.k_caches[0].shape[1]
+            print(f"Cache loaded: shape {self.k_caches[0].shape}, max_cache_len {self.max_cache_len}")
+
+    def get_page_table(self, cache_position: torch.Tensor, q_indptr: torch.Tensor, 
+                      kv_indptr: torch.Tensor, kv_indices: torch.Tensor, bsz_tensors: torch.tensor):
+        """Get page table for paged attention."""
+        page_offset = cache_position % self.page_size  
+        page_idx_local = cache_position // self.page_size  
+        query_ids = torch.zeros_like(cache_position)
+        
+        for i in range(len(q_indptr) - 1):
+            start_idx = q_indptr[i]
+            end_idx = q_indptr[i + 1]
+            query_ids[start_idx:end_idx] = i
+            
+        page_idx = torch.zeros_like(page_idx_local)
+        for i in range(bsz_tensors[0]):
+            query_id = query_ids[i]
+            local_block = page_idx_local[i]
+            start_block = kv_indptr[query_id]
+            if local_block < kv_indptr[query_id + 1] - kv_indptr[query_id]:
+                page_idx[i] = kv_indices[start_block + local_block]
+        
+        return page_idx, page_offset
+
+    def get_k_cache(self, layer_idx):
+        """Get k_cache for specific layer."""
+        return self.k_caches[layer_idx]
+
+    def get_v_cache(self, layer_idx):
+        """Get v_cache for specific layer."""
+        return self.v_caches[layer_idx]

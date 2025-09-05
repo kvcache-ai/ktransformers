@@ -30,6 +30,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeRMSNorm
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeRMSNorm
 from ktransformers.models.modeling_smallthinker import SmallthinkerRMSNorm
 from ktransformers.models.modeling_glm4_moe import Glm4MoeRMSNorm
+from ktransformers.models.modeling_hunyuan import HunYuanRMSNorm
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
 if not torch.xpu.is_available():
@@ -309,6 +310,71 @@ class KDeepseekRMSNormIPEXLLM(DeepseekV3RMSNorm, BaseInjectedModule):
             output = rms_norm_forward(self, x)
         return output.to(x.dtype)
 
+    def load(self):
+        BaseInjectedModule.load(self)
+        if self.weight.dtype not in [torch.float32, torch.float16]:
+            self.weight = self.weight.float()
+
+
+class KHunYuanRMSNorm(HunYuanRMSNorm, BaseInjectedModule):
+    """HunYuan RMSNorm with KTransformers optimizations
+    
+    Unlike Qwen/DeepSeek models, HunYuan's LayerNorm is designed to ONLY normalize,
+    without handling residual connections. Residual additions happen explicitly
+    in the HunYuanDecoderLayer after attention and MLP blocks.
+    """
+    
+    def __init__(self,
+                 key: str,
+                 gguf_loader: GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        # Use the same pattern as other RMSNorm classes - call original module's __init__
+        # For QK normalization, use the weight shape to determine the correct size
+        # orig_module.weight.shape[0] gives us the actual dimension (head_dim=128 for QK norm, hidden_size=4096 for regular)
+        actual_size = orig_module.weight.shape[0]
+        self.orig_module.__init__(actual_size, orig_module.variance_epsilon)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        batch_size_tensor: torch.Tensor = None,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Forward pass for HunYuan RMSNorm - pure normalization only
+        
+        IMPORTANT: HunYuan's architecture handles residual connections externally.
+        This RMSNorm should ONLY normalize, never add residuals.
+        The residual parameter is ignored to maintain compatibility with the interface.
+        """
+        # Explicitly ignore residual parameter (kept for interface compatibility)
+        _ = residual
+        
+        if batch_size_tensor is None:
+            return self.forward_native(x)
+        
+        # Use flashinfer optimized rmsnorm for pure normalization
+        # We explicitly DO NOT use fused_add_rmsnorm here
+        # out = rmsnorm(x, self.weight.data, batch_size_tensor, self.variance_epsilon)
+        out = self.forward_native(x)
+        
+        # Return normalized output only (no residual handling)
+        return out
+    
+    def forward_native(self, hidden_states):
+        """Native PyTorch implementation as fallback"""
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        # Ensure weight matches input dtype to prevent type promotion to float32
+        weight = self.weight.to(input_dtype) if self.weight.dtype != input_dtype else self.weight
+        return weight * hidden_states.to(input_dtype)
+    
     def load(self):
         BaseInjectedModule.load(self)
         if self.weight.dtype not in [torch.float32, torch.float16]:

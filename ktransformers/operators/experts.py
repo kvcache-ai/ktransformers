@@ -185,12 +185,26 @@ class KExpertsCPU(KExpertsBase):
             hidden_type = 1 # fp16
         else:
             hidden_type = 30 # bf16
+        
+        # Unified parameter handling for different model types
+        # This will not influence other models
+        if hasattr(self.config, 'model_type') and self.config.model_type == "hunyuan_v1_moe":
+            # Hunyuan uses moe_topk instead of num_experts_per_tok
+            moe_topk = getattr(self.config, 'moe_topk', 8)
+            experts_per_tok = moe_topk[0] if isinstance(moe_topk, list) else moe_topk
+            moe_intermediate_size = self.config.moe_intermediate_size
+            if isinstance(moe_intermediate_size, list):
+                moe_intermediate_size = moe_intermediate_size[0]
+        else:
+            # Other models use num_experts_per_tok directly
+            experts_per_tok = self.config.num_experts_per_tok
+            moe_intermediate_size = self.config.moe_intermediate_size
         if self.backend == "llamafile":
             moe_config = MOEConfig(
                 n_routed_experts,
-                self.config.num_experts_per_tok,
+                experts_per_tok,
                 self.config.hidden_size,
-                self.config.moe_intermediate_size,
+                moe_intermediate_size,
                 64,
                 10,
                 1024,
@@ -211,9 +225,9 @@ class KExpertsCPU(KExpertsBase):
             assert self.down_type == GGMLQuantizationType.BF16
             moe_config = AMX_MOEConfig(
                 n_routed_experts,
-                self.config.num_experts_per_tok,
+                experts_per_tok,
                 self.config.hidden_size,
-                self.config.moe_intermediate_size,
+                moe_intermediate_size,
                 max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size,
                 self.config.hidden_act == 'silu',
                 gate_ptr,
@@ -230,9 +244,9 @@ class KExpertsCPU(KExpertsBase):
             assert self.down_type == GGMLQuantizationType.BF16
             moe_config = AMX_MOEConfig(
                 n_routed_experts,
-                self.config.num_experts_per_tok,
+                experts_per_tok,
                 self.config.hidden_size,
-                self.config.moe_intermediate_size,
+                moe_intermediate_size,
                 max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size,
                 self.config.hidden_act == 'silu',
                 gate_ptr,
@@ -242,8 +256,8 @@ class KExpertsCPU(KExpertsBase):
             self.moe = AMXInt8_MOE(moe_config)
             self.cpu_infer.submit(self.moe.load_weights())
             self.cpu_infer.sync()
-        # print(n_routed_experts, hidden_size, moe_intermediate_size)
-        num_experts_per_tok = self.config.num_experts_per_tok
+        # Use the unified experts_per_tok value for buffer allocation
+        num_experts_per_tok = experts_per_tok
         if warmup:
             self.cpu_infer.submit(self.moe.warm_up())
             self.cpu_infer.sync()
@@ -297,9 +311,7 @@ class KExpertsCPU(KExpertsBase):
             KExpertsCPU.output_gpu_map[self.out_device].copy_(KExpertsCPU.output_cpu, non_blocking=True)
             return KExpertsCPU.output_gpu_map[self.out_device]
 
-    def forward(self, input_tensor, expert_ids, weights, bsz_tensor=None, cuda_graph_idx=0):
-        # generate, capture and run cuda graph
-        # print(expert_ids)
+    def forward(self, input_tensor, expert_ids, weights, bsz_tensor=None, cuda_graph_idx=0):      
         if bsz_tensor is None and (not torch.xpu.is_available() or input_tensor.size(0) > 1):
             bsz_tensor = torch.tensor([input_tensor.size(0)], device=input_tensor.device, dtype=torch.int32)
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
@@ -338,7 +350,8 @@ class KExpertsCPU(KExpertsBase):
             bsz_tensor = bsz_tensor.contiguous().cpu()
             output = torch.empty_like(input_tensor).contiguous()
             self.cpu_infer.submit(self.moe.forward(expert_ids.size(0), expert_ids.size(1), expert_ids.data_ptr(), weights.data_ptr(), input_tensor.data_ptr(), output.data_ptr(), bsz_tensor.data_ptr()))
-            self.cpu_infer.sync()
+            self.cpu_infer.sync()  
+
             return output.to(device=object.__getattribute__(self, "out_device"))
     
     def unload(self):
@@ -734,6 +747,7 @@ from ktransformers.models.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 from ktransformers.models.modeling_mixtral import MixtralSparseMoeBlock
 from ktransformers.models.modeling_smallthinker import SmallthinkerMoeBlock
 from ktransformers.models.modeling_glm4_moe import Glm4MoeMoE
+from ktransformers.models.modeling_hunyuan import HunYuanMoE
 
 
 class KQwen2MoeSparseMoeBlock(BaseInjectedModule, Qwen2MoeSparseMoeBlock):
@@ -1301,7 +1315,8 @@ class KTransformersExpertsV2(BaseInjectedModule, KExpertsBase):
     def forward(self, input_tensor, expert_ids, weights, bsz_tensor, cuda_graph_idx=0):
         if self.mode == InferenceState.GENERATE:
             assert self.generate_experts is not None, "generate_experts is None"
-            return self.generate_experts.forward(input_tensor, expert_ids, weights, bsz_tensor, cuda_graph_idx)
+            result = self.generate_experts.forward(input_tensor, expert_ids, weights, bsz_tensor, cuda_graph_idx)
+            return result
         elif self.mode == InferenceState.PREFILL:
             assert self.prefill_experts is not None, "prefill_experts is None"
             return self.prefill_experts.forward(input_tensor, expert_ids, weights, bsz_tensor, cuda_graph_idx)
@@ -1938,3 +1953,116 @@ class KGlm4MoeMoE(BaseInjectedModule, Glm4MoeMoE):
             .type(new_x.dtype)
         )
         return final_out
+
+
+class KHunyuanGateWrapper(nn.Module):
+    """Wrapper for HunYuan gate that converts output to standard MoE format"""
+    
+    def __init__(self, original_gate, config):
+        super().__init__()
+        self.original_gate = original_gate
+        self.config = config
+        self.moe_topk = config.moe_topk[0] if isinstance(config.moe_topk, list) else config.moe_topk
+    
+    def forward(self, hidden_states):
+        """Forward pass that converts HunYuan format to standard MoE format"""
+        # Debug: Track gate execution during problematic warmup
+        batch_size = hidden_states.shape[0] if hidden_states.dim() > 1 else 1
+        l_moe, combine_weights, dispatch_mask, exp_counts = self.original_gate(hidden_states)
+
+        
+        mask = dispatch_mask.bool()
+        
+        # Aggregate weights per expert (sum over capacity dimension)
+        # If combine_weights might be non-zero at inactive positions, multiply by mask to zero them out
+        expert_weights = (combine_weights * mask.float()).sum(dim=-1)  # [batch_size, num_experts]
+        
+        # Direct top-k selection (fixed shape, CUDA Graph friendly)
+        topk_weight, topk_ids = torch.topk(expert_weights, k=self.moe_topk, dim=1, largest=True, sorted=True)
+        
+        # Handle case where some tokens have fewer valid experts than moe_topk
+        # IMPORTANT: Use 0 instead of -1 for invalid entries to avoid uint64_t overflow in C++
+        # The weight being 0 ensures these entries won't contribute to the output
+        valid = topk_weight > 0
+        topk_ids = torch.where(valid, topk_ids, torch.zeros_like(topk_ids))  # Use 0 instead of -1
+        topk_weight = torch.where(valid, topk_weight, torch.zeros_like(topk_weight))
+        
+        return topk_ids, topk_weight
+
+
+class KHunyuanMoE(BaseInjectedModule, HunYuanMoE):
+    """HunYuan MoE with KTransformers optimizations"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Wrap the gate to output standard format
+        if hasattr(self, 'gate'):
+            self.gate = KHunyuanGateWrapper(self.gate, self.config)
+    
+    def forward(self, hidden_states: torch.Tensor, bsz_tensor=None, cuda_graph_idx=0) -> torch.Tensor:
+        """HunYuan MoE forward pass following KQwen3MoeSparseMoeBlockV2 structure"""
+        
+        orig_shape = hidden_states.shape
+        
+        # Compute shared MLP if using mixed MLP mode (HunYuan specific)
+        shared_output = None
+        if getattr(self.config, 'use_mixed_mlp_moe', True) and hasattr(self, 'shared_mlp'):
+
+            if bsz_tensor is not None:
+                shared_output = self.shared_mlp(hidden_states, bsz_tensor)
+            else:
+                shared_output = self.shared_mlp(hidden_states)
+
+        topk_ids, topk_weight = self.gate(hidden_states)
+
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
+        # Determine which path to use based on expert type
+        if isinstance(self.experts, KExpertsBase):
+            # Use KTransformers optimized path with standard format
+            y = self.moe_on_cpuinfer(hidden_states, topk_ids, topk_weight, bsz_tensor, cuda_graph_idx)
+
+        elif hidden_states.size(0) > 10:
+            # Use batch processing for larger inputs
+            y = self.moe_infer(hidden_states, topk_ids, topk_weight)
+        else:
+            # Use simple iteration for small inputs
+            y = self.moe_infer_simple(hidden_states, topk_ids, topk_weight)
+        
+        y = y.view(*orig_shape)
+        
+        # Combine shared and expert outputs
+        if shared_output is not None:
+            return shared_output + y
+        else:
+            return y
+    
+    @torch.no_grad()
+    def moe_on_cpuinfer(self, x, topk_ids, topk_weight, bsz_tensor=None, cuda_graph_idx=0):
+        """Use KTransformers experts with standard MoE format"""
+        
+        # Use standard KTransformers experts interface - pass all 4 required parameters
+        # KTransformersExpertsV2.forward requires (input_tensor, expert_ids, weights, bsz_tensor)
+        outs = self.experts(x, topk_ids, topk_weight, bsz_tensor, cuda_graph_idx)
+        
+        return outs
+    
+    @torch.no_grad()
+    def moe_infer_simple(self, x, topk_ids, topk_weight):
+        """Simple routing for small batches using standard MoE format"""
+        outs = torch.zeros_like(x)
+        for token_idx in range(topk_ids.size(0)):
+            for expert_idx in range(topk_ids.size(1)):
+                expert_id = topk_ids[token_idx, expert_idx].item()
+                weight = topk_weight[token_idx, expert_idx].item()
+                # Skip if weight is 0 (invalid expert)
+                if weight > 0:
+                    expert = self.experts[expert_id]
+                    outs[token_idx] += expert.forward(x[token_idx]) * weight
+        return outs
+    
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        """Batch routing using standard MoE format"""
+        # Use simple implementation for now - can be optimized later
+        return self.moe_infer_simple(x, topk_ids, topk_weight)

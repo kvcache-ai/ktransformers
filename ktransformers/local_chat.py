@@ -28,6 +28,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
+from ktransformers.models.modeling_hunyuan import HunYuanMoEV1ForCausalLM
 from ktransformers.util.utils import prefill_and_generate, get_compute_capability, xpu_fp16_model
 from ktransformers.server.config.config import Config
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
@@ -39,6 +40,7 @@ custom_models = {
     "Qwen2MoeForCausalLM": Qwen2MoeForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "MixtralForCausalLM": MixtralForCausalLM,
+    "HunYuanMoEV1ForCausalLM": HunYuanMoEV1ForCausalLM,
 }
 
 ktransformer_rules_dir = (
@@ -50,6 +52,7 @@ default_optimize_rules = {
     "Qwen2MoeForCausalLM": ktransformer_rules_dir + "Qwen2-57B-A14B-Instruct.yaml",
     "LlamaForCausalLM": ktransformer_rules_dir + "Internlm2_5-7b-Chat-1m.yaml",
     "MixtralForCausalLM": ktransformer_rules_dir + "Mixtral.yaml",
+    "HunYuanMoEV1ForCausalLM": ktransformer_rules_dir + "Hunyuan-serve.yaml",
 }
 
 
@@ -95,6 +98,8 @@ def local_chat(
             if "Llama" in config.architectures[0]:
                 config._attn_implementation = "eager"
             if "Mixtral" in config.architectures[0]:
+                config._attn_implementation = "flash_attention_2"
+            if "HunYuan" in config.architectures[0]:
                 config._attn_implementation = "flash_attention_2"
             if torch.xpu.is_available():
                 config._attn_implementation = "eager"
