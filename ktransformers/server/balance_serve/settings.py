@@ -11,10 +11,6 @@ from time import sleep
 import sched_ext
 from transformers import AutoConfig
 
-from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
-from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
-from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
-
 def create_sched_settings(args):
     default_sample_options = sched_ext.SampleOptions()
     model_name = os.path.basename(os.path.normpath(args.model_dir))
@@ -32,7 +28,7 @@ def create_sched_settings(args):
     settings.quant_type = "BF16"
     settings.model_settings = input_model_settings
     settings.page_size = args.page_size
-    settings.gpu_device_count = 1 # tp
+    settings.gpu_device_count = args.tp # only full tp supported now
     settings.gpu_device_id = [i for i in range(settings.gpu_device_count)]
     # settings.gpu_memory_size = args.cache_lens*576*2
     settings.gpu_memory_size = args.gpu_memory_size
@@ -60,7 +56,7 @@ def create_sched_settings(args):
     settings.kvc2_metrics_port = args.kvc2_metrics_port
     settings.load_from_disk = False
     settings.save_to_disk = True
-
+    settings.full_kv_cache_on_each_gpu = True
 
     settings.strategy_name = args.sched_strategy
 
