@@ -17,7 +17,7 @@ With a dual-socket CPU and sufficient system memory, enabling NUMA optimizations
 - Official Kimi-K2-0905 Release:
   - https://huggingface.co/moonshotai/Kimi-K2-Instruct-0905
 - GGUF Format(quantized models):
-  - Uploading...
+  - https://huggingface.co/KVCache-ai/Kimi-K2-Instruct-0905-GGUF
 
 ## Installation Guide
 
