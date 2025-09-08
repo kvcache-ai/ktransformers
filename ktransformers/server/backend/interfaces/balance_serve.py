@@ -1,5 +1,5 @@
 from typing import Any, AsyncIterator, List, Optional, Set
-from ktransformers.models.custom_cache import KVC2StaticCache
+from ktransformers.models.custom_cache import KVC2StaticCache, KDeepSeekV3Cache, KGQACache
 from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel, get_tensor_parallel_group, get_tensor_parallel_size
 from transformers import (
     AutoTokenizer,
@@ -24,8 +24,6 @@ from ktransformers.server.config.log import logger
 from ktransformers.optimize.optimize import optimize_and_load_gguf
 # from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
 # from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
-from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
-from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
 from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
@@ -33,6 +31,18 @@ from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
+try:
+    import torch_npu
+    use_npu = torch.npu.is_available()
+except:
+    use_npu = False
+if use_npu:
+    from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
+else:
+    from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
+from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
+from ktransformers.models.modeling_llama import LlamaForCausalLM
+from ktransformers.models.modeling_mixtral import MixtralForCausalLM
 from ktransformers.util import utils
 custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
@@ -50,8 +60,8 @@ from ktransformers.server.balance_serve.settings import sched_ext
 
 from torch.multiprocessing import Queue
 import torch.multiprocessing as mp
-import datetime
 from multiprocessing.synchronize import Event
+import datetime
 from ktransformers.server.schemas.endpoints.chat import RawUsage
 from ktransformers.server.utils.multi_timer import Profiler
 import zmq
@@ -69,16 +79,13 @@ import subprocess
 import tempfile
 import atexit
 import signal
+
 ENABLE_HOST_PROF = False
 
-try: 
-    import torch_npu
-    use_npu = torch.npu.is_available()
-except:
-    use_npu = False
 ktransformer_rules_dir = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "./optimize/optimize_rules/") 
 )
+
 default_optimize_rules = {
     # "DeepseekV3ForCausalLM": ktransformer_rules_dir + "Moonlight-16B-A3B-serve.yaml",
     "DeepseekV3ForCausalLM": ktransformer_rules_dir + "DeepSeek-V3-Chat-serve.yaml",
@@ -87,6 +94,8 @@ default_optimize_rules = {
     "SmallThinkerForCausalLM": ktransformer_rules_dir + "Smallthinker-serve.yaml",
     "Glm4MoeForCausalLM": ktransformer_rules_dir + "Glm4Moe-serve.yaml",
 }
+if use_npu:
+    default_optimize_rules["Qwen2MoeForCausalLM"] = ktransformer_rules_dir + "Qwen2-57B-A14B-Instruct-serve.yaml"
 
 async def chat_stream(queue: asyncio.Queue, tokenizer: AutoTokenizer):
     streamer = TextStreamer(tokenizer)
@@ -107,12 +116,11 @@ async def chat_stream(queue: asyncio.Queue, tokenizer: AutoTokenizer):
 
         # str = model.tokenizer.decode(token)
         yield streamer.put(token)
-        
 
 def fill_generated_tokens(query_updates: list[sched_ext.QueryUpdate], generated_tokens: torch.Tensor, query_manager: QueryManager = None):
     #print(len(query_updates), generated_tokens.size(0), generated_tokens)
     for i in range(generated_tokens.size(0)):
-        print(generated_tokens[i].item())
+        # print(generated_tokens[i].item())
         query_updates[i].generated_token = generated_tokens[i].item()
         if not query_manager.query_map[query_updates[i].id].is_prefill:
             pos = query_updates[i].active_position
@@ -138,15 +146,19 @@ class Engine:
     model_runner: ModelRunner
     sampler: Sampler
     query_manager: QueryManager
-    cache: KVC2StaticCache | KDeepSeekV3Cache | KGQACache
-    def __init__(self, args: ConfigArgs = default_args, generated_token_queue:Queue = None, broadcast_endpoint: str = None):
+    cache: KDeepSeekV3Cache | KGQACache | KVC2StaticCache
+    def __init__(self, args: ConfigArgs = default_args, generated_token_queue:Queue = None, broadcast_endpoint: str = None, kvcache_event: Event = None):
         self.args = args
 
         # 子进程和父进程无法共享 config 变量
         for key, value in vars(args).items():
             if value is not None and hasattr(Config(), key):
                 setattr(Config(), key, value)
-        self.device = self.args.device
+        if use_npu:
+            utils.CUR_DEVICE = f"npu:{torch.npu.current_device()}"
+            self.device = f"npu:{torch.npu.current_device()}"
+        else:
+            self.device = self.args.device
         self.sched_client = SchedulerClient(args.sched_port)
         self.updates = []
 
@@ -165,9 +177,6 @@ class Engine:
                 config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
             except:
                 raise ValueError(f"Model {args.architectures} not supported. Please check your model directory or model name.")
-
-
-        config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
         self.cache = KVC2StaticCache(config, args.max_batch_size, self.args.page_size)
 
         self.gen_queue = generated_token_queue
@@ -183,32 +192,29 @@ class Engine:
         self.block_num = inference_context.k_cache[0].size(1)
         self.profiler_cprofile = cProfile.Profile()
         self.cprof_prof_cnt, self.max_cprof_prof_cnt = 0, 8
-        if use_npu:
-            with torch.device("meta"):
-                if config.architectures[0] == "DeepseekV3ForCausalLM":
-                    self.model = KNPUDeepseekV3ForCausalLM(config)
+        with torch.device("meta"):
+            if use_npu and config.architectures[0] == "DeepseekV3ForCausalLM":
+                self.model = KNPUDeepseekV3ForCausalLM(config)
+            if config.architectures[0] == "DeepseekV3ForCausalLM":
+                self.cache = KDeepSeekV3Cache(config, self.args.page_size)
+                self.model = KDeepseekV3ForCausalLM(config, self.cache)
+            elif config.architectures[0] == "DeepseekV2ForCausalLM":
+                self.cache = KDeepSeekV3Cache(config, self.args.page_size)
+                self.model = KDeepseekV2ForCausalLM(config, self.cache)
+            elif config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM":
+                self.cache = KGQACache(config, self.args.page_size)
+                if config.architectures[0] == "Qwen2MoeForCausalLM":
+                    self.model = KQwen2MoeForCausalLM(config, self.cache)
                 else:
-                    raise NotImplementedError
-        else:
-            with torch.device("meta"):
-                if config.architectures[0] == "DeepseekV3ForCausalLM":
-                    self.cache = KDeepSeekV3Cache(config, self.args.page_size)
-                    self.model = KDeepseekV3ForCausalLM(config, self.cache)
-                elif config.architectures[0] == "DeepseekV2ForCausalLM":
-                    self.cache = KDeepSeekV3Cache(config, self.args.page_size)
-                    self.model = KDeepseekV2ForCausalLM(config, self.cache)
-                elif config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM":
-                    self.cache = KGQACache(config, self.args.page_size)
-                    if config.architectures[0] == "Qwen2MoeForCausalLM":
-                        self.model = KQwen2MoeForCausalLM(config, self.cache)
-                    else:
-                        self.model = KQwen3MoeForCausalLM(config, self.cache)
-                elif config.architectures[0] == "SmallThinkerForCausalLM":
-                    self.cache = KGQACache(config, self.args.page_size)
-                    self.model = KSmallThinkerForCausalLM(config, self.cache)
-                elif config.architectures[0] == "Glm4MoeForCausalLM":
-                    self.cache = KGQACache(config, self.args.page_size)
-                    self.model = KGlm4MoeForCausalLM(config, self.cache)
+                    self.model = KQwen3MoeForCausalLM(config, self.cache)
+            elif config.architectures[0] == "SmallThinkerForCausalLM":
+                self.cache = KGQACache(config, self.args.page_size)
+                self.model = KSmallThinkerForCausalLM(config, self.cache)
+            elif config.architectures[0] == "Glm4MoeForCausalLM":
+                self.cache = KGQACache(config, self.args.page_size)
+                self.model = KGlm4MoeForCausalLM(config, self.cache)
+            else:
+                raise NotImplementedError
         # print(self.block_num)
 
         context = zmq.Context()
@@ -273,6 +279,7 @@ class Engine:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, max(self.model_runner.cuda_graphs), args.max_batch_size, self.block_num) 
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)
+
 
         # self.args.use_cuda_graph代表是否使用图下沉
         self.model_runner = get_or_create_model_runner(self.model, self.cache, self.device, self.args.use_cuda_graph, page_size = args.page_size)
@@ -390,10 +397,10 @@ def init_distributed(rank: int,
     return local_rank, world_size
 
 
-def run_engine(args, token_queue, broadcast_endpoint, event, rank=None, world_size=None):
+def run_engine(args, token_queue, broadcast_endpoint, event, kvcache_event, rank=None, world_size=None):
     init_distributed(rank, world_size, args.tp, backend="hccl")
     import torch.distributed as dist
-    engine = Engine(args, token_queue, broadcast_endpoint)
+    engine = Engine(args, token_queue, broadcast_endpoint, kvcache_event)
     if args.use_cuda_graph:
         if 'npu' in engine.device:
             engine.model_runner.warmup_npu()
@@ -452,6 +459,10 @@ class BalanceServeInterface(BackendInterfaceBase):
         for evt in start_events:
             evt.wait()
         self._engines = processes
+
+        kvcache_event.wait()
+
+
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             pickle.dump(args, temp_file)
             temp_file_path = temp_file.name
