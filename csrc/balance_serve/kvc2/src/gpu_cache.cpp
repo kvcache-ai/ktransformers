@@ -10,6 +10,24 @@
 namespace kvc2 {
 
 GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
+#ifdef KTRANSFORMERS_USE_NPU
+  size_t gpu_count = c10_npu::device_count();
+  if (gpu_count > 0) {
+    SPDLOG_INFO("Number of available NPUs: {}, want {}", gpu_count, config.gpu_devices_id.size());
+    if (gpu_count < config.gpu_devices_id.size()) {
+      SPDLOG_ERROR("Not enough NPUs available.");
+      exit(0);
+    }
+    for (auto x : config.gpu_devices_id) {
+      std::string device_str = "npu:" + std::to_string(x);
+      // torch_npu::init_npu(device_str); should inited in scheduler
+      gpu_devices.push_back(at::Device(device_str));
+    }
+  } else {
+    SPDLOG_ERROR("NPU is not available on this system.");
+    exit(0);
+  }
+#else
   if (torch::cuda::is_available()) {
     size_t gpu_count = torch::cuda::device_count();
     SPDLOG_INFO("Number of available GPUs: {}, want {}", gpu_count, config.gpu_devices_id.size());
@@ -24,6 +42,8 @@ GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
     SPDLOG_ERROR("CUDA is not available on this system.");
     exit(0);
   }
+#endif
+}
 
   SPDLOG_WARN("Creating GPU Cache");
   shape.push_back(config.layer_count);
@@ -47,7 +67,9 @@ GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
   if (config.k_cache_on) {
     for (size_t i = 0; i < config.gpu_devices_id.size(); i++) {
       auto k = torch::zeros(shape, torch::TensorOptions().dtype(config.tensor_type));
+      SPDLOG_INFO("ALLOCATE on CPU OK");
       k = k.to(gpu_devices[i]);
+      SPDLOG_INFO("ALLOCATE on NPU OK");
 
       k_cache.push_back(k);
 
@@ -93,6 +115,10 @@ GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
 
   stream_manager =
       std::unique_ptr<CudaStreamManager>(new CudaStreamManager(config.gpu_devices_id, config.num_streams_per_device));
+}
+
+kvc2::GPUPageCache::~GPUPageCache() {
+  // torch_npu::finalize_npu()
 }
 
 bool GPUPageCache::alloc_col(std::vector<std::vector<std::shared_ptr<CacheBlockEntry>>>& k_entries,
@@ -218,8 +244,13 @@ std::vector<std::unique_lock<CacheBlockEntry::MutexT>> GPUPageCache::try_lock_co
   return re;
 }
 
-std::vector<std::shared_ptr<CudaStreamManager::Request>> GPUPageCache::basic_request(cudaMemcpyKind direction,
-                                                                                     std::function<void()> callback) {
+std::vector<std::shared_ptr<CudaStreamManager::Request>> GPUPageCache::basic_request(
+#ifdef KTRANSFORMERS_USE_NPU
+    aclrtMemcpyKind direction,
+#else
+    cudaMemcpyKind direction,
+#endif
+    std::function<void()> callback) {
   std::vector<std::shared_ptr<CudaStreamManager::Request>> re;
   re.resize(config.gpu_devices_id.size(), nullptr);
   for (size_t i = 0; i < re.size(); i++) {
