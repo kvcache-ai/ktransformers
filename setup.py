@@ -161,6 +161,8 @@ class VersionInfo:
         return cuda_version
 
     def get_cuda_version_of_torch(self):
+        if KTRANSFORMERS_BUILD_NPU:
+            return 'aarch64'
         torch_cuda_version = parse(torch.version.cuda)
         cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
         return cuda_version
