@@ -51,6 +51,12 @@ WARM_UP_SKIP_CNT = [1, 1]
 _IS_PREFILL = None
 _SPECULATE_STEP = 1
 
+try:
+    import torch_npu
+    use_npu = torch_npu.npu.is_available()
+except:
+    use_npu = False
+
 def get_use_npu_graph():
     assert _USE_NPU_GRAPH is not None, "use npu graph is not setting"
     return _USE_NPU_GRAPH
@@ -169,14 +175,14 @@ def get_free_ports(n: int, continue_prot: list):
     return ports
 
 def get_current_device():
-    return f"npu:{torch.npu.current_device()}"
+    if use_npu:
+        return f"npu:{torch.npu.current_device()}"
+    else:
+        return f"cuda:{torch.npu.current_device()}"
 
 def get_compute_capability(device:torch.device = None):
-    try:
-        if torch_npu.npu.is_available():
-            return 0
-    expect:
-        pass
+    if use_npu:
+        return 0
     if torch.cuda.is_available():
         if device is None:
             num_gpus = torch.cuda.device_count()
@@ -222,47 +228,83 @@ def get_all_used_cuda_device(device_map:dict):
         all_device_list.add(device_map[key]["prefill_device"]) if "prefill_device" in device_map[key] else None
     if "cpu" in all_device_list:
         all_device_list.remove("cpu")
-    all_device_list = set([device.replace('cuda', 'npu') for device in all_device_list])
+    if use_npu:
+        all_device_list = set([device.replace('cuda', 'npu') for device in all_device_list])
     all_device_list = list(all_device_list)
     return all_device_list
 
-def load_cur_state_dict(module: nn.Module, gguf_loader: GGUFLoader, prefix: str = ""):
+def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="cuda"):
     prefix = prefix.replace("orig_module.", "")
     persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
     local_name_params = itertools.chain(module._parameters.items(), persistent_buffers.items())
     local_state = {k: v for k, v in local_name_params if v is not None}
     for name, param in local_state.items():
         key = prefix + name
-        translated_key = translate_name_to_gguf(key)
+        translated_key = key
+        
         # TODO: Merge all loader.
         # I know this is ugly but lets do it for now.
-        if gguf_loader.safetensor_loader is not None:
-            load_dequantized_tensor = gguf_loader.safetensor_loader.load_dequantized_tensor
-            tensor_file_map = gguf_loader.safetensor_loader.tensor_file_map
+        if isinstance(gguf_loader, SafeTensorLoader):
+            load_dequantized_tensor = gguf_loader.load_dequantized_tensor
         else:
             load_dequantized_tensor = gguf_loader.load_gguf_tensor
             tensor_file_map = gguf_loader.tensor_file_map
         
-        if translated_key in tensor_file_map:
+        if gguf_loader.has_tensor(translated_key) or "kv_b_proj" in translated_key:
             target_dtype = torch.get_default_dtype()
             device = get_device(translated_key[:translated_key.rfind(".")], gguf_loader.tensor_device_map)
-            # Todo need fix
-            device = "cpu" if "embd" in translated_key else get_current_device()
-            print(f"loading layer {translated_key} to {device}") if torch.distributed.get_rank() == 0 else None
-            torch.cuda.empty_cache()
-            weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
-            set_param(module, name, weights)
-            del weights
+            print(f"loading {translated_key} to {device}")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.xpu.is_available():
+                torch.xpu.empty_cache()
+            if "kv_b_proj" in translated_key and not gguf_loader.has_tensor(translated_key):
+                attn_k_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_k_b"), device=device).to(dtype=target_dtype)
+                attn_k_b = attn_k_b.transpose(1, 2).contiguous()
+                attn_v_b = load_dequantized_tensor(translated_key.replace("self_attn.kv_b_proj", "attn_v_b"), device=device).to(dtype=target_dtype)
+                kv_b_proj = torch.cat((attn_k_b, attn_v_b), dim=1)
+                kv_b_proj = kv_b_proj.contiguous() if kv_b_proj.ndim == 2 else kv_b_proj.flatten(0, 1).contiguous()
+                set_param(module, name, kv_b_proj)
+                del attn_k_b
+                del attn_v_b
+            else:
+                weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
+                set_param(module, name, weights)
+                del weights
         else:
             #print(load_config.tensor_file_map.keys())
             raise Exception(f"can't find {translated_key} in GGUF file!")
-        
-def load_weights(module:nn.Module, gguf_loader:GGUFLoader, prefix=''):
+
+  
+def sync_all_device(all_device_list):
+    for device in all_device_list:
+        if "cuda" in device.lower():
+            torch.cuda.synchronize(device)
+        elif "xpu" in device.lower():
+            torch.xpu.synchronize(device)
+        else:
+            raise RuntimeError("The device {} is not available".format(device))
+
+torch_device_mapping ={"cuda": "cuda:0", "xpu": "xpu:0"}
+
+def xpu_fp16_model(config):
+    # This function is to check if we run this model on XPU with FP16 dtype
+    if not torch.xpu.is_available():
+        return False
+    if config.architectures[0] == "DeepseekV3ForCausalLM":
+        return True
+    if config.architectures[0] == "Qwen3MoeForCausalLM" and config.hidden_size == 4096:
+        # Qwen3-30B seems have precision issue with FP16
+        # so we only use FP16 for Qwen3-235B now
+        return True
+    return False
+
+def load_weights(module:nn.Module, gguf_loader:ModelLoader, prefix='', device="cuda"):
     #print(f"recursively loading weights {prefix}")
     if not isinstance(module, base_operator.BaseInjectedModule):
-        load_cur_state_dict(module, gguf_loader, prefix)
+        load_cur_state_dict(module, gguf_loader, prefix, device=device)
         for name, child in module._modules.items():
-            load_weights(child, gguf_loader, prefix+name+".")
+            load_weights(child, gguf_loader, prefix+name+".", device=device)
     else:
         module.load()
 
@@ -321,20 +363,22 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                          num_heads = None, head_dim_ckv = None, head_dim_kpe = None, q_head_dim = None,
                          static_cache = None, draft_model=None, draft_cache=None):
     import os
-    CUR_DEVICE = f"npu:{torch.npu.current_device()}"
+    
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch._dynamo.config.suppress_errors = True
     batch_size, seq_length = inputs.shape
     device_map = model.gguf_loader.tensor_device_map
-    # torch_device = get_device('blk.0.self_attn', device_map)
-    # torch_device = "cuda:0" if torch_device == "cuda" else torch_device
-    vocabulary_size = model.config.vocab_size
-    topp = torch.tensor([[model.generation_config.top_p]], dtype=torch.float16).npu()
-    topk = torch.tensor([[model.generation_config.top_k]], dtype=torch.int32).npu()
-    temperature = torch.tensor([[model.generation_config.temperature]], dtype=torch.float16).npu()
-    next_token_fake = torch.tensor([[1]], dtype=torch.int32).npu()
-    next_token_probs = torch.tensor([[1.0]], dtype=torch.float16).npu()
-    torch_device = torch.npu.current_device()
+    torch_device = get_device('model.layers.0.self_attn', device_map)
+    torch_device = torch_device_mapping[torch_device] if torch_device in torch_device_mapping else torch_device
+    if use_npu:
+        CUR_DEVICE = f"npu:{torch.npu.current_device()}"
+        vocabulary_size = model.config.vocab_size
+        topp = torch.tensor([[model.generation_config.top_p]], dtype=torch.float16).npu()
+        topk = torch.tensor([[model.generation_config.top_k]], dtype=torch.int32).npu()
+        temperature = torch.tensor([[model.generation_config.temperature]], dtype=torch.float16).npu()
+        next_token_fake = torch.tensor([[1]], dtype=torch.int32).npu()
+        next_token_probs = torch.tensor([[1.0]], dtype=torch.float16).npu()
+        torch_device = torch.npu.current_device()
     inputs = inputs.to(torch_device)
     all_cuda_device = get_all_used_cuda_device(device_map)
 
