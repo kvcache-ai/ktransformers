@@ -47,7 +47,8 @@ default_optimize_rules = {
     "LlamaForCausalLM": ktransformer_rules_dir + "Internlm2_5-7b-Chat-1m.yaml",
     "MixtralForCausalLM": ktransformer_rules_dir + "Mixtral.yaml"
 }
-
+if use_npu:
+    default_optimize_rules["DeepseekV3ForCausalLM"] = ktransformer_rules_dir + "DeepSeek-V3-Chat-npu.yaml"
 class KTransformersThreadContext(TransformersThreadContext):
     pass
 
