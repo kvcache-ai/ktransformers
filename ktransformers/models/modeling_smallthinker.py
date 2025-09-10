@@ -17,7 +17,7 @@ from transformers.modeling_outputs import (
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, can_return_tuple, is_torch_flex_attn_available, logging
+from transformers.utils import can_return_tuple, is_torch_flex_attn_available, logging
 from .configuration_smallthinker import SmallthinkerConfig
 
 
@@ -753,7 +753,7 @@ class SmallthinkerModel(SmallthinkerPreTrainedModel):
         return causal_mask
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+class KwargsForCausalLM(FlashAttentionKwargs): ...
 
 
 def load_balancing_loss_func(
