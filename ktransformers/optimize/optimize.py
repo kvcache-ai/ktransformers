@@ -12,7 +12,8 @@ from torch import nn
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 # from operators import BaseInjectedModule
-from ktransformers.util.custom_loader import GGUFLoader, ModelLoaderFactory
+from ktransformers.util.custom_gguf import GGUFLoader, ModelLoaderFactory, translate_name_to_gguf
+from ktransformers.util import utils
 from ktransformers.util.utils import set_module, load_weights
 import itertools
 import copy
@@ -29,7 +30,8 @@ def inject(module, local_optimization_dict, model_config:AutoConfig ,gguf_loader
                     gguf_loader.tensor_device_map[inject_module_meta["key"]] = inject_module_meta["kwargs"] if "kwargs" in inject_module_meta else dict()
                     import_class_name = import_path[-1]
                     module_cls=getattr(__import__(import_module_name, fromlist=[""]), import_class_name)
-                    print(f"Injecting {child_prefix} as", import_module_name, ".", import_class_name)
+                    print(f"Injecting {child_prefix} as", import_module_name, ".",
+                         import_class_name) if torch.distributed.get_rank() == 0 else None
                     inject_module=module_cls(key = inject_module_meta["key"], gguf_loader = gguf_loader, config = model_config, orig_module=child, **inject_module_meta["kwargs"])
                     set_module(module, name, inject_module)
                 elif inject_module_meta["class"] == "default":
@@ -54,8 +56,7 @@ def del_meta(module:nn.Module):
 
 def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str="", default_device: str = "cuda:0"):
     module_name = prefix[:-1]
-    # translated_name = translate_name_to_gguf(prefix)[:-1]
-    #print("gen_optimize_config", prefix, module_name, translated_name)
+    translated_name = translate_name_to_gguf(prefix)[:-1]
     recursive = True
     for rule in rule_list:
         match_meta = rule["match"]
@@ -76,7 +77,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "replace" in rule:
             replace_meta = rule["replace"]
             if module_name not in out_data:
-                out_data[module_name]={"key": module_name,
+                out_data[module_name]={"key": translated_name,
                                     "class": replace_meta["class"] if "class" in replace_meta else "default",
                                     # "device": replace_meta["device"] if "device" in replace_meta else default_device,
                                     "kwargs": copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict()}
@@ -91,7 +92,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
     if module_name not in out_data:
         out_data[module_name]= {
             "class": "default",
-            "key": module_name,
+            "key": translated_name,
             "kwargs": {"generate_device": default_device,
                        "prefill_device": default_device}
         }
@@ -114,7 +115,7 @@ def translate_model_config(model_config: PretrainedConfig):
     return model_config
 
 
-def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = "cuda:0"):
+def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, model_config: PretrainedConfig, default_device: str = "cuda:0", q4_gguf_path=""):
     with open(rule_file, 'r', encoding='utf-8') as f:
         rule_list = yaml.load(f.read(), Loader=yaml.FullLoader)
     
@@ -123,6 +124,9 @@ def optimize_and_load_gguf(module: nn.Module, rule_file: str, gguf_path: str, mo
     
     model_config = translate_model_config(model_config)
 
+    if q4_gguf_path:
+        q4_gguf_loader = GGUFLoader(q4_gguf_path)
+        utils.Q4_GGUF_LODER = q4_gguf_loader
     weights_loader = ModelLoaderFactory.create_loader(gguf_path)
     with torch.device("meta"):
         inject(module, optimize_config, model_config, weights_loader)
