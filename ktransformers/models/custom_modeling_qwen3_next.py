@@ -60,6 +60,11 @@ class KQwen3NextForCausalLM(Qwen3NextPreTrainedModel):
 
         return features
 
+    def reset_conv_states(self):
+        for i in range(self.config.num_hidden_layers):
+            self.conv_states[i] = None
+            self.recurrent_states[i] = None
+
 
     def forward(
         self,
@@ -75,7 +80,10 @@ class KQwen3NextForCausalLM(Qwen3NextPreTrainedModel):
 
         forward_batch_output = ForwardBatchOutput()
 
-        
+        q_len = features[0].size(0)
+        if q_len > 1:
+            self.reset_conv_states()
+
         hidden_states = features[0]
         self.attn[cuda_graph_idx].calc_batch_indices(hidden_states.shape[0])
         freqs_cis = self.model.rotary_emb(hidden_states.unsqueeze(0), batch.minibatch.position_ids.unsqueeze(0))
