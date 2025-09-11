@@ -9,7 +9,7 @@
  **/
 // Python bindings
 #include "cpu_backend/cpuinfer.h"
-#if !defined(KTRANSFORMERS_USE_ROCM) && !defined(KTRANSFORMERS_USE_XPU)
+#if !defined(KTRANSFORMERS_USE_ROCM) && !defined(KTRANSFORMERS_USE_XPU) && !defined(KTRANSFORMERS_USE_NPU)
 #include "device_launch_parameters.h"
 #endif
 #include "llamafile/flags.h"
