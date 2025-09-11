@@ -42,6 +42,12 @@ option(KTRANSFORMERS_USE_CUDA                "ktransformers: use CUDA"          
 option(KTRANSFORMERS_USE_MUSA                "ktransformers: use MUSA"                          OFF)
 option(KTRANSFORMERS_USE_ROCM                "ktransformers: use ROCM"                          OFF)
 option(KTRANSFORMERS_USE_XPU                 "ktransformers: use XPU"                           OFF)
+option(KTRANSFORMERS_USE_NPU                 "ktransformers: use NPU"                           OFF)
+
+if(KTRANSFORMERS_USE_NPU)
+    add_definitions(-DKTRANSFORMERS_USE_NPU=1)
+endif()
+
 
 # Architecture specific
 # TODO: probably these flags need to be tweaked on some architectures

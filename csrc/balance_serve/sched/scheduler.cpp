@@ -25,21 +25,37 @@ using json = nlohmann::json;
 namespace scheduler {
 
 void Settings::auto_derive() {
+  // 统一设备数量获取方式
   gpu_device_count = gpu_device_id.size();
-  if (torch::cuda::is_available()) {
-    size_t gpu_count = torch::cuda::device_count();
-    SPDLOG_INFO("Number of available GPUs: {}, want {}", gpu_count,
-                gpu_device_count);
-    if (gpu_count < gpu_device_count) {
-      SPDLOG_ERROR("Not enough GPUs available.");
+  
+  // 设备初始化分支
+  if (device_type == DeviceType::NPU) {
+    size_t npu_count = c10_npu::device_count();
+    SPDLOG_INFO("Number of available NPUs: {}, want {}", npu_count, gpu_device_count);
+    if (npu_count < gpu_device_count) {
+      SPDLOG_ERROR("Not enough NPUs available.");
       exit(0);
     }
     for (size_t i = 0; i < gpu_device_count; i++) {
-      devices.push_back(torch::Device(torch::kCUDA, gpu_device_id[i]));
+      std::string device_str = "npu:" + std::to_string(gpu_device_id[i]);
+      devices.push_back(torch::Device(device_str));
     }
-  } else {
-    SPDLOG_ERROR("CUDA is not available on this system.");
-    exit(0);
+  } 
+  else { // GPU模式
+    if (torch::cuda::is_available()) {
+      size_t gpu_count = torch::cuda::device_count();
+      SPDLOG_INFO("Number of available GPUs: {}, want {}", gpu_count, gpu_device_count);
+      if (gpu_count < gpu_device_count) {
+        SPDLOG_ERROR("Not enough GPUs available.");
+        exit(0);
+      }
+      for (size_t i = 0; i < gpu_device_count; i++) {
+        devices.push_back(torch::Device(torch::kCUDA, gpu_device_id[i]));
+      }
+    } else {
+      SPDLOG_ERROR("CUDA is not available on this system.");
+      exit(0);
+    }
   }
 
   if (model_settings.num_k_heads % gpu_device_count != 0) {
@@ -58,13 +74,14 @@ void Settings::auto_derive() {
   }
 
   assert(model_settings.k_head_dim % model_settings.num_k_heads == 0);
+  // 统一head_per_gpu计算方式（每设备分配头数）
   size_t head_per_gpu = model_settings.num_k_heads / gpu_device_count;
   size_t gpu_memory_for_kv_cache =
       gpu_memory_available /*- model_settings.params_nbytes() /
                               gpu_device_count*/
       ;
   SPDLOG_INFO(
-      "Each GPU Total: {}MiB, Model Params: {}MiB, KVCache: {}MiB, Left: {}MiB",
+      "Each Device Total: {}MiB, Model Params: {}MiB, KVCache: {}MiB, Left: {}MiB",
       gpu_memory_size / (1 << 20),
       model_settings.params_nbytes() / gpu_device_count / (1 << 20),
       gpu_memory_for_kv_cache / (1 << 20),
