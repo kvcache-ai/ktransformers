@@ -25,11 +25,15 @@ class ArgumentParser:
             "--device", type=str, default=self.cfg.model_device, help="Warning: Abandoning this parameter"
         )
         parser.add_argument("--architectures", type=str, default=self.cfg.model_name)
+        parser.add_argument("--q4_gguf_path", type=str, default=None)
         parser.add_argument("--gguf_path", type=str, default=self.cfg.gguf_path)
+        parser.add_argument("--draft_model_path", type=str, default=None)
+        parser.add_argument("--draft_gguf_path", type=str, default=None)
         parser.add_argument("--optimize_config_path", default=None, type=str, required=False)
         parser.add_argument("--cpu_infer", type=int, default=self.cfg.cpu_infer)
         parser.add_argument("--backend_type", type=str, default=self.cfg.backend_type)
         parser.add_argument("--chunk_size", type=int, default=self.cfg.chunk_size)
+        parser.add_argument("--tp", type=int, default=1)
 
         # model configs
         # parser.add_argument("--model_cache_lens", type=int, default=self.cfg.cache_lens)  # int?
@@ -114,6 +118,7 @@ class ArgumentParser:
         # parser.add_argument("--sched_port", type=int, default=self.cfg.sched_port)
         # parser.add_argument("--sched_metrics_port", type=int, default=self.cfg.sched_metrics_port)
         # parser.add_argument("--kvc2_metrics_port", type=int, default=self.cfg.kvc2_metrics_port)
+        parser.add_argument("--full_kv_cache_on_each_gpu", type=bool, default=self.cfg.full_kv_cache_on_each_gpu)
         parser.add_argument("--page_size", type=str, default=self.cfg.page_size)
         parser.add_argument("--memory_gpu_only", type=str, default=self.cfg.memory_gpu_only)
         parser.add_argument("--utilization_percentage", type=str, default=self.cfg.utilization_percentage)

@@ -1,5 +1,6 @@
 from typing import Any, AsyncIterator, List, Optional, Set
-from ktransformers.models.custom_cache import KDeepSeekV3Cache, KGQACache
+from ktransformers.models.custom_cache import KVC2StaticCache, KDeepSeekV3Cache, KGQACache
+from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel, get_tensor_parallel_group, get_tensor_parallel_size
 from transformers import (
     AutoTokenizer,
     AutoConfig,
@@ -9,6 +10,7 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
+import torch.distributed as dist
 from ktransformers.server.config.config import Config
 from ..base import ThreadContext, BackendInterfaceBase
 import torch
@@ -20,8 +22,8 @@ from ktransformers.server.backend.interfaces.transformers import (
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.config.log import logger
 from ktransformers.optimize.optimize import optimize_and_load_gguf
-from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
-from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
+# from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
+# from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
 from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
@@ -29,15 +31,37 @@ from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
-from ktransformers.server.balance_serve.inference.model_runner import ModelRunner 
+try:
+    import torch_npu
+    use_npu = torch.npu.is_available()
+except:
+    use_npu = False
+if use_npu:
+    from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
+else:
+    from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
+from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
+from ktransformers.models.modeling_llama import LlamaForCausalLM
+from ktransformers.models.modeling_mixtral import MixtralForCausalLM
+from ktransformers.util import utils
+custom_models = {
+    "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
+    "DeepseekV3ForCausalLM": KNPUDeepseekV3ForCausalLM,
+    "Qwen2MoeForCausalLM": Qwen2MoeForCausalLM,
+    "LlamaForCausalLM": LlamaForCausalLM,
+    "MixtralForCausalLM": MixtralForCausalLM,
+}
+from ktransformers.server.balance_serve.inference.model_runner import ModelRunner, get_or_create_model_runner
 from ktransformers.server.balance_serve.inference.sampling.sampler import Sampler, SamplingOptions
 from ktransformers.server.balance_serve.inference.query_manager import QueryManager
 from ktransformers.server.balance_serve.inference.forward_batch import ForwardBatchInput, ForwardBatchOutput
 from ktransformers.server.balance_serve.sched_rpc import SchedulerClient
 from ktransformers.server.balance_serve.settings import sched_ext
+
 from torch.multiprocessing import Queue
 import torch.multiprocessing as mp
 from multiprocessing.synchronize import Event
+import datetime
 from ktransformers.server.schemas.endpoints.chat import RawUsage
 from ktransformers.server.utils.multi_timer import Profiler
 import zmq
@@ -45,6 +69,7 @@ import time
 import queue
 import tempfile
 import asyncio
+import cProfile
 import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -55,10 +80,12 @@ import tempfile
 import atexit
 import signal
 
+ENABLE_HOST_PROF = False
 
 ktransformer_rules_dir = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "./optimize/optimize_rules/") 
 )
+
 default_optimize_rules = {
     # "DeepseekV3ForCausalLM": ktransformer_rules_dir + "Moonlight-16B-A3B-serve.yaml",
     "DeepseekV3ForCausalLM": ktransformer_rules_dir + "DeepSeek-V3-Chat-serve.yaml",
@@ -67,7 +94,8 @@ default_optimize_rules = {
     "SmallThinkerForCausalLM": ktransformer_rules_dir + "Smallthinker-serve.yaml",
     "Glm4MoeForCausalLM": ktransformer_rules_dir + "Glm4Moe-serve.yaml",
 }
-
+if use_npu:
+    default_optimize_rules["Qwen2MoeForCausalLM"] = ktransformer_rules_dir + "Qwen2-57B-A14B-Instruct-serve.yaml"
 
 async def chat_stream(queue: asyncio.Queue, tokenizer: AutoTokenizer):
     streamer = TextStreamer(tokenizer)
@@ -81,16 +109,18 @@ async def chat_stream(queue: asyncio.Queue, tokenizer: AutoTokenizer):
             if s is not None:
                 yield s
             break
+        else:
+            # text output
+            text = tokenizer.decode(token)
+            print(text, end="", flush=True)
 
         # str = model.tokenizer.decode(token)
         yield streamer.put(token)
-        
-
 
 def fill_generated_tokens(query_updates: list[sched_ext.QueryUpdate], generated_tokens: torch.Tensor, query_manager: QueryManager = None):
     #print(len(query_updates), generated_tokens.size(0), generated_tokens)
     for i in range(generated_tokens.size(0)):
-        print(generated_tokens[i].item())
+        # print(generated_tokens[i].item())
         query_updates[i].generated_token = generated_tokens[i].item()
         if not query_manager.query_map[query_updates[i].id].is_prefill:
             pos = query_updates[i].active_position
@@ -116,7 +146,7 @@ class Engine:
     model_runner: ModelRunner
     sampler: Sampler
     query_manager: QueryManager
-    cache: KDeepSeekV3Cache | KGQACache
+    cache: KDeepSeekV3Cache | KGQACache | KVC2StaticCache
     def __init__(self, args: ConfigArgs = default_args, generated_token_queue:Queue = None, broadcast_endpoint: str = None, kvcache_event: Event = None):
         self.args = args
 
@@ -124,8 +154,11 @@ class Engine:
         for key, value in vars(args).items():
             if value is not None and hasattr(Config(), key):
                 setattr(Config(), key, value)
-
-        self.device = self.args.device
+        if use_npu:
+            utils.CUR_DEVICE = f"npu:{torch.npu.current_device()}"
+            self.device = f"npu:{torch.npu.current_device()}"
+        else:
+            self.device = self.args.device
         self.sched_client = SchedulerClient(args.sched_port)
         self.updates = []
 
@@ -144,13 +177,24 @@ class Engine:
                 config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
             except:
                 raise ValueError(f"Model {args.architectures} not supported. Please check your model directory or model name.")
-
-
-         
+        self.cache = KVC2StaticCache(config, args.max_batch_size, self.args.page_size)
 
         self.gen_queue = generated_token_queue
-            
+        self.debug = False
+
+        print(f"Getting inference context from sched_client.")
+        inference_context = self.sched_client.get_inference_context_raw()
+        print(f"Got inference context, sending it to subscribers.")
+        inference_context = self.sched_client.rebuild_inferece_context(inference_context)
+        self.cache.load(inference_context)
+        print(f"kv_cache loaded successfully.")
+
+        self.block_num = inference_context.k_cache[0].size(1)
+        self.profiler_cprofile = cProfile.Profile()
+        self.cprof_prof_cnt, self.max_cprof_prof_cnt = 0, 8
         with torch.device("meta"):
+            if use_npu and config.architectures[0] == "DeepseekV3ForCausalLM":
+                self.model = KNPUDeepseekV3ForCausalLM(config)
             if config.architectures[0] == "DeepseekV3ForCausalLM":
                 self.cache = KDeepSeekV3Cache(config, self.args.page_size)
                 self.model = KDeepseekV3ForCausalLM(config, self.cache)
@@ -169,14 +213,21 @@ class Engine:
             elif config.architectures[0] == "Glm4MoeForCausalLM":
                 self.cache = KGQACache(config, self.args.page_size)
                 self.model = KGlm4MoeForCausalLM(config, self.cache)
-
-
+            else:
+                raise NotImplementedError
+        # print(self.block_num)
 
         context = zmq.Context()
 
-            
-        self.pub_socket = context.socket(zmq.PUB)
-        self.pub_socket.bind(f"ipc://{broadcast_endpoint}") 
+        if torch.distributed.get_rank() == 0:
+            self.pub_socket = context.socket(zmq.PUB)
+            self.pub_socket.bind(f"ipc://{broadcast_endpoint}")
+            self.sub_socket = None
+        else:
+            self.sub_socket = context.socket(zmq.SUB)
+            self.sub_socket.connect(f"ipc://{broadcast_endpoint}")
+            self.sub_socket.setsockopt_string(zmq.SUBSCRIBE, "")
+            self.pub_socket = None
         # time.sleep(1) # make sure all subscribers are ready
 
 
@@ -201,7 +252,11 @@ class Engine:
                 "please input the path of your gguf file(gguf file in the dir containing input gguf file must all"
                 " belong to current model):"
             )
-        optimize_and_load_gguf(self.model, optimize_config_path, gguf_path, config)
+        tp_group = get_tensor_parallel_group()
+        torch.distributed.barrier(group=tp_group)
+        optimize_and_load_gguf(self.model, optimize_config_path, gguf_path, config)        
+        get_absort_weight(self.model, config)
+        torch.distributed.barrier(group=tp_group)
         self.model.generation_config = generation_config
         if self.model.generation_config.pad_token_id is None:
             self.model.generation_config.pad_token_id = self.model.generation_config.eos_token_id
@@ -225,12 +280,17 @@ class Engine:
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)
 
+
+        # self.args.use_cuda_graph代表是否使用图下沉
+        self.model_runner = get_or_create_model_runner(self.model, self.cache, self.device, self.args.use_cuda_graph, page_size = args.page_size)
         self.sampler = Sampler()
         self.query_manager = QueryManager(device = self.device, page_size = args.page_size)
 
             
     def sampling(self, forward_output: ForwardBatchOutput):
-        generated_tokens = torch.empty(0, device=self.device, dtype=torch.int32)
+        generated_tokens = []
+        probs = []
+
         for i in range(forward_output.num_batchs):
             logit = forward_output.logits[i]
             if hasattr(forward_output, "temperatures"):
@@ -244,7 +304,10 @@ class Engine:
                 top_ps = None
 
             sample_options = SamplingOptions(logit.size(0), self.device, pretrained_config=self.model.generation_config, temperatures=temperatures, top_ps=top_ps)
-            generated_tokens, probs=self.sampler(logit, sample_options)
+            generated_token, prob=self.sampler(logit, sample_options)
+            generated_tokens.append(generated_token.clone())
+            probs.append(prob.clone())
+        generated_tokens, probs = torch.cat(generated_tokens), torch.cat(probs, dim=0)
         return generated_tokens, probs
     
     def loop(self):
@@ -254,7 +317,16 @@ class Engine:
         while True:
             self.batch = next_batch
             if self.batch is not None:
-                self.model_runner.run(self.batch, self.query_manager)
+                if ENABLE_HOST_PROF and self.cprof_prof_cnt < self.max_cprof_prof_cnt:
+                    if self.profiler_cprofile is None:
+                        self.profiler_cprofile = cProfile.Profile()
+                    self.profiler_cprofile.enable()
+
+                batch_size = 0
+                for i in range(len(self.batch.decode_mini_batches)):
+                    batch_size += len(self.batch.decode_mini_batches[i])
+                logger.debug(f"prefill batch: {len(self.batch.prefill_mini_batches)} decode batch: {len(self.batch.decode_mini_batches)} {batch_size} \n")
+                self.model_runner.run_split(self.batch, self.query_manager)
 
             if len(self.updates) > 0:
                 for q in self.updates:
@@ -262,14 +334,19 @@ class Engine:
                         continue
                     # print(f"Putting token {q.generated_token} into queue for query id: {q.id}")
                     try:
-                        self.gen_queue.put((q.id, q.generated_token if q.decode_done == False else None), timeout=5)
+                        if torch.distributed.get_rank() == 0:
+                            self.gen_queue.put((q.id, q.generated_token if q.decode_done == False else None), timeout=5)
                     except queue.Full:
                         pass#print("Queue is full after timeout; unable to put more items.")
-                
-            next_batch = self.sched_client.update_last_batch(self.updates)
-            if next_batch.query_ids == []:
-                next_batch = None
-            self.pub_socket.send_pyobj(next_batch)  
+
+            # 完成一次收发，这里不能进行抢占
+            if torch.distributed.get_rank() == 0:
+                next_batch = self.sched_client.update_last_batch(self.updates)
+                if next_batch.query_ids == []:
+                    next_batch = None
+                self.pub_socket.send_pyobj(next_batch)
+            else:
+                next_batch = self.sub_socket.recv_pyobj()
 
             if next_batch is not None:
                 self.query_manager.add_query(next_batch)
@@ -277,13 +354,21 @@ class Engine:
             
             if self.batch is not None:
                 self.model_runner.sync()
-                print(f"Model execution time (GPU): {self.model_runner.model_time:.3f} ms, {1000/self.model_runner.model_time:.3f} tokens/s")
+                # print(f"Model execution time (GPU): {self.model_runner.model_time:.3f} ms")
                 # if self.rank == 0:
                 
                 generated_tokens, probs = self.sampling( self.model_runner.output)
                 
                 self.updates = self.query_manager.update(self.batch)
                 fill_generated_tokens(self.updates, generated_tokens, self.query_manager)
+
+                if ENABLE_HOST_PROF and self.cprof_prof_cnt < self.max_cprof_prof_cnt:
+                    self.profiler_cprofile.disable()
+                    if not os.path.isdir("./cprof_prof"):
+                        os.mkdir("./cprof_prof")
+                    self.profiler_cprofile.dump_stats(f"./cprof_prof/cprof_{self.cprof_prof_cnt}.prof")
+                    self.profiler_cprofile = cProfile.Profile()  # clear history
+                    self.cprof_prof_cnt += 1
             else:
                 self.updates = []
 
@@ -294,13 +379,36 @@ class BalanceServeThreadContext(ThreadContext):
             local_messages.append({"role": m.role.value, "content": m.get_text_content()})
 
         return local_messages
-    
 
-def run_engine(args, token_queue, broadcast_endpoint, event, kvcache_event):
+
+def init_distributed(rank: int,
+                     world_size: int,
+                     tp_size: int,
+                     master_addr: str = os.getenv("MASTER_ADDR", "127.0.0.1"),
+                     master_port: int = os.getenv("MASTER_PORT", "29500"),
+                     backend: str = "hccl"):
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["MASTER_ADDR"] = master_addr
+    os.environ["MASTER_PORT"] = str(master_port)
+
+    local_rank, world_size = setup_model_parallel(tp=tp_size)
+    return local_rank, world_size
+
+
+def run_engine(args, token_queue, broadcast_endpoint, event, kvcache_event, rank=None, world_size=None):
+    init_distributed(rank, world_size, args.tp, backend="hccl")
+    import torch.distributed as dist
     engine = Engine(args, token_queue, broadcast_endpoint, kvcache_event)
     if args.use_cuda_graph:
-        engine.model_runner.warmup()
-        
+        if 'npu' in engine.device:
+            engine.model_runner.warmup_npu()
+        else:
+            engine.model_runner.warmup()
+
+    event.set()
+    args.port += torch.distributed.get_rank()
     event.set()
     engine.loop()
 
@@ -321,8 +429,8 @@ class BalanceServeInterface(BackendInterfaceBase):
     last_request_id: Optional[str] = None
     ever_generated_ids: Set[int] = set()
 
-    def __init__(self, args: ConfigArgs = default_args):
-        self.args = args
+    def __init__(self, args: ConfigArgs = default_args, input_args=None):
+        self.args = input_args
         self.queue_map:dict[int,asyncio.Queue] = {}
         self.thread_map: dict[int, int] = {}
         processes = []
@@ -332,13 +440,26 @@ class BalanceServeInterface(BackendInterfaceBase):
         self.tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
         self.sched_client = SchedulerClient(args.sched_port)
         self.streamer = TextStreamer(self.tokenizer)
+        world_size = str(os.getenv("WORLD_SIZE", self.args.tp))
+        if not isinstance(world_size, str):
+            raise ValueError(f"world_size ({world_size}) must be str")
+        start_events = []
+        for rank in range(self.args.tp):
+            if int(self.args.device[-1]) > 0:
+                break
 
-        start_event = ctx.Event()
-        kvcache_event = ctx.Event()
+            start_event = ctx.Event()
 
-        p = ctx.Process(target=run_engine, args=(self.args, self.token_queue, self.broadcast_endpoint, start_event, kvcache_event))
-        p.start()
-        processes.append(p)
+            p = ctx.Process(target=run_engine, args=(self.args, self.token_queue, self.broadcast_endpoint, start_event,
+                                                     rank, world_size))
+            p.start()
+            processes.append(p)
+            start_events.append(start_event)
+
+        for evt in start_events:
+            evt.wait()
+        self._engines = processes
+
         kvcache_event.wait()
 
 
@@ -433,34 +554,50 @@ class BalanceServeInterface(BackendInterfaceBase):
         return input_ids
 
     def format_and_tokenize_input_ids(self, thread_id: ObjectID, messages: List):
-        input_str: str = self.tokenizer.apply_chat_template(messages,tokenize=False,add_generation_prompt=True)
-        # drop <think> token in chat template
-        if input_str.endswith('<think>\n'):
-            input_str = input_str[:-len('<think>\n')]
-        input_ids = self.tokenizer.encode(input_str, return_tensors="pt", add_special_tokens=False).to(self.args.device)
-        logger.debug(f"get input ids of shape {input_ids.shape}")
+        for m in messages:
+            if m["role"] == "system":
+                logger.warning(f'change {m["role"]} to user')
+                m["role"] = "user"
+
+        new_messages = [messages[0]]
+        for m in messages[1:]:
+            if m["role"] == "user" and new_messages[-1]["role"] == "user":
+                logger.warning("merge two adjacent user messages")
+                new_messages[-1]["content"] += '\n' + m["content"]
+            else:
+                new_messages.append(m)
+        # input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
+        # # drop <think> token in chat template
+        # if input_str.endswith('<think>\n'):
+        #     input_str = input_str[:-len('<think>\n')]
+        input_ids = self.tokenizer.apply_chat_template(new_messages, add_generation_prompt=True, return_tensors="pt").to(self.args.device)
         return input_ids
     
-    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None, 
-                        max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = 0, top_p: Optional[float] = None):
         profiler = Profiler()
         profiler.create_and_start_timer("tokenize")
         
         if isinstance(local_messages, List):
             input_ids = self.format_and_tokenize_input_ids(thread_id, local_messages)
         elif isinstance(local_messages, str):
+            #local_messages = local_messages[0]['content']
             input_ids = self.tokenize_prompt(local_messages)
         else:
             raise ValueError("local_messages should be List or str")
         if Config().user_force_think:
             token_thinks = torch.tensor([self.tokenizer.encode("<think>\n",add_special_tokens=False)],device=input_ids.device)
-            input_ids = torch.cat(
-                [input_ids, token_thinks], dim=1
-            )
+            if not torch.equal(input_ids[0, -token_thinks.shape[-1]:], token_thinks[-1]):
+                input_ids = torch.cat(
+                    [input_ids, token_thinks], dim=1
+                )
+        logger.debug(f"get input ids of shape {input_ids.shape}")
+
 
         profiler.pause_timer("tokenize")
 
         profiler.create_and_start_timer("prefill")
+
+        
         
         query_add = sched_ext.QueryAdd()
         query_add.query_token =  input_ids[0].tolist()
@@ -468,20 +605,15 @@ class BalanceServeInterface(BackendInterfaceBase):
         query_add.query_length = query_length
         profiler.set_counter("prefill", query_length)
         #@TODO add server
-        stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>", add_special_tokens=True)]
+        stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>")]
         query_add.stop_criteria = stop_criteria
-        
-        temperature, top_p, max_new_tokens = self.get_params(temperature, top_p, max_tokens, max_completion_tokens)
-            
         query_add.sample_options.temperature = temperature
+        if top_p == 0 or top_p is None:
+            top_p = 0.0001
         query_add.sample_options.top_p = top_p
-        query_add.estimated_length = min(self.args.cache_lens, query_length+max_new_tokens)
-
-        if query_add.estimated_length < query_add.query_length:
-            raise Exception(f'query too long: estimated_length={query_add.estimated_length} < query_length={query_add.query_length}')
-
+        query_add.estimated_length = min(self.args.cache_lens, query_length+self.args.max_new_tokens)
         query_id = self.sched_client.add_query(query_add)
-        queue = asyncio.Queue(maxsize=max_new_tokens)
+        queue = asyncio.Queue(maxsize=self.args.max_new_tokens)
         self.queue_map[query_id] = queue
         self.thread_map[thread_id] = query_id
         is_first_token = True
@@ -497,11 +629,12 @@ class BalanceServeInterface(BackendInterfaceBase):
                     yield think, None
             else:
                 profiler.inc("decode")
+            # TODO: 传入rank避免打印重复
             yield token, None
         profiler.pause_timer("decode")
         report_last_time_performance(profiler)
         yield self.streamer.end(), None
-        if profiler.get_counter('decode') >= max_new_tokens - 1:
+        if profiler.get_counter('decode') >= self.args.max_new_tokens - 1:
             yield "", "length"
         else:
             yield "", "stop"
