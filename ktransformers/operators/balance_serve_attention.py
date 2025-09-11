@@ -626,14 +626,14 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
         print(cos.shape)
         print(sin.shape)
         """
-        if freqs_cis is not None:  
-            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
-
-
 
         query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
         key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
         value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
+
+        if freqs_cis is not None:  
+            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
+
 
         k_cache = kv_cache.get_k_cache(self.layer_idx)
         v_cache = kv_cache.get_v_cache(self.layer_idx)
@@ -666,8 +666,11 @@ class KQwen3NextAttention(BaseInjectedModule, Qwen3NextAttention):
             orig_module.layer_idx)
         self.chunck_size = chunck_size # TODO, generate chunck_size automatically.
 
+    # Adapted from transformers.models.glm.modular_glm.apply_rotary_pos_emb
     def apply_rotary_pos_emb(self, q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         """Applies Rotary Position Embedding to the query and key tensors.
+
+        Removes the interleaving of cos and sin from GLM
 
         Args:
             q (`torch.Tensor`): The query tensor.
@@ -688,17 +691,28 @@ class KQwen3NextAttention(BaseInjectedModule, Qwen3NextAttention):
         """
         cos = cos.unsqueeze(unsqueeze_dim)
         sin = sin.unsqueeze(unsqueeze_dim)
-        q_embed = (q * cos) + (rotate_half(q) * sin)
-        k_embed = (k * cos) + (rotate_half(k) * sin)
+
+        # Keep half or full tensor for later concatenation
+        rotary_dim = cos.shape[-1]
+        q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+        k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+        # Apply rotary embeddings on the first half or full tensor
+        q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+
+        # Concatenate back to full shape
+        q_embed = torch.cat([q_embed, q_pass], dim=-1)
+        k_embed = torch.cat([k_embed, k_pass], dim=-1)
         return q_embed, k_embed
 
     def forward(self,
                 hidden_states: torch.Tensor,
                 kv_cache: KGQACache,
                 freqs_cis: torch.Tensor,
-                position_ids: torch.Tensor,
                 wrapper: flashInferAttn,
                 bsz_tensors: torch.Tensor,
+                position_ids: Optional[torch.Tensor] = None,
                 attention_mask: Optional[torch.Tensor] = None,
                 ):
 
@@ -713,21 +727,24 @@ class KQwen3NextAttention(BaseInjectedModule, Qwen3NextAttention):
 
         key_states = self.k_proj(hidden_states, bsz_tensors)
 
+        query_states = query_states.reshape(q_len, -1)
         query_states = self.q_norm(query_states, bsz_tensors)
         key_states = self.k_norm(key_states, bsz_tensors)
 
 
         value_states = self.v_proj(hidden_states, bsz_tensors)
 
-        if freqs_cis:  
-            cos, sin = freqs_cis
-            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), cos, sin, unsqueeze_dim=2)
-
 
 
         query_states = query_states.view(q_len, self.num_attention_heads, self.head_dim)
         key_states = key_states.view(q_len, self.num_key_value_heads, self.head_dim)
         value_states = value_states.view(q_len, self.num_key_value_heads, self.head_dim)
+
+        if freqs_cis:  
+            cos, sin = freqs_cis
+            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), cos, sin, unsqueeze_dim=2)
+            query_states, key_states = query_states.squeeze(0), key_states.squeeze(0)
+
 
         k_cache = kv_cache.get_k_cache(self.layer_idx)
         v_cache = kv_cache.get_v_cache(self.layer_idx)
@@ -793,6 +810,7 @@ class KQwen3NextGatedDeltaNet(BaseInjectedModule, Qwen3NextGatedDeltaNet):
         conv_states: Optional[list[torch.Tensor]] = None,
         recurrent_states: Optional[list[torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        bsz_tensors: Optional[torch.Tensor] = None,
     ):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
 
@@ -810,8 +828,8 @@ class KQwen3NextGatedDeltaNet(BaseInjectedModule, Qwen3NextGatedDeltaNet):
             and seq_len == 1
         )
 
-        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
-        projected_states_ba = self.in_proj_ba(hidden_states)
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states, bsz_tensors)
+        projected_states_ba = self.in_proj_ba(hidden_states, bsz_tensors)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_states_qkvz, projected_states_ba)
         query, key, value = (x.reshape(x.shape[0], x.shape[1], -1) for x in (query, key, value))
 
@@ -898,7 +916,7 @@ class KQwen3NextGatedDeltaNet(BaseInjectedModule, Qwen3NextGatedDeltaNet):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
 
-        output = self.out_proj(core_attn_out)
+        output = self.out_proj(core_attn_out, bsz_tensors)
 
         if conv_state is not None:
             conv_states[self.layer_idx] = conv_state

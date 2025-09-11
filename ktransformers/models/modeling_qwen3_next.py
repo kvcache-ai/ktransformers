@@ -216,6 +216,8 @@ class Qwen3NextRotaryEmbedding(nn.Module):
 class Qwen3NextRMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
+        self.hidden_size = dim
+        self.variance_epsilon = eps
         self.eps = eps
         self.weight = nn.Parameter(torch.zeros(dim))
 
@@ -327,6 +329,8 @@ class Qwen3NextAttention(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_attention_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
@@ -572,6 +576,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.activation = config.hidden_act
         self.act = ACT2FN[config.hidden_act]
         self.layer_norm_epsilon = config.rms_norm_eps
+        
+        self.config = config
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim

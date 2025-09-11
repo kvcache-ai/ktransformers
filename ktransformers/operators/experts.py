@@ -1967,6 +1967,9 @@ class KQwen3NextSparseMoeBlockV2(BaseInjectedModule, Qwen3NextSparseMoeBlock):
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
 
+        if self.norm_topk_prob:
+            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+
         # only for generate phase
         if hasattr(self.experts.generate_experts, "submit_for_one_decode") and torch.cuda.is_available() and torch.cuda.is_current_stream_capturing(): # TODO: this branch cause jit bug
             self.experts.generate_experts.submit_for_one_decode(hidden_states, selected_experts, routing_weights, bsz_tensor, cuda_graph_idx)
@@ -1979,10 +1982,10 @@ class KQwen3NextSparseMoeBlockV2(BaseInjectedModule, Qwen3NextSparseMoeBlock):
             y.resize_(*orig_shape)
             return y
 
-        # y_ = self.shared_expert(hidden_states, bsz_tensor).squeeze(0)
-        # y_ = (
-        #     F.sigmoid(self.shared_expert_gate(hidden_states)) * y_
-        # )
+        y_ = self.shared_expert(hidden_states, bsz_tensor).squeeze(0)
+        y_ = (
+            F.sigmoid(self.shared_expert_gate(hidden_states)) * y_
+        )
 
 
         if isinstance(self.experts, KExpertsBase):
@@ -2001,7 +2004,7 @@ class KQwen3NextSparseMoeBlockV2(BaseInjectedModule, Qwen3NextSparseMoeBlock):
                 .view(*orig_shape)
                 .to(device=hidden_states.device)
             ) 
-        # y += y_
+        y += y_
         return y
 
     @torch.no_grad()
