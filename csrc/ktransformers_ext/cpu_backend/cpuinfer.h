@@ -67,7 +67,7 @@
      }
  
      void submit_with_cuda_stream(intptr_t user_cuda_stream, std::pair<intptr_t, intptr_t> params) {
-        #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || defined(KTRANSFORMERS_USE_NPU)
+        #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM)
          void (*func)(void*) = (void (*)(void*))params.first;
          void* args = (void*)params.second;
          *((CPUInfer**)args) = this;
@@ -83,7 +83,7 @@
      }
  
      void sync_with_cuda_stream(intptr_t user_cuda_stream) {
-        #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || defined(KTRANSFORMERS_USE_NPU)
+        #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM)
          cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)this);
         #else
          throw std::runtime_error("sync_with_cuda_stream is not supported on this platforma");
