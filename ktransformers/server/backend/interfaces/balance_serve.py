@@ -305,7 +305,6 @@ class BalanceServeThreadContext(ThreadContext):
     
 
 def run_engine(args, token_queue, broadcast_endpoint, event, kvcache_event):
-    args.use_cuda_graph = False # tmp set
     engine = Engine(args, token_queue, broadcast_endpoint, kvcache_event)
     if args.use_cuda_graph:
         engine.model_runner.warmup()
