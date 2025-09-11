@@ -48,7 +48,6 @@ if(KTRANSFORMERS_USE_NPU)
     add_definitions(-DKTRANSFORMERS_USE_NPU=1)
 endif()
 
-
 # Architecture specific
 # TODO: probably these flags need to be tweaked on some architectures
 #       feel free to update the Makefile for your architecture and send a pull request or issue
@@ -95,6 +94,9 @@ if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM_LWR STR
         endif ()
         set(CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS_PREV})
     else()
+        if(KTRANSFORMERS_USE_NPU)
+            list(APPEND ARCH_FLAGS -march=armv8.2-a+fp16+fp16fml+dotprod -lnuma)
+        endif()
         check_cxx_compiler_flag(-mfp16-format=ieee COMPILER_SUPPORTS_FP16_FORMAT_I3E)
         if (NOT "${COMPILER_SUPPORTS_FP16_FORMAT_I3E}" STREQUAL "")
             list(APPEND ARCH_FLAGS -mfp16-format=ieee)
@@ -122,36 +124,38 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         (NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_GENERATOR_PLATFORM_LWR AND
          CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|i686|AMD64)$"))
     message(STATUS "x86 detected")
-    set(HOST_IS_X86 TRUE)
-    set(HAS_AVX512 TRUE)
-    set(__HAS_AMX__ TRUE)
-    add_compile_definitions(__x86_64__)
-    # check AVX512
-    execute_process(
-        COMMAND lscpu
-        OUTPUT_VARIABLE LSCPU_OUTPUT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    # message(STATUS "LSCPU_OUTPUT: ${LSCPU_OUTPUT}")
-
-    string(FIND "${LSCPU_OUTPUT}" "avx512" COMPILER_SUPPORTS_AVX512F)
+    if(NOT KTRANSFORMERS_USE_NPU)
+        set(HOST_IS_X86 TRUE)
+        set(HAS_AVX512 TRUE)
+        set(__HAS_AMX__ TRUE)
+        add_compile_definitions(__x86_64__)
+        # check AVX512
+        execute_process(
+            COMMAND lscpu
+            OUTPUT_VARIABLE LSCPU_OUTPUT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        # message(STATUS "LSCPU_OUTPUT: ${LSCPU_OUTPUT}")
     
-    if (COMPILER_SUPPORTS_AVX512F GREATER -1)
-        message(STATUS "Compiler and CPU support AVX512F (tested by compiling a program)")
-        add_compile_definitions(__HAS_AVX512F__)
-    else()
-        message(STATUS "Compiler and/or CPU do NOT support AVX512F")
-        set(HAS_AVX512 False)
-    endif()
-
-    # check AMX
-    string(FIND "${LSCPU_OUTPUT}" "amx" COMPILER_SUPPORTS_AMX)
+        string(FIND "${LSCPU_OUTPUT}" "avx512" COMPILER_SUPPORTS_AVX512F)
+        
+        if (COMPILER_SUPPORTS_AVX512F GREATER -1)
+            message(STATUS "Compiler and CPU support AVX512F (tested by compiling a program)")
+            add_compile_definitions(__HAS_AVX512F__)
+        else()
+            message(STATUS "Compiler and/or CPU do NOT support AVX512F")
+            set(HAS_AVX512 False)
+        endif()
     
-    if(COMPILER_SUPPORTS_AMX GREATER -1)
-        message(STATUS "Compiler supports AMX")
-        add_compile_definitions(__HAS_AMX__)
-    else()
-        message(STATUS "Compiler does NOT support AMX")
+        # check AMX
+        string(FIND "${LSCPU_OUTPUT}" "amx" COMPILER_SUPPORTS_AMX)
+        
+        if(COMPILER_SUPPORTS_AMX GREATER -1)
+            message(STATUS "Compiler supports AMX")
+            add_compile_definitions(__HAS_AMX__)
+        else()
+            message(STATUS "Compiler does NOT support AMX")
+        endif()
     endif()
     if (MSVC)
         # instruction set detection for MSVC only
@@ -312,7 +316,7 @@ elseif (UNIX)
         endif()
     elseif (KTRANSFORMERS_USE_XPU)
         add_compile_definitions(KTRANSFORMERS_USE_XPU=1)
-    else()
+    elseif (KTRANSFORMERS_USE_CUDA)
         find_package(CUDA REQUIRED)
         include_directories("${CUDA_INCLUDE_DIRS}")
         include(CheckLanguage)
@@ -331,7 +335,13 @@ endif()
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
+# aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
+file(GLOB LLAMAFILE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/*.cpp")
+list(REMOVE_ITEM LLAMAFILE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/sgemm_arm.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/sgemm_x86.cpp"
+)
+set(SOURCE_DIR4 ${LLAMAFILE_SOURCES})
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 
 if (HOST_IS_X86 AND HAS_AVX512 AND __HAS_AMX__)
@@ -371,7 +381,7 @@ elseif(UNIX)
     elseif(KTRANSFORMERS_USE_MUSA)
         target_link_libraries(${PROJECT_NAME} PRIVATE MUSA::musart)
     elseif(KTRANSFORMERS_USE_XPU)
-    else()
+    elseif(KTRANSFORMERS_USE_CUDA AND NOT KTRANSFORMERS_USE_MUSA)
         target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
     endif()
 endif()
