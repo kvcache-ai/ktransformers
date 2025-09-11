@@ -8,6 +8,9 @@ class ConfigArgs(BaseModel):
     model_dir: Optional[str] = Field(..., description="Path to model directory")
     optimize_config_path: Optional[str] = Field(None, description="Path of your optimize config yml file")
     gguf_path: Optional[str] = Field(None, description="Path of your gguf file")
+    draft_model_path: Optional[str] = Field(None, description="Path of your gguf file")
+    draft_gguf_path: Optional[str] = Field(None, description="Path of your gguf file")
+    tp: int = Field(None, description="tp size")
 
     class Config:
         protected_namespaces = ()

@@ -207,4 +207,5 @@ class Config(metaclass=Singleton):
         # only support 2 prefill task
         self.max_prefill_batch_size = 2
         self.max_decode_batch_size = self.max_batch_size - self.max_prefill_batch_size 
+        self.full_kv_cache_on_each_gpu = cfg["kvc2"]["full_kv_cache_on_each_gpu"]
 

@@ -16,6 +16,8 @@ import yaml
 import json
 from typing import Optional
 
+model_runner_dict = dict()
+
 class ModelConfig:
     vocab_size: int = 32000
     n_layer: int = 1
