@@ -986,13 +986,23 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
       }
     });
 
-    cudaMemcpyKind direction;
-    if (option == IO_Read || option == IO_ForceRead) {
-      direction = cudaMemcpyHostToDevice;
-    }
-    if (option == IO_Write || option == IO_ForceWrite) {
-      direction = cudaMemcpyDeviceToHost;
-    }
+    #if defined(KTRANSFORMERS_USE_NPU)  // NPU平台分支
+      aclrtMemcpyKind direction;
+      if (option == IO_Read || option == IO_ForceRead) {
+          direction = ACL_MEMCPY_HOST_TO_DEVICE;
+      }
+      if (option == IO_Write || option == IO_ForceWrite) {
+          direction = ACL_MEMCPY_DEVICE_TO_HOST;
+      }
+    #else  // 默认GPU分支
+      cudaMemcpyKind direction;
+      if (option == IO_Read || option == IO_ForceRead) {
+          direction = cudaMemcpyHostToDevice;
+      }
+      if (option == IO_Write || option == IO_ForceWrite) {
+          direction = cudaMemcpyDeviceToHost;
+      }
+    #endif
 
     auto reqs = gpu_cache->basic_request(direction, [io_helper]() { io_helper->batch_promise.set(); });
 

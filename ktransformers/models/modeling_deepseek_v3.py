@@ -72,6 +72,12 @@ if is_torch_fx_available():
 
     _prepare_4d_causal_attention_mask = torch.fx.wrap(_prepare_4d_causal_attention_mask)
 
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
 
 logger = logging.get_logger(__name__)
 
@@ -1177,6 +1183,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
+        is_prefill: Optional[bool] = False,
         **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
@@ -1212,6 +1219,7 @@ class DeepseekV3DecoderLayer(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
+            is_prefill=is_prefill,
             **kwargs,
         )
         hidden_states = residual + hidden_states
@@ -1646,6 +1654,7 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        is_prefill: Optional[bool] = False,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1698,10 +1707,15 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            is_prefill=is_prefill,
         )
 
         hidden_states = outputs[0]
-        logits = self.lm_head(hidden_states[:,-1:,:])
+        if use_torch_npu:
+            hidden_states_without_norm = outputs[-1]
+            logits = self.lm_head(hidden_states)
+        else:
+            logits = self.lm_head(hidden_states[:,-1:,:])
         logits = logits.float()
 
         loss = None
@@ -1718,7 +1732,10 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            if use_torch_npu:
+                output = (logits,) + outputs[1:] + (hidden_states_without_norm,)
+            else:
+                output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
         return CausalLMOutputWithPast(
