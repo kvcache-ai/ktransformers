@@ -1,0 +1,89 @@
+- match:
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.KQwen3MoeRotaryEmbedding
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^lm_head$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "VLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+- match:
+    name: "^model\\.layers\\.(?!.*mlp\\.shared_expert_gate).*$"  # regular expression 
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextSparseMoeBlock
+  replace:
+    class: ktransformers.operators.experts.KQwen3NextSparseMoeBlockV2     # mlp module with custom forward function
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2     # custom MoE Kernel with expert paralleism
+    kwargs:
+      prefill_device: "cuda"
+      prefill_op: "KExpertsTorch"
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda"
+  recursive: False # don't recursively inject submodules of this module
+- match:
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextGatedDeltaNet
+  replace:
+    class: ktransformers.operators.balance_serve_attention.KQwen3NextGatedDeltaNet # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextAttention
+  replace:
+    class: ktransformers.operators.balance_serve_attention.KQwen3NextAttention # optimized MLA implementation
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cpu"
+
+- match:
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextRMSNorm
+  replace:
+    class: ktransformers.operators.layernorm.KQwen3NextRMSNorm
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    class: ktransformers.models.modeling_qwen3_next.Qwen3NextMLP
+  replace:
+    class:  ktransformers.operators.mlp.KQwen2MoeMLP
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
