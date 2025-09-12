@@ -26,9 +26,11 @@ from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
 from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
+from ktransformers.models.custom_modeling_qwen3_next import KQwen3NextForCausalLM
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
+from ktransformers.models.configuration_qwen3_next import Qwen3NextConfig
 from ktransformers.server.balance_serve.inference.model_runner import ModelRunner 
 from ktransformers.server.balance_serve.inference.sampling.sampler import Sampler, SamplingOptions
 from ktransformers.server.balance_serve.inference.query_manager import QueryManager
@@ -66,6 +68,7 @@ default_optimize_rules = {
     "Qwen3MoeForCausalLM": ktransformer_rules_dir + "Qwen3Moe-serve.yaml",
     "SmallThinkerForCausalLM": ktransformer_rules_dir + "Smallthinker-serve.yaml",
     "Glm4MoeForCausalLM": ktransformer_rules_dir + "Glm4Moe-serve.yaml",
+    "Qwen3NextForCausalLM": ktransformer_rules_dir + "Qwen3Next-serve.yaml",
 }
 
 
@@ -139,6 +142,8 @@ class Engine:
             config = SmallthinkerConfig.from_pretrained(args.model_dir, trust_remote_code=True)
             config._attn_implementation = "eager"  
             config.moe_intermediate_size = config.moe_ffn_hidden_size
+        elif args.architectures == "Qwen3NextForCausalLM":
+            config = Qwen3NextConfig.from_pretrained(args.model_dir, trust_remote_code=True)
         else:
             try:
                 config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
@@ -169,6 +174,9 @@ class Engine:
             elif config.architectures[0] == "Glm4MoeForCausalLM":
                 self.cache = KGQACache(config, self.args.page_size)
                 self.model = KGlm4MoeForCausalLM(config, self.cache)
+            elif config.architectures[0] == "Qwen3NextForCausalLM":
+                self.cache = KGQACache(config, self.args.page_size)
+                self.model = KQwen3NextForCausalLM(config, self.cache)
 
 
 
@@ -220,7 +228,7 @@ class Engine:
         self.block_num = inference_context.k_cache[0].size(1)
         self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
         #@TODO add config
-        if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM" or config.architectures[0] == "Glm4MoeForCausalLM" or config.architectures[0] == "SmallThinkerForCausalLM":
+        if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM" or config.architectures[0] == "Glm4MoeForCausalLM" or config.architectures[0] == "SmallThinkerForCausalLM" or config.architectures[0] == "Qwen3NextForCausalLM":
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, max(self.model_runner.cuda_graphs), args.max_batch_size, self.block_num) 
         else:
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, args.max_batch_size, self.block_num)

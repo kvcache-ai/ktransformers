@@ -1,5 +1,5 @@
 fire
-transformers==4.53.3
+transformers
 numpy
 torch>=2.3.0
 packaging
