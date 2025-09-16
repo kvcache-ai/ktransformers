@@ -38,6 +38,7 @@ To install KTransformers, follow the official [Installation Guide](https://kvcac
 python ktransformers/server/main.py \
   --port 10021 \
   --model_path path-to-Qwen3-Next-80B-A3B-Thinking \
+  --gguf_path path-to-Qwen3-Next-80B-A3B-Thinking \
   --model_name Qwen3NextForCausalLM \
   --optimize_config_path <local_path>/ktransformers/optimize/optimize_rules/Qwen3Next-serve.yaml \
   --max_new_tokens 1024 \
