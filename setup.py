@@ -48,7 +48,10 @@ if dev_backend == "xpu":
         "pytorch-triton-xpu==3.3.0"
     ]
 else:
-    triton_dep = ["triton>=3.2"]
+    triton_dep = [
+        "triton >= 3.2; sys_platform != 'win32' and sys_platform != 'Windows'",
+        "triton-windows >= 3.2; sys_platform == 'win32' or sys_platform == 'Windows'"
+    ]
 
 with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
