@@ -43,10 +43,23 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.utils.generic import OutputRecorder, check_model_inputs
-from transformers.utils.import_utils import (
-    is_causal_conv1d_available,
-    is_flash_linear_attention_available,
-)
+try:
+    from transformers.utils.import_utils import (
+        is_causal_conv1d_available,
+        is_flash_linear_attention_available,
+    )
+except ImportError:
+    is_causal_conv1d_available = lambda: False
+
+
+try:
+    from transformers.utils.import_utils import (
+        is_flash_linear_attention_available,
+    )
+except ImportError:
+    is_flash_linear_attention_available = lambda: False
+
+
 from .configuration_qwen3_next import Qwen3NextConfig
 
 
