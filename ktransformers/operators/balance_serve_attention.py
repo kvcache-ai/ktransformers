@@ -614,11 +614,6 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
             query_states = self.q_norm(query_states, bsz_tensors)
             key_states = self.k_norm(key_states, bsz_tensors)
 
-
-        query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
-        key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
-        value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
-        
         # cos, sin = freqs_cis
         """
         print(query_states.shape)
@@ -634,11 +629,16 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
         if freqs_cis is not None:  
             query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
 
+        query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
+        key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
+        value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
+
 
         k_cache = kv_cache.get_k_cache(self.layer_idx)
         v_cache = kv_cache.get_v_cache(self.layer_idx)
 
 
+        print(f"{k_cache.shape=}, {v_cache.shape=}, {query_states.shape=}, {key_states.shape=}, {value_states.shape=}")
         attn_output = wrapper.forward(query_states, k_cache, v_cache, key_states, value_states)
   
 
