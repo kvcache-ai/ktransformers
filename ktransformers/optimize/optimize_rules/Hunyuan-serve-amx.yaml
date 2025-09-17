@@ -1,0 +1,102 @@
+# HunYuan MoE v1 with AMX Balance Serve Configuration
+# Optimized configuration for balance serve mode with CPU/GPU hybrid deployment
+
+# RoPE configuration - simplified for HunYuanDynamicNTKAlphaRotaryEmbedding only
+- match:
+    class: ktransformers.models.modeling_hunyuan.HunYuanDynamicNTKAlphaRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.KHunYuanRotaryEmbedding
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^lm_head$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "VLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+- match:
+    name: "^model\\.layers\\..*$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.linear.KTransformersLinear
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+      generate_op: "KLinearMarlin"
+      prefill_op: "KLinearTorch"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_hunyuan.HunYuanMoE
+  replace:
+    class: ktransformers.operators.experts.KHunyuanMoE
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExpertsV2
+    kwargs:
+      prefill_device: "cuda"
+      prefill_op: "KExpertsTorch"
+      generate_device: "cpu"
+      generate_op: "KExpertsCPU"
+      out_device: "cuda"
+      backend: "AMXBF16" # or "AMXBF16" or "llamafile" (default)
+  recursive: False
+
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.balance_serve_attention.KHunYuanAttention
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KHunyuanModel"
+    kwargs:
+      per_layer_prefill_intput_threshold: 0
+
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cpu"
+
+- match:
+    class: ktransformers.models.modeling_hunyuan.HunYuanRMSNorm
+  replace:
+    class: ktransformers.operators.layernorm.KHunYuanRMSNorm
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    class: ktransformers.models.modeling_hunyuan.HunYuanMLP
+  replace:
+    class: ktransformers.operators.mlp.KHunYuanMLP
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"
+
+- match:
+    class: ktransformers.models.modeling_hunyuan.HunYuanAttention
+  replace:
+    class: ktransformers.operators.attention.KHunYuanAttention
+    kwargs:
+      generate_device: "cuda"
+      prefill_device: "cuda"

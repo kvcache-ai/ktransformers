@@ -90,7 +90,17 @@ class SafeTensorLoader(ModelLoader):
         elif key in self.tensor_file_map:
             pass
         else:
-            raise KeyError(f"Key {key} not found in Safetensor files")
+            # Handle weight tying/sharing for models like Hunyuan
+            if key == "lm_head.weight":
+                alternative_key = "model.embed_tokens.weight"
+                if alternative_key in self.tensor_file_map:
+                    print(f"Key '{key}' not found, using '{alternative_key}' (tied weights)")
+                    key = alternative_key
+                else:
+                    raise KeyError(f"Key {key} not found in Safetensor files, and alternative key {alternative_key} also not found")
+            else:
+                raise KeyError(f"Key {key} not found in Safetensor files")
+                
         file = self.tensor_file_map[key]
         f = self.file_handle_map.get(file)
         if f is None:
