@@ -62,6 +62,7 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.utils.import_utils import is_torch_fx_available
+from transformers.generation import GenerationMixin
 from .configuration_deepseek import DeepseekV2Config
 import torch.distributed as dist
 import numpy as np
@@ -1641,7 +1642,7 @@ class DeepseekV2Model(DeepseekV2PreTrainedModel):
         return causal_mask
 
 
-class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel):
+class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
