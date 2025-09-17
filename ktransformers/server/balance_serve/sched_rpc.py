@@ -10,7 +10,8 @@ current_file_path = os.path.abspath(__file__)
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import pickle
 import argparse
-from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe, create_sched_settings_glm4moe, create_sched_settings_smallthinker, create_sched_settings_hunyuan
+from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe, create_sched_settings_hunyuan, create_sched_settings_glm4moe, create_sched_settings_smallthinker, create_sched_settings_qwen3next
+
 
 
 
@@ -219,6 +220,8 @@ if __name__ == '__main__':
         settings = create_sched_settings_smallthinker(main_args)
     elif main_args.architectures == "HunYuanMoEV1ForCausalLM":
         settings = create_sched_settings_hunyuan(main_args)
+    elif main_args.architectures == "Qwen3NextForCausalLM":
+        settings = create_sched_settings_qwen3next(main_args)
     else:
         settings = create_sched_settings(main_args)
     start_server(settings, main_args)

@@ -3,6 +3,7 @@ from ktransformers.server.backend.args import ConfigArgs, default_args
 from ktransformers.util.utils import get_free_ports
 from transformers import AutoConfig
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
+from ktransformers.models.configuration_qwen3_next import Qwen3NextConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
 
@@ -138,12 +139,16 @@ class ArgumentParser:
         self.cfg.server_ip = args.host
         self.cfg.server_port = args.port
         self.cfg.user_force_think = args.force_think
+
+
+        args.architectures = args.model_name
+
         try:
             model_config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
         except:
-            try:
-                model_config = Glm4MoeConfig.from_pretrained(args.model_dir, trust_remote_code=True)
-            except:
+            if args.model_name == "Qwen3NextForCausalLM":
+                model_config = Qwen3NextConfig.from_pretrained(args.model_dir)
+            else:
                 raise ValueError(f"Model {args.model_name} not supported. Please check your model directory or model name.")
 
 
