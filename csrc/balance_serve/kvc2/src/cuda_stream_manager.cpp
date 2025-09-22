@@ -1,5 +1,4 @@
 #include "cuda_stream_manager.hh"
-#include <cuda_runtime.h>
 #include <functional>
 #include <chrono>
 #include <iostream>

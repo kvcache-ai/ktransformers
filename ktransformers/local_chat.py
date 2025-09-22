@@ -80,7 +80,7 @@ def local_chat(
     mode: str = "normal",
     force_think: bool = False,
     chunk_size: int = 8192,
-    device: str = "cuda"
+    device: str = "cuda",
     tp: int = 1,
 ):
     Config().cpu_infer = cpu_infer

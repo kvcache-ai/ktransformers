@@ -7,10 +7,19 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-if not torch.xpu.is_available():
+
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not torch.xpu.is_available() and not use_torch_npu:
     import KTransformersOps
 from safetensors import safe_open
-from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
+
+if not use_torch_npu:
+    from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from ktransformers.util.custom_gguf import *
 from safetensors.torch import save_file
 from abc import ABC, abstractmethod
@@ -270,7 +279,7 @@ class GGUFLoader(ModelLoader):
     tensor_file_map: dict # {tensor_name: tensor_file_path}
     gguf_file_meta: dict
     safetensor_loader: SafeTensorLoader
-    def __init__(self, gguf_path: str):
+    def __init__(self, gguf_path: str, quantize: str = None):
         # Check dir exist
         if not os.path.exists(gguf_path):
             raise FileNotFoundError(f"GGUF dir not found: {gguf_path}")
@@ -285,6 +294,15 @@ class GGUFLoader(ModelLoader):
         self.file_data_map = {}
         self.gguf_file_meta = {}
         self.tensor_device_map = {}
+
+        if use_torch_npu:
+            if quantize == "w8a8_dynamic":
+                safetensor_loader = W8A8SafeTensorLoader(gguf_path)
+            else:
+                safetensor_loader = SafeTensorLoader(gguf_path)
+            if safetensor_loader.tensor_file_map:
+                self.safetensor_loader = safetensor_loader
+                return
 
         # Walk through all the .gguf files in the directory
         found_gguf = False

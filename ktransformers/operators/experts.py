@@ -26,7 +26,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext
 import cpuinfer_ext
 from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
-from ktransformers.util.custom_gguf import GGMLQuantizationType
+from ktransformers.util.custom_gguf import GGMLQuantizationType, translate_name_to_gguf
 from ktransformers.util.custom_loader import GGUFLoader, SafeTensorLoader, ModelLoader
 from ktransformers.util.utils import InferenceState
 from ktransformers.server.config.config import Config
@@ -419,6 +419,16 @@ class KExpertsCPU(KExpertsBase):
                 gate_type = self.gguf_loader.get_ggml_type(key + ".ffn_gate.0.weight")
                 up_type = self.gguf_loader.get_ggml_type(key + ".ffn_up.0.weight")
                 down_type = self.gguf_loader.get_ggml_type(key + ".ffn_down.0.weight")
+            elif self.gguf_loader.safetensor_loader is not None:
+                # for npu
+                # using a temp ugly way to temprary load the tensor
+                translate_key = translate_name_to_gguf(key)
+                gate = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_gate_exps.weight").numpy()
+                up = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_up_exps.weight").numpy()
+                down = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_down_exps.weight").numpy()
+                gate_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_gate_exps.ggml_type").item()
+                up_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_up_exps.ggml_type").item()
+                down_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_down_exps.ggml_type").item()
             else:
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {key:{"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}

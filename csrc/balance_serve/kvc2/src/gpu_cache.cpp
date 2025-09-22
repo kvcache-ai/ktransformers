@@ -43,7 +43,6 @@ GPUPageCache::GPUPageCache(GPUPageCacheConfig& config) : config(config) {
     exit(0);
   }
 #endif
-}
 
   SPDLOG_WARN("Creating GPU Cache");
   shape.push_back(config.layer_count);

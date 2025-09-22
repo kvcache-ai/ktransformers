@@ -148,7 +148,12 @@ endif()
 
 set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
 
-set(CMAKE_CXX_FLAGS "-O3 -march=native")
+if(KTRANSFORMERS_USE_NPU)
+    set(CMAKE_CXX_FLAGS "-O3 -march=armv8.2-a")
+else()
+    set(CMAKE_CXX_FLAGS "-O3 -march=native")
+endif()
+
 message(STATUS "CMAKE_CXX_FLAGS of PhotonLibOS: ${CMAKE_CXX_FLAGS}")
 
 add_subdirectory(${THIRD_PARTY_DIR}/PhotonLibOS ${THIRD_PARTY_BUILD_DIR}/PhotonLibOS)
