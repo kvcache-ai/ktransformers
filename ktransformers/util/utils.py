@@ -28,9 +28,7 @@ from transformers import (
     EtaLogitsWarper,
 )
 from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size
-from ktransformers.util.custom_gguf import translate_name_to_gguf
-from ktransformers.util.custom_gguf import GGUFLoader
-from ktransformers.util.custom_loader import ModelLoaderFactory, ModelLoader, SafeTensorLoader
+from ktransformers.util.custom_loader import ModelLoaderFactory, ModelLoader, SafeTensorLoader, translate_name_to_gguf
 from ktransformers.operators import base_operator
 from ktransformers.models.custom_cache import StaticCache
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
@@ -41,21 +39,19 @@ if not torch.xpu.is_available():
 import socket
 
 warm_uped = False
-warm_up_cnt = [1, 1]  # skip warm up profiling[prefill, decode]
 CUR_DEVICE = None
 W8A8_ENABLE = False
 Q4_GGUF_LODER = None
 _USE_NPU_GRAPH = False
 _MAX_DECODE_PROFILE = 1
 WARM_UP_SKIP_CNT = [1, 1]
-_IS_PREFILL = None
 _SPECULATE_STEP = 1
 
 try:
     import torch_npu
-    use_npu = torch_npu.npu.is_available()
+    use_torch_npu = torch_npu.npu.is_available()
 except:
-    use_npu = False
+    use_torch_npu = False
 
 def get_use_npu_graph():
     assert _USE_NPU_GRAPH is not None, "use npu graph is not setting"
@@ -233,7 +229,41 @@ def get_all_used_cuda_device(device_map:dict):
     all_device_list = list(all_device_list)
     return all_device_list
 
+def load_cur_state_dict_npu(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="npu"):
+    prefix = prefix.replace("orig_module.", "")
+    persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
+    local_name_params = itertools.chain(module._parameters.items(), persistent_buffers.items())
+    local_state = {k: v for k, v in local_name_params if v is not None}
+    for name, param in local_state.items():
+        key = prefix + name
+        translated_key = translate_name_to_gguf(key)
+        # TODO: Merge all loader.
+        # I know this is ugly but lets do it for now.
+        if gguf_loader.safetensor_loader is not None:
+            load_dequantized_tensor = gguf_loader.safetensor_loader.load_dequantized_tensor
+            tensor_file_map = gguf_loader.safetensor_loader.tensor_file_map
+        else:
+            load_dequantized_tensor = gguf_loader.load_gguf_tensor
+            tensor_file_map = gguf_loader.tensor_file_map
+        
+        if translated_key in tensor_file_map:
+            target_dtype = torch.get_default_dtype()
+            device = get_device(translated_key[:translated_key.rfind(".")], gguf_loader.tensor_device_map)
+            # Todo need fix
+            device = "cpu" if "embd" in translated_key else get_current_device()
+            print(f"loading layer {translated_key} to {device}")
+            torch.cuda.empty_cache()
+            weights = load_dequantized_tensor(translated_key, device=device).to(dtype=target_dtype)
+            set_param(module, name, weights)
+            del weights
+        else:
+            #print(load_config.tensor_file_map.keys())
+            raise Exception(f"can't find {translated_key} in GGUF file!")
+
 def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="cuda"):
+    if use_torch_npu:
+        load_cur_state_dict_npu(module, gguf_loader, prefix, device)
+
     prefix = prefix.replace("orig_module.", "")
     persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
     local_name_params = itertools.chain(module._parameters.items(), persistent_buffers.items())
@@ -282,6 +312,8 @@ def sync_all_device(all_device_list):
             torch.cuda.synchronize(device)
         elif "xpu" in device.lower():
             torch.xpu.synchronize(device)
+        elif use_torch_npu:
+            torch_npu.synchronize(device)
         else:
             raise RuntimeError("The device {} is not available".format(device))
 
@@ -368,9 +400,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
     torch._dynamo.config.suppress_errors = True
     batch_size, seq_length = inputs.shape
     device_map = model.gguf_loader.tensor_device_map
-    torch_device = get_device('model.layers.0.self_attn', device_map)
-    torch_device = torch_device_mapping[torch_device] if torch_device in torch_device_mapping else torch_device
-    if use_npu:
+    if use_torch_npu:
         CUR_DEVICE = f"npu:{torch.npu.current_device()}"
         vocabulary_size = model.config.vocab_size
         topp = torch.tensor([[model.generation_config.top_p]], dtype=torch.float16).npu()
@@ -379,109 +409,87 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         next_token_fake = torch.tensor([[1]], dtype=torch.int32).npu()
         next_token_probs = torch.tensor([[1.0]], dtype=torch.float16).npu()
         torch_device = torch.npu.current_device()
+    else:
+        torch_device = get_device('model.layers.0.self_attn', device_map)
+        torch_device = torch_device_mapping[torch_device] if torch_device in torch_device_mapping else torch_device
     inputs = inputs.to(torch_device)
     all_cuda_device = get_all_used_cuda_device(device_map)
 
     tokens = []
 
-    def decode_one_tokens(cuda_graph_runner, next_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph: bool = True):
-        # if draft_model is not None:
-        #     nonlocal global_acc_counts
-        #     nonlocal global_verify_counts
-        # next_token, mtp_hidden_states = decode_model_token(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
-        if draft_model is not None:
-            nonlocal draft_token
-            nonlocal global_acc_counts
-            nonlocal global_verify_counts
+    def decode_one_tokens_npu(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph: bool = True):
         if cuda_graph_runner is None:
             use_cuda_graph = False
+        
+        inputs_embeds = model.model.embed_tokens(cur_token.to('cpu')).to(torch_device)
         if use_cuda_graph:
-            if timeStat.on:
-                start_time = timeStat.record_start_time()
-            spec_cur_tokens = next_token
-            model_inputs_embeds = model.model.embed_tokens(spec_cur_tokens.to('cpu')).to(torch_device)
-            model_position_ids = position_ids
-            model_cache_position = cache_position
-            if timeStat.on:
-                timeStat.add_time_stat(StatKey.Embedding, start_time, False)
-                start_time = timeStat.record_start_time()
             if cuda_graph_runner.model_capture:
-                if timeStat.on:
-                    start_time = timeStat.record_start_time()
-                cuda_graph_runner.capture(model, spec_cur_tokens, model_position_ids, model_cache_position, past_key_values, CUR_DEVICE, return_dict=False, use_cache=True)
+                cuda_graph_runner.capture(model, cur_token, position_ids, cache_position, past_key_values, CUR_DEVICE, return_dict=False, use_cache=True)
                 cuda_graph_runner.model_capture = False
-                if timeStat.on:
-                    timeStat.add_time_stat(StatKey.GraphCapture, start_time, False)
-            if timeStat.on:
-                start_time = timeStat.record_start_time()
-            ret = cuda_graph_runner(model_inputs_embeds, model_position_ids, model_cache_position)
-            if timeStat.on:
-                timeStat.add_time_stat(StatKey.GraphReplay, start_time, False)
+
+            ret = cuda_graph_runner(inputs_embeds, position_ids, cache_position)
             logits = ret[0]
             next_token = torch.argmax(logits, dim=-1)
         else:
             torch_npu.npu.set_device(torch_device)
-            #inputs_embeds = model.model.embed_tokens(next_token.to("cpu")).to(torch_device)
-            if draft_model is not None:
-                spec_cur_tokens = torch.cat((next_token[0], torch.tensor(draft_token))).unsqueeze(0)
-                model_position_ids = torch.cat((position_ids[0], position_ids[0] + 1)).unsqueeze(0)
-                model_cache_position = torch.cat((cache_position, cache_position + 1))
-                model_inputs_embeds = model.model.embed_tokens(spec_cur_tokens.to("cpu")).to(torch_device)
-            else:
-                model_inputs_embeds = model.model.embed_tokens(next_token.to('cpu')).to(torch_device)
-                model_position_ids = position_ids
-                model_cache_position = cache_position
-            # with torch.cuda.stream(custom_stream):
-            ret = model(inputs_embeds=model_inputs_embeds,
-                       position_ids=model_position_ids,
-                       cache_position=model_cache_position,
+            logits = model(inputs_embeds=inputs_embeds,
+                       position_ids=position_ids,
+                       cache_position=cache_position,
                        past_key_values=past_key_values,
-                       return_dict=False, use_cache=True, is_prefill=False)
-            logits = ret[0]
-
-        accept_token_num = 1
-        if draft_model is not None:
-            global_verify_counts += 1
-            if draft_token == next_token[0][0]:   # 接受
-                if timeStat.on:
-                    start_time = timeStat.record_start_time()
-                past_key_values.position[0] += 2
-                draft_cache.position[0] += 2
-                global_acc_counts += 1
-                accept_token_num = 2
-                position_ids = model_position_ids + 1
-                position_ids = position_ids.squeeze(0)
-            else: # 拒绝
-                if timeStat.on:
-                    start_time = timeStat.record_start_time()
-                past_key_values.position[0] += 1
-                draft_cache.position[0] += 1
-                position_ids = torch.tensor([model_position_ids[0][1]]).to(torch_device)
-            if timeStat.on:
-                start_time = timeStat.record_start_time()
-            if use_cuda_graph:
-                if accept_token_num == 1:
-                    if timeStat.on:
-                        start_time = timeStat.record_start_time()
-                else:
-                    if timeStat.on:
-                        start_time = timeStat.record_start_time()
-        else:
-            if generation_config.do_sample:
-                logits = logits / temperature
-                torch.manual_seed(0)
-                probs = logits.view(batch_size, vocabulary_size)
-                sm = nn.Softmax(dim=-1)
-                probs = sm(probs).half().npu()
-                next_token = next_token_fake
-                torch_npu._npu_topk_topp_sampling(probs, topk, topp, next_token, next_token_probs)
-                next_token = next_token.squeeze(-1)
-            else:
-                next_token_scores = logits_warper(inputs, logits[:, -1, :])
-                next_token = torch.argmax(next_token_scores, dim=-1)
+                       return_dict=False, use_cache=True, is_prefill=False)[0]
         if past_key_values != None:
-            past_key_values.change_seq_length(accept_token_num)
-        return next_token, accept_token_num
+            past_key_values.change_seq_length(1)
+
+        if generation_config.do_sample:
+            logits = logits / temperature
+            torch.manual_seed(0)
+            probs = logits.view(batch_size, vocabulary_size)
+            sm = nn.Softmax(dim=-1)
+            probs = sm(probs).half().npu()
+            next_token = next_token_fake
+            torch_npu._npu_topk_topp_sampling(probs, topk, topp, next_token, next_token_probs)
+            next_token = next_token.squeeze(-1)
+        else:
+            next_token_scores = logits_warper(inputs, logits[:, -1, :])
+            next_token = torch.argmax(next_token_scores, dim=-1)
+        
+        return next_token
+            
+    
+    def decode_one_tokens(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph: bool = True):
+        if use_torch_npu:
+            return decode_one_tokens_npu(cuda_graph_runner, cur_token, position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
+        if cuda_graph_runner is None:
+            use_cuda_graph = False
+        if use_cuda_graph:
+            logits = cuda_graph_runner(cur_token, position_ids, cache_position)
+        else:
+            # custom_stream = torch.cuda.Stream()
+            if torch.cuda.is_available():
+                torch.cuda.set_device(torch_device)
+            elif torch.xpu.is_available():
+                torch.xpu.set_device(torch_device)
+            elif use_torch_npu:
+                torch_npu.set_device(torch_device)
+            else:
+                raise RuntimeError(f"The device: {torch_device} is not available")
+            inputs_embeds = model.model.embed_tokens(cur_token.to("cpu")).to(torch_device)
+            # with torch.cuda.stream(custom_stream):
+            logits=model(inputs_embeds=inputs_embeds,
+                        position_ids=position_ids,
+                        cache_position=cache_position,
+                        past_key_values=past_key_values,
+                        return_dict=False, use_cache=True)[0]
+        if past_key_values != None and isinstance(past_key_values, StaticCache):
+            past_key_values.change_seq_length(1)
+        sync_all_device(all_cuda_device)
+        next_token_scores = logits_warper(inputs, logits[:, -1, :])
+        if generation_config.do_sample:
+            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
+        else:
+            next_token = torch.argmax(next_token_scores, dim=-1)
+        return next_token
 
     # TODO: use CUDA Graph for chunk prefill, may get small improvement
     def chunk_prefill(inputs, cache_position, past_key_values):
@@ -498,22 +506,18 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             inputs_embeds = inputs_embeds, cache_position=cache_position, past_key_values=past_key_values, return_dict=False, use_cache=True, is_prefill=True
         )
         logits = ret[0][:,-1,:].unsqueeze(0).clone().to(torch_device)
-        hidden_states = ret[-1]
 
-        return logits, hidden_states
+        return logits
 
     def decode_wrapper(next_token, position_ids, cache_position, cuda_graph_runner, past_key_values, inputs, seq_length, prof=None):
         global warm_uped
         global _USE_NPU_GRAPH
-        nonlocal draft_token
         if use_cuda_graph:
-            start_time = timeStat.record_start_time()
             from ktransformers.util.npu_graph_runner import get_or_create_runner
-            np_graph_runner = get_or_create_runner(CUR_DEVICE)
-            np_graph_runner.init(batch_size, seq_length)
-            timeStat.add_time_stat(StatKey.GraphInit, start_time, False)
+            npu_graph_runner = get_or_create_runner(CUR_DEVICE)
+            npu_graph_runner.init(batch_size, seq_length)
             
-            with torch_npu.npu.stream(np_graph_runner.main_stream):
+            with torch_npu.npu.stream(npu_graph_runner.main_stream):
                 gen_num_tokens = 1
                 while gen_num_tokens < max_new_tokens:
                     start_time = timeStat.record_start_time()
@@ -525,40 +529,31 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                         warm_uped = True
                         _USE_NPU_GRAPH = True
                         #np_graph_runner.capture(model, draft_model, next_token, torch.tensor(draft_token), position_ids, cache_position, past_key_values, draft_cache, torch_device, return_dict=False, use_cache=True)
-                        cuda_graph_runner = np_graph_runner
-                    next_token, cur_gen_num = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
-                    timeStat.add_time_stat(StatKey.DecodeOneToken, start_time, False)
-                    start_time = timeStat.record_start_time()
+                        cuda_graph_runner = npu_graph_runner
+                    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
                     next_token = next_token.to(torch_device)
                     inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
-                    generated_ids[:, cache_position] = next_token[0].int()
-                    tokens.append(int(next_token[0]))
-                    if cur_gen_num == 2:
-                        generated_ids[:, (cache_position + 1)] = next_token[1].int()
-                        tokens.append(int(next_token[1]))
-                    seq_length += cur_gen_num
+                    generated_ids[:, cache_position] = next_token.int()
+                    tokens.append(int(next_token))
+                    
+                    seq_length += 1
 
-                    if next_token[-1].item() == tokenizer.eos_token_id or tokenizer.decode(next_token[-1].tolist()) == '<|im_end|>':
+                    if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token.tolist()) == '<|im_end|>':
                         print(stream.end(), end="", flush=True)
                         break
                     else:
                         if torch.distributed.get_rank() % get_tensor_parallel_size() == 0:
-                            print(stream.put(next_token[0].item()), end="", flush=True)
-                        if cur_gen_num == 2:
-                            print(stream.put(next_token[1].item()), end="", flush=True)
+                            print(stream.put(next_token.item()), end="", flush=True)
 
-                    cache_position += cur_gen_num
+                    cache_position += 1
                     past_key_values.position[0] += 1
                     position_ids = cache_position.unsqueeze(0)
-                    gen_num_tokens += cur_gen_num
-                    if cur_gen_num == 2:
-                        next_token = torch.tensor(next_token[-1]).unsqueeze(0)
-                    else:
-                        next_token = torch.tensor(next_token[0]).unsqueeze(0)
-                    timeStat.add_time_stat(StatKey.DecodeOneTokenPost, start_time, False)
-                start_time = timeStat.record_start_time()
-                np_graph_runner.destroy()
-                timeStat.add_time_stat(StatKey.GraphDestroy, start_time, False)
+                    gen_num_tokens += 1
+                    
+                    if prof is not None:
+                        prof.step()
+
+                npu_graph_runner.destroy()
                 _USE_NPU_GRAPH = False
         else:
             gen_num_tokens = 1
@@ -567,42 +562,50 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                     MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,None,
                                                 num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
                                                 model.model.layers[0].self_attn.softmax_scale, torch.bfloat16, torch.bfloat16)
-                next_token, cur_gen_num = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
+                next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph)
                 next_token = next_token.to(torch_device)
                 inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
-                generated_ids[:, cache_position] = next_token[0].int()
-                tokens.append(int(next_token[0]))
-                if cur_gen_num == 2:
-                    generated_ids[:, (cache_position + 1)] = next_token[1].int()
-                    tokens.append(int(next_token[1]))
-                seq_length += cur_gen_num
+                generated_ids[:, cache_position] = next_token.int()
+                tokens.append(int(next_token))
+                seq_length += 1
 
-                if next_token[-1].item() == tokenizer.eos_token_id or tokenizer.decode(next_token.tolist()) == '<|im_end|>':
+                if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token.tolist()) == '<|im_end|>':
                     print(stream.end(), end="", flush=True)
                     break
                 else:
                     if torch.distributed.get_rank() % get_tensor_parallel_size() == 0:
-                        print(stream.put(next_token[0].item()), end="", flush=True)
-                    if cur_gen_num == 2:
-                        print(stream.put(next_token[1].item()), end="", flush=True)
+                        print(stream.put(next_token.item()), end="", flush=True)
 
-                cache_position += cur_gen_num
+                cache_position += 1
                 past_key_values.position[0] += 1
                 position_ids = cache_position.unsqueeze(0)
-                gen_num_tokens += cur_gen_num
-                if cur_gen_num == 2:
-                    next_token = torch.tensor(next_token[-1]).unsqueeze(0)
-                else:
-                    next_token = torch.tensor(next_token[0]).unsqueeze(0)
-    
+                gen_num_tokens += 1
 
-    # torch.cuda.set_device(torch_device)
-    torch_npu.npu.set_device(torch_device)
-    global warm_up_cnt
+                if prof is not None:
+                    prof.step()
+        
+        if prof is not None:
+            prof.stop()
+    
+    if torch.cuda.is_available():
+        torch.cuda.set_device(torch_device)
+    elif torch.xpu.is_available():
+        torch.xpu.set_device(torch_device)
+    elif use_torch_npu:
+        torch_npu.set_device(torch_device)
+    else:
+        raise RuntimeError(f"The device: {torch_device} is not available")
+
     with torch.no_grad():
 
         stream = TextStreamer(tokenizer)
-        if static_cache:
+        if torch.xpu.is_available():
+            from ipex_llm.transformers.kv import DynamicUnbalancedFp8Cache, DynamicNormalCache
+            if model.config.architectures[0] in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"]:
+                past_key_values = DynamicUnbalancedFp8Cache.from_legacy_cache(None)
+            else:
+                past_key_values = DynamicNormalCache.from_legacy_cache(None)
+        elif use_torch_npu and static_cache:
             assert isinstance(static_cache, StaticCache), '[ERROR] static_cache format not equal to StaticCache'
             past_key_values = static_cache
             if past_key_values.max_batch_size < batch_size or past_key_values.max_cache_len < seq_length + max_new_tokens:
@@ -624,30 +627,18 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             # change this to modify generate config
             #top_k=5, top_p=0.85, temperature=0.1
         )
-        try: # transformers==4.43
-            logits_warper = (
-                model._get_logits_warper(generation_config,device=inputs.device)
-            )
-        except: 
-            logits_warper = (
-                model._get_logits_warper(generation_config)
-            )
+        
+        logits_warper = tf_logits_warper(generation_config)
 
         cache_position = torch.arange(seq_length, device=torch_device, dtype=torch.int32)
-        past_key_values.position[0] = seq_length + 1
+        if use_torch_npu:
+            past_key_values.position[0] = seq_length + 1
         generated_ids = torch.zeros(
             batch_size, seq_length + max_new_tokens + 1, dtype=torch.int, device=torch_device
         )
         generated_ids[:, cache_position] = inputs.to(torch_device).to(torch.int)
         start_time = time.time()
         logits = None
-        if draft_model is not None:
-            draft_cache.reset()
-            past_key_values.position[0] = seq_length + 2
-            draft_cache.position[0] = seq_length
-            draft_token = None
-            global_acc_counts = 0
-            global_verify_counts = 0
 
         def prefill_wrapper(prof=None):
             nonlocal logits
@@ -656,7 +647,7 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
                 chunk_end = min(chunk_start + chunk_size, seq_length)
                 if past_key_values != None:
                     past_key_values.cur_idx=cache_position[chunk_start:chunk_end]
-                logits, _ = chunk_prefill(inputs[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end], past_key_values)
+                logits = chunk_prefill(inputs[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end], past_key_values)
                 chunk_start += chunk_size
                 if prof is not None:
                     prof.step()
@@ -665,32 +656,40 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             if logits is None:
                 raise ValueError('logits cannot be None')
 
-        global WARM_UP_SKIP_CNT
-        global _IS_PREFILL
-        _IS_PREFILL = True
-        prof_prefill = os.environ["PROF_PREFILL"] if "PROF_PREFILL" in os.environ else "0"
-        if prof_prefill == "1" and WARM_UP_SKIP_CNT[0] <= 0:
-            experimental_config = torch_npu.profiler._ExperimentalConfig(
-                aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level1, l2_cache=False
-            )
-            with torch_npu.profiler.profile(
-                    activities=[
-                        torch_npu.profiler.ProfilerActivity.CPU,
-                        torch_npu.profiler.ProfilerActivity.NPU
-                    ],
-                    schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=8, repeat=1, skip_first=0),
-                    on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./prefill_prof"),
-                    record_shapes=True,
-                    profile_memory=True,
-                    with_stack=False,
-                    with_flops=False,
-                    with_modules=False,
-                    experimental_config=experimental_config) as prof:
-                prefill_wrapper(prof)
+        if use_torch_npu:
+            global WARM_UP_SKIP_CNT
+            prof_prefill = os.environ["PROF_PREFILL"] if "PROF_PREFILL" in os.environ else "0"
+            if prof_prefill == "1" and WARM_UP_SKIP_CNT[0] <= 0:
+                experimental_config = torch_npu.profiler._ExperimentalConfig(
+                    aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+                    profiler_level=torch_npu.profiler.ProfilerLevel.Level1, l2_cache=False
+                )
+                with torch_npu.profiler.profile(
+                        activities=[
+                            torch_npu.profiler.ProfilerActivity.CPU,
+                            torch_npu.profiler.ProfilerActivity.NPU
+                        ],
+                        schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=8, repeat=1, skip_first=0),
+                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./prefill_prof"),
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=False,
+                        with_flops=False,
+                        with_modules=False,
+                        experimental_config=experimental_config) as prof:
+                    prefill_wrapper(prof)
+            else:
+                prefill_wrapper()
+            WARM_UP_SKIP_CNT[0] -= 1
         else:
-            prefill_wrapper()
-        WARM_UP_SKIP_CNT[0] -= 1
+
+            chunk_start = 0
+            while chunk_start < seq_length:
+                chunk_end = min(chunk_start + chunk_size, seq_length)
+                if past_key_values != None:
+                    past_key_values.cur_idx=cache_position[chunk_start:chunk_end]
+                logits = chunk_prefill(inputs[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end], past_key_values)
+                chunk_start += chunk_size
 
         next_token_scores = logits_warper(inputs, logits[:, -1, :])
         if generation_config.do_sample:
@@ -707,10 +706,15 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
 
         prefill_count = seq_length
         prefill_time = first_token_time
-        if torch.distributed.get_rank() % get_tensor_parallel_size() == 0:
+        if use_torch_npu and torch.distributed.get_rank() % get_tensor_parallel_size() == 0:
             if force_think:
                 print("<think>")
             print(stream.put(next_token.item()), end="", flush=True)
+        elif not use_torch_npu:
+            if force_think:
+                print("<think>")
+            print(stream.put(next_token.item()), end="", flush=True)
+
         generated_ids[:, seq_length] = next_token
         tokens.append(int(next_token))
         inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
@@ -720,52 +724,85 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
         
         cuda_graph_runner = None
         
-        _IS_PREFILL = False
         start_time = time.time()
-        prof_decode = os.environ["PROF_DECODE"] if "PROF_DECODE" in os.environ else "0"
-        if prof_decode == "1" and warm_up_cnt[1] <= 0:
-            experimental_config = torch_npu.profiler._ExperimentalConfig(
-                aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level1, l2_cache=False
-            )
-            with torch_npu.profiler.profile(
-                    activities=[
-                        torch_npu.profiler.ProfilerActivity.CPU,
-                        torch_npu.profiler.ProfilerActivity.NPU
-                    ],
-                    schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=_MAX_DECODE_PROFILE, repeat=0, skip_first=0),
-                    on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./decode_prof"),
-                    record_shapes=True,
-                    profile_memory=True,
-                    with_stack=True,  #
-                    with_flops=False,
-                    with_modules=False,
-                    experimental_config=experimental_config) as prof:
-                decode_wrapper(next_token, position_ids, cache_position, cuda_graph_runner, past_key_values, inputs, seq_length, prof)
+
+        if not use_torch_npu:
+            for i in range(1, max_new_tokens):
+                if use_flashinfer_mla:
+                    MLAWrapperSingleton.plan_all(None,None,None,position_ids.squeeze(1)+1,None,
+                                                num_heads, head_dim_ckv, head_dim_kpe, past_key_values.page_size,
+                                                model.model.layers[0].self_attn.softmax_scale, torch.bfloat16, torch.bfloat16)
+                global warm_uped
+                if use_cuda_graph and ( (warm_uped == True and int(i) == 1) or (warm_uped == False and int(i) == 2) ):
+                    warm_uped = True
+                    cuda_graph_runner = CUDAGraphRunner()
+                    cuda_graph_runner.capture(model, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, torch_device, return_dict=False, use_cache=True)
+                next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, logits_warper, generation_config, use_cuda_graph).to(torch_device)
+                inputs = torch.cat((inputs, next_token.unsqueeze(0)), dim=-1)
+                generated_ids[:, cache_position] = next_token.int()
+                tokens.append(int(next_token))
+                seq_length += 1
+                
+                if next_token[0].item() == tokenizer.eos_token_id or tokenizer.decode(next_token.tolist()) == '<|im_end|>':
+                    print(stream.end(), end="", flush=True)
+                    break
+                else:
+                    print(stream.put(next_token.item()), end="", flush=True)
+                cache_position += 1
+                position_ids = cache_position.unsqueeze(0)
         else:
-            decode_wrapper(next_token, position_ids, cache_position, cuda_graph_runner, past_key_values, inputs, seq_length)
-        warm_up_cnt[1] -= 1
+            prof_decode = os.environ["PROF_DECODE"] if "PROF_DECODE" in os.environ else "0"
+            prof_ranks = os.environ["PROF_RANK"] if "PROF_RANK" in os.environ else "0"
+            prof_ranks = [int(r.strip()) for r in prof_ranks.split(",")]
+            if prof_decode == "1" and torch.distributed.get_rank() in prof_ranks and WARM_UP_SKIP_CNT[1] <= 0:
+                experimental_config = torch_npu.profiler._ExperimentalConfig(
+                    aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
+                    profiler_level=torch_npu.profiler.ProfilerLevel.Level1, l2_cache=False
+                )
+                with torch_npu.profiler.profile(
+                        activities=[
+                            torch_npu.profiler.ProfilerActivity.CPU,
+                            torch_npu.profiler.ProfilerActivity.NPU
+                        ],
+                        schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=_MAX_DECODE_PROFILE, repeat=1, skip_first=0),
+                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./decode_prof"),
+                        record_shapes=True,
+                        profile_memory=True,
+                        with_stack=False,
+                        with_flops=False,
+                        with_modules=False,
+                        experimental_config=experimental_config) as prof:
+                    decode_wrapper(next_token, position_ids, cache_position, cuda_graph_runner, past_key_values, inputs, seq_length, prof)
+            else:
+                decode_wrapper(next_token, position_ids, cache_position, cuda_graph_runner, past_key_values, inputs, seq_length)
+            WARM_UP_SKIP_CNT[1] -= 1 
 
     total_time = time.time() - start_time
     tokens_generated = len(tokens)
     tokens_per_second = tokens_generated / total_time
 
-    tp_size = get_tensor_parallel_size()
-    if torch.distributed.get_rank() % tp_size == 0:
-        rank = f"[rank:{torch.distributed.get_rank()}]"
-        msg = f"\n{rank} Eval Time\n"
-        msg += rank + f"prompt eval count    {prefill_count} token(s)\n"
-        msg += rank + f"prompt eval duration {prefill_time:.9f}s\n"
-        msg += rank + f"prompt eval rate     {prefill_count/prefill_time:.9f} tokens/s\n"
-        msg += rank + f"eval count           {tokens_generated} token(s)\n"
-        msg += rank + f"eval duration        {total_time:.9f}s\n"
-        msg += rank + f"eval rate            {tokens_per_second:.9f} tokens/s\n"
-        print(msg)
-    if draft_model is not None:
-        print(f"mtp accept rate:      {global_acc_counts}/{global_verify_counts} = {global_acc_counts * 100 / global_verify_counts} %")
-    if timeStat.on:
-        timeStat.print_all()
-        timeStat.reset_all()
+    if not use_torch_npu:
+        print("")
+
+        print(f"prompt eval count:    {prefill_count} token(s)")
+        print(f"prompt eval duration: {prefill_time}s")
+        print(f"prompt eval rate:     {prefill_count/prefill_time} tokens/s")
+        print(f"eval count:           {tokens_generated} token(s)")
+        print(f"eval duration:        {total_time}s")
+        print(f"eval rate:            {tokens_per_second} tokens/s")
+    else:
+        tp_size = get_tensor_parallel_size()
+        if torch.distributed.get_rank() % tp_size == 0:
+            rank = f"[rank:{torch.distributed.get_rank()}]"
+            msg = f"\n{rank} Eval Time\n"
+            msg += rank + f"prompt eval count:    {prefill_count} token(s)\n"
+            msg += rank + f"prompt eval duration: {prefill_time:.9f}s\n"
+            msg += rank + f"prompt eval rate:     {prefill_count/prefill_time:.9f} tokens/s\n"
+            msg += rank + f"eval count:           {tokens_generated} token(s)\n"
+            msg += rank + f"eval duration:        {total_time:.9f}s\n"
+            msg += rank + f"eval rate:            {tokens_per_second:.9f} tokens/s\n"
+            print(msg)
+
     return tokens
 
 class InferenceState(enum.Enum):

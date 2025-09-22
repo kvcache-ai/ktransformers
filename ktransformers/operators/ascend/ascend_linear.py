@@ -9,9 +9,10 @@ from transformers import PretrainedConfig
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.operators.linear import KLinearBase, LINEAR_MAP
 from ktransformers.util import utils
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.utils import InferenceState
 from ktransformers.util.ascend.ascend_utils import get_safetensors_cut_weight, get_tensor_parallel_size, get_tensor_parallel_group
+from ktransformers.util.custom_gguf import translate_name_to_gguf
 
 
 class KLinearW8A8(KLinearBase):
@@ -35,6 +36,11 @@ class KLinearW8A8(KLinearBase):
         for key in keys:
             if device is None:
                 device = utils.get_current_device()
+            
+            key = translate_name_to_gguf(key)
+            if key == "lm_head":
+                key = "output"
+                
             if key + ".weight" in self.gguf_loader.safetensor_loader.tensor_file_map:
                 if key + ".deq_scale" in self.gguf_loader.safetensor_loader.tensor_file_map:
                     qweight = self.gguf_loader.safetensor_loader.load_tensor(f"{key}.weight")

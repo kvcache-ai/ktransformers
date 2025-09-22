@@ -15,6 +15,11 @@ from flashinfer.sampling import (
 	top_p_renorm_probs,
 )
 
+try:
+    import torch_npu
+    use_torch_npu = torch.npu.is_available()
+except:
+    use_torch_npu = False
 logger = logging.getLogger(__name__)
 
 class SamplingOptions():
@@ -65,7 +70,7 @@ class Sampler(nn.Module):
 
 		logits = logits.contiguous()
 		origin_logits = logits.clone()
-		if sampling_config.is_all_greedy:
+		if sampling_config.is_all_greedy or use_torch_npu:
 			# Use torch.argmax if all requests use greedy sampling
 			probs = torch.softmax(logits, dim=-1)
 			batch_next_token_ids = torch.argmax(logits, -1)
