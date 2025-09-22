@@ -9,7 +9,7 @@ from torch import nn
 from ktransformers.models.modeling_deepseek import DeepseekV2Attention, apply_rotary_pos_emb
 from typing import Optional, Tuple
 from ktransformers.operators.base_operator import BaseInjectedModule
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.utils import get_compute_capability, get_use_npu_graph, get_current_device
 from transformers.configuration_utils import PretrainedConfig
 from ktransformers.models.custom_cache import KVC2StaticCache, StaticCache

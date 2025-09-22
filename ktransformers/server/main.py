@@ -140,28 +140,6 @@ def main():
     args = arg_parser.parse_args()
     verify_arg(args)
 
-    if args.backend_type == "balance_serve":
-        import pickle
-        def cleanup():
-            if sched_process.poll() is None:
-                sched_process.terminate()
-
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            pickle.dump(args, temp_file)
-            temp_file_path = temp_file.name
-        current_file = __file__
-        print(temp_file.name)
-        target_file = os.path.join(os.path.dirname(current_file), "balance_serve", "sched_rpc.py")
-        target_file = os.path.normpath(target_file)
-        log_path = os.path.join(args.log_dir, "rpc.log")
-        log = open(log_path, "a") 
-        sched_process = subprocess.Popen(
-            ["python3", target_file, "--config", temp_file_path], 
-            stdout=log, 
-            stderr=log
-        )
-        print("sched_rpc started with PID:", sched_process.pid)
-        atexit.register(cleanup)
     rank_id = int(os.environ["RANK"])
     args.device = args.device[:-1] + str(rank_id)
     create_interface(config=cfg, default_args=cfg, input_args=args)

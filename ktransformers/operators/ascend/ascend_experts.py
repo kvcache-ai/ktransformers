@@ -6,7 +6,7 @@ import torch_npu
 from transformers import PretrainedConfig
 
 from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size, get_tensor_parallel_group
-from ktransformers.util.custom_gguf import GGUFLoader
+from ktransformers.util.custom_loader import GGUFLoader
 
 from ktransformers.operators.experts import cuda_graphs, KExpertsBase, KExpertsCPU, KTransformersExperts, EXPERTS_MAP, \
                                             KDeepseekV3MoE
@@ -14,7 +14,7 @@ from ktransformers.models.modeling_deepseek_v3 import DeepseekV3MoE
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.utils import CUR_DEVICE, get_use_npu_graph, InferenceState
 
-from ktransformers.operators.experts import cuda_graphs, npu_graphs
+from ktransformers.operators.experts import cuda_graphs as npu_graphs
 from ktransformers.util import utils
 
 class KExpertsCPUW8A8(KExpertsCPU):

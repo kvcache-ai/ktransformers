@@ -8,7 +8,6 @@
  */
 #pragma once
 
-#include <cuda_runtime.h>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -16,7 +15,7 @@
 #include <vector>
 #include "utils/mpsc.hpp"
 
-#ifdef KTRANSFOMERS_USE_NPU
+#ifdef KTRANSFORMERS_USE_NPU
 #include "acl/acl_mdl.h"
 #else
 #include <cuda_runtime.h>

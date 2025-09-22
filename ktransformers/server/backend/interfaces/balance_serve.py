@@ -22,8 +22,8 @@ from ktransformers.server.backend.interfaces.transformers import (
 from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.config.log import logger
 from ktransformers.optimize.optimize import optimize_and_load_gguf
-# from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
-# from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
+from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
+from ktransformers.models.custom_modeling_deepseek_v2 import KDeepseekV2ForCausalLM
 from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
@@ -31,22 +31,21 @@ from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
 from ktransformers.models.configuration_qwen3_moe import Qwen3MoeConfig
 from ktransformers.models.configuration_smallthinker import SmallthinkerConfig
 from ktransformers.models.configuration_glm4_moe import Glm4MoeConfig
+from ktransformers.models.modeling_qwen2_moe import Qwen2MoeForCausalLM
 try:
     import torch_npu
-    use_npu = torch.npu.is_available()
+    use_torch_npu = torch.npu.is_available()
 except:
-    use_npu = False
-if use_npu:
+    use_torch_npu = False
+if use_torch_npu:
     from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
-else:
-    from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
+
 from ktransformers.models.modeling_deepseek import DeepseekV2ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
 from ktransformers.util import utils
 custom_models = {
     "DeepseekV2ForCausalLM": DeepseekV2ForCausalLM,
-    "DeepseekV3ForCausalLM": KNPUDeepseekV3ForCausalLM,
     "Qwen2MoeForCausalLM": Qwen2MoeForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "MixtralForCausalLM": MixtralForCausalLM,
@@ -94,7 +93,7 @@ default_optimize_rules = {
     "SmallThinkerForCausalLM": ktransformer_rules_dir + "Smallthinker-serve.yaml",
     "Glm4MoeForCausalLM": ktransformer_rules_dir + "Glm4Moe-serve.yaml",
 }
-if use_npu:
+if use_torch_npu:
     default_optimize_rules["Qwen2MoeForCausalLM"] = ktransformer_rules_dir + "Qwen2-57B-A14B-Instruct-serve.yaml"
 
 async def chat_stream(queue: asyncio.Queue, tokenizer: AutoTokenizer):
@@ -154,7 +153,7 @@ class Engine:
         for key, value in vars(args).items():
             if value is not None and hasattr(Config(), key):
                 setattr(Config(), key, value)
-        if use_npu:
+        if use_torch_npu:
             utils.CUR_DEVICE = f"npu:{torch.npu.current_device()}"
             self.device = f"npu:{torch.npu.current_device()}"
         else:
@@ -177,27 +176,20 @@ class Engine:
                 config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True) 
             except:
                 raise ValueError(f"Model {args.architectures} not supported. Please check your model directory or model name.")
-        self.cache = KVC2StaticCache(config, args.max_batch_size, self.args.page_size)
 
         self.gen_queue = generated_token_queue
         self.debug = False
 
-        print(f"Getting inference context from sched_client.")
-        inference_context = self.sched_client.get_inference_context_raw()
-        print(f"Got inference context, sending it to subscribers.")
-        inference_context = self.sched_client.rebuild_inferece_context(inference_context)
-        self.cache.load(inference_context)
-        print(f"kv_cache loaded successfully.")
-
-        self.block_num = inference_context.k_cache[0].size(1)
         self.profiler_cprofile = cProfile.Profile()
         self.cprof_prof_cnt, self.max_cprof_prof_cnt = 0, 8
         with torch.device("meta"):
-            if use_npu and config.architectures[0] == "DeepseekV3ForCausalLM":
-                self.model = KNPUDeepseekV3ForCausalLM(config)
             if config.architectures[0] == "DeepseekV3ForCausalLM":
-                self.cache = KDeepSeekV3Cache(config, self.args.page_size)
-                self.model = KDeepseekV3ForCausalLM(config, self.cache)
+                if use_torch_npu:
+                    self.cache = KVC2StaticCache(config, args.max_batch_size, self.args.page_size)
+                    self.model = KNPUDeepseekV3ForCausalLM(config)
+                else:
+                    self.cache = KDeepSeekV3Cache(config, self.args.page_size)
+                    self.model = KDeepseekV3ForCausalLM(config, self.cache)
             elif config.architectures[0] == "DeepseekV2ForCausalLM":
                 self.cache = KDeepSeekV3Cache(config, self.args.page_size)
                 self.model = KDeepseekV2ForCausalLM(config, self.cache)
@@ -273,7 +265,7 @@ class Engine:
         
 
         self.block_num = inference_context.k_cache[0].size(1)
-        self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
+        # self.model_runner = ModelRunner(self.model, self.device, self.args.use_cuda_graph, page_size = args.page_size, block_num=self.block_num)
         #@TODO add config
         if config.architectures[0] == "Qwen2MoeForCausalLM" or config.architectures[0] == "Qwen3MoeForCausalLM" or config.architectures[0] == "Glm4MoeForCausalLM" or config.architectures[0] == "SmallThinkerForCausalLM":
             self.model.init_wrapper(self.args.use_cuda_graph, self.device, max(self.model_runner.cuda_graphs), args.max_batch_size, self.block_num) 
@@ -444,26 +436,29 @@ class BalanceServeInterface(BackendInterfaceBase):
         if not isinstance(world_size, str):
             raise ValueError(f"world_size ({world_size}) must be str")
         start_events = []
+        kvcache_events = []
         for rank in range(self.args.tp):
             if int(self.args.device[-1]) > 0:
                 break
 
             start_event = ctx.Event()
+            kvcache_event = ctx.Event()
 
             p = ctx.Process(target=run_engine, args=(self.args, self.token_queue, self.broadcast_endpoint, start_event,
-                                                     rank, world_size))
+                                                     kvcache_event, rank, world_size))
             p.start()
             processes.append(p)
             start_events.append(start_event)
+            kvcache_events.append(kvcache_event)
 
-        for evt in start_events:
+        for evt in kvcache_events:
             evt.wait()
         self._engines = processes
 
-        kvcache_event.wait()
-
-
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            if use_torch_npu:
+                args.tp = input_args.tp
+
             pickle.dump(args, temp_file)
             temp_file_path = temp_file.name
         current_file = __file__
@@ -499,7 +494,8 @@ class BalanceServeInterface(BackendInterfaceBase):
         signal.signal(signal.SIGINT, signal_handler)   
         signal.signal(signal.SIGTERM, signal_handler)
 
-        start_event.wait()
+        for evt in start_events:
+            evt.wait()
     
     def get_params(self, temperature: Optional[float] = None, top_p: Optional[float] = None, 
                    max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None) -> tuple[float, float]:
