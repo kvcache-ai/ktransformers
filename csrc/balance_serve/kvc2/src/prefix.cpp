@@ -1,4 +1,7 @@
+#ifdef KTRANSFORMERS_USE_NPU
+#else
 #include <immintrin.h>
+#endif
 #include <tbb/concurrent_hash_map.h>
 
 #include <algorithm>
