@@ -263,6 +263,7 @@ def load_cur_state_dict_npu(module: nn.Module, gguf_loader: ModelLoader, prefix:
 def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="cuda"):
     if use_torch_npu:
         load_cur_state_dict_npu(module, gguf_loader, prefix, device)
+        return
 
     prefix = prefix.replace("orig_module.", "")
     persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
