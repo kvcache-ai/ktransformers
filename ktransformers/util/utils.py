@@ -171,13 +171,13 @@ def get_free_ports(n: int, continue_prot: list):
     return ports
 
 def get_current_device():
-    if use_npu:
+    if use_torch_npu:
         return f"npu:{torch.npu.current_device()}"
     else:
         return f"cuda:{torch.npu.current_device()}"
 
 def get_compute_capability(device:torch.device = None):
-    if use_npu:
+    if use_torch_npu:
         return 0
     if torch.cuda.is_available():
         if device is None:
@@ -224,7 +224,7 @@ def get_all_used_cuda_device(device_map:dict):
         all_device_list.add(device_map[key]["prefill_device"]) if "prefill_device" in device_map[key] else None
     if "cpu" in all_device_list:
         all_device_list.remove("cpu")
-    if use_npu:
+    if use_torch_npu:
         all_device_list = set([device.replace('cuda', 'npu') for device in all_device_list])
     all_device_list = list(all_device_list)
     return all_device_list

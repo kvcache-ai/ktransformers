@@ -1765,7 +1765,11 @@ void GPUPageCache::gpu_background_flush() {
       std::vector<CacheBlockEntry*> entries;
       std::vector<std::unique_lock<CacheBlockEntry::MutexT>> uls;
       BatchPromise promise(config.gpu_devices_id.size());
-      auto reqs = basic_request(cudaMemcpyDeviceToHost, [&promise]() { promise.set(); });
+      #if defined(KTRANSFORMERS_USE_NPU) // NPU分支
+        auto reqs = basic_request(ACL_MEMCPY_DEVICE_TO_HOST, [&promise]() { promise.set(); });
+      #else
+        auto reqs = basic_request(cudaMemcpyDeviceToHost, [&promise]() { promise.set(); });
+      #endif
 
       for (size_t i = 0; i < config.total_kvcache_pages; i++) {
         std::lock_guard<std::mutex> lg(this->lock);
