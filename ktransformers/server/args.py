@@ -118,7 +118,6 @@ class ArgumentParser:
         # parser.add_argument("--sched_port", type=int, default=self.cfg.sched_port)
         # parser.add_argument("--sched_metrics_port", type=int, default=self.cfg.sched_metrics_port)
         # parser.add_argument("--kvc2_metrics_port", type=int, default=self.cfg.kvc2_metrics_port)
-        parser.add_argument("--full_kv_cache_on_each_gpu", type=bool, default=self.cfg.full_kv_cache_on_each_gpu)
         parser.add_argument("--page_size", type=str, default=self.cfg.page_size)
         parser.add_argument("--memory_gpu_only", type=str, default=self.cfg.memory_gpu_only)
         parser.add_argument("--utilization_percentage", type=str, default=self.cfg.utilization_percentage)
