@@ -40,6 +40,7 @@ void Settings::auto_derive() {
       std::string device_str = "npu:" + std::to_string(gpu_device_id[i]);
       devices.push_back(torch::Device(device_str));
     }
+    size_t head_per_gpu = model_settings.num_k_heads;
   #else // GPU模式
     if (torch::cuda::is_available()) {
       size_t gpu_count = torch::cuda::device_count();
@@ -55,13 +56,14 @@ void Settings::auto_derive() {
       SPDLOG_ERROR("CUDA is not available on this system.");
       exit(0);
     }
-  #endif
-
-  if (model_settings.num_k_heads % gpu_device_count != 0) {
+    if (model_settings.num_k_heads % gpu_device_count != 0) {
     SPDLOG_ERROR("num_k_heads {} is not divisible by gpu_device_count {}",
                  model_settings.num_k_heads, gpu_device_count);
     assert(false);
-  }
+    }
+    // 统一head_per_gpu计算方式（每设备分配头数）
+    size_t head_per_gpu = model_settings.num_k_heads / gpu_device_count;
+  #endif
 
   size_t gpu_memory_available = gpu_memory_size * memory_utilization_percentage;
   if (gpu_memory_available * gpu_device_count <
@@ -73,8 +75,6 @@ void Settings::auto_derive() {
   }
 
   assert(model_settings.k_head_dim % model_settings.num_k_heads == 0);
-  // 统一head_per_gpu计算方式（每设备分配头数）
-  size_t head_per_gpu = model_settings.num_k_heads / gpu_device_count;
   size_t gpu_memory_for_kv_cache =
       gpu_memory_available /*- model_settings.params_nbytes() /
                               gpu_device_count*/

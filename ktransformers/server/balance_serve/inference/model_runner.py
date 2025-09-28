@@ -45,8 +45,6 @@ from ktransformers.server.balance_serve.settings import sched_ext
 try:
     import torch_npu
     use_torch_npu = torch_npu.npu.is_available()
-    ENABLE_NPU_PREFILL_PROF = False
-    ENABLE_NPU_DECODE_PROF = False
 except:
     use_torch_npu = False
 
@@ -76,16 +74,28 @@ class ModelRunner:
     cache: KVC2StaticCache
 
     def __init__(self, model = None, cache = None, device = None, use_cuda_graph = False, max_decode_batch_size = 1, max_chunk_size = 4096, num_mini_batches: int = 1, page_size = 256, block_num = 8):
-
+        
+        # 先注释掉
+        self.model = model  # Compile and move model to the specified device
         if use_torch_npu:
             self.stream = torch.npu.Stream(device=device)
             self.stream_scope = torch.npu.stream
+            self.input_decode = []
+            max_batch_size = 1 if Config().max_batch_size <= 1 else Config().max_batch_size
+            self.npu_graphs = sorted(set([i for i in range(1, max_batch_size + 1)]))
+            self.model.stream = self.stream  # npu do not support multi stream like this
+            if use_cuda_graph:
+                torch_npu.npu._subscribe_report(self.stream)
+
+            self.start_model_event = torch.npu.Event(enable_timing=True)
+            self.end_model_event = torch.npu.Event(enable_timing=True)
         else:
             self.stream = torch.cuda.Stream(device=device)
-            self.stream_scope = torch.cuda.stream
-        # 先注释掉
-        self.model = model  # Compile and move model to the specified device
-        self.model.stream = self.stream  # npu do not support multi stream like this
+            self.cuda_graphs = generate_cuda_graphs(Config().chunk_size)
+
+            self.start_model_event = torch.cuda.Event(enable_timing=True)
+            self.end_model_event = torch.cuda.Event(enable_timing=True)
+ 
         self.device = device
         self.input = None
         self.features_buf = None
@@ -95,24 +105,10 @@ class ModelRunner:
         self.use_cuda_graph = use_cuda_graph
         self.debug = False
 
-        if use_cuda_graph and use_torch_npu:
-            torch_npu.npu._subscribe_report(self.stream)
-        if use_torch_npu:
-            max_batch_size = 1 if Config().max_batch_size <= 1 else Config().max_batch_size
-            self.npu_graphs = sorted(set([i for i in range(1, max_batch_size + 1)]))
-        else:
-            self.cuda_graphs = generate_cuda_graphs(Config().chunk_size)
-
         self.model_time = 0
         self.page_size = page_size
         self.block_num = block_num
-        # GPU timing for model execution
-        if use_torch_npu:
-            self.start_model_event = torch.npu.Event(enable_timing=True)
-            self.end_model_event = torch.npu.Event(enable_timing=True)
-        else:
-            self.start_model_event = torch.cuda.Event(enable_timing=True)
-            self.end_model_event = torch.cuda.Event(enable_timing=True)
+
         if 'cuda' in device:
             self.graphs = [torch.cuda.CUDAGraph() for _ in range(len(self.cuda_graphs))]
             self.page_idx_buf = [torch.zeros([self.cuda_graphs[i]], dtype=torch.int32, device = self.device) for i in range(len(self.cuda_graphs))]
@@ -130,17 +126,6 @@ class ModelRunner:
 
         self.bsz_tensor_buf = torch.empty((1, ),dtype=torch.int32, device=device)
         self.num_tokens_tensor_buf = torch.empty((1, ),dtype=torch.int32, device=device)
-        
-        # for profilling
-        if use_torch_npu:
-            self.experimental_config = torch_npu.profiler._ExperimentalConfig(
-                aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level1, l2_cache=False
-            )
-            self.profiler_prefill = None
-            self.prefill_prof_cnt, self.max_prefill_prof_cnt = 0, 1
-            self.profiler_decode = None
-            self.decode_prof_cnt, self.max_decode_prof_cnt = 0, 8
 
     def model_attn_plan(self, batch, cuda_graph_idx=0):
         if isinstance(self.model, KDeepseekV3ForCausalLM):
@@ -412,9 +397,6 @@ class ModelRunner:
                     self.output.merge(new_output)
                 self.end_model_event.record(self.stream) if self.end_model_event else None
 
-        global ENABLE_NPU_PREFILL_PROF
-        global ENABLE_NPU_DECODE_PROF
-
         with self.stream_scope(self.stream):
 
             batch_size = len(batch.prefill_mini_batches) # TODO: calc this
@@ -452,61 +434,16 @@ class ModelRunner:
 
             # ++++++++++++++++++++++++++++++++++++++++++ Prefill Stage ++++++++++++++++++++++++++++++++++++++++++++++++
             if self.input_tmp.minibatch.prefill_batch > 0:
-                if ENABLE_NPU_PREFILL_PROF:
-                    self.profiler_prefill = torch_npu.profiler.profile(
-                        activities=[
-                            torch_npu.profiler.ProfilerActivity.CPU,
-                            torch_npu.profiler.ProfilerActivity.NPU
-                        ],
-                        schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=self.max_prefill_prof_cnt, repeat=1, skip_first=0),
-                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./prefill_prof"),
-                        record_shapes=True,
-                        profile_memory=True,
-                        with_stack=False,
-                        with_flops=False,
-                        with_modules=False,
-                        experimental_config=self.experimental_config)
-                    self.profiler_prefill.start()
                 _run_infer_stage(is_prefill=True)
                 self.output.num_batchs = self.input.minibatch.batch_size
-                if ENABLE_NPU_PREFILL_PROF:
-                    self.profiler_prefill.stop()
             # ++++++++++++++++++++++++++++++++++++++++++ Decode Stage ++++++++++++++++++++++++++++++++++++++++++++++++
             if self.input_tmp.minibatch.decode_batch > 0:
-                # prof filter for both p&d sched cases
-                # if self.input_tmp.minibatch.prefill_batch == 0 and self.input_tmp.minibatch.decode_batch == 4:
-                #     ENABLE_NPU_DECODE_PROF = True
-                if self.profiler_decode is None and ENABLE_NPU_DECODE_PROF:
-                    self.profiler_decode = torch_npu.profiler.profile(
-                        activities=[
-                            torch_npu.profiler.ProfilerActivity.CPU,
-                            torch_npu.profiler.ProfilerActivity.NPU
-                        ],
-                        schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=self.max_decode_prof_cnt+1, repeat=1, skip_first=0),
-                        on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./decode_prof"),
-                        record_shapes=True,
-                        profile_memory=True,
-                        with_stack=False,
-                        with_flops=False,
-                        with_modules=False,
-                        experimental_config=self.experimental_config)
-                    self.profiler_decode.start()
                 if self.use_cuda_graph:
                     _run_infer_stage(is_prefill=False)
                     self.output.num_batchs = self.input_decode[idx].minibatch.batch_size
                 else:
                     _run_infer_stage(is_prefill=False)
                     self.output.num_batchs = self.input.minibatch.batch_size
-
-                if ENABLE_NPU_DECODE_PROF:
-                    if self.decode_prof_cnt >= self.max_decode_prof_cnt:
-                        if self.decode_prof_cnt == self.max_decode_prof_cnt:
-                            torch_npu.npu.synchronize(self.device)   # must sync or stop will hang
-                            self.profiler_decode.stop()
-                            self.decode_prof_cnt += 1
-                    else:
-                        self.profiler_decode.step()
-                        self.decode_prof_cnt += 1
 
             print(self.output) if self.debug else None
 

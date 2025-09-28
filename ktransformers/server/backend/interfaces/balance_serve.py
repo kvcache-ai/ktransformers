@@ -79,7 +79,6 @@ import tempfile
 import atexit
 import signal
 
-ENABLE_HOST_PROF = False
 
 ktransformer_rules_dir = (
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "./optimize/optimize_rules/") 
@@ -207,7 +206,6 @@ class Engine:
                 self.model = KGlm4MoeForCausalLM(config, self.cache)
             else:
                 raise NotImplementedError
-        # print(self.block_num)
 
         context = zmq.Context()
 
@@ -309,16 +307,14 @@ class Engine:
         while True:
             self.batch = next_batch
             if self.batch is not None:
-                if ENABLE_HOST_PROF and self.cprof_prof_cnt < self.max_cprof_prof_cnt:
-                    if self.profiler_cprofile is None:
-                        self.profiler_cprofile = cProfile.Profile()
-                    self.profiler_cprofile.enable()
-
-                batch_size = 0
-                for i in range(len(self.batch.decode_mini_batches)):
-                    batch_size += len(self.batch.decode_mini_batches[i])
-                logger.debug(f"prefill batch: {len(self.batch.prefill_mini_batches)} decode batch: {len(self.batch.decode_mini_batches)} {batch_size} \n")
-                self.model_runner.run_split(self.batch, self.query_manager)
+                if use_torch_npu:
+                    batch_size = 0
+                    for i in range(len(self.batch.decode_mini_batches)):
+                        batch_size += len(self.batch.decode_mini_batches[i])
+                    logger.debug(f"prefill batch: {len(self.batch.prefill_mini_batches)} decode batch: {len(self.batch.decode_mini_batches)} {batch_size} \n")
+                    self.model_runner.run_split(self.batch, self.query_manager)
+                else:
+                    self.model_runner.run(self.batch, self.query_manager)
 
             if len(self.updates) > 0:
                 for q in self.updates:
@@ -331,7 +327,6 @@ class Engine:
                     except queue.Full:
                         pass#print("Queue is full after timeout; unable to put more items.")
 
-            # 完成一次收发，这里不能进行抢占
             if torch.distributed.get_rank() == 0:
                 next_batch = self.sched_client.update_last_batch(self.updates)
                 if next_batch.query_ids == []:
@@ -354,13 +349,6 @@ class Engine:
                 self.updates = self.query_manager.update(self.batch)
                 fill_generated_tokens(self.updates, generated_tokens, self.query_manager)
 
-                if ENABLE_HOST_PROF and self.cprof_prof_cnt < self.max_cprof_prof_cnt:
-                    self.profiler_cprofile.disable()
-                    if not os.path.isdir("./cprof_prof"):
-                        os.mkdir("./cprof_prof")
-                    self.profiler_cprofile.dump_stats(f"./cprof_prof/cprof_{self.cprof_prof_cnt}.prof")
-                    self.profiler_cprofile = cProfile.Profile()  # clear history
-                    self.cprof_prof_cnt += 1
             else:
                 self.updates = []
 
@@ -399,7 +387,6 @@ def run_engine(args, token_queue, broadcast_endpoint, event, kvcache_event, rank
         else:
             engine.model_runner.warmup()
 
-    event.set()
     args.port += torch.distributed.get_rank()
     event.set()
     engine.loop()
