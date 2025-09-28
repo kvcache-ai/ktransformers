@@ -288,26 +288,15 @@ class TransformersInterface(BackendInterfaceBase):
             top_p = 0.0001
         # keep sampler the same as local_chat
         generation_config, model_kwargs = self.model._prepare_generation_config(
-            None, do_sample=True,
-            # top_p=top_p, temperature=temperature
+            None, max_length=self.args.max_new_tokens,
+            do_sample=True, 
+            top_k=self.args.top_k, 
+            top_p=top_p, 
+            temperature=temperature,
+            repetition_penalty=self.args.repetition_penalty # change this to modify generate config
         )
-        # generation_config, model_kwargs = self.model._prepare_generation_config(
-        #     None, max_length=self.args.max_new_tokens,
-        #     do_sample=True,
-        #     top_k=self.args.top_k,
-        #     top_p=top_p,
-        #     temperature=temperature,
-        #     repetition_penalty=self.args.repetition_penalty # change this to modify generate config
-        # )
         self.inputs = inputs
-        try: # transformers==4.43
-            self.logits_warper = (
-                self.model._get_logits_warper(generation_config, device=device)
-            )
-        except: 
-            self.logits_warper = (
-                self.model._get_logits_warper(generation_config)
-            )
+        self.logits_warper = self.tf_logits_warper(generation_config)
 
     def logits_to_token(self, logits: torch.Tensor):
         logits = self.logits_warper(self.inputs.view(1, -1), logits.view(1, -1))
@@ -340,7 +329,7 @@ class TransformersInterface(BackendInterfaceBase):
         return self.logits_to_token(logits)
 
     @torch.no_grad
-    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float] = None, top_p: Optional[float] = None):
+    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         input_ids_length = input_ids.shape[-1]
         logger.debug(f"input_ids: {input_ids.shape}")
         if max_tokens is not None:
@@ -466,7 +455,7 @@ class TransformersInterface(BackendInterfaceBase):
                 self.last_request_id = thread_id
                 return True
 
-    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         self.streamer.reset()
         self.profiler.create_and_start_timer("tokenize")
         torch.distributed.barrier()
@@ -514,7 +503,7 @@ class TransformersInterface(BackendInterfaceBase):
             print(think, end="",flush=True)
             yield think, None
         
-        for t in self.prefill(input_ids, self.check_is_new(thread_id), temperature, top_p):
+        for t in self.prefill(input_ids, self.check_is_new(thread_id), temperature, top_p, max_tokens, max_completion_tokens):
             # output think token after prefill done
             if t is not None:
                 print(t, end="",flush=True)
