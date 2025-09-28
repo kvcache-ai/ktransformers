@@ -56,7 +56,6 @@ def create_sched_settings(args):
     settings.kvc2_metrics_port = args.kvc2_metrics_port
     settings.load_from_disk = False
     settings.save_to_disk = True
-    settings.full_kv_cache_on_each_gpu = True
 
     settings.strategy_name = args.sched_strategy
 
