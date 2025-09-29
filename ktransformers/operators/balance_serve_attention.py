@@ -11,6 +11,7 @@ from ktransformers.models.modeling_qwen2_moe import Qwen2MoeAttention
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeAttention
 from ktransformers.models.modeling_smallthinker import SmallthinkerAttention
 from ktransformers.models.modeling_glm4_moe import Glm4MoeAttention
+from ktransformers.models.modeling_qwen3_next import Qwen3NextGatedDeltaNet
 from typing import Optional, Tuple
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
@@ -613,11 +614,6 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
             query_states = self.q_norm(query_states, bsz_tensors)
             key_states = self.k_norm(key_states, bsz_tensors)
 
-
-        query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
-        key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
-        value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
-        
         # cos, sin = freqs_cis
         """
         print(query_states.shape)
@@ -625,22 +621,306 @@ class KGlm4MoeAttention(BaseInjectedModule, Glm4MoeAttention):
         print(cos.shape)
         print(sin.shape)
         """
-        if freqs_cis is not None:  
-            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
-
-
 
         query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
         key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
         value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
 
+        if freqs_cis is not None:  
+            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), freqs_cis)
+
+        query_states = query_states.view(q_len, self.config.num_attention_heads, self.head_dim)
+        key_states = key_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
+        value_states = value_states.view(q_len, self.config.num_key_value_heads, self.head_dim)
+
+
         k_cache = kv_cache.get_k_cache(self.layer_idx)
         v_cache = kv_cache.get_v_cache(self.layer_idx)
 
 
+        print(f"{k_cache.shape=}, {v_cache.shape=}, {query_states.shape=}, {key_states.shape=}, {value_states.shape=}")
         attn_output = wrapper.forward(query_states, k_cache, v_cache, key_states, value_states)
   
 
         attn_output = self.o_proj(attn_output.view(q_len, self.config.num_attention_heads * self.head_dim), bsz_tensors)
 
         return attn_output
+    
+from ktransformers.models.modeling_qwen3_next import apply_mask_to_padding_states
+import torch.nn.functional as F
+
+from ktransformers.models.modeling_qwen3_next import Qwen3NextAttention
+
+class KQwen3NextAttention(BaseInjectedModule, Qwen3NextAttention):
+    def __init__(self,
+                 key: str,
+                 gguf_loader : GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
+                 chunck_size: int = 1000,
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.config,
+            orig_module.layer_idx)
+        self.chunck_size = chunck_size # TODO, generate chunck_size automatically.
+
+    # Adapted from transformers.models.glm.modular_glm.apply_rotary_pos_emb
+    def apply_rotary_pos_emb(self, q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+        """Applies Rotary Position Embedding to the query and key tensors.
+
+        Removes the interleaving of cos and sin from GLM
+
+        Args:
+            q (`torch.Tensor`): The query tensor.
+            k (`torch.Tensor`): The key tensor.
+            cos (`torch.Tensor`): The cosine part of the rotary embedding.
+            sin (`torch.Tensor`): The sine part of the rotary embedding.
+            position_ids (`torch.Tensor`, *optional*):
+                Deprecated and unused.
+            unsqueeze_dim (`int`, *optional*, defaults to 1):
+                The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+                sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+                that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+                k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+                cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+                the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+        Returns:
+            `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+        """
+        cos = cos.unsqueeze(unsqueeze_dim)
+        sin = sin.unsqueeze(unsqueeze_dim)
+
+        # Keep half or full tensor for later concatenation
+        rotary_dim = cos.shape[-1]
+        q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+        k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+        # Apply rotary embeddings on the first half or full tensor
+        q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+
+        # Concatenate back to full shape
+        q_embed = torch.cat([q_embed, q_pass], dim=-1)
+        k_embed = torch.cat([k_embed, k_pass], dim=-1)
+        return q_embed, k_embed
+
+    def forward(self,
+                hidden_states: torch.Tensor,
+                kv_cache: KGQACache,
+                freqs_cis: torch.Tensor,
+                wrapper: flashInferAttn,
+                bsz_tensors: torch.Tensor,
+                position_ids: Optional[torch.Tensor] = None,
+                attention_mask: Optional[torch.Tensor] = None,
+                ):
+
+        q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states, bsz_tensors)
+
+        query_states, gate = torch.chunk(
+            self.q_proj(hidden_states).view(q_len, -1, self.head_dim * 2), 2, dim=-1
+        )
+        gate = gate.reshape(q_len, -1)
+
+        key_states = self.k_proj(hidden_states, bsz_tensors)
+
+        query_states = query_states.reshape(q_len, -1)
+        query_states = self.q_norm(query_states, bsz_tensors)
+        key_states = self.k_norm(key_states, bsz_tensors)
+
+
+        value_states = self.v_proj(hidden_states, bsz_tensors)
+
+
+
+        query_states = query_states.view(q_len, self.num_attention_heads, self.head_dim)
+        key_states = key_states.view(q_len, self.num_key_value_heads, self.head_dim)
+        value_states = value_states.view(q_len, self.num_key_value_heads, self.head_dim)
+
+        if freqs_cis:  
+            cos, sin = freqs_cis
+            query_states, key_states = self.apply_rotary_pos_emb(query_states.unsqueeze(0), key_states.unsqueeze(0), cos, sin, unsqueeze_dim=2)
+            query_states, key_states = query_states.squeeze(0), key_states.squeeze(0)
+
+
+        k_cache = kv_cache.get_k_cache(self.layer_idx)
+        v_cache = kv_cache.get_v_cache(self.layer_idx)
+
+        attn_output = wrapper.forward(query_states, k_cache, v_cache, key_states, value_states)
+  
+        attn_output = attn_output.reshape(q_len, -1).contiguous()
+        attn_output = attn_output * torch.sigmoid(gate)
+
+
+        attn_output = self.o_proj(attn_output.view(q_len, self.num_attention_heads * self.head_dim), bsz_tensors)
+
+        return attn_output
+
+
+class KQwen3NextGatedDeltaNet(BaseInjectedModule, Qwen3NextGatedDeltaNet):
+    def __init__(self,
+                 key: str,
+                 gguf_loader : GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
+                 chunck_size: int = 1000,
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.config,
+            orig_module.layer_idx)
+        self.chunck_size = chunck_size # TODO, generate chunck_size automatically.
+
+    def fix_query_key_value_ordering(self, mixed_qkvz, mixed_ba):
+        """
+        Derives `query`, `key` and `value` tensors from `mixed_qkvz` and `mixed_ba`.
+        """
+
+        new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
+            self.num_k_heads,
+            2 * self.head_k_dim + 2 * self.head_v_dim * self.num_v_heads // self.num_k_heads,
+        )
+        new_tensor_shape_ba = mixed_ba.size()[:-1] + (self.num_k_heads, 2 * self.num_v_heads // self.num_k_heads)
+
+        mixed_qkvz = mixed_qkvz.view(*new_tensor_shape_qkvz)
+        mixed_ba = mixed_ba.view(*new_tensor_shape_ba)
+        split_arg_list_qkvz = [
+            self.head_k_dim,
+            self.head_k_dim,
+            (self.num_v_heads // self.num_k_heads * self.head_v_dim),
+            (self.num_v_heads // self.num_k_heads * self.head_v_dim),
+        ]
+        split_arg_list_ba = [self.num_v_heads // self.num_k_heads, self.num_v_heads // self.num_k_heads]
+        query, key, value, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=3)
+        b, a = torch.split(mixed_ba, split_arg_list_ba, dim=3)
+        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
+        value = value.reshape(value.size(0), value.size(1), -1, self.head_v_dim)
+        z = z.reshape(z.size(0), z.size(1), -1, self.head_v_dim)
+        b = b.reshape(b.size(0), b.size(1), self.num_v_heads)
+        a = a.reshape(a.size(0), a.size(1), self.num_v_heads)
+        return query, key, value, z, b, a
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        conv_states: Optional[list[torch.Tensor]] = None,
+        recurrent_states: Optional[list[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        bsz_tensors: Optional[torch.Tensor] = None,
+    ):
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+
+        # Set up dimensions for reshapes later
+        batch_size, seq_len, _ = hidden_states.shape
+
+        conv_state = conv_states[self.layer_idx] if conv_states is not None else None
+        recurrent_state = (
+            recurrent_states[self.layer_idx] if recurrent_states is not None else None
+        )
+
+        use_precomputed_states = (
+            conv_state is not None
+            and recurrent_state is not None
+            and seq_len == 1
+        )
+
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states, bsz_tensors)
+        projected_states_ba = self.in_proj_ba(hidden_states, bsz_tensors)
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_states_qkvz, projected_states_ba)
+        query, key, value = (x.reshape(x.shape[0], x.shape[1], -1) for x in (query, key, value))
+
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+
+        if use_precomputed_states:
+            # 2. Convolution sequence transformation
+            # NOTE: the conv state is updated in `causal_conv1d_update`
+            mixed_qkv = self.causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                self.activation,
+            )
+        else:
+            conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+
+            if self.causal_conv1d_fn is not None:
+                mixed_qkv = self.causal_conv1d_fn(
+                    x=mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    seq_idx=None,
+                )
+            else:
+                mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+        query, key, value = torch.split(
+            mixed_qkv,
+            [
+                self.key_dim,
+                self.key_dim,
+                self.value_dim,
+            ],
+            dim=-1,
+        )
+        query = query.reshape(query.shape[0], query.shape[1], -1, self.head_k_dim)
+        key = key.reshape(key.shape[0], key.shape[1], -1, self.head_k_dim)
+        value = value.reshape(value.shape[0], value.shape[1], -1, self.head_v_dim)
+
+        beta = b.sigmoid()
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+
+        if not use_precomputed_states:
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=None,
+                output_final_state=conv_state is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        else:
+            core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=conv_state is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        # Update cache
+        recurrent_state = last_recurrent_state
+
+        z_shape_og = z.shape
+        # reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(core_attn_out.shape[0], core_attn_out.shape[1], -1)
+
+        output = self.out_proj(core_attn_out, bsz_tensors)
+
+        if conv_state is not None:
+            conv_states[self.layer_idx] = conv_state
+        if recurrent_state is not None:
+            recurrent_states[self.layer_idx] = recurrent_state
+
+        return output

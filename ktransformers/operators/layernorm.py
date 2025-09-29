@@ -28,6 +28,7 @@ import torch.nn as nn
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3RMSNorm
 from ktransformers.models.modeling_qwen2_moe import Qwen2MoeRMSNorm
 from ktransformers.models.modeling_qwen3_moe import Qwen3MoeRMSNorm
+from ktransformers.models.modeling_qwen3_next import Qwen3NextRMSNorm
 from ktransformers.models.modeling_smallthinker import SmallthinkerRMSNorm
 from ktransformers.models.modeling_glm4_moe import Glm4MoeRMSNorm
 from ktransformers.operators.base_operator import BaseInjectedModule
@@ -167,6 +168,40 @@ class KQwen3MoeRMSNorm(Qwen3MoeRMSNorm, BaseInjectedModule):
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
     
+class KQwen3NextRMSNorm(Qwen3NextRMSNorm, BaseInjectedModule):
+    def __init__(self,
+                 key: str,
+                 gguf_loader : GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "cuda",
+                 generate_device: str = "cuda",
+                 **kwargs):
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, **kwargs)
+        self.orig_module.__init__(orig_module.hidden_size,
+            orig_module.variance_epsilon)
+
+    def _norm(self, x):
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x, num_tokens_tensors, residual = None):
+        if residual is not None:
+            x = x + residual
+            residual = x
+        x = x.view(-1, self.orig_module.hidden_size)
+        output = self._norm(x.float())
+        # Llama does x.to(float16) * w whilst Qwen3Next is (x * w).to(float16)
+        # See https://github.com/huggingface/transformers/pull/29402
+        output = output * (1.0 + self.weight.float())
+        if residual is None:
+            return output.type_as(x)
+
+        return output.type_as(x), residual
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.eps}"
+
+
 class KSmallthinkerRMSNorm(SmallthinkerRMSNorm, BaseInjectedModule):
     def __init__(self,
                  key: str,

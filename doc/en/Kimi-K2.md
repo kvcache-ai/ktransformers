@@ -3,7 +3,7 @@
 ## Introduction
 
 ### Overview
-We are very pleased to announce that Ktransformers now supports Kimi-K2.
+We are very pleased to announce that Ktransformers now supports Kimi-K2 and Kimi-K2-0905.
 
 On a single-socket CPU with one consumer-grade GPU, running the Q4_K_M model yields roughly 10 TPS and requires about 600 GB of DRAM.  
 With a dual-socket CPU and sufficient system memory, enabling NUMA optimizations increases performance to about 14 TPS.
@@ -14,6 +14,10 @@ With a dual-socket CPU and sufficient system memory, enabling NUMA optimizations
   - https://huggingface.co/collections/moonshotai/kimi-k2-6871243b990f2af5ba60617d
 - GGUF Format(quantized models):
   - https://huggingface.co/KVCache-ai/Kimi-K2-Instruct-GGUF
+- Official Kimi-K2-0905 Release:
+  - https://huggingface.co/moonshotai/Kimi-K2-Instruct-0905
+- GGUF Format(quantized models):
+  - https://huggingface.co/KVCache-ai/Kimi-K2-Instruct-0905-GGUF
 
 ## Installation Guide
 
