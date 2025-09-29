@@ -9,6 +9,16 @@
 #include "metrics.h"
 #include "utils/periodic_task.hpp"
 
+// 根据设备类型包含不同的头文件和流管理器
+#ifdef KTRANSFORMERS_USE_NPU
+#include "torch_npu/csrc/libs/torch_npu.h"
+#include "torch_npu/csrc/libs/init_npu.h"
+#include "torch_npu/csrc/core/npu/NPUFunctions.h"
+#include "cuda_stream_manager.hh"  // 假设NPU也有类似实现
+#else
+#include "cuda_stream_manager.hh"
+#endif
+
 namespace kvc2 {
 
 class GPUPageCache {
@@ -43,6 +53,7 @@ class GPUPageCache {
   std::unique_ptr<periodic::PeriodicTask> background_flush_back =nullptr;
 
   GPUPageCache(GPUPageCacheConfig& config);
+  ~GPUPageCache();  // 统一添加析构函数声明
 
   std::vector<size_t> gpu_only_alloc_col(size_t count);
   void gpu_only_free_cols(std::vector<size_t> cols);
@@ -59,8 +70,14 @@ class GPUPageCache {
 
   void free_col(size_t at);
 
-  std::vector<std::shared_ptr<CudaStreamManager::Request>> basic_request(cudaMemcpyKind direction,
-                                                                         std::function<void()> callback);
+  // 统一内存拷贝类型接口
+  std::vector<std::shared_ptr<CudaStreamManager::Request>> basic_request(
+#ifdef KTRANSFORMERS_USE_NPU
+      aclrtMemcpyKind direction,
+#else
+      cudaMemcpyKind direction,
+#endif
+      std::function<void()> callback);
 
   void submit_requests(std::vector<std::shared_ptr<CudaStreamManager::Request>> reqs);
 

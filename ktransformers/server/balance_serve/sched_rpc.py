@@ -10,7 +10,14 @@ current_file_path = os.path.abspath(__file__)
 # sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import pickle
 import argparse
+import torch
+try:
+    import torch_npu
+    use_npu = torch.npu.is_available()
+except:
+    pass
 from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe, create_sched_settings_glm4moe, create_sched_settings_smallthinker, create_sched_settings_qwen3next
+
 
 
 
@@ -24,6 +31,9 @@ else:
 class SchedulerServer:
     def __init__(self, settings, main_args):
         # 创建 Scheduler 实例并初始化
+        if use_npu:
+            for device_id in settings.gpu_device_id:
+                torch_npu.npu.set_device(f'npu:{device_id}')
         self.sched = sched_ext.create_scheduler(settings)
     
         # 初始化 ZeroMQ 上下文和套接字

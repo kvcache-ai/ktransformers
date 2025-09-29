@@ -16,13 +16,20 @@ def setup_seed(seed):
 
 setup_seed(998244353)
 
-torch.set_grad_enabled(False)
-torch.set_default_dtype(torch.bfloat16)
-global_dtype=torch.bfloat16
-global_device=torch.device("cuda",0)
-torch.cuda.set_device(0)
-torch.backends.cudnn.enabled =True
-torch.backends.cudnn.benchmark = True
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not use_torch_npu:
+	torch.set_grad_enabled(False)
+	torch.set_default_dtype(torch.bfloat16)
+	global_dtype=torch.bfloat16
+	global_device=torch.device("cuda",0)
+	torch.cuda.set_device(0)
+	torch.backends.cudnn.enabled =True
+	torch.backends.cudnn.benchmark = True
 
 class flashInferAttn():
 	
