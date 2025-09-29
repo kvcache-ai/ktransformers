@@ -8,6 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+import torch.distributed
 from ktransformers.server.config.config import Config
 from ktransformers.server.utils.create_interface import get_interface
 from ktransformers.server.schemas.assistants.streaming import check_link_response
@@ -54,6 +55,7 @@ class OllamaGenerationResponse(BaseModel):
     response: str
     done: bool
 
+
 @router.post("/generate", tags=['ollama'])
 async def generate(request: Request, input: OllamaGenerateCompletionRequest):
     id = str(uuid4())
@@ -63,7 +65,7 @@ async def generate(request: Request, input: OllamaGenerateCompletionRequest):
 
     if input.stream:
         async def inner():
-            async for res in interface.inference(input.prompt, id):
+            async for res in interface.inference(input.prompt, id, config.temperature, config.top_p):
                 if isinstance(res, RawUsage):
                     raw_usage = res
                 else: 
@@ -98,7 +100,7 @@ async def generate(request: Request, input: OllamaGenerateCompletionRequest):
             done=True
         )
         return response
-    
+
 # https://github.com/ollama/ollama/blob/main/docs/api.md#generate-a-chat-completion
 class OllamaChatCompletionMessage(BaseModel):
     role: str
@@ -123,6 +125,8 @@ class OllamaChatCompletionStreamResponse(BaseModel):
     eval_count: Optional[int] = Field(None, description="Number of tokens generated")
     eval_duration: Optional[int] = Field(None, description="Time spent generating response in nanoseconds")
 
+
+
 class OllamaChatCompletionResponse(BaseModel):
     model: str
     created_at: str
@@ -142,11 +146,13 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
     interface: BackendInterfaceBase = get_interface()
     config = Config()
 
+    # 将消息转换为提示字符串
     input_message = [json.loads(m.model_dump_json()) for m in input.messages]
 
     if input.stream:
         async def inner():
             start_time = time()  # 记录开始时间（秒）
+            eval_count = 0  # 统计生成的 token 数量
             tokens = []
 
             async for res in interface.inference(input_message, id):
@@ -222,7 +228,7 @@ async def chat(request: Request, input: OllamaChatCompletionRequest):
             done_reason=done_reason
         )
         return response
-    
+
 # https://github.com/ollama/ollama/blob/main/docs/api.md#list-local-models
 class OllamaModel(BaseModel):
     name: str

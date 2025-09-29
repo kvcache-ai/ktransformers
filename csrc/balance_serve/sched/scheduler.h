@@ -6,6 +6,13 @@
 #include <torch/torch.h>
 #include <vector>
 
+// 条件编译：仅在NPU环境下引入相关头文件
+#ifdef KTRANSFORMERS_USE_NPU
+#include "torch_npu/csrc/libs/torch_npu.h"
+#include "torch_npu/csrc/libs/init_npu.h"
+#include "torch_npu/csrc/core/npu/NPUFunctions.h"
+#endif
+
 namespace scheduler {
 
 using Token = uint32_t;

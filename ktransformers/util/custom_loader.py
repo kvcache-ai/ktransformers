@@ -7,14 +7,25 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-if not torch.xpu.is_available():
+
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not torch.xpu.is_available() and not use_torch_npu:
     import KTransformersOps
 from safetensors import safe_open
-from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
+
+if not use_torch_npu:
+    from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
 from ktransformers.util.custom_gguf import *
 from safetensors.torch import save_file
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 class ModelLoader(ABC):
     """
@@ -84,7 +95,7 @@ class SafeTensorLoader(ModelLoader):
         # if not found_safetensor:
         #     raise FileNotFoundError(f"No Safetensor files found in {folder_path}")
 
-    def load_tensor(self, key: str, device: str="cpu"):
+    def load_tensor(self, key: str, device: str = "cpu"):
         if translate_name_to_gguf(key) in self.tensor_file_map:
             key = translate_name_to_gguf(key)
         elif key in self.tensor_file_map:
@@ -235,13 +246,13 @@ class SafeTensorLoader(ModelLoader):
                     tensor = self.load_tensor(f"{base_key}.{k}", device)
                     res[k] = tensor
         return res
-    
+
     def close_all_handles(self):
         for handle in self.file_handle_map.values():
             handle.close()
         self.file_handle_map.clear()
 
-    def load_dequantized_tensor(self, key:str, device: str="cpu"):
+    def load_dequantized_tensor(self, key: str, device: str = "cpu"):
         if key in self.tensor_file_map and translate_name_to_gguf(key):
             pass
         elif translate_name_to_gguf(key) in self.tensor_file_map:
@@ -258,7 +269,7 @@ class SafeTensorLoader(ModelLoader):
                 weight_scale_inv = f.get_tensor(key[:-7] + ".weight_scale_inv").to(device)
                 tensor = weight_dequant(tensor, weight_scale_inv)
         return tensor.to(device)
-    
+
     def has_tensor(self, name: str):
         return name in self.tensor_file_map or translate_name_to_gguf(name) in self.tensor_file_map
 
@@ -268,7 +279,7 @@ class GGUFLoader(ModelLoader):
     tensor_file_map: dict # {tensor_name: tensor_file_path}
     gguf_file_meta: dict
     safetensor_loader: SafeTensorLoader
-    def __init__(self, gguf_path: str):
+    def __init__(self, gguf_path: str, quantize: str = None):
         # Check dir exist
         if not os.path.exists(gguf_path):
             raise FileNotFoundError(f"GGUF dir not found: {gguf_path}")
@@ -283,6 +294,15 @@ class GGUFLoader(ModelLoader):
         self.file_data_map = {}
         self.gguf_file_meta = {}
         self.tensor_device_map = {}
+
+        if use_torch_npu:
+            if quantize == "w8a8_dynamic":
+                safetensor_loader = W8A8SafeTensorLoader(gguf_path)
+            else:
+                safetensor_loader = SafeTensorLoader(gguf_path)
+            if safetensor_loader.tensor_file_map:
+                self.safetensor_loader = safetensor_loader
+                return
 
         # Walk through all the .gguf files in the directory
         found_gguf = False
@@ -574,3 +594,32 @@ class ModelLoaderFactory:
         
         # No supported model files found
         raise FileNotFoundError(f"No .safetensors or .gguf files found in: {folder_path}")
+
+class W8A8SafeTensorLoader(SafeTensorLoader):
+    def load_tensor(self, key: str, device: str = "cpu"):
+        if key not in self.tensor_file_map:
+            raise KeyError(f"Key {key} not found in Safetensor files")
+        file = self.tensor_file_map[key]
+        f = self.file_handle_map.get(file)
+        if f is None:
+            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+        tensor = f.get_tensor(key)
+        if 'deq_scale' in key:
+            tensor = torch.from_numpy(
+                np.frombuffer(tensor.to(torch.float16).to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64))
+        if 'input_scale' in key:
+            tensor = tensor.to(torch.float16)
+        if "weight_scale" in key or "weight_offset" in key:
+            if "ffn" in key:
+                tensor = tensor.to(torch.float32)
+            else:
+                tensor = tensor.to(torch.float16)
+        if 'input_offset' in key:
+            tensor = tensor.to(torch.int8)
+        if tensor.dtype == torch.bfloat16:
+            tensor = tensor.to(torch.float16)
+        return tensor.to(device)
+
+    def load_dequantized_tensor(self, key: str, device: str = "cpu"):
+        tensor = self.load_tensor(key, device)
+        return tensor

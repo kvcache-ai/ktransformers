@@ -14,7 +14,15 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import ctypes
 import torch
 from torch import Tensor, nn
-if not torch.xpu.is_available():
+
+try:
+    import torch_npu
+
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not torch.xpu.is_available() and not use_torch_npu:
     import KTransformersOps
     import vLLMMarlin
 from ktransformers.util.custom_loader import GGUFLoader, SafeTensorLoader
@@ -30,7 +38,10 @@ if not torch.xpu.is_available():
     )
 from ktransformers.operators.base_operator import BaseInjectedModule
 from transformers.configuration_utils import PretrainedConfig
-from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
+try:
+    from ktransformers.ktransformers_ext.triton.fp8gemm import fp8_gemm, act_quant, weight_dequant
+except:
+    print("no triton")
 from abc import ABC, abstractmethod
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext", "build"))
