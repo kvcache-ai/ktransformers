@@ -347,7 +347,7 @@ class TransformersInterface(BackendInterfaceBase):
             if getattr(self, 'generated_ids', None) is None:
                 self.generated_ids = torch.zeros(
                     self.args.batch_size,
-                    input_ids.shape[-1] + self.args.max_new_tokens + 1,
+                    input_ids.shape[-1] + max_new_tokens + 1,
                     dtype=torch.int,
                     device=self.args.device,
                 )
@@ -374,7 +374,7 @@ class TransformersInterface(BackendInterfaceBase):
         logger.debug(f"generate_ids: {self.generated_ids.shape}")
         former_seq_length = self.seq_length
         self.seq_length += input_ids_length
-        expected_length = self.seq_length + self.args.max_new_tokens + 1
+        expected_length = self.seq_length + max_new_tokens + 1
         delta_length = expected_length - self.generated_ids.shape[-1]
         if delta_length > 0:
             new_generate_ids = torch.zeros(
