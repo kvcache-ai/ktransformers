@@ -50,7 +50,7 @@ async def chat_completion(request:Request,create:ChatCompletionCreate):
                 model = Config().model_name,
             )
 
-            async for res in interface.inference(input_message, id, create.temperature, create.top_p):
+            async for res in interface.inference(input_message, id, create.temperature, create.top_p, create.max_tokens, create.max_completion_tokens):
                 if isinstance(res, RawUsage):
                     # at the end of inference, inference.inference() will return the usage of inference
                     raw_usage = res
