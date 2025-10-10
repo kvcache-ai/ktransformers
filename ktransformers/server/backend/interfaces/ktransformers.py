@@ -203,7 +203,7 @@ class KTransformersInterface(TransformersInterface):
 
 
     @torch.no_grad
-    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float], top_p: Optional[float]):
+    def prefill(self, input_ids: torch.Tensor, is_new: bool, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         input_ids_length = input_ids.shape[-1]
         if max_tokens is not None:
             max_completion_tokens = max_tokens
@@ -226,7 +226,7 @@ class KTransformersInterface(TransformersInterface):
             if getattr(self, 'generated_ids', None) is None:
                 self.generated_ids = torch.zeros(
                     self.args.batch_size,
-                    input_ids.shape[-1] + self.args.max_new_tokens + 1,
+                    input_ids.shape[-1] + max_new_tokens + 1,
                     dtype=torch.int,
                     device=self.args.device,
                 )
@@ -254,7 +254,7 @@ class KTransformersInterface(TransformersInterface):
         
         former_seq_length = self.seq_length
         self.seq_length += input_ids_length
-        expected_length = min(self.seq_length + self.args.max_new_tokens + 1, self.args.cache_lens)
+        expected_length = min(self.seq_length + max_new_tokens + 1, self.args.cache_lens)
         delta_length = expected_length - self.generated_ids.shape[-1]
         if delta_length > 0:
             new_generate_ids = torch.zeros(
@@ -290,20 +290,23 @@ class KTransformersInterface(TransformersInterface):
                 logits = self.model(inputs_embeds=inputs_embeds, return_dict=False, is_prefill=True)[0]
 
             return logits
-        chunk_start = 0
-        while chunk_start < input_ids_length:
-            chunk_end = min(chunk_start + self.args.chunk_size, input_ids_length)
-            if self.cache != None:
-                self.cache.cur_idx=cache_position[chunk_start:chunk_end]
-            logits = chunk_prefill(input_ids[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end])
-            chunk_start += self.args.chunk_size
-            
-        if flashinfer_enabled:
-            MLAWrapperSingleton.reset_buffer()
-        self.prepare_logits_wrapper(input_ids, device, temperature, top_p)
-        next_token = self.logits_to_token(logits[0, -1, :])
-        self.max_new_tokens = min(max_new_tokens, self.args.cache_lens - self.seq_length) - 1 
-        yield self.append_new_tokens(next_token)
+
+        if not use_npu:
+            chunk_start = 0
+            while chunk_start < input_ids_length:
+                chunk_end = min(chunk_start + self.args.chunk_size, input_ids_length)
+                if self.cache != None:
+                    self.cache.cur_idx=cache_position[chunk_start:chunk_end]
+                logits = chunk_prefill(input_ids[:, chunk_start:chunk_end], cache_position[chunk_start:chunk_end])
+                chunk_start += self.args.chunk_size
+                
+            if flashinfer_enabled:
+                MLAWrapperSingleton.reset_buffer()
+            self.prepare_logits_wrapper(input_ids, device, temperature, top_p)
+            next_token = self.logits_to_token(logits[0, -1, :])
+            self.max_new_tokens = min(max_new_tokens, self.args.cache_lens - self.seq_length) - 1 
+            yield self.append_new_tokens(next_token)
+            return
 
         def prefill_wrapper(prof=None):
             chunk_start = 0
@@ -410,7 +413,7 @@ class KTransformersInterface(TransformersInterface):
         self.ever_generated_ids.add(last)
         return last
 
-    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         async with self._infer_lock:
             async for v in super().inference(local_messages, thread_id, temperature, top_p, max_tokens, max_completion_tokens):
                 yield v
