@@ -1,0 +1,65 @@
+[build-system]
+# Minimum versions: setuptools for setup.py declarative usage, wheel for bdist_wheel
+requires = ["setuptools>=61", "wheel", "cmake>=3.16", "pybind11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kt-kernel"
+version = "0.1.0"
+description = "KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)"
+readme = "README.md"
+authors = [ { name = "kvcache-ai" } ]
+# Use SPDX string form (table form deprecated in newer setuptools)
+license = "Apache-2.0"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+requires-python = ">=3.8"
+dependencies = [
+  # Install black by default so git hook can use it
+  "black>=25.9.0",
+  "torch",
+  "safetensors",
+]
+
+# No optional dev group needed for formatting; using custom git hooks instead of pre-commit
+
+[project.urls]
+Homepage = "https://github.com/kvcache-ai"
+
+[tool.setuptools]
+# Enable Python package (kt_kernel) and compiled extension (cpuinfer_ext)
+packages = ["kt_kernel"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# (empty) placeholder if you later add resources
+
+[tool.setuptools.exclude-package-data]
+# (empty)
+
+[tool.cpuinfer]
+# Custom section (example). You can place build options documentation here.
+# CPUINFER_CPU_INSTRUCT: NATIVE|FANCY|AVX512|AVX2
+# CPUINFER_ENABLE_AMX: ON/OFF
+# CPUINFER_VERBOSE: 1/0
+
+[tool.black]
+# Code style for Black formatter
+line-length = 120
+target-version = ["py311"]
+exclude = '''
+(
+  /(\.
+    | build
+    | dist
+    | temp
+    | __pycache__
+    | kt_kernel\.egg-info
+    | third_party
+  )/
+)
+'''
