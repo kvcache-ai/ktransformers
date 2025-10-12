@@ -10,7 +10,6 @@ node_modules
 .vs/
 *pycache*
 *build/
-*/third_party/*
 .DS_Store
 compile_commands.json
 *.egg-info*
