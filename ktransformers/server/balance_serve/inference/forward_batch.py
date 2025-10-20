@@ -4,6 +4,11 @@ LastEditors: Xie Weiyu ervinxie@qq.com
 LastEditTime: 2024-11-26 08:12:49
 '''
 import torch
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
 from ktransformers.server.balance_serve.settings import sched_ext
 from ktransformers.server.balance_serve.inference.query_manager import QueryManager, QueryInfo
 from typing import Union
@@ -195,8 +200,9 @@ class ForwardMiniBatchSplit:
 
     def __init__(self, prefill_querys_info: list[QueryInfo], decode_querys_info: list[QueryInfo],
                  prefill_s: list[int] = None, prefill_l: list[int] = None,
-                 device=torch.device('npu'), page_size=256, max_page_num=64,
+                 device=None, page_size=256, max_page_num=64,
                  decode_padding_len: int = 1):
+        device = torch.device('npu')
         batch_decode = len(decode_querys_info)
         # batch_prefill = len(prefill_querys_info)
         # update valid prefill batch
@@ -295,7 +301,8 @@ class ForwardMiniBatchSplit:
 
         self.bsz_tensor = torch.tensor([self.batch_size], device=device, dtype=torch.int32)
 
-    def fill(self, prefill_querys_info: list[QueryInfo], decode_querys_info: list[QueryInfo], prefill_s: list[int] = None, prefill_l: list[int] = None, decode_padding_len=1, device = torch.device('npu'), page_size = 256, max_page_num=64):
+    def fill(self, prefill_querys_info: list[QueryInfo], decode_querys_info: list[QueryInfo], prefill_s: list[int] = None, prefill_l: list[int] = None, decode_padding_len=1, device = None, page_size = 256, max_page_num=64):
+        device = torch.device('npu')
         
         page_size = 128
         
@@ -439,9 +446,10 @@ class ForwardBatchInput:
                 query_manager.query_map[decode_batch_idx].decode_start_time =time.time()
             decode_querys_info.append(query_manager.query_map[decode_batch_idx])
 
-
-        minibatch = ForwardMiniBatchSplit(prefill_querys_info, decode_querys_info, prefill_s, prefill_l, device = query_manager.device, page_size = query_manager.page_size)
- 
+        if use_torch_npu:
+            minibatch = ForwardMiniBatchSplit(prefill_querys_info, decode_querys_info, prefill_s, prefill_l, device = query_manager.device, page_size = query_manager.page_size)
+        else:
+            minibatch = ForwardMiniBatchCombine(prefill_querys_info, decode_querys_info, prefill_s, prefill_l, device = query_manager.device, page_size = query_manager.page_size)
         self.minibatch = minibatch
 
     @classmethod
@@ -487,11 +495,12 @@ class ForwardBatchInput:
         
         if prefill_query_length*Config().max_prefill_batch_size + len(decode_querys_info) < cuda_lens:
             decode_querys_info.append(query_info)
-
-        instance.minibatch = ForwardMiniBatchSplit(prefill_query_info, decode_querys_info, [0, 0],
-                                            [prefill_active_length for _ in range(Config().max_prefill_batch_size)],
-                                            device, page_size, decode_padding_len=decode_query_length)
-
+        if use_torch_npu:
+            instance.minibatch = ForwardMiniBatchSplit(prefill_query_info, decode_querys_info, [0, 0],
+                                                [prefill_active_length for _ in range(Config().max_prefill_batch_size)],
+                                                device, page_size, decode_padding_len=decode_query_length)
+        else:
+            instance.minibatch = ForwardMiniBatchCombine(prefill_query_info, decode_querys_info, [0, 0], [prefill_active_length for _ in range(Config().max_prefill_batch_size)], device, page_size)
         
         return instance
 

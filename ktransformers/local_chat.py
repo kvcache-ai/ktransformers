@@ -12,8 +12,13 @@ import sys
 project_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, project_dir)
 import torch
-import torch_npu
-from torch_npu.contrib import transfer_to_npu
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+    from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel, get_tensor_parallel_group
+    from ktransformers.util import utils, npu_graph_runner
+except:
+    pass
 import torch.distributed as dist
 
 import logging
@@ -33,8 +38,7 @@ from ktransformers.models.modeling_deepseek_v3 import DeepseekV3ForCausalLM
 from ktransformers.models.modeling_llama import LlamaForCausalLM
 from ktransformers.models.modeling_mixtral import MixtralForCausalLM
 from ktransformers.util.utils import prefill_and_generate, get_compute_capability, xpu_fp16_model
-from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel, get_tensor_parallel_group
-from ktransformers.util import utils, npu_graph_runner
+from ktransformers.util import utils
 from ktransformers.models.custom_cache import StaticCache
 from ktransformers.server.config.config import Config
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled
