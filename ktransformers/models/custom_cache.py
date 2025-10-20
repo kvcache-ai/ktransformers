@@ -247,11 +247,11 @@ class KVC2StaticCache(transformers.Cache):
     Static Cache class connect with KVC2
     remind: page_idx & page_offset info need to refs to forward batching, only contains KV Block Tensor here
     """
-    def __init__(self, config: PretrainedConfig, max_batch_size, page_size: int = 256, dtype=torch.bfloat16, device=torch.device("npu:0")) -> None:
+    def __init__(self, config: PretrainedConfig, max_batch_size, page_size: int = 256, dtype=torch.bfloat16, device=None) -> None:
         super().__init__()
         self.config = config
         self.dtype = dtype
-        self.device = device
+        self.device = torch.device("npu:0")
         self.kv_lora_rank = config.kv_lora_rank
         self.max_batch_size = max_batch_size
         self.page_size = page_size
@@ -361,7 +361,7 @@ class KVC2StaticCache(transformers.Cache):
         self.max_cache_len = self.k_caches[0].shape[0] * self.k_caches[0].shape[1]  # page_len * page_size
 
     # todo-luo 这个 get_page_table 和 另外连个类的入参不一样
-    def get_page_table(self, mini_batch: ForwardMiniBatchSplit, bsz_tensors: torch.tensor = None, is_prefill=True):
+    def get_page_table(self, mini_batch, bsz_tensors: torch.tensor = None, is_prefill=True):
         if is_prefill:
             # TODO add padding support
             q_lens = [mini_batch.p_q_len[idx] for idx in range(mini_batch.prefill_batch)]
