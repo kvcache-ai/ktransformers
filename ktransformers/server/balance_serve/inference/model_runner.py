@@ -298,11 +298,15 @@ class ModelRunner:
                                                 head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size, causal=True,
                                                 sm_scale=self.model.model.layers[0].self_attn.softmax_scale, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
                 self.start_model_event.record(self.stream)
-                page_idx, page_offset = self.cache.get_page_table(self.input[cuda_graph_idx].minibatch, self.bsz_tensor_buf) #TODO csx minibatch
+                if use_torch_npu:
+                    page_idx, page_offset = self.cache.get_page_table(self.input[cuda_graph_idx].minibatch, self.bsz_tensor_buf) #TODO csx minibatch
+                    self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.cache.max_cache_len // self.cache.page_size - 1)
+                else:
+                    page_idx, page_offset = self.model.cache.get_page_table(self.input[cuda_graph_idx].minibatch.position_ids, self.input[cuda_graph_idx].minibatch.q_indptr, self.input[cuda_graph_idx].minibatch.kv_indptr, self.input[cuda_graph_idx].minibatch.kv_indices, self.num_tokens_tensor_buf)
+                    self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.model.cache.max_cache_len // self.model.cache.page_size -1)
 
                 self.page_idx_buf[cuda_graph_idx][:num_tokens].copy_(page_idx[:num_tokens])
                 self.page_offset_buf[cuda_graph_idx][:num_tokens].copy_(page_offset[:num_tokens])
-                self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.cache.max_cache_len // self.cache.page_size - 1)
                 self.replay(cuda_graph_idx)
                 self.output = ForwardBatchOutput()
                 

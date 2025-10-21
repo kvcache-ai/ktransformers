@@ -126,7 +126,7 @@ class QueryManager:
             if id not in self.query_map:
                 print(f"add query id: {id}, batch.query_lengths: {batch.query_lengths[i]}, "
                       f"batch_query_tokens: {batch.query_tokens[i].shape}, "
-                      f"batch.block_indexes: {batch.block_indexes[i]}") if torch.distributed.get_rank() == 0 else None
+                      f"batch.block_indexes: {batch.block_indexes[i]}")
                 assert batch.query_tokens[i].size(0) < self.max_length, "query max length in batchquerytodo exceeds internal max_length"
                 query_info = QueryInfo(id=id, query_length=batch.query_lengths[i], max_length=batch.query_tokens[i].size(0) + 1, page_size=self.page_size, device=self.device, temperature=batch.sample_options[i].temperature, top_p=batch.sample_options[i].top_p)
                 query_info.query_tokens[:query_info.query_length].copy_(batch.query_tokens[i][:query_info.query_length].to(self.device))
