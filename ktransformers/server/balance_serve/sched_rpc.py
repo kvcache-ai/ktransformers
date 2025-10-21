@@ -15,7 +15,7 @@ try:
     import torch_npu
     use_npu = torch.npu.is_available()
 except:
-    pass
+    use_npu = False
 from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe, create_sched_settings_glm4moe, create_sched_settings_smallthinker, create_sched_settings_qwen3next
 
 
