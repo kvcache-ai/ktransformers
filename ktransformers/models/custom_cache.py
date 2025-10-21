@@ -242,7 +242,7 @@ class StaticCache(transformers.StaticCache):
         """Returns the maximum shape of the cache."""
         return self.max_cache_len
 
-class KVC2StaticCache(transformers.Cache):
+class KVC2StaticCache:
     """
     Static Cache class connect with KVC2
     remind: page_idx & page_offset info need to refs to forward batching, only contains KV Block Tensor here

@@ -67,7 +67,7 @@ def del_meta(module:nn.Module):
 def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str="", default_device: str = "cuda:0"):
     module_name = prefix[:-1]
     if use_torch_npu:
-        module_name = translate_name_to_gguf(prefix)[:-1] #TODO 主仓中没有使用此变量
+        translated_name = translate_name_to_gguf(prefix)[:-1] #TODO 主仓中没有使用此变量
     recursive = True
     for rule in rule_list:
         match_meta = rule["match"]
@@ -88,7 +88,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "replace" in rule:
             replace_meta = rule["replace"]
             if module_name not in out_data:
-                out_data[module_name]={"key": module_name,
+                out_data[module_name]={"key": module_name if not use_torch_npu else translated_name,
                                     "class": replace_meta["class"] if "class" in replace_meta else "default",
                                     # "device": replace_meta["device"] if "device" in replace_meta else default_device,
                                     "kwargs": copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict()}
@@ -103,7 +103,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
     if module_name not in out_data:
         out_data[module_name]= {
             "class": "default",
-            "key": module,
+            "key": module_name if not use_torch_npu else translated_name,
             "kwargs": {"generate_device": default_device,
                        "prefill_device": default_device}
         }
