@@ -473,8 +473,8 @@ class BalanceServeInterface(BackendInterfaceBase):
 
             kvcache_event.wait()
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            if use_torch_npu:
-                args.tp = input_args.tp
+            
+            args.tp = input_args.tp
 
             pickle.dump(args, temp_file)
             temp_file_path = temp_file.name
@@ -588,7 +588,7 @@ class BalanceServeInterface(BackendInterfaceBase):
         input_ids = self.tokenizer.apply_chat_template(new_messages, add_generation_prompt=True, return_tensors="pt").to(self.args.device)
         return input_ids
     
-    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = 0, top_p: Optional[float] = None):
+    async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = 0, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         profiler = Profiler()
         profiler.create_and_start_timer("tokenize")
         
