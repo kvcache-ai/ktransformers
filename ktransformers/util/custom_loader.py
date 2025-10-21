@@ -24,8 +24,6 @@ from ktransformers.util.custom_gguf import *
 from safetensors.torch import save_file
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union
-from safetensors import safe_open
-from safetensors.torch import save_file
 
 class ModelLoader(ABC):
     """

@@ -37,8 +37,11 @@ def inject(module, local_optimization_dict, model_config:AutoConfig ,gguf_loader
                     gguf_loader.tensor_device_map[inject_module_meta["key"]] = inject_module_meta["kwargs"] if "kwargs" in inject_module_meta else dict()
                     import_class_name = import_path[-1]
                     module_cls=getattr(__import__(import_module_name, fromlist=[""]), import_class_name)
-                    print(f"Injecting {child_prefix} as", import_module_name, ".",
-                         import_class_name) if torch.distributed.get_rank() == 0 else None
+                    if use_torch_npu:
+                        print(f"Injecting {child_prefix} as", import_module_name, ".",
+                            import_class_name) if torch.distributed.get_rank() == 0 else None #TODO 分布式
+                    else: 
+                        print(f"Injecting {child_prefix} as", import_module_name, ".", import_class_name)
                     inject_module=module_cls(key = inject_module_meta["key"], gguf_loader = gguf_loader, config = model_config, orig_module=child, **inject_module_meta["kwargs"])
                     set_module(module, name, inject_module)
                 elif inject_module_meta["class"] == "default":
@@ -63,7 +66,8 @@ def del_meta(module:nn.Module):
 
 def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str="", default_device: str = "cuda:0"):
     module_name = prefix[:-1]
-    translated_name = translate_name_to_gguf(prefix)[:-1]
+    if use_torch_npu:
+        module_name = translate_name_to_gguf(prefix)[:-1] #TODO 主仓中没有使用此变量
     recursive = True
     for rule in rule_list:
         match_meta = rule["match"]
@@ -84,7 +88,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
         if "replace" in rule:
             replace_meta = rule["replace"]
             if module_name not in out_data:
-                out_data[module_name]={"key": translated_name,
+                out_data[module_name]={"key": module_name,
                                     "class": replace_meta["class"] if "class" in replace_meta else "default",
                                     # "device": replace_meta["device"] if "device" in replace_meta else default_device,
                                     "kwargs": copy.deepcopy(replace_meta["kwargs"]) if "kwargs" in replace_meta else dict()}
@@ -99,7 +103,7 @@ def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, p
     if module_name not in out_data:
         out_data[module_name]= {
             "class": "default",
-            "key": translated_name,
+            "key": module,
             "kwargs": {"generate_device": default_device,
                        "prefill_device": default_device}
         }
