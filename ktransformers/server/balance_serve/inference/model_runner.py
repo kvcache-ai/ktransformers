@@ -7,7 +7,6 @@ import os.path
 import threading
 
 import torch
-import torch_npu
 from torch import nn
 import queue
 import signal
@@ -29,7 +28,6 @@ import tempfile
 from ktransformers.server.balance_serve.inference.forward_batch import (
     ForwardBatchInput, ForwardBatchOutput, ForwardMiniBatchCombine, ForwardMiniBatchSplit)
 from ktransformers.util import utils
-from ktransformers.models.custom_cache import KVC2StaticCache
 
 from ktransformers.server.config.config import Config
 from ktransformers.models.custom_modeling_deepseek_v3 import KDeepseekV3ForCausalLM
@@ -38,7 +36,6 @@ from ktransformers.models.custom_modeling_qwen2_moe import KQwen2MoeForCausalLM
 from ktransformers.models.custom_modeling_qwen3_moe import KQwen3MoeForCausalLM
 from ktransformers.models.custom_modeling_smallthinker import KSmallThinkerForCausalLM
 from ktransformers.models.custom_modeling_glm4_moe import KGlm4MoeForCausalLM
-from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
 from ktransformers.models.custom_modeling_qwen3_next import KQwen3NextForCausalLM
 from ktransformers.server.balance_serve.inference.query_manager import QueryManager
 from ktransformers.server.balance_serve.settings import sched_ext
@@ -46,6 +43,8 @@ from ktransformers.server.balance_serve.settings import sched_ext
 try:
     import torch_npu
     use_torch_npu = torch_npu.npu.is_available()
+    from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
+    from ktransformers.models.custom_cache import KVC2StaticCache
 except:
     use_torch_npu = False
 
@@ -68,11 +67,14 @@ def generate_cuda_graphs(chunk_size: int) -> list:
     return deduplicate_and_sort(base_list + multiples)
 class ModelRunner:
     """A CudaGraphRunner runs the forward pass of a model with CUDA graph and torch.compile."""
-
-    model: KDeepseekV3ForCausalLM  | KQwen2MoeForCausalLM | KQwen3MoeForCausalLM | KSmallThinkerForCausalLM | KGlm4MoeForCausalLM | KQwen3NextForCausalLM | KNPUDeepseekV3ForCausalLM
+    if not use_torch_npu:
+        model: KDeepseekV3ForCausalLM  | KQwen2MoeForCausalLM | KQwen3MoeForCausalLM | KSmallThinkerForCausalLM | KGlm4MoeForCausalLM | KQwen3NextForCausalLM
+    else:
+        model: KNPUDeepseekV3ForCausalLM
+        cache: KVC2StaticCache #TODO 只有npu适配的代码里用到，规避
     input: ForwardBatchInput | list[ForwardBatchInput]
     output: ForwardBatchOutput
-    cache: KVC2StaticCache
+    
 
     def __init__(self, model = None, cache = None, device = None, use_cuda_graph = False, max_decode_batch_size = 1, max_chunk_size = 4096, num_mini_batches: int = 1, page_size = 256, block_num = 8):
         
@@ -103,6 +105,7 @@ class ModelRunner:
         self.output = None
         self.graph_memory_pool = None
         self.cache = cache
+        #TODO 删掉了一行 self.cuda_graphs = generate_cuda_graphs(Config().chunk_size) 是为何，这样下面不会影响GPU吗
         self.use_cuda_graph = use_cuda_graph
         self.debug = False
 
@@ -295,11 +298,19 @@ class ModelRunner:
                                                 head_dim_kpe=self.model.config.qk_rope_head_dim, page_size=self.cache.page_size, causal=True,
                                                 sm_scale=self.model.model.layers[0].self_attn.softmax_scale, q_data_type=torch.bfloat16, kv_data_type=torch.bfloat16)
                 self.start_model_event.record(self.stream)
-                page_idx, page_offset = self.cache.get_page_table(self.input[cuda_graph_idx].minibatch, self.bsz_tensor_buf)
+                if use_torch_npu:
+                    page_idx, page_offset = self.cache.get_page_table(self.input[cuda_graph_idx].minibatch, self.bsz_tensor_buf) #TODO csx minibatch
+                    self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.cache.max_cache_len // self.cache.page_size - 1)
+                else:
+                    page_idx, page_offset = self.model.cache.get_page_table(self.input[cuda_graph_idx].minibatch.position_ids, self.input[cuda_graph_idx].minibatch.q_indptr, self.input[cuda_graph_idx].minibatch.kv_indptr, self.input[cuda_graph_idx].minibatch.kv_indices, self.num_tokens_tensor_buf)
+                    self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.model.cache.max_cache_len // self.model.cache.page_size -1)
+
+
+                # page_idx, page_offset = self.cache.get_page_table(self.input[cuda_graph_idx].minibatch, self.bsz_tensor_buf) #TODO csx minibatch
 
                 self.page_idx_buf[cuda_graph_idx][:num_tokens].copy_(page_idx[:num_tokens])
                 self.page_offset_buf[cuda_graph_idx][:num_tokens].copy_(page_offset[:num_tokens])
-                self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.cache.max_cache_len // self.cache.page_size - 1)
+                # self.page_idx_buf[cuda_graph_idx][num_tokens:].fill_(self.cache.max_cache_len // self.cache.page_size - 1)
                 self.replay(cuda_graph_idx)
                 self.output = ForwardBatchOutput()
                 
