@@ -4,7 +4,6 @@ import re
 from uuid import uuid4
 
 import torch
-import torch_npu
 import torch.distributed
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -128,20 +127,21 @@ def verify_arg(args):
 def main():
     try:
         import torch_npu
-        if torch.npu.is_available():
-            torch.npu.config.allow_internal_format = True
+        use_npu = torch.npu.is_available()
+        torch.npu.config.allow_internal_format = True
     except:
-        pass
+        use_npu = False
 
     cfg = Config()
 
     arg_parser = ArgumentParser(cfg)
 
     args = arg_parser.parse_args()
-    verify_arg(args)
+    if use_npu:
+        verify_arg(args)
 
-    rank_id = int(os.environ["RANK"])
-    args.device = args.device[:-1] + str(rank_id)
+        rank_id = int(os.environ["RANK"])
+        args.device = args.device[:-1] + str(rank_id)
     create_interface(config=cfg, default_args=cfg, input_args=args)
 
     tp_size = args.tp

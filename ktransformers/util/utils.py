@@ -11,7 +11,6 @@ import sys
 import threading
 
 import torch
-import torch_npu
 import torch.distributed as dist
 from torch import nn
 import itertools
@@ -27,7 +26,7 @@ from transformers import (
     EpsilonLogitsWarper,
     EtaLogitsWarper,
 )
-from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size
+
 from ktransformers.util.custom_loader import ModelLoaderFactory, ModelLoader, SafeTensorLoader, translate_name_to_gguf
 from ktransformers.operators import base_operator
 from ktransformers.models.custom_cache import StaticCache
@@ -50,6 +49,7 @@ _SPECULATE_STEP = 1
 try:
     import torch_npu
     use_torch_npu = torch_npu.npu.is_available()
+    from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size
 except:
     use_torch_npu = False
 
@@ -177,8 +177,8 @@ def get_current_device():
         return f"cuda:{torch.npu.current_device()}"
 
 def get_compute_capability(device:torch.device = None):
-    if use_torch_npu:
-        return 0
+    # if use_torch_npu:
+    #     return 0
     if torch.cuda.is_available():
         if device is None:
             num_gpus = torch.cuda.device_count()
@@ -189,6 +189,8 @@ def get_compute_capability(device:torch.device = None):
             return min_compute_capability_major
         else:
             return torch.cuda.get_device_properties(device)
+    else:
+        return 0 #TODO 为什么不这么写
 
 def set_module(model, submodule_key, module):
     tokens = submodule_key.split('.')

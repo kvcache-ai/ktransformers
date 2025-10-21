@@ -15,13 +15,13 @@ import os
 try:
     import torch_npu
     use_npu = torch.npu.is_available()
+    from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel
 except:
     use_npu = False
 from torch import nn
 from ktransformers.server.config.log import logger
 from ktransformers.optimize.optimize import optimize_and_load_gguf
 from ktransformers.models.custom_cache import StaticCache
-from ktransformers.util.ascend.ascend_utils import get_absort_weight, setup_model_parallel
 from ktransformers.util.cuda_graph_runner import CUDAGraphRunner
 from ktransformers.local_chat import custom_models, default_optimize_rules
 from ktransformers.util.utils import get_device, get_all_used_cuda_device
