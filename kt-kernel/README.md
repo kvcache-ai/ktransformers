@@ -84,6 +84,63 @@ pip install .
 ```bash
 python -c "from kt_kernel import AMXMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
+
+## Weight Quantization
+
+KT-Kernel provides a weight conversion tool to quantize model weights from FP8/FP16/BF16 to INT4/INT8 format optimized for AMX inference.
+
+### Quantization Methods
+
+- **INT4**: 4-bit quantization for maximum memory efficiency
+- **INT8**: 8-bit quantization for better accuracy
+
+### Supported Input Formats
+
+- **FP8**: 8-bit floating point with automatic dequantization
+- **FP16**: 16-bit floating point
+- **BF16**: BFloat16 format
+
+### Basic Usage
+
+```bash
+# Quantize BF16 model to INT4
+python scripts/convert_weights.py \
+  --input-path /path/to/bf16/model \
+  --input-type bf16 \
+  --output /path/to/output \
+  --quant-method int4
+
+# Quantize FP16 model to INT8
+python scripts/convert_weights.py \
+  --input-path /path/to/fp16/model \
+  --input-type fp16 \
+  --output /path/to/output \
+  --quant-method int8
+
+# Quantize FP8 model to INT4
+python scripts/convert_weights.py \
+  --input-path /path/to/fp8/model \
+  --input-type fp8 \
+  --output /path/to/output \
+  --quant-method int4
+```
+
+### Output Format
+
+The converted weights are saved in SafeTensors format with NUMA-aware layout:
+```
+output_dir/
+├── model-00001-of-00050.safetensors
+├── model-00002-of-00050.safetensors
+├── ...
+├── config.json
+└── tokenizer files...
+```
+
+Each expert's weights are split across NUMA nodes for optimal memory access:
+- `blk.{layer}.ffn_{proj}_exps.{expert}.numa.{numa_idx}.weight`: Quantized weights
+- `blk.{layer}.ffn_{proj}_exps.{expert}.numa.{numa_idx}.scale`: Quantization scales
+
 ## Before Commit!
 your msg should match: Conventional Commits (https://www.conventionalcommits.org/) <br>and format your code before commit:
 ```shell
