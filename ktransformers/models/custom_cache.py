@@ -35,9 +35,10 @@ class StaticCache(transformers.StaticCache):
     """
 
     def __init__(self, config: PretrainedConfig, max_batch_size: int, max_cache_len: int, device: torch.device| dict, dtype=None) -> None:
-        Cache.__init__(self)
-        self.max_batch_size = max_batch_size
-        self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
+        #Cache.__init__(self)
+        super().__init__(config=config, layers=config.num_hidden_layers, max_batch_size=max_batch_size, max_cache_len=max_cache_len)
+        self._max_batch_size = max_batch_size
+        self._max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
         # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
         if config.architectures[0] == "DeepseekV3ForCausalLM":
             self.head_dim = config.qk_rope_head_dim
@@ -108,6 +109,11 @@ class StaticCache(transformers.StaticCache):
             self.key_cache.append(new_layer_key_cache)
             self.value_cache.append(new_layer_value_cache)
             self.past_tokens.append(0)
+
+    def get_usable_length(self, seq_len=None, layer_idx=None):
+        if hasattr(self, "cache_position") and self.cache_position is not None:
+            return int(self.cache_position.max().item()) + 1
+        return 0
 
     def update(
         self,
