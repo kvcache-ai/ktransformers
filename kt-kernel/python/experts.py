@@ -191,7 +191,7 @@ class AMXMoEWrapper:
         moe_intermediate_size: int,
         num_gpu_experts: int,
         cpuinfer_threads: int,
-        subpool_count: int,
+        threadpool_count: int,
         amx_weight_path: str,
         chunked_prefill_size: int,
         cpu_save: bool = False,
@@ -207,7 +207,7 @@ class AMXMoEWrapper:
             moe_intermediate_size: MoE intermediate size
             num_gpu_experts: Number of experts to run on GPU
             cpuinfer_threads: Number of CPU inference threads
-            subpool_count: Number of NUMA subpools
+            threadpool_count: Number of NUMA subpools
             amx_weight_path: Path to AMX weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
@@ -227,13 +227,13 @@ class AMXMoEWrapper:
         if AMXMoEWrapper._cpu_infer_instance is None:
             worker_config = cpuinfer_ext.WorkerPoolConfig()
 
-            subpool_numa_map = list(range(subpool_count))
+            subpool_numa_map = list(range(threadpool_count))
             subpool_thread_count = [
-                cpuinfer_threads // subpool_count + (1 if i < cpuinfer_threads % subpool_count else 0)
-                for i in range(subpool_count)
+                cpuinfer_threads // threadpool_count + (1 if i < cpuinfer_threads % threadpool_count else 0)
+                for i in range(threadpool_count)
             ]
 
-            worker_config.subpool_count = subpool_count
+            worker_config.subpool_count = threadpool_count
             worker_config.subpool_numa_map = subpool_numa_map
             worker_config.subpool_thread_count = subpool_thread_count
             AMXMoEWrapper._cpu_infer_instance = cpuinfer_ext.CPUInfer(worker_config)
@@ -260,6 +260,64 @@ class AMXMoEWrapper:
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
+
+    def load_weights_from_tensors(
+        self,
+        gate_proj: torch.Tensor,
+        up_proj: torch.Tensor,
+        down_proj: torch.Tensor,
+        physical_to_logical_map_cpu: torch.Tensor,
+    ):
+        """
+        Load and quantize weights from BF16/FP16 tensors (online quantization).
+
+        Args:
+            gate_proj: Gate projection weights [num_experts, intermediate_size, hidden_size]
+            up_proj: Up projection weights [num_experts, intermediate_size, hidden_size]
+            down_proj: Down projection weights [num_experts, hidden_size, intermediate_size]
+            physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
+        """
+        # Store tensors as instance variables to keep them alive
+        self.gate_proj = gate_proj.contiguous()
+        self.up_proj = up_proj.contiguous()
+        self.down_proj = down_proj.contiguous()
+
+        # Configure MoE with online quantization (cpu_save mode)
+        moe_config = MOEConfig(
+            self.num_experts,
+            self.num_experts_per_tok,
+            self.hidden_size,
+            self.moe_intermediate_size,
+            self.num_gpu_experts,
+        )
+        moe_config.layer_idx = self.layer_idx
+        moe_config.pool = self.cpu_infer.backend_
+        moe_config.max_len = self.chunked_prefill_size
+
+        # Enable save mode for online quantization
+        moe_config.save = True
+        moe_config.load = False
+
+        # Set weight pointers
+        moe_config.gate_proj = self.gate_proj.data_ptr()
+        moe_config.up_proj = self.up_proj.data_ptr()
+        moe_config.down_proj = self.down_proj.data_ptr()
+
+        # Set output path for quantized weights
+        moe_config.path = self.amx_weight_path
+
+        # Create MoE module based on AMX method
+        amx_method = os.environ.get("AMX_METHOD", "AMXINT4")
+        if amx_method == "AMXINT4":
+            self.moe = AMXInt4_MOE(moe_config)
+        elif amx_method == "AMXINT8":
+            self.moe = AMXInt8_MOE(moe_config)
+        else:
+            raise NotImplementedError(f"Unsupported AMX method: {amx_method}")
+
+        # Submit quantization and save task
+        self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
+        self.cpu_infer.sync()
 
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         """
