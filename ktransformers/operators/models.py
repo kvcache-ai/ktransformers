@@ -678,7 +678,8 @@ class KDeepseekV2Model(BaseInjectedModule):
         elif use_torch_npu and not is_prefill:
             causal_mask = None
         else:
-            if (os.name == 'nt'
+            if (use_torch_npu
+                or os.name == 'nt'
                 or get_compute_capability() < 8
                 or (self.transfer_map is not None and 'cpu' in self.transfer_map.values())
                 or device_manager.gpu_vendor != GPUVendor.NVIDIA):
