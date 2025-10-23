@@ -4493,8 +4493,8 @@ template <int nrc> struct Q81 {
 
     inline float16x8_t load_scales(int iy, int i) const {
         const block_q8_1 * y4 = (const block_q8_1 *)y[iy] + i;
-        float16_t d_val = GGML_FP16_TO_FP32(y4->ds[0]);
-        float16_t s_val = GGML_FP16_TO_FP32(y4->ds[1]);
+        float16_t d_val = GGML_FP16_TO_FP32(y4->d);
+        float16_t s_val = GGML_FP16_TO_FP32(y4->s);
         float16x4_t d_vec = vdup_n_f16(d_val);
         float16x4_t s_vec = vdup_n_f16(s_val);
         return vcombine_f16(d_vec, s_vec);
