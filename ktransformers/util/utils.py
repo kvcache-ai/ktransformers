@@ -164,6 +164,8 @@ def xpu_fp16_model(config):
         # Qwen3-30B seems have precision issue with FP16
         # so we only use FP16 for Qwen3-235B now
         return True
+    if config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+        return True
     return False
 
 def load_weights(module:nn.Module, gguf_loader:ModelLoader, prefix='', device="cuda"):
@@ -302,6 +304,8 @@ def prefill_and_generate(model, tokenizer, inputs, max_new_tokens=10000, use_cud
             from ipex_llm.transformers.kv import DynamicUnbalancedFp8Cache, DynamicNormalCache
             if model.config.architectures[0] in ["DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"]:
                 past_key_values = DynamicUnbalancedFp8Cache.from_legacy_cache(None)
+            elif model.config.architectures[0] in ["HunYuanMoEV1ForCausalLM"]:
+                past_key_values = DynamicNormalCache.from_legacy_cache(None)
             else:
                 past_key_values = DynamicNormalCache.from_legacy_cache(None)
         elif mode != 'long_context':

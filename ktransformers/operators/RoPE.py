@@ -22,6 +22,10 @@ from ktransformers.models.modeling_deepseek import (
     yarn_linear_ramp_mask,
     yarn_find_correction_range
 )
+from ktransformers.models.modeling_hunyuan import (
+    HunYuanRotaryEmbedding,
+    HunYuanDynamicNTKAlphaRotaryEmbedding
+)
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.utils import InferenceState
@@ -528,3 +532,64 @@ class KGlm4MoeRotaryEmbedding(BaseInjectedModule, Glm4MoeRotaryEmbedding):
             sin = emb.sin() * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
+class KHunYuanRotaryEmbedding(BaseInjectedModule, HunYuanDynamicNTKAlphaRotaryEmbedding):
+    """HunYuan RoPE with KTransformers optimizations - simplified for HunYuanDynamicNTKAlphaRotaryEmbedding"""
+    
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        orig_module: nn.Module,
+        generate_device: str = "cuda",
+        prefill_device: str = "cuda",
+        **kwargs,
+    ):
+        BaseInjectedModule.__init__(
+            self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs
+        )
+        
+        self.generate_device = generate_device
+        self.prefill_device = prefill_device
+        
+        self.orig_module.__init__(
+            dim=orig_module.dim,
+            max_position_embeddings=orig_module.max_position_embeddings,
+            base=orig_module.base,
+            device=None,  # Will be set in load()
+            scaling_alpha=orig_module.scaling_alpha if hasattr(orig_module, 'scaling_alpha') else 1000.0
+        )
+    
+    
+    def forward(self, x, position_ids=None, seq_len=None):
+        """Forward pass with KTransformers compatibility
+        
+        Args:
+            x: Input tensor
+            position_ids: Position indices (KTransformers mode)
+            seq_len: Sequence length (native Hunyuan mode)
+        """
+        # Convert position_ids to seq_len if needed
+        if position_ids is not None and seq_len is None:
+            # We need seq_len = max(position_ids) + 1 to avoid index out of bounds
+            # But avoid .item() for CUDA Graph compatibility
+            seq_len = self.max_seq_len_cached  
+        elif seq_len is None:
+            seq_len = x.shape[-2] if x.ndim > 2 else x.shape[0]
+            
+        # Call parent's forward with seq_len (no .item() needed)
+        return super().forward(x, seq_len=seq_len)
+    
+    def load(self):
+        """Reinitialize the module on the correct device after loading"""
+        BaseInjectedModule.load(self)
+        
+        self.orig_module.__init__(
+            dim=self.orig_module.dim,
+            max_position_embeddings=self.orig_module.max_position_embeddings,
+            base=self.orig_module.base,
+            device=self.generate_device,
+            scaling_alpha=self.orig_module.scaling_alpha if hasattr(self.orig_module, 'scaling_alpha') else 1000.0
+        )
