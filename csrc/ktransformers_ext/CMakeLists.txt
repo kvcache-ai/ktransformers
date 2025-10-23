@@ -100,9 +100,11 @@ if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM_LWR STR
             add_compile_definitions(__aarch64__)
             add_compile_definitions(__ARM_NEON)
             
-            # Add include paths for ARM64-specific headers
-            include_directories(/usr/include/aarch64-linux-gnu)
-            include_directories(/usr/include/asm)
+            # Add include paths for ARM64-specific headers (Linux only)
+            if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+                include_directories(/usr/include/aarch64-linux-gnu)
+                include_directories(/usr/include/asm)
+            endif()
             
             # Add compiler flags to handle ARM64-specific issues
             list(APPEND ARCH_FLAGS -D_GNU_SOURCE)

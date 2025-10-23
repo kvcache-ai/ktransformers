@@ -44,16 +44,105 @@ KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
 # Apply ARM64 fixes before building
 def apply_arm64_fixes():
     """Apply ARM64-specific compilation fixes"""
-    if platform.machine() == "aarch64":
-        script_path = Path(__file__).parent / "scripts" / "apply_arm64_fixes.sh"
-        if script_path.exists():
-            print("Applying ARM64 CUDA compilation fixes...")
-            try:
-                subprocess.run([str(script_path)], check=True)
-                print("ARM64 fixes applied successfully")
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to apply ARM64 fixes: {e}")
-                print("Continuing with build...")
+    if platform.machine() in ("aarch64", "arm64"):
+        print("Applying ARM64 CUDA compilation fixes...")
+        try:
+            # Apply fixes directly in Python instead of calling external script
+            project_root = Path(__file__).parent
+            
+            # Fix sgemm.cpp
+            sgemm_file = project_root / "third_party" / "llamafile" / "sgemm.cpp"
+            if sgemm_file.exists():
+                content = sgemm_file.read_text()
+                
+                # Add ARM64 headers if not already present
+                if "#include <sys/auxv.h>" not in content:
+                    content = content.replace(
+                        '#include "llamafile.h"',
+                        '#include "llamafile.h"\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
+                    )
+                
+                # Fix hardware capability detection
+                if "long hwcap = getauxval(AT_HWCAP);" in content:
+                    content = content.replace(
+                        "long hwcap = getauxval(AT_HWCAP);",
+                        "long hwcap = 0;\n#ifdef __linux__\n        hwcap = getauxval(AT_HWCAP);"
+                    )
+                    
+                    # Add else clause for non-Linux ARM64
+                    if "mixmul = llamafile_mixmul_arm80;" in content and "#else" not in content:
+                        content = content.replace(
+                            "mixmul = llamafile_mixmul_arm80;\n        }",
+                            "mixmul = llamafile_mixmul_arm80;\n        }\n#else\n        // Non-Linux ARM64 systems (e.g., macOS)\n        // Use baseline ARM64 implementation\n        sgemm = llamafile_sgemm_arm80;\n        mixmul = llamafile_mixmul_arm80;\n#endif"
+                        )
+                
+                sgemm_file.write_text(content)
+                print("Fixed sgemm.cpp")
+            
+            # Fix iqk_mul_mat.inc
+            iqk_file = project_root / "third_party" / "llamafile" / "iqk_mul_mat.inc"
+            if iqk_file.exists():
+                content = iqk_file.read_text()
+                
+                # Add missing structures if not already present
+                if "block_q8_0_x4" not in content:
+                    content = content.replace(
+                        'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);',
+                        'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);\n\n\n// Define missing block structures for ARM64\ntypedef struct {\n    ggml_half d[4];       // delta for each block\n    int8_t  qs[QK8_0 * 4]; // quants for 4 blocks\n} block_q8_0_x4;\n\ntypedef struct {\n    union {\n        struct {\n            ggml_half d[4]; // delta for each block\n            ggml_half s[4]; // d * sum(qs[i]) for each block\n        } GGML_COMMON_AGGR;\n        ggml_half2 ds[4];\n    };\n    int8_t qs[QK8_1 * 4]; // quants for 4 blocks\n} block_q8_1_x4;'
+                    )
+                
+                # Fix function signature mismatch - remove the conflicting function definition
+                if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in content:
+                    # Find and remove the conflicting function definition
+                    lines = content.split('\n')
+                    new_lines = []
+                    skip_function = False
+                    brace_count = 0
+                    
+                    for line in lines:
+                        if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in line:
+                            skip_function = True
+                            brace_count = 0
+                            continue
+                        
+                        if skip_function:
+                            brace_count += line.count('{')
+                            brace_count -= line.count('}')
+                            if brace_count <= 0 and '}' in line:
+                                skip_function = False
+                                continue
+                        
+                        if not skip_function:
+                            new_lines.append(line)
+                    
+                    content = '\n'.join(new_lines)
+                    print("Removed conflicting set_mul_mat function definition")
+                
+                # Fix function parameter references
+                content = content.replace("MulMat::set_functions<DequantizerQ2K>(m);", "MulMat::set_functions<DequantizerQ2K>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ3K>(m);", "MulMat::set_functions<DequantizerQ3K>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ4K>(m);", "MulMat::set_functions<DequantizerQ4K>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ5K>(m);", "MulMat::set_functions<DequantizerQ5K>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ6K>(m);", "MulMat::set_functions<DequantizerQ6K>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ2XXS>(m);", "MulMat::set_functions<DequantizerIQ2XXS>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ2XS>(m);", "MulMat::set_functions<DequantizerIQ2XS>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ2S>(m);", "MulMat::set_functions<DequantizerIQ2S>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ3XXS>(m);", "MulMat::set_functions<DequantizerIQ3XXS>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ4XS>(m);", "MulMat::set_functions<DequantizerIQ4XS>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerIQ3S>(m);", "MulMat::set_functions<DequantizerIQ3S>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ40>(m);", "MulMat::set_functions<DequantizerQ40>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ41>(m);", "MulMat::set_functions<DequantizerQ41>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ50>(m);", "MulMat::set_functions<DequantizerQ50>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ51>(m);", "MulMat::set_functions<DequantizerQ51>(mm);")
+                content = content.replace("MulMat::set_functions<DequantizerQ80>(m);", "MulMat::set_functions<DequantizerQ80>(mm);")
+                
+                iqk_file.write_text(content)
+                print("Fixed iqk_mul_mat.inc")
+            
+            print("ARM64 fixes applied successfully")
+        except Exception as e:
+            print(f"Warning: Failed to apply ARM64 fixes: {e}")
+            print("Continuing with build...")
 
 # Apply fixes before any other operations
 apply_arm64_fixes()
@@ -199,7 +288,7 @@ class VersionInfo:
         if sys.platform.startswith("linux"):
             with open('/proc/cpuinfo', 'r', encoding="utf-8") as cpu_f:
                 cpuinfo = cpu_f.read()
-            if platform.machine() == "aarch64":
+            if platform.machine() in ("aarch64", "arm64"):
                 # Adapt this part based on GH200's /proc/cpuinfo
                 for line in cpuinfo.split('\n'):
                     if line.startswith('Features'):
@@ -631,7 +720,7 @@ class CMakeBuild(BuildExtension):
 if CUDA_HOME is not None or ROCM_HOME is not None:
     # ARM64-specific compiler flags
     arm64_flags = []
-    if platform.machine() == "aarch64":
+    if platform.machine() in ("aarch64", "arm64"):
         arm64_flags = [
             '-D_GNU_SOURCE',
             '-D__USE_GNU',
