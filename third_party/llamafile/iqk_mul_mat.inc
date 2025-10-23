@@ -170,7 +170,7 @@ struct MulMat {
             funcs[n_left-1](n, vx, bx, info, nrc_x);
         }
     }
-    static IQK_NOINLINE bool set_mul_mat(int typeA, int typeB,int ne00, MulMat& mm, int Ny);
+    static IQK_NOINLINE bool set_mul_mat(int typeA, int ne00, MulMat& mm, int& row_size_q8, int Ny);
 private:
     template <typename Dequantizer> static IQK_NOINLINE void set_functions(MulMat& m);
 };
@@ -4444,12 +4444,12 @@ template <int nrc> struct Q80 {
     }
 
     inline const int8_t * quant_data(int iy, int i) const {
-        const block_q8_0_x4 * y4 = (const block_q8_0_x4 *)y[iy] + i;
+        const block_q8_0 * y4 = (const block_q8_0 *)y[iy] + i;
         return y4->qs;
     }
 
     inline float16x4_t load_scales(int iy, int i) const {
-        const block_q8_0_x4 * y4 = (const block_q8_0_x4 *)y[iy] + i;
+        const block_q8_0 * y4 = (const block_q8_0 *)y[iy] + i;
         return vld1_f16((const float16_t *)y4->d);
     }
 
@@ -4485,12 +4485,12 @@ template <int nrc> struct Q81 {
     }
 
     inline const int8_t * quant_data(int iy, int i) const {
-        const block_q8_1_x4 * y4 = (const block_q8_1_x4 *)y[iy] + i;
+        const block_q8_1 * y4 = (const block_q8_1 *)y[iy] + i;
         return y4->qs;
     }
 
     inline float16x8_t load_scales(int iy, int i) const {
-        const block_q8_1_x4 * y4 = (const block_q8_1_x4 *)y[iy] + i;
+        const block_q8_1 * y4 = (const block_q8_1 *)y[iy] + i;
         return vld1q_f16((const float16_t *)y4->d);
     }
 
