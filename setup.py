@@ -34,157 +34,29 @@ import torch.version
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 from setuptools import setup, Extension
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME, ROCM_HOME
+
 try:
     from torch_musa.utils.simple_porting import SimplePorting
     from torch_musa.utils.musa_extension import BuildExtension, MUSAExtension, MUSA_HOME
 except ImportError:
-    MUSA_HOME=None
+    MUSA_HOME = None
 KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
+
 
 # Apply ARM64 fixes before building
 def apply_arm64_fixes():
     """Apply ARM64-specific compilation fixes"""
-    if platform.machine() in ("aarch64", "arm64"):
-        print("Applying ARM64 CUDA compilation fixes...")
-        try:
-            # Apply fixes directly in Python instead of calling external script
-            project_root = Path(__file__).parent
-            
-            # Fix sgemm.cpp
-            sgemm_file = project_root / "third_party" / "llamafile" / "sgemm.cpp"
-            if sgemm_file.exists():
-                content = sgemm_file.read_text()
-                
-                # Add ARM64 headers if not already present
-                if "#include <sys/auxv.h>" not in content:
-                    # Find the right place to insert headers
-                    if '#include "llamafile.h"' in content:
-                        content = content.replace(
-                            '#include "llamafile.h"',
-                            '#include "llamafile.h"\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
-                        )
-                    elif '#include <cassert>' in content:
-                        content = content.replace(
-                            '#include <cassert>',
-                            '#include <cassert>\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
-                        )
-                
-                # Fix hardware capability detection - be more specific
-                if "#elif defined(__aarch64__)" in content and "long hwcap = getauxval(AT_HWCAP);" in content:
-                    # Replace the entire ARM64 section
-                    old_section = """#elif defined(__aarch64__)
-        long hwcap = getauxval(AT_HWCAP);
-        if ((hwcap & HWCAP_FPHP) &&     // fp16 scalar isa (ID_AA64PFR0_EL1.FP == 1)
-            (hwcap & HWCAP_ASIMDHP) &&  // fp16 vector isa (ID_AA64PFR0_EL1.AdvSIMD == 1)
-            (hwcap & HWCAP_ASIMDDP)) {  // dotprod isa (ID_AA64ISAR0_EL1.DP == 1)
-            // e.g. Apple M1, Raspberry Pi 5
-            sgemm = llamafile_sgemm_arm82;
-            mixmul = llamafile_mixmul_arm82;
-            iqk_mixmul = iqk_mul_mat_moe_arm82;
-        } else {
-            // ARM64 baseline ISA
-            sgemm = llamafile_sgemm_arm80;
-            mixmul = llamafile_mixmul_arm80;
-        }"""
-                    
-                    new_section = """#elif defined(__aarch64__)
-        // ARM64 hardware capability detection
-        long hwcap = 0;
-#ifdef __linux__
-        hwcap = getauxval(AT_HWCAP);
-        if ((hwcap & HWCAP_FPHP) &&     // fp16 scalar isa (ID_AA64PFR0_EL1.FP == 1)
-            (hwcap & HWCAP_ASIMDHP) &&  // fp16 vector isa (ID_AA64PFR0_EL1.AdvSIMD == 1)
-            (hwcap & HWCAP_ASIMDDP)) {  // dotprod isa (ID_AA64ISAR0_EL1.DP == 1)
-            // e.g. Apple M1, Raspberry Pi 5
-            sgemm = llamafile_sgemm_arm82;
-            mixmul = llamafile_mixmul_arm82;
-            iqk_mixmul = iqk_mul_mat_moe_arm82;
-        } else {
-            // ARM64 baseline ISA
-            sgemm = llamafile_sgemm_arm80;
-            mixmul = llamafile_mixmul_arm80;
-        }
-#else
-        // Non-Linux ARM64 systems (e.g., macOS)
-        // Use baseline ARM64 implementation
-        sgemm = llamafile_sgemm_arm80;
-        mixmul = llamafile_mixmul_arm80;
-#endif"""
-                    
-                    content = content.replace(old_section, new_section)
-                
-                sgemm_file.write_text(content)
-                print("Fixed sgemm.cpp")
-            
-            # Fix iqk_mul_mat.inc
-            iqk_file = project_root / "third_party" / "llamafile" / "iqk_mul_mat.inc"
-            if iqk_file.exists():
-                content = iqk_file.read_text()
-                
-                # Add missing structures if not already present
-                if "block_q8_0_x4" not in content:
-                    # Find the right place to insert structures
-                    if 'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);' in content:
-                        content = content.replace(
-                            'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);',
-                            'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);\n\n\n// Define missing block structures for ARM64\ntypedef struct {\n    ggml_half d[4];       // delta for each block\n    int8_t  qs[QK8_0 * 4]; // quants for 4 blocks\n} block_q8_0_x4;\n\ntypedef struct {\n    union {\n        struct {\n            ggml_half d[4]; // delta for each block\n            ggml_half s[4]; // d * sum(qs[i]) for each block\n        } GGML_COMMON_AGGR;\n        ggml_half2 ds[4];\n    };\n    int8_t qs[QK8_1 * 4]; // quants for 4 blocks\n} block_q8_1_x4;'
-                        )
-                
-                # Fix function signature mismatch - remove the conflicting function definition
-                if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in content:
-                    # Find and remove the conflicting function definition more carefully
-                    lines = content.split('\n')
-                    new_lines = []
-                    skip_function = False
-                    brace_count = 0
-                    in_function = False
-                    
-                    for i, line in enumerate(lines):
-                        if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in line:
-                            skip_function = True
-                            in_function = True
-                            brace_count = 0
-                            continue
-                        
-                        if skip_function and in_function:
-                            brace_count += line.count('{')
-                            brace_count -= line.count('}')
-                            if brace_count <= 0 and '}' in line:
-                                skip_function = False
-                                in_function = False
-                                continue
-                        
-                        if not skip_function:
-                            new_lines.append(line)
-                    
-                    content = '\n'.join(new_lines)
-                    print("Removed conflicting set_mul_mat function definition")
-                
-                # Fix function parameter references
-                content = content.replace("MulMat::set_functions<DequantizerQ2K>(m);", "MulMat::set_functions<DequantizerQ2K>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ3K>(m);", "MulMat::set_functions<DequantizerQ3K>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ4K>(m);", "MulMat::set_functions<DequantizerQ4K>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ5K>(m);", "MulMat::set_functions<DequantizerQ5K>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ6K>(m);", "MulMat::set_functions<DequantizerQ6K>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ2XXS>(m);", "MulMat::set_functions<DequantizerIQ2XXS>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ2XS>(m);", "MulMat::set_functions<DequantizerIQ2XS>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ2S>(m);", "MulMat::set_functions<DequantizerIQ2S>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ3XXS>(m);", "MulMat::set_functions<DequantizerIQ3XXS>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ4XS>(m);", "MulMat::set_functions<DequantizerIQ4XS>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerIQ3S>(m);", "MulMat::set_functions<DequantizerIQ3S>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ40>(m);", "MulMat::set_functions<DequantizerQ40>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ41>(m);", "MulMat::set_functions<DequantizerQ41>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ50>(m);", "MulMat::set_functions<DequantizerQ50>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ51>(m);", "MulMat::set_functions<DequantizerQ51>(mm);")
-                content = content.replace("MulMat::set_functions<DequantizerQ80>(m);", "MulMat::set_functions<DequantizerQ80>(mm);")
-                
-                iqk_file.write_text(content)
-                print("Fixed iqk_mul_mat.inc")
-            
-            print("ARM64 fixes applied successfully")
-        except Exception as e:
-            print(f"Warning: Failed to apply ARM64 fixes: {e}")
-            print("Continuing with build...")
+    if platform.machine() == "aarch64":
+        script_path = Path(__file__).parent / "scripts" / "apply_arm64_fixes.sh"
+        if script_path.exists():
+            print("Applying ARM64 CUDA compilation fixes...")
+            try:
+                subprocess.run([str(script_path)], check=True)
+                print("ARM64 fixes applied successfully")
+            except subprocess.CalledProcessError as e:
+                print(f"Warning: Failed to apply ARM64 fixes: {e}")
+                print("Continuing with build...")
+
 
 # Apply fixes before any other operations
 apply_arm64_fixes()
@@ -200,6 +72,7 @@ else:
 
 with_balance = os.environ.get("USE_BALANCE_SERVE", "0") == "1"
 
+
 class CpuInstructInfo:
     CPU_INSTRUCT = os.getenv("CPU_INSTRUCT", "NATIVE")
     FANCY = "FANCY"
@@ -210,10 +83,11 @@ class CpuInstructInfo:
     CMAKE_AVX512 = "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON -DLLAMA_AVX512=ON"
     CMAKE_AVX2 = "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON"
 
+
 class VersionInfo:
     THIS_DIR = os.path.dirname(os.path.abspath(__file__))
     PACKAGE_NAME = "ktransformers"
-    BASE_WHEEL_URL:str = (
+    BASE_WHEEL_URL: str = (
         "https://github.com/kvcache-ai/ktransformers/releases/download/{tag_name}/{wheel_filename}"
     )
     FORCE_BUILD = os.getenv("KTRANSFORMERS_FORCE_BUILD", "FALSE") == "TRUE"
@@ -306,7 +180,7 @@ class VersionInfo:
         cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
         return cuda_version
 
-    def get_platform(self,):
+    def get_platform(self, ):
         """
         Returns the platform name as used in wheel filenames.
         """
@@ -317,7 +191,7 @@ class VersionInfo:
         else:
             raise ValueError("Unsupported platform: {}".format(sys.platform))
 
-    def get_cpu_instruct(self,):
+    def get_cpu_instruct(self, ):
         if CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.FANCY:
             return "fancy"
         elif CpuInstructInfo.CPU_INSTRUCT == CpuInstructInfo.AVX512:
@@ -330,22 +204,22 @@ class VersionInfo:
         if sys.platform.startswith("linux"):
             with open('/proc/cpuinfo', 'r', encoding="utf-8") as cpu_f:
                 cpuinfo = cpu_f.read()
-            if platform.machine() in ("aarch64", "arm64"):
+            if platform.machine() == "aarch64":
                 # Adapt this part based on GH200's /proc/cpuinfo
                 for line in cpuinfo.split('\n'):
                     if line.startswith('Features'):
                         features_line = line
                         features = features_line.split(':')[1].strip().split(' ')
-                        if 'sve' in features: # Example: Scalable Vector Extension
-                            return 'sve' # Or a custom label
+                        if 'sve' in features:  # Example: Scalable Vector Extension
+                            return 'sve'  # Or a custom label
                         elif 'neon' in features:
                             return 'neon'
                         else:
                             print("Using generic Arm CPU instructions")
-                            return 'native_arm' # Or a default Arm label
+                            return 'native_arm'  # Or a default Arm label
                 print("Warning: Could not find 'Features' line in /proc/cpuinfo on aarch64. Using native.")
-                return 'native' # Fallback for aarch64 if 'Features' not found
-            else: # Assume x86-like if not aarch64
+                return 'native'  # Fallback for aarch64 if 'Features' not found
+            else:  # Assume x86-like if not aarch64
                 for line in cpuinfo.split('\n'):
                     if line.startswith('flags'):
                         flags_line = line
@@ -359,7 +233,7 @@ class VersionInfo:
                         raise ValueError(
                             "Unsupported cpu Instructions: {}".format(flags_line))
                 print("Warning: Could not find 'flags' line in /proc/cpuinfo on x86-like. Using native.")
-                return 'native' # Fallback for x86-like if 'flags' not found
+                return 'native'  # Fallback for x86-like if 'flags' not found
 
         elif sys.platform == "win32":
             from cpufeature.extension import CPUFeature
@@ -374,12 +248,12 @@ class VersionInfo:
         else:
             raise ValueError("Unsupported platform: {}".format(sys.platform))
 
-    def get_torch_version(self,):
+    def get_torch_version(self, ):
         torch_version_raw = parse(torch.__version__)
         torch_version = f"{torch_version_raw.major}{torch_version_raw.minor}"
         return torch_version
 
-    def get_flash_version(self,):
+    def get_flash_version(self, ):
         version_file = os.path.join(
             Path(VersionInfo.THIS_DIR), VersionInfo.PACKAGE_NAME, "__init__.py")
         with open(version_file, "r", encoding="utf-8") as f:
@@ -412,7 +286,7 @@ class VersionInfo:
 
 
 class BuildWheelsCommand(_bdist_wheel):
-    def get_wheel_name(self,):
+    def get_wheel_name(self, ):
         version_info = VersionInfo()
         package_version = version_info.get_package_version(full_version=True)
         flash_version = version_info.get_flash_version()
@@ -420,7 +294,6 @@ class BuildWheelsCommand(_bdist_wheel):
         wheel_filename = f"{VersionInfo.PACKAGE_NAME}-{package_version}-{python_version}-{python_version}-{version_info.get_platform()}.whl"
         wheel_url = VersionInfo.BASE_WHEEL_URL.format(tag_name=f"v{flash_version}", wheel_filename=wheel_filename)
         return wheel_filename, wheel_url
-
 
     def run(self):
         if VersionInfo.FORCE_BUILD:
@@ -452,9 +325,10 @@ ANSI_ESCAPE = re.compile(
     r'\033[@-Z\\-_\[\]P]|\033\[[0-?]*[ -/]*[@-~]|\033][^\007\033]*\007|[\000-\037]'
 )
 
+
 def colored(text, color=None, bold=False):
     fmt = []
-    if color== 'red':
+    if color == 'red':
         fmt.append('31')
     elif color == 'green':
         fmt.append('32')
@@ -480,14 +354,14 @@ def split_line(text: str) -> List[str]:
     return lines
 
 
-
 ANSI_ESCAPE = re.compile(
     r'\033[@-Z\\-_\[\]P]|\033\[[0-?]*[ -/]*[@-~]|\033][^\007\033]*\007|[\000-\037]'
 )
 
+
 def colored(text, color=None, bold=False):
     fmt = []
-    if color== 'red':
+    if color == 'red':
         fmt.append('31')
     elif color == 'green':
         fmt.append('32')
@@ -553,7 +427,7 @@ def run_command_with_live_tail(ext: str, command: List[str], output_lines: int =
         nonlocal current_lines, process
         sys.stdout.write(SAVE_CURSOR)
         sys.stdout.write(MOVE_UP * current_lines)
-        banner = f"ext={ext} pid={process.pid} status={status.upper()} elapsed=({time.time()-start:.2f}S)\n"
+        banner = f"ext={ext} pid={process.pid} status={status.upper()} elapsed=({time.time() - start:.2f}S)\n"
         if status != 'FAILED':
             banner = colored(banner, 'green', bold=True)
         else:
@@ -629,12 +503,14 @@ class CMakeExtension(Extension):
         print(name, sourcedir)
         self.sourcedir = sourcedir
 
+
 def get_cmake_abi_args(cmake_args):
     if torch.compiled_with_cxx11_abi():
         cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=1")
     else:
         cmake_args.append("-D_GLIBCXX_USE_CXX11_ABI=0")
     return cmake_args
+
 
 class CMakeBuild(BuildExtension):
 
@@ -759,10 +635,11 @@ class CMakeBuild(BuildExtension):
             ["cmake", "--build", build_temp, "--verbose", *build_args], cwd=build_temp
         )
 
+
 if CUDA_HOME is not None or ROCM_HOME is not None:
     # ARM64-specific compiler flags
     arm64_flags = []
-    if platform.machine() in ("aarch64", "arm64"):
+    if platform.machine() == "aarch64":
         arm64_flags = [
             '-D_GNU_SOURCE',
             '-D__USE_GNU',
@@ -771,7 +648,7 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
             '-I/usr/include/aarch64-linux-gnu',
             '-I/usr/include/asm'
         ]
-    
+
     ops_module = CUDAExtension('KTransformersOps', [
         'csrc/ktransformers_ext/cuda/custom_gguf/dequant.cu',
         'csrc/ktransformers_ext/cuda/binding.cpp',
@@ -794,7 +671,7 @@ elif MUSA_HOME is not None:
         "#include <ATen/cuda/CUDAContext.h>": "#include \"torch_musa/csrc/aten/musa/MUSAContext.h\"",
         "#include <c10/cuda/CUDAGuard.h>": "#include \"torch_musa/csrc/core/MUSAGuard.h\"",
         "nv_bfloat16": "mt_bfloat16",
-        }).run()
+    }).run()
     ops_module = MUSAExtension('KTransformersOps', [
         'csrc/ktransformers_ext/cuda_musa/custom_gguf/dequant.mu',
         'csrc/ktransformers_ext/cuda_musa/binding.cpp',
@@ -834,7 +711,7 @@ if not torch.xpu.is_available():
     if with_balance:
         print("using balance_serve")
         ext_modules.append(
-            CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
+            CMakeExtension("balance_serve", os.fspath(Path("").resolve() / "csrc" / "balance_serve"))
         )
 else:
     ext_modules = [
@@ -845,6 +722,6 @@ setup(
     name=VersionInfo.PACKAGE_NAME,
     version=VersionInfo().get_package_version(),
     install_requires=triton_dep,
-    cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+    cmdclass={"bdist_wheel": BuildWheelsCommand, "build_ext": CMakeBuild},
     ext_modules=ext_modules
 )
