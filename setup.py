@@ -41,6 +41,23 @@ except ImportError:
     MUSA_HOME=None
 KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
 
+# Apply ARM64 fixes before building
+def apply_arm64_fixes():
+    """Apply ARM64-specific compilation fixes"""
+    if platform.machine() == "aarch64":
+        script_path = Path(__file__).parent / "scripts" / "apply_arm64_fixes.sh"
+        if script_path.exists():
+            print("Applying ARM64 CUDA compilation fixes...")
+            try:
+                subprocess.run([str(script_path)], check=True)
+                print("ARM64 fixes applied successfully")
+            except subprocess.CalledProcessError as e:
+                print(f"Warning: Failed to apply ARM64 fixes: {e}")
+                print("Continuing with build...")
+
+# Apply fixes before any other operations
+apply_arm64_fixes()
+
 # 检测 DEV_BACKEND 环境变量
 dev_backend = os.environ.get("DEV_BACKEND", "").lower()
 if dev_backend == "xpu":
@@ -612,19 +629,31 @@ class CMakeBuild(BuildExtension):
         )
 
 if CUDA_HOME is not None or ROCM_HOME is not None:
+    # ARM64-specific compiler flags
+    arm64_flags = []
+    if platform.machine() == "aarch64":
+        arm64_flags = [
+            '-D_GNU_SOURCE',
+            '-D__USE_GNU',
+            '-D__aarch64__',
+            '-D__ARM_NEON__',
+            '-I/usr/include/aarch64-linux-gnu',
+            '-I/usr/include/asm'
+        ]
+    
     ops_module = CUDAExtension('KTransformersOps', [
         'csrc/ktransformers_ext/cuda/custom_gguf/dequant.cu',
         'csrc/ktransformers_ext/cuda/binding.cpp',
         'csrc/ktransformers_ext/cuda/gptq_marlin/gptq_marlin.cu'
     ],
     extra_compile_args={
-            'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'],
+            'cxx': ['-O3', '-DKTRANSFORMERS_USE_CUDA'] + arm64_flags,
             'nvcc': [
                 '-O3',
                 # '--use_fast_math',
                 '-Xcompiler', '-fPIC',
                 '-DKTRANSFORMERS_USE_CUDA',
-            ]
+            ] + ['-Xcompiler', flag for flag in arm64_flags]
         }
     )
 elif MUSA_HOME is not None:
@@ -666,8 +695,8 @@ if not torch.xpu.is_available():
                 'csrc/custom_marlin/gptq_marlin/gptq_marlin_repack.cu',
             ],
             extra_compile_args={
-                'cxx': ['-O3'],
-                'nvcc': ['-O3', '-Xcompiler', '-fPIC'],
+                'cxx': ['-O3'] + arm64_flags,
+                'nvcc': ['-O3', '-Xcompiler', '-fPIC'] + ['-Xcompiler', flag for flag in arm64_flags],
             },
         )
     ]

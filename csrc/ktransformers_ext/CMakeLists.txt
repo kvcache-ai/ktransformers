@@ -93,6 +93,22 @@ if (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM_LWR STR
         if (NOT "${COMPILER_SUPPORTS_FP16_FORMAT_I3E}" STREQUAL "")
             list(APPEND ARCH_FLAGS -mfp16-format=ieee)
         endif()
+        
+        # Add ARM64-specific compiler flags for CUDA compatibility
+        if (KTRANSFORMERS_USE_CUDA)
+            # Add flags to handle missing ARM64 headers
+            add_compile_definitions(__aarch64__)
+            add_compile_definitions(__ARM_NEON)
+            
+            # Add include paths for ARM64-specific headers
+            include_directories(/usr/include/aarch64-linux-gnu)
+            include_directories(/usr/include/asm)
+            
+            # Add compiler flags to handle ARM64-specific issues
+            list(APPEND ARCH_FLAGS -D_GNU_SOURCE)
+            list(APPEND ARCH_FLAGS -D__USE_GNU)
+        endif()
+        
         if (${CMAKE_SYSTEM_PROCESSOR} MATCHES "armv6")
             # Raspberry Pi 1, Zero
             list(APPEND ARCH_FLAGS -mfpu=neon-fp-armv8 -mno-unaligned-access)
