@@ -44,22 +44,6 @@ class MatMulOps(object):
         return [torch_npu.npu_quant_matmul(quant_out, weight.T, deq_scale, bias=quant_bia, output_dtype=torch.float16)]
 
 
-class MatMulOpsAtb(object):
-    def execute(self, x_input):
-        """
-            :param x, weight, quant_bia, deq_scale
-            :return:
-        """
-        x = x_input[0]
-        weight = x_input[1]
-        quant_bia = x_input[2]
-        deq_scale = x_input[3]
-        target_shape = (x.shape[0], x.shape[-2], weight.shape[-2])
-        target_tensor = torch.zeros(target_shape, dtype=torch.float16, device=x.device)
-        torch_npu.torch_npu._npu_matmul_dequant(x, weight, quant_bia, deq_scale, target_tensor)
-        return [target_tensor]
-
-
 class DynamicQuantOps(object):
     """
         :param x, scale, offset
@@ -125,7 +109,6 @@ class KDeepseekV2AttentionW8A8A2(BaseInjectedModule, DeepseekV2Attention):
             self.num_heads //= tp
 
         if self.use_merge == "0":
-            print("--Use ATB FA-MLA and PA-MLA OP !--")
             self.elewise_quant = DynamicQuantOps()
             self.matmulDequant_operation = MatMulOps()
             self.matmulDequant_operation_aclnn = MatMulOps()

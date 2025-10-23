@@ -702,7 +702,7 @@ def translate_name_to_gguf(name):
     name = name.replace(".mlp.shared_experts.up_proj", ".ffn_up_shexp")
     name = name.replace(".mlp.shared_experts_gate", ".ffn_gate_inp_shexp")
     name = name.replace(".mlp.experts", "")
-    #TODO 考虑影响
+
     name = name.replace(".mlp.experts.ffn_down_exps", ".ffn_down_exps")
     name = name.replace(".mlp.experts.ffn_gate_exps", ".ffn_gate_exps")
     name = name.replace(".mlp.experts.ffn_up_exps", ".ffn_up_exps")
