@@ -1020,8 +1020,9 @@ bool iqk_mul_mat(long Nx, long Ny, long ne00,
     float * C, long stride_C, int ith, int nth) {
 
         MulMat mm;
+        int row_size_q8;
     
-        if (!MulMat::set_mul_mat(typeA, typeB, ne00, mm, Ny)) {
+        if (!MulMat::set_mul_mat(typeA, ne00, mm, row_size_q8, Ny)) {
             return false;
         }
 
@@ -4450,7 +4451,8 @@ template <int nrc> struct Q80 {
 
     inline float16x4_t load_scales(int iy, int i) const {
         const block_q8_0 * y4 = (const block_q8_0 *)y[iy] + i;
-        return vld1_f16((const float16_t *)y4->d);
+        float16_t d_val = GGML_FP16_TO_FP32(y4->d);
+        return vdup_n_f16(d_val);
     }
 
     template <typename Dequantizer>
@@ -4491,7 +4493,11 @@ template <int nrc> struct Q81 {
 
     inline float16x8_t load_scales(int iy, int i) const {
         const block_q8_1 * y4 = (const block_q8_1 *)y[iy] + i;
-        return vld1q_f16((const float16_t *)y4->d);
+        float16_t d_val = GGML_FP16_TO_FP32(y4->ds[0]);
+        float16_t s_val = GGML_FP16_TO_FP32(y4->ds[1]);
+        float16x4_t d_vec = vdup_n_f16(d_val);
+        float16x4_t s_vec = vdup_n_f16(s_val);
+        return vcombine_f16(d_vec, s_vec);
     }
 
     template <typename Dequantizer>
