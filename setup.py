@@ -504,6 +504,13 @@ class CMakeBuild(BuildExtension):
             f"-DCMAKE_BUILD_TYPE={cfg}",  # not used on MSVC, but no harm
         ]
 
+        # Add ARM-specific flags for aarch64 Linux systems
+        if platform.system() == "Linux" and platform.machine() == "aarch64":
+            cmake_args += [
+                "-DCMAKE_C_FLAGS=-march=armv8.6-a+fp+simd+sve+sve2+i8mm+f32mm+f64mm+fp16+bf16+fp16fml+crc",
+                "-DCMAKE_CXX_FLAGS=-march=armv8.6-a+fp+simd+sve+sve2+i8mm+f32mm+f64mm+fp16+bf16+fp16fml+crc",
+            ]
+
         if CUDA_HOME is not None:
             cmake_args += ["-DKTRANSFORMERS_USE_CUDA=ON"]
         elif MUSA_HOME is not None:
