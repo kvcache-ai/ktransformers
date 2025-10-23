@@ -10,7 +10,6 @@ node_modules
 .vs/
 *pycache*
 *build/
-*/third_party/*
 .DS_Store
 compile_commands.json
 *.egg-info*
@@ -27,3 +26,7 @@ mmlu_result*
 ktransformers/ktransformers_ext/cuda_musa/
 test_prompt.txt
 csrc/demo
+build*
+CMakeFiles/
+kvc2/
+sched/

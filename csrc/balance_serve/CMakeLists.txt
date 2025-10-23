@@ -10,11 +10,29 @@ message(STATUS "Using compiler: ${CMAKE_CXX_COMPILER}")
 project(balance_serve VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 20)
-# set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
-# set(CMAKE_BUILD_TYPE "Debug")
-set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+set(CMAKE_CXX_FLAGS "-Og -march=native -Wall -Wextra -g -fPIC")
+set(CMAKE_BUILD_TYPE "Debug")
+# set(CMAKE_CXX_FLAGS "-O3 -march=native -Wall -Wextra -fPIC")
+# set(CMAKE_BUILD_TYPE "Release")
+
+
+if(NOT DEFINED _GLIBCXX_USE_CXX11_ABI)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c
+        "import torch; print('1' if torch.compiled_with_cxx11_abi() else '0')"
+        OUTPUT_VARIABLE ABI_FLAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    set(_GLIBCXX_USE_CXX11_ABI ${ABI_FLAG} CACHE STRING "C++11 ABI setting from PyTorch" FORCE)
+endif()
+
+# 无论是否是自动检测，都传给编译器
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI})
-set(CMAKE_BUILD_TYPE "Release")
+
+message(STATUS "_GLIBCXX_USE_CXX11_ABI=${_GLIBCXX_USE_CXX11_ABI}")
 
 file(GLOB_RECURSE FMT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
 

@@ -79,8 +79,9 @@ def local_chat(
     if mode == 'long_context':
         assert config.architectures[0] == "LlamaForCausalLM", "only LlamaForCausalLM support long_context mode"
         torch.set_default_dtype(torch.float16)
-    elif xpu_fp16_model(config):
-        torch.set_default_dtype(torch.float16)
+    # elif xpu_fp16_model(config):
+    #     # using FP16 may cause accuracy issues, triggering core dumped during runtime
+    #     torch.set_default_dtype(torch.float16)
     else:
         torch.set_default_dtype(config.torch_dtype)
 

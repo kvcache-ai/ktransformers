@@ -9,7 +9,7 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference Optimizations</h3>
-  <strong><a href="#show-cases">🌟 Show Cases</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#tutorial">📃 Tutorial</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬  Discussion </a>|<a href="#FAQ"> 🙋 FAQ</a> </strong>
+  <strong><a href="#show-cases">🌟 Show Cases</a> | <a href="#quick-start">🚀 Quick Start</a> | <a href="#tutorial">📃 Tutorial</a> | <a href="#Citation">🔥  Citation </a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬  Discussion </a>|<a href="#FAQ"> 🙋 FAQ</a> </strong>
 </div>
 
 <h2 id="intro">🎉 Introduction</h2>
@@ -23,14 +23,16 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
 <h2 id="Updates">🔥 Updates</h2>
 
+* **Oct 10, 2025**: Integrating into SGLang. ([Roadmap](https://github.com/sgl-project/sglang/issues/11425))
+* **Sept 11, 2025**: Support Qwen3-Next. ([Tutorial](./doc/en/Qwen3-Next.md))
+* **Sept 05, 2025**: Support Kimi-K2-0905. ([Tutorial](./doc/en/Kimi-K2.md))
+* **July 26, 2025**: Support SmallThinker and GLM4-MoE. ([Tutorial](./doc/en/SmallThinker_and_Glm4moe.md))
+* **July 11, 2025**: Support Kimi-K2. ([Tutorial](./doc/en/Kimi-K2.md))
+* **June 30, 2025**: Support 3-layer (GPU-CPU-Disk) [prefix cache](./doc/en/prefix_cache.md) reuse.
 * **May 14, 2025**: Support Intel Arc GPU ([Tutorial](./doc/en/xpu.md)).
-
 * **Apr 29, 2025**: Support AMX-Int8、 AMX-BF16 and Qwen3MoE ([Tutorial](./doc/en/AMX.md))
 
 https://github.com/user-attachments/assets/fafe8aec-4e22-49a8-8553-59fb5c6b00a2
-
-
-
 
 * **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./doc/en/llama4.md)).
 * **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./doc/en/balance-serve.md)).
@@ -61,7 +63,7 @@ https://github.com/user-attachments/assets/ebd70bfa-b2c1-4abb-ae3b-296ed38aa285
 </p>
 
 - **[NEW!!!] Local 671B DeepSeek-Coder-V3/R1:** Running its Q4_K_M version using only 14GB VRAM and 382GB DRAM([Tutorial](./doc/en/DeepseekR1_V3_tutorial.md)).
-
+  
   - Prefill Speed (tokens/s):
     - KTransformers: 54.21 (32 cores) → 74.362 (dual-socket, 2×32 cores) → 255.26 (optimized AMX-based MoE kernel, V0.3 only) → 286.55 (selectively using 6 experts, V0.3 only)
     - Compared to 10.31 tokens/s in llama.cpp with 2×32 cores, achieving up to **27.79× speedup**.
@@ -127,7 +129,6 @@ we have already supported vendors:
 - Kunpeng
 - AMD
 
-
 ### 📥 Installation
 
 To install KTransformers, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
@@ -184,6 +185,19 @@ You can find example rule templates for optimizing DeepSeek-V2 and Qwen2-57B-A14
 
 If you are interested in our design principles and the implementation of the injection framework, please refer to the [design document](doc/en/deepseek-v2-injection.md).
 
+<h2 id="Citation">🔥 Citation</h2>
+
+If you use KTransformers for your research, please cite our [paper](https://madsys.cs.tsinghua.edu.cn/publication/ktransformers-unleashing-the-full-potential-of-cpu/gpu-hybrid-inference-for-moe-models/):
+
+```
+@inproceedings{10.1145/3731569.3764843,
+title = {KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models},
+author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
+year = {2025}
+}
+```
+
 <h2 id="ack">Acknowledgment and Contributors</h2>
 
 The development of KTransformers is based on the flexible and versatile framework provided by Transformers. We also benefit from advanced kernels such as GGUF/GGML, Llamafile, Marlin, sglang and flashinfer. We are planning to contribute back to the community by upstreaming our modifications.
@@ -197,3 +211,4 @@ If you have any questions, feel free to open an issue. Alternatively, you can jo
 <h2 id="FAQ">🙋 FAQ</h2>
 
 Some common questions are answered in the [FAQ](doc/en/FAQ.md).
+

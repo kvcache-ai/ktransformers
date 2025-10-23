@@ -21,12 +21,12 @@ user:
 
 model:
   # type: transformers
-  # type: balance_serve
-  type: ktransformers
+  type: balance_serve
+  # type: ktransformers
 
-  name: DeepSeek-Coder-V2-Instruct
-  path: deepseek-ai/DeepSeek-V2-Lite-Chat
-  gguf_path: ./DeepSeek-V2-Lite-Chat-GGUF
+  name: SmallThinkerForCausalLM
+  path: /mnt/data/models/Smallthinker-21B
+  gguf_path: /mnt/data/models/Smallthinker-21B
 
   device: cuda:0
   cache_lens: 16384
@@ -70,3 +70,4 @@ kvc2:
   gpu_only: true 
   utilization_percentage: 1.0
   cpu_memory_size_GB: 500
+  disk_path: /home/wjh/kvc
