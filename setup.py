@@ -653,7 +653,7 @@ if CUDA_HOME is not None or ROCM_HOME is not None:
                 # '--use_fast_math',
                 '-Xcompiler', '-fPIC',
                 '-DKTRANSFORMERS_USE_CUDA',
-            ] + ['-Xcompiler', flag for flag in arm64_flags]
+            ] + [item for flag in arm64_flags for item in ['-Xcompiler', flag]]
         }
     )
 elif MUSA_HOME is not None:
@@ -696,7 +696,7 @@ if not torch.xpu.is_available():
             ],
             extra_compile_args={
                 'cxx': ['-O3'] + arm64_flags,
-                'nvcc': ['-O3', '-Xcompiler', '-fPIC'] + ['-Xcompiler', flag for flag in arm64_flags],
+                'nvcc': ['-O3', '-Xcompiler', '-fPIC'] + [item for flag in arm64_flags for item in ['-Xcompiler', flag]],
             },
         )
     ]
