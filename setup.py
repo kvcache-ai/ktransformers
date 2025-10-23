@@ -57,24 +57,61 @@ def apply_arm64_fixes():
                 
                 # Add ARM64 headers if not already present
                 if "#include <sys/auxv.h>" not in content:
-                    content = content.replace(
-                        '#include "llamafile.h"',
-                        '#include "llamafile.h"\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
-                    )
-                
-                # Fix hardware capability detection
-                if "long hwcap = getauxval(AT_HWCAP);" in content:
-                    content = content.replace(
-                        "long hwcap = getauxval(AT_HWCAP);",
-                        "long hwcap = 0;\n#ifdef __linux__\n        hwcap = getauxval(AT_HWCAP);"
-                    )
-                    
-                    # Add else clause for non-Linux ARM64
-                    if "mixmul = llamafile_mixmul_arm80;" in content and "#else" not in content:
+                    # Find the right place to insert headers
+                    if '#include "llamafile.h"' in content:
                         content = content.replace(
-                            "mixmul = llamafile_mixmul_arm80;\n        }",
-                            "mixmul = llamafile_mixmul_arm80;\n        }\n#else\n        // Non-Linux ARM64 systems (e.g., macOS)\n        // Use baseline ARM64 implementation\n        sgemm = llamafile_sgemm_arm80;\n        mixmul = llamafile_mixmul_arm80;\n#endif"
+                            '#include "llamafile.h"',
+                            '#include "llamafile.h"\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
                         )
+                    elif '#include <cassert>' in content:
+                        content = content.replace(
+                            '#include <cassert>',
+                            '#include <cassert>\n\n// ARM64-specific headers and constants\n#ifdef __aarch64__\n#include <sys/auxv.h>\n#include <asm/hwcap.h>\n#endif'
+                        )
+                
+                # Fix hardware capability detection - be more specific
+                if "#elif defined(__aarch64__)" in content and "long hwcap = getauxval(AT_HWCAP);" in content:
+                    # Replace the entire ARM64 section
+                    old_section = """#elif defined(__aarch64__)
+        long hwcap = getauxval(AT_HWCAP);
+        if ((hwcap & HWCAP_FPHP) &&     // fp16 scalar isa (ID_AA64PFR0_EL1.FP == 1)
+            (hwcap & HWCAP_ASIMDHP) &&  // fp16 vector isa (ID_AA64PFR0_EL1.AdvSIMD == 1)
+            (hwcap & HWCAP_ASIMDDP)) {  // dotprod isa (ID_AA64ISAR0_EL1.DP == 1)
+            // e.g. Apple M1, Raspberry Pi 5
+            sgemm = llamafile_sgemm_arm82;
+            mixmul = llamafile_mixmul_arm82;
+            iqk_mixmul = iqk_mul_mat_moe_arm82;
+        } else {
+            // ARM64 baseline ISA
+            sgemm = llamafile_sgemm_arm80;
+            mixmul = llamafile_mixmul_arm80;
+        }"""
+                    
+                    new_section = """#elif defined(__aarch64__)
+        // ARM64 hardware capability detection
+        long hwcap = 0;
+#ifdef __linux__
+        hwcap = getauxval(AT_HWCAP);
+        if ((hwcap & HWCAP_FPHP) &&     // fp16 scalar isa (ID_AA64PFR0_EL1.FP == 1)
+            (hwcap & HWCAP_ASIMDHP) &&  // fp16 vector isa (ID_AA64PFR0_EL1.AdvSIMD == 1)
+            (hwcap & HWCAP_ASIMDDP)) {  // dotprod isa (ID_AA64ISAR0_EL1.DP == 1)
+            // e.g. Apple M1, Raspberry Pi 5
+            sgemm = llamafile_sgemm_arm82;
+            mixmul = llamafile_mixmul_arm82;
+            iqk_mixmul = iqk_mul_mat_moe_arm82;
+        } else {
+            // ARM64 baseline ISA
+            sgemm = llamafile_sgemm_arm80;
+            mixmul = llamafile_mixmul_arm80;
+        }
+#else
+        // Non-Linux ARM64 systems (e.g., macOS)
+        // Use baseline ARM64 implementation
+        sgemm = llamafile_sgemm_arm80;
+        mixmul = llamafile_mixmul_arm80;
+#endif"""
+                    
+                    content = content.replace(old_section, new_section)
                 
                 sgemm_file.write_text(content)
                 print("Fixed sgemm.cpp")
@@ -86,30 +123,35 @@ def apply_arm64_fixes():
                 
                 # Add missing structures if not already present
                 if "block_q8_0_x4" not in content:
-                    content = content.replace(
-                        'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);',
-                        'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);\n\n\n// Define missing block structures for ARM64\ntypedef struct {\n    ggml_half d[4];       // delta for each block\n    int8_t  qs[QK8_0 * 4]; // quants for 4 blocks\n} block_q8_0_x4;\n\ntypedef struct {\n    union {\n        struct {\n            ggml_half d[4]; // delta for each block\n            ggml_half s[4]; // d * sum(qs[i]) for each block\n        } GGML_COMMON_AGGR;\n        ggml_half2 ds[4];\n    };\n    int8_t qs[QK8_1 * 4]; // quants for 4 blocks\n} block_q8_1_x4;'
-                    )
+                    # Find the right place to insert structures
+                    if 'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);' in content:
+                        content = content.replace(
+                            'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);',
+                            'constexpr ggml_type GGML_TYPE_Q8_1_X4 = static_cast<ggml_type>(99);\n\n\n// Define missing block structures for ARM64\ntypedef struct {\n    ggml_half d[4];       // delta for each block\n    int8_t  qs[QK8_0 * 4]; // quants for 4 blocks\n} block_q8_0_x4;\n\ntypedef struct {\n    union {\n        struct {\n            ggml_half d[4]; // delta for each block\n            ggml_half s[4]; // d * sum(qs[i]) for each block\n        } GGML_COMMON_AGGR;\n        ggml_half2 ds[4];\n    };\n    int8_t qs[QK8_1 * 4]; // quants for 4 blocks\n} block_q8_1_x4;'
+                        )
                 
                 # Fix function signature mismatch - remove the conflicting function definition
                 if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in content:
-                    # Find and remove the conflicting function definition
+                    # Find and remove the conflicting function definition more carefully
                     lines = content.split('\n')
                     new_lines = []
                     skip_function = False
                     brace_count = 0
+                    in_function = False
                     
-                    for line in lines:
+                    for i, line in enumerate(lines):
                         if "bool MulMat::set_mul_mat(int typeA, int ne00, MulMat& m, int& row_size_q8, int Ny)" in line:
                             skip_function = True
+                            in_function = True
                             brace_count = 0
                             continue
                         
-                        if skip_function:
+                        if skip_function and in_function:
                             brace_count += line.count('{')
                             brace_count -= line.count('}')
                             if brace_count <= 0 and '}' in line:
                                 skip_function = False
+                                in_function = False
                                 continue
                         
                         if not skip_function:
