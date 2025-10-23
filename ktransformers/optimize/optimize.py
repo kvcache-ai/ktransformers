@@ -67,7 +67,7 @@ def del_meta(module:nn.Module):
 def gen_optimize_config(module: nn.Module, out_data: Mapping, rule_list: List, prefix: str="", default_device: str = "cuda:0"):
     module_name = prefix[:-1]
     if use_torch_npu:
-        translated_name = translate_name_to_gguf(prefix)[:-1] #TODO 主仓中没有使用此变量
+        translated_name = translate_name_to_gguf(prefix)[:-1]
     recursive = True
     for rule in rule_list:
         match_meta = rule["match"]

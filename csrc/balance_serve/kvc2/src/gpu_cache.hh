@@ -3,7 +3,6 @@
 
 #include <torch/torch.h>
 #include "cache_entry.hh"
-#include "cuda_stream_manager.hh"
 #include "defs.h"
 #include "kvc2.h"
 #include "metrics.h"
@@ -14,7 +13,6 @@
 #include "torch_npu/csrc/libs/torch_npu.h"
 #include "torch_npu/csrc/libs/init_npu.h"
 #include "torch_npu/csrc/core/npu/NPUFunctions.h"
-#include "cuda_stream_manager.hh"  // 假设NPU也有类似实现
 #else
 #include "cuda_stream_manager.hh"
 #endif
