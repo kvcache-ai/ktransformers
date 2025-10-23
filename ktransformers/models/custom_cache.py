@@ -250,7 +250,7 @@ class StaticCache(transformers.StaticCache):
         """Returns the maximum shape of the cache."""
         return self.max_cache_len
 
-class KVC2StaticCache(transformers.Cache):
+class KVC2StaticCache:
     """
     Static Cache class connect with KVC2
     remind: page_idx & page_offset info need to refs to forward batching, only contains KV Block Tensor here
@@ -313,29 +313,14 @@ class KVC2StaticCache(transformers.Cache):
             raise ValueError('[ERROR] block info:page_idx & page_offset missing!')
 
         k_out = self.k_caches[layer_idx]
-        # v_out = self.value_cache[layer_idx]
-        # self.past_tokens[layer_idx] += cache_position.size(0)
-        # print(cache_position)
         assert self.is_MLA, "currently only support DeepSeekV3 on NPU balance server"
 
-        # print("############### page_idx id is ", id(page_idx))
-        # print("############### page_offset id is ", id(page_offset))
-        # 一次性写入到 k_out 的指定位置+
-        # print("k_out size is ", k_out.size())
         if page_idx.dim() == 1:
             page_idx_tmp = page_idx.unsqueeze(0)
             page_offset_tmp = page_offset.unsqueeze(0)
         else:
              page_idx_tmp = page_idx
              page_offset_tmp = page_offset
-
-        # # page_idx = page_idx.flatten()
-        # # page_offset = page_offset.flatten()
-        # if layer_idx == 0:
-        #     # print("page_idx ", page_idx, "page_offset", page_offset)
-        #     print("page_idx_tmp ", page_idx_tmp.size(), "page_offset_tmp", page_offset_tmp.size())
-        #     print("k_out[page_idx, page_offset] size is ", k_out[page_idx_tmp, page_offset_tmp].size())
-        #     print("combined size is ", combined.size())
 
         k_out[page_idx_tmp, page_offset_tmp] = combined
         return k_out, page_idx
@@ -345,7 +330,6 @@ class KVC2StaticCache(transformers.Cache):
         raise ValueError('kvc2 cache pool no longer hold seq_length info, refer to forward batching')
 
     def get_usable_length(self, kv_seq_len, layer_idx: Optional[int] = 0) -> int:
-        # print('[WARN] currently npu balance serve do not support chunk prefill or prefix cache')
         return 0
 
     def change_seq_length(self, bias: Optional[int] = 0) -> int:
@@ -357,7 +341,6 @@ class KVC2StaticCache(transformers.Cache):
         return self.max_cache_len
 
     def reset(self, inference_context):
-        # print(" KVC2StaticCache reset activate 1!!!!")
         assert self.is_MLA and len(inference_context.k_cache) == 1, "currently only support MLA and Cache Pool TP=1"
         self.k_caches = []
         self.v_caches = []
@@ -368,7 +351,6 @@ class KVC2StaticCache(transformers.Cache):
             self.v_caches.append(None)
         self.max_cache_len = self.k_caches[0].shape[0] * self.k_caches[0].shape[1]  # page_len * page_size
 
-    # todo-luo 这个 get_page_table 和 另外连个类的入参不一样
     def get_page_table(self, mini_batch, bsz_tensors: torch.tensor = None, is_prefill=True):
         if is_prefill:
             # TODO add padding support
@@ -392,8 +374,6 @@ class KVC2StaticCache(transformers.Cache):
             # assert not indices[0].numel() > 0, 'there still have un-calculated page_idx value'
         else:
             page_local_idx = mini_batch.d_position_ids // self.page_size
-            # print("page_local_idx is ", page_local_idx)
-            # print("mini_batch.d_block_tables is ", mini_batch.d_block_tables)
 
             page_offset = mini_batch.d_position_ids % self.page_size
             
@@ -401,9 +381,7 @@ class KVC2StaticCache(transformers.Cache):
                 page_local_idx[i] = mini_batch.d_block_tables[i, page_local_idx[i]]
             
             page_idx = page_local_idx
-            # print("page_idx is ", page_idx)
-            # print("page_offset is ", page_offset)
-
+            
         return page_idx, page_offset
 
 class KDeepSeekV3Cache(nn.Module):

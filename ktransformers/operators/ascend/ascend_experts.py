@@ -108,7 +108,6 @@ class KDeepseekV3MoEW8A8(KDeepseekV3MoE):
                     event.wait(stream)
                 else:
                     from ktransformers.util.npu_graph_runner import get_or_create_runner
-                    # todo 同步kt_mb写法
                     npu_graph_runner = get_or_create_runner(utils.get_current_device())
                     event = torch.npu.Event()
                     event.record(npu_graph_runner.main_stream)
@@ -117,15 +116,11 @@ class KDeepseekV3MoEW8A8(KDeepseekV3MoE):
                         y_ = share_experts_forward() if share_experts_forward is not None else None
                         event.record(npu_graph_runner.share_experts_stream)
                     topk_weight = topk_weight.contiguous().to(torch.float32)
-                    # todo 同步kt_mb，新增参数个数
                     self.moe_kexperts_param = (hidden_states, topk_idx, topk_weight, None, True)
 
-                    # todo 比kt_mb 多，下面转换类型使用
                     org_type = hidden_states.dtype
-                    # todo 和 kt_mb 区别，kt_mb直接使用的 hidden_states
                     input_tensor = hidden_states.to(torch.bfloat16)
 
-                    # todo 同步kt_mb
                     cuda_graph_idx = bisect.bisect_left(npu_graphs, 1)
                     if cuda_graph_idx < len(npu_graphs):
 
