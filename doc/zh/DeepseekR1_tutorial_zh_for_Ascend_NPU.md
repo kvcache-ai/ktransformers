@@ -108,6 +108,8 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
 export USE_MERGE=0
 export INF_NAN_MODE_FORCE_DISABLE=1
 export TASK_QUEUE_ENABLE=0
+export RANK=0
+export LOCAL_WORLD_SIZE=1
 #export PROF_DECODE=1
 #export PROF_PREFILL=1
 
@@ -116,7 +118,6 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 python ktransformers/server/main.py \
 --port 10002 \
-
 --model_path /mnt/data/models/DeepSeek-R1-q4km-w8a8 \
 --gguf_path /mnt/data/models/DeepSeek-R1-q4km-w8a8 \
 --model_name DeepSeekV3ForCausalLM \
