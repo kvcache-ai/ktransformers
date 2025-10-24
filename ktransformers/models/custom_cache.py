@@ -222,6 +222,9 @@ class StaticCache(transformers.StaticCache):
     def get_max_length(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states."""
         return self.max_cache_len
+    
+    def get_usable_length(self, kv_seq_len, layer_idx: Optional[int] = 0) -> int:
+        return 0
 
     def reset(self):
         """Resets the cache values while preserving the objects"""
