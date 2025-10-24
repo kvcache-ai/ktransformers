@@ -473,9 +473,7 @@ class BalanceServeInterface(BackendInterfaceBase):
 
             kvcache_event.wait()
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            
             args.tp = input_args.tp
-
             pickle.dump(args, temp_file)
             temp_file_path = temp_file.name
         current_file = __file__
@@ -622,13 +620,16 @@ class BalanceServeInterface(BackendInterfaceBase):
         #@TODO add server
         stop_criteria =  [self.tokenizer.encode(self.tokenizer.eos_token, add_special_tokens=False),self.tokenizer.encode("<|im_end|>")]
         query_add.stop_criteria = stop_criteria
+
+        temperature, top_p, max_new_tokens = self.get_params(temperature, top_p, max_tokens, max_completion_tokens)
+
         query_add.sample_options.temperature = temperature
         if top_p == 0 or top_p is None:
             top_p = 0.0001
         query_add.sample_options.top_p = top_p
-        query_add.estimated_length = min(self.args.cache_lens, query_length+self.args.max_new_tokens)
+        query_add.estimated_length = min(self.args.cache_lens, query_length+max_new_tokens)
         query_id = self.sched_client.add_query(query_add)
-        queue = asyncio.Queue(maxsize=self.args.max_new_tokens)
+        queue = asyncio.Queue(maxsize=max_new_tokens)
         self.queue_map[query_id] = queue
         self.thread_map[thread_id] = query_id
         is_first_token = True
@@ -649,7 +650,7 @@ class BalanceServeInterface(BackendInterfaceBase):
         profiler.pause_timer("decode")
         report_last_time_performance(profiler)
         yield self.streamer.end(), None
-        if profiler.get_counter('decode') >= self.args.max_new_tokens - 1: #TODO max_new_tokens传入方式不同
+        if profiler.get_counter('decode') >= max_new_tokens - 1:
             yield "", "length"
         else:
             yield "", "stop"
