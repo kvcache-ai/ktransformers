@@ -11,15 +11,33 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ## Installation
 
+### Prerequisites
+
+First, initialize git submodules:
+```bash
+git submodule update --init --recursive
+```
+
 ### Standard Installation
 ```bash
 pip install .
 ```
 
+All dependencies (torch, safetensors, compressed-tensors, numpy) will be automatically installed from `pyproject.toml`.
+
 ### Editable Installation (Development)
 ```bash
 pip install -e .
 ```
+
+### Optional: Pre-install Dependencies
+
+If you encounter network issues or prefer to install dependencies separately, you can optionally use:
+```bash
+pip install -r requirements.txt
+```
+
+**Note**: This step is **optional**. If your environment already has torch and other required packages, you can skip this and directly run `pip install .`
 
 ## Usage
 

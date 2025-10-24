@@ -19,10 +19,13 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 dependencies = [
-  # Install black by default so git hook can use it
+  # Core dependencies
+  "torch>=2.0.0",
+  "safetensors>=0.4.0",
+  "compressed-tensors>=0.7.0",
+  "numpy>=1.24.0",
+  # Development dependencies
   "black>=25.9.0",
-  "torch",
-  "safetensors",
 ]
 
 # No optional dev group needed for formatting; using custom git hooks instead of pre-commit
