@@ -123,7 +123,6 @@ python ktransformers/server/main.py \
 --cpu_infer 60 \
 --optimize_config_path  /home/huawei/ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
 --max_new_tokens 128 \
---chunk_size 128 \
 --max_batch_size 4 \
 --use_cuda_graph \
 --tp 1 \
