@@ -1,0 +1,54 @@
+#!/bin/sh
+# commit-msg hook to enforce Conventional Commits (https://www.conventionalcommits.org/)
+# This script checks the commit message subject (first line) for a conventional commit format.
+# If the message does not conform, the hook exits non-zero to block the commit.
+
+# Read the commit message (first line)
+if [ -z "$1" ]; then
+  echo "commit-msg hook: no message file provided" >&2
+  exit 0
+fi
+
+MSG_FILE="$1"
+read -r FIRST_LINE < "$MSG_FILE" || FIRST_LINE=""
+
+# Trim leading/trailing whitespace
+FIRST_LINE="$(echo "$FIRST_LINE" | sed -e 's/^[ \t]*//' -e 's/[ \t]*$//')"
+
+# Allow empty message (let git handle it), or allow merges/reverts
+case "$FIRST_LINE" in
+  Merge:*|merge:*|Revert:*|revert:*)
+    exit 0
+    ;;
+esac
+
+# Conventional Commit regex (POSIX ERE)
+# [type](scope)!?: subject
+# types: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|wip
+# scope: any chars except )
+
+regex='^\[(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|wip)\](\([^\)]+\))?(!)?: .+'
+
+printf "%s" "$FIRST_LINE" | grep -E "$regex" >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  exit 0
+fi
+
+cat <<'EOF' >&2
+ERROR: Commit message does not follow Conventional Commits.
+
+Expected format:
+  [type](scope)?: subject
+
+Examples:
+  [feat]: add new feature
+  [fix(parser)]: handle edge case
+  [docs]!: update API docs (breaking change)
+
+Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, wip
+
+You can bypass this hook locally by running:
+  git commit --no-verify
+EOF
+
+exit 1

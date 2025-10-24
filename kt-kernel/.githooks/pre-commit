@@ -1,0 +1,63 @@
+#!/usr/bin/bash
+# Pre-commit hook: run clang-format via CMake 'format' target and Black for Python before allowing commit.
+# If formatting makes changes, stage them and abort so user can review.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BUILD_DIR="$REPO_ROOT/build"
+FORMAT_TARGET="format"
+CLANG_FORMAT_BIN="${CLANG_FORMAT_BIN:-clang-format}"
+BLACK_BIN="${BLACK_BIN:-black}"
+
+# Simple check clang-format present (optional)
+# clang-format optional: if missing, skip C/C++ formatting
+if ! command -v "$CLANG_FORMAT_BIN" >/dev/null 2>&1; then
+  echo "[pre-commit] clang-format not found (looked for $CLANG_FORMAT_BIN). Skipping C/C++ format." >&2
+fi
+
+# black optional: if missing, skip Python formatting
+if ! command -v "$BLACK_BIN" >/dev/null 2>&1; then
+  echo "[pre-commit] black not found (looked for $BLACK_BIN). Skipping Python format." >&2
+fi
+
+# Configure build directory if missing (quiet)
+if [ ! -d "$BUILD_DIR" ] || [ ! -f "$BUILD_DIR/Makefile" ] && [ ! -f "$BUILD_DIR/build.ninja" ]; then
+  echo "[pre-commit] configuring project (cmake) ..." >&2
+  cmake -S "$REPO_ROOT" -B "$BUILD_DIR" >/dev/null
+fi
+
+# Run format target (prefer ninja if present)
+# Run clang-format target when available and tool present
+if command -v "$CLANG_FORMAT_BIN" >/dev/null 2>&1; then
+  if [ -f "$BUILD_DIR/build.ninja" ]; then
+    (cd "$BUILD_DIR" && ninja -k0 "$FORMAT_TARGET" >/dev/null)
+  else
+    (cd "$BUILD_DIR" && make "$FORMAT_TARGET")
+  fi
+fi
+
+# Run black on staged python files (or entire repo if you prefer)
+if command -v "$BLACK_BIN" >/dev/null 2>&1; then
+  # Get staged python files; if none, skip
+  PY_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
+  if [ -n "$PY_FILES" ]; then
+    echo "[pre-commit] running black on staged python files..." >&2
+    $BLACK_BIN $PY_FILES
+  else
+    # Optionally format all python files; comment out if not desired
+    # $BLACK_BIN "$REPO_ROOT"
+    :
+  fi
+fi
+
+# Stage any formatting changes for tracked files
+if ! git diff --quiet --exit-code; then
+  echo "[pre-commit] Formatting applied; updating index." >&2
+  # Add only modified tracked files (exclude untracked new files not staged yet unless user staged them)
+  git add -u
+  echo "[pre-commit] Re-run git commit to proceed after reviewing changes." >&2
+  exit 1
+fi
+
+echo "[pre-commit] format OK." >&2
+exit 0
