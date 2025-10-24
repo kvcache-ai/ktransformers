@@ -177,8 +177,8 @@ def get_current_device():
         return f"cuda:{torch.npu.current_device()}"
 
 def get_compute_capability(device:torch.device = None):
-    # if use_torch_npu:
-    #     return 0
+    if use_torch_npu:
+        return 0
     if torch.cuda.is_available():
         if device is None:
             num_gpus = torch.cuda.device_count()
@@ -189,8 +189,6 @@ def get_compute_capability(device:torch.device = None):
             return min_compute_capability_major
         else:
             return torch.cuda.get_device_properties(device)
-    else:
-        return 0 #TODO 为什么不这么写
 
 def set_module(model, submodule_key, module):
     tokens = submodule_key.split('.')

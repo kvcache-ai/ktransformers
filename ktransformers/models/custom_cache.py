@@ -25,7 +25,7 @@ try:
     use_torch_npu = torch_npu.npu.is_available()
 except:
     use_torch_npu = False
-
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
 class StaticCache(transformers.StaticCache):
     """
@@ -46,13 +46,13 @@ class StaticCache(transformers.StaticCache):
     """
 
     def __init__(self, config: PretrainedConfig, max_batch_size: int, max_cache_len: int, device: torch.device| dict, dtype=None) -> None:
-        Cache.__init__(self)
-        self.max_batch_size = max_batch_size
+        Cache.__init__(self, layer_class_to_replicate=LlamaDecoderLayer)
+        self._max_batch_size = max_batch_size
 
         if use_torch_npu:
             self.position = [0]
 
-        self.max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
+        self._max_cache_len = config.max_position_embeddings if max_cache_len is None else max_cache_len
         # Some model define a custom `head_dim` != config.hidden_size // config.num_attention_heads
         if config.architectures[0] == "DeepseekV3ForCausalLM":
             self.head_dim = config.qk_rope_head_dim
@@ -68,7 +68,7 @@ class StaticCache(transformers.StaticCache):
 
         self.key_cache: List[torch.Tensor] = []
         self.value_cache: List[torch.Tensor] = []
-        cache_shape = (max_batch_size, self.num_key_value_heads, self.max_cache_len, self.head_dim)
+        cache_shape = (max_batch_size, self.num_key_value_heads, self._max_cache_len, self.head_dim)
         if config.architectures[0] == "DeepseekV2ForCausalLM" or config.architectures[0] == "DeepseekV3ForCausalLM":
             # TODO: for deepseek, cache_shape is different whether using Absorbed MLA, check it automatically
 
@@ -78,11 +78,11 @@ class StaticCache(transformers.StaticCache):
                 self.page_size,
                 dtype=torch.int32,
                     ).npu()
-                self.max_pages_per_batch = (self.max_cache_len + self.page_size - 1) // self.page_size
-                self.max_pages = (self.max_cache_len + self.page_size - 1) // self.page_size * self.max_batch_size
+                self.max_pages_per_batch = (self._max_cache_len + self.page_size - 1) // self.page_size
+                self.max_pages = (self._max_cache_len + self.page_size - 1) // self.page_size * self._max_batch_size
             else:
                 self.page_size = 64
-                self.max_pages = (self.max_cache_len + self.page_size - 1) // self.page_size
+                self.max_pages = (self._max_cache_len + self.page_size - 1) // self.page_size
             latent_shape = (self.max_pages, self.page_size, 1, config.kv_lora_rank + config.qk_rope_head_dim)
             self.kv_lora_rank = config.kv_lora_rank
             self.qk_rope_head_dim = config.qk_rope_head_dim
@@ -138,6 +138,14 @@ class StaticCache(transformers.StaticCache):
             self.key_cache.append(new_layer_key_cache)
             self.value_cache.append(new_layer_value_cache)
             self.past_tokens.append(0)
+
+    @property
+    def max_batch_size(self):
+        return self._max_batch_size
+
+    @property
+    def max_cache_len(self):
+        return self._max_cache_len
 
     def update(
         self,
@@ -214,6 +222,9 @@ class StaticCache(transformers.StaticCache):
     def get_max_length(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states."""
         return self.max_cache_len
+    
+    def get_usable_length(self, kv_seq_len, layer_idx: Optional[int] = 0) -> int:
+        return 0
 
     def reset(self):
         """Resets the cache values while preserving the objects"""
