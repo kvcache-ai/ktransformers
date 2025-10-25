@@ -37,8 +37,9 @@ conda install -c conda-forge libstdcxx-ng  # 安装`GLIBCXX-3.4.32`
 apt install zlib1g-dev libtbb-dev libssl-dev libaio-dev libcurl4-openssl-dev
 pip3 install numpy==1.26.4  # 适配torch/torch_npu
 pip3 install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
-pip3 install packaging ninja transformers==4.43.2 fire protobuf attrs decorator cloudpickle ml-dtypes scipy tornado absl-py psutil
+pip3 install packaging ninja fire protobuf attrs decorator cloudpickle ml-dtypes scipy tornado absl-py psutil
 pip3 install sqlalchemy
+pip3 install transformers==4.57.1 #此处注意运行时transformers版本要求4.57.1(其他版本未验证)
 #pip3 install cpufeature  # only for x86
 ```
 
@@ -122,7 +123,7 @@ python ktransformers/server/main.py \
 --gguf_path /mnt/data/models/DeepSeek-R1-q4km-w8a8 \
 --model_name DeepSeekV3ForCausalLM \
 --cpu_infer 60 \
---optimize_config_path  /home/huawei/ktransformers/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
+--optimize_config_path  ./ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
 --max_new_tokens 128 \
 --max_batch_size 4 \
 --use_cuda_graph \
