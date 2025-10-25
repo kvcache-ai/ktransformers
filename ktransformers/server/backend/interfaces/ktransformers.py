@@ -232,12 +232,6 @@ class KTransformersInterface(TransformersInterface):
                 )
                 self.seq_length = 1
             
-            # flat_prev_ids = self.generated_ids.flatten()
-            # for i in range(min(self.seq_length, flat_input_ids.shape[0]) - 1):
-            #     if flat_input_ids[i] == flat_prev_ids[i]:
-            #         same_prefix += 1
-            #     else:
-            #         break
 
             logger.debug(f"same prefix len: {same_prefix}")
             self.cache.remove_suffix(same_prefix)
