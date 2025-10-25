@@ -106,19 +106,3 @@ class ProfStatItem:
 
 PROF_TIME_STAT = ProfTimeStat()
 
-
-# j=0
-# start_time = PROF_TIME_STAT.record_start_time()
-# for i in range(500):
-#     j+=1
-# PROF_TIME_STAT.add_time_stat(ProfStatKey.ExpertsSummitCurrLayer, start_time, False)
-
-# for i in range(500):
-#     j+=1
-# PROF_TIME_STAT.add_time_stat(ProfStatKey.ExpertsSummitCurrLayer, start_time, False)
-
-# for i in range(500):
-#     j+=1
-# PROF_TIME_STAT.add_time_stat(ProfStatKey.ExpertsSummitCurrLayer, start_time, False)
-
-# PROF_TIME_STAT.print_all()

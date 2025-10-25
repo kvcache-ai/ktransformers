@@ -114,16 +114,6 @@ class KNPUDeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
             print("########################################")
             print("hidden_states is ", hidden_states)
             print("########################################")
-        # with torch.npu.stream(self.call_stream):
-        #     position_ids, page_idx, page_offset, block_tables, hidden_states, bsz, q_len, hidden_size = param
-        #     print("########################################")
-        #     print("position_ids is ", position_ids)
-        #     print("page_idx is ", page_idx)
-        #     print("page_offset is ", page_offset)
-        #     print("block_tables is ", block_tables)
-        #     print("hidden_states is ", hidden_states)
-        #     print("#########################################")
-
 
     def forward(
         self,
@@ -172,27 +162,8 @@ class KNPUDeepseekV3ForCausalLM(DeepseekV3PreTrainedModel):
             q_len_raw = None
             kv_len_raw = batch.minibatch.d_kv_len_list
             bsz_real = None
-            # if utils._USE_NPU_GRAPH:
-            #     from libgraph_capture import graph_capture_launch_callback
-            #     param = (position_ids, page_idx, page_offset, block_tables, hidden_states, bsz, q_len, hidden_size)
-            #     graph_capture_launch_callback(self.print_callback, param, 1, self.stream.npu_stream)
-            # else:
-            #     param = (position_ids, page_idx, page_offset, block_tables, hidden_states, bsz, q_len, hidden_size)
-            #     self.print_callback(param)
 
-
-        # with torch_npu.npu.stream(self.stream):
-        # print_ex("####: before decode layer...")
         for i, decode_layer in enumerate(self.model.layers):
-            # if not is_prefill:
-            #     if utils._USE_NPU_GRAPH:
-            #         from libgraph_capture import graph_capture_launch_callback
-            #         param = (hidden_states, )
-            #         graph_capture_launch_callback(self.print_callback, param, 1, self.stream.npu_stream)
-            #     else:
-            #         param = (hidden_states, )
-            #         self.print_callback(param)
-            # attn
             residual = hidden_states
             hidden_states = decode_layer.input_layernorm(hidden_states)
 
