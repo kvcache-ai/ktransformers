@@ -24,8 +24,16 @@ from typing import Sequence
 import os
 from enum import IntEnum
 import torch
-if not torch.xpu.is_available():
+
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not torch.xpu.is_available() and not use_torch_npu:
     import KTransformersOps
+
 import ctypes
 import math
 
@@ -165,7 +173,6 @@ DATA_TYPES = {
     "float64": 12,
     "FP8": 13,
 }
-
 
 def read_value(f, data_type):
     if data_type == DATA_TYPES["string"]:
@@ -694,9 +701,11 @@ def translate_name_to_gguf(name):
     name = name.replace(".mlp.shared_experts.gate_proj", ".ffn_gate_shexp")
     name = name.replace(".mlp.shared_experts.up_proj", ".ffn_up_shexp")
     name = name.replace(".mlp.shared_experts_gate", ".ffn_gate_inp_shexp")
-
-
     name = name.replace(".mlp.experts", "")
+
+    name = name.replace(".mlp.experts.ffn_down_exps", ".ffn_down_exps")
+    name = name.replace(".mlp.experts.ffn_gate_exps", ".ffn_gate_exps")
+    name = name.replace(".mlp.experts.ffn_up_exps", ".ffn_up_exps")
 
     
     name = name.replace(".block_sparse_moe.gate.", ".ffn_gate_inp.")
@@ -707,9 +716,7 @@ def translate_name_to_gguf(name):
     name = name.replace(".feed_forward.shared_experts.down_proj", ".ffn_down_shexp")
     name = name.replace(".feed_forward.shared_experts.gate_proj", ".ffn_gate_shexp")
     name = name.replace(".feed_forward.shared_experts.up_proj", ".ffn_up_shexp")
-
     return name
-
 
 if __name__ == '__main__':
     gguf_path = '/mnt/data/model/DeepSeek-Coder-V2-GGUF-WJH'

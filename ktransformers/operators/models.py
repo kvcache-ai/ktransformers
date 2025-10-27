@@ -74,6 +74,12 @@ if is_flash_attn_2_available():
         inspect.signature(flash_attn_func).parameters
     )
 
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "Qwen/Qwen1.5-MoE-A2.7B"
@@ -580,6 +586,7 @@ class KDeepseekV2Model(BaseInjectedModule):
         per_layer_prefill_intput_threshold: (
             int | None
         ) = None,  # if None, no per-layer prefill
+        is_prefill: Optional[bool] = False,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         if per_layer_prefill_intput_threshold is None:
             per_layer_prefill_intput_threshold = self.per_layer_prefill_intput_threshold
@@ -668,8 +675,11 @@ class KDeepseekV2Model(BaseInjectedModule):
 
         if per_layer_prefill_flag:
             causal_mask = None
+        elif use_torch_npu and not is_prefill:
+            causal_mask = None
         else:
-            if (os.name == 'nt'
+            if (use_torch_npu
+                or os.name == 'nt'
                 or get_compute_capability() < 8
                 or (self.transfer_map is not None and 'cpu' in self.transfer_map.values())
                 or device_manager.gpu_vendor != GPUVendor.NVIDIA):
@@ -757,6 +767,7 @@ class KDeepseekV2Model(BaseInjectedModule):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    is_prefill = is_prefill,
                 )
                 t5 = time.time()
                 if per_layer_prefill_flag:
@@ -777,6 +788,8 @@ class KDeepseekV2Model(BaseInjectedModule):
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
 
+        if use_torch_npu:
+            hidden_states_without_norm = hidden_states.clone()
         hidden_states = self.norm(hidden_states)
         # with open("log.txt", "a") as f:
         #     f.write(f"@@@After layers\n")
@@ -808,11 +821,18 @@ class KDeepseekV2Model(BaseInjectedModule):
                 else next_decoder_cache
             )
         if not return_dict:
-            return tuple(
-                v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
-                if v is not None
-            )
+            if use_torch_npu:
+                return tuple(
+                    v
+                    for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, hidden_states_without_norm]
+                    if v is not None
+                )
+            else:
+                return tuple(
+                    v
+                    for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+                    if v is not None
+                )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,

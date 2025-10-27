@@ -2,6 +2,12 @@ from typing import Any, List, Optional, Set
 import re
 import json
 import uuid
+try:
+    import torch_npu
+    use_npu = torch.npu.is_available()
+except:
+    use_npu = False
+
 from transformers import (
     LlamaTokenizer,
     AutoTokenizer,
@@ -26,11 +32,16 @@ from ktransformers.server.schemas.base import ObjectID
 from ktransformers.server.utils.multi_timer import Profiler
 from torch.nn.attention import SDPBackend
 import torch
+import torch.distributed as dist
+
+from ktransformers.util import utils
 import sys, os
 from ..base import ThreadContext, BackendInterfaceBase
 from ktransformers.server.config.log import logger
 from ..args import ConfigArgs, default_args
 from ktransformers.operators.flashinfer_wrapper import flashinfer_enabled, MLAWrapperSingleton
+from ktransformers.util import utils
+
 
 # This TextStreamer is a modified version from https://github.com/huggingface/transformers/blob/main/src/transformers/generation/streamers.py
 class TextStreamer:
@@ -191,11 +202,12 @@ class TransformersInterface(BackendInterfaceBase):
         #     input_ids = self.tokenizer.apply_chat_template(
         #         new_messages, return_tensors="pt", add_generation_prompt=True
         #     ).to(self.args.device)
-        input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
+        # input_str: str = self.tokenizer.apply_chat_template(new_messages,tokenize=False,add_generation_prompt=True)
         # drop <think> token in chat template
-        if input_str.endswith('<think>\n'):
-            input_str = input_str[:-len('<think>\n')]
-        input_ids = self.tokenizer.encode(input_str, return_tensors="pt").to(self.args.device)
+        # if input_str.endswith('<think>\n'):
+        #     input_str = input_str[:-len('<think>\n')]
+        # input_ids = self.tokenizer.encode(input_str, return_tensors="pt").to(self.args.device)
+        input_ids = self.tokenizer.apply_chat_template(new_messages, add_generation_prompt=True, return_tensors="pt").to(self.args.device)
         if (self.last_request_id is not None) and self.last_request_id == thread_id:
             x = self.generated_ids[:,:self.seq_length]
             y = input_ids[:,:self.seq_length]
@@ -212,6 +224,7 @@ class TransformersInterface(BackendInterfaceBase):
     def append_new_tokens(self, new_tokens: int) -> Optional[str]:
         self.generated_ids[0, self.seq_length] = new_tokens
         self.seq_length += 1
+        self.cache.position[0] += 1
         return self.streamer.put(new_tokens)
 
     @staticmethod
@@ -273,6 +286,7 @@ class TransformersInterface(BackendInterfaceBase):
             top_p = self.model.generation_config.top_p
         if top_p == 0:
             top_p = 0.0001
+        # keep sampler the same as local_chat
         generation_config, model_kwargs = self.model._prepare_generation_config(
             None, max_length=self.args.max_new_tokens,
             do_sample=True, 
@@ -282,7 +296,6 @@ class TransformersInterface(BackendInterfaceBase):
             repetition_penalty=self.args.repetition_penalty # change this to modify generate config
         )
         self.inputs = inputs
-
         self.logits_warper = self.tf_logits_warper(generation_config)
 
     def logits_to_token(self, logits: torch.Tensor):
@@ -325,6 +338,7 @@ class TransformersInterface(BackendInterfaceBase):
             max_new_tokens = self.args.max_new_tokens
         else:
             max_new_tokens = min(self.args.max_new_tokens, max_completion_tokens)
+
         if is_new:
             self.ever_generated_ids.clear()
             same_prefix = 0
@@ -389,16 +403,17 @@ class TransformersInterface(BackendInterfaceBase):
 
         self.prepare_logits_wrapper(input_ids, device, temperature, top_p)
         next_token = self.logits_to_token(logits[0, -1, :])
-        self.max_new_tokens = min(max_new_tokens, self.args.cache_lens - self.seq_length) - 1 
         yield self.append_new_tokens(next_token)
 
     @torch.no_grad
     def generate(self):
+        self.max_new_tokens = min(self.args.max_new_tokens, self.args.cache_lens - self.seq_length) - 1 
         logger.info(f"args.max_new_tokens: {self.args.max_new_tokens}, cache_lens: {self.args.cache_lens}, seq_length: {self.seq_length}")
         if(self.max_new_tokens <= 0):
             logger.warning("max_new_tokens is less than 0")
             yield self.streamer.end(), "length"
             return
+        logger.info(f"max_new_tokens: {self.max_new_tokens}")
         self.profiler.set_counter("decode", 0)
 
         for i in range(1, self.max_new_tokens):
@@ -420,8 +435,12 @@ class TransformersInterface(BackendInterfaceBase):
         else:   # for's else, if output get max new tokens
             yield self.streamer.end(), None
             yield "", "length"
-        
-        
+
+        if self.args.use_cuda_graph:
+            utils._USE_NPU_GRAPH = False
+            from ktransformers.util.npu_graph_runner import get_or_create_runner
+            npu_graph_runner = get_or_create_runner(utils.get_current_device())
+            npu_graph_runner.destroy()
 
     def check_is_new(self, thread_id: str):
         if not self.use_static_cache:
@@ -439,6 +458,10 @@ class TransformersInterface(BackendInterfaceBase):
     async def inference(self, local_messages, thread_id: str, temperature: Optional[float] = None, top_p: Optional[float] = None, max_tokens: Optional[float] = None, max_completion_tokens: Optional[float] = None):
         self.streamer.reset()
         self.profiler.create_and_start_timer("tokenize")
+        torch.distributed.barrier()
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        tp_size = utils.get_tensor_parallel_size()
         if isinstance(local_messages, List):
             input_ids = self.format_and_tokenize_input_ids(thread_id, local_messages)
         elif isinstance(local_messages, str):
@@ -447,12 +470,29 @@ class TransformersInterface(BackendInterfaceBase):
             #input_ids = torch.tensor([[6366]], device=input_ids.device)
         else:
             raise ValueError("local_messages should be List or str")
+
+        if tp_size == world_size and tp_size > 1:
+            torch.distributed.barrier()
+            input_size = torch.tensor([input_ids.size(1)], dtype=torch.int64, device=utils.CUR_DEVICE)
+            all_input_sizes = [torch.zeros_like(input_size) for _ in range(world_size)]
+            dist.all_gather(all_input_sizes, input_size)
+
+            max_input_size = max([size.item() for size in all_input_sizes])
+            padded_input_ids = torch.zeros(1, max_input_size, dtype=input_ids.dtype, device=utils.CUR_DEVICE)
+            padded_input_ids[0, :input_ids.size(1)] = input_ids[0]
+
+            all_padded_inputs = [torch.zeros_like(padded_input_ids) for _ in range(world_size)]
+            dist.all_gather(all_padded_inputs, padded_input_ids)
+
+            original_size = all_input_sizes[0].item()
+            input_ids = all_padded_inputs[0][:, :original_size]
         
         if Config().user_force_think:
             token_thinks = torch.tensor([self.tokenizer.encode("<think>\n",add_special_tokens=False)],device=input_ids.device)
-            input_ids = torch.cat(
-                [input_ids, token_thinks], dim=1
-            )
+            if not torch.equal(input_ids[0, -token_thinks.shape[-1]:], token_thinks[-1]):
+                input_ids = torch.cat(
+                    [input_ids, token_thinks], dim=1
+                )
 
         self.profiler.pause_timer("tokenize")
 
@@ -473,8 +513,19 @@ class TransformersInterface(BackendInterfaceBase):
         self.profiler.create_and_start_timer("decode")
         for t, finish_reason in self.generate():
             if t is not None:
-                print(t, end="",flush=True)
+                if tp_size == world_size:
+                    if rank == 0:
+                        print(t, end="", flush=True)
+                else:
+                    print(t, end="",flush=True)
                 yield t, finish_reason
-        print("")
-        self.profiler.pause_timer("decode")
-        self.report_last_time_performance()
+
+        if tp_size == world_size:
+            if rank == 0:
+                print("")
+                self.profiler.pause_timer("decode")
+                self.report_last_time_performance()
+        else:
+            print("")
+            self.profiler.pause_timer("decode")
+            self.report_last_time_performance()

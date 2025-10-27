@@ -1,0 +1,114 @@
+- match:
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3RotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.YarnRotaryEmbeddingV3
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+
+- match:
+    name: "^lm_head$"  # regular expression
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.ascend.ascend_linear.KTransformersLinearW8A8A2  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      generate_op: "KLinearTorchW8A8A2"
+      prefill_op: "KLinearTorchW8A8A2"
+
+- match:
+    name: "^model\\.layers\\.(?!.*self_attn\\.kv_b_proj).*$"  # regular expression
+    class: torch.nn.Linear  # only match modules matching name and class simultaneously
+  replace:
+    class: ktransformers.operators.ascend.ascend_linear.KTransformersLinearW8A8A2  # optimized Kernel on quantized data types
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      generate_op: "KLinearTorchW8A8A2"
+      prefill_op: "KLinearTorchW8A8A2"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_deepseek_v3.DeepseekV3MoE
+  replace:
+    class: ktransformers.operators.ascend.ascend_experts.KDeepseekV3MoEW8A8     # mlp module with custom forward function
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+
+- match:
+    name: "^model\\.layers\\.([0-2])\\.mlp$"
+    class: "ktransformers.models.modeling_deepseek_v3.DeepseekV3MLP"
+  replace:
+    class: "ktransformers.operators.ascend.ascend_mlp.KDeepseekV3MLPW8A8A2V1"
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.shared_experts$"
+    class: "ktransformers.models.modeling_deepseek_v3.DeepseekV3MLP"
+  replace:
+    class: "ktransformers.operators.ascend.ascend_mlp.KDeepseekV3MLPW8A8A2V2"
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+
+- match:
+    class: ktransformers.models.modeling_deepseek_v3.MoEGate
+  replace:
+    class: ktransformers.operators.ascend.ascend_gate.KDeepseekV3GateA2
+    kwargs:
+      generate_device: "npu:0"
+      prefill_device: "npu:0"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.ascend.ascend_experts.KTransformersExpertsW8A8
+    kwargs:
+      prefill_device: "npu"
+      prefill_op: "KExpertsTorch"
+      generate_device: "cpu"
+      generate_op: "KExpertsCPUW8A8"
+      out_device: "npu"
+  recursive: False # don't recursively inject submodules of this module
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+    class: ktransformers.operators.experts.KExpertsCPU
+  replace:
+    class: ktransformers.operators.ascend.ascend_experts.KExpertsCPUW8A8
+
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.ascend.ascend_attention.KDeepseekV2AttentionW8A8A2Serve # optimized MLA implementation
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      absorb_for_prefill: False # change this to True to enable long context(prefill may slower).
+
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KDeepseekV2Model"
+    kwargs:
+      per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
+
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cpu"
+
+- match:
+    name: "^model..*norm"
+  replace:
+    class: ktransformers.operators.ascend.ascend_layernorm.KDeepseekV3RMSNormW8A8
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"

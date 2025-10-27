@@ -26,7 +26,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "ktransformers_ext
 import cpuinfer_ext
 from cpuinfer_ext.moe import MOEConfig, MOE
 import ctypes
-from ktransformers.util.custom_gguf import GGMLQuantizationType
+from ktransformers.util.custom_gguf import GGMLQuantizationType, translate_name_to_gguf
 from ktransformers.util.custom_loader import GGUFLoader, SafeTensorLoader, ModelLoader
 from ktransformers.util.utils import InferenceState
 from ktransformers.server.config.config import Config
@@ -36,6 +36,13 @@ from abc import ABC, abstractmethod
 from ktransformers.operators.linear import KLinearMarlin, KLinearTorch, KTransformersLinear
 import time
 from ktransformers.operators.cpuinfer import CPUInfer
+
+try:
+    import torch_npu
+    from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
 
 
 def deduplicate_and_sort(lst):
@@ -53,6 +60,8 @@ def generate_cuda_graphs(chunk_size: int) -> list:
 #cuda_graphs = [Config().chunk_size] 
 if torch.cuda.is_available():
     cuda_graphs = generate_cuda_graphs(Config().chunk_size)
+elif use_torch_npu:
+    cuda_graphs = deduplicate_and_sort([1, 2, 3, 4])
 else:
     cuda_graphs = 1
 # class Base(BaseInjectedModule, ABC):
@@ -158,6 +167,10 @@ class KExpertsCPU(KExpertsBase):
         self.backend = kwargs.get("backend", "llamafile")
 
     def load(self, w: dict | nn.Parameter | tuple | None = None, device:str|None = None, warmup:bool = False):
+        if use_torch_npu and get_tensor_parallel_size() != 1 and (
+            not torch.distributed.is_initialized() or torch.distributed.get_rank() != 0):
+            return
+
         if device:
             assert device.lower() == "cpu", "KExpertsCPU can only be loaded on CPU, Parameter \"device\" can be cpu or None."
         if w is None: w = self.load_weights()[self.key]
@@ -254,11 +267,18 @@ class KExpertsCPU(KExpertsBase):
                 KExpertsCPU.output_gpu_map[self.out_device] = torch.zeros((cuda_graphs, self.config.hidden_size), device=self.out_device)
         if KExpertsCPU.input_tensor_cpu == None:
             if isinstance(cuda_graphs, list):
-                KExpertsCPU.input_tensor_cpu = [torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True) for i in range(len(cuda_graphs))]
-                KExpertsCPU.expert_ids_cpu = [torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True) for i in range(len(cuda_graphs))]
-                KExpertsCPU.weights_cpu = [torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True) for i in range(len(cuda_graphs))]
-                KExpertsCPU.output_cpu = [torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16) for i in range(len(cuda_graphs))]
-                KExpertsCPU.bsz_tensor_cpu = [torch.zeros((1), device="cpu", dtype=torch.int32, pin_memory=True) for i in range(len(cuda_graphs))]
+                if use_torch_npu:
+                    KExpertsCPU.input_tensor_cpu = [[torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)] for i in range(len(cuda_graphs))]
+                    KExpertsCPU.expert_ids_cpu = [[torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)] for i in range(len(cuda_graphs))]
+                    KExpertsCPU.weights_cpu = [[torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True)] for i in range(len(cuda_graphs))]
+                    KExpertsCPU.output_cpu = [[torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)] for i in range(len(cuda_graphs))]
+                    KExpertsCPU.bsz_tensor_cpu = [[torch.tensor([cuda_graphs[i]], device="cpu", dtype=torch.int32, pin_memory=True)] for i in range(len(cuda_graphs))]                    
+                else:
+                    KExpertsCPU.input_tensor_cpu = [torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True) for i in range(len(cuda_graphs))]
+                    KExpertsCPU.expert_ids_cpu = [torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True) for i in range(len(cuda_graphs))]
+                    KExpertsCPU.weights_cpu = [torch.zeros((cuda_graphs[i], num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True) for i in range(len(cuda_graphs))]
+                    KExpertsCPU.output_cpu = [torch.zeros((cuda_graphs[i], self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16) for i in range(len(cuda_graphs))]
+                    KExpertsCPU.bsz_tensor_cpu = [torch.zeros((1), device="cpu", dtype=torch.int32, pin_memory=True) for i in range(len(cuda_graphs))]
             else:
                 KExpertsCPU.input_tensor_cpu = torch.zeros((cuda_graphs, self.config.hidden_size), device="cpu", pin_memory=True)
                 KExpertsCPU.expert_ids_cpu = torch.zeros((cuda_graphs, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)
@@ -399,6 +419,16 @@ class KExpertsCPU(KExpertsBase):
                 gate_type = self.gguf_loader.get_ggml_type(key + ".ffn_gate.0.weight")
                 up_type = self.gguf_loader.get_ggml_type(key + ".ffn_up.0.weight")
                 down_type = self.gguf_loader.get_ggml_type(key + ".ffn_down.0.weight")
+            elif self.gguf_loader.safetensor_loader is not None:
+                # for npu
+                # using a temp ugly way to temprary load the tensor
+                translate_key = translate_name_to_gguf(key)
+                gate = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_gate_exps.weight").numpy()
+                up = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_up_exps.weight").numpy()
+                down = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_down_exps.weight").numpy()
+                gate_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_gate_exps.ggml_type").item()
+                up_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_up_exps.ggml_type").item()
+                down_type = self.gguf_loader.safetensor_loader.load_tensor(translate_key + ".ffn_down_exps.ggml_type").item()
             else:
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {key:{"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}
