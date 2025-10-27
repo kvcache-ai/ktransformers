@@ -16,7 +16,7 @@ from ktransformers.server.backend.interfaces.exllamav2 import ExllamaInterface
 from ktransformers.server.backend.interfaces.transformers import TransformersInterface
 from ktransformers.server.backend.interfaces.ktransformers import KTransformersInterface
 
-def create_interface(config: Config, default_args: ConfigArgs):
+def create_interface(config: Config, default_args: ConfigArgs, input_args=None):
     if config.backend_type=='transformers':
         from ktransformers.server.backend.interfaces.transformers import  TransformersInterface as BackendInterface
     elif config.backend_type == 'exllamav2':
@@ -27,7 +27,12 @@ def create_interface(config: Config, default_args: ConfigArgs):
         from ktransformers.server.backend.interfaces.balance_serve import BalanceServeInterface as BackendInterface
     else:
         raise NotImplementedError(f'{config.backend_type} not implemented')
-    GlobalInterface.interface = BackendInterface(default_args)
+    if config.backend_type == 'ktransformers':
+        GlobalInterface.interface = BackendInterface(default_args, input_args)
+    elif config.backend_type == 'balance_serve':
+        GlobalInterface.interface = BackendInterface(default_args, input_args)
+    else:
+        GlobalInterface.interface = BackendInterface(default_args)
     GlobalContextManager.context_manager = ThreadContextManager(GlobalInterface.interface)
 
 class GlobalContextManager:

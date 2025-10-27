@@ -1,4 +1,7 @@
+#ifdef KTRANSFORMERS_USE_NPU
+#else
 #include <immintrin.h>
+#endif
 #include <tbb/concurrent_hash_map.h>
 
 #include <algorithm>
@@ -986,13 +989,23 @@ struct DoubleCacheHandle : public DoubleCacheHandleInterface {
       }
     });
 
-    cudaMemcpyKind direction;
-    if (option == IO_Read || option == IO_ForceRead) {
-      direction = cudaMemcpyHostToDevice;
-    }
-    if (option == IO_Write || option == IO_ForceWrite) {
-      direction = cudaMemcpyDeviceToHost;
-    }
+    #if defined(KTRANSFORMERS_USE_NPU)  // NPU平台分支
+      aclrtMemcpyKind direction;
+      if (option == IO_Read || option == IO_ForceRead) {
+          direction = ACL_MEMCPY_HOST_TO_DEVICE;
+      }
+      if (option == IO_Write || option == IO_ForceWrite) {
+          direction = ACL_MEMCPY_DEVICE_TO_HOST;
+      }
+    #else  // 默认GPU分支
+      cudaMemcpyKind direction;
+      if (option == IO_Read || option == IO_ForceRead) {
+          direction = cudaMemcpyHostToDevice;
+      }
+      if (option == IO_Write || option == IO_ForceWrite) {
+          direction = cudaMemcpyDeviceToHost;
+      }
+    #endif
 
     auto reqs = gpu_cache->basic_request(direction, [io_helper]() { io_helper->batch_promise.set(); });
 
@@ -1752,7 +1765,11 @@ void GPUPageCache::gpu_background_flush() {
       std::vector<CacheBlockEntry*> entries;
       std::vector<std::unique_lock<CacheBlockEntry::MutexT>> uls;
       BatchPromise promise(config.gpu_devices_id.size());
-      auto reqs = basic_request(cudaMemcpyDeviceToHost, [&promise]() { promise.set(); });
+      #if defined(KTRANSFORMERS_USE_NPU) // NPU分支
+        auto reqs = basic_request(ACL_MEMCPY_DEVICE_TO_HOST, [&promise]() { promise.set(); });
+      #else
+        auto reqs = basic_request(cudaMemcpyDeviceToHost, [&promise]() { promise.set(); });
+      #endif
 
       for (size_t i = 0; i < config.total_kvcache_pages; i++) {
         std::lock_guard<std::mutex> lg(this->lock);

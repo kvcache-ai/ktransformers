@@ -73,8 +73,19 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
 
 # include_directories(/usr/include/tbb)
 # link_directories(/usr/lib64)
+option(KTRANSFORMERS_USE_NPU                 "ktransformers: use NPU"                           OFF)
+if(KTRANSFORMERS_USE_NPU)
+    add_definitions(-DKTRANSFORMERS_USE_NPU=1)
+endif()
 find_package(TBB REQUIRED)
-find_package(CUDA REQUIRED)
+
+if(KTRANSFORMERS_USE_NPU)
+    # NPU 构建
+    # find_package(CUDA REQUIRED)  # NPU 情况不需要 CUDA
+else()
+    # GPU 构建
+    find_package(CUDA REQUIRED)
+endif()
 
 # find_package(prometheus-cpp CONFIG REQUIRED)
 if(NOT TARGET prometheus-cpp::pull)
@@ -83,18 +94,29 @@ else()
     message(STATUS "prometheus Found!")
 endif()
 
-if(CUDA_FOUND)
-    message(STATUS "CUDA Found!")
-    message(STATUS "CUDA Version: ${CUDA_VERSION_STRING}")
-    message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
+if(KTRANSFORMERS_USE_NPU)
+    # NPU 情况下不检查 CUDA
 else()
-    message(FATAL_ERROR "CUDA not found!")
+    if(CUDA_FOUND)
+        message(STATUS "CUDA Found!")
+        message(STATUS "CUDA Version: ${CUDA_VERSION_STRING}")
+        message(STATUS "CUDA Toolkit Root: ${CUDA_TOOLKIT_ROOT_DIR}")
+    else()
+        message(FATAL_ERROR "CUDA not found!")
+    endif()
 endif()
 
 add_subdirectory(src)
 
 if(BUILD_TEST)
-    add_subdirectory(test)
+    if(KTRANSFORMERS_USE_NPU)
+        message(STATUS "Build test...")
+        set(THIRD_PARTY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party)
+        add_subdirectory(${THIRD_PARTY_DIR}/spdlog ${CMAKE_CURRENT_SOURCE_DIR}/../build/third_party/spdlog)
+        add_subdirectory(test)
+    else()
+        add_subdirectory(test)
+    endif()
 endif()
 
 message(STATUS "BUILD_PYTHON_EXT: ${BUILD_PYTHON_EXT}")
@@ -126,7 +148,12 @@ endif()
 
 set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
 
-set(CMAKE_CXX_FLAGS "-O3 -march=native")
+if(KTRANSFORMERS_USE_NPU)
+    set(CMAKE_CXX_FLAGS "-O3 -march=armv8.2-a")
+else()
+    set(CMAKE_CXX_FLAGS "-O3 -march=native")
+endif()
+
 message(STATUS "CMAKE_CXX_FLAGS of PhotonLibOS: ${CMAKE_CXX_FLAGS}")
 
 add_subdirectory(${THIRD_PARTY_DIR}/PhotonLibOS ${THIRD_PARTY_BUILD_DIR}/PhotonLibOS)
