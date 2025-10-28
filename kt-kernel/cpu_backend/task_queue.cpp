@@ -42,7 +42,11 @@ void TaskQueue::enqueue(std::function<void()> task) {
   prev->next.store(node, std::memory_order_release);
 }
 
-void TaskQueue::sync(size_t n) { while (pending.load(std::memory_order_acquire) > n); }
+void TaskQueue::sync(size_t allow_n_pending) {
+  // Spin until the pending task count drops to the allowed threshold.
+  while (pending.load(std::memory_order_acquire) > allow_n_pending)
+    ;
+}
 
 void TaskQueue::worker() {
   Node* curr = head.load(std::memory_order_relaxed);
