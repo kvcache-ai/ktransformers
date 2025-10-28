@@ -112,8 +112,11 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
   cd ktransformers
   git submodule update --init --recursive
   ```
-- 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的`#define iqk_mul_mat iqk_mul_mat_arm82 #define iqk_mul_mat_moe iqk_mul_mat_moe_arm82`这两行
-
+- 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的
+  ```cpp
+  #define iqk_mul_mat iqk_mul_mat_arm82
+  #define iqk_mul_mat_moe iqk_mul_mat_moe_arm82
+  ```
 - 执行`source /usr/local/Ascend/ascend-toolkit/set_env.sh`（以实际CANN-TOOLKIT安装路径为准）。
 - 执行`apt install cmake libhwloc-dev pkg-config`安装依赖。
 - 修改项目目录下 /ktransformers/config/config.yaml 中attn部分的page_size: 128  chunk_size: 16384
