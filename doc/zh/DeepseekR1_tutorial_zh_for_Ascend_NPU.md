@@ -155,7 +155,7 @@ python ktransformers/server/main.py \
 - `--gguf_path`：kTransformers原生参数，str，此处用来指定合并后的模型文件路径
 - `--cpu_infer`：kTransformers原生参数，int，用来控制CPU侧实际worker线程数，非必选
 - `--optimize_config_path`：kTransformers原生参数，str，用来指定所用的模型优化配置文件，需要注意相对路径的使用，此处为**必选**
-- `--cache_lens 20480`  调度器申请 kvcache 的总长度。所有请求共享 20480 个 tokens 对应 kvcache 空间，请求完成后会释放其所占用的 kvcache 空间，非必选
+- `--cache_lens`：调度器申请 kvcache 的总长度。所有请求共享指定数量（例如 `20480`）的 tokens 对应的 kvcache 空间，请求完成后会释放其所占用的 kvcache 空间，非必选
 - `--use_cuda_graph`：kTransformers原生参数，bool，为True表示开启图下沉，为False表示关闭图下沉，非必选
 - `--max_new_tokens`：kTransformers原生参数，int，当统计到输出的tokens数量达到该值时，会直接中止输出，非必选
 - `--tp`：新增参数，int，用于开启tensor model parallel功能，目前local_chat只支持tp大小与ws大小相同（不支持local_chat使用多dp），非必选
