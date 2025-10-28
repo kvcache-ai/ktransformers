@@ -6,11 +6,11 @@
 | KTrans Decode token/s | 16.07 | 15.7 | 15.96 |
 
 ## 先决条件
-我们在以下配置下进行了最佳性能测试： <br>
-服务器型号：Atlas 2UP <br>
-NPU：300I A2 <br>
-CPU: HUAWEI Kunpeng 920 7270Z <br>
-内存: DDR5服务器内存（1TB）
+我们在以下配置下进行了最佳性能测试：
+- 服务器型号：Atlas 2UP
+- NPU：300I A2
+- CPU: HUAWEI Kunpeng 920 7270Z
+- 内存: DDR5服务器内存（1TB）
 
 # 部署
 
