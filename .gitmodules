@@ -20,3 +20,9 @@
 [submodule "third_party/PhotonLibOS"]
 	path = third_party/PhotonLibOS
 	url = https://github.com/alibaba/PhotonLibOS.git
+[submodule "kt-kernel/third_party/llama.cpp"]
+	path = kt-kernel/third_party/llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git
+[submodule "kt-kernel/third_party/pybind11"]
+	path = kt-kernel/third_party/pybind11
+	url = https://github.com/pybind/pybind11.git
