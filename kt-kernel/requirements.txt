@@ -1,0 +1,12 @@
+# Optional: Install these if not already available in your environment
+# These dependencies will be automatically installed when running `pip install .`
+# You can skip this file if you already have these packages installed
+
+# Core dependencies (minimum versions)
+torch>=2.0.0
+safetensors>=0.4.0
+compressed-tensors>=0.7.0
+numpy>=1.24.0
+
+# Development dependencies
+black>=25.9.0
