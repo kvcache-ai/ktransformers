@@ -75,8 +75,8 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh  # 以实际CANN安装路径�
 source /usr/local/Ascend/nnal/atb/set_env.sh  # 以实际NNAL安装路径为准
 ```
 由于环境对于torch_npu版本号有特定要求，使用编译后的torch_npu包需要手动移除版本信息中的哈希后缀，操作如下：
-使用文本编辑器打开/usr/local/lib/python3.11/site-packages/torch_npu/version.py(不同环境python路径可能不同，可以使用pip show torch_npu查看安装的python路径)
-将__version__ = '2.5.1.post4+git69550dfc'改为__version__ = '2.5.1.post4'
+使用文本编辑器打开`/usr/local/lib/python3.11/site-packages/torch_npu/version.py`(不同环境python路径可能不同，可以使用`pip show torch_npu`查看安装的python路径)
+将`__version__ = '2.5.1.post4+git69550dfc'`改为`__version__ = '2.5.1.post4'`
 
 
 ## 权重准备
