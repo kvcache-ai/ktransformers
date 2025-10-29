@@ -143,7 +143,7 @@ python ktransformers/server/main.py \
 --gguf_path <your model path> \
 --model_name DeepSeekV3ForCausalLM \
 --cpu_infer 100 \
---optimize_config_path  ./ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
+--optimize_config_path  ./ktransformers/optimize/optimize_rules/npu/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
 --max_new_tokens 1024 \
 --cache_lens 20480 \
 --max_batch_size 4 \
