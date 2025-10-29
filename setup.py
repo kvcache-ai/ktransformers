@@ -506,9 +506,10 @@ class CMakeBuild(BuildExtension):
 
         # Add ARM-specific flags for aarch64 Linux systems
         if platform.system() == "Linux" and platform.machine() == "aarch64":
+            # Using -march=native is more portable as it optimizes for the host CPU.
             cmake_args += [
-                "-DCMAKE_C_FLAGS=-march=armv8.6-a+fp+simd+sve+sve2+i8mm+f32mm+f64mm+fp16+bf16+fp16fml+crc",
-                "-DCMAKE_CXX_FLAGS=-march=armv8.6-a+fp+simd+sve+sve2+i8mm+f32mm+f64mm+fp16+bf16+fp16fml+crc",
+                "-DCMAKE_C_FLAGS=-march=native",
+                "-DCMAKE_CXX_FLAGS=-march=native",
             ]
 
         if CUDA_HOME is not None:
