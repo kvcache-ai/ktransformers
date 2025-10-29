@@ -2,8 +2,8 @@
 
 | Prompt length                     | 1K     | 2K     | 4K     |
 | --------------------------------- | ------ | ------ | ------ |
-| KTrans Prefill token/s | 174.68 | 185.66 | 158.92 |
-| KTrans Decode token/s | 16.07 | 15.7 | 15.96 |
+| KTrans Prefill token/s | 174.68 | 169.52 | 167.15 |
+| KTrans Decode token/s | 16.07 | 16.12 | 16.48 |
 
 ## 先决条件
 我们在以下配置下进行了最佳性能测试：
