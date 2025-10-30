@@ -24,7 +24,6 @@ except:
 
 if not torch.xpu.is_available() and not use_torch_npu:
     import KTransformersOps
-    import vLLMMarlin
 from ktransformers.util.custom_loader import GGUFLoader, SafeTensorLoader
 from ktransformers.util.utils import InferenceState
 if not torch.xpu.is_available():
@@ -538,6 +537,7 @@ class VLinearMarlin(KLinearBase):
         # padding x.shape[0] to avoid CUDA illegal memory access error
         x, orig_size_m = self._pad_input(x)
 
+        import vLLMMarlin
         x = vLLMMarlin.gptq_marlin_gemm(
             x,
             self.marlin_q_w,
