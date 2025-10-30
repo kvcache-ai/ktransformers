@@ -28,7 +28,7 @@
 
 ## HDK安装
 
-选择[Ascend HDK 25.3.RC1](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=32&cann=8.3.RC1.beta1&driver=Ascend+HDK+25.0.RC1)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/81RC1beta1/softwareinst/instg/instg_0005.html?Mode=PmIns&InstallType=local&OS=Ubuntu&Software=cannToolKit)。
+选择[Ascend HDK 25.3.RC1]([https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=32&cann=8.3.RC1.beta1&driver=Ascend+HDK+25.0.RC1](https://support.huawei.com/enterprise/zh/ascend-computing/ascend-hdk-pid-252764743/software/264672545?idAbsPath=fixnode01|23710424|251366513|254884019|261408772|252764743))进行安装，安装方式参考[昇腾社区HDK安装指导]([https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/81RC1beta1/softwareinst/instg/instg_0005.html?Mode=PmIns&InstallType=local&OS=Ubuntu&Software=cannToolKit](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_0005.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit))。
 
 
 ## Conda部署
