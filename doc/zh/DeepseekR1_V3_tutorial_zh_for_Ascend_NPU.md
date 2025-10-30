@@ -1,8 +1,22 @@
+# 基准测试结果
+
+| Prompt length                     | 1K     | 2K     | 4K     |
+| --------------------------------- | ------ | ------ | ------ |
+| KTrans Prefill token/s | 174.68 | 169.52 | 167.15 |
+| KTrans Decode token/s | 16.07 | 16.12 | 16.48 |
+
+## 先决条件
+我们在以下配置下进行了Deepseek-R1最佳性能测试：
+- 服务器型号：Atlas 2UP
+- NPU：300I A2
+- CPU: HUAWEI Kunpeng 920 7270Z
+- 内存: DDR5服务器内存（1TB）
+
 # 部署
 
 ## 物理机安装
 
-部署满血版DeepseekV3，需要机器物理内存能够存放下全部路由专家的权重，约400GB。
+部署满血版Deepseek-R1/V3，需要机器物理内存能够存放下全部路由专家的权重，约400GB。
 
 目前支持的NPU型号：**300I A2**。
 
@@ -14,7 +28,7 @@
 
 ## HDK安装
 
-选择[Ascend HDK 25.3.RC1](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=32&cann=8.3.RC1.beta1&driver=Ascend+HDK+25.0.RC1)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/81RC1beta1/softwareinst/instg/instg_0005.html?Mode=PmIns&InstallType=local&OS=Ubuntu&Software=cannToolKit)。
+选择[Ascend HDK 25.3.RC1](https://support.huawei.com/enterprise/zh/ascend-computing/ascend-hdk-pid-252764743/software/264672545?idAbsPath=fixnode01|23710424|251366513|254884019|261408772|252764743)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_0005.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
 
 
 ## Conda部署
@@ -60,6 +74,9 @@ pip3 install transformers==4.57.1 #此处注意运行时transformers版本要求
 source /usr/local/Ascend/ascend-toolkit/set_env.sh  # 以实际CANN安装路径为准
 source /usr/local/Ascend/nnal/atb/set_env.sh  # 以实际NNAL安装路径为准
 ```
+由于环境对于torch_npu版本号有特定要求，使用编译后的torch_npu包需要手动移除版本信息中的哈希后缀，操作如下：
+使用文本编辑器打开`/usr/local/lib/python3.11/site-packages/torch_npu/version.py`(不同环境python路径可能不同，可以使用`pip show torch_npu`查看安装的python路径)
+将`__version__ = '2.5.1.post4+git69550dfc'`改为`__version__ = '2.5.1.post4'`
 
 
 ## 权重准备
@@ -95,8 +112,11 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
   cd ktransformers
   git submodule update --init --recursive
   ```
-- 对于arm平台，注释掉`./requirements-local_chat.txt`中的`cpufeature`。
-
+- 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的
+  ```cpp
+  #define iqk_mul_mat iqk_mul_mat_arm82
+  #define iqk_mul_mat_moe iqk_mul_mat_moe_arm82
+  ```
 - 执行`source /usr/local/Ascend/ascend-toolkit/set_env.sh`（以实际CANN-TOOLKIT安装路径为准）。
 - 执行`apt install cmake libhwloc-dev pkg-config`安装依赖。
 - 修改项目目录下 /ktransformers/config/config.yaml 中attn部分的page_size: 128  chunk_size: 16384
@@ -119,12 +139,13 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 python ktransformers/server/main.py \
 --port 10002 \
---model_path /mnt/data/models/DeepSeek-R1-q4km-w8a8 \
---gguf_path /mnt/data/models/DeepSeek-R1-q4km-w8a8 \
+--model_path <your model path> \
+--gguf_path <your model path> \
 --model_name DeepSeekV3ForCausalLM \
---cpu_infer 60 \
---optimize_config_path  ./ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
---max_new_tokens 128 \
+--cpu_infer 100 \
+--optimize_config_path  ./ktransformers/optimize/optimize_rules/npu/DeepSeek-V3-Chat-300IA2-npu-serve.yaml \
+--max_new_tokens 1024 \
+--cache_lens 20480 \
 --max_batch_size 4 \
 --use_cuda_graph \
 --tp 1 \
@@ -137,6 +158,7 @@ python ktransformers/server/main.py \
 - `--gguf_path`：kTransformers原生参数，str，此处用来指定合并后的模型文件路径
 - `--cpu_infer`：kTransformers原生参数，int，用来控制CPU侧实际worker线程数，非必选
 - `--optimize_config_path`：kTransformers原生参数，str，用来指定所用的模型优化配置文件，需要注意相对路径的使用，此处为**必选**
+- `--cache_lens`：调度器申请 kvcache 的总长度。所有请求共享指定数量（例如 `20480`）的 tokens 对应的 kvcache 空间，请求完成后会释放其所占用的 kvcache 空间，非必选
 - `--use_cuda_graph`：kTransformers原生参数，bool，为True表示开启图下沉，为False表示关闭图下沉，非必选
 - `--max_new_tokens`：kTransformers原生参数，int，当统计到输出的tokens数量达到该值时，会直接中止输出，非必选
 - `--tp`：新增参数，int，用于开启tensor model parallel功能，目前local_chat只支持tp大小与ws大小相同（不支持local_chat使用多dp），非必选
