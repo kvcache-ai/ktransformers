@@ -3,15 +3,15 @@ import sys
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
 import torch
 import ctypes
-import cpuinfer_ext
-from cpuinfer_ext.moe import MOEConfig, MOE, AMXBF16_MOE, AMXInt8_MOE, AMXInt4_MOE, AMXInt4_1_MOE
+import kt_kernel_ext
+from kt_kernel_ext.moe import MOEConfig, MOE, AMXBF16_MOE, AMXInt8_MOE, AMXInt4_MOE, AMXInt4_1_MOE
 
 intermediate_size_full = 2048
 moe_intermediate_size = 3072
 hidden_size = 7168
 experts_num = 256
 num_experts_per_tok = 8
-cpu_infer = cpuinfer_ext.CPUInfer(97)
+cpu_infer = kt_kernel_ext.CPUInfer(97)
 
 up = torch.empty(experts_num, intermediate_size_full, hidden_size, dtype=torch.bfloat16, device="cpu")
         

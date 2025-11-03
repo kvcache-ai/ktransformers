@@ -17,9 +17,9 @@ from safetensors import safe_open
 import os
 import ctypes
 
-# Import the C++ extension module (compiled as cpuinfer_ext)
-import cpuinfer_ext
-from cpuinfer_ext.moe import MOEConfig, AMXInt4_MOE, AMXInt8_MOE
+# Import the C++ extension module (compiled as kt_kernel_ext)
+import kt_kernel_ext
+from kt_kernel_ext.moe import MOEConfig, AMXInt4_MOE, AMXInt8_MOE
 
 
 class SafeTensorLoader:
@@ -195,6 +195,7 @@ class AMXMoEWrapper:
         amx_weight_path: str,
         chunked_prefill_size: int,
         cpu_save: bool = False,
+        amx_method: str = "AMXINT4",
     ):
         """
         Initialize AMX MoE Wrapper.
@@ -211,6 +212,7 @@ class AMXMoEWrapper:
             amx_weight_path: Path to AMX weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
+            amx_method: AMX quantization method ("AMXINT4" or "AMXINT8")
         """
 
         self.layer_idx = layer_idx
@@ -222,10 +224,11 @@ class AMXMoEWrapper:
         self.amx_weight_path = amx_weight_path
         self.chunked_prefill_size = chunked_prefill_size
         self.cpu_save = cpu_save
+        self.amx_method = amx_method
 
         # Initialize CPU inference engine (singleton)
         if AMXMoEWrapper._cpu_infer_instance is None:
-            worker_config = cpuinfer_ext.WorkerPoolConfig()
+            worker_config = kt_kernel_ext.WorkerPoolConfig()
 
             subpool_numa_map = list(range(threadpool_count))
             subpool_thread_count = [
@@ -236,7 +239,7 @@ class AMXMoEWrapper:
             worker_config.subpool_count = threadpool_count
             worker_config.subpool_numa_map = subpool_numa_map
             worker_config.subpool_thread_count = subpool_thread_count
-            AMXMoEWrapper._cpu_infer_instance = cpuinfer_ext.CPUInfer(worker_config)
+            AMXMoEWrapper._cpu_infer_instance = kt_kernel_ext.CPUInfer(worker_config)
 
         self.cpu_infer = AMXMoEWrapper._cpu_infer_instance
 
@@ -307,13 +310,12 @@ class AMXMoEWrapper:
         moe_config.path = self.amx_weight_path
 
         # Create MoE module based on AMX method
-        amx_method = os.environ.get("AMX_METHOD", "AMXINT4")
-        if amx_method == "AMXINT4":
+        if self.amx_method == "AMXINT4":
             self.moe = AMXInt4_MOE(moe_config)
-        elif amx_method == "AMXINT8":
+        elif self.amx_method == "AMXINT8":
             self.moe = AMXInt8_MOE(moe_config)
         else:
-            raise NotImplementedError(f"Unsupported AMX method: {amx_method}")
+            raise NotImplementedError(f"Unsupported AMX method: {self.amx_method}")
 
         # Submit quantization and save task
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
@@ -440,13 +442,12 @@ class AMXMoEWrapper:
             moe_config.path = self.amx_weight_path
 
         # Create MoE module based on AMX method
-        amx_method = os.environ.get("AMX_METHOD", "AMXINT4")
-        if amx_method == "AMXINT4":
+        if self.amx_method == "AMXINT4":
             self.moe = AMXInt4_MOE(moe_config)
-        elif amx_method == "AMXINT8":
+        elif self.amx_method == "AMXINT8":
             self.moe = AMXInt8_MOE(moe_config)
         else:
-            raise NotImplementedError(f"Unsupported AMX method: {amx_method}")
+            raise NotImplementedError(f"Unsupported AMX method: {self.amx_method}")
 
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))

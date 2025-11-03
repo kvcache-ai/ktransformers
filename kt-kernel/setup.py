@@ -16,8 +16,13 @@ Environment knobs (export before running pip install .):
   CPUINFER_BUILD_TYPE=Release     Debug / RelWithDebInfo / Release
   CPUINFER_PARALLEL=8             Parallel build jobs (auto = detected cores)
   CPUINFER_CPU_INSTRUCT=FANCY     One of: NATIVE|FANCY|AVX512|AVX2 (maps to CMake flags)
-  CPUINFER_ENABLE_AMX=ON          ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX
+  CPUINFER_ENABLE_AMX=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX
   CPUINFER_ENABLE_MLA=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MLA
+  CPUINFER_ENABLE_AMD=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MOE_AMD
+  CPUINFER_ENABLE_KML=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_KML
+  CPUINFER_ENABLE_AVX512=OFF      ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX_AVX512
+
+
   CPUINFER_ENABLE_LTO=ON          ON/OFF -> -DCPUINFER_ENABLE_LTO (your added option)
   CPUINFER_LTO_JOBS=8             Forward to -DCPUINFER_LTO_JOBS
   CPUINFER_LTO_MODE=auto          Forward to -DCPUINFER_LTO_MODE
@@ -100,6 +105,88 @@ class CMakeBuild(build_ext):
             raise RuntimeError("CMake is required to build this project") from e
         super().run()
 
+    def detect_cpu_info(self) -> dict:
+        """Detect CPU vendor/arch and instruction set features.
+
+        Returns a dict like:
+            {
+                'vendor': 'intel'|'amd'|'arm'|'unknown',
+                'arch': platform.machine().lower(),
+                'features': set(['AVX2','AVX512','AMX']),
+                'raw': { 'flags': set([...]) }
+            }
+        """
+        info = {
+            "vendor": "unknown",
+            "arch": platform.machine().lower(),
+            "features": set(),
+            "raw": {"flags": set()},
+        }
+        try:
+            sysname = platform.system()
+            if sysname == "Linux":
+                with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
+                    cpuinfo = f.read()
+                low = cpuinfo.lower()
+
+                # vendor
+                if "vendor_id" in low:
+                    # Typical x86 linux
+                    m = re.search(r"vendor_id\s*:\s*(\S+)", cpuinfo)
+                    if m:
+                        v = m.group(1).lower()
+                        if "genuineintel" in v:
+                            info["vendor"] = "intel"
+                        elif "authenticamd" in v:
+                            info["vendor"] = "amd"
+                # ARM sometimes has 'model name' or 'Hardware'
+                if info["vendor"] == "unknown":
+                    if any(tok in low for tok in ["aarch64", "armv8", "arm cortex", "kunpeng", "kirin", "huawei"]):
+                        info["vendor"] = "arm"
+
+                # flags collection (x86 uses 'flags', arm uses 'Features')
+                flags = set()
+                for key in ("flags", "Features", "features"):
+                    m = re.search(rf"^{key}\s*:\s*(.+)$", cpuinfo, re.IGNORECASE | re.MULTILINE)
+                    if m:
+                        flags.update(m.group(1).lower().split())
+                info["raw"]["flags"] = flags
+
+                # feature summary
+                if any(f in flags or f in low for f in ["avx512f", "avx512bw", "avx512dq", "avx512vl", "avx512vnni"]):
+                    info["features"].add("AVX512")
+                if "avx2" in flags or "avx2" in low:
+                    info["features"].add("AVX2")
+                # AMX flags on Linux are with underscores; keep hyphen fallback just in case
+                if any(
+                    f in flags or f in low
+                    for f in ["amx_bf16", "amx_int8", "amx_tile", "amx-bf16", "amx-int8", "amx-tile"]
+                ):
+                    info["features"].add("AMX")
+
+            elif sysname == "Darwin":
+                # macOS: Apple Silicon (arm64) vs Intel
+                arch = platform.machine().lower()
+                info["arch"] = arch
+                if arch in ("arm64", "aarch64"):
+                    info["vendor"] = "arm"
+                else:
+                    info["vendor"] = "intel"
+                # No AVX/AMX on Apple Silicon; assume none
+
+            elif sysname == "Windows":
+                # Minimal detection via arch; detailed CPUID omitted for brevity
+                arch = platform.machine().lower()
+                info["arch"] = arch
+                if arch in ("arm64", "aarch64"):
+                    info["vendor"] = "arm"
+                else:
+                    # Could be Intel or AMD; leave unknown
+                    info["vendor"] = "unknown"
+        except Exception as e:
+            print(f"Warning: CPU detection failed: {e}")
+        return info
+
     def build_extension(self, ext: CMakeExtension):
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
@@ -134,10 +221,42 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_BUILD_TYPE={cfg}",
         ]
 
-        # CPU feature flags mapping
-        cmake_args += cpu_feature_flags()
+        # CPU feature flags mapping: if user specified CPUINFER_CPU_INSTRUCT, honor it;
+        # else auto-pick based on detection (x86 only)
+        if os.environ.get("CPUINFER_CPU_INSTRUCT"):
+            cmake_args += cpu_feature_flags()
+        else:
+            d = self.detect_cpu_info()
+            print(f"Detected CPU info: {d}")
 
-        # Optional AMX / MLA toggles
+            # Vendor / feature specific toggles
+            # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
+            if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
+                cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+                print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+
+            # On ARM, enable KML by default if not explicitly toggled
+            if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:
+                cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
+                print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
+
+            # If AMX or AVX512 present, enable umbrella unless overridden; enable AMX specifically when present
+            if "AMX" in d["features"]:
+                if os.environ.get("CPUINFER_ENABLE_AMX") is None:
+                    cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX=ON")
+                    print("-- AMX support detected; enabling (-DKTRANSFORMERS_CPU_USE_AMX=ON)")
+            if ("AMX" in d["features"] or "AVX512" in d["features"]) and os.environ.get(
+                "CPUINFER_ENABLE_AVX512"
+            ) is None:
+                cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
+                print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
+
+            # Friendly summary
+            print(
+                f"-- CPU detection: vendor={d.get('vendor')} arch={d.get('arch')} features={sorted(list(d.get('features', [])))}"
+            )
+
+        # Optional AMX / MLA toggles (explicit env overrides auto detection above)
         if os.environ.get("CPUINFER_ENABLE_AMX"):
             cmake_args.append(f"-DKTRANSFORMERS_CPU_USE_AMX={os.environ['CPUINFER_ENABLE_AMX']}")
         if os.environ.get("CPUINFER_ENABLE_KML"):
@@ -219,7 +338,7 @@ setup(
     python_requires=">=3.8",
     packages=["kt_kernel"],
     package_dir={"kt_kernel": "python"},
-    ext_modules=[CMakeExtension("cpuinfer_ext", str(REPO_ROOT))],
+    ext_modules=[CMakeExtension("kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
     classifiers=[

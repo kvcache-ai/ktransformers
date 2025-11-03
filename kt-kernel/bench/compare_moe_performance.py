@@ -50,12 +50,12 @@ import torch
 
 # Try importing both implementations
 try:
-    import cpuinfer_ext
+    import kt_kernel_ext
     KTRANSFORMERS_AVAILABLE = True
-    logger.info("KTransformers cpuinfer_ext loaded successfully")
+    logger.info("KTransformers kt_kernel_ext loaded successfully")
 except ImportError as e:
     KTRANSFORMERS_AVAILABLE = False
-    logger.warning(f"KTransformers cpuinfer_ext not available: {e}")
+    logger.warning(f"KTransformers kt_kernel_ext not available: {e}")
 
 try:
     from sgl_kernel.common_ops import fused_experts_cpu
@@ -472,11 +472,11 @@ def bench_ktransformers_moe(test_config: TestConfig, quant_mode: str, qlen: int,
     try:
         with torch.inference_mode():
             # Setup worker config with consistent threads per NUMA
-            worker_config = cpuinfer_ext.WorkerPoolConfig()
+            worker_config = kt_kernel_ext.WorkerPoolConfig()
             worker_config.subpool_count = sys_config.numa_count
             worker_config.subpool_numa_map = list(range(sys_config.numa_count))
             worker_config.subpool_thread_count = [thread_config.threads_per_numa] * sys_config.numa_count
-            CPUInfer = cpuinfer_ext.CPUInfer(worker_config)
+            CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
         
             # Create MoE layers
             moes = []
@@ -493,7 +493,7 @@ def bench_ktransformers_moe(test_config: TestConfig, quant_mode: str, qlen: int,
                 down_proj = torch.randn((test_config.expert_num, test_config.hidden_size, test_config.intermediate_size), 
                                       dtype=torch.float32).contiguous()
             
-                config = cpuinfer_ext.moe.MOEConfig(
+                config = kt_kernel_ext.moe.MOEConfig(
                     test_config.expert_num, test_config.num_experts_per_tok, 
                     test_config.hidden_size, test_config.intermediate_size)
                 config.max_len = test_config.max_len
@@ -503,11 +503,11 @@ def bench_ktransformers_moe(test_config: TestConfig, quant_mode: str, qlen: int,
                 config.pool = CPUInfer.backend_
             
                 if quant_mode == "bf16":
-                    moe = cpuinfer_ext.moe.AMXBF16_MOE(config)
+                    moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
                 elif quant_mode == "int8":
-                    moe = cpuinfer_ext.moe.AMXInt8_MOE(config)
+                    moe = kt_kernel_ext.moe.AMXInt8_MOE(config)
                 elif quant_mode == "int4":
-                    moe = cpuinfer_ext.moe.AMXInt4_MOE(config)
+                    moe = kt_kernel_ext.moe.AMXInt4_MOE(config)
                 else:
                     raise ValueError(f"Unsupported quantization mode: {quant_mode}")
                 

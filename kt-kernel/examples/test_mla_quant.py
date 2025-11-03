@@ -4,8 +4,8 @@ import time
 from typing import Optional
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 import torch
 from torch import inf, nn
 from torch.nn import init

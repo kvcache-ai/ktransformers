@@ -29,14 +29,10 @@
 
 #include "../../cpu_backend/shared_mem_buffer.h"
 #include "../../cpu_backend/worker_pool.h"
+#include "../common.hpp"
 #include "../moe-tp.hpp"
 #include "la/amx.hpp"
-#include "llama.cpp/ggml-impl.h"
-#include "llama.cpp/ggml-quants.h"
 #include "llama.cpp/ggml.h"
-#include "llamafile/sgemm.h"
-
-#define expert_map(m, x) (m != nullptr ? m[(x)] : (x))
 
 template <class T>
 class AMX_AWQ_MOE_TP {
@@ -475,12 +471,6 @@ class AMX_AWQ_MOE_TP {
     m_local_up_output_ptr_.resize(config_.expert_num);
     m_local_down_output_ptr_.resize(config_.expert_num);
 
-    // printf("tp part %d alloc layer %d, %f GB, on numa %d\n", tp_part_idx, config_.layer_idx,
-    //        1e-9 * config_.expert_num *
-    //            (T::BufferB::required_size(config_.intermediate_size, config_.hidden_size) * 2 +
-    //             T::BufferB::required_size(config_.hidden_size, config_.intermediate_size)),
-    //        numa_node_of_cpu(sched_getcpu()));
-
     for (size_t i = 0; i < config_.expert_num; i++) {
       gate_up_ba_.push_back(
           std::make_shared<typename T::BufferA>(config_.max_len, config_.hidden_size, group_size, nullptr));
@@ -524,9 +514,10 @@ class AMX_AWQ_MOE_TP {
     // shared_mem_buffer_numa.dealloc(this);
   }
 
-  void load_weights(const uint64_t* physical_to_logical_map) {
+  void load_weights() {
     auto& quant_config = config_.quant_config;
     int& group_size = quant_config.group_size;
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     if (quant_config.group_size == 0 || !quant_config.zero_point) {
       throw std::runtime_error("AWQ-Quantization AMX MoE only support KGroup Int4_1");
     }
@@ -534,171 +525,12 @@ class AMX_AWQ_MOE_TP {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     if (config_.gate_projs.size()) {
       throw std::runtime_error("AMX load weights is not support");
-      // pool->do_work_stealing_job(
-      //     config_.expert_num, nullptr,
-      //     [this, physical_to_logical_map](int expert_id) {
-      //       // printf("Load layer %d [%d/%d]\n", config_.layer_idx, expert_id, config_.expert_num);
-      //       uint64_t logical_expert_id = physical_to_logical_map[expert_id];
-      //       auto& quant_config = config_.quant_config;
-      //       int& group_size = quant_config.group_size;
-      //       {
-      //         int num_group = config_.hidden_size / group_size;
-      //         size_t scale_size = num_group * config_.intermediate_size * sizeof(float);
-      //         size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, group_size) -
-      //         (scale_size << 1);
-
-      //         memcpy(gate_bb_[expert_id]->b, config_.gate_projs[tp_part_idx][logical_expert_id], size);
-
-      //         if constexpr (T::BufferB::SCALE) {
-      //           memcpy(gate_bb_[expert_id]->d, config_.gate_scales[tp_part_idx][logical_expert_id], scale_size);
-      //         }
-
-      //         memcpy(up_bb_[expert_id]->b, config_.up_projs[tp_part_idx][logical_expert_id], size);
-
-      //         if constexpr (T::BufferB::SCALE) {
-      //           memcpy(up_bb_[expert_id]->d, config_.up_scales[tp_part_idx][logical_expert_id], scale_size);
-      //         }
-
-      //         if (quant_config.zero_point) {
-      //           // Convert INT4 zeros to float mins using AVX optimization
-      //           size_t num_elements = num_group * config_.intermediate_size;
-      //           convert_zeros_to_mins_avx(
-      //               (const uint8_t*)config_.gate_zeros[tp_part_idx][logical_expert_id],
-      //               (const float*)config_.gate_scales[tp_part_idx][logical_expert_id],
-      //               gate_bb_[expert_id]->mins,
-      //               num_elements
-      //           );
-      //           convert_zeros_to_mins_avx(
-      //               (const uint8_t*)config_.up_zeros[tp_part_idx][logical_expert_id],
-      //               (const float*)config_.up_scales[tp_part_idx][logical_expert_id],
-      //               up_bb_[expert_id]->mins,
-      //               num_elements
-      //           );
-      //         }
-      //       }
-
-      //       {
-      //         int num_group = config_.intermediate_size / group_size;
-      //         size_t scale_size = num_group * config_.hidden_size * sizeof(float);
-      //         size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, group_size) -
-      //         (scale_size << 1);
-
-      //         memcpy(down_bb_[expert_id]->b, config_.down_projs[tp_part_idx][logical_expert_id], size);
-
-      //         if constexpr (T::BufferB::SCALE) {
-      //           memcpy(down_bb_[expert_id]->d, config_.down_scales[tp_part_idx][logical_expert_id], scale_size);
-      //         }
-
-      //         if (quant_config.zero_point) {
-      //           // Convert INT4 zeros to float mins using AVX optimization
-      //           size_t num_elements = num_group * config_.hidden_size;
-      //           convert_zeros_to_mins_avx(
-      //               (const uint8_t*)config_.down_zeros[tp_part_idx][logical_expert_id],
-      //               (const float*)config_.down_scales[tp_part_idx][logical_expert_id],
-      //               down_bb_[expert_id]->mins,
-      //               num_elements
-      //           );
-      //         }
-      //       }
-      //     },
-      //     nullptr);
-
     } else {
       // AWQ Load from file implementation
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
       if (config_.load) {
         throw std::runtime_error("AMX load weights from file is not support");
-        //   std::cout << "Loading AWQ weights from " << prefix << std::endl;
-
-        //   // Use work stealing job for parallel loading
-        //   pool->do_work_stealing_job(
-        //       config_.expert_num * mat_type_all, nullptr,
-        //       [this, physical_to_logical_map, mat_split](int task_id) {
-        //         auto& quant_config = config_.quant_config;
-        //         int& group_size = quant_config.group_size;
-
-        //         int64_t expert_idx = task_id / mat_type_all;
-        //         uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
-        //         uint8_t mat_class = task_id % mat_type_all;
-
-        //         if (mat_class == 0) { // gate projection
-        //           int num_group = config_.hidden_size / group_size;
-        //           size_t weights_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size,
-        //           group_size) - (2 * num_group * config_.intermediate_size * sizeof(float)); size_t scales_size =
-        //           num_group * config_.intermediate_size * sizeof(float); size_t zeros_size = num_group *
-        //           config_.intermediate_size / 2; // INT4 packed format
-
-        //           // Allocate temporary buffer for zeros
-        //           std::vector<uint8_t> zeros_buf(zeros_size);
-
-        //           read_awq_weights(prefix, "gate_proj", logical_expert_id,
-        //                          (char*)gate_bb_[expert_idx]->b,
-        //                          (float*)gate_bb_[expert_idx]->d,
-        //                          zeros_buf.data(),
-        //                          weights_size, scales_size, zeros_size,
-        //                          mat_split, 0);
-
-        //           // Convert INT4 zeros to float mins
-        //           if (quant_config.zero_point) {
-        //             convert_zeros_to_mins_avx(zeros_buf.data(),
-        //                                     (float*)gate_bb_[expert_idx]->d,
-        //                                     gate_bb_[expert_idx]->mins,
-        //                                     num_group * config_.intermediate_size);
-        //           }
-
-        //         } else if (mat_class == 1) { // up projection
-        //           int num_group = config_.hidden_size / group_size;
-        //           size_t weights_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size,
-        //           group_size) - (2 * num_group * config_.intermediate_size * sizeof(float)); size_t scales_size =
-        //           num_group * config_.intermediate_size * sizeof(float); size_t zeros_size = num_group *
-        //           config_.intermediate_size / 2; // INT4 packed format
-
-        //           // Allocate temporary buffer for zeros
-        //           std::vector<uint8_t> zeros_buf(zeros_size);
-
-        //           read_awq_weights(prefix, "up_proj", logical_expert_id,
-        //                          (char*)up_bb_[expert_idx]->b,
-        //                          (float*)up_bb_[expert_idx]->d,
-        //                          zeros_buf.data(),
-        //                          weights_size, scales_size, zeros_size,
-        //                          mat_split, 0);
-
-        //           // Convert INT4 zeros to float mins
-        //           if (quant_config.zero_point) {
-        //             convert_zeros_to_mins_avx(zeros_buf.data(),
-        //                                     (float*)up_bb_[expert_idx]->d,
-        //                                     up_bb_[expert_idx]->mins,
-        //                                     num_group * config_.intermediate_size);
-        //           }
-
-        //         } else { // down projection
-        //           int num_group = config_.intermediate_size / group_size;
-        //           size_t weights_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size,
-        //           group_size) - (2 * num_group * config_.hidden_size * sizeof(float)); size_t scales_size = num_group
-        //           * config_.hidden_size * sizeof(float); size_t zeros_size = num_group * config_.hidden_size / 2; //
-        //           INT4 packed format
-
-        //           // Allocate temporary buffer for zeros
-        //           std::vector<uint8_t> zeros_buf(zeros_size);
-
-        //           read_awq_weights(prefix, "down_proj", logical_expert_id,
-        //                          (char*)down_bb_[expert_idx]->b,
-        //                          (float*)down_bb_[expert_idx]->d,
-        //                          zeros_buf.data(),
-        //                          weights_size, scales_size, zeros_size,
-        //                          mat_split, 0);
-
-        //           // Convert INT4 zeros to float mins
-        //           if (quant_config.zero_point) {
-        //             convert_zeros_to_mins_avx(zeros_buf.data(),
-        //                                     (float*)down_bb_[expert_idx]->d,
-        //                                     down_bb_[expert_idx]->mins,
-        //                                     num_group * config_.hidden_size);
-        //           }
-        //         }
-        //       },
-        //       nullptr);
       }
 // check process, store down matrix to check
 #ifdef CHECK
@@ -709,12 +541,11 @@ class AMX_AWQ_MOE_TP {
 #endif
       {
         // Loading quantized weights
-        // Loading quantized weights
         pool->do_work_stealing_job(
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // gate part
               gate_bb_[expert_idx]->from_raw_mat(
@@ -734,7 +565,7 @@ class AMX_AWQ_MOE_TP {
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // down part
               down_bb_[expert_idx]->from_raw_mat(
@@ -748,7 +579,7 @@ class AMX_AWQ_MOE_TP {
             config_.expert_num, nullptr,
             [this, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id;
-              uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               size_t scale_elem_count =
                   (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
 
@@ -793,7 +624,7 @@ class AMX_AWQ_MOE_TP {
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // gate part
               gate_bb_[logical_expert_id]->from_mat(
@@ -812,7 +643,7 @@ class AMX_AWQ_MOE_TP {
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // down part
               down_bb_[logical_expert_id]->from_mat(
@@ -1280,16 +1111,15 @@ template <typename K>
 class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
  public:
   using TP_MOE_Common<AMX_AWQ_MOE_TP<K>>::TP_MOE_Common;
-  void load_weights(const uint64_t* physical_to_logical_map) {
+  void load_weights() {
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;
     auto pool = config.pool;
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
     if (config.gate_projs.empty() == false) {
       printf("TP Load from loader\n");
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else if (config.gate_scale != nullptr) {
       printf("From Packed Int4 with KGroup Scale and Zeros\n");
@@ -1314,7 +1144,7 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
-                size_t expert_id = expert_id_;
+                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
                 // weight TP-slicing
                 memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
@@ -1384,9 +1214,7 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
         }
       }
 
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      DO_TPS_LOAD_WEIGHTS(pool);
 
       for (auto i = 0; i < tp_count; i++) {
         auto& tpc = tps[i]->config_;
@@ -1417,7 +1245,7 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
-                size_t expert_id = physical_to_logical_map[expert_id_];
+                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
                 memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
                        (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
                            i * gate_up_elcount,
@@ -1438,9 +1266,7 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
         }
       }
 
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      DO_TPS_LOAD_WEIGHTS(pool);
 
       for (auto i = 0; i < tp_count; i++) {
         auto& tpc = tps[i]->config_;
@@ -1452,9 +1278,7 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE_Common<AMX_AWQ_MOE_TP<K>> {
       this->weights_loaded = true;
     } else if (config.path != "") {
       printf("TP Load from file\n");
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");

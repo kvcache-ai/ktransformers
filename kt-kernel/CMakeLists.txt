@@ -348,6 +348,7 @@ if(HOST_IS_X86)
         if(KTRANSFORMERS_CPU_USE_AMX)
             add_compile_definitions(HAVE_AMX=1)
             message(STATUS "AMX enabled")
+            list(APPEND ARCH_FLAGS -mamx-tile)
         endif()
         # add_executable(amx-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/amx-test.cpp)
         # target_link_libraries(amx-test llama)
@@ -611,5 +612,4 @@ endif()
 
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
-
 
