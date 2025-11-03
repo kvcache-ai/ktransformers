@@ -24,8 +24,8 @@ model:
   type: balance_serve
   # type: ktransformers
 
-  name: SmallThinkerForCausalLM
-  path: /mnt/data/models/Smallthinker-21B
+  name: DeepSeek-Coder-V2-Instruct
+  path: deepseek-ai/DeepSeek-V2-Lite-Chat
   gguf_path: /mnt/data/models/Smallthinker-21B
 
   device: cuda:0

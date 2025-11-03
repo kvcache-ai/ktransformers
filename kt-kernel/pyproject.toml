@@ -24,6 +24,7 @@ dependencies = [
   "safetensors>=0.4.0",
   "compressed-tensors>=0.7.0",
   "numpy>=1.24.0",
+  "triton>=2.0.0",
   # Development dependencies
   "black>=25.9.0",
 ]
@@ -34,7 +35,7 @@ dependencies = [
 Homepage = "https://github.com/kvcache-ai"
 
 [tool.setuptools]
-# Enable Python package (kt_kernel) and compiled extension (cpuinfer_ext)
+# Enable Python package (kt_kernel) and compiled extension (kt_kernel_ext)
 packages = ["kt_kernel"]
 include-package-data = true
 

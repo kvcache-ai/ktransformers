@@ -8,7 +8,6 @@
  */
 #pragma once
 
-#include <cuda_runtime.h>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -16,6 +15,11 @@
 #include <vector>
 #include "utils/mpsc.hpp"
 
+#ifdef KTRANSFORMERS_USE_NPU
+#include "acl/acl_mdl.h"
+#else
+#include <cuda_runtime.h>
+#endif
 class CudaStreamManager {
  public:
   // 构造函数，接受要使用的设备 ID 列表和每个设备的流数量
@@ -29,7 +33,11 @@ class CudaStreamManager {
     std::vector<void*> host_mem_addresses;
     std::vector<void*> device_mem_addresses;
     std::vector<size_t> sizes;
+#ifdef KTRANSFORMERS_USE_NPU
+    aclrtMemcpyKind direction;
+#else
     cudaMemcpyKind direction;
+#endif
     std::function<void()> callback;
   };
 
@@ -40,7 +48,12 @@ class CudaStreamManager {
   struct DeviceInfo {
     int device_id;
     std::thread worker_thread;
+#ifdef KTRANSFORMERS_USE_NPU
+    std::thread callback_thread;
+    std::vector<aclrtStream> streams;
+#else
     std::vector<cudaStream_t> streams;
+#endif
     int next_stream_index;
     MPSCQueueConsumerLock<std::shared_ptr<Request>> request_queue;
     std::atomic_bool stop_flag;
@@ -51,4 +64,7 @@ class CudaStreamManager {
 
   // 私有方法
   void deviceWorker(DeviceInfo& device_info);
+#ifdef KTRANSFORMERS_USE_NPU
+  void deviceCallback(DeviceInfo& device_info); // NPU 专用回调线程函数
+#endif
 };

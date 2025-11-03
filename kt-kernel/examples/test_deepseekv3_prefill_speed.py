@@ -2,8 +2,8 @@ import os, sys
 import time
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 import torch
 import logging
 import sys
@@ -22,11 +22,11 @@ logger = logging.getLogger("reader")
 from gguf.gguf_reader import GGUFReader
 # load_layers = 3
 load_layers = None
-worker_config = cpuinfer_ext.WorkerPoolConfig()
+worker_config = kt_kernel_ext.WorkerPoolConfig()
 worker_config.subpool_count = 2
 worker_config.subpool_numa_map= [0,1]
 worker_config.subpool_thread_count = [72,72]
-CPUInfer = cpuinfer_ext.CPUInfer(worker_config)
+CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 
 max_qlen = 4096
 max_kvlen = 4096
@@ -141,7 +141,7 @@ def build_mla(layer_idx, json_config, gguf_weights):
     rope_theta = json_config["rope_theta"]
     rope_scaling = json_config["rope_scaling"]
 
-    config = cpuinfer_ext.mla.MLAConfig(
+    config = kt_kernel_ext.mla.MLAConfig(
         hidden_size,
         q_lora_rank,
         kv_lora_rank,
@@ -196,12 +196,12 @@ def build_mla(layer_idx, json_config, gguf_weights):
     config.page_count = pages_count
 
     if q_a_type == "F32":
-        mla = cpuinfer_ext.mla.MLA_F32(config)
+        mla = kt_kernel_ext.mla.MLA_F32(config)
     elif q_a_type == "F16":
-        mla = cpuinfer_ext.mla.MLA_F16(config)
+        mla = kt_kernel_ext.mla.MLA_F16(config)
     elif q_a_type == "BF16":
-        # mla = cpuinfer_ext.mla.MLA_F32(config)
-        mla = cpuinfer_ext.mla.MLA_QUAN_F32(config)
+        # mla = kt_kernel_ext.mla.MLA_F32(config)
+        mla = kt_kernel_ext.mla.MLA_QUAN_F32(config)
     else:
         raise ValueError(f"Unsupported data type: {q_a_type}")
 
@@ -212,7 +212,7 @@ def build_mla(layer_idx, json_config, gguf_weights):
 
 def build_ffn(layer_idx, json_config, gguf_weights):
     if f"blk.{layer_idx}.ffn_gate.weight" in gguf_weights:  # dense
-        config = cpuinfer_ext.moe.MOEConfig(
+        config = kt_kernel_ext.moe.MOEConfig(
             json_config["num_experts_per_tok"] + json_config["n_shared_experts"],
             json_config["num_experts_per_tok"] + json_config["n_shared_experts"],
             json_config["hidden_size"],
@@ -232,12 +232,12 @@ def build_ffn(layer_idx, json_config, gguf_weights):
         config.down_proj = down.data_ptr()
         config.down_type = type_to_ggml_type(down_type)
 
-        moe = cpuinfer_ext.moe.KMLInt8_MOE(config)
+        moe = kt_kernel_ext.moe.KMLInt8_MOE(config)
         moe.load_weights()
         return moe
 
     elif f"blk.{layer_idx}.ffn_gate_exps.weight" in gguf_weights:
-        config = cpuinfer_ext.moe.MOEConfig(
+        config = kt_kernel_ext.moe.MOEConfig(
             json_config["n_routed_experts"] + json_config["n_shared_experts"],
             json_config["num_experts_per_tok"] + json_config["n_shared_experts"],
             json_config["hidden_size"],
@@ -272,7 +272,7 @@ def build_ffn(layer_idx, json_config, gguf_weights):
         config.down_proj = down.data_ptr()
         config.down_type = type_to_ggml_type(down_type)
 
-        moe = cpuinfer_ext.moe.KMLInt8_MOE(config)
+        moe = kt_kernel_ext.moe.KMLInt8_MOE(config)
         moe.load_weights()
         return moe
 
@@ -281,7 +281,7 @@ def build_ffn(layer_idx, json_config, gguf_weights):
 
 
 def build_moegate(layer_idx, json_config, gguf_weights):
-    config = cpuinfer_ext.gate.GateConfig(
+    config = kt_kernel_ext.gate.GateConfig(
         json_config["hidden_size"],
         json_config["num_experts_per_tok"],
         json_config["n_routed_experts"],
@@ -301,7 +301,7 @@ def build_moegate(layer_idx, json_config, gguf_weights):
     config.e_score_correction_bias = bias.data_ptr()
     config.e_score_correction_bias_type = type_to_ggml_type(bias_type)
 
-    gate = cpuinfer_ext.gate.MoEGate(config)
+    gate = kt_kernel_ext.gate.MoEGate(config)
     
     return gate
    
@@ -309,7 +309,7 @@ def build_moegate(layer_idx, json_config, gguf_weights):
 
 def build_llm(json_config, gguf_weights):
 
-    general_config = cpuinfer_ext.GeneralConfig()
+    general_config = kt_kernel_ext.GeneralConfig()
     general_config.vocab_size = json_config["vocab_size"]
     general_config.hidden_size = json_config["hidden_size"]
     general_config.num_experts_per_tok = json_config["num_experts_per_tok"]
@@ -331,8 +331,8 @@ def build_llm(json_config, gguf_weights):
 
     general_config.pool = CPUInfer.backend_
 
-    llm = cpuinfer_ext.DeepseekV3ForCausalLM(general_config)
-    model = cpuinfer_ext.DeepseekV3Model(general_config)
+    llm = kt_kernel_ext.DeepseekV3ForCausalLM(general_config)
+    model = kt_kernel_ext.DeepseekV3Model(general_config)
     llm.model = model
 
 
@@ -341,7 +341,7 @@ def build_llm(json_config, gguf_weights):
 
     for i in range(real_load_layers):
     # for i in [2,3]:
-        layer = cpuinfer_ext.DeepseekV3DecoderLayer(general_config,i)
+        layer = kt_kernel_ext.DeepseekV3DecoderLayer(general_config,i)
         attn_norm, attn_norm_type = get_torch_tensor_and_type_from_gguf(gguf_weights, f"blk.{i}.attn_norm.weight")
         ffn_norm, ffn_norm_type = get_torch_tensor_and_type_from_gguf(gguf_weights, f"blk.{i}.ffn_norm.weight")
 

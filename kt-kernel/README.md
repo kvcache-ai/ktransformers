@@ -105,59 +105,42 @@ python -c "from kt_kernel import AMXMoEWrapper; print('✓ kt-kernel installed s
 
 ## Weight Quantization
 
-KT-Kernel provides a weight conversion tool to quantize model weights from FP8/FP16/BF16 to INT4/INT8 format optimized for AMX inference.
+KT-Kernel provides weight quantization tools for CPU-GPU hybrid inference (e.g., integrating with SGLang). Both tools work together to enable heterogeneous expert placement across CPUs and GPUs.
 
-### Quantization Methods
+### CPU Weights (for "cold" experts on CPU)
 
-- **INT4**: 4-bit quantization for maximum memory efficiency
-- **INT8**: 8-bit quantization for better accuracy
-
-### Supported Input Formats
-
-- **FP8**: 8-bit floating point with automatic dequantization
-- **FP16**: 16-bit floating point
-- **BF16**: BFloat16 format
-
-### Basic Usage
+Quantize weights to INT4/INT8 format optimized for AMX inference:
 
 ```bash
-# Quantize BF16 model to INT4
-python scripts/convert_weights.py \
-  --input-path /path/to/bf16/model \
+python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
   --input-type bf16 \
   --output /path/to/output \
   --quant-method int4
-
-# Quantize FP16 model to INT8
-python scripts/convert_weights.py \
-  --input-path /path/to/fp16/model \
-  --input-type fp16 \
-  --output /path/to/output \
-  --quant-method int8
-
-# Quantize FP8 model to INT4
-python scripts/convert_weights.py \
-  --input-path /path/to/fp8/model \
-  --input-type fp8 \
-  --output /path/to/output \
-  --quant-method int4
 ```
 
-### Output Format
+**Supported formats:** FP8, FP16, BF16 → INT4/INT8
 
-The converted weights are saved in SafeTensors format with NUMA-aware layout:
-```
-output_dir/
-├── model-00001-of-00050.safetensors
-├── model-00002-of-00050.safetensors
-├── ...
-├── config.json
-└── tokenizer files...
+### GPU Weights (for "hot" experts on GPU)
+
+Apply GPTQ quantization to model weights:
+
+```bash
+# Install additional dependencies first
+pip install accelerate transformers llmcompressor datasets
+
+# Quantize GPU weights
+python scripts/convert_gpu_weights.py \
+  --model_id /path/to/model \
+  --output_dir /path/to/output \
+  --quant_type W4A16
 ```
 
-Each expert's weights are split across NUMA nodes for optimal memory access:
-- `blk.{layer}.ffn_{proj}_exps.{expert}.numa.{numa_idx}.weight`: Quantized weights
-- `blk.{layer}.ffn_{proj}_exps.{expert}.numa.{numa_idx}.scale`: Quantization scales
+**Supported types:** W4A16 (GPTQ4), W8A16 (GPTQ8)
+
+---
+
+For detailed documentation, advanced options, and low-memory mode, see [scripts/README.md](scripts/README.md).
 
 ## Before Commit!
 your msg should match: Conventional Commits (https://www.conventionalcommits.org/) <br>and format your code before commit:

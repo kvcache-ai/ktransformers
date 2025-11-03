@@ -1,6 +1,8 @@
 #ifndef LLAMAFILE_MOE_HPP
 #define LLAMAFILE_MOE_HPP
+#ifdef FORWARD_TIME_PROFILE
 #include <fmt/format.h>
+#endif
 #include <numa.h>
 #include <numaif.h>
 
@@ -10,8 +12,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
-#include <iostream>
-#include <mutex>
 #include <vector>
 
 #include "../../cpu_backend/shared_mem_buffer.h"
@@ -737,8 +737,7 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
  public:
   using TP_MOE_Common<LLAMA_MOE_TP>::TP_MOE_Common;
 
-  void load_weights(const uint64_t* physical_to_logical_map) {
-    throw std::runtime_error("[llamafile] physical_to_logical_map not supported");
+  void load_weights() {
     auto pool = this->config.pool;
     auto inter = this->config.intermediate_size / this->tp_count;
     pool->dispense_backend()->do_numa_job([this, pool, inter](int tp_id) {

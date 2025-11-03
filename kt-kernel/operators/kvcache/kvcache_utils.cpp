@@ -10,6 +10,7 @@
 
 #include <chrono>
 
+#include "ggml-impl.h"
 #include "kvcache.h"
 
 std::string ggml_type_to_string(ggml_type type) {

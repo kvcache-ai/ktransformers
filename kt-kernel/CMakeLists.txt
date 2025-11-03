@@ -2,7 +2,33 @@ cmake_minimum_required(VERSION 3.16)
 
 # Toggle: default to system compilers; optionally use conda toolchain
 option(USE_CONDA_TOOLCHAIN "Use C/C++ compilers and libraries from active conda env" OFF)
+option(LLAMA_NATIVE "llama: enable -march=native flag" OFF)
+option(LLAMA_AVX "llama: enable AVX" OFF)
+option(LLAMA_AVX2 "llama: enable AVX2" OFF)
+option(LLAMA_AVX512 "llama: enable AVX512" OFF)
+option(LLAMA_AVX512_VBMI "llama: enable AVX512-VBMI" OFF)
+option(LLAMA_AVX512_VNNI "llama: enable AVX512-VNNI" OFF)
+option(LLAMA_AVX512_BF16 "llama: enable AVX512-BF16" OFF)
+option(LLAMA_FMA "llama: enable FMA" OFF)
+# in MSVC F16C is implied with AVX2/AVX512
+if(NOT MSVC)
+    option(LLAMA_F16C "llama: enable F16C" OFF)
+endif()
+option(LLAMA_AVX512_FANCY_SIMD "llama: enable AVX512-VL, AVX512-BW, AVX512-DQ, AVX512-VNNI" OFF)
+option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
+option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
+option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
+option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
+option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" OFF)
+option(KTRANSFORMERS_CPU_USE_AMX "ktransformers: CPU use AMX" OFF)
+option(KTRANSFORMERS_CPU_DEBUG "ktransformers: DEBUG CPU use AMX" OFF)
+option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
+option(KTRANSFORMERS_CPU_MOE_KERNEL "ktransformers: CPU use moe kernel" OFF)
+option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF)
+# LTO control
+option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
+project(kt_kernel_ext VERSION 0.1.0)
 # Choose compilers BEFORE project() so CMake honors them
 if(USE_CONDA_TOOLCHAIN)
     if(NOT DEFINED ENV{CONDA_PREFIX} OR NOT EXISTS "$ENV{CONDA_PREFIX}")
@@ -23,8 +49,6 @@ else()
         set(CMAKE_CXX_COMPILER "/usr/bin/g++" CACHE FILEPATH "C++ compiler" FORCE)
     endif()
 endif()
-
-project(cpuinfer_ext VERSION 0.1.0)
 
 
 # If explicitly using conda toolchain, prefer its libraries/headers and RPATH
@@ -88,7 +112,7 @@ add_compile_definitions(FMT_HEADER_ONLY)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 set(CMAKE_BUILD_TYPE "Release")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g ")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
 # set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenMP REQUIRED)
@@ -98,7 +122,6 @@ include(CheckCXXCompilerFlag)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 
-option(LLAMA_NATIVE "llama: enable -march=native flag" ON)
 
 # instruction set specific
 if(LLAMA_NATIVE)
@@ -106,51 +129,10 @@ if(LLAMA_NATIVE)
 else()
     set(INS_ENB ON)
 endif()
-
-option(LLAMA_AVX "llama: enable AVX" OFF)
-option(LLAMA_AVX2 "llama: enable AVX2" OFF)
-option(LLAMA_AVX512 "llama: enable AVX512" OFF)
-option(LLAMA_AVX512_VBMI "llama: enable AVX512-VBMI" OFF)
-option(LLAMA_AVX512_VNNI "llama: enable AVX512-VNNI" OFF)
-option(LLAMA_AVX512_BF16 "llama: enable AVX512-BF16" OFF)
-option(LLAMA_FMA "llama: enable FMA" OFF)
-# in MSVC F16C is implied with AVX2/AVX512
-if(NOT MSVC)
-    option(LLAMA_F16C "llama: enable F16C" OFF)
-endif()
-option(LLAMA_AVX512_FANCY_SIMD "llama: enable AVX512-VL, AVX512-BW, AVX512-DQ, AVX512-VNNI" OFF)
-option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
-option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
-option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
-option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
-option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" ON)
-option(KTRANSFORMERS_CPU_USE_AMX "ktransformers: CPU use AMX" OFF)
-option(KTRANSFORMERS_CPU_DEBUG "ktransformers: DEBUG CPU use AMX" OFF)
-option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
-# LTO control
-option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 # Architecture specific
 # TODO: probably these flags need to be tweaked on some architectures
 #       feel free to update the Makefile for your architecture and send a pull request or issue
 message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-if(MSVC)
-    string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" CMAKE_GENERATOR_PLATFORM_LWR)
-    message(STATUS "CMAKE_GENERATOR_PLATFORM: ${CMAKE_GENERATOR_PLATFORM}")
-else()
-    set(CMAKE_GENERATOR_PLATFORM_LWR "")
-endif()
-
-if(NOT MSVC)
-    if(LLAMA_STATIC)
-        add_link_options(-static)
-        if(MINGW)
-            add_link_options(-static-libgcc -static-libstdc++)
-        endif()
-    endif()
-    if(LLAMA_GPROF)
-        add_compile_options(-pg)
-    endif()
-endif()
 
 set(ARCH_FLAGS "")
 
@@ -266,14 +248,14 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
             list(APPEND ARCH_FLAGS -mfma)
         endif()
         if(LLAMA_AVX)
-            list(APPEND ARCH_FLAGS -mavx)
+            list(APPEND ARCH_FLAGS -mavx -mfma -msse3 -mf16c)
+            message(WARNING "pure AVX is not supported at least avx2")
         endif()
         if(LLAMA_AVX2)
-            list(APPEND ARCH_FLAGS -mavx2)
+            list(APPEND ARCH_FLAGS -mavx2 -mfma -msse3 -mf16c)
         endif()
         if(LLAMA_AVX512)
-            list(APPEND ARCH_FLAGS -mavx512f)
-            list(APPEND ARCH_FLAGS -mavx512bw)
+            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mfma -mf16c)
         endif()
         if(LLAMA_AVX512_VBMI)
             list(APPEND ARCH_FLAGS -mavx512vbmi)
@@ -305,14 +287,6 @@ else()
     message(STATUS "Unknown architecture")
 endif()
 
-# message(STATUS "CUDAToolkit_ROOT:${CUDAToolkit_ROOT}")
-# find_package(FindCUDAToolkit REQUIRED)
-# if(CUDAToolkit_FOUND)
-#     message(STATUS "Found CUDA cudart lib at:${CUDAToolkit_LIBRARY_DIR}")
-# else()
-#     message(STATUS "Can't found CUDA lib")
-# endif()
-
 if(NOT EXISTS $ENV{ROCM_PATH})
     if(NOT EXISTS /opt/rocm)
         set(ROCM_PATH /usr)
@@ -338,6 +312,62 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
 
+if(KTRANSFORMERS_CPU_MOE_AMD)
+    set(BLIS_ROOT "" CACHE PATH "Root directory of BLIS installation")
+    set(_BLIS_SEARCH_DIRS)
+    if(BLIS_ROOT)
+        list(APPEND _BLIS_SEARCH_DIRS "${BLIS_ROOT}")
+    endif()
+    list(APPEND _BLIS_SEARCH_DIRS "/usr/local" "/usr")
+
+    find_path(BLIS_INCLUDE_DIR
+        NAMES blis.h
+        HINTS ${_BLIS_SEARCH_DIRS}
+        PATH_SUFFIXES include include/blis
+    )
+    find_library(BLIS_LIBRARY
+        NAMES blis
+        HINTS ${_BLIS_SEARCH_DIRS}
+        PATH_SUFFIXES lib lib64
+    )
+
+    if(NOT BLIS_INCLUDE_DIR OR NOT BLIS_LIBRARY)
+        message(FATAL_ERROR "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
+    else()
+        message(STATUS "Found BLIS include at ${BLIS_INCLUDE_DIR}")
+        message(STATUS "Found BLIS library ${BLIS_LIBRARY}")
+    endif()
+    target_include_directories(${PROJECT_NAME} PRIVATE ${BLIS_INCLUDE_DIR})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${BLIS_LIBRARY})
+endif()
+
+
+if(HOST_IS_X86)
+    if(KTRANSFORMERS_CPU_USE_AMX_AVX512)
+        add_compile_definitions(USE_AMX_AVX_KERNEL=1)
+        if(KTRANSFORMERS_CPU_USE_AMX)
+            add_compile_definitions(HAVE_AMX=1)
+            list(APPEND ARCH_FLAGS -mamx-tile -mamx-bf16 -mamx-int8)
+            message(STATUS "AMX enabled")
+            list(APPEND ARCH_FLAGS -mamx-tile)
+        endif()
+        # add_executable(amx-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/amx-test.cpp)
+        # target_link_libraries(amx-test llama)
+        if(KTRANSFORMERS_CPU_DEBUG)
+            file(GLOB AMX_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/test/*.cpp")
+            foreach(test_src ${AMX_TEST_SOURCES})
+                # 获取不带扩展名的文件名作为 target 名
+                get_filename_component(test_name ${test_src} NAME_WE)
+                add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
+                target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
+            endforeach()
+        endif()
+        list(APPEND ARCH_FLAGS -mfma -mf16c -mavx512bf16 -mavx512vnni)
+    endif()
+endif()
+
+
+
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
 
@@ -345,53 +375,48 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/pybind11 ${CMAKE_CURREN
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-if(WIN32)
-    include_directories("$ENV{CUDA_PATH}/include")
-    add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
-elseif(UNIX)
-    if(KTRANSFORMERS_USE_CUDA)
-        include(CheckLanguage)
-        check_language(CUDA)
-        if(CMAKE_CUDA_COMPILER)
-            message(STATUS "CUDA detected")
-            find_package(CUDAToolkit REQUIRED)
-            include_directories(${CUDAToolkit_INCLUDE_DIRS})
-        else()
-            message(FATAL_ERROR "KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found")
-        endif()
-        message(STATUS "enabling CUDA")
-        enable_language(CUDA)
-        add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
-    elseif(KTRANSFORMERS_USE_ROCM)
-        find_package(HIP REQUIRED)
-        if(HIP_FOUND)
-            include_directories("${HIP_INCLUDE_DIRS}")
-            add_compile_definitions(KTRANSFORMERS_USE_ROCM=1)
-        endif()
-    elseif(KTRANSFORMERS_USE_MUSA)
-        if(NOT EXISTS $ENV{MUSA_PATH})
-            if(NOT EXISTS /opt/musa)
-                set(MUSA_PATH /usr/local/musa)
-            else()
-                set(MUSA_PATH /opt/musa)
-            endif()
-        else()
-            set(MUSA_PATH $ENV{MUSA_PATH})
-        endif()
-
-        list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
-
-        find_package(MUSAToolkit)
-        if(MUSAToolkit_FOUND)
-            message(STATUS "MUSA Toolkit found")
-            add_compile_definitions(KTRANSFORMERS_USE_MUSA=1)
-        endif()
-    elseif(KTRANSFORMERS_CPU_USE_KML)
-        message(STATUS "KML CPU detected")
+if(KTRANSFORMERS_USE_CUDA)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        message(STATUS "CUDA detected")
+        find_package(CUDAToolkit REQUIRED)
+        include_directories(${CUDAToolkit_INCLUDE_DIRS})
     else()
-        message(STATUS "No GPU support enabled, building for CPU only")
-        add_compile_definitions(KTRANSFORMERS_CPU_ONLY=1)
+        message(FATAL_ERROR "KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found")
     endif()
+    message(STATUS "enabling CUDA")
+    enable_language(CUDA)
+    add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
+elseif(KTRANSFORMERS_USE_ROCM)
+    find_package(HIP REQUIRED)
+    if(HIP_FOUND)
+        include_directories("${HIP_INCLUDE_DIRS}")
+        add_compile_definitions(KTRANSFORMERS_USE_ROCM=1)
+    endif()
+elseif(KTRANSFORMERS_USE_MUSA)
+    if(NOT EXISTS $ENV{MUSA_PATH})
+        if(NOT EXISTS /opt/musa)
+            set(MUSA_PATH /usr/local/musa)
+        else()
+            set(MUSA_PATH /opt/musa)
+        endif()
+    else()
+        set(MUSA_PATH $ENV{MUSA_PATH})
+    endif()
+
+    list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
+
+    find_package(MUSAToolkit)
+    if(MUSAToolkit_FOUND)
+        message(STATUS "MUSA Toolkit found")
+        add_compile_definitions(KTRANSFORMERS_USE_MUSA=1)
+    endif()
+elseif(KTRANSFORMERS_CPU_USE_KML)
+    message(STATUS "KML CPU detected")
+else()
+    message(STATUS "No GPU support enabled, building for CPU only")
+    add_compile_definitions(KTRANSFORMERS_CPU_ONLY=1)
 endif()
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
@@ -404,14 +429,31 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # arm64
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kml SOURCE_DIR6)
+    if(NOT KTRANSFORMERS_CPU_MLA)
+        list(REMOVE_ITEM SOURCE_DIR6 ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/mla/)
+    endif()
 endif()
 # message(STATUS "SOURCE_DIR6: ${SOURCE_DIR6}")
 
-# aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/amx SOURCE_DIR7)
+if(KTRANSFORMERS_CPU_MOE_KERNEL)
+    aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/la SOURCE_DIR7)
+    if(KTRANSFORMERS_CPU_MOE_AMD)
+        aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/aocl_kernel SOURCE_DIR7_KERNEL)
+        add_compile_definitions(USE_MOE_KERNEL_AMD=1)
+    elseif(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
+        aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/kml_kernel SOURCE_DIR7_KERNEL)
+    endif()
+    list(APPEND SOURCE_DIR7 ${SOURCE_DIR7_KERNEL})
+    if(NOT KTRANSFORMERS_CPU_MLA)
+        list(REMOVE_ITEM SOURCE_DIR7 ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mla/)
+    endif()
+    add_compile_definitions(USE_MOE_KERNEL=1)
+endif()
+message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 
 
-set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6})
+set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
 
 file(GLOB_RECURSE FMT_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -437,47 +479,47 @@ if(NOT DEFINED CLANG_FORMAT_BIN)
     )
 endif()
 if(NOT CLANG_FORMAT_BIN)
-    message(FATAL_ERROR "clang-format not found. Please install clang-format (>=18) or pass -DCLANG_FORMAT_BIN=/full/path and reconfigure.")
-endif()
-execute_process(
-    COMMAND ${CLANG_FORMAT_BIN} --version
-    OUTPUT_VARIABLE _CLANG_FORMAT_VER
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-message(STATUS "CMake PATH: $ENV{PATH}")
-# Parse version string, e.g. "Ubuntu clang-format version 19.1.0" or "clang-format version 18.1.8"
-string(REGEX MATCH "version[ ]+([0-9]+(\\.[0-9]+)*)" _CF_VER_MATCH "${_CLANG_FORMAT_VER}")
-if(NOT _CF_VER_MATCH)
-    message(FATAL_ERROR "Failed to parse clang-format version from: ${_CLANG_FORMAT_VER}")
-endif()
-set(CLANG_FORMAT_VERSION "${CMAKE_MATCH_1}")
-message(STATUS "Using clang-format ${CLANG_FORMAT_VERSION} at ${CLANG_FORMAT_BIN}")
-if(CLANG_FORMAT_VERSION VERSION_LESS "18.0.0")
-    message(FATAL_ERROR "clang-format >=18.0.0 required (found ${CLANG_FORMAT_VERSION} at ${CLANG_FORMAT_BIN}).\n"
-                        "Tip: Ensure your desired clang-format (e.g., conda's ${CONDA_PREFIX}/bin/clang-format) is earlier in PATH when running CMake,\n"
-                        "or pass -DCLANG_FORMAT_BIN=/full/path/to/clang-format.")
-endif()
+    message(WARNING "clang-format not found. Please install clang-format (>=18) or pass -DCLANG_FORMAT_BIN=/full/path and reconfigure.")
+else()
+    execute_process(
+        COMMAND ${CLANG_FORMAT_BIN} --version
+        OUTPUT_VARIABLE _CLANG_FORMAT_VER
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    # message(STATUS "CMake PATH: $ENV{PATH}")
+    # Parse version string, e.g. "Ubuntu clang-format version 19.1.0" or "clang-format version 18.1.8"
+    string(REGEX MATCH "version[ ]+([0-9]+(\\.[0-9]+)*)" _CF_VER_MATCH "${_CLANG_FORMAT_VER}")
+    if(NOT _CF_VER_MATCH)
+        message(WARNING "Failed to parse clang-format version from: ${_CLANG_FORMAT_VER}")
+    endif()
+    set(CLANG_FORMAT_VERSION "${CMAKE_MATCH_1}")
+    message(STATUS "Using clang-format ${CLANG_FORMAT_VERSION} at ${CLANG_FORMAT_BIN}")
+    if(CLANG_FORMAT_VERSION VERSION_LESS "18.0.0")
+        message(WARNING "clang-format >=18.0.0 required (found ${CLANG_FORMAT_VERSION} at ${CLANG_FORMAT_BIN}).\n"
+                            "Tip: Ensure your desired clang-format (e.g., conda's ${CONDA_PREFIX}/bin/clang-format) is earlier in PATH when running CMake,\n"
+                            "or pass -DCLANG_FORMAT_BIN=/full/path/to/clang-format.")
+    endif()
+    add_custom_target(
+        format
+        COMMAND ${CLANG_FORMAT_BIN}
+                -i
+                -style=file
+                -fallback-style=none
+                ${FMT_SOURCES}
+        COMMENT "Running clang-format on all source files"
+    )
 
-add_custom_target(
-    format
-    COMMAND ${CLANG_FORMAT_BIN}
-            -i
-            -style=file
-            -fallback-style=none
-            ${FMT_SOURCES}
-    COMMENT "Running clang-format on all source files"
-)
-
-# Optional: target to check formatting without modifying files (CI-friendly)
-add_custom_target(
-    format-check
-    COMMAND ${CLANG_FORMAT_BIN}
-            -n --Werror
-            -style=file
-            -fallback-style=none
-            ${FMT_SOURCES}
-    COMMENT "Checking clang-format on all source files"
-)
+    # Optional: target to check formatting without modifying files (CI-friendly)
+    add_custom_target(
+        format-check
+        COMMAND ${CLANG_FORMAT_BIN}
+                -n --Werror
+                -style=file
+                -fallback-style=none
+                ${FMT_SOURCES}
+        COMMENT "Checking clang-format on all source files"
+    )
+endif()
 
 include(FindPkgConfig)
 if(PKG_CONFIG_FOUND)
@@ -489,8 +531,6 @@ endif(PKG_CONFIG_FOUND)
 
 add_library(llamafile STATIC ${SOURCE_DIR4})
 
-message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
-message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
 
 if(CPUINFER_ENABLE_LTO)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
@@ -502,6 +542,7 @@ else()
     pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
     message(STATUS "LTO: disabled")
 endif()
+
 # Ensure the module target also has correct RPATH when conda is active
 if(TARGET ${PROJECT_NAME} AND DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}")
     set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -513,44 +554,23 @@ endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     message(STATUS "KML CPU detected")
 
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/prefillgemm)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/kml_kernel/prefillgemm)
     target_link_libraries(${PROJECT_NAME} PRIVATE prefillint8gemm)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/prefillgemm_int4)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/kml_kernel/prefillgemm_int4)
     target_link_libraries(${PROJECT_NAME} PRIVATE prefillint4gemm)
 
     set(DECODE_GEMM_SOURCES
-        ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/la/batch_gemm.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/la/batch_gemm_kernels.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/kml_kernel/batch_gemm.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/operators/moe_kernel/mat_kernel/kml_kernel/batch_gemm_kernels.cpp
     )
     add_library(decode_gemm SHARED ${DECODE_GEMM_SOURCES})
     target_link_libraries(${PROJECT_NAME} PRIVATE decode_gemm)  
-    
-    target_link_libraries(${PROJECT_NAME} PRIVATE kml_rt)
+    if(KTRANSFORMERS_CPU_MLA)
+        target_link_libraries(${PROJECT_NAME} PRIVATE kml_rt)
+    endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE CPU_USE_KML)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC OpenMP::OpenMP_CXX)
-
-
-if(HOST_IS_X86)
-    if(KTRANSFORMERS_CPU_USE_AMX_AVX512)
-        if(KTRANSFORMERS_CPU_USE_AMX)
-            add_compile_definitions(HAVE_AMX=1)
-            message(STATUS "AMX enabled")
-        endif()
-        # add_executable(amx-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/amx-test.cpp)
-        # target_link_libraries(amx-test llama)
-        if(KTRANSFORMERS_CPU_DEBUG)
-            file(GLOB AMX_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/test/*.cpp")
-            foreach(test_src ${AMX_TEST_SOURCES})
-                # 获取不带扩展名的文件名作为 target 名
-                get_filename_component(test_name ${test_src} NAME_WE)
-                add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
-                target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
-            endforeach()
-        endif()
-    endif()
-endif()
-
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     if(KTRANSFORMERS_CPU_DEBUG)
         # add_executable(convert-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/convert-test.cpp)
@@ -560,27 +580,27 @@ if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
             # 获取不带扩展名的文件名作为 target 名
             get_filename_component(test_name ${test_src} NAME_WE)
             add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
-            target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa kml_rt)
+            if(KTRANSFORMERS_CPU_MLA)
+                target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa kml_rt)
+            endif()
         endforeach()
     endif()
 endif()
 
 
-if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE "$ENV{CUDA_PATH}/lib/x64/cudart.lib") #CUDA::cudart
-elseif(UNIX)
-    if(NOT KTRANSFORMERS_USE_MUSA)
-        target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
-    endif()
-    if(KTRANSFORMERS_USE_ROCM)
-        add_compile_definitions(USE_HIP=1)
-        target_link_libraries(${PROJECT_NAME} PRIVATE "${ROCM_PATH}/lib/libamdhip64.so")
-        message(STATUS "Building for HIP")
-    endif()
-    if(KTRANSFORMERS_USE_MUSA)
-        target_link_libraries(${PROJECT_NAME} PRIVATE MUSA::musart)
-    endif()
+
+if(KTRANSFORMERS_USE_CUDA)
+    target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
 endif()
+if(KTRANSFORMERS_USE_ROCM)
+    add_compile_definitions(USE_HIP=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE "${ROCM_PATH}/lib/libamdhip64.so")
+    message(STATUS "Building for HIP")
+endif()
+if(KTRANSFORMERS_USE_MUSA)
+    target_link_libraries(${PROJECT_NAME} PRIVATE MUSA::musart)
+endif()
+
 
 
 find_library(NUMA_LIBRARY NAMES numa)
@@ -590,3 +610,7 @@ if(NUMA_LIBRARY)
 else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
+
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
+

@@ -1,3 +1,23 @@
+option(KTRANSFORMERS_USE_NPU                 "ktransformers: use NPU"                           OFF)
+if(KTRANSFORMERS_USE_NPU)
+    add_definitions(-DKTRANSFORMERS_USE_NPU=1)
+endif()
+
+if(KTRANSFORMERS_USE_NPU)
+    set(ASCEND_HOME_PATH "$ENV{ASCEND_HOME_PATH}")
+    message(STATUS "ASCEND_HOME_PATH is ${ASCEND_HOME_PATH}")
+    include_directories(${ASCEND_HOME_PATH}/include)
+    
+    link_directories(${TORCH_INSTALL_PREFIX}/../torch.libs)
+    # find torch_npu
+    execute_process(
+            COMMAND python -c "import torch; import torch_npu; print(torch_npu.__path__[0])"
+            OUTPUT_VARIABLE TORCH_NPU_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "Found PTA at: ${TORCH_NPU_PATH}")
+    find_library(PTA_LIBRARY torch_npu PATH "${TORCH_NPU_PATH}/lib")
+endif()
 
 cmake_minimum_required(VERSION 3.21)
 find_program(GCC_COMPILER NAMES g++-13 g++-12 g++-11 g++ REQUIRED)

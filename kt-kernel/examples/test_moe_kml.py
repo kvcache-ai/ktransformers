@@ -14,7 +14,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 os.environ["BLAS_NUM_THREADS"] = "1"
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 expert_num = 16
@@ -25,7 +25,7 @@ num_experts_per_tok = 8
 qlen = 512
 # qlen = 640
 layer_num = 1
-CPUInfer = cpuinfer_ext.CPUInfer(112)
+CPUInfer = kt_kernel_ext.CPUInfer(112)
 # validation_iter = 10000
 validation_iter = 1
 
@@ -97,26 +97,26 @@ def test_moe(quant_mode: str):
                 .to("cpu")
                 .contiguous()
             )
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
             config.up_proj = up_proj.data_ptr()
             config.down_proj = down_proj.data_ptr()
             config.pool = CPUInfer.backend_
             if quant_mode == "bf16":
-                moe = cpuinfer_ext.moe.AMXBF16_MOE(config)
+                moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())
                 CPUInfer.sync()
             elif quant_mode == "int8":
-                moe = cpuinfer_ext.moe.KMLInt8_MOE(config)
+                moe = kt_kernel_ext.moe.KMLInt8_MOE(config)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 # CPUInfer.submit(moe.warm_up_task())
                 # CPUInfer.sync()
             elif quant_mode == "int4":
-                moe = cpuinfer_ext.moe.KMLInt4_MOE(config)
+                moe = kt_kernel_ext.moe.KMLInt4_MOE(config)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())

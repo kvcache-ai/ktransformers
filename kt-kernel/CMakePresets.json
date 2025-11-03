@@ -1,0 +1,47 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 19,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "avx512",
+      "displayName": "avx512_platform",
+      "description": "for avx512 platform",
+      "cacheVariables": {
+        "KTRANSFORMERS_CPU_USE_AMX": "OFF",
+        "LLAMA_AVX512": "OFF",
+        "LLAMA_AVX2": "OFF",
+        "KTRANSFORMERS_CPU_USE_AMX_AVX512": "ON",
+        "KTRANSFORMERS_USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "avx",
+      "displayName": "avx_platform",
+      "description": "for avx platform",
+      "cacheVariables": {
+        "KTRANSFORMERS_CPU_USE_AMX": "OFF",
+        "LLAMA_AVX2": "ON",
+        "KTRANSFORMERS_USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "amx",
+      "displayName": "amx_platform",
+      "description": "for amx platform",
+      "cacheVariables": {
+        "KTRANSFORMERS_CPU_USE_AMX": "ON",
+        "LLAMA_AVX512": "OFF",
+        "LLAMA_AVX2": "OFF",
+        "KTRANSFORMERS_CPU_USE_AMX_AVX512": "ON",
+        "KTRANSFORMERS_USE_CUDA": "ON"
+      }
+    }
+
+  ]
+}
+
+

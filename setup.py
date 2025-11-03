@@ -41,6 +41,13 @@ except ImportError:
     MUSA_HOME=None
 KTRANSFORMERS_BUILD_XPU = torch.xpu.is_available()
 
+
+try:
+    import torch_npu
+    KTRANSFORMERS_BUILD_NPU = torch_npu.npu.is_available()
+except:
+    KTRANSFORMERS_BUILD_NPU = False
+
 # 检测 DEV_BACKEND 环境变量
 dev_backend = os.environ.get("DEV_BACKEND", "").lower()
 if dev_backend == "xpu":
@@ -154,6 +161,8 @@ class VersionInfo:
         return cuda_version
 
     def get_cuda_version_of_torch(self):
+        if KTRANSFORMERS_BUILD_NPU:
+            return 'aarch64'
         torch_cuda_version = parse(torch.version.cuda)
         cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
         return cuda_version
@@ -179,6 +188,8 @@ class VersionInfo:
         else:
             print("Using native cpu instruct")
         if sys.platform.startswith("linux"):
+            if KTRANSFORMERS_BUILD_NPU:
+                return 'aarch64'
             with open('/proc/cpuinfo', 'r', encoding="utf-8") as cpu_f:
                 cpuinfo = cpu_f.read()
             flags_line = [line for line in cpuinfo.split(
@@ -237,6 +248,8 @@ class VersionInfo:
             backend_version = f"rocm{self.get_rocm_bare_metal_version(ROCM_HOME)}"
         elif torch.xpu.is_available():
             backend_version = f"xpu"
+        elif KTRANSFORMERS_BUILD_NPU:
+            backend_version = f"npu{torch_npu.__version__}"
         else:
             raise ValueError("Unsupported backend: CUDA_HOME MUSA_HOME ROCM_HOME all not set and XPU is not available.")
         package_version = f"{flash_version}+{backend_version}torch{torch_version}{cpu_instruct}"
@@ -509,6 +522,8 @@ class CMakeBuild(BuildExtension):
             cmake_args += ["-DKTRANSFORMERS_USE_ROCM=ON"]
         elif KTRANSFORMERS_BUILD_XPU:
             cmake_args += ["-DKTRANSFORMERS_USE_XPU=ON", "-DKTRANSFORMERS_USE_CUDA=OFF"]
+        elif KTRANSFORMERS_BUILD_NPU:
+            cmake_args += ["-DKTRANSFORMERS_USE_NPU=ON", "-DKTRANSFORMERS_USE_CUDA=OFF"]
         else:
             raise ValueError("Unsupported backend: CUDA_HOME, MUSA_HOME, and ROCM_HOME are not set and XPU is not available.")
         
@@ -636,10 +651,12 @@ elif MUSA_HOME is not None:
     )
 elif torch.xpu.is_available(): #XPUExtension is not available now.
     ops_module = None
+elif KTRANSFORMERS_BUILD_NPU:
+    pass
 else:
     raise ValueError("Unsupported backend: CUDA_HOME ROCM_HOME MUSA_HOME are not set and XPU is not available.")
 
-if not torch.xpu.is_available():
+if not torch.xpu.is_available() and not KTRANSFORMERS_BUILD_NPU:
     ext_modules = [
         CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
         ops_module,
@@ -660,15 +677,42 @@ if not torch.xpu.is_available():
         ext_modules.append(
             CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
         )
-else:
+
+    setup(
+        name=VersionInfo.PACKAGE_NAME,
+        version=VersionInfo().get_package_version(),
+        install_requires=triton_dep,
+        cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+        ext_modules=ext_modules
+    )
+
+
+
+elif torch.xpu.is_available():
     ext_modules = [
         CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
     ]
+    setup(
+        name=VersionInfo.PACKAGE_NAME,
+        version=VersionInfo().get_package_version(),
+        install_requires=triton_dep,
+        cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+        ext_modules=ext_modules
+    )
 
-setup(
-    name=VersionInfo.PACKAGE_NAME,
-    version=VersionInfo().get_package_version(),
-    install_requires=triton_dep,
-    cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
-    ext_modules=ext_modules
-)
+elif KTRANSFORMERS_BUILD_NPU:
+    ext_modules = [
+        CMakeExtension("cpuinfer_ext", os.fspath(Path("").resolve() / "csrc" / "ktransformers_ext")),
+    ] 
+    if with_balance:
+        print("using balance_serve")
+        ext_modules.append(
+            CMakeExtension("balance_serve", os.fspath(Path("").resolve()/ "csrc"/ "balance_serve"))
+        )
+
+    setup(
+        name=VersionInfo.PACKAGE_NAME,
+        version=VersionInfo().get_package_version(),
+        cmdclass={"bdist_wheel":BuildWheelsCommand ,"build_ext": CMakeBuild},
+        ext_modules=ext_modules
+    )
