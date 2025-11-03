@@ -13,7 +13,7 @@ import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import cpuinfer_ext
+import kt_kernel_ext
 from flash_attn import flash_attn_with_kvcache
 import torch
 
@@ -26,20 +26,20 @@ anchor_num = 1
 cache_seqlen = 8192
 cache_seqlens = torch.tensor([cache_seqlen], dtype=torch.int32, device="cpu")
 seqlens_zero = torch.zeros((1,), dtype=torch.int32, device="cpu")
-anchor_type = cpuinfer_ext.kvcache.AnchorType.DYNAMIC
-kv_type = cpuinfer_ext.kvcache.ggml_type.FP16
-retrieval_type = cpuinfer_ext.kvcache.RetrievalType.LAYER
+anchor_type = kt_kernel_ext.kvcache.AnchorType.DYNAMIC
+kv_type = kt_kernel_ext.kvcache.ggml_type.FP16
+retrieval_type = kt_kernel_ext.kvcache.RetrievalType.LAYER
 layer_step: int = 1
 token_step: int = 1
 layer_offset: int = 0
 max_thread_num: int = 2
 max_batch_size: int = 1
 max_block_num: int = 512
-CPUInfer = cpuinfer_ext.CPUInfer(max_thread_num)
+CPUInfer = kt_kernel_ext.CPUInfer(max_thread_num)
 validation_iter = 100
 
 with torch.inference_mode(mode=True):
-    config = cpuinfer_ext.kvcache.KVCacheConfig(
+    config = kt_kernel_ext.kvcache.KVCacheConfig(
         layer_num,
         kv_head_num,
         q_head_num,
@@ -56,7 +56,7 @@ with torch.inference_mode(mode=True):
         max_batch_size,
         max_thread_num,
     )
-    local_kvcache = cpuinfer_ext.kvcache.KVCache(config)
+    local_kvcache = kt_kernel_ext.kvcache.KVCache(config)
 
     kvcaches = []
     block_table = (

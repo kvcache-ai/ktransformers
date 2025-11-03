@@ -4,8 +4,8 @@ import time
 from typing import Optional
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 import torch
 from torch import inf, nn
 from torch.nn import init
@@ -110,7 +110,7 @@ rope_scaling = {
 
 
 
-CPUInfer = cpuinfer_ext.CPUInfer(30)
+CPUInfer = kt_kernel_ext.CPUInfer(30)
 validation_iter = 100
 
 
@@ -214,7 +214,7 @@ def test_cpu_mla():
     kv_b_proj_weight = kv_b_proj.weight.to(weight_type).to('cpu').contiguous()
     o_proj_weight = o_proj.weight.to(weight_type).to('cpu').contiguous()
 
-    config = cpuinfer_ext.mla.MLAConfig(
+    config = kt_kernel_ext.mla.MLAConfig(
         hidden_size,
         q_lora_rank,
         kv_lora_rank,
@@ -272,12 +272,12 @@ def test_cpu_mla():
 
 
     if weight_type == torch.float32:
-        mla = cpuinfer_ext.mla.MLA_F32(config)
+        mla = kt_kernel_ext.mla.MLA_F32(config)
     elif weight_type == torch.float16:
-        mla = cpuinfer_ext.mla.MLA_F16(config)
+        mla = kt_kernel_ext.mla.MLA_F16(config)
     elif weight_type == torch.bfloat16:
-        # mla = cpuinfer_ext.mla.MLA_F32(config)
-        mla = cpuinfer_ext.mla.MLA_QUAN_F32(config)
+        # mla = kt_kernel_ext.mla.MLA_F32(config)
+        mla = kt_kernel_ext.mla.MLA_QUAN_F32(config)
     else:
         raise ValueError(f"Unsupported data type: {weight_type}")
     

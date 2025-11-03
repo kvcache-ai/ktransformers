@@ -13,7 +13,7 @@ import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 layer_num = 10

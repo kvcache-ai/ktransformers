@@ -5,8 +5,8 @@ import platform
 import json
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build'))
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 import torch
 from torch import inf, nn
 from torch.nn import init
@@ -47,7 +47,7 @@ rope_scaling = {
 
 CPUINFER_PARAM = 304
 # 初始化 CPUInfer（此处使用原始构造函数，可根据需要调整配置参数）
-CPUInfer = cpuinfer_ext.CPUInfer(CPUINFER_PARAM)
+CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
 
 warm_up_iter = 20
@@ -200,7 +200,7 @@ def bench_mla(quant_mode: str):
             kv_b_proj_weight = kv_b_proj.weight.to(torch.float16).to('cpu').contiguous()
             o_proj_weight = o_proj.weight.to(torch.float16).to('cpu').contiguous()
 
-            config = cpuinfer_ext.mla.MLAConfig(
+            config = kt_kernel_ext.mla.MLAConfig(
                 hidden_size,
                 q_lora_rank,
                 kv_lora_rank,
@@ -236,7 +236,7 @@ def bench_mla(quant_mode: str):
 
 
 
-            mla = cpuinfer_ext.mla.MLA(config)
+            mla = kt_kernel_ext.mla.MLA(config)
             mla.load_weights()
             mla.set_local_pages(pages_count)
             mlas.append(mla)

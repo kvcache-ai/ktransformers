@@ -13,7 +13,7 @@ import os, sys, time, json, subprocess, platform
 
 from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build'))
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 import numpy as np
 
@@ -37,14 +37,14 @@ physical_to_logical_map = torch.tensor(
 ).contiguous()
 # 将 CPUInfer 参数设为变量
 # CPUINFER_PARAM = 257
-# CPUInfer = cpuinfer_ext.CPUInfer(CPUINFER_PARAM)
+# CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
-worker_config = cpuinfer_ext.WorkerPoolConfig()
+worker_config = kt_kernel_ext.WorkerPoolConfig()
 worker_config.subpool_count = 2
 worker_config.subpool_numa_map= [0,1]
 worker_config.subpool_thread_count = [40,40]
 CPUINFER_PARAM = 80
-CPUInfer = cpuinfer_ext.CPUInfer(worker_config)
+CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 
 
 
@@ -163,7 +163,7 @@ def bench_moe(quant_mode: str):
             gate_proj = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda").to("cpu").contiguous()
             up_proj = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda").to("cpu").contiguous()
             down_proj = torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cuda").to("cpu").contiguous()
-            config = cpuinfer_ext.moe.MOEConfig(
+            config = kt_kernel_ext.moe.MOEConfig(
                 expert_num, num_experts_per_tok, hidden_size, intermediate_size,0)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
@@ -171,17 +171,17 @@ def bench_moe(quant_mode: str):
             config.down_proj = down_proj.data_ptr()
             config.pool = CPUInfer.backend_
             if quant_mode == "bf16":
-                moe = cpuinfer_ext.moe.AMXBF16_MOE(config)
+                moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
             elif quant_mode == "int8":
-                moe = cpuinfer_ext.moe.AMXInt8_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt8_MOE(config)
             elif quant_mode == "int4":
-                moe = cpuinfer_ext.moe.AMXInt4_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt4_MOE(config)
             elif quant_mode == "int4_1k":
                 config.quant_config.bits = 4
                 config.quant_config.group_size = k_group_size
                 config.quant_config.zero_point = True
                 config.gate_scale = 0
-                moe = cpuinfer_ext.moe.AMXInt4_1KGroup_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt4_1KGroup_MOE(config)
             CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
             CPUInfer.sync()
             gate_projs.append(gate_proj)

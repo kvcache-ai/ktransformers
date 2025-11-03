@@ -29,10 +29,7 @@
 #include "../../cpu_backend/worker_pool.h"
 #include "../moe-tp.hpp"
 #include "la/amx.hpp"
-#include "llama.cpp/ggml-impl.h"
-#include "llama.cpp/ggml-quants.h"
 #include "llama.cpp/ggml.h"
-#include "llamafile/sgemm.h"
 
 template <class T>
 class AMX_MOE_TP {
@@ -264,16 +261,15 @@ class AMX_MOE_TP {
   ~AMX_MOE_TP() {
     // shared_mem_buffer_numa.dealloc(this);
   }
-  // pack and quant the weights
-  void pack_weights() {}
-  void load_weights(const uint64_t* physical_to_logical_map) {
+  void load_weights() {
     auto pool = config_.pool->get_subpool(tp_part_idx);
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     if (config_.gate_projs.size()) {
       pool->do_work_stealing_job(
           config_.expert_num, nullptr,
           [this, physical_to_logical_map](int expert_id) {
             // printf("Load layer %d [%d/%d]\n", config_.layer_idx, expert_id, config_.expert_num);
-            uint64_t logical_expert_id = physical_to_logical_map[expert_id];
+            uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_id);
             {
               size_t scale_size = config_.intermediate_size * sizeof(float);
               size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size) - scale_size;
@@ -311,7 +307,7 @@ class AMX_MOE_TP {
         std::cout << "Loading from " << prefix << std::endl;
         for (int task_id = 0; task_id < config_.expert_num * mat_type_all * mat_split; task_id++) {
           int64_t expert_idx = task_id / (mat_type_all * mat_split);
-          uint64_t logical_expert_id = physical_to_logical_map[expert_idx];
+          uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
           uint8_t mat_split_idex = task_id % mat_split;
           if (mat_class == 0) {  // the up matrix
@@ -345,30 +341,32 @@ class AMX_MOE_TP {
         }
         pool->do_work_stealing_job(
             nth * config_.expert_num, nullptr,
-            [this, nth](int task_id) {
+            [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // gate part
-              gate_bb_[expert_idx]->from_mat(
-                  (ggml_bf16_t*)config_.gate_proj + expert_idx * config_.intermediate_size * config_.hidden_size, ith,
-                  nth);
+              gate_bb_[logical_expert_id]->from_mat(
+                  (ggml_bf16_t*)config_.gate_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
+                  ith, nth);
               // up part
-              up_bb_[expert_idx]->from_mat(
-                  (ggml_bf16_t*)config_.up_proj + expert_idx * config_.intermediate_size * config_.hidden_size, ith,
-                  nth);
+              up_bb_[logical_expert_id]->from_mat(
+                  (ggml_bf16_t*)config_.up_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
+                  ith, nth);
             },
             nullptr);
 
         nth = T::recommended_nth(config_.hidden_size);
         pool->do_work_stealing_job(
             nth * config_.expert_num, nullptr,
-            [this, nth](int task_id) {
+            [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // down part
-              down_bb_[expert_idx]->from_mat(
-                  (ggml_bf16_t*)config_.down_proj + expert_idx * config_.hidden_size * config_.intermediate_size, ith,
-                  nth);
+              down_bb_[logical_expert_id]->from_mat(
+                  (ggml_bf16_t*)config_.down_proj + logical_expert_id * config_.hidden_size * config_.intermediate_size,
+                  ith, nth);
               // printf("load down, expert %ld, ith %d, total nth %d\n", expert_idx, ith, nth);
             },
             nullptr);
@@ -380,8 +378,9 @@ class AMX_MOE_TP {
       if (config_.save) {
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
-            [this](int task_id) {
+            [this, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / mat_type_all;
+              expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
@@ -829,16 +828,16 @@ template <typename K>
 class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
  public:
   using TP_MOE_Common<AMX_MOE_TP<K>>::TP_MOE_Common;
-  void load_weights(const uint64_t* physical_to_logical_map) {
+  void load_weights() {
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;
     auto pool = config.pool;
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
     if (config.gate_projs.empty() == false) {
       printf("TP Load from loader\n");
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+
       this->weights_loaded = true;
     } else if (config.gate_proj != nullptr) {
       printf("From BF16\n");
@@ -852,7 +851,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
-                size_t expert_id = expert_id_;
+                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
                 memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
                        (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
                            i * gate_up_elcount,
@@ -873,9 +872,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
         }
       }
 
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
 
       for (auto i = 0; i < tp_count; i++) {
         auto& tpc = tps[i]->config_;
@@ -887,9 +884,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
       this->weights_loaded = true;
     } else if (config.path != "") {
       printf("TP Load from file\n");
-      pool->dispense_backend()->do_numa_job([this, pool, physical_to_logical_map](int numa_id) {
-        this->tps[numa_id]->load_weights(physical_to_logical_map);
-      });
+      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");

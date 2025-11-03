@@ -2,8 +2,8 @@ import os,sys
 import time
 from typing import Optional
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 import torch
 from torch import nn
 from torch.nn import init
@@ -54,7 +54,7 @@ rope_scaling = {
 
 
 
-CPUInfer = cpuinfer_ext.CPUInfer(64)
+CPUInfer = kt_kernel_ext.CPUInfer(64)
 validation_iter = 100
 
 
@@ -79,7 +79,7 @@ o_proj_weight = o_proj.weight.to(torch.float16).to('cpu').contiguous()
 
 
 
-config = cpuinfer_ext.mla.MLAConfig(
+config = kt_kernel_ext.mla.MLAConfig(
     hidden_size,
     q_lora_rank,
     kv_lora_rank,
@@ -115,7 +115,7 @@ config.pool = CPUInfer.backend_
 
 
 
-mla = cpuinfer_ext.mla.MLA(config)
+mla = kt_kernel_ext.mla.MLA(config)
 mla.load_weights()
 mla.set_local_pages(pages_count)
 

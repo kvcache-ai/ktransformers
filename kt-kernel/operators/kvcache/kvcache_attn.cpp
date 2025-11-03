@@ -9,8 +9,11 @@
  **/
 
 #include <chrono>
+#include <cmath>
 
+#include "ggml-impl.h"
 #include "kvcache.h"
+#include "llamafile/sgemm.h"
 
 void KVCache::attention_kvhead_(const uint16_t* q_in_data, ggml_fp16_t* output, float* attn_lse, int batch_size,
                                 WorkerPool* backend) {

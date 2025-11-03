@@ -8,11 +8,18 @@
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
 // Python bindings
+#include <sys/types.h>
+
+#include <cstddef>
+
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
-// #include "device_launch_parameters.h"
-#include "llamafile/flags.h"
 #include "operators/common.hpp"
+
+#if defined(USE_MOE_KERNEL)
+#include "operators/moe_kernel/la/kernel.hpp"
+#include "operators/moe_kernel/moe.hpp"
+#endif
 
 #if defined(__aarch64__) && defined(CPU_USE_KML)
 #if defined(KTRANSFORMERS_CPU_MLA)
@@ -22,26 +29,27 @@
 #include "operators/kml/mla_int8.hpp"
 #endif
 #include "operators/kml/moe.hpp"
+static const bool _is_plain_ = true;
+#else
+static const bool _is_plain_ = false;
 #endif
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
+#include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
 #endif
+#include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
+
 #include <cstdint>
-#include <iostream>
 #include <memory>
-#include <string>
 
 #include "operators/kvcache/kvcache.h"
 #include "operators/llamafile/linear.h"
 #include "operators/llamafile/mla.hpp"
 #include "operators/llamafile/mlp.h"
 #include "operators/llamafile/moe.hpp"
-#include "pybind11/functional.h"
-#include "pybind11/operators.h"
 #include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
 
 namespace py = pybind11;
 using namespace pybind11::literals;
@@ -160,16 +168,24 @@ class MOEBindings {
     struct Args {
       CPUInfer* cpuinfer;
       TP_MOE<T>* moe;
-      const uint64_t* physical_to_logical_map;
     };
     static void inner(void* args) {
       Args* args_ = (Args*)args;
-      args_->cpuinfer->enqueue(&TP_MOE<T>::load_weights, args_->moe, args_->physical_to_logical_map);
+      args_->cpuinfer->enqueue(&TP_MOE<T>::load_weights, args_->moe);
     }
     static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
-                                                            intptr_t physical_to_logical_map) {
-      Args* args = new Args{nullptr, moe.get(), (const uint64_t*)physical_to_logical_map};
+                                                            const uintptr_t physical_to_logical_map = 0) {
+      Args* args = new Args{nullptr, moe.get()};
+      if (physical_to_logical_map) {
+        printf("debug physical_to_logical_map in arg:%lu\n", physical_to_logical_map);
+        moe->config.physical_to_logical_map = reinterpret_cast<void*>(physical_to_logical_map);
+        printf("moe ptr:%p,confirm: moe->config.physical_to_logical_map:%lu\n", reinterpret_cast<void*>(moe.get()),
+               reinterpret_cast<uintptr_t>(moe->config.physical_to_logical_map));
+      }
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe) {
+      return cpuinfer_interface(moe, 0);
     }
   };
   class ForwardBindings {
@@ -196,10 +212,41 @@ class MOEBindings {
       Args* args = new Args{nullptr, moe.get(), qlen, k, expert_ids, weights, input, output, incremental};
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe, intptr_t qlen, int k,
+                                                            intptr_t expert_ids, intptr_t weights, intptr_t input,
+                                                            intptr_t output) {
+      return cpuinfer_interface(moe, qlen, k, expert_ids, weights, input, output, false);
+    }
   };
 };
 
-PYBIND11_MODULE(cpuinfer_ext, m) {
+template <typename MoeTP>
+void bind_moe_module(py::module_& moe_module, const char* name) {
+  using MoeClass = TP_MOE<MoeTP>;
+  using MoeBindings = MOEBindings<MoeTP>;
+
+  py::class_<MoeClass, MoE_Interface, std::shared_ptr<MoeClass>>(moe_module, name)
+      .def(py::init<GeneralMOEConfig>())
+      .def("warm_up_task", &MoeBindings::WarmUpBindings::cpuinfer_interface)
+      .def("load_weights_task",
+           py::overload_cast<std::shared_ptr<MoeClass>>(&MoeBindings::LoadWeightsBindings::cpuinfer_interface))
+      .def("load_weights_task",
+           py::overload_cast<std::shared_ptr<MoeClass>, const uintptr_t>(
+               &MoeBindings::LoadWeightsBindings::cpuinfer_interface),
+           py::arg("physical_to_logical_map"))
+      // .def("forward_task", &MoeBindings::ForwardBindings::cpuinfer_interface)
+      .def("forward_task",
+           py::overload_cast<std::shared_ptr<MoeClass>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t>(
+               &MoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("forward_task",
+           py::overload_cast<std::shared_ptr<MoeClass>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t, bool>(
+               &MoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("warm_up", &MoeClass::warm_up)
+      .def("load_weights", &MoeClass::load_weights)
+      .def("forward", &MoeClass::forward_binding);
+}
+
+PYBIND11_MODULE(kt_kernel_ext, m) {
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())
@@ -398,11 +445,15 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
   auto moe_module = m.def_submodule("moe");
 
   py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
+      .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
+        return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
+      }))
       .def(py::init(
           [](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int num_gpu_experts) {
-            return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size, num_gpu_experts);
+            GeneralMOEConfig cfg(expert_num, routed_expert_num, hidden_size, intermediate_size);
+            cfg.num_gpu_experts = num_gpu_experts;
+            return cfg;
           }))
-
       .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)
       .def_readwrite("pool", &GeneralMOEConfig::pool)
 
@@ -453,109 +504,92 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
 
   py::class_<MoE_Interface, std::shared_ptr<MoE_Interface>>(moe_module, "MoE_Interface");
 
-  py::class_<TP_MOE<LLAMA_MOE_TP>, MoE_Interface, std::shared_ptr<TP_MOE<LLAMA_MOE_TP>>>(moe_module, "MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<LLAMA_MOE_TP>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task", &MOEBindings<LLAMA_MOE_TP>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<LLAMA_MOE_TP>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<LLAMA_MOE_TP>::warm_up)
-      .def("load_weights", &TP_MOE<LLAMA_MOE_TP>::load_weights)
-      .def("forward", &TP_MOE<LLAMA_MOE_TP>::forward_binding);
+  bind_moe_module<LLAMA_MOE_TP>(moe_module, "MOE");
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
-  py::class_<TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>>>(moe_module, "AMXBF16_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224BF>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224BF>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224BF>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>::warm_up)
-      .def("load_weights", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>::load_weights)
-      .def("forward", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>::forward_binding);
-  py::class_<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int8>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int8>>>>(moe_module, "AMXInt8_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int8>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int8>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int8>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int8>>::warm_up)
-      .def("load_weights", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int8>>::load_weights)
-      .def("forward", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int8>>::forward_binding);
-
-  py::class_<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4>>>>(moe_module, "AMXInt4_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4>>::warm_up)
-      .def("load_weights", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4>>::load_weights)
-      .def("forward", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4>>::forward_binding);
-
-  py::class_<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4_1>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4_1>>>>(moe_module, "AMXInt4_1_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::warm_up)
-      .def("load_weights", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::load_weights)
-      .def("forward", &TP_MOE<AMX_MOE_TP<amx::GemmKernel224Int4_1>>::forward_binding);
-
-  // py::class_<TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>, MoE_Interface,
-  //            std::shared_ptr<TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>>>(moe_module, "AMXInt4KGroup_MOE")
-  //     .def(py::init<GeneralMOEConfig>())
-  //     .def("warm_up_task",
-  //     &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::WarmUpBindings::cpuinfer_interface)
-  //     .def("load_weights_task",
-  //          &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::LoadWeightsBindings::cpuinfer_interface)
-  //     .def("forward_task",
-  //     &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::ForwardBindings::cpuinfer_interface)
-  //     .def("warm_up", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::warm_up)
-  //     .def("load_weights", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::load_weights)
-  //     .def("forward", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4KGroup>>::forward_binding);
-
-  py::class_<TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>>>(moe_module,
-                                                                                          "AMXInt4_1KGroup_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task",
-           &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task",
-           &MOEBindings<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::warm_up)
-      .def("load_weights", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::load_weights)
-      .def("forward", &TP_MOE<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>::forward_binding);
+  bind_moe_module<AMX_MOE_TP<amx::GemmKernel224BF>>(moe_module, "AMXBF16_MOE");
+  bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_MOE");
+  bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4>>(moe_module, "AMXInt4_MOE");
+  bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
+  bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
 #endif
-
+#if defined(USE_MOE_KERNEL)
+  bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt8, _is_plain_>>(moe_module, "Int8_KERNEL_MOE");
 #if defined(__aarch64__) && defined(CPU_USE_KML)
-  py::class_<TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt8>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt8>>>>(moe_module, "KMLInt8_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt8>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt8>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt8>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt8>>::warm_up)
-      .def("load_weights", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt8>>::load_weights)
-      .def("forward", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt8>>::forward_binding);
-
-  py::class_<TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt4>>, MoE_Interface,
-             std::shared_ptr<TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt4>>>>(moe_module, "KMLInt4_MOE")
-      .def(py::init<GeneralMOEConfig>())
-      .def("warm_up_task", &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt4>>::WarmUpBindings::cpuinfer_interface)
-      .def("load_weights_task",
-           &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt4>>::LoadWeightsBindings::cpuinfer_interface)
-      .def("forward_task", &MOEBindings<KML_MOE_TP<arm_kml::GemmKernelInt4>>::ForwardBindings::cpuinfer_interface)
-      .def("warm_up", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt4>>::warm_up)
-      .def("load_weights", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt4>>::load_weights)
-      .def("forward", &TP_MOE<KML_MOE_TP<arm_kml::GemmKernelInt4>>::forward_binding);
+  // amd have not implemented int4 kernel yet
+  bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt4, _is_plain_>>(moe_module, "Int4_KERNEL_MOE");
 #endif
+#endif
+
+  // Expose kernel tiling/runtime parameters so Python can modify them at runtime
+  {
+    auto tiling_module = moe_module.def_submodule("tiling");
+#if defined(USE_MOE_KERNEL)
+    tiling_module.def(
+        "get_int8",
+        []() {
+          auto t = moe_kernel::GemmKernelInt8::get_tiling();
+          py::dict d;
+          d["n_block_up_gate"] = std::get<0>(t);
+          d["n_block_down"] = std::get<1>(t);
+          d["n_block"] = std::get<2>(t);
+          d["m_block"] = std::get<3>(t);
+          d["k_block"] = std::get<4>(t);
+          d["n_block_up_gate_prefi"] = std::get<5>(t);
+          d["n_block_down_prefi"] = std::get<6>(t);
+          return d;
+        },
+        "Get current tiling parameters for INT8 kernel");
+    tiling_module.def(
+        "set_int8",
+        [](int n_block_up_gate, int n_block_down, int n_block, int m_block, int k_block, int n_block_up_gate_prefi,
+           int n_block_down_prefi) {
+          moe_kernel::GemmKernelInt8::set_tiling(n_block_up_gate, n_block_down, n_block, m_block, k_block,
+                                                 n_block_up_gate_prefi, n_block_down_prefi);
+        },
+        py::arg("n_block_up_gate"), py::arg("n_block_down"), py::arg("n_block"), py::arg("m_block"), py::arg("k_block"),
+        py::arg("n_block_up_gate_prefi"), py::arg("n_block_down_prefi"), "Set tiling parameters for INT8 kernel");
+
+    tiling_module.def(
+        "get_int4",
+        []() {
+          auto t = moe_kernel::GemmKernelInt4::get_tiling();
+          py::dict d;
+          d["n_block_up_gate"] = std::get<0>(t);
+          d["n_block_down"] = std::get<1>(t);
+          d["n_block"] = std::get<2>(t);
+          d["m_block"] = std::get<3>(t);
+          d["k_block"] = std::get<4>(t);
+          d["n_block_up_gate_prefi"] = std::get<5>(t);
+          d["n_block_down_prefi"] = std::get<6>(t);
+          return d;
+        },
+        "Get current tiling parameters for INT4 kernel");
+    tiling_module.def(
+        "set_int4",
+        [](int n_block_up_gate, int n_block_down, int n_block, int m_block, int k_block, int n_block_up_gate_prefi,
+           int n_block_down_prefi) {
+          moe_kernel::GemmKernelInt4::set_tiling(n_block_up_gate, n_block_down, n_block, m_block, k_block,
+                                                 n_block_up_gate_prefi, n_block_down_prefi);
+        },
+        py::arg("n_block_up_gate"), py::arg("n_block_down"), py::arg("n_block"), py::arg("m_block"), py::arg("k_block"),
+        py::arg("n_block_up_gate_prefi"), py::arg("n_block_down_prefi"), "Set tiling parameters for INT4 kernel");
+
+    // Convenience: set both
+    tiling_module.def(
+        "set_all",
+        [](int n_block_up_gate, int n_block_down, int n_block, int m_block, int k_block, int n_block_up_gate_prefi,
+           int n_block_down_prefi) {
+          moe_kernel::GemmKernelInt8::set_tiling(n_block_up_gate, n_block_down, n_block, m_block, k_block,
+                                                 n_block_up_gate_prefi, n_block_down_prefi);
+          moe_kernel::GemmKernelInt4::set_tiling(n_block_up_gate, n_block_down, n_block, m_block, k_block,
+                                                 n_block_up_gate_prefi, n_block_down_prefi);
+        },
+        py::arg("n_block_up_gate"), py::arg("n_block_down"), py::arg("n_block"), py::arg("m_block"), py::arg("k_block"),
+        py::arg("n_block_up_gate_prefi"), py::arg("n_block_down_prefi"),
+        "Set tiling parameters for both INT8 and INT4 kernels");
+#endif
+  }
 
   auto kvcache_module = m.def_submodule("kvcache");
 
@@ -627,18 +661,7 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
       .def(py::init<KVCacheConfig>())
       .def("get_cache_total_len", &KVCache::get_cache_total_len)
       .def("update_cache_total_len",
-           [](KVCache& kvcache, int cache_total_len) { kvcache.update_cache_total_len(cache_total_len); })
-
-      // .def("attn", &KVCacheBindings::AttnBindings::cpuinfer_interface)
-      // .def("get_all_kvcache_one_layer", &KVCacheBindings::GetAllKVCacheOneLayerBindings::cpuinfer_interface)
-      // .def("get_and_update_kvcache_fp16", &KVCacheBindings::GetAndUpdateKVCacheFp16Bindings::cpuinfer_interface)
-      // .def("get_kvcache_fp16", &KVCacheBindings::GetKVCacheFp16Bindings::cpuinfer_interface)
-      // .def("update_kvcache_fp16", &KVCacheBindings::UpdateKVCacheFp16Bindings::cpuinfer_interface)
-      // .def("update_importance", &KVCacheBindings::UpdateImportanceBindings::cpuinfer_interface)
-      // .def("attn_with_kvcache", &KVCacheBindings::AttnWithKVCacheBindings::cpuinfer_interface)
-      // .def("clear_importance_all_layers", &KVCacheBindings::ClearImportanceAllLayersBindings::cpuinfer_interface)
-      // .def("calc_anchor_all_layers", &KVCacheBindings::CalcAnchorAllLayersBindings::cpuinfer_interface)
-      ;
+           [](KVCache& kvcache, int cache_total_len) { kvcache.update_cache_total_len(cache_total_len); });
 
   auto utils = m.def_submodule("utils");
 

@@ -20,7 +20,6 @@ concept MOE_TP_PART = requires(T t, int qlen, int k, const int64_t* expert_ids, 
 template <MOE_TP_PART T>
 class TP_MOE_Common : public MoE_Interface {
  protected:
-  GeneralMOEConfig config;
   std::vector<GeneralMOEConfig> tp_configs;
   int tp_count;
   int me_numa_id;
@@ -35,6 +34,7 @@ class TP_MOE_Common : public MoE_Interface {
   size_t forward_count = 0;
 #endif
  public:
+  GeneralMOEConfig config;
   using input_t = typename T::input_t;
   TP_MOE_Common(GeneralMOEConfig config) : config(config) {
     printf("TP MOE layer %d, pool: 0x%lx, expert num: %d, num_experts_per_tok: %d\n", config.layer_idx,
@@ -142,7 +142,7 @@ class TP_MOE_Common : public MoE_Interface {
 #endif
   }
 
-  virtual void load_weights(const uint64_t* physical_to_logical_map) = 0;
+  virtual void load_weights() = 0;
 
   virtual void merge_results(int qlen, void* output) = 0;
   virtual void merge_results(int qlen, void* output, bool incremental) {

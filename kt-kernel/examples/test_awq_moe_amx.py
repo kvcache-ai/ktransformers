@@ -2,7 +2,7 @@ import os, sys
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 # Set fixed seed for reproducible results
@@ -49,7 +49,7 @@ max_len = 25600
 num_experts_per_tok = 8
 qlen = 1
 layer_num = 1
-CPUInfer = cpuinfer_ext.CPUInfer(40)
+CPUInfer = kt_kernel_ext.CPUInfer(40)
 validation_iter = 10
 k_group_size = 64
 debug_print_count = 16
@@ -302,7 +302,7 @@ def test_online_int4_kgroup_moe():
 
         for _ in range(layer_num):
             # Create Int4LowKGroup configuration (online quantization)
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
             config.up_proj = up_proj.data_ptr()
@@ -320,7 +320,7 @@ def test_online_int4_kgroup_moe():
             config.path = "./awq_dump_online"
 
             # Create Int4LowKGroup MoE (online quantization during load_weights)
-            moe = cpuinfer_ext.moe.AMXInt4_1KGroup_MOE(config)
+            moe = kt_kernel_ext.moe.AMXInt4_1KGroup_MOE(config)
 
             # Load weights (performs online quantization)
             print(f"Physical Map: {physical_to_logical_map.data_ptr()}")
@@ -421,7 +421,7 @@ def test_awq_moe():
 
         for _ in range(layer_num):
             # Create AWQ MoE configuration
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
             config.max_len = max_len
 
             # Set quantization config for Int4_1LowKGroup
@@ -449,7 +449,7 @@ def test_awq_moe():
             config.pool = CPUInfer.backend_
 
             # Create Int4_1LowKGroup MoE
-            moe = cpuinfer_ext.moe.AMXInt4_1KGroup_MOE(config)
+            moe = kt_kernel_ext.moe.AMXInt4_1KGroup_MOE(config)
 
             # Load weights
             CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))

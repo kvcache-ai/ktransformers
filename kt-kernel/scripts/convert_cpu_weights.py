@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Convert Raw AWQ SafeTensors to Column Major format
-
-Usage:
-    python convert_awq_to_numa.py --input /path/to/raw/awq --output /path/to/column_major/awq
-
-Input Format:  model.layers.3.mlp.experts.21.down_proj.qweight
-Output Format: blk.3.ffn_down_exps.21.weight
-"""
 
 import argparse
 import os
@@ -16,7 +7,6 @@ from typing import Dict, List
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from compressed_tensors.compressors import pack_to_int32, unpack_from_int32
 import gc
 import time
 import json
@@ -28,7 +18,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from kt_kernel import AMXMoEWrapper
 
-import cpuinfer_ext
+import triton
+import triton.language as tl
+
 
 
 Q_BITS = 4
@@ -39,6 +31,29 @@ NUMA_NUM = 2
 REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+@triton.jit
+def weight_dequant_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
+    pid_m = tl.program_id(axis=0)
+    pid_n = tl.program_id(axis=1)
+    n = tl.cdiv(N, BLOCK_SIZE)
+    offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offs = offs_m[:, None] * N + offs_n[None, :]
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
+    s = tl.load(s_ptr + pid_m * n + pid_n)
+    y = x * s
+    tl.store(y_ptr + offs, y, mask=mask)
+
+
+def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
+    assert x.is_contiguous() and s.is_contiguous()
+    assert x.dim() == 2 and s.dim() == 2
+    M, N = x.size()
+    y = torch.empty_like(x, dtype=torch.get_default_dtype())
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE']), triton.cdiv(N, meta['BLOCK_SIZE']))
+    weight_dequant_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
+    return y
 
 def load_model_config(input_path: str, input_type: str = None) -> Dict:
     """Load model configuration from config.json
@@ -225,15 +240,17 @@ class ConverterBase:
         output_path: str,
         model_config: Dict,
         cpuinfer_threads: int = 60,
-        subpool_count: int = 2,
+        threadpool_count: int = 2,
         input_type: str = None,
+        merge_to_safetensor: bool = True,
     ):
         self.input_path = input_path
         self.output_path = output_path
         self.model_config = model_config
         self.cpuinfer_threads = cpuinfer_threads
-        self.subpool_count = subpool_count
+        self.threadpool_count = threadpool_count
         self.input_type = input_type
+        self.merge_to_safetensor = merge_to_safetensor
         self.tensor_file_map: Dict[str, str] = {}  # key -> filename
         self.file_handle_map: Dict[str, any] = {}  # filename -> file
 
@@ -350,42 +367,46 @@ class ConverterBase:
                     torch.cuda.empty_cache()
                 print(f"  Memory cleanup after layer {layer_idx}")
 
-        # Copy non-expert tensors (embeddings, norms, etc.)
-        print("Copying non-expert tensors...")
-        for key in self.tensor_file_map.keys():
-            if not (".mlp.experts." in key):
-                # Convert key format for consistency
-                if key.startswith("model."):
-                    # Convert model.layers.X -> blk.X for non-expert layers
-                    new_key = key.replace("model.layers.", "blk.").replace("model.", "")
-                    all_tensors[new_key] = self._load_tensor(key)
-                else:
-                    all_tensors[key] = self._load_tensor(key)
+        if self.merge_to_safetensor:
+            # Copy non-expert tensors (embeddings, norms, etc.)
+            print("Copying non-expert tensors...")
+            for key in self.tensor_file_map.keys():
+                if not (".mlp.experts." in key):
+                    # Convert key format for consistency
+                    if key.startswith("model."):
+                        # Convert model.layers.X -> blk.X for non-expert layers
+                        new_key = key.replace("model.layers.", "blk.").replace("model.", "")
+                        all_tensors[new_key] = self._load_tensor(key)
+                    else:
+                        all_tensors[key] = self._load_tensor(key)
 
-        # Save all tensors
-        print(f"Saving {len(all_tensors)} tensors...")
+            # Save all tensors
+            print(f"Saving {len(all_tensors)} tensors...")
 
-        # Split into multiple files if too large
-        max_tensors_per_file = 3000  # Adjust based on memory constraints
-        tensor_items = list(all_tensors.items())
+            # Split into multiple files if too large
+            max_tensors_per_file = 3000  # Adjust based on memory constraints
+            tensor_items = list(all_tensors.items())
 
-        if len(tensor_items) <= max_tensors_per_file:
-            # Single file
-            output_file = os.path.join(self.output_path, "model.safetensors")
-            save_file(dict(tensor_items), output_file)
-            print(f"Saved to: {output_file}")
+            if len(tensor_items) <= max_tensors_per_file:
+                # Single file
+                output_file = os.path.join(self.output_path, "model.safetensors")
+                save_file(dict(tensor_items), output_file)
+                print(f"Saved to: {output_file}")
+            else:
+                # Multiple files
+                for i in range(0, len(tensor_items), max_tensors_per_file):
+                    batch = dict(tensor_items[i : i + max_tensors_per_file])
+                    output_file = os.path.join(self.output_path, f"model-{i//max_tensors_per_file + 1:05d}.safetensors")
+                    save_file(batch, output_file)
+                    print(f"Saved batch to: {output_file}")
+
+            # Copy config files
+            self._copy_config_files()
+
+            print("Conversion completed successfully!")
         else:
-            # Multiple files
-            for i in range(0, len(tensor_items), max_tensors_per_file):
-                batch = dict(tensor_items[i : i + max_tensors_per_file])
-                output_file = os.path.join(self.output_path, f"model-{i//max_tensors_per_file + 1:05d}.safetensors")
-                save_file(batch, output_file)
-                print(f"Saved batch to: {output_file}")
-
-        # Copy config files
-        self._copy_config_files()
-
-        print("Conversion completed successfully!")
+            print("Skipping safetensor merge, weights kept in layer folder structure")
+            print("Conversion completed successfully!")
 
     def _copy_config_files(self):
         """Copy configuration files to output directory"""
@@ -402,8 +423,6 @@ class ConverterBase:
 
     def close(self):
         """Close all file handles"""
-        # for handle in self.file_handle_map.values():
-        #     handle.close()
         self.file_handle_map.clear()
 
 
@@ -493,11 +512,12 @@ class OnlineQuantConverter(ConverterBase):
         output_path: str,
         model_config: Dict,
         cpuinfer_threads: int = 60,
-        subpool_count: int = 2,
+        threadpool_count: int = 2,
         input_type: str = None,
         quant_method: str = "int4",
+        merge_to_safetensor: bool = True,
     ):
-        super().__init__(input_path, output_path, model_config, cpuinfer_threads, subpool_count, input_type)
+        super().__init__(input_path, output_path, model_config, cpuinfer_threads, threadpool_count, input_type, merge_to_safetensor)
         self.quant_method = quant_method
 
         # For FP8, get block size from model_config
@@ -588,7 +608,7 @@ class OnlineQuantConverter(ConverterBase):
         amx_method = quant_to_amx_map.get(self.quant_method, "INT4")
 
         # Iterate through all NUMA folders
-        for numa_idx in range(self.subpool_count):
+        for numa_idx in range(self.threadpool_count):
             numa_folder = os.path.join(layer_path, f"_numa_{numa_idx}")
             if not os.path.exists(numa_folder):
                 continue
@@ -685,18 +705,18 @@ class OnlineQuantConverter(ConverterBase):
                     raise KeyError(f"Missing down weight_scale_inv for layer {layer_idx}, expert {expert_id}")
 
                 # Load FP8 weights and scales
-                gate_fp8 = self._load_tensor(gate_key)
-                up_fp8 = self._load_tensor(up_key)
-                down_fp8 = self._load_tensor(down_key)
+                gate_fp8 = self._load_tensor(gate_key).to('cuda')
+                up_fp8 = self._load_tensor(up_key).to('cuda')
+                down_fp8 = self._load_tensor(down_key).to('cuda')
 
-                gate_scale_inv = self._load_tensor(gate_scale_key)
-                up_scale_inv = self._load_tensor(up_scale_key)
-                down_scale_inv = self._load_tensor(down_scale_key)
+                gate_scale_inv = self._load_tensor(gate_scale_key).to('cuda')
+                up_scale_inv = self._load_tensor(up_scale_key).to('cuda')
+                down_scale_inv = self._load_tensor(down_scale_key).to('cuda')
 
                 # Dequantize FP8 to BF16 using block-wise scaling
-                gate_weight = self._dequantize_fp8_blockwise(gate_fp8, gate_scale_inv)
-                up_weight = self._dequantize_fp8_blockwise(up_fp8, up_scale_inv)
-                down_weight = self._dequantize_fp8_blockwise(down_fp8, down_scale_inv)
+                gate_weight = weight_dequant(gate_fp8, gate_scale_inv).to('cpu').to(torch.bfloat16).contiguous()
+                up_weight = weight_dequant(up_fp8, up_scale_inv).to('cpu').to(torch.bfloat16).contiguous()
+                down_weight = weight_dequant(down_fp8, down_scale_inv).to('cpu').to(torch.bfloat16).contiguous()
 
             elif self.input_type == "fp16":
                 # Load FP16 and convert to BF16
@@ -730,6 +750,13 @@ class OnlineQuantConverter(ConverterBase):
         # Create physical_to_logical_map: identity mapping where position i maps to expert i
         physical_to_logical_map = torch.arange(self.num_experts, dtype=torch.int64)
 
+        # Map quant_method to AMX method format
+        quant_to_amx_map = {
+            "int4": "AMXINT4",
+            "int8": "AMXINT8",
+        }
+        amx_method = quant_to_amx_map.get(self.quant_method, "AMXINT4")
+
         # Create AMXMoEWrapper instance for this layer
         # num_gpu_experts=0 since we're converting all experts to CPU format
         wrapper = AMXMoEWrapper(
@@ -740,10 +767,11 @@ class OnlineQuantConverter(ConverterBase):
             moe_intermediate_size=self.moe_intermediate_size,
             num_gpu_experts=0,  # All experts on CPU for conversion
             cpuinfer_threads=self.cpuinfer_threads,
-            subpool_count=self.subpool_count,
+            threadpool_count=self.threadpool_count,
             amx_weight_path=self.output_path,  # Output path for quantized weights
             chunked_prefill_size=512,  # Arbitrary value, not critical for conversion
             cpu_save=True,  # Enable saving quantized weights to output
+            amx_method=amx_method,  # Specify quantization method (AMXINT4 or AMXINT8)
         )
 
         # Load and quantize weights from tensors
@@ -755,24 +783,32 @@ class OnlineQuantConverter(ConverterBase):
         del gate_proj, up_proj, down_proj
         gc.collect()
 
-        # Load quantized tensors from disk
-        print(f"  Loading quantized tensors from disk...")
-        layer_tensors = self._load_layer_tensors_from_disk(layer_idx)
-        print(f"  Loaded {len(layer_tensors)} tensors")
-
-        # Remove temporary layer folder
-        self._remove_layer_folder(layer_idx)
-
         elapsed = time.time() - start_time
-        print(f"  Layer {layer_idx} quantized and saved in {elapsed:.2f}s")
 
-        # Return loaded tensors
-        return layer_tensors
+        if self.merge_to_safetensor:
+            # Load quantized tensors from disk
+            print(f"  Loading quantized tensors from disk...")
+            layer_tensors = self._load_layer_tensors_from_disk(layer_idx)
+            print(f"  Loaded {len(layer_tensors)} tensors")
+
+            # Remove temporary layer folder
+            self._remove_layer_folder(layer_idx)
+
+            print(f"  Layer {layer_idx} quantized and saved in {elapsed:.2f}s")
+
+            # Return loaded tensors
+            return layer_tensors
+        else:
+            # Keep layer folders, return empty dict
+            print(f"  Layer {layer_idx} quantized and saved in {elapsed:.2f}s")
+            print(f"  Keeping layer folder structure at {self.output_path}/_layer_{layer_idx}")
+            return {}
 
 """
 Example usage(test passed):
-python convert_weights.py --input-path /mnt/data3/models/DeepSeek-V3.1 --input-type fp8 --output /mnt/data3/models/DeepSeek-V3.1-INT4-test --quant-method int4 --cpuinfer-threads 60 --subpool-count 2
-python convert_weights.py --input-path /mnt/data2/models/Qwen3-Next-80B-A3B-Instruct --input-type bf16 --output /mnt/data2/models/Qwen3-Next-80B-A3B-Instruct-INT4-test --quant-method int4 --cpuinfer-threads 60 --subpool-count 2
+python convert_cpu_weights.py --input-path /mnt/data3/models/DeepSeek-R1-0528/ --input-type fp8 --output /mnt/data3/models/DeepSeek-R1-0528-INT4-test --quant-method int4 --cpuinfer-threads 60 --threadpool-count 2
+python convert_cpu_weights.py --input-path /mnt/data3/models/DeepSeek-R1-0528/ --input-type fp8 --output /mnt/data3/models/DeepSeek-R1-0528-INT8-test --quant-method int8 --cpuinfer-threads 60 --threadpool-count 2
+python convert_cpu_weights.py --input-path /mnt/data2/models/Qwen3-Next-80B-A3B-Instruct --input-type bf16 --output /mnt/data2/models/Qwen3-Next-80B-A3B-Instruct-INT4-test --quant-method int4 --cpuinfer-threads 60 --threadpool-count 2
 """
 
 def main():
@@ -798,15 +834,20 @@ def main():
         help="Number of CPU inference threads (default: 60)",
     )
     parser.add_argument(
-        "--subpool-count",
+        "--threadpool-count",
         type=int,
         default=2,
         help="Number of NUMA subpools for thread distribution (default: 2)",
     )
     parser.add_argument("--gpu", action="store_true", help="Use GPU for conversion if available")
+    parser.add_argument(
+        "--no-merge-safetensor",
+        action="store_true",
+        default=False,
+        help="Keep layer folders without merging to safetensor files (default: False)",
+    )
 
     args = parser.parse_args()
-    device = torch.device("cuda" if args.gpu and torch.cuda.is_available() else "cpu")
 
     # Validate inputs
     if not os.path.exists(args.input_path):
@@ -823,19 +864,21 @@ def main():
         print(f"  moe_intermediate_size: {model_config['moe_intermediate_size']}")
         print(f"CPU inference config:")
         print(f"  cpuinfer_threads: {args.cpuinfer_threads}")
-        print(f"  subpool_count: {args.subpool_count}")
+        print(f"  threadpool_count: {args.threadpool_count}")
         print()
 
         # Create converter by quantization method
         quant_method = args.quant_method.lower()
+        merge_to_safetensor = not args.no_merge_safetensor
+
         if quant_method == "awq":
             converter = AWQToColumnMajorConverter(
-                args.input_path, args.output, model_config, args.cpuinfer_threads, args.subpool_count
+                args.input_path, args.output, model_config, args.cpuinfer_threads, args.threadpool_count, input_type=None, merge_to_safetensor=merge_to_safetensor
             )
         elif quant_method in ["int4", "int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
             # Use OnlineQuantConverter for both INT4 and INT8 quantization
             converter = OnlineQuantConverter(
-                args.input_path, args.output, model_config, args.cpuinfer_threads, args.subpool_count, args.input_type, quant_method
+                args.input_path, args.output, model_config, args.cpuinfer_threads, args.threadpool_count, args.input_type, quant_method, merge_to_safetensor
             )
         else:
             raise ValueError(
