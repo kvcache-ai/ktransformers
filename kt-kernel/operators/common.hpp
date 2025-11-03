@@ -1,9 +1,10 @@
 #ifndef CPUINFER_OPERATOR_COMMON_HPP
 #define CPUINFER_OPERATOR_COMMON_HPP
 
-#include "../cpu_backend/shared_mem_buffer.h"
+#include <map>
+
 #include "../cpu_backend/worker_pool.h"
-#include "llama.cpp/ggml.h"
+#include "ggml.h"
 
 #if defined(__aarch64__) && defined(CPU_USE_KML)
 #include <arm_sve.h>
@@ -13,8 +14,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <limits>
-#include <memory>
 #include <stdexcept>
 #include <type_traits>
 
@@ -39,6 +38,14 @@
     time_map[(name)] = duration;                                                                    \
     last = end_time;                                                                                \
   } while (0)
+
+#define DO_TPS_LOAD_WEIGHTS(pool)                                                         \
+  (pool)->dispense_backend()->do_numa_job([this, pool, config](int numa_id) {             \
+    this->tps[numa_id]->config_.physical_to_logical_map = config.physical_to_logical_map; \
+    this->tps[numa_id]->load_weights();                                                   \
+  })
+
+#define expert_map(m, x) (m != nullptr ? m[(x)] : (x))
 
 template <typename T, typename std::enable_if<std::is_integral<T>::value, int>::type = 0>
 inline T div_up(T x, T y) {
@@ -274,12 +281,11 @@ struct GeneralMOEConfig {
 
   GeneralMOEConfig() {}
 
-  GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int num_gpu_experts)
+  GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
       : expert_num(expert_num),
         num_experts_per_tok(routed_expert_num),
         hidden_size(hidden_size),
-        intermediate_size(intermediate_size),
-        num_gpu_experts(num_gpu_experts) {}
+        intermediate_size(intermediate_size) {}
 
   int max_possible_qlen() { return std::max(max_len, group_max_len); }
 };

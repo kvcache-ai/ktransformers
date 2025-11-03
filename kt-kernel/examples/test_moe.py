@@ -12,10 +12,10 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import os, sys
 import time
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 from tqdm import tqdm
-from cpuinfer_ext.kvcache import ggml_type
+from kt_kernel_ext.kvcache import ggml_type
 
 torch.manual_seed(0)
 
@@ -36,7 +36,7 @@ layer_num = 1
 # num_experts_per_tok = 8
 # qlen = 1024
 # layer_num = 1
-CPUInfer = cpuinfer_ext.CPUInfer(64)
+CPUInfer = kt_kernel_ext.CPUInfer(64)
 validation_iter = 10
 
 def act_fn(x):
@@ -83,10 +83,10 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
 
 def to_cpuinfer_tensor(tensor, type):
     size = torch.prod(torch.tensor(tensor.shape, dtype=torch.int32)).item()
-    return cpuinfer_ext.utils.from_float(tensor.data_ptr(), size, type)
+    return kt_kernel_ext.utils.from_float(tensor.data_ptr(), size, type)
 
 def from_cpuinfer_tensor(tensor, size, type):
-    return cpuinfer_ext.utils.to_float(tensor.data_ptr(), size, type)
+    return kt_kernel_ext.utils.to_float(tensor.data_ptr(), size, type)
 
 qlens = [1,64] #[64, 512, 2048, 8192, 16384]
 # gate_types = [ggml_type.FP32, ggml_type.FP16, ggml_type.Q8_0, ggml_type.Q6_K, ggml_type.Q5_K, ggml_type.Q4_K, ggml_type.Q3_K]
@@ -118,7 +118,7 @@ for qlen in qlens:
                 up_tensor = to_cpuinfer_tensor(up_proj, up_type)
                 down_tensor = to_cpuinfer_tensor(down_proj, down_type)
                 
-                config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
+                config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
                 config.pool = CPUInfer.backend_
                 config.stride = stride
                 config.group_min_len = group_min_len
@@ -132,7 +132,7 @@ for qlen in qlens:
                 config.hidden_type = hidden_type
 
 
-                moe = cpuinfer_ext.moe.MOE(config)
+                moe = kt_kernel_ext.moe.MOE(config)
                 gate_projs.append(gate_proj)
                 up_projs.append(up_proj)
                 down_projs.append(down_proj)    

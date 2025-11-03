@@ -7,27 +7,15 @@
 #include <tmmintrin.h>
 #include <unistd.h>
 
-#include <array>
 #include <cassert>
-#include <chrono>
-#include <cstdint>
 #include <cstdio>
-#include <iostream>
-#include <memory>
-#include <random>
 #include <stdexcept>
 
-#include "llama.cpp/ggml-impl.h"
 #include "llama.cpp/ggml-quants.h"
-#include "llamafile/sgemm.h"
-#include "utils.hpp"
 
 // Include the split AMX headers
-#include "amx_buffers.hpp"
 #include "amx_config.hpp"
 #include "amx_kernels.hpp"
-#include "amx_quantization.hpp"
-#include "amx_utils.hpp"
 
 namespace amx {
 

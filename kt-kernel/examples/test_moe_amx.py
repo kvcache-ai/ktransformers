@@ -1,21 +1,22 @@
 import os, sys
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
+print("sys.path:", sys.path)
 
-import cpuinfer_ext
 import torch
+import kt_kernel_ext
 
 expert_num = 256
 hidden_size = 7168
 intermediate_size = 2048
 max_len = 25600
 num_experts_per_tok = 8
-# qlen = 1
-qlen = 640
+qlen = 1
+# qlen = 640
 layer_num = 1
-CPUInfer = cpuinfer_ext.CPUInfer(40)
+CPUInfer = kt_kernel_ext.CPUInfer(90)
 # validation_iter = 10000
-validation_iter = 10
+validation_iter = 2
 k_group_size = 64
 debug_print_count = 16  # Number of values to print in debug output
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
@@ -126,7 +127,7 @@ def test_moe(quant_mode: str):
                 .to("cpu")
                 .contiguous()
             )
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
             config.up_proj = up_proj.data_ptr()
@@ -134,25 +135,25 @@ def test_moe(quant_mode: str):
             config.gate_scale = 0
             config.pool = CPUInfer.backend_
             if quant_mode == "bf16":
-                moe = cpuinfer_ext.moe.AMXBF16_MOE(config)
+                moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
                 CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())
                 CPUInfer.sync()
             elif quant_mode == "int8":
-                moe = cpuinfer_ext.moe.AMXInt8_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt8_MOE(config)
                 CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
                 CPUInfer.sync()
                 # CPUInfer.submit(moe.warm_up_task())
                 # CPUInfer.sync()
             elif quant_mode == "int4":
-                moe = cpuinfer_ext.moe.AMXInt4_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt4_MOE(config)
                 CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())
                 CPUInfer.sync()
             elif quant_mode == "int4_1":
-                moe = cpuinfer_ext.moe.AMXInt4_1_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt4_1_MOE(config)
                 CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())
@@ -161,11 +162,12 @@ def test_moe(quant_mode: str):
                 config.quant_config.bits = 4
                 config.quant_config.group_size = k_group_size
                 config.quant_config.zero_point = True
-                moe = cpuinfer_ext.moe.AMXInt4_1KGroup_MOE(config)
+                moe = kt_kernel_ext.moe.AMXInt4_1KGroup_MOE(config)
                 # import debugpy
                 # debugpy.listen(("127.0.0.1", 5678))
                 # debugpy.wait_for_client()
                 # debugpy.breakpoint()
+                print(f"the physical_logical map:{physical_to_logical_map.data_ptr()}")
                 CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
                 CPUInfer.sync()
                 # CPUInfer.submit(moe.warm_up_task())
@@ -260,7 +262,7 @@ def test_moe(quant_mode: str):
 # 5. Final output comparison
 
 # test_moe("bf16")
-# test_moe("int8")
-# test_moe("int4")
-# test_moe("int4_1")
+test_moe("int8")
+test_moe("int4")
+test_moe("int4_1")
 test_moe("int4_1k")

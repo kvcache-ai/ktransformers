@@ -13,7 +13,7 @@ import os, sys, time, json, subprocess, platform
 
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -33,15 +33,15 @@ test_iter = 10000
 
 # 将 CPUInfer 参数设为变量
 CPUINFER_PARAM = 112
-CPUInfer = cpuinfer_ext.CPUInfer(CPUINFER_PARAM)
+CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
-# worker_config = cpuinfer_ext.WorkerPoolConfig()
+# worker_config = kt_kernel_ext.WorkerPoolConfig()
 # worker_config.subpool_count = 4
 # worker_config.subpool_numa_map= [0,1,2,3]
 # worker_config.subpool_thread_count = [36,36,36,36]
 # worker_config.subpool_thread_count = [39,39,39,39]
 # CPUINFER_PARAM = 156
-# CPUInfer = cpuinfer_ext.CPUInfer(worker_config)
+# CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 
 
 def get_git_commit():
@@ -166,16 +166,16 @@ def bench_moe(quant_mode: str):
             down_proj = torch.randn(
                 (expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cpu"
             ).contiguous()
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
             config.up_proj = up_proj.data_ptr()
             config.down_proj = down_proj.data_ptr()
             config.pool = CPUInfer.backend_
             if quant_mode == "int8":
-                moe = cpuinfer_ext.moe.KMLInt8_MOE(config)
+                moe = kt_kernel_ext.moe.KMLInt8_MOE(config)
             elif quant_mode == "int4":
-                moe = cpuinfer_ext.moe.KMLInt4_MOE(config)
+                moe = kt_kernel_ext.moe.KMLInt4_MOE(config)
             else:
                 raise ValueError(f"Unsupported quantization mode: {quant_mode}")
             CPUInfer.submit(moe.load_weights_task())
