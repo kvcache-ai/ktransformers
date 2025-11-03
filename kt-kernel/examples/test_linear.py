@@ -12,7 +12,7 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import os, sys
 import time
 sys.path.append(os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 input_size = 16384
@@ -23,7 +23,7 @@ proj_type = 1 # ggml_type::GGML_TYPE_F16
 hidden_type = 1 # ggml_type::GGML_TYPE_F16
 qlen = 30
 layer_num = 10
-CPUInfer = cpuinfer_ext.CPUInfer(48)
+CPUInfer = kt_kernel_ext.CPUInfer(48)
 validation_iter = 100
 
 with torch.inference_mode(mode=True):
@@ -31,8 +31,8 @@ with torch.inference_mode(mode=True):
     projs = []
     for _ in range(layer_num):
         proj = torch.randn((output_size, input_size), dtype=torch.float16, device = "cuda").to("cpu").contiguous()
-        config = cpuinfer_ext.linear.LinearConfig(input_size, output_size, stride, group_max_len, proj.data_ptr(), proj_type, hidden_type)
-        linear = cpuinfer_ext.linear.Linear(config)
+        config = kt_kernel_ext.linear.LinearConfig(input_size, output_size, stride, group_max_len, proj.data_ptr(), proj_type, hidden_type)
+        linear = kt_kernel_ext.linear.Linear(config)
         projs.append(proj)
         linears.append(linear)
 

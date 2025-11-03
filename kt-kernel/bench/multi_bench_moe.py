@@ -90,7 +90,7 @@ def update_bench_parameters(params):
     bench.test_iter = params["test_iter"]
     bench.CPUINFER_PARAM = params["CPUINFER_PARAM"]
     # 重新初始化 CPUInfer 对象
-    bench.CPUInfer = bench.cpuinfer_ext.CPUInfer(bench.CPUINFER_PARAM)
+    bench.CPUInfer = bench.kt_kernel_ext.CPUInfer(bench.CPUINFER_PARAM)
 
 
 def main():

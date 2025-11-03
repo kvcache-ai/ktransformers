@@ -13,7 +13,7 @@ import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 layer_num = 10
@@ -23,16 +23,16 @@ head_dim = 128
 block_len = 128
 anchor_num = 1
 
-anchor_type = cpuinfer_ext.kvcache.AnchorType.DYNAMIC
-kv_type = cpuinfer_ext.kvcache.ggml_type.FP16
-retrieval_type = cpuinfer_ext.kvcache.RetrievalType.LAYER
+anchor_type = kt_kernel_ext.kvcache.AnchorType.DYNAMIC
+kv_type = kt_kernel_ext.kvcache.ggml_type.FP16
+retrieval_type = kt_kernel_ext.kvcache.RetrievalType.LAYER
 layer_step: int = 1
 token_step: int = 1
 layer_offset: int = 0
 max_thread_num: int = 64
 max_batch_size: int = 1
 max_block_num: int = 1024
-CPUInfer = cpuinfer_ext.CPUInfer(max_thread_num)
+CPUInfer = kt_kernel_ext.CPUInfer(max_thread_num)
 
 warm_up_iter = 1000
 test_iter = 10000
@@ -43,7 +43,7 @@ def bench_linear(cache_seqlen: int):
         cache_seqlens = torch.tensor([cache_seqlen], dtype=torch.int32, device="cpu")
         seqlens_zero = torch.zeros((1,), dtype=torch.int32, device="cpu")
 
-        config = cpuinfer_ext.kvcache.KVCacheConfig(
+        config = kt_kernel_ext.kvcache.KVCacheConfig(
             layer_num,
             kv_head_num,
             q_head_num,
@@ -60,7 +60,7 @@ def bench_linear(cache_seqlen: int):
             max_batch_size,
             max_thread_num,
         )
-        local_kvcache = cpuinfer_ext.kvcache.KVCache(config)
+        local_kvcache = kt_kernel_ext.kvcache.KVCache(config)
         block_table = (
             torch.arange(max_block_num, dtype=torch.int32, device="cpu")
             .contiguous()

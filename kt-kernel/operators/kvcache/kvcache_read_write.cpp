@@ -10,6 +10,7 @@
 
 #include <chrono>
 
+#include "ggml-impl.h"
 #include "kvcache.h"
 
 void KVCache::get_anchor_one_block(ggml_fp16_t* anchor, int layer_id, int block_idx, WorkerPool* backend) {

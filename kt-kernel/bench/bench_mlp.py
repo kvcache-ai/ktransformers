@@ -12,7 +12,7 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import os, sys
 import time
 sys.path.append(os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 hidden_size = 5120
@@ -21,7 +21,7 @@ stride = 16
 group_max_len = 1024
 layer_num = 10
 qlen = 1
-CPUInfer = cpuinfer_ext.CPUInfer(64)
+CPUInfer = kt_kernel_ext.CPUInfer(64)
 warm_up_iter = 1000
 test_iter = 10000
 
@@ -96,8 +96,8 @@ def bench_mlp(quant_mode: str):
             gate_proj = torch.randn((intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             up_proj = torch.randn((intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
             down_proj = torch.randn((hidden_size, intermediate_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-            config = cpuinfer_ext.mlp.MLPConfig(hidden_size, intermediate_size, stride, group_max_len, gate_proj.data_ptr(), up_proj.data_ptr(), down_proj.data_ptr(), gate_type, up_type, down_type, hidden_type)
-            mlp = cpuinfer_ext.mlp.MLP(config)
+            config = kt_kernel_ext.mlp.MLPConfig(hidden_size, intermediate_size, stride, group_max_len, gate_proj.data_ptr(), up_proj.data_ptr(), down_proj.data_ptr(), gate_type, up_type, down_type, hidden_type)
+            mlp = kt_kernel_ext.mlp.MLP(config)
             gate_projs.append(gate_proj)
             up_projs.append(up_proj)
             down_projs.append(down_proj)

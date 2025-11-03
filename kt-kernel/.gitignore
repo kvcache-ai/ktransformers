@@ -1,0 +1,21 @@
+debug/
+debug_prefill/
+debug_decode/
+debug1/
+debug2/
+.gdbinit
+bp.gdb
+.gdb_history
+build/
+# local git hooks installer and hooks
+.clangd
+.cache
+tmp*
+.vscode/
+*.egg-info/
+*.pyc
+*.so
+sparse_logs/
+build-cm/
+*.so
+sparse_logs/
