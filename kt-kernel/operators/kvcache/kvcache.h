@@ -11,31 +11,20 @@
 #ifndef CPUINFER_OPERATOR_KVCACHE_H
 #define CPUINFER_OPERATOR_KVCACHE_H
 
-#include <algorithm>
-#include <atomic>
 #include <cassert>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <functional>
-#include <future>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <queue>
-#include <random>
-#include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include "../../cpu_backend/worker_pool.h"
 #include "llama.cpp/ggml-common.h"
-#include "llama.cpp/ggml-impl.h"
 #include "llama.cpp/ggml-quants.h"
 #include "llama.cpp/ggml.h"
-#include "llamafile/sgemm.h"
 
 #define CHUNK_SIZE 32
 

@@ -26,11 +26,15 @@ class ArgumentParser:
             "--device", type=str, default=self.cfg.model_device, help="Warning: Abandoning this parameter"
         )
         parser.add_argument("--architectures", type=str, default=self.cfg.model_name)
+        parser.add_argument("--q4_gguf_path", type=str, default=None)
         parser.add_argument("--gguf_path", type=str, default=self.cfg.gguf_path)
+        parser.add_argument("--draft_model_path", type=str, default=None)
+        parser.add_argument("--draft_gguf_path", type=str, default=None)
         parser.add_argument("--optimize_config_path", default=None, type=str, required=False)
         parser.add_argument("--cpu_infer", type=int, default=self.cfg.cpu_infer)
         parser.add_argument("--backend_type", type=str, default=self.cfg.backend_type)
         parser.add_argument("--chunk_size", type=int, default=self.cfg.chunk_size)
+        parser.add_argument("--tp", type=int, default=1)
 
         # model configs
         # parser.add_argument("--model_cache_lens", type=int, default=self.cfg.cache_lens)  # int?

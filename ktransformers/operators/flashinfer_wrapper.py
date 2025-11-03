@@ -5,7 +5,6 @@ Version      : 0.2.3
 '''
 import torch
 import os
-from ktransformers.operators.triton_attention import decode_attention_fwd_grouped
 
 flashinfer_enabled = False
 
@@ -16,6 +15,15 @@ try:
     
 except ImportError:
     print("flashinfer not found, use triton for linux")
+
+try:
+    import torch_npu
+    use_torch_npu = torch_npu.npu.is_available()
+except:
+    use_torch_npu = False
+
+if not use_torch_npu:
+    from ktransformers.operators.triton_attention import decode_attention_fwd_grouped
 
 import math
 

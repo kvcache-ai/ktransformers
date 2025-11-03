@@ -4,8 +4,8 @@ import time
 from typing import Optional
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
-from cpuinfer_ext.kvcache import ggml_type
+import kt_kernel_ext
+from kt_kernel_ext.kvcache import ggml_type
 
 import torch
 from torch import nn
@@ -171,7 +171,7 @@ def torch_gate(hidden_states):
 
 
 def cpuinfer_gate(hidden_states):
-    config = cpuinfer_ext.gate.GateConfig(
+    config = kt_kernel_ext.gate.GateConfig(
     hidden_size,
     num_experts_per_token,
     n_routed_experts,
@@ -179,7 +179,7 @@ def cpuinfer_gate(hidden_states):
     topk_group,
     )
 
-    CPUInfer = cpuinfer_ext.CPUInfer(64)
+    CPUInfer = kt_kernel_ext.CPUInfer(64)
     config.routed_scaling_factor = routed_scaling_factor
 
     config.pool = CPUInfer.backend_
@@ -188,7 +188,7 @@ def cpuinfer_gate(hidden_states):
     config.e_score_correction_bias = bias.data_ptr()
     config.e_score_correction_bias_type = ggml_type.FP32
 
-    gate = cpuinfer_ext.gate.MoEGate(config) 
+    gate = kt_kernel_ext.gate.MoEGate(config) 
 
 
 

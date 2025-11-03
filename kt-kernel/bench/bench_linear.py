@@ -12,7 +12,7 @@ Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 import os, sys
 import time
 sys.path.append(os.path.dirname(__file__) + '/../build')
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 
 input_size = 16384
@@ -21,7 +21,7 @@ stride = 16
 group_max_len = 1024
 layer_num = 10
 qlen = 1
-CPUInfer = cpuinfer_ext.CPUInfer(64)
+CPUInfer = kt_kernel_ext.CPUInfer(64)
 warm_up_iter = 1000
 test_iter = 10000
 
@@ -69,8 +69,8 @@ def bench_linear(quant_mode: str):
         projs = []
         for _ in range(layer_num):
             proj = torch.randn((output_size, input_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-            config = cpuinfer_ext.linear.LinearConfig(input_size, output_size, stride, group_max_len, proj.data_ptr(), proj_type, hidden_type)
-            linear = cpuinfer_ext.linear.Linear(config)
+            config = kt_kernel_ext.linear.LinearConfig(input_size, output_size, stride, group_max_len, proj.data_ptr(), proj_type, hidden_type)
+            linear = kt_kernel_ext.linear.Linear(config)
             projs.append(proj)
             linears.append(linear)
         input = torch.randn((layer_num, qlen, input_size), dtype=torch.bfloat16, device = "cuda").to("cpu").contiguous()

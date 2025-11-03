@@ -6,7 +6,7 @@ import subprocess
 import platform
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build'))
-import cpuinfer_ext
+import kt_kernel_ext
 import torch
 from tqdm import tqdm
 
@@ -29,7 +29,7 @@ warm_up_iter = 100
 test_iter = 10000
 CPUINFER_PARAM = 304
 # 初始化 CPUInfer（此处使用原始构造函数，可根据需要调整配置参数）
-CPUInfer = cpuinfer_ext.CPUInfer(CPUINFER_PARAM)
+CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
 # 获取脚本相关信息，用于生成结果保存文件名
 script_path = os.path.abspath(__file__)
@@ -198,7 +198,7 @@ def bench_moe(quant_mode: str):
             up_proj = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float16, device="cpu").to("cpu").contiguous()
             down_proj = torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float16, device="cpu").to("cpu").contiguous()
             
-            config = cpuinfer_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
+            config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
             config.pool = CPUInfer.backend_
             config.m_block = m_block 
             config.group_min_len = group_min_len
@@ -211,7 +211,7 @@ def bench_moe(quant_mode: str):
             config.down_type = down_type
             config.hidden_type = hidden_type
 
-            moe = cpuinfer_ext.moe.MOE(config)
+            moe = kt_kernel_ext.moe.MOE(config)
             CPUInfer.submit(moe.load_weights_task())
             CPUInfer.sync()
             moes.append(moe)
