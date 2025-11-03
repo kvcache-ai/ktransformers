@@ -24,7 +24,7 @@
 #include "operators/kml/moe.hpp"
 #endif
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
 #include "operators/amx/moe.hpp"
 #endif
@@ -462,7 +462,7 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
       .def("load_weights", &TP_MOE<LLAMA_MOE_TP>::load_weights)
       .def("forward", &TP_MOE<LLAMA_MOE_TP>::forward_binding);
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
   py::class_<TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>, MoE_Interface,
              std::shared_ptr<TP_MOE<AMX_MOE_TP<amx::GemmKernel224BF>>>>(moe_module, "AMXBF16_MOE")
       .def(py::init<GeneralMOEConfig>())
