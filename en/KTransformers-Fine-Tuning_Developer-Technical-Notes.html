@@ -1,0 +1,416 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>SFT developer tech notes - Ktransformers</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/KTransformers-Fine-Tuning_Developer-Technical-Notes.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <ul>
+<li>
+<p><a href="#ktransformers-fine-tuning-x-llama-factory-integration-%E2%80%93-developer-technical-notes">KTransformers Fine-Tuning × LLaMA-Factory Integration – Developer Technical Notes</a></p>
+</li>
+<li>
+<p><a href="#introduction">Introduction</a></p>
+</li>
+<li>
+<p><a href="#overall-view-of-the-kt-fine-tuning-framework">Overall View of the KT Fine-Tuning Framework</a></p>
+<ul>
+<li><a href="#attention-lora--kt-coexist">Attention (LoRA + KT coexist)</a></li>
+<li><a href="#moe-operator-encapsulation--backward">MoE (operator encapsulation + backward)</a>
+<ul>
+<li><a href="#encapsulation">Encapsulation</a></li>
+<li><a href="#backward-cpu">Backward (CPU)</a></li>
+</ul>
+</li>
+<li><a href="#multi-gpu-loadingtraining-placement-strategy-instead-of-dataparallel">Multi-GPU Loading/Training: Placement strategy instead of DataParallel</a></li>
+</ul>
+</li>
+<li>
+<p><a href="#kt-lora-fine-tuning-evaluation">KT-LoRA Fine-Tuning Evaluation</a></p>
+<ul>
+<li><a href="#setup">Setup</a></li>
+<li><a href="#results">Results</a>
+<ul>
+<li><a href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></li>
+<li><a href="#translational-style-benchmark-generative">Translational-Style benchmark (generative)</a></li>
+<li><a href="#medical-vertical-benchmark-afrimed-saqmcq">Medical Vertical Benchmark (AfriMed-SAQ/MCQ)</a></li>
+<li><a href="#limitations">Limitations</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><a href="#speed-tests">Speed Tests</a></p>
+<ul>
+<li><a href="#end-to-end-performance">End-to-End Performance</a></li>
+<li><a href="#moe-compute-deepseek-v3-671b">MoE Compute (DeepSeek-V3-671B)</a></li>
+<li><a href="#memory-footprint">Memory Footprint</a></li>
+</ul>
+</li>
+<li>
+<p><a href="#conclusion">Conclusion</a></p>
+</li>
+</ul>
+<h1 id="ktransformers-fine-tuning--llama-factory-integration--developer-technical-notes"><a class="header" href="#ktransformers-fine-tuning--llama-factory-integration--developer-technical-notes">KTransformers Fine-Tuning × LLaMA-Factory Integration – Developer Technical Notes</a></h1>
+<p><strong>MadSys Lab, KVCache-AI Team, Approaching AI, LLaMA-Factory Team</strong></p>
+<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<p>Recent open-source LLMs—from DeepSeek-V3/R1 to Qwen-MoE and Kimi-K2—have surged in performance and scale. Yet due to <strong>compute and memory constraints</strong>, it is difficult for typical researchers to fine-tune trillion-parameter-class models. We therefore integrate <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong> so that, with <strong>2–4 RTX 4090 GPUs</strong> and sufficient CPU memory, one can fine-tune ultra-large Mixture-of-Experts (MoE) models such as DeepSeek-671B.</p>
+<p>This architecture bridges resource gaps, enabling <strong>local fine-tuning of ultra-large models</strong>, while also supporting <strong>efficient scenario customization</strong> at 14B/30B scales. We validate on stylized dialogue, Westernized translation tone, and medical Q&amp;A, achieving rapid adaptation within hours.</p>
+<p>Architecturally, LLaMA-Factory orchestrates data/config/training, LoRA insertion, and inference; KTransformers is a pluggable, high-performance operator backend that takes over Attention and MoE under the same training code, enabling <strong>GPU+CPU heterogeneity</strong> to accelerate training and reduce GPU memory.</p>
+<p><img src="../assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
+<p>We evaluated LoRA fine-tuning with HuggingFace default, Unsloth, and KTransformers backends (same settings and data). <strong>KTransformers</strong> is currently the only solution feasible on <strong>2–4×24GB 4090s</strong> for <strong>671B-scale MoE</strong>, and also shows higher throughput and lower GPU memory for 14B MoEs.</p>
+<div class="table-wrapper"><table><thead><tr><th>Under LoRA (BF16) + <a href="https://github.com/mindsRiverPonder/LLM-practice">NekoQA-10K stylized dialogue</a></th><th>HuggingFace Backend</th><th>Unsloth Backend</th><th>KTransformers Backend</th></tr></thead><tbody>
+<tr><td>[14B-DeepSeekV2-Lite] LoRA fine-tuning throughput</td><td>303.58 token/s</td><td>455.37 token/s</td><td>530.38 token/s</td></tr>
+<tr><td>[14B-DeepSeekV2-Lite] GPU memory</td><td>32.12 GB</td><td>9.64 GB</td><td>6.08 GB</td></tr>
+<tr><td>[671B-DeepSeekV3] LoRA fine-tuning throughput</td><td><font color='red'>Too Huge to run</font></td><td><font color='red'>NOT SUPPORT</font></td><td>40.35 token/s</td></tr>
+<tr><td>[671B-DeepSeekV3] GPU memory (sum across GPUs)</td><td>theoretical 1400 GB †</td><td><font color='red'>NOT SUPPORT</font></td><td>70 GB †</td></tr>
+</tbody></table>
+</div>
+<p>† The <strong>1400 GB</strong> is the <strong>theoretical</strong> FP16 full-resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT (Attention on GPU + layered MoE offload).</p>
+<p>From the table above, it can be seen that for the 14B model, the KTransformers backend achieves approximately 75% higher throughput than the default HuggingFace solution, while using only about one-fifth of the GPU memory. For the 671B model, both HuggingFace and Unsloth fail to run on a single 4090 GPU, whereas KTransformers is able to perform LoRA fine-tuning at 40 tokens/s, keeping the GPU memory usage within 70 GB.</p>
+<p><img src="../assets/image-compare_model.png" alt="按照模型划分的对比图_02" /></p>
+<h2 id="overall-view-of-the-kt-fine-tuning-framework"><a class="header" href="#overall-view-of-the-kt-fine-tuning-framework">Overall View of the KT Fine-Tuning Framework</a></h2>
+<p>We detail how KTransformers takes over core operators in LLaMA-Factory’s fine-tuning framework to optimize Attention and MoE.</p>
+<p>DeepSeek-V3/V2 MoE models comprise a small-parameter dense Attention part and a large-parameter sparse MoE part. For illustration, consider layer 2 of DeepSeek-V2-Lite-Chat (from which each layer includes both Attention and MoE). Attention compute and KV cache mainly reside on the GPU; the heavyweight MoE part is primarily executed on the CPU. We first cover <strong>Attention replacement and inheritance</strong>, then <strong>MoE encapsulation and backend interfacing</strong>, and finally <strong>multi-GPU placement</strong>.</p>
+<h3 id="attention-lora--kt-coexist"><a class="header" href="#attention-lora--kt-coexist">Attention (LoRA + KT coexist)</a></h3>
+<p>KTransformers provides operator injection (<code>BaseInjectedModule</code>), and PEFT provides LoRA layer insertion. For fine-tuning, we design <code>KTransformersLinearLora</code>, inheriting from both <code>KTransformersLinear</code> and <code>LoraLayer</code>:</p>
+<ul>
+<li><strong>Inheritance:</strong> <code>KTransformersLinearLora</code> retains KT’s high-performance paths (<code>prefill_linear</code>/<code>generate_linear</code>) while accepting LoRA parameters (<code>lora_A/lora_B</code>).</li>
+<li><strong>Replacement:</strong> During preparation, we replace original <code>KTransformersLinear</code> layers (Q/K/V/O) with <code>KTransformersLinearLora</code>, preserving KT optimizations while enabling LoRA trainability.</li>
+</ul>
+<p><img src="../assets/image-20251016182810716.png" alt="image-20251016182810716" /></p>
+<p>After replacement, LoRA is inserted at Q/K/V/O linear transforms (left), and <code>KTransformersLinearLora</code> contains both KT fast paths and LoRA matrices (right).</p>
+<p><img src="../assets/image-20251016182920722.png" alt="image-20251016182920722" /></p>
+<h3 id="moe-operator-encapsulation--backward"><a class="header" href="#moe-operator-encapsulation--backward">MoE (operator encapsulation + backward)</a></h3>
+<h4 id="encapsulation"><a class="header" href="#encapsulation">Encapsulation</a></h4>
+<p>Given large parameters and sparse compute, we encapsulate the expert computation as a <strong>differentiable black-box operator</strong>—transparent upstream, replaceable downstream.</p>
+<ul>
+<li><strong>Upstream (PyTorch graph):</strong> we register a custom Autograd Function so the MoE layer appears as <strong>a single node</strong>. In the left figure (red box), only <code>KSFTExpertsCPU</code> is visible; on the right, the unencapsulated graph expands routing, dispatch, and FFN experts. Encapsulation makes the MoE layer behave like a standard <code>nn.Module</code> with gradients.</li>
+<li><strong>Downstream (backend):</strong> inside the Autograd Function, pybind11 calls C++ extensions for forward/backward. Multiple <strong>pluggable backends</strong> exist (AMX BF16/INT8; <strong>llamafile</strong>). The backend can be switched via YAML (e.g., <code>"backend": "AMXBF16"</code> vs. <code>"llamafile"</code>).</li>
+</ul>
+<p><img src="../assets/image-20250801174623919.png" alt="image-20250801174623919" /></p>
+<h4 id="backward-cpu"><a class="header" href="#backward-cpu">Backward (CPU)</a></h4>
+<p>MoE backward frequently needs the transposed weights $W^\top$. To avoid repeated runtime transposes, we <strong>precompute/cache</strong> $W^\top$ at load time (blue box). We also <strong>cache necessary intermediate activations</strong> (e.g., expert projections, red box) to reuse in backward and reduce recomputation. We provide backward implementations for <strong>llamafile</strong> and <strong>AMX (INT8/BF16)</strong>, with NUMA-aware optimizations.</p>
+<img src="../assets/image-20251016182942726.png" alt="image-20251016182942726" style="zoom:33%;" />
+<h3 id="multi-gpu-loadingtraining-placement-strategy-instead-of-dataparallel"><a class="header" href="#multi-gpu-loadingtraining-placement-strategy-instead-of-dataparallel">Multi-GPU Loading/Training: Placement strategy instead of DataParallel</a></h3>
+<p>To lower <strong>per-GPU memory peaks</strong> on 2–4 GPUs, we use <strong>model parallelism + explicit placement</strong>, not DataParallel (which duplicates the whole model on each GPU).</p>
+<p>Key changes:</p>
+<ol>
+<li><strong>KTrainer:</strong> takes over <code>.to(device)</code> to prevent “move whole model to a single GPU”. Using KT’s optimize-rule YAML, each layer declares <code>device: cuda:0/cuda:1/...</code> and is <strong>constructed directly on the target GPU</strong> (no extra copies).</li>
+<li><strong>Disable automatic DataParallel:</strong> when <code>USE_KT=1</code>, we disable automatic DP wrappers from LLaMA-Factory/HF Trainer to avoid duplication and keep full control over sharding.</li>
+<li><strong>Gradient aggregation:</strong> gradients are reduced to <code>cuda:0</code>. Intermediate activations stay local; only necessary tensors are transferred, cutting communication/activation overhead.</li>
+</ol>
+<p>Thus, we keep KT placement strategies under multi-GPU fine-tuning. Users choose a <code>kt_optimize_rule</code> with <code>multi-gpu</code>. For DeepSeek-671B, <code>DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml</code> is a typical 2-GPU plan: KV/attention parts on each GPU; MoE experts sharded on CPU; both GPUs share the workload.</p>
+<h2 id="kt-lora-fine-tuning-evaluation"><a class="header" href="#kt-lora-fine-tuning-evaluation">KT-LoRA Fine-Tuning Evaluation</a></h2>
+<h3 id="setup"><a class="header" href="#setup">Setup</a></h3>
+<p>LLaMA-Factory orchestration, KTransformers backend, LoRA (rank=8, α=32, dropout=0.1, BF16), <code>GAS=16</code>, <code>qlen=512</code>, with the same KT optimize rule as training. We evaluate (a) stylized dialogue transfer and (b) two <strong>small-scale representative</strong> benchmarks: Translational-Style (generative) and AfriMed-QA (medical vertical; <strong>SAQ</strong> and <strong>MCQ</strong>). AMX is enabled; GPUs: 2×48GB RTX 4090; CPU: Intel Xeon Platinum 8488C.</p>
+<h3 id="results"><a class="header" href="#results">Results</a></h3>
+<h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
+<p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. The fine-tuned model consistently exhibits the target style (red boxes) versus neutral/rational base (blue). This shows <strong>KT-LoRA injects style features</strong> into the generation distribution with low GPU cost.</p>
+<p><img src="../assets/image-20251016175848143.png" alt="image-20251016175848143" /></p>
+<h4 id="translational-style-benchmark-generative"><a class="header" href="#translational-style-benchmark-generative">Translational-Style benchmark (generative)</a></h4>
+<p>Dataset: <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>. Metrics: BLEU-1/2/3/4, ROUGE-1/2/L.</p>
+<div class="table-wrapper"><table><thead><tr><th>Translational-Style dataset</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>20.66</td><td>8.33</td><td>4.54</td><td>2.89</td><td>22.71</td><td>4.52</td><td>19.19</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.41</strong></td><td><strong>22.44</strong></td><td><strong>15.42</strong></td><td><strong>11.18</strong></td><td><strong>42.03</strong></td><td><strong>18.38</strong></td><td><strong>33.10</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>8.49</td><td>3.34</td><td>1.62</td><td>0.96</td><td>15.91</td><td>2.55</td><td>10.07</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>37.02</strong></td><td><strong>23.70</strong></td><td><strong>16.21</strong></td><td><strong>11.49</strong></td><td><strong>43.43</strong></td><td><strong>18.96</strong></td><td><strong>34.54</strong></td></tr>
+</tbody></table>
+</div>
+<p>As shown by the test results in the tables above, under a unified workflow and placement strategy, <strong>both model scales exhibit consistent gains after fine-tuning</strong>, supporting the usability and effectiveness of the “KT backend + LoRA fine-tuning” combination for generative style control. At the same time, this indicates that KT’s heterogeneous placement and operator optimizations can stably support small-sample adaptation in the style domain.</p>
+<h4 id="medical-vertical-benchmark-afrimed-saqmcq"><a class="header" href="#medical-vertical-benchmark-afrimed-saqmcq">Medical Vertical Benchmark (AfriMed-SAQ/MCQ)</a></h4>
+<p>The dataset adopts <a href="https://aclanthology.org/2025.acl-long.96/">AfriMed-QA</a> (ACL 2025), a domain-specific dataset for the medical field in Africa with strong scenario customization characteristics, comprising two formats—multiple-choice questions (MCQ) and short-answer questions (SAQ)—which in this case serve as the evaluation for vertical-domain fine-tuning. In terms of evaluation criteria, BLEU/ROUGE are used for SAQ, and Accuracy is used for MCQ.</p>
+<div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (SAQ)</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>13.58</td><td>11.12</td><td>9.10</td><td>7.23</td><td>22.48</td><td>7.81</td><td>11.73</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.90</strong></td><td><strong>27.63</strong></td><td><strong>22.99</strong></td><td><strong>19.15</strong></td><td><strong>35.25</strong></td><td><strong>17.50</strong></td><td><strong>28.44</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>12.75</td><td>10.27</td><td>8.05</td><td>5.99</td><td>20.33</td><td>5.65</td><td>10.11</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>42.42</strong></td><td><strong>34.12</strong></td><td><strong>28.95</strong></td><td><strong>24.54</strong></td><td><strong>41.97</strong></td><td><strong>22.37</strong></td><td><strong>33.28</strong></td></tr>
+</tbody></table>
+</div><div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (MCQ)</th><th>Accuracy</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>0.0645</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>0.4812</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>0.5833</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>0.7930</strong></td></tr>
+</tbody></table>
+</div>
+<p>As shown in the tables above, (1) DeepSeek-V3 (671B) after KT-LoRA fine-tuning achieves clearly higher performance than the fine-tuned DeepSeek-V2-Lite (14B) on both MCQ and SAQ, and it also surpasses the V3 base model. Within our small-scale setting, this preliminarily indicates that KT-LoRA fine-tuning of ultra-large-parameter models has practical significance in vertical domains.</p>
+<p>(2) Across both SAQ/MCQ sub-tasks, KT-LoRA delivers consistent gains, indicating that—with KT’s heterogeneous placement and backend operator support—LoRA fine-tuning can effectively inject the key knowledge points of vertical domains such as medicine into the model.</p>
+<h4 id="limitations"><a class="header" href="#limitations">Limitations</a></h4>
+<p>At present, most of our testing is conducted on <strong>single datasets</strong> and at <strong>small scale</strong> (≤ 20k examples), with the goal of providing <strong>existence evidence of system effectiveness for KT-LoRA fine-tuning</strong>, rather than drawing generalized conclusions about algorithmic generalization or scaling laws. Our report primarily presents representative figures; to support stronger algorithmic claims, larger sample sizes, multi-lingual/multi-domain datasets, and multi-seed repeated experiments would be required—these are beyond the scope of this work.</p>
+<p><strong>We also warmly welcome everyone to join the open-source LLaMA-Factory KT fine-tuning project. If you have additional test results, we especially welcome you to record them in the shared spreadsheet below, and to include the corresponding <code>kt_optimize_rule</code> files, dataset examples, training/evaluation YAMLs, and detailed GPU-memory and CPU configurations for community reference and reproducibility~!</strong></p>
+<h3 id="speed-tests"><a class="header" href="#speed-tests">Speed Tests</a></h3>
+<h4 id="end-to-end-performance"><a class="header" href="#end-to-end-performance">End-to-End Performance</a></h4>
+<p><strong>Definitions</strong></p>
+<p><code>step_time</code>：time per optimization step (tensor movement + Attention + MoE + others).</p>
+<p><code>tokens_per_step = GAS × qlen</code>；<code>token/s = tokens_per_step / step_time</code>。 We use <code>GAS=16</code>, <code>qlen=512</code> → <code>tokens_per_step=8192</code>.</p>
+<p><strong>Measured</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Model</th><th>step_time (s)</th><th>tokens/step</th><th>token/s</th></tr></thead><tbody>
+<tr><td>DeepSeek-V3-671B</td><td>203</td><td>8192</td><td><strong>40.35</strong></td></tr>
+<tr><td>DeepSeek-V2-Lite-14B</td><td>36</td><td>8192</td><td><strong>227.6</strong></td></tr>
+</tbody></table>
+</div>
+<h4 id="moe-compute-deepseek-v3-671b"><a class="header" href="#moe-compute-deepseek-v3-671b">MoE Compute (DeepSeek-V3-671B)</a></h4>
+<p><strong>Theory</strong></p>
+<ul>
+<li>MoE per-layer, per-token FLOPs (forward+backward) approx.:
+$$
+\text{FLOPs}_{\text{per-layer, per-token}} \approx c \cdot k \cdot H \cdot I
+$$</li>
+</ul>
+<p>​		with $k = 8$（Top-k），$H = 7168$（hidden size），$I = 2048$（intermediate size），$c\approx16$（≈6 forward + ≈10 backward matmuls）。</p>
+<ul>
+<li>Per-step across all MoE layers:
+$$
+\text{FLOPs}<em>{\text{per-step}} \approx c \cdot qlen \cdot k \cdot H \cdot I \cdot L</em>{\text{MoE}}
+$$</li>
+</ul>
+<p>​		Plugging $c=16, qlen=512, k=8, H=7168, I=2048, L_{MoE}=58$，$\text{FLOPs}_{\text{per-step}} \approx 55.8\ \text{TFLOPs}$.</p>
+<p><strong>Measured (MoE TFLOPS on CPU)</strong></p>
+<p>If the <strong>MoE-only</strong> time per step is <code>t_moe</code> (seconds), $\text{TFLOPS} = \text{FLOPs}_{\text{per-step}} / \text{step_per_second}.$</p>
+<p>Use MoE-phase time, not full <code>step_time</code>, to get MoE throughput.</p>
+<div class="table-wrapper"><table><thead><tr><th>TFLOPS</th><th>Forward</th><th>Backward</th></tr></thead><tbody>
+<tr><td>Average</td><td>17.55</td><td>18.41</td></tr>
+</tbody></table>
+</div>
+<h3 id="memory-footprint"><a class="header" href="#memory-footprint">Memory Footprint</a></h3>
+<ul>
+<li>DeepSeek-V3 (671B; 58 MoE layers out of 61): ~<strong>70 GB</strong> total GPU, ~<strong>1.2–1.3 TB</strong> host memory.</li>
+<li>DeepSeek-V2-Lite (14B; 26 MoE layers out of 27): ~<strong>5 GB</strong> GPU, ~<strong>30 GB</strong> host memory.</li>
+</ul>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>Integrating <strong>KTransformers LoRA</strong> with <strong>LLaMA-Factory</strong> provides a practical path to efficiently train and deploy MoE LLMs. KT contributes placement strategies and operator optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization with very low GPU memory; LLaMA-Factory supplies a coherent user-level interface.</p>
+<p>This means even tens-to-hundreds-of-billion-parameter MoE models can be fine-tuned and served with low latency on ordinary hardware. The approach balances <strong>memory savings</strong>, <strong>speed</strong>, and <strong>usability</strong>, turning ultra-large models into tools that developers can actually wield.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../en/KTransformers-Fine-Tuning_User-Guide.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../en/api/server/server.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../en/KTransformers-Fine-Tuning_User-Guide.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../en/api/server/server.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
