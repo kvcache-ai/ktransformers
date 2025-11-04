@@ -1,0 +1,121 @@
+{
+  "id": "4550268",
+  "name": "Lexllama",
+  "font_family": "iconfont",
+  "css_prefix_text": "icon-",
+  "description": "Lexllama开源项目使用",
+  "glyphs": [
+    {
+      "icon_id": "11372665",
+      "name": "复制",
+      "font_class": "copy",
+      "unicode": "e8b0",
+      "unicode_decimal": 59568
+    },
+    {
+      "icon_id": "34202237",
+      "name": "箭头下",
+      "font_class": "arrow-down",
+      "unicode": "e85e",
+      "unicode_decimal": 59486
+    },
+    {
+      "icon_id": "7766233",
+      "name": "进度",
+      "font_class": "usage-progress",
+      "unicode": "e651",
+      "unicode_decimal": 58961
+    },
+    {
+      "icon_id": "38865122",
+      "name": "环形进度条",
+      "font_class": "gen-progress",
+      "unicode": "e617",
+      "unicode_decimal": 58903
+    },
+    {
+      "icon_id": "577406",
+      "name": "向左1",
+      "font_class": "back",
+      "unicode": "e779",
+      "unicode_decimal": 59257
+    },
+    {
+      "icon_id": "1920286",
+      "name": "点",
+      "font_class": "point",
+      "unicode": "e608",
+      "unicode_decimal": 58888
+    },
+    {
+      "icon_id": "8866967",
+      "name": "编辑",
+      "font_class": "edit",
+      "unicode": "e7dd",
+      "unicode_decimal": 59357
+    },
+    {
+      "icon_id": "10199175",
+      "name": "删除",
+      "font_class": "delete",
+      "unicode": "e614",
+      "unicode_decimal": 58900
+    },
+    {
+      "icon_id": "1010111",
+      "name": "上传",
+      "font_class": "upload-1",
+      "unicode": "e618",
+      "unicode_decimal": 58904
+    },
+    {
+      "icon_id": "351773",
+      "name": "探索-选中",
+      "font_class": "explore",
+      "unicode": "e621",
+      "unicode_decimal": 58913
+    },
+    {
+      "icon_id": "564941",
+      "name": "ellipsis",
+      "font_class": "ellipsis",
+      "unicode": "e657",
+      "unicode_decimal": 58967
+    },
+    {
+      "icon_id": "1048859",
+      "name": "发送",
+      "font_class": "sent",
+      "unicode": "e60c",
+      "unicode_decimal": 58892
+    },
+    {
+      "icon_id": "1304951",
+      "name": "列表",
+      "font_class": "list-list",
+      "unicode": "e62d",
+      "unicode_decimal": 58925
+    },
+    {
+      "icon_id": "8676284",
+      "name": "列表",
+      "font_class": "list-icon",
+      "unicode": "e639",
+      "unicode_decimal": 58937
+    },
+    {
+      "icon_id": "22290034",
+      "name": "重试",
+      "font_class": "zhongshi",
+      "unicode": "e6bd",
+      "unicode_decimal": 59069
+    },
+    {
+      "icon_id": "22961085",
+      "name": "Fork 记录",
+      "font_class": "log",
+      "unicode": "e826",
+      "unicode_decimal": 59430
+    }
+  ]
+}

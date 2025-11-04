@@ -1,0 +1,161 @@
+
+/*Define color variables*/
+$bg_gray_light_normal = #F9F9F9
+$bg_gray_light_hover = #E8E8E8
+$bg_gray_light_active = #E8E8E8
+
+$border_gray_light_normal = rgba(0, 0, 0, .15)
+$border_gray_light_hover = #8080FF
+
+$gray_20 = #333333
+$gray_40 = #585858
+$gray_50 = #7F7F7F
+$gray_60 = #9F9F9F
+$gray_70 = #BFBFBF
+$gray_80 = #DFDFDF
+$gray_85 = #F2F2F2
+$gray_90 = #F7F7F7
+
+$gray = #53525B
+$gray_dark = #42414a
+$gray_hover = #121212
+$gray_action = #6C757D
+
+$primary = #409eff
+$primary_hover = #428bca
+$primary_middle = #9DDDF9
+$primary_light = #D4F0FC
+
+$cyan = #66CCCC
+$cyan_hover = #46C2C2
+
+
+/*Define common modules*/
+$input-duration = .25s
+input-border()
+  -webkit-transition: border-color ease-in-out $input-duration,-webkit-box-shadow ease-in-out $input-duration
+  -o-transition: border-color ease-in-out $input-duration,box-shadow ease-in-out $input-duration
+  transition: border-color ease-in-out $input-duration,box-shadow ease-in-out $input-duration
+input-focus()
+  border-color: #66afe9
+  outline: 0
+  z-index: 100
+  -webkit-box-shadow: inset 0 1px 1px rgba(0,0,0,.075),0 0 8px rgba(102,175,233,.6)
+  box-shadow: inset 0 1px 1px rgba(0,0,0,.075),0 0 8px rgba(102,175,233,.6)
+
+
+/*Define common class*/
+.flex-column
+  display: -webkit-box
+  display: -webkit-flex
+  display: flex
+  box-sizing: border-box
+  -webkit-box-orient: vertical
+  -webkit-box-direction: normal
+  -webkit-flex-direction: column
+  flex-direction: column
+  height: 100%
+
+.flex-row
+  position: relative
+  display: -webkit-box
+  display: -ms-flexbox
+  display: flex
+  box-sizing: border-box
+  -webkit-box-align: center
+  -ms-flex-align: center
+  align-items: center
+
+.flex-unit
+  -webkit-box-flex: 1
+  -ms-flex: 1
+  flex: 1
+  // overflow: hidden
+
+.clearfix
+  &:after
+    clear: both
+    content: "\20"
+    display: block
+    height: 0
+    visibility: hidden
+
+a,a:hover
+  text-decoration:none
+
+button:focus
+  outline: none
+
+.btn
+  display: inline-block
+  margin-bottom: 0
+  padding:0px 15px
+  font-size: 14px
+  height: 34px
+  line-height: 32px
+  float: left /*去掉inline-block之间的空格*/
+  font-weight: normal
+  text-align: center
+  white-space: nowrap
+  vertical-align: middle
+  cursor: pointer
+  background-image: none
+  border-radius: 3px
+  -webkit-user-select: none
+  -moz-user-select: none
+  -ms-user-select: none
+  -o-user-select: none
+  user-select: none
+  &:hover
+    .dropdown-list
+      display: block
+  i
+    font-size: 16px
+  .text
+    float: right
+    margin-left: 3px
+
+.btn-gray
+  color: $gray_action
+  background-color: #FFFFFF
+  border: 1px solid $gray_action
+  &:not(.is-disabled):hover
+    color: #FFFFFF
+    background-color: $gray_action
+    border: 1px solid $gray_action
+
+.btn-primary
+  color: #FFFFFF
+  background-color: $primary
+  border: 1px solid $primary
+  &:not(.is-disabled):hover
+    color: #FFFFFF
+    background-color: $primary_hover
+    border: 1px solid $primary_hover
+
+.chat-box
+  position: relative
+  .chat-input
+    border: 1px solid $border_gray_light_normal
+    height: 48px
+    line-height: 48px
+    font-size: 16px
+    outline: 0
+    box-sizing: border-box
+    padding:0 30px0 20px
+    color: #7F7F7F
+    width: 800px
+    border-radius: 12px
+    position: relative
+    &:focus
+      input-focus()
+  i
+    position: absolute
+    font-size: 26px
+    right: 13px
+    bottom:0px
+    color: $border_gray_light_normal
+    z-index: 100
+    cursor: pointer
+    &:hover
+      color: $border_gray_light_hover
