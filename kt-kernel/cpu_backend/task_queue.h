@@ -25,7 +25,7 @@ class TaskQueue {
 
   void enqueue(std::function<void()>);
 
-  void sync(size_t n);
+  void sync(size_t allow_n_pending);
 
  private:
   struct Node {

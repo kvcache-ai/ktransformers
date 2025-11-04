@@ -94,22 +94,22 @@ class CPUInfer {
 
   struct SyncArgs {
     CPUInfer* cpuinfer;
-    size_t n;
+    size_t allow_n_pending;
   };
 
   static void sync_(void* sync_args) {
     SyncArgs* args = (SyncArgs*)sync_args;
-    args->cpuinfer->task_queue_->sync(args->n);
+    args->cpuinfer->task_queue_->sync(args->allow_n_pending);
   }
 
-  void sync(size_t n = 0) {
-    SyncArgs* args = new SyncArgs{this, n};
+  void sync(size_t allow_n_pending = 0) {
+    SyncArgs* args = new SyncArgs{this, allow_n_pending};
     sync_(args);
   }
 #ifndef KTRANSFORMERS_CPU_ONLY
-  void sync_with_cuda_stream(intptr_t user_cuda_stream, size_t n = 0) {
+  void sync_with_cuda_stream(intptr_t user_cuda_stream, size_t allow_n_pending = 0) {
 #if defined(KTRANSFORMERS_USE_CUDA)
-    SyncArgs* args = new SyncArgs{this, n};
+    SyncArgs* args = new SyncArgs{this, allow_n_pending};
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)args);
 #endif
   }
