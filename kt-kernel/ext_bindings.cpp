@@ -258,10 +258,11 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def(py::init<int>())
       .def(py::init<WorkerPoolConfig>())
       .def("submit", &CPUInfer::submit)
-      .def("sync", &CPUInfer::sync, py::arg("n") = 0)
+      .def("sync", &CPUInfer::sync, py::arg("allow_n_pending") = 0)
       .def_readwrite("backend_", &CPUInfer::backend_)
 #ifndef KTRANSFORMERS_CPU_ONLY
-      .def("sync_with_cuda_stream", &CPUInfer::sync_with_cuda_stream, py::arg("user_cuda_stream"), py::arg("n") = 0)
+      .def("sync_with_cuda_stream", &CPUInfer::sync_with_cuda_stream, py::arg("user_cuda_stream"),
+           py::arg("allow_n_pending") = 0)
       .def("submit_with_cuda_stream", &CPUInfer::submit_with_cuda_stream)
 #endif
       ;
