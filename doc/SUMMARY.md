@@ -11,6 +11,8 @@
 - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md)
 - [Use FP8 GPU Kernel](en/fp8_kernel.md)
 - [Use AMD GPU](en/ROCm.md)
+- [SFT user guide](en/KTransformers-Fine-Tuning_User-Guide.md)
+- [SFT developer tech notes](en/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
 # Server
   - [Server](en/api/server/server.md)
   - [Website](en/api/server/website.md)
