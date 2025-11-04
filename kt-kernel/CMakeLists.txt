@@ -108,7 +108,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Use header-only fmt to avoid needing to link libfmt (fix undefined symbol vprint)
 add_compile_definitions(FMT_HEADER_ONLY)
 
-
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 set(CMAKE_BUILD_TYPE "Release")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
@@ -116,6 +115,7 @@ set(CMAKE_BUILD_TYPE "Release")
 # set(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenMP REQUIRED)
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 
 
 include(CheckCXXCompilerFlag)
@@ -255,7 +255,7 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
             list(APPEND ARCH_FLAGS -mavx2 -mfma -msse3 -mf16c)
         endif()
         if(LLAMA_AVX512)
-            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mfma -mf16c)
+            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mfma -mf16c -msse3)
         endif()
         if(LLAMA_AVX512_VBMI)
             list(APPEND ARCH_FLAGS -mavx512vbmi)
@@ -349,7 +349,6 @@ if(HOST_IS_X86)
             add_compile_definitions(HAVE_AMX=1)
             list(APPEND ARCH_FLAGS -mamx-tile -mamx-bf16 -mamx-int8)
             message(STATUS "AMX enabled")
-            list(APPEND ARCH_FLAGS -mamx-tile)
         endif()
         # add_executable(amx-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/amx-test.cpp)
         # target_link_libraries(amx-test llama)
@@ -366,7 +365,7 @@ if(HOST_IS_X86)
     endif()
 endif()
 
-
+message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
 
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
@@ -611,6 +610,4 @@ else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
 
-message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
-message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
 

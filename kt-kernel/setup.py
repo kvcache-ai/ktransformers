@@ -223,38 +223,36 @@ class CMakeBuild(build_ext):
 
         # CPU feature flags mapping: if user specified CPUINFER_CPU_INSTRUCT, honor it;
         # else auto-pick based on detection (x86 only)
-        if os.environ.get("CPUINFER_CPU_INSTRUCT"):
-            cmake_args += cpu_feature_flags()
-        else:
-            d = self.detect_cpu_info()
-            print(f"Detected CPU info: {d}")
+        cmake_args += cpu_feature_flags()
+        d = self.detect_cpu_info()
+        print(f"Detected CPU info: {d}")
 
-            # Vendor / feature specific toggles
-            # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
-            if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
-                cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
-                print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+        # Vendor / feature specific toggles
+        # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
+        if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
+            cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+            print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
 
-            # On ARM, enable KML by default if not explicitly toggled
-            if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:
-                cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
-                print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
+        # On ARM, enable KML by default if not explicitly toggled
+        if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:
+            cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
+            print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
 
-            # If AMX or AVX512 present, enable umbrella unless overridden; enable AMX specifically when present
-            if "AMX" in d["features"]:
-                if os.environ.get("CPUINFER_ENABLE_AMX") is None:
-                    cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX=ON")
-                    print("-- AMX support detected; enabling (-DKTRANSFORMERS_CPU_USE_AMX=ON)")
-            if ("AMX" in d["features"] or "AVX512" in d["features"]) and os.environ.get(
-                "CPUINFER_ENABLE_AVX512"
-            ) is None:
-                cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
-                print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
+        # If AMX or AVX512 present, enable umbrella unless overridden; enable AMX specifically when present
+        if "AMX" in d["features"]:
+            if os.environ.get("CPUINFER_ENABLE_AMX") is None:
+                cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX=ON")
+                print("-- AMX support detected; enabling (-DKTRANSFORMERS_CPU_USE_AMX=ON)")
+        if ("AMX" in d["features"] or "AVX512" in d["features"]) and os.environ.get(
+            "CPUINFER_ENABLE_AVX512"
+        ) is None:
+            cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
+            print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
 
-            # Friendly summary
-            print(
-                f"-- CPU detection: vendor={d.get('vendor')} arch={d.get('arch')} features={sorted(list(d.get('features', [])))}"
-            )
+        # Friendly summary
+        print(
+            f"-- CPU detection: vendor={d.get('vendor')} arch={d.get('arch')} features={sorted(list(d.get('features', [])))}"
+        )
 
         # Optional AMX / MLA toggles (explicit env overrides auto detection above)
         if os.environ.get("CPUINFER_ENABLE_AMX"):
