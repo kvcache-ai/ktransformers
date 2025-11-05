@@ -1611,11 +1611,11 @@ git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. Install the KTransformers wheel that matches your Torch and Python versions (Note: The CUDA version can differ from that in the wheel filename.)
+# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
 pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
 
 # 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
 # abi=True/False can find from below
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
@@ -1744,8 +1744,8 @@ chunk_size: 8192
 </ul>
 <h3 id="gpucpu-memory-footprint"><a class="header" href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></h3>
 <ul>
-<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU memory (multi-GPU), ~<strong>1.2–1.3 TB</strong> host memory.</li>
-<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU memory, ~<strong>150 GB</strong> host memory.</li>
+<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU VRAM (multi-GPU), ~<strong>1.2–1.3 TB</strong> CPU RAM.</li>
+<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU VRAM, ~<strong>30 GB</strong> CPU RAM.</li>
 </ul>
 <h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
 <p>By integrating <strong>KTransformers LoRA fine-tuning</strong> into <strong>LLaMA-Factory</strong>, we provide a practical guide for efficient training and deployment of MoE LLMs. KT brings cutting-edge optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization under very low GPU memory. LLaMA-Factory offers a friendly, unified interface.</p>
