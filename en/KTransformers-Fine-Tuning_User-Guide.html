@@ -424,8 +424,8 @@ chunk_size: 8192
 </ul>
 <h3 id="gpucpu-memory-footprint"><a class="header" href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></h3>
 <ul>
-<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU memory (multi-GPU), ~<strong>1.2–1.3 TB</strong> host memory.</li>
-<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU memory, ~<strong>150 GB</strong> host memory.</li>
+<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU VRAM (multi-GPU), ~<strong>1.2–1.3 TB</strong> CPU RAM.</li>
+<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU VRAM, ~<strong>30 GB</strong> CPU RAM.</li>
 </ul>
 <h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
 <p>By integrating <strong>KTransformers LoRA fine-tuning</strong> into <strong>LLaMA-Factory</strong>, we provide a practical guide for efficient training and deployment of MoE LLMs. KT brings cutting-edge optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization under very low GPU memory. LLaMA-Factory offers a friendly, unified interface.</p>
