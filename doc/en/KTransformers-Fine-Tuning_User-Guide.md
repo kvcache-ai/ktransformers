@@ -284,8 +284,8 @@ chunk_size: 8192
 
 ### GPU/CPU Memory Footprint
 
-- DeepSeek-V3 (671B; 61 layers with 58 MoE): ~**70 GB** total GPU memory (multi-GPU), ~**1.2–1.3 TB** host memory.
-- DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~**5.5 GB** GPU memory, ~**150 GB** host memory.
+- DeepSeek-V3 (671B; 61 layers with 58 MoE): ~**70 GB** total GPU VRAM (multi-GPU), ~**1.2–1.3 TB** CPU RAM.
+- DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~**5.5 GB** GPU VRAM, ~**30 GB** CPU RAM.
 
 ## Conclusion
 
