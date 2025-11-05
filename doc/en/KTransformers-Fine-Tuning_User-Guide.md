@@ -120,11 +120,11 @@ git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. Install the KTransformers wheel that matches your Torch and Python versions (Note: The CUDA version can differ from that in the wheel filename.)
+# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
 pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
 
 # 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
 # abi=True/False can find from below
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
@@ -284,8 +284,8 @@ chunk_size: 8192
 
 ### GPU/CPU Memory Footprint
 
-- DeepSeek-V3 (671B; 61 layers with 58 MoE): ~**70 GB** total GPU memory (multi-GPU), ~**1.2–1.3 TB** host memory.
-- DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~**5.5 GB** GPU memory, ~**150 GB** host memory.
+- DeepSeek-V3 (671B; 61 layers with 58 MoE): ~**70 GB** total GPU VRAM (multi-GPU), ~**1.2–1.3 TB** CPU RAM.
+- DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~**5.5 GB** GPU VRAM, ~**30 GB** CPU RAM.
 
 ## Conclusion
 
