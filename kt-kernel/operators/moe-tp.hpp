@@ -54,7 +54,6 @@ class TP_MOE_Common : public MoE_Interface {
     
     // Check if this is Llamafile backend using compile-time type checking
     constexpr bool is_llamafile = std::is_same<T, LLAMA_MOE_TP>::value;
-    const int QK_K = 256;
 
     if (is_llamafile) {
       // For Llamafile backend: use QK_K-aligned TP splitting
