@@ -332,13 +332,13 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     )
 
     if(NOT BLIS_INCLUDE_DIR OR NOT BLIS_LIBRARY)
-        message(FATAL_ERROR "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
+        message(WARNING "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
     else()
         message(STATUS "Found BLIS include at ${BLIS_INCLUDE_DIR}")
         message(STATUS "Found BLIS library ${BLIS_LIBRARY}")
+        target_include_directories(${PROJECT_NAME} PRIVATE ${BLIS_INCLUDE_DIR})
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${BLIS_LIBRARY})
     endif()
-    target_include_directories(${PROJECT_NAME} PRIVATE ${BLIS_INCLUDE_DIR})
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${BLIS_LIBRARY})
 endif()
 
 
