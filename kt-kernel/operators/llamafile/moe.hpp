@@ -322,6 +322,9 @@ class LLAMA_MOE_TP {
         [&](int task_id) {
           int expert_idx = task_id / nth;
           int64_t expert_id = expert_ids[expert_idx];
+          if (expert_id == -1) {
+            return;
+          }
           int ith = task_id % nth;
 
           void* gate_proj_ptr =
@@ -402,6 +405,9 @@ class LLAMA_MOE_TP {
           }
           for (int expert_idx = 0; expert_idx < k; expert_idx++) {
             int64_t expert_id = expert_ids[expert_idx];
+            if (expert_id == -1) {
+              continue;
+            }
 
             auto expert_offset = expert_id * config_.hidden_size * config_.intermediate_size;
             auto m_block_offset = ith * config_.m_block * config_.intermediate_size;
@@ -452,6 +458,9 @@ class LLAMA_MOE_TP {
     }
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] == -1) {
+          continue;
+        }
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
       }
     }
@@ -539,6 +548,9 @@ class LLAMA_MOE_TP {
             }
           }
           for (int j = 0; j < k; j++) {
+            if (expert_ids[i * k + j] == -1) {
+              continue;
+            }
             memcpy(m_local_gate_input_ptr_[expert_ids[i * k + j]] +
                        m_local_pos_[i][j] * config_.hidden_size *
                            ggml_type_size(ggml_internal_get_type_traits((ggml_type)config_.gate_type).vec_dot_type) /
@@ -683,6 +695,9 @@ class LLAMA_MOE_TP {
             m_output_fp32_[i][e] = 0;
           }
           for (int j = 0; j < k; j++) {
+            if (expert_ids[i * k + j] == -1) {
+              continue;
+            }
             for (int e = 0; e < config_.hidden_size; e++) {
               m_output_fp32_[i][e] +=
                   m_local_down_output_ptr_[expert_ids[i * k + j]][m_local_pos_[i][j] * config_.hidden_size + e] *
@@ -739,24 +754,38 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
 
   void load_weights() {
     auto pool = this->config.pool;
-    auto inter = this->config.intermediate_size / this->tp_count;
-    pool->dispense_backend()->do_numa_job([this, pool, inter](int tp_id) {
-      this->tps[tp_id]->load_weights(this->config.intermediate_size, tp_id * inter);
+
+    std::vector<int> tp_offsets(this->tp_count);
+    int accumulated_offset = 0;
+    for (int i = 0; i < this->tp_count; i++) {
+      tp_offsets[i] = accumulated_offset;
+      accumulated_offset += this->tp_configs[i].intermediate_size;
+    }
+
+    pool->dispense_backend()->do_numa_job([this, pool, tp_offsets](int tp_id) {
+      this->tps[tp_id]->load_weights(this->config.intermediate_size, tp_offsets[tp_id]);
     });
     this->weights_loaded = true;
   }
 
   void merge_results(int qlen, void* output) { merge_results(qlen, output, false); }
 
-  void merge_results(int qlen, void* output, bool incremental) {
-    if (incremental) {
-      throw std::runtime_error("Not Implemented");
-    }
+  void merge_results(int qlen, void *output, bool incremental) {
     auto pool = this->config.pool;
     pool->do_work_stealing_job(
         qlen, nullptr,
-        [this, output](int token_nth) {
-          auto& tp_count = this->tp_count;
+        [this, output, incremental](int token_nth) {
+          if (incremental) {
+            to_float((uint8_t *)output + token_nth * config.hidden_size *
+                                             ggml_type_size((ggml_type)config.hidden_type) /
+                                             ggml_blck_size((ggml_type)config.hidden_type),
+                     local_output + token_nth * config.hidden_size, config.hidden_size, (ggml_type)config.hidden_type);
+            for (int e = 0; e < config.hidden_size; e++) {
+              local_output_numa[0][token_nth * config.hidden_size + e] +=
+                  local_output[token_nth * config.hidden_size + e];
+            }
+          }
+          auto &tp_count = this->tp_count;
           for (int i = 1; i < tp_count; i++) {
             for (int e = 0; e < config.hidden_size; e++) {
               local_output_numa[0][token_nth * config.hidden_size + e] +=
@@ -764,8 +793,9 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
             }
           }
           from_float(local_output_numa[0] + token_nth * config.hidden_size,
-                     (uint8_t*)output + token_nth * config.hidden_size * ggml_type_size((ggml_type)config.hidden_type) /
-                                            ggml_blck_size((ggml_type)config.hidden_type),
+                     (uint8_t *)output + token_nth * config.hidden_size *
+                                             ggml_type_size((ggml_type)config.hidden_type) /
+                                             ggml_blck_size((ggml_type)config.hidden_type),
                      config.hidden_size, (ggml_type)config.hidden_type);
         },
         nullptr);
