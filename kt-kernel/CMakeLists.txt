@@ -332,13 +332,17 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     )
 
     if(NOT BLIS_INCLUDE_DIR OR NOT BLIS_LIBRARY)
-        message(WARNING "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
+        message(FATAL_ERROR "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
     else()
         message(STATUS "Found BLIS include at ${BLIS_INCLUDE_DIR}")
         message(STATUS "Found BLIS library ${BLIS_LIBRARY}")
-        target_include_directories(${PROJECT_NAME} PRIVATE ${BLIS_INCLUDE_DIR})
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${BLIS_LIBRARY})
     endif()
+    # The Python extension target (${PROJECT_NAME}) is created later by
+    # pybind11_add_module(). Calling target_include_directories/target_link_libraries
+    # here would fail because the target doesn't exist yet. Save the discovered
+    # BLIS paths and apply them after the module target is created.
+    set(_KT_BLIS_INCLUDE_DIR ${BLIS_INCLUDE_DIR})
+    set(_KT_BLIS_LIBRARY ${BLIS_LIBRARY})
 endif()
 
 
@@ -540,6 +544,18 @@ else()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
     pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
     message(STATUS "LTO: disabled")
+endif()
+
+# If BLIS was detected earlier, apply its include directory and library to the
+# created Python extension target. We only do this after the module target
+# (${PROJECT_NAME}) has been created by pybind11_add_module().
+if(DEFINED _KT_BLIS_INCLUDE_DIR AND DEFINED _KT_BLIS_LIBRARY)
+    if(TARGET ${PROJECT_NAME})
+        target_include_directories(${PROJECT_NAME} PRIVATE ${_KT_BLIS_INCLUDE_DIR})
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${_KT_BLIS_LIBRARY})
+    else()
+        message(WARNING "BLIS was detected earlier but ${PROJECT_NAME} target was not found when attempting to apply BLIS link/include settings.")
+    endif()
 endif()
 
 # Ensure the module target also has correct RPATH when conda is active
