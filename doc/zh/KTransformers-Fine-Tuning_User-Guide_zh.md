@@ -114,11 +114,11 @@ git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. 安装对应torch和python版本的KTransformers（CUDA版本可以跟whl命名的不一致）
+# 3. 安装对应torch和python版本的KTransformers（CUDA版本可以跟whl命名的不一致），从https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1
 pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
 
 # 4. 安装flash-attention，参照python版本和torch版本，从https://github.com/Dao-AILab/flash-attention/releases下载
-https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
 # abi=True/False可以用下面代码查看
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
@@ -233,7 +233,7 @@ infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransforme
 trust_remote_code: true
 
 use_kt: true # 调用KTransformers backend
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx.yaml # 请选择和LoRA微调的时候保持一致的YAML文件
+kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml # 请选择和LoRA微调的时候保持一致的YAML文件
 cpu_infer: 32
 chunk_size: 8192
 ```
