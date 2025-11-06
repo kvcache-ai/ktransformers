@@ -20,7 +20,7 @@ Download the official KIMI weights as GPU weights.
 * huggingface: https://huggingface.co/moonshotai/Kimi-K2-Thinking
 * modelscope: https://modelscope.cn/models/moonshotai/Kimi-K2-Thinking
 
-Download the AMX INT4 quantized weights provided by Approaching AI from https://modelscope.cn/models/ApproachingAI2024/Kimi-K2-Thinking-CPU-weight as CPU weights.
+Download the AMX INT4 quantized weights from https://huggingface.co/KVCache-ai/Kimi-K2-Thinking-CPU-weight as CPU weights.
 
 ## How to start
 ```
