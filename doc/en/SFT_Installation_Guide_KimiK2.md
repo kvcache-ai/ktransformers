@@ -42,7 +42,7 @@ pip install custom_flashinfer/
 
 ## Download Model
 
-Download the official KIMI weights. If the weights are in FP8 format, please refer to https://github.com/kvcache-ai/ktransformers/pull/1559 to convert them to BF16 weights.
+Download the official KIMI weights. If the weights are in FP8 format, please refer to [convert_kimi_k2_fp8_to_bf16_cpu.py](https://github.com/kvcache-ai/ktransformers/blob/main/kt-kernel/scripts/convert_kimi_k2_fp8_to_bf16_cpu.py) to convert them to BF16 weights.
 
 ## How to start
 
@@ -131,4 +131,5 @@ use_kt: true # use KTransformers as LoRA sft backend to inference
 kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
 cpu_infer: 32
 chunk_size: 8192
+
 ```
