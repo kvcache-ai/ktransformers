@@ -50,10 +50,19 @@ class TP_MOE_Common : public MoE_Interface {
 
     this->config = config;
     tp_count = config.pool->config.subpool_count;
+    if (config.intermediate_size % tp_count != 0) {
+      printf("intermediate_size %d, tp count %d\n", config.intermediate_size, tp_count);
+      throw std::runtime_error(
+          "For TP, intermediate_size must be a "
+          "multiple of NUMA node count");
+    }
 
     
     // Check if this is Llamafile backend using compile-time type checking
     constexpr bool is_llamafile = std::is_same<T, LLAMA_MOE_TP>::value;
+    #ifndef QK_K
+    #define QK_K 256
+    #endif
 
     if (is_llamafile) {
       // For Llamafile backend: use QK_K-aligned TP splitting
@@ -195,15 +204,9 @@ class TP_MOE_Common : public MoE_Interface {
 
   virtual void load_weights() = 0;
 
-  // virtual void merge_results(int qlen, void* output, bool incremental) {
-  //   // if (incremental == false) {
-  //   //   merge_results(qlen, output);
-  //   // } else {
-  //   //   throw std::runtime_error("Not Implemented");
-  //   // }
-  //   merge_results(qlen, output, incremental);
-  // };
+
   virtual void merge_results(int qlen, void* output) = 0;
+
   virtual void merge_results(int qlen, void* output, bool incremental) {
     if (incremental == false) {
       merge_results(qlen, output);

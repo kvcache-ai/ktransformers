@@ -315,24 +315,35 @@ class LLAMA_MOE_TP {
 
 #endif
 
+    int activated_expert = 0;
+    for (int i = 0; i < k; i++) {
+      if (expert_ids[i] < config_.num_gpu_experts || expert_ids[i] >= config_.expert_num) {
+        continue;
+      }
+      m_expert_id_map_[activated_expert] = expert_ids[i];
+      activated_expert++;
+    }
+
     int nth = config_.intermediate_size / config_.m_block;
 
-    pool->do_work_stealing_job(
-        nth * k, nullptr,
-        [&](int task_id) {
-          int expert_idx = task_id / nth;
-          int64_t expert_id = expert_ids[expert_idx];
-          if (expert_id == -1) {
-            return;
-          }
-          int ith = task_id % nth;
+    // Only process activated (CPU) experts; skip GPU experts entirely to keep buffers aligned.
+    if (activated_expert > 0) {
+      pool->do_work_stealing_job(
+          nth * activated_expert, nullptr,
+          [&](int task_id) {
+            int act_idx = task_id / nth;
+            int64_t expert_id = m_expert_id_map_[act_idx];
+            if (expert_id == -1) {
+              return;
+            }
+            int ith = task_id % nth;
 
           void* gate_proj_ptr =
               (uint8_t*)m_local_gate_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
                                                  config_.hidden_size * ggml_type_size((ggml_type)config_.gate_type) /
                                                  ggml_blck_size((ggml_type)config_.gate_type);
 
-          float* gate_output_ptr = s_gate_output_[expert_idx] + ith * config_.m_block;
+          float* gate_output_ptr = s_gate_output_[act_idx] + ith * config_.m_block;
           auto ok = llamafile_sgemm(config_.m_block, 1,
                                     config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_proj_ptr,
                                     config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_input_ptr,
@@ -343,33 +354,29 @@ class LLAMA_MOE_TP {
           if (ok == false) [[unlikely]] {
             throw std::runtime_error("llamafile not supported");
           }
-          // printf("gate output: ");
-          // debug_f32(gate_output_ptr);
 
           void* up_proj_ptr =
               (uint8_t*)m_local_up_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
                                                config_.hidden_size * ggml_type_size((ggml_type)config_.up_type) /
                                                ggml_blck_size((ggml_type)config_.up_type);
 
-          float* up_output_ptr = s_up_output_[expert_idx] + ith * config_.m_block;
+          float* up_output_ptr = s_up_output_[act_idx] + ith * config_.m_block;
           llamafile_sgemm(config_.m_block, 1, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type),
                           up_proj_ptr, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_input_ptr,
                           config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_output_ptr,
                           config_.m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.up_type,
                           ggml_internal_get_type_traits((ggml_type)config_.up_type).vec_dot_type, GGML_TYPE_F32,
                           GGML_PREC_DEFAULT);
-          // printf("up output: ");
-          // debug_f32(up_output_ptr);
 
           for (int i = ith * config_.m_block; i < (ith + 1) * config_.m_block; i++) {
-            s_intermediate_fp32_[expert_idx][i] = act_fn(s_gate_output_[expert_idx][i]) * s_up_output_[expert_idx][i];
+            s_intermediate_fp32_[act_idx][i] = act_fn(s_gate_output_[act_idx][i]) * s_up_output_[act_idx][i];
           }
           if (config_.m_block %
                   ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) ==
               0) {
-            float* intermediate_fp32_ptr = s_intermediate_fp32_[expert_idx] + ith * config_.m_block;
+            float* intermediate_fp32_ptr = s_intermediate_fp32_[act_idx] + ith * config_.m_block;
             void* down_input_ptr =
-                s_down_input_[expert_idx] +
+                s_down_input_[act_idx] +
                 ith * config_.m_block *
                     ggml_type_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) /
                     ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
@@ -378,10 +385,11 @@ class LLAMA_MOE_TP {
           }
         },
         nullptr);
+    }
 
     if (config_.m_block % ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) !=
         0) {
-      for (int i = 0; i < k; i++) {
+      for (int i = 0; i < activated_expert; i++) {
         from_float(s_intermediate_fp32_[i], s_down_input_[i], config_.intermediate_size,
                    ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
       }
@@ -403,8 +411,8 @@ class LLAMA_MOE_TP {
           for (int i = ith * config_.m_block; i < (ith + 1) * config_.m_block; i++) {
             output[i] = 0;
           }
-          for (int expert_idx = 0; expert_idx < k; expert_idx++) {
-            int64_t expert_id = expert_ids[expert_idx];
+          for (int expert_idx = 0; expert_idx < activated_expert; expert_idx++) {
+            int64_t expert_id = m_expert_id_map_[expert_idx];
             if (expert_id == -1) {
               continue;
             }
@@ -424,8 +432,16 @@ class LLAMA_MOE_TP {
                 ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type, GGML_TYPE_F32,
                 GGML_PREC_DEFAULT);
 
+            float expert_weight = 0.0f;
+            for (int j = 0; j < k; j++) {
+              if (expert_ids[j] == expert_id) {
+                expert_weight = weights[j];
+                break;
+              }
+            }
+
             for (int i = ith * config_.m_block; i < (ith + 1) * config_.m_block; i++) {
-              output[i] += s_down_output_[expert_idx][i] * weights[expert_idx];
+              output[i] += s_down_output_[expert_idx][i] * expert_weight;
             }
           }
         },
@@ -458,6 +474,9 @@ class LLAMA_MOE_TP {
     }
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+          continue;
+        }
         if (expert_ids[i * k + j] == -1) {
           continue;
         }
@@ -548,6 +567,9 @@ class LLAMA_MOE_TP {
             }
           }
           for (int j = 0; j < k; j++) {
+            if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+              continue;
+            }
             if (expert_ids[i * k + j] == -1) {
               continue;
             }
@@ -695,6 +717,9 @@ class LLAMA_MOE_TP {
             m_output_fp32_[i][e] = 0;
           }
           for (int j = 0; j < k; j++) {
+            if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+              continue;
+            }
             if (expert_ids[i * k + j] == -1) {
               continue;
             }
