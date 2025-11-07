@@ -1181,8 +1181,8 @@ struct GemmKernel224Int4 {
 
   static void load_a(dt* a, size_t lda) {
 #ifdef HAVE_AMX
-    _tile_loadd(0, a, lda);
-    _tile_loadd(1, offset_pointer(a, lda * TILE_M), lda);
+    _tile_stream_loadd(0, a, lda);
+    _tile_stream_loadd(1, offset_pointer(a, lda * TILE_M), lda);
 #else
     (void)a;
     (void)lda;
