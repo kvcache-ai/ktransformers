@@ -177,10 +177,10 @@ class MOEBindings {
                                                             const uintptr_t physical_to_logical_map = 0) {
       Args* args = new Args{nullptr, moe.get()};
       if (physical_to_logical_map) {
-        printf("debug physical_to_logical_map in arg:%lu\n", physical_to_logical_map);
+        // printf("debug physical_to_logical_map in arg:%lu\n", physical_to_logical_map);
         moe->config.physical_to_logical_map = reinterpret_cast<void*>(physical_to_logical_map);
-        printf("moe ptr:%p,confirm: moe->config.physical_to_logical_map:%lu\n", reinterpret_cast<void*>(moe.get()),
-               reinterpret_cast<uintptr_t>(moe->config.physical_to_logical_map));
+        // printf("moe ptr:%p,confirm: moe->config.physical_to_logical_map:%lu\n", reinterpret_cast<void*>(moe.get()),
+              //  reinterpret_cast<uintptr_t>(moe->config.physical_to_logical_map));
       }
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }

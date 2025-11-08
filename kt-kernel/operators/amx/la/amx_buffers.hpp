@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <vector>
 
+#include "amx_config.hpp"
 #include "amx_utils.hpp"
 #include "llama.cpp/ggml-impl.h"
 #include "pack.hpp"
@@ -80,7 +82,6 @@ struct BufferAImpl {
         d[m_begin + i] = amax / ((1 << 7) - 1);
       }
     }
-
     int m_block_size = (m + M_STEP - 1) / M_STEP * M_STEP;
     for (int m_begin = 0; m_begin < m; m_begin += M_STEP) {
       for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
