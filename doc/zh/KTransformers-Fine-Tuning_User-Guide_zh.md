@@ -105,7 +105,7 @@
 
 ```shell
 # 1. 安装conda环境
-conda create -n Kllama python=3.10 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda create -n Kllama python=3.12 # choose from : [3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
 
@@ -115,10 +115,10 @@ cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
 # 3. 安装对应torch和python版本的KTransformers（CUDA版本可以跟whl命名的不一致），从https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1
-pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
+pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
 
 # 4. 安装flash-attention，参照python版本和torch版本，从https://github.com/Dao-AILab/flash-attention/releases下载
-pip install flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 # abi=True/False可以用下面代码查看
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
