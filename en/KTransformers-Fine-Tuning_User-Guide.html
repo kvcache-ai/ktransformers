@@ -282,7 +282,7 @@ This time, to simplify the installation process of KTransformers, we have specia
 The detailed installation steps are as follows:
 (Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, <strong>CUDA version</strong>, and the <strong>KTransformers wheel filename</strong> correspond correctly.)</p>
 <pre><code class="language-shell"># 1. Create a conda environment
-conda create -n Kllama python=3.10 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
 
@@ -292,10 +292,10 @@ cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
 # 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
-pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
+pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
 
 # 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 # abi=True/False can find from below
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
