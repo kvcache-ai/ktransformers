@@ -367,7 +367,7 @@ class AMX_MOE_TP {
               down_bb_[logical_expert_id]->from_mat(
                   (ggml_bf16_t*)config_.down_proj + logical_expert_id * config_.hidden_size * config_.intermediate_size,
                   ith, nth);
-              // printf("load down, expert %ld, ith %d, total nth %d\n", expert_idx, ith, nth);
+              // printf("load idown, expert %ld, ith %d, total nth %d\n", expert_idx, ith, nth);
             },
             nullptr);
       }
@@ -836,8 +836,8 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
     if (config.gate_projs.empty() == false) {
       printf("TP Load from loader\n");
-      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
-
+      // pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+      DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else if (config.gate_proj != nullptr) {
       printf("From BF16\n");
@@ -872,7 +872,8 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
         }
       }
 
-      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+      // pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+      DO_TPS_LOAD_WEIGHTS(pool);
 
       for (auto i = 0; i < tp_count; i++) {
         auto& tpc = tps[i]->config_;
@@ -884,7 +885,8 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
       this->weights_loaded = true;
     } else if (config.path != "") {
       printf("TP Load from file\n");
-      pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+      // pool->dispense_backend()->do_numa_job([this, pool](int numa_id) { this->tps[numa_id]->load_weights(); });
+      DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");
