@@ -8,4 +8,4 @@ Version      : 1.0.0
 LastEditors  : chenxl 
 LastEditTime : 2025-02-15 03:53:02
 '''
-__version__ = "0.3.2"
+__version__ = "0.4.1"
