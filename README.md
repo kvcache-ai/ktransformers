@@ -38,7 +38,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 CPU-optimized kernel operations for heterogeneous LLM inference.
 
-![image-20251011010558909](./kt-kernel/assets/heterogeneous_computing.png)
+![image-20251011010558909](./doc/assets/heterogeneous_computing.png)
 
 **Key Features:**
 - **AMX/AVX Acceleration**: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference
@@ -71,7 +71,7 @@ pip install .
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
-![image-20251011010558909](./KT-SFT/assets/image-20251011010558909.png)
+![image-20251011010558909](./doc/assets/image-20251011010558909.png)
 
 **Key Features:**
 
