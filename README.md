@@ -9,7 +9,7 @@
 
 ## 🎯 Overview
 
-KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**:
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [KT-SFT](./KT-SFT/).
 
 ## 🔥 Updates
 
