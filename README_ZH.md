@@ -16,7 +16,7 @@ KTransformers 是一个专注于大语言模型高效推理和微调的研究项
 * **2025年11月6日**：支持 Kimi-K2-Thinking 推理和微调
 * **2025年11月4日**：KTransformers 微调 × LLaMA-Factory 集成
 * **2025年10月27日**：支持 Ascend NPU
-* **2025年10月10日**：集成到 SGLang ([路线图](https://github.com/sgl-project/sglang/issues/11425))
+* **2025年10月10日**：集成到 SGLang ([路线图](https://github.com/sgl-project/sglang/issues/11425), [博客](https://lmsys.org/blog/2025-10-22-KTransformers/))
 * **2025年9月11日**：支持 Qwen3-Next
 * **2025年9月5日**：支持 Kimi-K2-0905
 * **2025年7月26日**：支持 SmallThinker 和 GLM4-MoE
@@ -55,14 +55,12 @@ pip install .
 - 与 SGLang 集成用于生产服务
 - 异构专家放置（热门专家在 GPU，冷门专家在 CPU）
 
-**性能亮点：**
-| 优化项 | 测试场景 | 性能提升 |
-|--------|---------|---------|
-| AMX 内核 | 单路 Xeon | 21.3 TFLOPS（比 PyTorch 快 3.9 倍）|
-| Prefill 阶段 | 多种提示词长度 | 比基线快最高 20 倍 |
-| Decode 阶段 | 协调开销优化 | 最高 4 倍加速 |
-| NUMA 优化 | 双路服务器 | 吞吐量提升最高 63% |
-| 多卡 (8×L20) | DeepSeek-R1 FP8 | 总吞吐量 227.85 tokens/s |
+**性能示例：**
+| 模型 | 硬件配置 | 总吞吐量 | 输出吞吐量 |
+|------|---------|---------|-----------|
+| DeepSeek-R1-0528 (FP8) | 8×L20 GPU + Xeon Gold 6454S | 227.85 tokens/s | 87.58 tokens/s（8路并发）|
+| DeepSeek-V3 (671B) | 单路 Xeon + AMX | 21.3 TFLOPS | 比 PyTorch 快 3.9 倍 |
+| DeepSeek-V3 (671B) | 双路 Xeon + NUMA | 解码吞吐量 +63% | 相比单路基线 |
 
 👉 **[完整文档 →](./kt-kernel/README.md)**
 

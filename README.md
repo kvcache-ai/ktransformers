@@ -16,7 +16,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Nov 6, 2025**: Support Kimi-K2-Thinking inference and fine-tune
 * **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration
 * **Oct 27, 2025**: Support Ascend NPU
-* **Oct 10, 2025**: Integrating into SGLang ([Roadmap](https://github.com/sgl-project/sglang/issues/11425))
+* **Oct 10, 2025**: Integrating into SGLang ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
 * **Sept 11, 2025**: Support Qwen3-Next
 * **Sept 05, 2025**: Support Kimi-K2-0905
 * **July 26, 2025**: Support SmallThinker and GLM4-MoE
@@ -55,14 +55,12 @@ pip install .
 - Integration with SGLang for production serving
 - Heterogeneous expert placement (hot experts on GPU, cold experts on CPU)
 
-**Performance Highlights:**
-| Optimization | Benchmark | Speedup |
-|--------------|-----------|---------|
-| AMX Kernels | Single Xeon socket | 21.3 TFLOPS (3.9× vs PyTorch) |
-| Prefill Phase | Various prompt lengths | Up to 20× vs baseline |
-| Decode Phase | Coordination overhead | Up to 4× speedup |
-| NUMA Optimization | Dual-socket servers | Up to 63% throughput gain |
-| Multi-GPU (8×L20) | DeepSeek-R1 FP8 | 227.85 tokens/s total throughput |
+**Performance Examples:**
+| Model | Hardware Configuration | Total Throughput | Output Throughput |
+|-------|------------------------|------------------|-------------------|
+| DeepSeek-R1-0528 (FP8) | 8×L20 GPU + Xeon Gold 6454S | 227.85 tokens/s | 87.58 tokens/s (8-way concurrency) |
+| DeepSeek-V3 (671B) | Single Xeon + AMX | 21.3 TFLOPS | 3.9× faster than PyTorch |
+| DeepSeek-V3 (671B) | Dual-socket Xeon + NUMA | +63% decode throughput | vs single-socket baseline |
 
 👉 **[Full Documentation →](./kt-kernel/README.md)**
 
