@@ -76,6 +76,7 @@ debug/*
 
 test_adapter/ESC_inst_all.json
 
+!CMakeLists.txt
 !requirements-sft.txt
 
 *-test*.yaml
