@@ -30,6 +30,7 @@ KTransformers 是一个专注于大语言模型高效推理和微调的研究项
 * **2025年2月25日**：支持 DeepSeek-V3 和 R1 的 FP8 GPU 内核
 * **2025年2月10日**：支持 Deepseek-R1 和 V3，速度提升最高达 3~28 倍
 
+---
 
 ## 📦 核心模块
 
@@ -84,12 +85,6 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 👉 **[完整文档 →](./KT-SFT/README.md)**
 
 ---
-
-## 📚 文档
-
-- **模块文档**：查看各模块的 README（[kt-kernel](./kt-kernel/README.md) | [KT-SFT](./KT-SFT/README.md)）
-- **API 参考**：[在线文档](https://kvcache-ai.github.io/ktransformers/)
-- **历史教程**：[archive/doc/](./archive/doc/) 目录
 
 ## 🔥 引用
 

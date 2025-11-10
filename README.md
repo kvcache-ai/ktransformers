@@ -29,7 +29,8 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Mar 5, 2025**: Support unsloth 1.58/2.51 bits weights and IQ1_S/FP8 hybrid weights; 139K longer context for DeepSeek-V3/R1
 * **Feb 25, 2025**: Support FP8 GPU kernel for DeepSeek-V3 and R1
 * **Feb 10, 2025**: Support Deepseek-R1 and V3, up to 3~28x speedup
-
+* 
+---
 
 ## 📦 Core Modules
 
@@ -84,11 +85,6 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 👉 **[Full Documentation →](./KT-SFT/README.md)**
 
 ---
-
-## 📚 Documentation
-
-- **Module Documentation**: See each module's README ([kt-kernel](./kt-kernel/README.md) | [KT-SFT](./KT-SFT/README.md))
-- **API Reference**: [Online Documentation](https://kvcache-ai.github.io/ktransformers/)
 
 ## 🔥 Citation
 
