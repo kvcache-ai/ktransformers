@@ -1,103 +1,136 @@
-# Archive - Legacy KTransformers Code
+<div align="center">
+  <p align="center">
+    <picture>
+      <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
+    </picture>
+  </p>
+  <h3>High-Performance CPU-GPU Hybrid Inference for Large Language Models</h3>
+</div>
 
-This directory contains the original integrated KTransformers framework code that has been archived as part of the repository restructuring.
+## 🎯 Overview
 
-## 📋 What's Here
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [KT-SFT](./KT-SFT/).
 
-This archive preserves the complete original KTransformers implementation, including:
+## 🔥 Updates
 
-- **Core Framework** (`ktransformers/`): Original integrated inference framework
-- **C/C++ Extensions** (`csrc/`): Low-level kernel implementations
-- **Third-party Dependencies** (`third_party/`): Vendored external libraries
-- **Git Submodules** (`.gitmodules`): Complete submodule configuration for legacy dependencies
-- **Build System**: Installation scripts, Dockerfiles, and configuration files
-- **Legacy Documentation**: Original README files with full quick-start guides
-
-## 📚 Documentation
-
-### Original README Files
-
-- **[English README (Legacy)](./README_LEGACY.md)**: Complete original English documentation with:
-  - Quick Start guides
-  - Show cases and benchmarks
-  - Injection tutorial
-  - Full installation instructions
-
-- **[中文 README (Legacy)](./README_ZH_LEGACY.md)**: 完整的原始中文文档，包含：
-  - 快速入门指南
-  - 案例展示和基准测试
-  - 注入教程
-  - 完整安装说明
-
-## 🔄 Migration to New Structure
-
-The KTransformers project has evolved into two focused modules:
-
-### For Inference (CPU-optimized kernels):
-→ Use **[kt-kernel](../kt-kernel/)** instead
-
-### For Fine-tuning (LLaMA-Factory integration):
-→ Use **[KT-SFT](../KT-SFT/)** instead
-
-## ⚠️ Status
-
-This code is **archived for reference only**. For active development and support:
-
-- **Inference**: See [kt-kernel](../kt-kernel/)
-- **Fine-tuning**: See [KT-SFT](../KT-SFT/)
-- **Documentation**: See [doc](../doc/) directory
-- **Issues**: Visit [GitHub Issues](https://github.com/kvcache-ai/ktransformers/issues)
-
-## 🔧 Git Submodules (For Researchers)
-
-The root `.gitmodules` only contains kt-kernel's dependencies to keep the repository lightweight. If you need to build the legacy code, you can use the archived submodule configuration:
-
-```bash
-# Copy the complete submodule configuration
-cp archive/.gitmodules .gitmodules
-
-# Initialize legacy submodules
-git submodule update --init --recursive archive/third_party/
-```
-
-**Note**: This will download ~500MB of additional dependencies.
-
-## 📦 Contents Overview
-
-```
-archive/
-├── README.md              # This file
-├── README_LEGACY.md       # Original English documentation
-├── README_ZH_LEGACY.md    # Original Chinese documentation
-├── .gitmodules            # Complete git submodule configuration (7 legacy submodules)
-├── ktransformers/         # Original framework code
-├── csrc/                  # C/C++ extensions
-├── third_party/           # External dependencies (submodules not initialized by default)
-├── setup.py               # Original installation script
-├── pyproject.toml         # Python project configuration
-├── Dockerfile*            # Container configurations
-├── install*.sh            # Installation scripts
-└── ...                    # Other legacy files
-```
-
-## 💡 Why Archived?
-
-The original monolithic framework has been refactored into modular components for:
-
-1. **Better Maintainability**: Separated concerns between inference and fine-tuning
-2. **Easier Integration**: Cleaner APIs for external frameworks (SGLang, LLaMA-Factory)
-3. **Focused Development**: Dedicated modules with specific optimization goals
-4. **Reduced Complexity**: Smaller, more manageable codebases
-
-## 🔗 Related Resources
-
-- **Main Repository**: [../README.md](../README.md)
-- **kt-kernel Documentation**: [../kt-kernel/README.md](../kt-kernel/README.md)
-- **KT-SFT Documentation**: [../KT-SFT/README.md](../KT-SFT/README.md)
-- **Project Website**: https://kvcache-ai.github.io/ktransformers/
+* **Nov 6, 2025**: Support Kimi-K2-Thinking inference and fine-tune
+* **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration
+* **Oct 27, 2025**: Support Ascend NPU
+* **Oct 10, 2025**: Integrating into SGLang ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
+* **Sept 11, 2025**: Support Qwen3-Next
+* **Sept 05, 2025**: Support Kimi-K2-0905
+* **July 26, 2025**: Support SmallThinker and GLM4-MoE
+* **June 30, 2025**: Support 3-layer (GPU-CPU-Disk) prefix cache reuse
+* **May 14, 2025**: Support Intel Arc GPU
+* **Apr 29, 2025**: Support AMX-Int8、AMX-BF16 and Qwen3MoE
+* **Apr 9, 2025**: Experimental support for LLaMA 4 models
+* **Apr 2, 2025**: Support Multi-concurrency
+* **Mar 15, 2025**: Support ROCm on AMD GPU
+* **Mar 5, 2025**: Support unsloth 1.58/2.51 bits weights and IQ1_S/FP8 hybrid weights; 139K longer context for DeepSeek-V3/R1
+* **Feb 25, 2025**: Support FP8 GPU kernel for DeepSeek-V3 and R1
+* **Feb 10, 2025**: Support Deepseek-R1 and V3, up to 3~28x speedup
 
 ---
 
-<div align="center">
-  <sub>Archived on 2025-11 as part of repository restructuring</sub>
-</div>
+## 📦 Core Modules
+
+### 🚀 [kt-kernel](./kt-kernel/) - High-Performance Inference Kernels
+
+CPU-optimized kernel operations for heterogeneous LLM inference.
+
+![image-20251011010558909](./doc/assets/heterogeneous_computing.png)
+
+**Key Features:**
+- **AMX/AVX Acceleration**: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference
+- **MoE Optimization**: Efficient Mixture-of-Experts inference with NUMA-aware memory management
+- **Quantization Support**: CPU-side INT4/INT8 quantized weights, GPU-side GPTQ support
+- **Easy Integration**: Clean Python API for SGLang and other frameworks
+
+**Quick Start:**
+```bash
+cd kt-kernel
+pip install .
+```
+
+**Use Cases:**
+
+- CPU-GPU hybrid inference for large MoE models
+- Integration with SGLang for production serving
+- Heterogeneous expert placement (hot experts on GPU, cold experts on CPU)
+
+**Performance Examples:**
+| Model | Hardware Configuration | Total Throughput | Output Throughput |
+|-------|------------------------|------------------|-------------------|
+| DeepSeek-R1-0528 (FP8) | 8×L20 GPU + Xeon Gold 6454S | 227.85 tokens/s | 87.58 tokens/s (8-way concurrency) |
+
+👉 **[Full Documentation →](./kt-kernel/README.md)**
+
+---
+
+### 🎓 [KT-SFT](./KT-SFT/) - Fine-Tuning Framework
+
+KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
+
+![image-20251011010558909](./doc/assets/image-20251011010558909.png)
+
+**Key Features:**
+
+- **Resource Efficient**: Fine-tune 671B DeepSeek-V3 with just **70GB GPU memory** + 1.3TB RAM
+- **LoRA Support**: Full LoRA fine-tuning with heterogeneous acceleration
+- **LLaMA-Factory Integration**: Seamless integration with popular fine-tuning framework
+- **Production Ready**: Chat, batch inference, and metrics evaluation
+
+**Performance Examples:**
+
+| Model | Configuration | Throughput | GPU Memory |
+|-------|--------------|------------|------------|
+| DeepSeek-V3 (671B) | LoRA + AMX | ~40 tokens/s | 70GB (multi-GPU) |
+| DeepSeek-V2-Lite (14B) | LoRA + AMX | ~530 tokens/s | 6GB |
+
+**Quick Start:**
+```bash
+cd KT-SFT
+# Install environment following KT-SFT/README.md
+USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+```
+
+👉 **[Full Documentation →](./KT-SFT/README.md)**
+
+---
+
+## 🔥 Citation
+
+If you use KTransformers in your research, please cite our paper:
+
+```bibtex
+@inproceedings{10.1145/3731569.3764843,
+  title = {KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models},
+  author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+  booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
+  year = {2025}
+}
+```
+
+## 👥 Contributors & Team
+
+Developed and maintained by:
+- [MADSys Lab](https://madsys.cs.tsinghua.edu.cn/) @ Tsinghua University
+- [Approaching.AI](http://approaching.ai/)
+- Community contributors
+
+We welcome contributions! Please feel free to submit issues and pull requests.
+
+## 💬 Community & Support
+
+- **GitHub Issues**: [Report bugs or request features](https://github.com/kvcache-ai/ktransformers/issues)
+- **GitHub Discussions**: [Ask questions and share ideas](https://github.com/kvcache-ai/ktransformers/discussions)
+- **WeChat Group**: See [archive/WeChatGroup.png](./archive/WeChatGroup.png)
+
+## 📦 Legacy Code
+
+The original integrated KTransformers framework has been archived to the [`archive/`](./archive/) directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.
+
+For the original documentation with full quick-start guides and examples, see:
+- [archive/README_LEGACY.md](./archive/README_LEGACY.md) (English)
+- [archive/README_ZH_LEGACY.md](./archive/README_ZH_LEGACY.md) (中文)
+
