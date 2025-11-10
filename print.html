@@ -768,7 +768,7 @@ is speed up which is inspiring. So our showcase makes use of this finding</em></
 <code>&lt;your gguf path&gt;</code> can also be online, but as its large we recommend you download it and quantize the model to what you want (notice it's the dir path) <br>
 <code>--max_new_tokens 1000</code> is the max output token length. If you find the answer is truncated, you
 can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).</p>
-<p>The command <code>numactl -N 1 -m 1</code> aims to advoid data transfer between numa nodes<br>
+<p>The command <code>numactl -N 1 -m 1</code> aims to avoid data transfer between numa nodes<br>
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: <code>--force_think true</code>. This is explained in <a href="en/DeepseekR1_V3_tutorial.html#faq">FAQ</a> part</p>
 <h4 id="dual-socket-version-64-cores"><a class="header" href="#dual-socket-version-64-cores">Dual socket version (64 cores)</a></h4>
 <p>Make sure before you install (use install.sh or <code>make dev_install</code>), setting the env var <code>USE_NUMA=1</code> by <code>export USE_NUMA=1</code> (if already installed, reinstall it with this env var set). You may check the doc <a href="en/./install.html">here</a> for install details. <br></p>
