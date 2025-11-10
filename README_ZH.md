@@ -138,10 +138,10 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 - **GitHub Discussions**：[提问和分享想法](https://github.com/kvcache-ai/ktransformers/discussions)
 - **微信群**：请参见 [archive/WeChatGroup.png](./archive/WeChatGroup.png)
 
-## 📦 遗留代码
+## 📦 KT原仓库
 
 原始的集成 KTransformers 框架已归档到 [`archive/`](./archive/) 目录以供参考。该项目现在专注于上述两个核心模块，以获得更好的模块化和可维护性。
 
 有关原始文档以及完整的快速入门指南和示例，请参见：
-- [archive/README_LEGACY.md](./archive/README_LEGACY.md)（英文）
-- [archive/README_ZH_LEGACY.md](./archive/README_ZH_LEGACY.md)（中文）
+- [archive/README.md](./archive/README.md)（英文）
+- [archive/README_ZH.md](./archive/README_ZH.md)（中文）
