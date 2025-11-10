@@ -6,15 +6,17 @@ import ctypes
 from ..experts_base import BaseMoEWrapper
 from .loader import SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
+
 try:
     from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE
+
     _HAS_AMX_SUPPORT = True
 except (ImportError, AttributeError):
     _HAS_AMX_SUPPORT = False
     AMXInt4_MOE, AMXInt8_MOE = None, None
 
 from typing import Optional
-    
+
 
 class AMXMoEWrapper(BaseMoEWrapper):
     """

@@ -5,9 +5,13 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 ## Features
 
 - **AMX Optimization**: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference
-- **Multi-Backend**: AVX512, AVX2, and ARM KML support
+- **Multi-Backend**: Unified `KTMoEWrapper` API supporting multiple backends (AMXINT4, AMXINT8, LLAMAFILE*)
+- **Flexible Backends**: AVX512, AVX2 via pluggable backend architecture
 - **Efficient MoE**: Optimized Mixture-of-Experts operations with NUMA-aware memory management
-- **Easy Integration**: Clean Python API with `AMXMoEWrapper` and future wrapper support
+- **Async Execution**: Non-blocking `submit_forward` / `sync_forward` API for improved pipelining
+- **Easy Integration**: Clean Python API with automatic backend selection
+
+**Note**: *LLAMAFILE backend support is currently in preview and not yet fully complete.
 
 ## Installation
 
@@ -42,10 +46,10 @@ pip install -r requirements.txt
 ## Usage
 
 ```python
-from kt_kernel import AMXMoEWrapper
+from kt_kernel import KTMoEWrapper
 
 # Initialize the MoE wrapper
-wrapper = AMXMoEWrapper(
+wrapper = KTMoEWrapper(
     layer_idx=0,
     num_experts=8,
     num_experts_per_tok=2,
@@ -53,16 +57,55 @@ wrapper = AMXMoEWrapper(
     moe_intermediate_size=14336,
     num_gpu_experts=2,
     cpuinfer_threads=32,
-    subpool_count=2,
-    amx_weight_path="/path/to/weights",
-    chunked_prefill_size=512
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE" (preview)
 )
 
-# Load weights
+# Load weights (from disk - pre-quantized)
 wrapper.load_weights(physical_to_logical_map)
+
+# Or load weights from tensors (online quantization)
+wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
 
 # Run inference
 output = wrapper.forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+
+# Or use async API for better performance
+wrapper.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+# ... do other work ...
+output = wrapper.sync_forward(hidden_states, cuda_stream)
+```
+
+### Advanced Options
+
+```python
+# Initialize with additional options
+wrapper = KTMoEWrapper(
+    layer_idx=0,
+    num_experts=8,
+    num_experts_per_tok=2,
+    hidden_size=4096,
+    moe_intermediate_size=14336,
+    num_gpu_experts=2,
+    cpuinfer_threads=32,
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4",
+    cpu_save=False,  # Keep weights in CPU memory after loading
+    max_deferred_experts_per_token=0  # Number of experts to defer (for pipelined execution)
+)
+
+# Pre-allocate buffers for specific batch sizes (improves performance)
+KTMoEWrapper.set_capture_batch_sizes([1, 2, 4, 8, 16])
+
+# Query captured batch sizes
+batch_sizes = KTMoEWrapper.get_capture_batch_sizes()
+
+# Clear buffer cache to free memory
+KTMoEWrapper.clear_buffer_cache()
 ```
 
 ## Build Configuration
@@ -100,7 +143,7 @@ pip install .
 ## Verification
 
 ```bash
-python -c "from kt_kernel import AMXMoEWrapper; print('✓ kt-kernel installed successfully')"
+python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
 
 ## Weight Quantization

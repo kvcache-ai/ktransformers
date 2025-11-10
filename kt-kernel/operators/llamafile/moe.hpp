@@ -338,53 +338,53 @@ class LLAMA_MOE_TP {
             }
             int ith = task_id % nth;
 
-          void* gate_proj_ptr =
-              (uint8_t*)m_local_gate_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
-                                                 config_.hidden_size * ggml_type_size((ggml_type)config_.gate_type) /
-                                                 ggml_blck_size((ggml_type)config_.gate_type);
+            void* gate_proj_ptr =
+                (uint8_t*)m_local_gate_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
+                                                   config_.hidden_size * ggml_type_size((ggml_type)config_.gate_type) /
+                                                   ggml_blck_size((ggml_type)config_.gate_type);
 
-          float* gate_output_ptr = s_gate_output_[act_idx] + ith * config_.m_block;
-          auto ok = llamafile_sgemm(config_.m_block, 1,
-                                    config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_proj_ptr,
-                                    config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_input_ptr,
-                                    config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_output_ptr,
-                                    config_.m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.gate_type,
-                                    ggml_internal_get_type_traits((ggml_type)config_.gate_type).vec_dot_type,
-                                    GGML_TYPE_F32, GGML_PREC_DEFAULT);
-          if (ok == false) [[unlikely]] {
-            throw std::runtime_error("llamafile not supported");
-          }
+            float* gate_output_ptr = s_gate_output_[act_idx] + ith * config_.m_block;
+            auto ok = llamafile_sgemm(
+                config_.m_block, 1, config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_proj_ptr,
+                config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_input_ptr,
+                config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_output_ptr, config_.m_block, 0,
+                1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.gate_type,
+                ggml_internal_get_type_traits((ggml_type)config_.gate_type).vec_dot_type, GGML_TYPE_F32,
+                GGML_PREC_DEFAULT);
+            if (ok == false) [[unlikely]] {
+              throw std::runtime_error("llamafile not supported");
+            }
 
-          void* up_proj_ptr =
-              (uint8_t*)m_local_up_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
-                                               config_.hidden_size * ggml_type_size((ggml_type)config_.up_type) /
-                                               ggml_blck_size((ggml_type)config_.up_type);
+            void* up_proj_ptr =
+                (uint8_t*)m_local_up_proj_ + (expert_id * config_.intermediate_size + ith * config_.m_block) *
+                                                 config_.hidden_size * ggml_type_size((ggml_type)config_.up_type) /
+                                                 ggml_blck_size((ggml_type)config_.up_type);
 
-          float* up_output_ptr = s_up_output_[act_idx] + ith * config_.m_block;
-          llamafile_sgemm(config_.m_block, 1, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type),
-                          up_proj_ptr, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_input_ptr,
-                          config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_output_ptr,
-                          config_.m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.up_type,
-                          ggml_internal_get_type_traits((ggml_type)config_.up_type).vec_dot_type, GGML_TYPE_F32,
-                          GGML_PREC_DEFAULT);
+            float* up_output_ptr = s_up_output_[act_idx] + ith * config_.m_block;
+            llamafile_sgemm(config_.m_block, 1, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type),
+                            up_proj_ptr, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_input_ptr,
+                            config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_output_ptr,
+                            config_.m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.up_type,
+                            ggml_internal_get_type_traits((ggml_type)config_.up_type).vec_dot_type, GGML_TYPE_F32,
+                            GGML_PREC_DEFAULT);
 
-          for (int i = ith * config_.m_block; i < (ith + 1) * config_.m_block; i++) {
-            s_intermediate_fp32_[act_idx][i] = act_fn(s_gate_output_[act_idx][i]) * s_up_output_[act_idx][i];
-          }
-          if (config_.m_block %
-                  ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) ==
-              0) {
-            float* intermediate_fp32_ptr = s_intermediate_fp32_[act_idx] + ith * config_.m_block;
-            void* down_input_ptr =
-                s_down_input_[act_idx] +
-                ith * config_.m_block *
-                    ggml_type_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) /
-                    ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
-            from_float(intermediate_fp32_ptr, down_input_ptr, config_.m_block,
-                       ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
-          }
-        },
-        nullptr);
+            for (int i = ith * config_.m_block; i < (ith + 1) * config_.m_block; i++) {
+              s_intermediate_fp32_[act_idx][i] = act_fn(s_gate_output_[act_idx][i]) * s_up_output_[act_idx][i];
+            }
+            if (config_.m_block %
+                    ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) ==
+                0) {
+              float* intermediate_fp32_ptr = s_intermediate_fp32_[act_idx] + ith * config_.m_block;
+              void* down_input_ptr =
+                  s_down_input_[act_idx] +
+                  ith * config_.m_block *
+                      ggml_type_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) /
+                      ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
+              from_float(intermediate_fp32_ptr, down_input_ptr, config_.m_block,
+                         ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type);
+            }
+          },
+          nullptr);
     }
 
     if (config_.m_block % ggml_blck_size(ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type) !=
@@ -795,22 +795,21 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
 
   void merge_results(int qlen, void* output) { merge_results(qlen, output, false); }
 
-  void merge_results(int qlen, void *output, bool incremental) {
+  void merge_results(int qlen, void* output, bool incremental) {
     auto pool = this->config.pool;
     pool->do_work_stealing_job(
         qlen, nullptr,
         [this, output, incremental](int token_nth) {
           if (incremental) {
-            to_float((uint8_t *)output + token_nth * config.hidden_size *
-                                             ggml_type_size((ggml_type)config.hidden_type) /
-                                             ggml_blck_size((ggml_type)config.hidden_type),
+            to_float((uint8_t*)output + token_nth * config.hidden_size * ggml_type_size((ggml_type)config.hidden_type) /
+                                            ggml_blck_size((ggml_type)config.hidden_type),
                      local_output + token_nth * config.hidden_size, config.hidden_size, (ggml_type)config.hidden_type);
             for (int e = 0; e < config.hidden_size; e++) {
               local_output_numa[0][token_nth * config.hidden_size + e] +=
                   local_output[token_nth * config.hidden_size + e];
             }
           }
-          auto &tp_count = this->tp_count;
+          auto& tp_count = this->tp_count;
           for (int i = 1; i < tp_count; i++) {
             for (int e = 0; e < config.hidden_size; e++) {
               local_output_numa[0][token_nth * config.hidden_size + e] +=
@@ -818,9 +817,8 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
             }
           }
           from_float(local_output_numa[0] + token_nth * config.hidden_size,
-                     (uint8_t *)output + token_nth * config.hidden_size *
-                                             ggml_type_size((ggml_type)config.hidden_type) /
-                                             ggml_blck_size((ggml_type)config.hidden_type),
+                     (uint8_t*)output + token_nth * config.hidden_size * ggml_type_size((ggml_type)config.hidden_type) /
+                                            ggml_blck_size((ggml_type)config.hidden_type),
                      config.hidden_size, (ggml_type)config.hidden_type);
         },
         nullptr);

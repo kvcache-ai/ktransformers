@@ -1,18 +1,22 @@
 import torch
 from typing import Optional
 import os
+
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
 from .loader import GGUFLoader
 from kt_kernel_ext.moe import MOEConfig
+
 try:
     from kt_kernel_ext.moe import MOE
+
     _HAS_LLAMAFILE_SUPPORT = True
 except (ImportError, AttributeError):
     _HAS_LLAMAFILE_SUPPORT = False
     MOE = None
 
 from kt_kernel_ext.kvcache import ggml_type
+
 
 class LlamafileMoEWrapper(BaseMoEWrapper):
     """
@@ -162,27 +166,17 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             )
 
         if physical_to_logical_map_cpu is None:
-            physical_to_logical_map_cpu = torch.arange(
-                self.num_experts,
-                dtype=torch.int32,
-                device="cpu"
-            )
+            physical_to_logical_map_cpu = torch.arange(self.num_experts, dtype=torch.int32, device="cpu")
             print(f"  Using default identity mapping for {self.num_experts} experts")
 
         base_key = f"blk.{self.layer_idx}"
 
         # Load quantized tensors from GGUF
-        gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-            f"{base_key}.ffn_gate_exps.weight"
-        )
+        gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_gate_exps.weight")
 
-        up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-            f"{base_key}.ffn_up_exps.weight"
-        )
+        up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
 
-        down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-            f"{base_key}.ffn_down_exps.weight"
-        )
+        down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_down_exps.weight")
 
         # Keep tensors alive
         self.weights_to_keep = (gate_data, up_data, down_data)
