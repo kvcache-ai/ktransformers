@@ -18,13 +18,13 @@ import ctypes
 import kt_kernel_ext
 
 
-
 class KExpertsCPUBuffer:
     """
     CPU buffer management for expert computation.
 
     Manages pinned memory buffers for efficient GPU-CPU data transfer.
     """
+
     capture_bs: List = list()
     capture_buffers: Dict = dict()
     temp_bs: int = 0
@@ -62,8 +62,7 @@ class KExpertsCPUBuffer:
             for _ in range(cls.buffer_depth)
         ]
         bsz_tensor_cpu = [
-            torch.zeros((1,), device="cpu", dtype=torch.int32, pin_memory=True)
-            for _ in range(cls.buffer_depth)
+            torch.zeros((1,), device="cpu", dtype=torch.int32, pin_memory=True) for _ in range(cls.buffer_depth)
         ]
         output_gpu = [
             torch.zeros((batch_size, hidden_size), device=hidden_states.device, dtype=hidden_states.dtype)
@@ -129,7 +128,6 @@ class BaseMoEWrapper(ABC):
             max_deferred_experts_per_token: Number of experts per token to defer on this layer. Defaults to 0 (no defer).
             method: Backend method string
         """
-        print(f"Init {self.__class__.__name__}")
         self.layer_idx = layer_idx
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -139,7 +137,9 @@ class BaseMoEWrapper(ABC):
         self.weight_path = weight_path
         self.chunked_prefill_size = chunked_prefill_size
         self.cpu_save = cpu_save
-        self.max_deferred_experts_per_token = int(max_deferred_experts_per_token) if max_deferred_experts_per_token is not None else 0
+        self.max_deferred_experts_per_token = (
+            int(max_deferred_experts_per_token) if max_deferred_experts_per_token is not None else 0
+        )
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
