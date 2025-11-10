@@ -59,8 +59,8 @@ pip install .
 | 模型 | 硬件配置 | 总吞吐量 | 输出吞吐量 |
 |------|---------|---------|-----------|
 | DeepSeek-R1-0528 (FP8) | 8×L20 GPU + Xeon Gold 6454S | 227.85 tokens/s | 87.58 tokens/s（8路并发）|
-| DeepSeek-V3 (671B) | 单路 Xeon + AMX | 21.3 TFLOPS | 比 PyTorch 快 3.9 倍 |
-| DeepSeek-V3 (671B) | 双路 Xeon + NUMA | 解码吞吐量 +63% | 相比单路基线 |
+| DeepSeek-V3 (671B) | 单路 Xeon + AMX | 21.3 TFLOPS |  |
+| DeepSeek-V3 (671B) | 双路 Xeon + NUMA | 解码吞吐量 +63% |  |
 
 👉 **[完整文档 →](./kt-kernel/README.md)**
 

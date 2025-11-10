@@ -59,8 +59,8 @@ pip install .
 | Model | Hardware Configuration | Total Throughput | Output Throughput |
 |-------|------------------------|------------------|-------------------|
 | DeepSeek-R1-0528 (FP8) | 8×L20 GPU + Xeon Gold 6454S | 227.85 tokens/s | 87.58 tokens/s (8-way concurrency) |
-| DeepSeek-V3 (671B) | Single Xeon + AMX | 21.3 TFLOPS | 3.9× faster than PyTorch |
-| DeepSeek-V3 (671B) | Dual-socket Xeon + NUMA | +63% decode throughput | vs single-socket baseline |
+| DeepSeek-V3 (671B) | Single Xeon + AMX | 21.3 TFLOPS |  |
+| DeepSeek-V3 (671B) | Dual-socket Xeon + NUMA | +63% decode throughput |  |
 
 👉 **[Full Documentation →](./kt-kernel/README.md)**
 
