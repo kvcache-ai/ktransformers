@@ -241,7 +241,7 @@ numactl -N 1 -m 1 python ./ktransformers/local_chat.py --model_path <your model 
 `--max_new_tokens 1000` is the max output token length. If you find the answer is truncated, you
 can increase the number for longer answer (But be aware of OOM, and increase it will slow down the generation rate.).
 
-The command `numactl -N 1 -m 1` aims to advoid data transfer between numa nodes<br>
+The command `numactl -N 1 -m 1` aims to avoid data transfer between numa nodes<br>
 Attention! If you are testing R1 and it may skip thinking. So you can add arg: `--force_think true`. This is explained in [FAQ](#faq) part
 
 #### Dual socket version (64 cores)
