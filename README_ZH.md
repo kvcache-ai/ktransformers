@@ -30,9 +30,10 @@ KTransformers 是一个专注于大语言模型高效推理和微调的研究项
 * **2025年2月25日**：支持 DeepSeek-V3 和 R1 的 FP8 GPU 内核
 * **2025年2月10日**：支持 Deepseek-R1 和 V3，速度提升最高达 3~28 倍
 
-### 📦 核心模块
 
-#### 🚀 [kt-kernel](./kt-kernel/) - 高性能推理内核
+## 📦 核心模块
+
+### 🚀 [kt-kernel](./kt-kernel/) - 高性能推理内核
 
 面向异构 LLM 推理的 CPU 优化内核操作库。
 
@@ -57,7 +58,7 @@ pip install .
 
 ---
 
-#### 🎓 [KT-SFT](./KT-SFT/) - 微调框架
+### 🎓 [KT-SFT](./KT-SFT/) - 微调框架
 
 KTransformers × LLaMA-Factory 集成，支持超大 MoE 模型微调。
 

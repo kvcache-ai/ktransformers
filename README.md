@@ -30,9 +30,10 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Feb 25, 2025**: Support FP8 GPU kernel for DeepSeek-V3 and R1
 * **Feb 10, 2025**: Support Deepseek-R1 and V3, up to 3~28x speedup
 
-### 📦 Core Modules
 
-#### 🚀 [kt-kernel](./kt-kernel/) - High-Performance Inference Kernels
+## 📦 Core Modules
+
+### 🚀 [kt-kernel](./kt-kernel/) - High-Performance Inference Kernels
 
 CPU-optimized kernel operations for heterogeneous LLM inference.
 
@@ -57,7 +58,7 @@ pip install .
 
 ---
 
-#### 🎓 [KT-SFT](./KT-SFT/) - Fine-Tuning Framework
+### 🎓 [KT-SFT](./KT-SFT/) - Fine-Tuning Framework
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
