@@ -1,5 +1,4 @@
 <div align="center">
-  <!-- <h1>KTransformers</h1> -->
   <p align="center">
 
 <picture>
@@ -112,7 +111,7 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 
 ## 🔥 引用
 
-如果您在研究中使用 KTransformers，请引用我们的论文：
+如果您在研究中使用了 KTransformers，请引用我们的论文：
 
 ```bibtex
 @inproceedings{10.1145/3731569.3764843,
@@ -125,7 +124,7 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 
 ## 👥 贡献者与团队
 
-开发和维护单位：
+由以下团队开发和维护：
 - 清华大学 [MADSys 实验室](https://madsys.cs.tsinghua.edu.cn/)
 - [Approaching.AI](http://approaching.ai/)
 - 社区贡献者

@@ -1,5 +1,4 @@
 <div align="center">
-  <!-- <h1>KTransformers</h1> -->
   <p align="center">
 
 <picture>
