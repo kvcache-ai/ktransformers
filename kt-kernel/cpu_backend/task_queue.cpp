@@ -44,8 +44,7 @@ void TaskQueue::enqueue(std::function<void()> task) {
 
 void TaskQueue::sync(size_t allow_n_pending) {
   // Spin until the pending task count drops to the allowed threshold.
-  while (pending.load(std::memory_order_acquire) > allow_n_pending)
-    ;
+  while (pending.load(std::memory_order_acquire) > allow_n_pending);
 }
 
 void TaskQueue::worker() {
