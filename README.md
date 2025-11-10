@@ -38,6 +38,8 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 CPU-optimized kernel operations for heterogeneous LLM inference.
 
+![image-20251011010558909](./kt-kernel/assets/heterogeneous_computing.png)
+
 **Key Features:**
 - **AMX/AVX Acceleration**: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference
 - **MoE Optimization**: Efficient Mixture-of-Experts inference with NUMA-aware memory management
@@ -69,13 +71,17 @@ pip install .
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
+![image-20251011010558909](./KT-SFT/assets/image-20251011010558909.png)
+
 **Key Features:**
+
 - **Resource Efficient**: Fine-tune 671B DeepSeek-V3 with just **70GB GPU memory** + 1.3TB RAM
 - **LoRA Support**: Full LoRA fine-tuning with heterogeneous acceleration
 - **LLaMA-Factory Integration**: Seamless integration with popular fine-tuning framework
 - **Production Ready**: Chat, batch inference, and metrics evaluation
 
 **Performance Examples:**
+
 | Model | Configuration | Throughput | GPU Memory |
 |-------|--------------|------------|------------|
 | DeepSeek-V3 (671B) | LoRA + AMX | ~40 tokens/s | 70GB (multi-GPU) |

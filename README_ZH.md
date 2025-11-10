@@ -38,6 +38,8 @@ KTransformers 是一个专注于大语言模型高效推理和微调的研究项
 
 面向异构 LLM 推理的 CPU 优化内核操作库。
 
+![image-20251011010558909](./kt-kernel/assets/heterogeneous_computing.png)
+
 **核心特性：**
 - **AMX/AVX 加速**：Intel AMX 和 AVX512/AVX2 优化内核，支持 INT4/INT8 量化推理
 - **MoE 优化**：高效的专家混合推理，支持 NUMA 感知内存管理
@@ -67,6 +69,8 @@ pip install .
 ### 🎓 [KT-SFT](./KT-SFT/) - 微调框架
 
 KTransformers × LLaMA-Factory 集成，支持超大 MoE 模型微调。
+
+![image-20251011010558909](./KT-SFT/assets/image-20251011010558909.png)
 
 **核心特性：**
 - **资源高效**：仅需 **70GB 显存** + 1.3TB 内存即可微调 671B DeepSeek-V3
