@@ -9,6 +9,7 @@ This archive preserves the complete original KTransformers implementation, inclu
 - **Core Framework** (`ktransformers/`): Original integrated inference framework
 - **C/C++ Extensions** (`csrc/`): Low-level kernel implementations
 - **Third-party Dependencies** (`third_party/`): Vendored external libraries
+- **Git Submodules** (`.gitmodules`): Complete submodule configuration for legacy dependencies
 - **Build System**: Installation scripts, Dockerfiles, and configuration files
 - **Legacy Documentation**: Original README files with full quick-start guides
 
@@ -47,6 +48,20 @@ This code is **archived for reference only**. For active development and support
 - **Documentation**: See [doc](../doc/) directory
 - **Issues**: Visit [GitHub Issues](https://github.com/kvcache-ai/ktransformers/issues)
 
+## 🔧 Git Submodules (For Researchers)
+
+The root `.gitmodules` only contains kt-kernel's dependencies to keep the repository lightweight. If you need to build the legacy code, you can use the archived submodule configuration:
+
+```bash
+# Copy the complete submodule configuration
+cp archive/.gitmodules .gitmodules
+
+# Initialize legacy submodules
+git submodule update --init --recursive archive/third_party/
+```
+
+**Note**: This will download ~500MB of additional dependencies.
+
 ## 📦 Contents Overview
 
 ```
@@ -54,9 +69,10 @@ archive/
 ├── README.md              # This file
 ├── README_LEGACY.md       # Original English documentation
 ├── README_ZH_LEGACY.md    # Original Chinese documentation
+├── .gitmodules            # Complete git submodule configuration (7 legacy submodules)
 ├── ktransformers/         # Original framework code
 ├── csrc/                  # C/C++ extensions
-├── third_party/           # External dependencies
+├── third_party/           # External dependencies (submodules not initialized by default)
 ├── setup.py               # Original installation script
 ├── pyproject.toml         # Python project configuration
 ├── Dockerfile*            # Container configurations
