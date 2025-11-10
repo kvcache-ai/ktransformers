@@ -23,7 +23,7 @@ Example usage:
 
 from __future__ import annotations
 
-from .experts import AMXMoEWrapper
+from .experts import KTMoEWrapper
 
 __version__ = "0.1.0"
-__all__ = ["AMXMoEWrapper"]
+__all__ = ["KTMoEWrapper"]
