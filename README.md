@@ -38,7 +38,8 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 CPU-optimized kernel operations for heterogeneous LLM inference.
 
-![image-20251011010558909](./doc/assets/heterogeneous_computing.png)
+<img width="1049" height="593" alt="image" src="https://github.com/user-attachments/assets/68f423da-3f55-4025-bdc9-9ceaa554f00b" />
+
 
 **Key Features:**
 - **AMX/AVX Acceleration**: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference
