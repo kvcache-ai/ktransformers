@@ -33,7 +33,7 @@ Our goal is to give resource-constrained researchers a **local path to explore f
 
 As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. **KTransformers** acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient **GPU+CPU heterogeneous cooperation**.
 
-![image-20251011010558909](../doc/assets/image-20251011010558909.png)
+![image-20251011010558909](./assets/image-20251011010558909.png)
 
 Within LLaMA-Factory, we compared LoRA fine-tuning with **HuggingFace**, **Unsloth**, and **KTransformers** backends. KTransformers is the **only workable 4090-class solution** for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).
 
@@ -46,7 +46,7 @@ Within LLaMA-Factory, we compared LoRA fine-tuning with **HuggingFace**, **Unslo
 
 † **1400 GB** is a **theoretical** FP16 full-parameter resident footprint (not runnable). **70 GB** is the **measured peak** with KT strategy (Attention on GPU + layered MoE offload).
 
-![按照模型划分的对比图_02](../doc/assets/image-compare_model.png)
+![按照模型划分的对比图_02](./assets/image-compare_model.png)
 
 ### Fine-Tuning Results (Examples)
 
@@ -56,7 +56,7 @@ Dataset: [NekoQA-10K](https://zhuanlan.zhihu.com/p/1934983798233231689). Goal: i
 
 The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of **style-transfer fine-tuning**.
 
-![image-20251016175046882](../doc/assets/image-20251016175046882.png)
+![image-20251016175046882](./assets/image-20251016175046882.png)
 
 #### Benchmarks
 
@@ -219,7 +219,7 @@ We recommend **AMX acceleration** where available (`lscpu | grep amx`). AMX supp
 
 Outputs go to `output_dir` in safetensors format plus adapter metadata for later loading.
 
-![image-20251016171537997](../doc/assets/image-20251016171537997.png)
+![image-20251016171537997](./assets/image-20251016171537997.png)
 
 ### Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)
 
@@ -244,7 +244,7 @@ We also support **GGUF** adapters: for safetensors, set the **directory**; for G
 
 During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like `Loaded adapter weight: XXX -> XXX`:
 
-![image-20251016171526210](../doc/assets/image-20251016171526210.png)
+![image-20251016171526210](./assets/image-20251016171526210.png)
 
 ### Core Feature 3: Batch inference + metrics (base + LoRA adapter)
 
