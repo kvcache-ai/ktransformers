@@ -55,6 +55,15 @@ pip install .
 - Integration with SGLang for production serving
 - Heterogeneous expert placement (hot experts on GPU, cold experts on CPU)
 
+**Performance Highlights:**
+| Optimization | Benchmark | Speedup |
+|--------------|-----------|---------|
+| AMX Kernels | Single Xeon socket | 21.3 TFLOPS (3.9× vs PyTorch) |
+| Prefill Phase | Various prompt lengths | Up to 20× vs baseline |
+| Decode Phase | Coordination overhead | Up to 4× speedup |
+| NUMA Optimization | Dual-socket servers | Up to 63% throughput gain |
+| Multi-GPU (8×L20) | DeepSeek-R1 FP8 | 227.85 tokens/s total throughput |
+
 👉 **[Full Documentation →](./kt-kernel/README.md)**
 
 ---
