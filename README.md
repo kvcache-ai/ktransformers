@@ -1,10 +1,14 @@
 <div align="center">
   <p align="center">
-    <picture>
-      <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
-    </picture>
-  </p>
-  <h3>High-Performance CPU-GPU Hybrid Inference for Large Language Models</h3>
+
+<picture>
+    <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
+
+</picture>
+
+</p>
+  <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬 Discussion</a> </strong>
 </div>
 
 ## 🎯 Overview
@@ -13,22 +17,29 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 ## 🔥 Updates
 
-* **Nov 6, 2025**: Support Kimi-K2-Thinking inference and fine-tune
-* **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration
-* **Oct 27, 2025**: Support Ascend NPU
-* **Oct 10, 2025**: Integrating into SGLang ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
-* **Sept 11, 2025**: Support Qwen3-Next
-* **Sept 05, 2025**: Support Kimi-K2-0905
-* **July 26, 2025**: Support SmallThinker and GLM4-MoE
-* **June 30, 2025**: Support 3-layer (GPU-CPU-Disk) prefix cache reuse
-* **May 14, 2025**: Support Intel Arc GPU
-* **Apr 29, 2025**: Support AMX-Int8、AMX-BF16 and Qwen3MoE
-* **Apr 9, 2025**: Experimental support for LLaMA 4 models
-* **Apr 2, 2025**: Support Multi-concurrency
-* **Mar 15, 2025**: Support ROCm on AMD GPU
-* **Mar 5, 2025**: Support unsloth 1.58/2.51 bits weights and IQ1_S/FP8 hybrid weights; 139K longer context for DeepSeek-V3/R1
-* **Feb 25, 2025**: Support FP8 GPU kernel for DeepSeek-V3 and R1
-* **Feb 10, 2025**: Support Deepseek-R1 and V3, up to 3~28x speedup
+* **Nov 6, 2025**: Support Kimi-K2-Thinking inference ([Tutorial](./doc/en/Kimi-K2-Thinking.md)) and fine-tune ([Tutorial](./doc/en/SFT_Installation_Guide_KimiK2.md))
+* **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration. ([Tutorial](./doc/en/KTransformers-Fine-Tuning_User-Guide.md))
+* **Oct 27, 2025**: Support Ascend NPU. ([Tutorial](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md))
+* **Oct 10, 2025**: Integrating into SGLang. ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
+* **Sept 11, 2025**: Support Qwen3-Next. ([Tutorial](./doc/en/Qwen3-Next.md))
+* **Sept 05, 2025**: Support Kimi-K2-0905. ([Tutorial](./doc/en/Kimi-K2.md))
+* **July 26, 2025**: Support SmallThinker and GLM4-MoE. ([Tutorial](./doc/en/SmallThinker_and_Glm4moe.md))
+* **July 11, 2025**: Support Kimi-K2. ([Tutorial](./doc/en/Kimi-K2.md))
+* **June 30, 2025**: Support 3-layer (GPU-CPU-Disk) [prefix cache](./doc/en/prefix_cache.md) reuse.
+* **May 14, 2025**: Support Intel Arc GPU ([Tutorial](./doc/en/xpu.md)).
+* **Apr 29, 2025**: Support AMX-Int8、 AMX-BF16 and Qwen3MoE ([Tutorial](./doc/en/AMX.md))
+* **Apr 9, 2025**: Experimental support for LLaMA 4 models ([Tutorial](./doc/en/llama4.md)).
+* **Apr 2, 2025**: Support Multi-concurrency. ([Tutorial](./doc/en/balance-serve.md)).
+* **Mar 15, 2025**: Support ROCm on AMD GPU ([Tutorial](./doc/en/ROCm.md)).
+* **Mar 5, 2025**: Support unsloth 1.58/2.51 bits weights and [IQ1_S/FP8 hybrid](./doc/en/fp8_kernel.md) weights. Support 139K [Longer Context](./doc/en/DeepseekR1_V3_tutorial.md#v022--v023-longer-context--fp8-kernel) for DeepSeek-V3 and R1 in 24GB VRAM.
+* **Feb 25, 2025**: Support [FP8 GPU kernel](./doc/en/fp8_kernel.md) for DeepSeek-V3 and R1; [Longer Context](./doc/en/DeepseekR1_V3_tutorial.md#v022-longer-context).
+* **Feb 15, 2025**: Longer Context (from 4K to 8K for 24GB VRAM) & Slightly Faster Speed （+15%, up to 16 Tokens/s), update [docs](./doc/en/DeepseekR1_V3_tutorial.md) and [online books](https://kvcache-ai.github.io/ktransformers/).
+* **Feb 10, 2025**: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. For detailed show case and reproduction tutorial, see [here](./doc/en/DeepseekR1_V3_tutorial.md).
+* **Aug 28, 2024**: Decrease DeepseekV2's required VRAM from 21G to 11G.
+* **Aug 15, 2024**: Update detailed [tutorial](doc/en/injection_tutorial.md) for injection and multi-GPU.
+* **Aug 14, 2024**: Support llamfile as linear backend.
+* **Aug 12, 2024**: Support multiple GPU; Support new model: mixtral 8\*7B  and 8\*22B; Support q2k, q3k, q5k dequant on gpu.
+* **Aug 9, 2024**: Support windows native.
 
 ---
 
@@ -127,11 +138,10 @@ We welcome contributions! Please feel free to submit issues and pull requests.
 - **GitHub Discussions**: [Ask questions and share ideas](https://github.com/kvcache-ai/ktransformers/discussions)
 - **WeChat Group**: See [archive/WeChatGroup.png](./archive/WeChatGroup.png)
 
-## 📦 Legacy Code
+## 📦 KT original Code
 
 The original integrated KTransformers framework has been archived to the [`archive/`](./archive/) directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.
 
 For the original documentation with full quick-start guides and examples, see:
-- [archive/README_LEGACY.md](./archive/README_LEGACY.md) (English)
-- [archive/README_ZH_LEGACY.md](./archive/README_ZH_LEGACY.md) (中文)
-
+- [archive/README.md](./archive/README.md) (English)
+- [archive/README_ZH.md](./archive/README_ZH.md) (中文)
