@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <type_traits>
+
 #include "common.hpp"
 
 // Forward declaration for Llamafile backend type checking
@@ -29,7 +30,7 @@ class TP_MOE_Common : public MoE_Interface {
   std::vector<std::unique_ptr<T>> tps;
 
   std::vector<typename T::output_t*> local_output_numa;
-  T::output_t *local_output = nullptr;
+  T::output_t* local_output = nullptr;
 
   bool weights_loaded = false;
 
@@ -57,18 +58,17 @@ class TP_MOE_Common : public MoE_Interface {
           "multiple of NUMA node count");
     }
 
-    
     // Check if this is Llamafile backend using compile-time type checking
     constexpr bool is_llamafile = std::is_same<T, LLAMA_MOE_TP>::value;
-    #ifndef QK_K
-    #define QK_K 256
-    #endif
+#ifndef QK_K
+#define QK_K 256
+#endif
 
     if (is_llamafile) {
       // For Llamafile backend: use QK_K-aligned TP splitting
       if (config.intermediate_size % QK_K != 0) {
-        printf("intermediate_size %d must be divisible by QK_K %d for Llamafile backend\n",
-               config.intermediate_size, QK_K);
+        printf("intermediate_size %d must be divisible by QK_K %d for Llamafile backend\n", config.intermediate_size,
+               QK_K);
         throw std::runtime_error("intermediate_size must be divisible by QK_K (256) for Llamafile backend");
       }
 
@@ -77,13 +77,13 @@ class TP_MOE_Common : public MoE_Interface {
       int extra_blocks = num_blocks % tp_count;
 
       if (base_blocks == 0) {
-        printf("intermediate_size %d is too small for tp_count %d (num_blocks=%d)\n",
-               config.intermediate_size, tp_count, num_blocks);
+        printf("intermediate_size %d is too small for tp_count %d (num_blocks=%d)\n", config.intermediate_size,
+               tp_count, num_blocks);
         throw std::runtime_error("intermediate_size too small: cannot distribute blocks to all TP instances");
       }
 
-      printf("Llamafile TP splitting: intermediate_size=%d, tp_count=%d, QK_K=%d\n",
-             config.intermediate_size, tp_count, QK_K);
+      printf("Llamafile TP splitting: intermediate_size=%d, tp_count=%d, QK_K=%d\n", config.intermediate_size, tp_count,
+             QK_K);
       printf("  num_blocks=%d, base_blocks=%d, extra_blocks=%d\n", num_blocks, base_blocks, extra_blocks);
 
       int current_offset = 0;
@@ -95,8 +95,8 @@ class TP_MOE_Common : public MoE_Interface {
         int num_blocks_for_this_tp = base_blocks + (i < extra_blocks ? 1 : 0);
         tp_config.intermediate_size = num_blocks_for_this_tp * QK_K;
 
-        printf("  TP %d: intermediate_size=%d, offset=%d, blocks=%d\n",
-               i, tp_config.intermediate_size, current_offset, num_blocks_for_this_tp);
+        printf("  TP %d: intermediate_size=%d, offset=%d, blocks=%d\n", i, tp_config.intermediate_size, current_offset,
+               num_blocks_for_this_tp);
 
         tp_configs.push_back(tp_config);
         current_offset += tp_config.intermediate_size;
@@ -128,8 +128,9 @@ class TP_MOE_Common : public MoE_Interface {
           &local_output_numa[i],
           (size_t)sizeof(typename T::output_t) * tp_configs[i].max_possible_qlen() * tp_configs[i].hidden_size);
     }
-    mem_requests.append_pointer((void **)&local_output, sizeof(typename T::output_t) * tp_configs[0].max_possible_qlen() *
-                                                          tp_configs[0].hidden_size);
+    mem_requests.append_pointer(
+        (void**)&local_output,
+        sizeof(typename T::output_t) * tp_configs[0].max_possible_qlen() * tp_configs[0].hidden_size);
     // printf("local output tp, %d,\n", tp_configs[0].max_possible_qlen());
     shared_mem_buffer.alloc(this, mem_requests);
   }
@@ -203,7 +204,6 @@ class TP_MOE_Common : public MoE_Interface {
   }
 
   virtual void load_weights() = 0;
-
 
   virtual void merge_results(int qlen, void* output) = 0;
 
