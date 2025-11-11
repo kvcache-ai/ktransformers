@@ -2,6 +2,13 @@
 
 High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, and KML support.
 
+## Note
+
+**Current Support Status:**
+- ✅ **Intel CPUs with AMX**: Fully supported
+- ⚠️ **LLAMAFILE backend**: In preview, not yet fully complete
+- ⚠️ **AMD CPUs with BLIS**: Upcoming, not yet fully integrated
+
 ## Features
 
 - **AMX Optimization**: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference
