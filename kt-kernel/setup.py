@@ -47,7 +47,7 @@ import sys
 import platform
 import subprocess
 from pathlib import Path
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 import shutil
 
@@ -334,8 +334,8 @@ setup(
     author="kvcache-ai",
     license="Apache-2.0",
     python_requires=">=3.8",
-    packages=["kt_kernel"],
-    package_dir={"kt_kernel": "python"},
+    packages=find_packages(where="python"),
+    package_dir={"": "python"},
     ext_modules=[CMakeExtension("kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
