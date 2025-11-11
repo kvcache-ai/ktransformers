@@ -36,9 +36,12 @@ dependencies = [
 Homepage = "https://github.com/kvcache-ai"
 
 [tool.setuptools]
-# Enable Python package (kt_kernel) and compiled extension (kt_kernel_ext)
-packages = ["kt_kernel"]
+packages = ["kt_kernel", "kt_kernel.utils"]
 include-package-data = true
+
+[tool.setuptools.package-dir]
+kt_kernel = "python"
+"kt_kernel.utils" = "python/utils"
 
 [tool.setuptools.package-data]
 # (empty) placeholder if you later add resources
