@@ -22,53 +22,24 @@ First, initialize git submodules:
 git submodule update --init --recursive
 ```
 
-### Standard Installation
+### Quick Installation (Recommended)
+
+Use the installation script which automatically installs system dependencies and builds the project:
+
 ```bash
-pip install .
+# For AVX2
+./install.sh avx
+
+# For AMX
+./install.sh amx
 ```
 
-All dependencies (torch, safetensors, compressed-tensors, numpy) will be automatically installed from `pyproject.toml`.
+The installation script will:
+- Install `cmake` via conda (for the latest version)
+- Install system dependencies (`libhwloc-dev`, `pkg-config`) based on your OS
+- Build and install the package in editable mode
 
-### Editable Installation (Development)
-```bash
-pip install -e .
-```
-
-### Optional: Pre-install Dependencies
-
-If you encounter network issues or prefer to install dependencies separately, you can optionally use:
-```bash
-pip install -r requirements.txt
-```
-
-**Note**: This step is **optional**. If your environment already has torch and other required packages, you can skip this and directly run `pip install .`
-
-### Error Troubleshooting
-
-#### CUDA Not Found
-
-```
- -- Looking for a CUDA compiler - NOTFOUND
-  CMake Error at CMakeLists.txt:389 (message):
-    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
-```
-
-Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
-
-Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip install .` again.
-
-#### hwloc Not Found
-
-Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
-
-```
-wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
-tar -xzf hwloc-2.12.2.tar.gz
-cd hwloc-2.12.2
-./configure
-make
-sudo make install
-```
+For manual installation and advanced build configuration, see [Build Configuration](#build-configuration).
 
 ## Verification
 
@@ -143,6 +114,32 @@ KTMoEWrapper.clear_buffer_cache()
 
 ## Build Configuration
 
+### Manual Installation
+
+If you prefer manual installation or need more control over the build process:
+
+```bash
+# Standard installation
+pip install .
+
+# Editable installation (for development)
+pip install -e .
+```
+
+All dependencies (torch, safetensors, compressed-tensors, numpy) will be automatically installed from `pyproject.toml`.
+
+**Note**: For manual installation, ensure you have the following system dependencies installed:
+- `cmake` (recommended via conda: `conda install -y cmake`)
+- `libhwloc-dev` (Debian/Ubuntu: `sudo apt install libhwloc-dev`)
+- `pkg-config` (Debian/Ubuntu: `sudo apt install pkg-config`)
+
+### Optional: Pre-install Dependencies
+
+If you encounter network issues or prefer to install dependencies separately:
+```bash
+pip install -r requirements.txt
+```
+
 ### CPU Instruction Set Tuning
 ```bash
 export CPUINFER_CPU_INSTRUCT=FANCY   # Options: NATIVE|FANCY|AVX512|AVX2
@@ -171,6 +168,33 @@ pip install .
 ```bash
 export CPUINFER_VERBOSE=1
 pip install .
+```
+
+### Error Troubleshooting
+
+#### CUDA Not Found
+
+```
+ -- Looking for a CUDA compiler - NOTFOUND
+  CMake Error at CMakeLists.txt:389 (message):
+    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
+```
+
+Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
+
+Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip install .` again.
+
+#### hwloc Not Found
+
+Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
+
+```
+wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
+tar -xzf hwloc-2.12.2.tar.gz
+cd hwloc-2.12.2
+./configure
+make
+sudo make install
 ```
 
 ## Weight Quantization
