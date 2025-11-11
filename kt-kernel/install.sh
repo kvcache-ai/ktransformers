@@ -233,3 +233,8 @@ echo ""
 
 pip install . -v
 
+
+echo "Successfully built and installed kt-kernel! with configuration:"
+echo "  CPUINFER_CPU_INSTRUCT=$CPUINFER_CPU_INSTRUCT"
+echo "  CPUINFER_ENABLE_AMX=$CPUINFER_ENABLE_AMX"
+echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
