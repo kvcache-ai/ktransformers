@@ -4,6 +4,17 @@ set -e
 install_dependencies() {
   echo "Checking and installing system dependencies..."
 
+  # Determine if we need to use sudo
+  SUDO=""
+  if [ "$EUID" -ne 0 ]; then
+    if command -v sudo &> /dev/null; then
+      SUDO="sudo"
+    else
+      echo "Warning: Not running as root and sudo not found. Package installation may fail."
+      echo "Please run as root or install sudo."
+    fi
+  fi
+
   if command -v conda &> /dev/null; then
     echo "Installing cmake via conda..."
     conda install -y cmake
@@ -29,20 +40,20 @@ install_dependencies() {
   case "$OS" in
     debian|ubuntu|linuxmint|pop)
       echo "Detected Debian-based system. Installing libhwloc-dev and pkg-config..."
-      sudo apt update
-      sudo apt install -y libhwloc-dev pkg-config
+      $SUDO apt update
+      $SUDO apt install -y libhwloc-dev pkg-config
       ;;
     fedora|rhel|centos|rocky|almalinux)
       echo "Detected Red Hat-based system. Installing hwloc-devel and pkgconfig..."
-      sudo dnf install -y hwloc-devel pkgconfig || sudo yum install -y hwloc-devel pkgconfig
+      $SUDO dnf install -y hwloc-devel pkgconfig || $SUDO yum install -y hwloc-devel pkgconfig
       ;;
     arch|manjaro)
       echo "Detected Arch-based system. Installing hwloc and pkgconf..."
-      sudo pacman -S --noconfirm hwloc pkgconf
+      $SUDO pacman -S --noconfirm hwloc pkgconf
       ;;
     opensuse*|sles)
       echo "Detected openSUSE-based system. Installing hwloc-devel and pkg-config..."
-      sudo zypper install -y hwloc-devel pkg-config
+      $SUDO zypper install -y hwloc-devel pkg-config
       ;;
     *)
       echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev and pkg-config."
