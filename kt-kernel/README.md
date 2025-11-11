@@ -59,6 +59,13 @@ Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip inst
 
 #### hwloc Not Found
 
+```
+  -- Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE)
+  CMake Error at CMakeLists.txt:531 (message):
+    FindHWLOC needs pkg-config program and PKG_CONFIG_PATH must contain the
+    path to hwloc.pc file.
+```
+
 Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
 
 ```
