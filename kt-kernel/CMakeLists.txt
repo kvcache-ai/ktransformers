@@ -332,17 +332,17 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     )
 
     if(NOT BLIS_INCLUDE_DIR OR NOT BLIS_LIBRARY)
-        message(FATAL_ERROR "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
+        message(WARNING "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
     else()
         message(STATUS "Found BLIS include at ${BLIS_INCLUDE_DIR}")
         message(STATUS "Found BLIS library ${BLIS_LIBRARY}")
+        set(_KT_BLIS_INCLUDE_DIR ${BLIS_INCLUDE_DIR})
+        set(_KT_BLIS_LIBRARY ${BLIS_LIBRARY})
     endif()
     # The Python extension target (${PROJECT_NAME}) is created later by
     # pybind11_add_module(). Calling target_include_directories/target_link_libraries
     # here would fail because the target doesn't exist yet. Save the discovered
     # BLIS paths and apply them after the module target is created.
-    set(_KT_BLIS_INCLUDE_DIR ${BLIS_INCLUDE_DIR})
-    set(_KT_BLIS_LIBRARY ${BLIS_LIBRARY})
 endif()
 
 
