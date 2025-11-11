@@ -39,7 +39,21 @@ The installation script will:
 - Install system dependencies (`libhwloc-dev`, `pkg-config`) based on your OS
 - Build and install the package in editable mode
 
-For manual installation and advanced build configuration, see [Build Configuration](#build-configuration).
+**Build options used by the script:**
+
+Both modes use `CPUINFER_CPU_INSTRUCT=NATIVE` to automatically detect and use the best available instructions on your CPU.
+
+For `./install.sh avx`:
+- `CPUINFER_ENABLE_AMX=OFF` (AMX disabled)
+- `CPUINFER_BUILD_TYPE=Release`
+- `CPUINFER_PARALLEL=8`
+
+For `./install.sh amx`:
+- `CPUINFER_ENABLE_AMX=ON` (AMX enabled)
+- `CPUINFER_BUILD_TYPE=Release`
+- `CPUINFER_PARALLEL=8`
+
+For manual installation and advanced build configuration, see [Build Configuration](#build-configuration) and [Error Troubleshooting](#error-troubleshooting).
 
 ## Verification
 
@@ -170,9 +184,9 @@ export CPUINFER_VERBOSE=1
 pip install .
 ```
 
-### Error Troubleshooting
+## Error Troubleshooting
 
-#### CUDA Not Found
+### CUDA Not Found
 
 ```
  -- Looking for a CUDA compiler - NOTFOUND
@@ -182,9 +196,9 @@ pip install .
 
 Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
 
-Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip install .` again.
+Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and reinstall again.
 
-#### hwloc Not Found
+### hwloc Not Found
 
 Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
 

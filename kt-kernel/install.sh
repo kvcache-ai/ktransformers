@@ -64,11 +64,9 @@ fi
 MODE="$1"
 case "$MODE" in
   avx)
-    export CPUINFER_CPU_INSTRUCT=AVX2
     export CPUINFER_ENABLE_AMX=OFF
     ;;
   amx)
-    export CPUINFER_CPU_INSTRUCT=AMX512
     export CPUINFER_ENABLE_AMX=ON
     ;;
   *)
@@ -77,6 +75,7 @@ case "$MODE" in
     ;;
 esac
 
+export CPUINFER_CPU_INSTRUCT=NATIVE
 export CPUINFER_BUILD_TYPE=Release
 export CPUINFER_PARALLEL=8
 export CPUINFER_VERBOSE=1
@@ -89,5 +88,5 @@ echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
 echo "  CPUINFER_PARALLEL=$CPUINFER_PARALLEL"
 echo "  CPUINFER_VERBOSE=$CPUINFER_VERBOSE"
 
-CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)" pip install . -v
+pip install . -v
 
