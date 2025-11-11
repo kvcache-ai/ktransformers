@@ -43,6 +43,33 @@ pip install -r requirements.txt
 
 **Note**: This step is **optional**. If your environment already has torch and other required packages, you can skip this and directly run `pip install .`
 
+### Error Troubleshooting
+
+#### CUDA Not Found
+
+```
+ -- Looking for a CUDA compiler - NOTFOUND
+  CMake Error at CMakeLists.txt:389 (message):
+    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
+```
+
+Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
+
+Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip install .` again.
+
+#### hwloc Not Found
+
+Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
+
+```
+wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
+tar -xzf hwloc-2.12.2.tar.gz
+cd hwloc-2.12.2
+./configure
+make
+sudo make install
+```
+
 ## Usage
 
 ```python

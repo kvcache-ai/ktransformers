@@ -8,7 +8,7 @@ name = "kt-kernel"
 version = "0.1.0"
 description = "KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)"
 readme = "README.md"
-authors = [ { name = "kvcache-ai" } ]
+authors = [{ name = "kvcache-ai" }]
 # Use SPDX string form (table form deprecated in newer setuptools)
 license = "Apache-2.0"
 classifiers = [
@@ -27,6 +27,7 @@ dependencies = [
   "triton>=2.0.0",
   # Development dependencies
   "black>=25.9.0",
+  "gguf>=0.17.0",
 ]
 
 # No optional dev group needed for formatting; using custom git hooks instead of pre-commit
