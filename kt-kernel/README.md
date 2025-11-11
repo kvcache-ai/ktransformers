@@ -11,7 +11,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - **Async Execution**: Non-blocking `submit_forward` / `sync_forward` API for improved pipelining
 - **Easy Integration**: Clean Python API with automatic backend selection
 
-**Note**: LLAMAFILE backend support is currently in *preview* and not yet fully complete.
+**Note**: *LLAMAFILE backend support is currently in *preview* and not yet fully complete.
 
 ## Installation
 
@@ -24,36 +24,38 @@ git submodule update --init --recursive
 
 ### Quick Installation (Recommended)
 
-Use the installation script which automatically installs system dependencies and builds the project:
+The installation script automatically detects your CPU and configures optimal build settings:
 
 ```bash
-# For AVX2
-./install.sh avx
-
-# For AMX
-./install.sh amx
+# Simple one-command installation (auto-detects CPU)
+./install.sh
 ```
 
 The installation script will:
+- Auto-detect CPU capabilities (AMX support)
 - Install `cmake` via conda (for the latest version)
 - Install system dependencies (`libhwloc-dev`, `pkg-config`) based on your OS
-- Build and install the package in editable mode
 
-**Build options used by the script:**
+**What gets configured automatically:**
+- AMX CPU detected → `NATIVE + AMX=ON`
+- No AMX detected → `NATIVE + AMX=OFF`
 
-Both modes use `CPUINFER_CPU_INSTRUCT=NATIVE` to automatically detect and use the best available instructions on your CPU.
+⚠️ **Important for LLAMAFILE backend users:** If you have an AMX-capable CPU and plan to use the LLAMAFILE backend, do NOT use auto-detection. Use manual mode with `AVX512` or `AVX2` instead of `NATIVE` to avoid compilation issues (see below).
 
-For `./install.sh avx`:
-- `CPUINFER_ENABLE_AMX=OFF` (AMX disabled)
-- `CPUINFER_BUILD_TYPE=Release`
-- `CPUINFER_PARALLEL=8`
+### Manual Configuration (Advanced)
 
-For `./install.sh amx`:
-- `CPUINFER_ENABLE_AMX=ON` (AMX enabled)
-- `CPUINFER_BUILD_TYPE=Release`
-- `CPUINFER_PARALLEL=8`
+If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):
 
-For manual installation with custom build options, see the [Build Configuration](#build-configuration) section. If you encounter issues, refer to [Error Troubleshooting](#error-troubleshooting).
+```bash
+# Example for LLAMAFILE backend on AMX CPU with AVX512
+export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
+export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
+
+# Run with manual mode
+./install.sh --manual
+```
+
+For advanced build options and binary distribution, see the [Build Configuration](#build-configuration) section. If you encounter issues, refer to [Error Troubleshooting](#error-troubleshooting).
 
 ## Verification
 
@@ -130,57 +132,60 @@ KTMoEWrapper.clear_buffer_cache()
 
 ### Manual Installation
 
-If you prefer manual installation or need more control over the build process:
+If you prefer manual installation without the `install.sh` script, follow these steps:
+
+#### 1. Install System Dependencies
+
+**Prerequisites:**
+- `cmake` (recommended: `conda install -y cmake`)
+- `libhwloc-dev` and `pkg-config`
+
+#### 2. Set Build Configuration
+
+**Core Options:**
+
+| Variable | Options | Description |
+|----------|---------|-------------|
+| `CPUINFER_CPU_INSTRUCT` | `NATIVE`, `AVX512`, `AVX2`, `FANCY` | CPU instruction set to use |
+| `CPUINFER_ENABLE_AMX` | `ON`, `OFF` | Enable Intel AMX support |
+| `CPUINFER_BUILD_TYPE` | `Release`, `Debug`, `RelWithDebInfo` | Build type (default: `Release`) |
+| `CPUINFER_PARALLEL` | Number | Parallel build jobs (default: auto-detect) |
+| `CPUINFER_VERBOSE` | `0`, `1` | Verbose build output (default: `0`) |
+
+**Instruction Set Details:**
+
+- **`NATIVE`**: Auto-detect and use all available CPU instructions (`-march=native`) - **Recommended for best performance**
+- **`AVX512`**: Explicit AVX512 support for Skylake-SP and Cascade Lake
+- **`AVX2`**: AVX2 support for maximum compatibility
+- **`FANCY`**: AVX512 with full extensions (AVX512F/BW/DQ/VL/VNNI) for Ice Lake+ and Zen 4+. Use this when building pre-compiled binaries to distribute to users with modern CPUs. For local builds, prefer `NATIVE` for better performance.
+
+**Example Configurations:**
 
 ```bash
-# Standard installation
-pip install .
+# Maximum performance on AMX CPU
+export CPUINFER_CPU_INSTRUCT=NATIVE
+export CPUINFER_ENABLE_AMX=ON
 
+# AVX512 CPU without AMX
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+
+# Compatibility build
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+
+# Debug build for development
+export CPUINFER_BUILD_TYPE=Debug
+export CPUINFER_VERBOSE=1
+```
+
+#### 3. Build and Install
+
+```bash
 # Editable installation (for development)
 pip install -e .
-```
 
-All dependencies (torch, safetensors, compressed-tensors, numpy) will be automatically installed from `pyproject.toml`.
-
-**Note**: For manual installation, ensure you have the following system dependencies installed:
-- `cmake` (recommended via conda: `conda install -y cmake`)
-- `libhwloc-dev` (Debian/Ubuntu: `sudo apt install libhwloc-dev`)
-- `pkg-config` (Debian/Ubuntu: `sudo apt install pkg-config`)
-
-### Optional: Pre-install Dependencies
-
-If you encounter network issues or prefer to install dependencies separately:
-```bash
-pip install -r requirements.txt
-```
-
-### CPU Instruction Set Tuning
-```bash
-export CPUINFER_CPU_INSTRUCT=FANCY   # Options: NATIVE|FANCY|AVX512|AVX2
-pip install .
-```
-
-### AMX Configuration
-```bash
-export CPUINFER_ENABLE_AMX=ON        # Enable/disable AMX support
-pip install .
-```
-
-### Build Type
-```bash
-export CPUINFER_BUILD_TYPE=Release   # Debug|RelWithDebInfo|Release
-pip install .
-```
-
-### Parallel Build
-```bash
-export CPUINFER_PARALLEL=8           # Number of parallel jobs
-pip install .
-```
-
-### Verbose Build
-```bash
-export CPUINFER_VERBOSE=1
+# Standard installation
 pip install .
 ```
 
