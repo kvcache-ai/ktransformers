@@ -11,7 +11,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - **Async Execution**: Non-blocking `submit_forward` / `sync_forward` API for improved pipelining
 - **Easy Integration**: Clean Python API with automatic backend selection
 
-**Note**: *LLAMAFILE backend support is currently in preview and not yet fully complete.
+**Note**: LLAMAFILE backend support is currently in *preview* and not yet fully complete.
 
 ## Installation
 
@@ -68,6 +68,12 @@ cd hwloc-2.12.2
 ./configure
 make
 sudo make install
+```
+
+## Verification
+
+```bash
+python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
 
 ## Usage
@@ -165,12 +171,6 @@ pip install .
 ```bash
 export CPUINFER_VERBOSE=1
 pip install .
-```
-
-## Verification
-
-```bash
-python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
 
 ## Weight Quantization
