@@ -31,16 +31,28 @@ git submodule update --init --recursive
 
 ### Quick Installation (Recommended)
 
-The installation script automatically detects your CPU and configures optimal build settings:
+You can now install in two clear steps using the same script.
+
+Option A: Two-step (explicit)
 
 ```bash
-# Simple one-command installation (auto-detects CPU)
-./install.sh
+# 1) Install system prerequisites (cmake, hwloc, pkg-config)
+./install.sh deps
+
+# 2) Build and install kt-kernel (auto-detects CPU)
+./install.sh build
 ```
 
-The installation script will:
+Option B: One-step (deps + build)
+
+```bash
+# Simple one-command installation
+./install.sh            # same as: ./install.sh all
+```
+
+The install script will:
 - Auto-detect CPU capabilities (AMX support)
-- Install `cmake` via conda (for the latest version)
+- Install `cmake` via conda (if available)
 - Install system dependencies (`libhwloc-dev`, `pkg-config`) based on your OS
 
 **What gets configured automatically:**
@@ -58,8 +70,8 @@ If you need specific build options (e.g., for LLAMAFILE backend, compatibility, 
 export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
 export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
 
-# Run with manual mode
-./install.sh --manual
+# Run with manual mode (build only)
+./install.sh build --manual
 ```
 
 For advanced build options and binary distribution, see the [Build Configuration](#build-configuration) section. If you encounter issues, refer to [Error Troubleshooting](#error-troubleshooting).

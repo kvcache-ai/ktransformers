@@ -1,12 +1,70 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+usage() {
+  cat <<EOF
+Usage: $0 [SUBCOMMAND] [BUILD_OPTIONS]
+
+Two-step installation in one file. Choose a subcommand:
+
+SUBCOMMANDS:
+  deps            Install system prerequisites only
+  build           Build and install kt-kernel (no dependency install)
+  all             Run deps then build (default when no subcommand)
+  -h, --help      Show this help message
+
+BUILD_OPTIONS (for "build" or "all"):
+  (none)          Auto-detect CPU and configure automatically (recommended)
+  --manual        Skip auto-detection, use manual configuration (see below)
+  --skip-deps     Skip deps step even with subcommand "all"
+
+AUTO-DETECTION (Default):
+  The script will automatically detect your CPU capabilities and configure:
+  - If AMX instructions detected → NATIVE + AMX=ON
+  - Otherwise                    → NATIVE + AMX=OFF
+
+MANUAL CONFIGURATION:
+  Use --manual flag and set these environment variables before running:
+
+  CPUINFER_CPU_INSTRUCT   - CPU instruction set
+                            Options: NATIVE, AVX512, AVX2
+  CPUINFER_ENABLE_AMX     - Enable Intel AMX support
+                            Options: ON, OFF
+
+Manual configuration examples:
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Configuration                    │ Use Case                             │
+├──────────────────────────────────┼──────────────────────────────────────┤
+│ NATIVE + AMX=ON                  │ Best performance on AMX CPUs         │
+│ AVX512 + AMX=OFF                 │ AVX512 CPUs without AMX              │
+│ AVX2 + AMX=OFF                   │ Older CPUs or maximum compatibility  │
+└──────────────────────────────────┴──────────────────────────────────────┘
+
+  Example manual build:
+    export CPUINFER_CPU_INSTRUCT=AVX512
+    export CPUINFER_ENABLE_AMX=OFF
+    $0 --manual
+
+Advanced option (for binary distribution):
+  FANCY - AVX512 with full extensions for Ice Lake+/Zen 4+
+          Use this when building pre-compiled binaries to distribute.
+
+Optional variables (with defaults):
+  CPUINFER_BUILD_TYPE=Release      Build type (Debug/RelWithDebInfo/Release)
+  CPUINFER_PARALLEL=8              Number of parallel build jobs
+  CPUINFER_VERBOSE=1               Verbose build output (0/1)
+
+EOF
+  exit 1
+}
 
 install_dependencies() {
   echo "Checking and installing system dependencies..."
 
   # Determine if we need to use sudo
   SUDO=""
-  if [ "$EUID" -ne 0 ]; then
+  if [ "${EUID:-0}" -ne 0 ]; then
     if command -v sudo &> /dev/null; then
       SUDO="sudo"
     else
@@ -61,60 +119,6 @@ install_dependencies() {
   esac
 }
 
-install_dependencies
-
-usage() {
-  cat <<EOF
-Usage: $0 [OPTIONS]
-
-This script builds kt-kernel with optimal settings for your CPU.
-
-OPTIONS:
-  (none)          Auto-detect CPU and configure automatically (recommended)
-  -h, --help      Show this help message
-  --manual        Skip auto-detection, use manual configuration (see below)
-
-AUTO-DETECTION (Default):
-  The script will automatically detect your CPU capabilities and configure:
-  - If AMX instructions detected → NATIVE + AMX=ON
-  - Otherwise                    → NATIVE + AMX=OFF
-
-MANUAL CONFIGURATION:
-  Use --manual flag and set these environment variables before running:
-
-  CPUINFER_CPU_INSTRUCT   - CPU instruction set
-                            Options: NATIVE, AVX512, AVX2
-  CPUINFER_ENABLE_AMX     - Enable Intel AMX support
-                            Options: ON, OFF
-
-Manual configuration examples:
-
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Configuration                    │ Use Case                             │
-├──────────────────────────────────┼──────────────────────────────────────┤
-│ NATIVE + AMX=ON                  │ Best performance on AMX CPUs         │
-│ AVX512 + AMX=OFF                 │ AVX512 CPUs without AMX              │
-│ AVX2 + AMX=OFF                   │ Older CPUs or maximum compatibility  │
-└──────────────────────────────────┴──────────────────────────────────────┘
-
-  Example manual build:
-    export CPUINFER_CPU_INSTRUCT=AVX512
-    export CPUINFER_ENABLE_AMX=OFF
-    $0 --manual
-
-Advanced option (for binary distribution):
-  FANCY - AVX512 with full extensions for Ice Lake+/Zen 4+
-          Use this when building pre-compiled binaries to distribute.
-
-Optional variables (with defaults):
-  CPUINFER_BUILD_TYPE=Release      Build type (Debug/RelWithDebInfo/Release)
-  CPUINFER_PARALLEL=8              Number of parallel build jobs
-  CPUINFER_VERBOSE=1               Verbose build output (0/1)
-
-EOF
-  exit 1
-}
-
 # Function to detect CPU features
 detect_cpu_features() {
   local has_amx=0
@@ -132,18 +136,19 @@ detect_cpu_features() {
   echo "$has_amx"
 }
 
-# Check if user requested help
-if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-  usage
-fi
+build_step() {
+  # Parse build-only flags from arguments to this function
+  local MANUAL_MODE=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --manual) MANUAL_MODE=1; shift ;;
+      --skip-deps) shift ;; # ignore here
+      -h|--help) usage ;;
+      *) break ;;
+    esac
+  done
 
-# Check if manual mode
-MANUAL_MODE=0
-if [ "$1" = "--manual" ]; then
-  MANUAL_MODE=1
-fi
-
-if [ "$MANUAL_MODE" = "0" ]; then
+  if [ "$MANUAL_MODE" = "0" ]; then
   # Auto-detection mode
   echo "=========================================="
   echo "Auto-detecting CPU capabilities..."
@@ -172,7 +177,7 @@ if [ "$MANUAL_MODE" = "0" ]; then
   echo ""
   echo "To use manual configuration instead, run: $0 --manual"
   echo ""
-else
+  else
   # Manual mode - validate user configuration (no exports)
   if [ -z "$CPUINFER_CPU_INSTRUCT" ] || [ -z "$CPUINFER_ENABLE_AMX" ]; then
     echo "Error: Manual mode requires CPUINFER_CPU_INSTRUCT and CPUINFER_ENABLE_AMX to be set."
@@ -216,7 +221,9 @@ else
       fi
     fi
   fi
-fi
+
+# Close MANUAL_MODE conditional
+  fi
 
 # Set defaults for optional variables
 export CPUINFER_BUILD_TYPE=${CPUINFER_BUILD_TYPE:-Release}
@@ -232,9 +239,31 @@ echo "  CPUINFER_VERBOSE=$CPUINFER_VERBOSE"
 echo ""
 
 pip install . -v
+}
 
+# Subcommand dispatcher: default to "all"
+SUBCMD="all"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    deps|build|all) SUBCMD="$1"; shift ;;
+    -h|--help) usage ;;
+    *) SUBCMD="build" ;; # backward compatibility: flags-only => build
+  esac
+fi
 
-echo "Successfully built and installed kt-kernel! with configuration:"
-echo "  CPUINFER_CPU_INSTRUCT=$CPUINFER_CPU_INSTRUCT"
-echo "  CPUINFER_ENABLE_AMX=$CPUINFER_ENABLE_AMX"
-echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
+case "$SUBCMD" in
+  deps)
+    install_dependencies
+    ;;
+  build)
+    build_step "$@"
+    ;;
+  all)
+    if [[ " ${*:-} " == *" --skip-deps "* ]]; then
+      build_step "$@"
+    else
+      install_dependencies
+      build_step "$@"
+    fi
+    ;;
+esac
