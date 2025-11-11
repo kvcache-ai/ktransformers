@@ -39,6 +39,19 @@
         "KTRANSFORMERS_CPU_USE_AMX_AVX512": "ON",
         "KTRANSFORMERS_USE_CUDA": "ON"
       }
+    },
+    {
+      "name": "amd",
+      "displayName": "amd_platform",
+      "description": "for amd platform",
+      "cacheVariables": {
+        "KTRANSFORMERS_CPU_USE_AMX": "OFF",
+        "LLAMA_AVX512": "OFF",
+        "LLAMA_AVX2": "ON",
+        "KTRANSFORMERS_CPU_USE_AMX_AVX512": "ON",
+        "KTRANSFORMERS_USE_CUDA": "ON",
+        "KTRANSFORMERS_CPU_MOE_AMD": "ON"
+      }
     }
 
   ]

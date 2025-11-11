@@ -28,6 +28,8 @@ Environment knobs (export before running pip install .):
   CPUINFER_LTO_MODE=auto          Forward to -DCPUINFER_LTO_MODE
   CPUINFER_NATIVE=ON               (override LLAMA_NATIVE)
 
+    CPUINFER_ALWAYS_CLEAN=1         When set to 1 (default), delete repo-level 'build' before configure
+
 GPU backends (if ever added later, keep placeholders):
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA
   CPUINFER_USE_ROCM=0/1           -DKTRANSFORMERS_USE_ROCM
@@ -188,6 +190,16 @@ class CMakeBuild(build_ext):
         return info
 
     def build_extension(self, ext: CMakeExtension):
+        # Clean repo-level 'build' directory on every invocation (opt-out via CPUINFER_ALWAYS_CLEAN=0)
+        try:
+            always_clean = os.environ.get("CPUINFER_ALWAYS_CLEAN", "1") != "0"
+            repo_build_dir = REPO_ROOT / "build"
+            if always_clean and repo_build_dir.exists():
+                print(f"-- Removing repository build directory: {repo_build_dir}")
+                shutil.rmtree(repo_build_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"Warning: failed to clean repository build directory: {e}")
+
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
@@ -203,6 +215,31 @@ class CMakeBuild(build_ext):
             if Path("/usr/local/cuda/bin/nvcc").exists():
                 return True
             return False
+
+        # Locate nvcc executable (without forcing user to set -DCMAKE_CUDA_COMPILER)
+        def find_nvcc_path() -> str | None:
+            cuda_home = os.environ.get("CUDA_HOME")
+            if cuda_home:
+                cand = Path(cuda_home) / "bin" / "nvcc"
+                if cand.exists():
+                    return str(cand)
+            which_nvcc = shutil.which("nvcc")
+            if which_nvcc:
+                return which_nvcc
+            # Common fallbacks (ordered by preference)
+            for cand in [
+                "/usr/local/cuda-12.6/bin/nvcc",
+                "/usr/local/cuda/bin/nvcc",
+                "/usr/bin/nvcc",
+                "/usr/lib/nvidia-cuda-toolkit/bin/nvcc",
+            ]:
+                if Path(cand).exists():
+                    return cand
+            return None
+
+        # Note: We no longer set CMAKE_CUDA_ARCHITECTURES by default.
+        # If users want to specify CUDA archs, they can set env CPUINFER_CUDA_ARCHS
+        # (e.g. "89" or "86;89") or pass it via CMAKE_ARGS.
 
         if os.environ.get("CPUINFER_USE_CUDA") is None:
             auto_cuda = detect_cuda_toolkit()
@@ -274,6 +311,24 @@ class CMakeBuild(build_ext):
         if os.environ.get("CPUINFER_USE_CUDA") == "1":
             cmake_args.append("-DKTRANSFORMERS_USE_CUDA=ON")
             print("-- Enabling CUDA backend (-DKTRANSFORMERS_USE_CUDA=ON)")
+            # Inject nvcc compiler path automatically unless user already specified one.
+            user_specified_compiler = any("CMAKE_CUDA_COMPILER" in a for a in cmake_args)
+            if not user_specified_compiler:
+                extra_env = os.environ.get("CMAKE_ARGS", "")
+                if "CMAKE_CUDA_COMPILER" in extra_env:
+                    user_specified_compiler = True
+            if not user_specified_compiler:
+                nvcc_path = find_nvcc_path()
+                if nvcc_path:
+                    cmake_args.append(f"-DCMAKE_CUDA_COMPILER={nvcc_path}")
+                    print(f"-- Auto-detected nvcc: {nvcc_path} (adding -DCMAKE_CUDA_COMPILER)")
+                else:
+                    print("-- Warning: nvcc not found via CUDA_HOME/PATH/common prefixes; CUDA configure may fail.")
+            # Respect user-provided architectures only (no default auto-detection).
+            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "").strip()
+            if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
+                cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
+                print(f"-- Set CUDA architectures from CPUINFER_CUDA_ARCHS: {archs_env}")
         if os.environ.get("CPUINFER_USE_ROCM") == "1":
             cmake_args.append("-DKTRANSFORMERS_USE_ROCM=ON")
         if os.environ.get("CPUINFER_USE_MUSA") == "1":
