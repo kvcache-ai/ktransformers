@@ -53,7 +53,7 @@ For `./install.sh amx`:
 - `CPUINFER_BUILD_TYPE=Release`
 - `CPUINFER_PARALLEL=8`
 
-For manual installation and advanced build configuration, see [Build Configuration](#build-configuration) and [Error Troubleshooting](#error-troubleshooting).
+For manual installation with custom build options, see the [Build Configuration](#build-configuration) section. If you encounter issues, refer to [Error Troubleshooting](#error-troubleshooting).
 
 ## Verification
 
