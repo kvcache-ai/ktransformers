@@ -1,6 +1,57 @@
 #!/usr/bin/env bash
 set -e
 
+install_dependencies() {
+  echo "Checking and installing system dependencies..."
+
+  if command -v conda &> /dev/null; then
+    echo "Installing cmake via conda..."
+    conda install -y cmake
+  else
+    echo "Warning: conda not found. Skipping cmake installation via conda."
+    echo "Please install conda or manually install cmake."
+  fi
+
+  # Detect OS type
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+  elif [ -f /etc/debian_version ]; then
+    OS="debian"
+  elif [ -f /etc/redhat-release ]; then
+    OS="rhel"
+  else
+    echo "Warning: Unable to detect OS type. Skipping dependency installation."
+    return 0
+  fi
+
+  # Install dependencies based on OS
+  case "$OS" in
+    debian|ubuntu|linuxmint|pop)
+      echo "Detected Debian-based system. Installing libhwloc-dev and pkg-config..."
+      sudo apt update
+      sudo apt install -y libhwloc-dev pkg-config
+      ;;
+    fedora|rhel|centos|rocky|almalinux)
+      echo "Detected Red Hat-based system. Installing hwloc-devel and pkgconfig..."
+      sudo dnf install -y hwloc-devel pkgconfig || sudo yum install -y hwloc-devel pkgconfig
+      ;;
+    arch|manjaro)
+      echo "Detected Arch-based system. Installing hwloc and pkgconf..."
+      sudo pacman -S --noconfirm hwloc pkgconf
+      ;;
+    opensuse*|sles)
+      echo "Detected openSUSE-based system. Installing hwloc-devel and pkg-config..."
+      sudo zypper install -y hwloc-devel pkg-config
+      ;;
+    *)
+      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev and pkg-config."
+      ;;
+  esac
+}
+
+install_dependencies
+
 usage() {
   echo "Usage: $0 [avx|amx]"
   exit 1
