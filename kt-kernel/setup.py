@@ -28,7 +28,6 @@ Environment knobs (export before running pip install .):
   CPUINFER_LTO_MODE=auto          Forward to -DCPUINFER_LTO_MODE
   CPUINFER_NATIVE=ON               (override LLAMA_NATIVE)
 
-  CPUINFER_ALWAYS_CLEAN=1         When set to 1 (default), delete repo-level 'build' before configure
 
 GPU backends (if ever added later, keep placeholders):
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA
@@ -227,16 +226,6 @@ class CMakeBuild(build_ext):
         return info
 
     def build_extension(self, ext: CMakeExtension):
-        # Clean repo-level 'build' directory on every invocation (opt-out via CPUINFER_ALWAYS_CLEAN=0)
-        try:
-            always_clean = _env_get_bool("CPUINFER_ALWAYS_CLEAN", True) is not False
-            repo_build_dir = REPO_ROOT / "build"
-            if always_clean and repo_build_dir.exists():
-                print(f"-- Removing repository build directory: {repo_build_dir}")
-                shutil.rmtree(repo_build_dir, ignore_errors=True)
-        except Exception as e:
-            print(f"Warning: failed to clean repository build directory: {e}")
-
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
@@ -379,7 +368,7 @@ class CMakeBuild(build_ext):
             cmake_args += [a for a in extra.split() if a]
 
         # Force rebuild? (delete cache)
-        if _env_get_bool("CPUINFER_FORCE_REBUILD", False):
+        if _env_get_bool("CPUINFER_FORCE_REBUILD", True):
             cache = build_temp / "CMakeCache.txt"
             if cache.exists():
                 cache.unlink()
