@@ -28,7 +28,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_LTO_MODE=auto          Forward to -DCPUINFER_LTO_MODE
   CPUINFER_NATIVE=ON               (override LLAMA_NATIVE)
 
-    CPUINFER_ALWAYS_CLEAN=1         When set to 1 (default), delete repo-level 'build' before configure
+  CPUINFER_ALWAYS_CLEAN=1         When set to 1 (default), delete repo-level 'build' before configure
 
 GPU backends (if ever added later, keep placeholders):
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA

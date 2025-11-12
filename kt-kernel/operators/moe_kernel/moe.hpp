@@ -17,7 +17,7 @@
 #include "api/common.h"
 #include "api/mat_kernel.h"
 #include "llama.cpp/ggml.h"
-
+#include "../cpu_backend/shared_mem_buffer.h"
 template <class T, bool PLAIN = true>
 class MOE_KERNEL_TP
 #ifdef FORWARD_TIME_PROFILE
