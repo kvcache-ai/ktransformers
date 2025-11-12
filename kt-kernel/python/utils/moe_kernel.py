@@ -47,7 +47,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         method: str = "MOE_INT8",
     ):
         """
-        Initialize AMX MoE Wrapper.
+        Initialize general MoE Wrapper.
 
         Args:
             layer_idx: Layer index
@@ -58,7 +58,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
             num_gpu_experts: Number of experts to run on GPU
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
-            weight_path: Path to AMX weights (SafeTensor format)
+            weight_path: Path to weights (SafeTensor format)
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
@@ -66,13 +66,13 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         """
         if not _HAS_INT4_SUPPORT and method == "MOE_INT4":
             raise RuntimeError(
-                "AMX backend not available. kt_kernel_ext was not compiled with AMX support.\n"
-                "Please recompile with AMX enabled."
+                "MoE_INT4 backend not available. kt_kernel_ext was not compiled with int4 support.\n"
+                "Please recompile with int4 enabled."
             )
         if not _HAS_INT8_SUPPORT and method == "MOE_INT8":
             raise RuntimeError(
-                "AMX backend not available. kt_kernel_ext was not compiled with AMX support.\n"
-                "Please recompile with AMX enabled."
+                "MoE_INT8 backend not available. kt_kernel_ext was not compiled with int8 support.\n"
+                "Please recompile with int8 enabled."
             )
 
         # Initialize base class
@@ -113,6 +113,62 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         self.up_scales = None
         self.down_scales = None
 
+    def load_weights_from_tensors(
+        self,
+        gate_proj: torch.Tensor,
+        up_proj: torch.Tensor,
+        down_proj: torch.Tensor,
+        physical_to_logical_map_cpu: torch.Tensor,
+    ):
+        """
+        Load and quantize weights from BF16/FP16 tensors (online quantization).
+
+        Args:
+            gate_proj: Gate projection weights [num_experts, intermediate_size, hidden_size]
+            up_proj: Up projection weights [num_experts, intermediate_size, hidden_size]
+            down_proj: Down projection weights [num_experts, hidden_size, intermediate_size]
+            physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
+        """
+        # Store tensors as instance variables to keep them alive
+        self.gate_proj = gate_proj.contiguous()
+        self.up_proj = up_proj.contiguous()
+        self.down_proj = down_proj.contiguous()
+
+        # Configure MoE with online quantization (cpu_save mode)
+        moe_config = MOEConfig(
+            self.num_experts,
+            self.num_experts_per_tok,
+            self.hidden_size,
+            self.moe_intermediate_size,
+            self.num_gpu_experts,
+        )
+        moe_config.layer_idx = self.layer_idx
+        moe_config.pool = self.cpu_infer.backend_
+        moe_config.max_len = self.chunked_prefill_size
+
+        # Enable save mode for online quantization
+        moe_config.save = True
+        moe_config.load = False
+
+        # Set weight pointers
+        moe_config.gate_proj = self.gate_proj.data_ptr()
+        moe_config.up_proj = self.up_proj.data_ptr()
+        moe_config.down_proj = self.down_proj.data_ptr()
+
+        # Set output path for quantized weights
+        moe_config.path = self.weight_path
+
+        # Create MoE module based on method
+        if self.method == "MOE_INT4":
+            self.moe = Int4_KERNEL_MOE(moe_config)
+        elif self.method == "MOE_INT8":
+            self.moe = Int8_KERNEL_MOE(moe_config)
+        else:
+            raise NotImplementedError(f"Unsupported MoE method: {self.method}")
+
+        # Submit quantization and save task
+        self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
+        self.cpu_infer.sync()
 
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         """

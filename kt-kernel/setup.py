@@ -53,6 +53,43 @@ from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import shutil
 
+# -------------------------
+# Env parsing helpers
+# -------------------------
+def _env_get_bool(name: str, default: bool | None = None) -> bool | None:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    val = v.strip().lower()
+    if val in ("1", "on", "true", "yes", "y", "enable", "enabled"):
+        return True
+    if val in ("0", "off", "false", "no", "n", "disable", "disabled"):
+        return False
+    return default
+
+
+def _cmake_onoff(flag: bool) -> str:
+    return "ON" if flag else "OFF"
+
+
+def _forward_bool_env(cmake_args: list[str], env_name: str, cmake_flag: str) -> bool:
+    """If env exists, forward it to CMake as -D<flag>=ON/OFF and return True; else return False."""
+    b = _env_get_bool(env_name, None)
+    if b is None:
+        return False
+    cmake_args.append(f"-D{cmake_flag}={_cmake_onoff(b)}")
+    print(f"-- Forward {env_name} -> -D{cmake_flag}={_cmake_onoff(b)}")
+    return True
+
+
+def _forward_str_env(cmake_args: list[str], env_name: str, cmake_flag: str) -> bool:
+    v = os.environ.get(env_name)
+    if not v:
+        return False
+    cmake_args.append(f"-D{cmake_flag}={v}")
+    print(f"-- Forward {env_name} -> -D{cmake_flag}={v}")
+    return True
+
 ################################################################################
 # Helpers
 ################################################################################
@@ -192,7 +229,7 @@ class CMakeBuild(build_ext):
     def build_extension(self, ext: CMakeExtension):
         # Clean repo-level 'build' directory on every invocation (opt-out via CPUINFER_ALWAYS_CLEAN=0)
         try:
-            always_clean = os.environ.get("CPUINFER_ALWAYS_CLEAN", "1") != "0"
+            always_clean = _env_get_bool("CPUINFER_ALWAYS_CLEAN", True) is not False
             repo_build_dir = REPO_ROOT / "build"
             if always_clean and repo_build_dir.exists():
                 print(f"-- Removing repository build directory: {repo_build_dir}")
@@ -241,7 +278,9 @@ class CMakeBuild(build_ext):
         # If users want to specify CUDA archs, they can set env CPUINFER_CUDA_ARCHS
         # (e.g. "89" or "86;89") or pass it via CMAKE_ARGS.
 
-        if os.environ.get("CPUINFER_USE_CUDA") is None:
+        # Normalize CPUINFER_USE_CUDA: if unset, auto-detect; otherwise respect truthy/falsey values
+        cuda_env = _env_get_bool("CPUINFER_USE_CUDA", None)
+        if cuda_env is None:
             auto_cuda = detect_cuda_toolkit()
             os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
             print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
@@ -265,51 +304,45 @@ class CMakeBuild(build_ext):
         print(f"Detected CPU info: {d}")
 
         # Vendor / feature specific toggles
-        # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
-        # temporarily disabled this opt, use llamafile backend for now
-        # if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
-        #     cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
-        #     print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+        # AMD MoE: explicit env overrides; otherwise default ON on AMD CPU
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AMD", "KTRANSFORMERS_CPU_MOE_AMD"):
+            if d.get("vendor") == "amd":
+                cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+                print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
 
-        # On ARM, enable KML by default if not explicitly toggled
-        if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:
-            cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
-            print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
+        # KML: explicit env overrides; otherwise default ON on ARM
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_KML", "KTRANSFORMERS_CPU_USE_KML"):
+            if d.get("vendor") == "arm":
+                cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
+                print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
 
-        # If AMX or AVX512 present, enable umbrella unless overridden; enable AMX specifically when present
-        if "AMX" in d["features"]:
-            if os.environ.get("CPUINFER_ENABLE_AMX") is None:
+        # AMX: explicit env overrides; else enable if detected
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AMX", "KTRANSFORMERS_CPU_USE_AMX"):
+            if "AMX" in d["features"]:
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX=ON")
                 print("-- AMX support detected; enabling (-DKTRANSFORMERS_CPU_USE_AMX=ON)")
-        if ("AMX" in d["features"] or "AVX512" in d["features"]) and os.environ.get(
-            "CPUINFER_ENABLE_AVX512"
-        ) is None:
-            cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
-            print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
+        # AVX512 umbrella: explicit env overrides; else enable if AMX or AVX512 detected
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512", "KTRANSFORMERS_CPU_USE_AMX_AVX512"):
+            if "AMX" in d["features"] or "AVX512" in d["features"]:
+                cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
+                print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
 
         # Friendly summary
         print(
             f"-- CPU detection: vendor={d.get('vendor')} arch={d.get('arch')} features={sorted(list(d.get('features', [])))}"
         )
 
-        # Optional AMX / MLA toggles (explicit env overrides auto detection above)
-        if os.environ.get("CPUINFER_ENABLE_AMX"):
-            cmake_args.append(f"-DKTRANSFORMERS_CPU_USE_AMX={os.environ['CPUINFER_ENABLE_AMX']}")
-        if os.environ.get("CPUINFER_ENABLE_KML"):
-            cmake_args.append(f"-DKTRANSFORMERS_CPU_USE_KML={os.environ['CPUINFER_ENABLE_KML']}")
-        if os.environ.get("CPUINFER_ENABLE_MLA"):
-            cmake_args.append(f"-DKTRANSFORMERS_CPU_MLA={os.environ['CPUINFER_ENABLE_MLA']}")
+        # MLA toggle (string/boolean allowed)
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_MLA", "KTRANSFORMERS_CPU_MLA"):
+            _forward_str_env(cmake_args, "CPUINFER_ENABLE_MLA", "KTRANSFORMERS_CPU_MLA")
 
-        # LTO toggles if user added them in CMakeLists
-        if os.environ.get("CPUINFER_ENABLE_LTO"):
-            cmake_args.append(f"-DCPUINFER_ENABLE_LTO={os.environ['CPUINFER_ENABLE_LTO']}")
-        if os.environ.get("CPUINFER_LTO_JOBS"):
-            cmake_args.append(f"-DCPUINFER_LTO_JOBS={os.environ['CPUINFER_LTO_JOBS']}")
-        if os.environ.get("CPUINFER_LTO_MODE"):
-            cmake_args.append(f"-DCPUINFER_LTO_MODE={os.environ['CPUINFER_LTO_MODE']}")
+        # LTO toggles
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_LTO", "CPUINFER_ENABLE_LTO")
+        _forward_str_env(cmake_args, "CPUINFER_LTO_JOBS", "CPUINFER_LTO_JOBS")
+        _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
 
         # GPU backends (mutually exclusive expected)
-        if os.environ.get("CPUINFER_USE_CUDA") == "1":
+        if _env_get_bool("CPUINFER_USE_CUDA", False):
             cmake_args.append("-DKTRANSFORMERS_USE_CUDA=ON")
             print("-- Enabling CUDA backend (-DKTRANSFORMERS_USE_CUDA=ON)")
             # Inject nvcc compiler path automatically unless user already specified one.
@@ -325,14 +358,19 @@ class CMakeBuild(build_ext):
                     print(f"-- Auto-detected nvcc: {nvcc_path} (adding -DCMAKE_CUDA_COMPILER)")
                 else:
                     print("-- Warning: nvcc not found via CUDA_HOME/PATH/common prefixes; CUDA configure may fail.")
+            # Optional host compiler for nvcc if user set CUDAHOSTCXX
+            if os.environ.get("CUDAHOSTCXX"):
+                hostcxx = os.environ["CUDAHOSTCXX"]
+                cmake_args.append(f"-DCMAKE_CUDA_HOST_COMPILER={hostcxx}")
+                print(f"-- Using CUDA host compiler from CUDAHOSTCXX: {hostcxx}")
             # Respect user-provided architectures only (no default auto-detection).
             archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "").strip()
             if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
                 cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
                 print(f"-- Set CUDA architectures from CPUINFER_CUDA_ARCHS: {archs_env}")
-        if os.environ.get("CPUINFER_USE_ROCM") == "1":
+        if _env_get_bool("CPUINFER_USE_ROCM", False):
             cmake_args.append("-DKTRANSFORMERS_USE_ROCM=ON")
-        if os.environ.get("CPUINFER_USE_MUSA") == "1":
+        if _env_get_bool("CPUINFER_USE_MUSA", False):
             cmake_args.append("-DKTRANSFORMERS_USE_MUSA=ON")
 
         # Respect user extra CMAKE_ARGS (space separated)
@@ -341,7 +379,7 @@ class CMakeBuild(build_ext):
             cmake_args += [a for a in extra.split() if a]
 
         # Force rebuild? (delete cache)
-        if os.environ.get("CPUINFER_FORCE_REBUILD") == "1":
+        if _env_get_bool("CPUINFER_FORCE_REBUILD", False):
             cache = build_temp / "CMakeCache.txt"
             if cache.exists():
                 cache.unlink()
