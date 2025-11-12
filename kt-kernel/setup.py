@@ -229,9 +229,10 @@ class CMakeBuild(build_ext):
 
         # Vendor / feature specific toggles
         # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
-        if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
-            cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
-            print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+        # temporarily disabled this opt, use llamafile backend for now
+        # if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
+        #     cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+        #     print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
 
         # On ARM, enable KML by default if not explicitly toggled
         if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:

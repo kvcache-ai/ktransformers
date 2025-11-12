@@ -113,6 +113,7 @@ According to the following example, install both the **KTransformers** and **LLa
 # 1. Create a conda environment
 conda create -n Kllama python=3.10 # choose from : [3.10, 3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
+# ATTENTION: DO NOT skip this step, even if your cuda version is not 11.8! Otherwise, you will get this error: ImportError: libcudart.so.11.0: cannot open shared object file: No such file or directory.
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
 
 # 2. Install the LLaMA-Factory environment
