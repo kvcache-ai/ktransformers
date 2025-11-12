@@ -17,6 +17,7 @@ BUILD_OPTIONS (for "build" or "all"):
   (none)          Auto-detect CPU and configure automatically (recommended)
   --manual        Skip auto-detection, use manual configuration (see below)
   --skip-deps     Skip deps step even with subcommand "all"
+  --no-clean      Do not delete local build/ before building (default cleans)
 
 AUTO-DETECTION (Default):
   The script will automatically detect your CPU capabilities and configure:
@@ -139,14 +140,28 @@ detect_cpu_features() {
 build_step() {
   # Parse build-only flags from arguments to this function
   local MANUAL_MODE=0
+  local CLEAN_BUILD=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --manual) MANUAL_MODE=1; shift ;;
       --skip-deps) shift ;; # ignore here
+      --no-clean) CLEAN_BUILD=0; shift ;;
       -h|--help) usage ;;
       *) break ;;
     esac
   done
+
+  # Clean local build directory to ensure a fresh CMake/configure
+  local REPO_ROOT
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ "$CLEAN_BUILD" -eq 1 ]]; then
+    if [[ -d "$REPO_ROOT/build" ]]; then
+      echo "Cleaning previous build directory: $REPO_ROOT/build"
+      rm -rf "$REPO_ROOT/build"
+    fi
+  else
+    echo "Skipping clean of $REPO_ROOT/build (requested by --no-clean)"
+  fi
 
   if [ "$MANUAL_MODE" = "0" ]; then
   # Auto-detection mode

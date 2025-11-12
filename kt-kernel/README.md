@@ -31,6 +31,13 @@ git submodule update --init --recursive
 
 ### Quick Installation (Recommended)
 
+Step 0: Create and activate a conda environment (recommended):
+
+```bash
+conda create -n kt-kernel python=3.11 -y
+conda activate kt-kernel
+```
+
 You can now install in two clear steps using the same script.
 
 Option A: Two-step (explicit)
@@ -40,6 +47,7 @@ Option A: Two-step (explicit)
 ./install.sh deps
 
 # 2) Build and install kt-kernel (auto-detects CPU)
+#    By default, the script cleans the local ./build directory before compiling.
 ./install.sh build
 ```
 
@@ -48,6 +56,8 @@ Option B: One-step (deps + build)
 ```bash
 # Simple one-command installation
 ./install.sh            # same as: ./install.sh all
+# Skip deps step if you already installed them
+./install.sh all --skip-deps
 ```
 
 The install script will:
