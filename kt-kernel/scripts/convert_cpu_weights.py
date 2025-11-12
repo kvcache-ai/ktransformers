@@ -16,7 +16,7 @@ import numpy as np
 
 # Add parent directory to path to import kt_kernel
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from kt_kernel import AMXMoEWrapper
+from kt_kernel import KTMoEWrapper
 
 import triton
 import triton.language as tl
@@ -759,7 +759,7 @@ class OnlineQuantConverter(ConverterBase):
 
         # Create AMXMoEWrapper instance for this layer
         # num_gpu_experts=0 since we're converting all experts to CPU format
-        wrapper = AMXMoEWrapper(
+        wrapper = KTMoEWrapper(
             layer_idx=layer_idx,
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
@@ -768,10 +768,10 @@ class OnlineQuantConverter(ConverterBase):
             num_gpu_experts=0,  # All experts on CPU for conversion
             cpuinfer_threads=self.cpuinfer_threads,
             threadpool_count=self.threadpool_count,
-            amx_weight_path=self.output_path,  # Output path for quantized weights
+            weight_path=self.output_path,  # Output path for quantized weights
             chunked_prefill_size=512,  # Arbitrary value, not critical for conversion
             cpu_save=True,  # Enable saving quantized weights to output
-            amx_method=amx_method,  # Specify quantization method (AMXINT4 or AMXINT8)
+            method=amx_method,  # Specify quantization method (AMXINT4 or AMXINT8)
         )
 
         # Load and quantize weights from tensors
