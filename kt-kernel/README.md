@@ -2,6 +2,13 @@
 
 High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, and KML support.
 
+## Note
+
+**Current Support Status:**
+- ✅ **Intel CPUs with AMX**: Fully supported
+- ⚠️ **LLAMAFILE backend**: In preview, not yet fully complete
+- ⚠️ **AMD CPUs with BLIS**: Upcoming, not yet fully integrated
+
 ## Features
 
 - **AMX Optimization**: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference
@@ -11,7 +18,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - **Async Execution**: Non-blocking `submit_forward` / `sync_forward` API for improved pipelining
 - **Easy Integration**: Clean Python API with automatic backend selection
 
-**Note**: LLAMAFILE backend support is currently in *preview* and not yet fully complete.
+**Note**: *LLAMAFILE backend support is currently in *preview* and not yet fully complete.
 
 ## Installation
 
@@ -22,60 +29,40 @@ First, initialize git submodules:
 git submodule update --init --recursive
 ```
 
-### Standard Installation
+### Quick Installation (Recommended)
+
+The installation script automatically detects your CPU and configures optimal build settings:
+
 ```bash
-pip install .
+# Simple one-command installation (auto-detects CPU)
+./install.sh
 ```
 
-All dependencies (torch, safetensors, compressed-tensors, numpy) will be automatically installed from `pyproject.toml`.
+The installation script will:
+- Auto-detect CPU capabilities (AMX support)
+- Install `cmake` via conda (for the latest version)
+- Install system dependencies (`libhwloc-dev`, `pkg-config`) based on your OS
 
-### Editable Installation (Development)
+**What gets configured automatically:**
+- AMX CPU detected → `NATIVE + AMX=ON`
+- No AMX detected → `NATIVE + AMX=OFF`
+
+⚠️ **Important for LLAMAFILE backend users:** If you have an AMX-capable CPU and plan to use the LLAMAFILE backend, do NOT use auto-detection. Use manual mode with `AVX512` or `AVX2` instead of `NATIVE` to avoid compilation issues (see below).
+
+### Manual Configuration (Advanced)
+
+If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):
+
 ```bash
-pip install -e .
+# Example for LLAMAFILE backend on AMX CPU with AVX512
+export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
+export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
+
+# Run with manual mode
+./install.sh --manual
 ```
 
-### Optional: Pre-install Dependencies
-
-If you encounter network issues or prefer to install dependencies separately, you can optionally use:
-```bash
-pip install -r requirements.txt
-```
-
-**Note**: This step is **optional**. If your environment already has torch and other required packages, you can skip this and directly run `pip install .`
-
-### Error Troubleshooting
-
-#### CUDA Not Found
-
-```
- -- Looking for a CUDA compiler - NOTFOUND
-  CMake Error at CMakeLists.txt:389 (message):
-    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
-```
-
-Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
-
-Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and run `pip install .` again.
-
-#### hwloc Not Found
-
-```
-  -- Could NOT find PkgConfig (missing: PKG_CONFIG_EXECUTABLE)
-  CMake Error at CMakeLists.txt:531 (message):
-    FindHWLOC needs pkg-config program and PKG_CONFIG_PATH must contain the
-    path to hwloc.pc file.
-```
-
-Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
-
-```
-wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
-tar -xzf hwloc-2.12.2.tar.gz
-cd hwloc-2.12.2
-./configure
-make
-sudo make install
-```
+For advanced build options and binary distribution, see the [Build Configuration](#build-configuration) section. If you encounter issues, refer to [Error Troubleshooting](#error-troubleshooting).
 
 ## Verification
 
@@ -150,34 +137,90 @@ KTMoEWrapper.clear_buffer_cache()
 
 ## Build Configuration
 
-### CPU Instruction Set Tuning
-```bash
-export CPUINFER_CPU_INSTRUCT=FANCY   # Options: NATIVE|FANCY|AVX512|AVX2
-pip install .
-```
+### Manual Installation
 
-### AMX Configuration
-```bash
-export CPUINFER_ENABLE_AMX=ON        # Enable/disable AMX support
-pip install .
-```
+If you prefer manual installation without the `install.sh` script, follow these steps:
 
-### Build Type
-```bash
-export CPUINFER_BUILD_TYPE=Release   # Debug|RelWithDebInfo|Release
-pip install .
-```
+#### 1. Install System Dependencies
 
-### Parallel Build
-```bash
-export CPUINFER_PARALLEL=8           # Number of parallel jobs
-pip install .
-```
+**Prerequisites:**
+- `cmake` (recommended: `conda install -y cmake`)
+- `libhwloc-dev` and `pkg-config`
 
-### Verbose Build
+#### 2. Set Build Configuration
+
+**Core Options:**
+
+| Variable | Options | Description |
+|----------|---------|-------------|
+| `CPUINFER_CPU_INSTRUCT` | `NATIVE`, `AVX512`, `AVX2`, `FANCY` | CPU instruction set to use |
+| `CPUINFER_ENABLE_AMX` | `ON`, `OFF` | Enable Intel AMX support |
+| `CPUINFER_BUILD_TYPE` | `Release`, `Debug`, `RelWithDebInfo` | Build type (default: `Release`) |
+| `CPUINFER_PARALLEL` | Number | Parallel build jobs (default: auto-detect) |
+| `CPUINFER_VERBOSE` | `0`, `1` | Verbose build output (default: `0`) |
+
+**Instruction Set Details:**
+
+- **`NATIVE`**: Auto-detect and use all available CPU instructions (`-march=native`) - **Recommended for best performance**
+- **`AVX512`**: Explicit AVX512 support for Skylake-SP and Cascade Lake
+- **`AVX2`**: AVX2 support for maximum compatibility
+- **`FANCY`**: AVX512 with full extensions (AVX512F/BW/DQ/VL/VNNI) for Ice Lake+ and Zen 4+. Use this when building pre-compiled binaries to distribute to users with modern CPUs. For local builds, prefer `NATIVE` for better performance.
+
+**Example Configurations:**
+
 ```bash
+# Maximum performance on AMX CPU
+export CPUINFER_CPU_INSTRUCT=NATIVE
+export CPUINFER_ENABLE_AMX=ON
+
+# AVX512 CPU without AMX
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+
+# Compatibility build
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+
+# Debug build for development
+export CPUINFER_BUILD_TYPE=Debug
 export CPUINFER_VERBOSE=1
+```
+
+#### 3. Build and Install
+
+```bash
+# Editable installation (for development)
+pip install -e .
+
+# Standard installation
 pip install .
+```
+
+## Error Troubleshooting
+
+### CUDA Not Found
+
+```
+ -- Looking for a CUDA compiler - NOTFOUND
+  CMake Error at CMakeLists.txt:389 (message):
+    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
+```
+
+Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
+
+Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and reinstall again.
+
+### hwloc Not Found
+
+Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
+
+```
+wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
+tar -xzf hwloc-2.12.2.tar.gz
+cd hwloc-2.12.2
+./configure
+make
+sudo make install
 ```
 
 ## Weight Quantization

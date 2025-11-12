@@ -266,9 +266,10 @@ class CMakeBuild(build_ext):
 
         # Vendor / feature specific toggles
         # Enable AMD MoE kernel on AMD by default unless user explicitly set CPUINFER_ENABLE_AMD
-        if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
-            cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
-            print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+        # temporarily disabled this opt, use llamafile backend for now
+        # if d.get("vendor") == "amd" and os.environ.get("CPUINFER_ENABLE_AMD") is None:
+        #     cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+        #     print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
 
         # On ARM, enable KML by default if not explicitly toggled
         if d.get("vendor") == "arm" and os.environ.get("CPUINFER_ENABLE_KML") is None:
@@ -389,8 +390,11 @@ setup(
     author="kvcache-ai",
     license="Apache-2.0",
     python_requires=">=3.8",
-    packages=["kt_kernel"],
-    package_dir={"kt_kernel": "python"},
+    packages=["kt_kernel", "kt_kernel.utils"],
+    package_dir={
+        "kt_kernel": "python",
+        "kt_kernel.utils": "python/utils",
+    },
     ext_modules=[CMakeExtension("kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
