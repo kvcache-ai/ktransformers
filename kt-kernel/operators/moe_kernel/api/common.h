@@ -4,12 +4,12 @@
 
 #include "llama.cpp/ggml.h"
 #if !defined(CPUINFER_HAS_FLOAT16_T)
-using float16_t = ggml_fp16_t;
+// using float16_t = ggml_fp16_t;
 #define CPUINFER_HAS_FLOAT16_T 1
 #endif
 
 #if !defined(CPUINFER_HAS_BFLOAT16_T)
-using bfloat16_t = ggml_bf16_t;
+// using bfloat16_t = ggml_bf16_t;
 #define CPUINFER_HAS_BFLOAT16_T 1
 #endif  // CPUINFER_HAS_BFLOAT16_T
 const bool PACKED = true;

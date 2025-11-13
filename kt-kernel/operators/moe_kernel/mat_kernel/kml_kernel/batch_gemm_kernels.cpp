@@ -1,4 +1,4 @@
-#include "prefillgemm_int4/integer_gemm_kernels.h"
+#include "../batch_gemm_api.hpp"
 #include "utils.hpp"
 #ifdef __cplusplus
 extern "C" {

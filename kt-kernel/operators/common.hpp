@@ -4,6 +4,7 @@
 #include <map>
 
 #include "../cpu_backend/worker_pool.h"
+#include "../cpu_backend/shared_mem_buffer.h"
 #include "ggml.h"
 
 #if defined(__aarch64__) && defined(CPU_USE_KML)

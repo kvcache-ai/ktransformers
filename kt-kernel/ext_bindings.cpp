@@ -28,7 +28,7 @@
 #include "operators/kml/mla.hpp"
 #include "operators/kml/mla_int8.hpp"
 #endif
-#include "operators/kml/moe.hpp"
+
 static const bool _is_plain_ = true;
 #else
 static const bool _is_plain_ = false;
