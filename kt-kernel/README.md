@@ -1,7 +1,29 @@
 # KT-Kernel
 
-High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, and KML support.
+High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.
 
+- [Note](#note)
+- [Features](#features)
+- [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Quick Installation (Recommended)](#quick-installation-recommended)
+  - [Manual Configuration (Advanced)](#manual-configuration-advanced)
+- [Verification](#verification)
+- [Integration with SGLang](#integration-with-sglang)
+  - [Installation Steps](#installation-steps)
+  - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
+  - [KT-Kernel Parameters](#kt-kernel-parameters)
+- [Direct Python API Usage](#direct-python-api-usage)
+  - [Advanced Options](#advanced-options)
+- [Build Configuration](#build-configuration)
+  - [Manual Installation](#manual-installation)
+- [Error Troubleshooting](#error-troubleshooting)
+  - [CUDA Not Found](#cuda-not-found)
+  - [hwloc Not Found](#hwloc-not-found)
+- [Weight Quantization](#weight-quantization)
+  - [CPU Weights (for "cold" experts on CPU)](#cpu-weights-for-cold-experts-on-cpu)
+  - [GPU Weights (for "hot" experts on GPU)](#gpu-weights-for-hot-experts-on-gpu)
+- [Before Commit!](#before-commit)
 ## Note
 
 **Current Support Status:**
