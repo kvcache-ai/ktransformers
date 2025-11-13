@@ -39,9 +39,8 @@
       prefill_op: "KLinearTorch"
 - match:
     name: "^model\\.layers\\..*\\.mlp$"
-    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
   replace:
-    class: ktransformers.operators.experts.KQwen3MoeSparseMoeBlockV2     # mlp module with custom forward function
+    class: ktransformers.operators.experts.KQwen3MoeSparseMoeBlock     # mlp module with custom forward function
     kwargs:
       generate_device: "cuda"
       prefill_device: "cuda"
@@ -49,7 +48,7 @@
 - match:
     name: "^model\\.layers\\..*\\.mlp\\.experts$"
   replace:
-    class: ktransformers.operators.experts.KTransformersExpertsV2     # custom MoE Kernel with expert paralleism
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert paralleism
     kwargs:
       prefill_device: "cuda"
       prefill_op: "KExpertsTorch"
@@ -80,24 +79,8 @@
       prefill_device: "cpu"
 
 - match:
-    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeRMSNorm
-  replace:
-    class: ktransformers.operators.layernorm.KQwen3MoeRMSNorm
-    kwargs:
-      generate_device: "cuda"
-      prefill_device: "cuda"
-
-- match:
-    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeMLP
-  replace:
-    class:  ktransformers.operators.mlp.KQwen2MoeMLP
-    kwargs:
-      generate_device: "cuda"
-      prefill_device: "cuda"
-
-- match:
     name: "^model$"
   replace:
     class: "ktransformers.operators.models.KQwen3MoeModel"
     kwargs:
-      per_layer_prefill_intput_threshold: 0 
+      per_layer_prefill_intput_threshold: 0
