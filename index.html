@@ -182,37 +182,123 @@
                 <div id="content" class="content">
                     <main>
                         <div align="center">
-  <!-- <h1 id="ktransformers"><a class="header" href="#ktransformers">KTransformers</a></h1> -->
   <p align="center">
 <picture>
     <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
 </picture>
 </p>
+  <h3 id="a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations"><a class="header" href="#a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations">A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</a></h3>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬 Discussion</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
 </div>
-<h2 id="intro"><a class="header" href="#intro">🎉 Introduction</a></h2>
-KTransformers, pronounced as Quick Transformers, is designed to enhance your 🤗 <a href="https://github.com/huggingface/transformers">Transformers</a> experience with advanced kernel optimizations and placement/parallelism strategies.
-<br/><br/>
-KTransformers is a flexible, Python-centric framework designed with extensibility at its core. 
-By implementing and injecting an optimized module with a single line of code, users gain access to a Transformers-compatible
-interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified ChatGPT-like web UI. 
-<br/><br/>
-Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
-<h2 id="Updates"><a class="header" href="#Updates">🔥 Updates</a></h2>
+<h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="./kt-kernel/">kt-kernel</a> and <a href="./KT-SFT/">KT-SFT</a>.</p>
+<h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
-<li><strong>May 14, 2025</strong>: Support Intel Arc GPU (<a href="./en/xpu.html">Tutorial</a>).</li>
-<li><strong>Apr 9, 2025</strong>: Experimental support for LLaMA 4 models (<a href="./en/llama4.html">Tutorial</a>).</li>
-<li><strong>Apr 2, 2025</strong>: Support Multi-concurrency. (<a href="./en/balance-serve.html">Tutorial</a>).</li>
-<li><strong>Mar 27, 2025</strong>: Support Multi-concurrency.</li>
-<li><strong>Mar 15, 2025</strong>: Support ROCm on AMD GPU (<a href="./en/ROCm.html">Tutorial</a>).</li>
-<li><strong>Mar 5, 2025</strong>: Support unsloth 1.58/2.51 bits weights and <a href="./en/fp8_kernel.html">IQ1_S/FP8 hybrid</a> weights. Support 139K <a href="./en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a> for DeepSeek-V3 and R1 in 24GB VRAM.</li>
-<li><strong>Feb 25, 2025</strong>: Support <a href="./en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
-<li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is <a href="./en/DeepseekR1_V3_tutorial.html">here</a>.</li>
-<li><strong>Aug 28, 2024</strong>: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is <a href="./en/long_context_tutorial.html">here</a>.</li>
+<li><strong>Nov 6, 2025</strong>: Support Kimi-K2-Thinking inference (<a href="./doc/en/Kimi-K2-Thinking.html">Tutorial</a>) and fine-tune (<a href="./doc/en/SFT_Installation_Guide_KimiK2.html">Tutorial</a>)</li>
+<li><strong>Nov 4, 2025</strong>: KTransformers Fine-Tuning × LLaMA-Factory Integration. (<a href="./doc/en/KTransformers-Fine-Tuning_User-Guide.html">Tutorial</a>)</li>
+<li><strong>Oct 27, 2025</strong>: Support Ascend NPU. (<a href="./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.html">Tutorial</a>)</li>
+<li><strong>Oct 10, 2025</strong>: Integrating into SGLang. (<a href="https://github.com/sgl-project/sglang/issues/11425">Roadmap</a>, <a href="https://lmsys.org/blog/2025-10-22-KTransformers/">Blog</a>)</li>
+<li><strong>Sept 11, 2025</strong>: Support Qwen3-Next. (<a href="./doc/en/Qwen3-Next.html">Tutorial</a>)</li>
+<li><strong>Sept 05, 2025</strong>: Support Kimi-K2-0905. (<a href="./doc/en/Kimi-K2.html">Tutorial</a>)</li>
+<li><strong>July 26, 2025</strong>: Support SmallThinker and GLM4-MoE. (<a href="./doc/en/SmallThinker_and_Glm4moe.html">Tutorial</a>)</li>
+<li><strong>July 11, 2025</strong>: Support Kimi-K2. (<a href="./doc/en/Kimi-K2.html">Tutorial</a>)</li>
+<li><strong>June 30, 2025</strong>: Support 3-layer (GPU-CPU-Disk) <a href="./doc/en/prefix_cache.html">prefix cache</a> reuse.</li>
+<li><strong>May 14, 2025</strong>: Support Intel Arc GPU (<a href="./doc/en/xpu.html">Tutorial</a>).</li>
+<li><strong>Apr 29, 2025</strong>: Support AMX-Int8、 AMX-BF16 and Qwen3MoE (<a href="./doc/en/AMX.html">Tutorial</a>)</li>
+<li><strong>Apr 9, 2025</strong>: Experimental support for LLaMA 4 models (<a href="./doc/en/llama4.html">Tutorial</a>).</li>
+<li><strong>Apr 2, 2025</strong>: Support Multi-concurrency. (<a href="./doc/en/balance-serve.html">Tutorial</a>).</li>
+<li><strong>Mar 15, 2025</strong>: Support ROCm on AMD GPU (<a href="./doc/en/ROCm.html">Tutorial</a>).</li>
+<li><strong>Mar 5, 2025</strong>: Support unsloth 1.58/2.51 bits weights and <a href="./doc/en/fp8_kernel.html">IQ1_S/FP8 hybrid</a> weights. Support 139K <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022--v023-longer-context--fp8-kernel">Longer Context</a> for DeepSeek-V3 and R1 in 24GB VRAM.</li>
+<li><strong>Feb 25, 2025</strong>: Support <a href="./doc/en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
+<li><strong>Feb 15, 2025</strong>: Longer Context (from 4K to 8K for 24GB VRAM) &amp; Slightly Faster Speed （+15%, up to 16 Tokens/s), update <a href="./doc/en/DeepseekR1_V3_tutorial.html">docs</a> and <a href="https://kvcache-ai.github.io/ktransformers/">online books</a>.</li>
+<li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. For detailed show case and reproduction tutorial, see <a href="./doc/en/DeepseekR1_V3_tutorial.html">here</a>.</li>
 <li><strong>Aug 28, 2024</strong>: Decrease DeepseekV2's required VRAM from 21G to 11G.</li>
-<li><strong>Aug 15, 2024</strong>: Update detailed <a href="./en/injection_tutorial.html">TUTORIAL</a> for injection and multi-GPU.</li>
+<li><strong>Aug 15, 2024</strong>: Update detailed <a href="doc/en/injection_tutorial.html">tutorial</a> for injection and multi-GPU.</li>
 <li><strong>Aug 14, 2024</strong>: Support llamfile as linear backend.</li>
 <li><strong>Aug 12, 2024</strong>: Support multiple GPU; Support new model: mixtral 8*7B  and 8*22B; Support q2k, q3k, q5k dequant on gpu.</li>
 <li><strong>Aug 9, 2024</strong>: Support windows native.</li>
+</ul>
+<hr />
+<h2 id="-core-modules"><a class="header" href="#-core-modules">📦 Core Modules</a></h2>
+<h3 id="-kt-kernel---high-performance-inference-kernels"><a class="header" href="#-kt-kernel---high-performance-inference-kernels">🚀 <a href="./kt-kernel/">kt-kernel</a> - High-Performance Inference Kernels</a></h3>
+<p>CPU-optimized kernel operations for heterogeneous LLM inference.</p>
+<img width="1049" height="593" alt="image" src="https://github.com/user-attachments/assets/68f423da-3f55-4025-bdc9-9ceaa554f00b" />
+<p><strong>Key Features:</strong></p>
+<ul>
+<li><strong>AMX/AVX Acceleration</strong>: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference</li>
+<li><strong>MoE Optimization</strong>: Efficient Mixture-of-Experts inference with NUMA-aware memory management</li>
+<li><strong>Quantization Support</strong>: CPU-side INT4/INT8 quantized weights, GPU-side GPTQ support</li>
+<li><strong>Easy Integration</strong>: Clean Python API for SGLang and other frameworks</li>
+</ul>
+<p><strong>Quick Start:</strong></p>
+<pre><code class="language-bash">cd kt-kernel
+pip install .
+</code></pre>
+<p><strong>Use Cases:</strong></p>
+<ul>
+<li>CPU-GPU hybrid inference for large MoE models</li>
+<li>Integration with SGLang for production serving</li>
+<li>Heterogeneous expert placement (hot experts on GPU, cold experts on CPU)</li>
+</ul>
+<p><strong>Performance Examples:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Model</th><th>Hardware Configuration</th><th>Total Throughput</th><th>Output Throughput</th></tr></thead><tbody>
+<tr><td>DeepSeek-R1-0528 (FP8)</td><td>8×L20 GPU + Xeon Gold 6454S</td><td>227.85 tokens/s</td><td>87.58 tokens/s (8-way concurrency)</td></tr>
+</tbody></table>
+</div>
+<p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
+<hr />
+<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./KT-SFT/">KT-SFT</a> - Fine-Tuning Framework</a></h3>
+<p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
+<p><img src="./doc/assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
+<p><strong>Key Features:</strong></p>
+<ul>
+<li><strong>Resource Efficient</strong>: Fine-tune 671B DeepSeek-V3 with just <strong>70GB GPU memory</strong> + 1.3TB RAM</li>
+<li><strong>LoRA Support</strong>: Full LoRA fine-tuning with heterogeneous acceleration</li>
+<li><strong>LLaMA-Factory Integration</strong>: Seamless integration with popular fine-tuning framework</li>
+<li><strong>Production Ready</strong>: Chat, batch inference, and metrics evaluation</li>
+</ul>
+<p><strong>Performance Examples:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Model</th><th>Configuration</th><th>Throughput</th><th>GPU Memory</th></tr></thead><tbody>
+<tr><td>DeepSeek-V3 (671B)</td><td>LoRA + AMX</td><td>~40 tokens/s</td><td>70GB (multi-GPU)</td></tr>
+<tr><td>DeepSeek-V2-Lite (14B)</td><td>LoRA + AMX</td><td>~530 tokens/s</td><td>6GB</td></tr>
+</tbody></table>
+</div>
+<p><strong>Quick Start:</strong></p>
+<pre><code class="language-bash">cd KT-SFT
+# Install environment following KT-SFT/README.md
+USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+</code></pre>
+<p>👉 <strong><a href="./KT-SFT/README.html">Full Documentation →</a></strong></p>
+<hr />
+<h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
+<p>If you use KTransformers in your research, please cite our paper:</p>
+<pre><code class="language-bibtex">@inproceedings{10.1145/3731569.3764843,
+  title = {KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models},
+  author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+  booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
+  year = {2025}
+}
+</code></pre>
+<h2 id="-contributors--team"><a class="header" href="#-contributors--team">👥 Contributors &amp; Team</a></h2>
+<p>Developed and maintained by:</p>
+<ul>
+<li><a href="https://madsys.cs.tsinghua.edu.cn/">MADSys Lab</a> @ Tsinghua University</li>
+<li><a href="http://approaching.ai/">Approaching.AI</a></li>
+<li>Community contributors</li>
+</ul>
+<p>We welcome contributions! Please feel free to submit issues and pull requests.</p>
+<h2 id="-community--support"><a class="header" href="#-community--support">💬 Community &amp; Support</a></h2>
+<ul>
+<li><strong>GitHub Issues</strong>: <a href="https://github.com/kvcache-ai/ktransformers/issues">Report bugs or request features</a></li>
+<li><strong>GitHub Discussions</strong>: <a href="https://github.com/kvcache-ai/ktransformers/discussions">Ask questions and share ideas</a></li>
+<li><strong>WeChat Group</strong>: See <a href="./archive/WeChatGroup.png">archive/WeChatGroup.png</a></li>
+</ul>
+<h2 id="-kt-original-code"><a class="header" href="#-kt-original-code">📦 KT original Code</a></h2>
+<p>The original integrated KTransformers framework has been archived to the <a href="./archive/"><code>archive/</code></a> directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.</p>
+<p>For the original documentation with full quick-start guides and examples, see:</p>
+<ul>
+<li><a href="./archive/README.html">archive/README.md</a> (English)</li>
+<li><a href="./archive/README_ZH.html">archive/README_ZH.md</a> (中文)</li>
 </ul>
 
                     </main>
@@ -220,7 +306,7 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
 
-                            <a rel="next prefetch" href="en/install.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="en/kt-kernel_intro.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -231,7 +317,7 @@ Our vision for KTransformers is to serve as a flexible platform for experimentin
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
 
-                    <a rel="next prefetch" href="en/install.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="en/kt-kernel_intro.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

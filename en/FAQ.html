@@ -182,179 +182,16 @@
                 <div id="content" class="content">
                     <main>
                         <!-- omit in toc -->
-<h1 id="faq"><a class="header" href="#faq">FAQ</a></h1>
-<ul>
-<li><a href="#install">Install</a>
-<ul>
-<li><a href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></li>
-<li><a href="#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial  token</a></li>
-</ul>
-</li>
-<li><a href="#usage">Usage</a>
-<ul>
-<li><a href="#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></li>
-<li><a href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></li>
-<li><a href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></li>
-<li><a href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></li>
-<li><a href="#q-loading-gguf-error">Q: Loading gguf error</a></li>
-<li><a href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></li>
-<li><a href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></li>
-<li><a href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></li>
-<li><a href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></li>
-</ul>
-</li>
-</ul>
-<h2 id="install"><a class="header" href="#install">Install</a></h2>
-<h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
-<pre><code>in Ubuntu 22.04 installation need to add the:
-sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-sudo apt-get update
-sudo apt-get install --only-upgrade libstdc++6
-</code></pre>
-<p>from-https://github.com/kvcache-ai/ktransformers/issues/117#issuecomment-2647542979</p>
-<h3 id="q-deepseek-r1-not-outputting-initial--token"><a class="header" href="#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial <think> token</a></h3>
-<blockquote>
-<p>from deepseek-R1 doc:<br>
-Additionally, we have observed that the DeepSeek-R1 series models tend to bypass thinking pattern (i.e., outputting "&lt;think&gt;\n\n&lt;/think&gt;") when responding to certain queries, which can adversely affect the model's performance. To ensure that the model engages in thorough reasoning, we recommend enforcing the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output.</p>
-</blockquote>
-<p>So we fix this by manually adding "&lt;think&gt;\n" token at prompt end (you can check out at local_chat.py),
-and pass the arg <code>--force_think true </code> can let the local_chat initiate the response with "&lt;think&gt;\n"</p>
-<p>from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552</p>
-<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
-<h3 id="q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it"><a class="header" href="#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></h3>
-<ol>
-<li>
-<p>Get larger context.</p>
-<ol>
-<li>local_chat.py: You can increase the context window size by setting <code>--max_new_tokens</code> to a larger value.</li>
-<li>server: Increase the `--cache_lens' to a larger value.</li>
-</ol>
-</li>
-<li>
-<p>Move more weights to the GPU.
-Refer to the ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-4.yaml</p>
-<pre><code class="language-yaml">- match:
-   name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$" # inject experts in layer 4~10 as marlin expert
- replace:
-   class: ktransformers.operators.experts.KTransformersExperts  
-   kwargs:
-     generate_device: "cuda:0" # run in cuda:0; marlin only support GPU
-     generate_op:  "KExpertsMarlin" # use marlin expert
- recursive: False
-</code></pre>
-<p>You can modify layer as you want, eg. <code>name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$"</code> to <code>name: "^model\\.layers\\.([4-12])\\.mlp\\.experts$"</code> to move more weights to the GPU.</p>
-<blockquote>
-<p>Note: The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.
-Note：Currently, executing experts on the GPU will conflict with CUDA Graph. Without CUDA Graph, there will be a significant slowdown. Therefore, unless you have a substantial amount of VRAM (placing a single layer of experts for DeepSeek-V3/R1 on the GPU requires at least 5.6GB of VRAM), we do not recommend enabling this feature. We are actively working on optimization.
-Note KExpertsTorch is untested.</p>
-</blockquote>
-</li>
-</ol>
-<h3 id="q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them"><a class="header" href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></h3>
-<p>Use the <code>--optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
-<blockquote>
-<p>Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.</p>
-</blockquote>
-<h3 id="q-how-to-get-the-best-performance"><a class="header" href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></h3>
-<p>You have to set <code>--cpu_infer</code> to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.</p>
-<h3 id="q-my-deepseek-r1-model-is-not-thinking"><a class="header" href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></h3>
-<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think True </code>.</p>
-<h3 id="q-loading-gguf-error"><a class="header" href="#q-loading-gguf-error">Q: Loading gguf error</a></h3>
-<p>Make sure you:</p>
-<ol>
-<li>Have the <code>gguf</code> file in the <code>--gguf_path</code> directory.</li>
-<li>The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.</li>
-<li>The folder name it self should not end with <code>.gguf</code>, eg. <code>Deep-gguf</code> is correct, <code>Deep.gguf</code> is wrong.</li>
-<li>The file itself is not corrupted; you can verify this by checking that the sha256sum matches the one from huggingface, modelscope, or hf-mirror.</li>
-</ol>
-<h3 id="q-version-glibcxx_3430-not-found"><a class="header" href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></h3>
-<p>The detailed error:</p>
-<blockquote>
-<p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
-</blockquote>
-<p>Running <code>conda install -c conda-forge libstdcxx-ng</code> can solve the problem.</p>
-<h3 id="q-when-running-the-bfloat16-moe-model-the-data-shows-nan"><a class="header" href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></h3>
-<p>The detailed error:</p>
-<pre><code class="language-shell">Traceback (most recent call last):
-  File "/root/ktransformers/ktransformers/local_chat.py", line 183, in &lt;module&gt;
-    fire.Fire(local_chat)
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 135, in Fire
-    component_trace = _Fire(component, args, parsed_flag_args, context, name)
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 468, in _Fire
-    component, remaining_args = _CallAndUpdateTrace(
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 684, in _CallAndUpdateTrace
-    component = fn(*varargs, **kwargs)
-  File "/root/ktransformers/ktransformers/local_chat.py", line 177, in local_chat
-    generated = prefill_and_generate(
-  File "/root/ktransformers/ktransformers/util/utils.py", line 204, in prefill_and_generate
-    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
-  File "/root/ktransformers/ktransformers/util/utils.py", line 128, in decode_one_tokens
-    next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
-RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
-</code></pre>
-<p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
-<h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
-<p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
-<h3 id="q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures"><a class="header" href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></h3>
-<p>From: https://github.com/kvcache-ai/ktransformers/issues/374</p>
-<ol>
-<li>First, download the latest source code using git.</li>
-<li>Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.</li>
-<li>Next, you need to compile from the ktransformers source code until it successfully compiles on your local machine.</li>
-<li>Then, install flash-attn. It won't be used, but not installing it will cause an error.</li>
-<li>Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.</li>
-<li>Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.</li>
-<li>During the running process, check the memory usage. Observe its invocation through the top command. The memory capacity on a single CPU must be greater than the complete size of the model. (For multiple CPUs, it's just a copy.)
-Finally, confirm that the model is fully loaded into memory and specific weight layers are fully loaded into the GPU memory. Then, try to input content in the chat interface and observe if there are any errors.</li>
-</ol>
-<p>Attention, for better perfomance, you can check this <a href="https://github.com/kvcache-ai/ktransformers/issues/374#issuecomment-2667520838">method</a> in the issue</p>
-<blockquote>
-<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L274-L279</p>
-<pre><code class="language-diff">+ original_dtype = query_states.dtype
-+ target_dtype = torch.half
-+ query_states = query_states.to(target_dtype)
-+ compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
-+ compressed_kv = compressed_kv.to(target_dtype)
-+ attn_output = attn_output.to(target_dtype)
-
-decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
-                            page_table,
-                            position_ids.squeeze(0).to(torch.int32)+1, attn_logits,
-                            4, #num_kv_splits # follow vLLM, fix it TODO
-                            self.softmax_scale,
-                            past_key_value.page_size)
-
-+ attn_output = attn_output.to(original_dtype)
-</code></pre>
-<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L320-L326</p>
-<pre><code class="language-diff">- attn_output = flash_attn_func( 
--     query_states, 
--     key_states, 
--     value_states_padded, 
--     softmax_scale=self.softmax_scale, 
--     causal=True, 
-- )
-+ attn_output = F.scaled_dot_product_attention(
-+     query_states.transpose(1, 2),
-+     key_states.transpose(1, 2),
-+     value_states_padded.transpose(1, 2),
-+     scale=self.softmax_scale,
-+     is_causal=True
-+ ).transpose(1, 2)
-</code></pre>
-</blockquote>
+<h1 id="see-the-issue-faq-page"><a class="header" href="#see-the-issue-faq-page">see the issue <a href="https://github.com/kvcache-ai/ktransformers/issues/1608">FAQ page</a></a></h1>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../en/makefile_usage.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../en/KTransformers-Fine-Tuning_Developer-Technical-Notes.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../en/V3-success.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                                <i class="fa fa-angle-right"></i>
-                            </a>
 
                         <div style="clear: both"></div>
                     </nav>
@@ -362,13 +199,10 @@ decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_k
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../en/makefile_usage.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../en/KTransformers-Fine-Tuning_Developer-Technical-Notes.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../en/V3-success.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
-                        <i class="fa fa-angle-right"></i>
-                    </a>
             </nav>
 
         </div>

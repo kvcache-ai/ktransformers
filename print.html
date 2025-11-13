@@ -180,348 +180,810 @@
                 <div id="content" class="content">
                     <main>
                         <div align="center">
-  <!-- <h1 id="ktransformers"><a class="header" href="#ktransformers">KTransformers</a></h1> -->
   <p align="center">
 <picture>
     <img alt="KTransformers" src="https://github.com/user-attachments/assets/d5a2492f-a415-4456-af99-4ab102f13f8b" width=50%>
 </picture>
 </p>
+  <h3 id="a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations"><a class="header" href="#a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations">A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</a></h3>
+  <strong><a href="index.html#-overview">🎯 Overview</a> | <a href="index.html#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="index.html#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="index.html#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬 Discussion</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
 </div>
-<h2 id="intro"><a class="header" href="#intro">🎉 Introduction</a></h2>
-KTransformers, pronounced as Quick Transformers, is designed to enhance your 🤗 <a href="https://github.com/huggingface/transformers">Transformers</a> experience with advanced kernel optimizations and placement/parallelism strategies.
-<br/><br/>
-KTransformers is a flexible, Python-centric framework designed with extensibility at its core. 
-By implementing and injecting an optimized module with a single line of code, users gain access to a Transformers-compatible
-interface, RESTful APIs compliant with OpenAI and Ollama, and even a simplified ChatGPT-like web UI. 
-<br/><br/>
-Our vision for KTransformers is to serve as a flexible platform for experimenting with innovative LLM inference optimizations. Please let us know if you need any other features.
-<h2 id="Updates"><a class="header" href="#Updates">🔥 Updates</a></h2>
+<h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="./kt-kernel/">kt-kernel</a> and <a href="./KT-SFT/">KT-SFT</a>.</p>
+<h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
-<li><strong>May 14, 2025</strong>: Support Intel Arc GPU (<a href="./en/xpu.html">Tutorial</a>).</li>
-<li><strong>Apr 9, 2025</strong>: Experimental support for LLaMA 4 models (<a href="./en/llama4.html">Tutorial</a>).</li>
-<li><strong>Apr 2, 2025</strong>: Support Multi-concurrency. (<a href="./en/balance-serve.html">Tutorial</a>).</li>
-<li><strong>Mar 27, 2025</strong>: Support Multi-concurrency.</li>
-<li><strong>Mar 15, 2025</strong>: Support ROCm on AMD GPU (<a href="./en/ROCm.html">Tutorial</a>).</li>
-<li><strong>Mar 5, 2025</strong>: Support unsloth 1.58/2.51 bits weights and <a href="./en/fp8_kernel.html">IQ1_S/FP8 hybrid</a> weights. Support 139K <a href="./en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a> for DeepSeek-V3 and R1 in 24GB VRAM.</li>
-<li><strong>Feb 25, 2025</strong>: Support <a href="./en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
-<li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. The detailed tutorial is <a href="./en/DeepseekR1_V3_tutorial.html">here</a>.</li>
-<li><strong>Aug 28, 2024</strong>: Support 1M context under the InternLM2.5-7B-Chat-1M model, utilizing 24GB of VRAM and 150GB of DRAM. The detailed tutorial is <a href="./en/long_context_tutorial.html">here</a>.</li>
+<li><strong>Nov 6, 2025</strong>: Support Kimi-K2-Thinking inference (<a href="./doc/en/Kimi-K2-Thinking.html">Tutorial</a>) and fine-tune (<a href="./doc/en/SFT_Installation_Guide_KimiK2.html">Tutorial</a>)</li>
+<li><strong>Nov 4, 2025</strong>: KTransformers Fine-Tuning × LLaMA-Factory Integration. (<a href="./doc/en/KTransformers-Fine-Tuning_User-Guide.html">Tutorial</a>)</li>
+<li><strong>Oct 27, 2025</strong>: Support Ascend NPU. (<a href="./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.html">Tutorial</a>)</li>
+<li><strong>Oct 10, 2025</strong>: Integrating into SGLang. (<a href="https://github.com/sgl-project/sglang/issues/11425">Roadmap</a>, <a href="https://lmsys.org/blog/2025-10-22-KTransformers/">Blog</a>)</li>
+<li><strong>Sept 11, 2025</strong>: Support Qwen3-Next. (<a href="./doc/en/Qwen3-Next.html">Tutorial</a>)</li>
+<li><strong>Sept 05, 2025</strong>: Support Kimi-K2-0905. (<a href="./doc/en/Kimi-K2.html">Tutorial</a>)</li>
+<li><strong>July 26, 2025</strong>: Support SmallThinker and GLM4-MoE. (<a href="./doc/en/SmallThinker_and_Glm4moe.html">Tutorial</a>)</li>
+<li><strong>July 11, 2025</strong>: Support Kimi-K2. (<a href="./doc/en/Kimi-K2.html">Tutorial</a>)</li>
+<li><strong>June 30, 2025</strong>: Support 3-layer (GPU-CPU-Disk) <a href="./doc/en/prefix_cache.html">prefix cache</a> reuse.</li>
+<li><strong>May 14, 2025</strong>: Support Intel Arc GPU (<a href="./doc/en/xpu.html">Tutorial</a>).</li>
+<li><strong>Apr 29, 2025</strong>: Support AMX-Int8、 AMX-BF16 and Qwen3MoE (<a href="./doc/en/AMX.html">Tutorial</a>)</li>
+<li><strong>Apr 9, 2025</strong>: Experimental support for LLaMA 4 models (<a href="./doc/en/llama4.html">Tutorial</a>).</li>
+<li><strong>Apr 2, 2025</strong>: Support Multi-concurrency. (<a href="./doc/en/balance-serve.html">Tutorial</a>).</li>
+<li><strong>Mar 15, 2025</strong>: Support ROCm on AMD GPU (<a href="./doc/en/ROCm.html">Tutorial</a>).</li>
+<li><strong>Mar 5, 2025</strong>: Support unsloth 1.58/2.51 bits weights and <a href="./doc/en/fp8_kernel.html">IQ1_S/FP8 hybrid</a> weights. Support 139K <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022--v023-longer-context--fp8-kernel">Longer Context</a> for DeepSeek-V3 and R1 in 24GB VRAM.</li>
+<li><strong>Feb 25, 2025</strong>: Support <a href="./doc/en/fp8_kernel.html">FP8 GPU kernel</a> for DeepSeek-V3 and R1; <a href="./doc/en/DeepseekR1_V3_tutorial.html#v022-longer-context">Longer Context</a>.</li>
+<li><strong>Feb 15, 2025</strong>: Longer Context (from 4K to 8K for 24GB VRAM) &amp; Slightly Faster Speed （+15%, up to 16 Tokens/s), update <a href="./doc/en/DeepseekR1_V3_tutorial.html">docs</a> and <a href="https://kvcache-ai.github.io/ktransformers/">online books</a>.</li>
+<li><strong>Feb 10, 2025</strong>: Support Deepseek-R1 and V3 on single (24GB VRAM)/multi gpu and 382G DRAM, up to 3~28x speedup. For detailed show case and reproduction tutorial, see <a href="./doc/en/DeepseekR1_V3_tutorial.html">here</a>.</li>
 <li><strong>Aug 28, 2024</strong>: Decrease DeepseekV2's required VRAM from 21G to 11G.</li>
-<li><strong>Aug 15, 2024</strong>: Update detailed <a href="./en/injection_tutorial.html">TUTORIAL</a> for injection and multi-GPU.</li>
+<li><strong>Aug 15, 2024</strong>: Update detailed <a href="doc/en/injection_tutorial.html">tutorial</a> for injection and multi-GPU.</li>
 <li><strong>Aug 14, 2024</strong>: Support llamfile as linear backend.</li>
 <li><strong>Aug 12, 2024</strong>: Support multiple GPU; Support new model: mixtral 8*7B  and 8*22B; Support q2k, q3k, q5k dequant on gpu.</li>
 <li><strong>Aug 9, 2024</strong>: Support windows native.</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
-<h1 id="how-to-run-deepseek-r1"><a class="header" href="#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a></h1>
+<hr />
+<h2 id="-core-modules"><a class="header" href="#-core-modules">📦 Core Modules</a></h2>
+<h3 id="-kt-kernel---high-performance-inference-kernels"><a class="header" href="#-kt-kernel---high-performance-inference-kernels">🚀 <a href="./kt-kernel/">kt-kernel</a> - High-Performance Inference Kernels</a></h3>
+<p>CPU-optimized kernel operations for heterogeneous LLM inference.</p>
+<img width="1049" height="593" alt="image" src="https://github.com/user-attachments/assets/68f423da-3f55-4025-bdc9-9ceaa554f00b" />
+<p><strong>Key Features:</strong></p>
 <ul>
-<li><a href="en/install.html#how-to-run-deepseek-r1">How to Run DeepSeek-R1</a>
-<ul>
-<li><a href="en/install.html#preparation">Preparation</a></li>
-<li><a href="en/install.html#installation">Installation</a>
-<ul>
-<li><a href="en/install.html#attention">Attention</a></li>
-<li><a href="en/install.html#supported-models-include">Supported models include</a></li>
-<li><a href="en/install.html#support-quantize-format">Support quantize format</a></li>
+<li><strong>AMX/AVX Acceleration</strong>: Intel AMX and AVX512/AVX2 optimized kernels for INT4/INT8 quantized inference</li>
+<li><strong>MoE Optimization</strong>: Efficient Mixture-of-Experts inference with NUMA-aware memory management</li>
+<li><strong>Quantization Support</strong>: CPU-side INT4/INT8 quantized weights, GPU-side GPTQ support</li>
+<li><strong>Easy Integration</strong>: Clean Python API for SGLang and other frameworks</li>
 </ul>
-</li>
-</ul>
-</li>
-</ul>
-<p>In this document, we will show you how to install and run KTransformers on your local machine. There are two versions:</p>
-<ul>
-<li>V0.2 is the current main branch.</li>
-<li>V0.3 is a preview version only provides binary distribution for now.</li>
-<li>To reproduce our DeepSeek-R1/V3 results, please refer to <a href="en/./DeepseekR1_V3_tutorial.html">Deepseek-R1/V3 Tutorial</a> for more detail settings after installation.</li>
-</ul>
-<h2 id="preparation"><a class="header" href="#preparation">Preparation</a></h2>
-<p>Some preparation:</p>
-<ul>
-<li>
-<p>CUDA 12.1 and above, if you didn't have it yet, you may install from <a href="https://developer.nvidia.com/cuda-downloads">here</a>.</p>
-<pre><code class="language-sh"># Adding CUDA to PATH
-if [ -d "/usr/local/cuda/bin" ]; then
-    export PATH=$PATH:/usr/local/cuda/bin
-fi
-
-if [ -d "/usr/local/cuda/lib64" ]; then
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
-    # Or you can add it to /etc/ld.so.conf and run ldconfig as root:
-    # echo "/usr/local/cuda-12.x/lib64" | sudo tee -a /etc/ld.so.conf
-    # sudo ldconfig
-fi
-
-if [ -d "/usr/local/cuda" ]; then
-    export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
-fi
+<p><strong>Quick Start:</strong></p>
+<pre><code class="language-bash">cd kt-kernel
+pip install .
 </code></pre>
-</li>
-<li>
-<p>Linux-x86_64 with gcc, g++&gt;=11 and cmake&gt;=3.25 (using Ubuntu as an example)</p>
-</li>
-<li>
-<p><strong>Note</strong>: The default CMake version in Ubuntu 22.04 LTS or higher may not support newer CUDA language dialects (e.g., CUDA 20). This can cause errors such as Target "cmTC_xxxxxx" requires the language dialect "CUDA20", but CMake does not know the compile flags to use to enable it. To resolve this, install a newer CMake version, for instance, by adding the Kitware APT repository.</p>
-<pre><code class="language-sh">sudo apt-get update 
-sudo apt-get install build-essential cmake ninja-build patchelf
-</code></pre>
-</li>
-<li>
-<p>We recommend using <a href="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh">Miniconda3</a> or <a href="https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh">Anaconda3</a> to create a virtual environment with Python=3.11 to run our program. Assuming your Anaconda installation directory is <code>~/anaconda3</code>, you should ensure that the version identifier of the GNU C++standard library used by Anaconda includes <code>GLIBCXX_3.4.32</code></p>
-<pre><code class="language-sh">conda create --name ktransformers python=3.11
-conda activate ktransformers # you may need to run ‘conda init’ and reopen shell first
-
-conda install -c conda-forge libstdcxx-ng # Anaconda provides a package called `libstdcxx-ng` that includes a newer version of `libstdc++`, which can be installed via `conda-forge`.
-
-strings ~/anaconda3/envs/ktransformers/lib/libstdc++.so.6 | grep GLIBCXX
-</code></pre>
-</li>
-<li>
-<p>Make sure that PyTorch, packaging, ninja is installed You can also <a href="https://pytorch.org/get-started/previous-versions/">install previous versions of PyTorch</a></p>
-<pre><code>pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
-pip3 install packaging ninja cpufeature numpy
-</code></pre>
-</li>
-<li>
-<p>At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.</p>
-</li>
+<p><strong>Use Cases:</strong></p>
+<ul>
+<li>CPU-GPU hybrid inference for large MoE models</li>
+<li>Integration with SGLang for production serving</li>
+<li>Heterogeneous expert placement (hot experts on GPU, cold experts on CPU)</li>
 </ul>
+<p><strong>Performance Examples:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Model</th><th>Hardware Configuration</th><th>Total Throughput</th><th>Output Throughput</th></tr></thead><tbody>
+<tr><td>DeepSeek-R1-0528 (FP8)</td><td>8×L20 GPU + Xeon Gold 6454S</td><td>227.85 tokens/s</td><td>87.58 tokens/s (8-way concurrency)</td></tr>
+</tbody></table>
+</div>
+<p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
+<hr />
+<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./KT-SFT/">KT-SFT</a> - Fine-Tuning Framework</a></h3>
+<p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
+<p><img src="./doc/assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
+<p><strong>Key Features:</strong></p>
+<ul>
+<li><strong>Resource Efficient</strong>: Fine-tune 671B DeepSeek-V3 with just <strong>70GB GPU memory</strong> + 1.3TB RAM</li>
+<li><strong>LoRA Support</strong>: Full LoRA fine-tuning with heterogeneous acceleration</li>
+<li><strong>LLaMA-Factory Integration</strong>: Seamless integration with popular fine-tuning framework</li>
+<li><strong>Production Ready</strong>: Chat, batch inference, and metrics evaluation</li>
+</ul>
+<p><strong>Performance Examples:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Model</th><th>Configuration</th><th>Throughput</th><th>GPU Memory</th></tr></thead><tbody>
+<tr><td>DeepSeek-V3 (671B)</td><td>LoRA + AMX</td><td>~40 tokens/s</td><td>70GB (multi-GPU)</td></tr>
+<tr><td>DeepSeek-V2-Lite (14B)</td><td>LoRA + AMX</td><td>~530 tokens/s</td><td>6GB</td></tr>
+</tbody></table>
+</div>
+<p><strong>Quick Start:</strong></p>
+<pre><code class="language-bash">cd KT-SFT
+# Install environment following KT-SFT/README.md
+USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+</code></pre>
+<p>👉 <strong><a href="./KT-SFT/README.html">Full Documentation →</a></strong></p>
+<hr />
+<h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
+<p>If you use KTransformers in your research, please cite our paper:</p>
+<pre><code class="language-bibtex">@inproceedings{10.1145/3731569.3764843,
+  title = {KTransformers: Unleashing the Full Potential of CPU/GPU Hybrid Inference for MoE Models},
+  author = {Chen, Hongtao and Xie, Weiyu and Zhang, Boxin and Tang, Jingqi and Wang, Jiahao and Dong, Jianwei and Chen, Shaoyuan and Yuan, Ziwei and Lin, Chen and Qiu, Chengyu and Zhu, Yuening and Ou, Qingliang and Liao, Jiaqi and Chen, Xianglin and Ai, Zhiyuan and Wu, Yongwei and Zhang, Mingxing},
+  booktitle = {Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles},
+  year = {2025}
+}
+</code></pre>
+<h2 id="-contributors--team"><a class="header" href="#-contributors--team">👥 Contributors &amp; Team</a></h2>
+<p>Developed and maintained by:</p>
+<ul>
+<li><a href="https://madsys.cs.tsinghua.edu.cn/">MADSys Lab</a> @ Tsinghua University</li>
+<li><a href="http://approaching.ai/">Approaching.AI</a></li>
+<li>Community contributors</li>
+</ul>
+<p>We welcome contributions! Please feel free to submit issues and pull requests.</p>
+<h2 id="-community--support"><a class="header" href="#-community--support">💬 Community &amp; Support</a></h2>
+<ul>
+<li><strong>GitHub Issues</strong>: <a href="https://github.com/kvcache-ai/ktransformers/issues">Report bugs or request features</a></li>
+<li><strong>GitHub Discussions</strong>: <a href="https://github.com/kvcache-ai/ktransformers/discussions">Ask questions and share ideas</a></li>
+<li><strong>WeChat Group</strong>: See <a href="./archive/WeChatGroup.png">archive/WeChatGroup.png</a></li>
+</ul>
+<h2 id="-kt-original-code"><a class="header" href="#-kt-original-code">📦 KT original Code</a></h2>
+<p>The original integrated KTransformers framework has been archived to the <a href="./archive/"><code>archive/</code></a> directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.</p>
+<p>For the original documentation with full quick-start guides and examples, see:</p>
+<ul>
+<li><a href="./archive/README.html">archive/README.md</a> (English)</li>
+<li><a href="./archive/README_ZH.html">archive/README_ZH.md</a> (中文)</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div><h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
+<p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
+<ul>
+<li><a href="en/kt-kernel_intro.html#note">Note</a></li>
+<li><a href="en/kt-kernel_intro.html#features">Features</a></li>
+<li><a href="en/kt-kernel_intro.html#installation">Installation</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#prerequisites">Prerequisites</a></li>
+<li><a href="en/kt-kernel_intro.html#quick-installation-recommended">Quick Installation (Recommended)</a></li>
+<li><a href="en/kt-kernel_intro.html#manual-configuration-advanced">Manual Configuration (Advanced)</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#verification">Verification</a></li>
+<li><a href="en/kt-kernel_intro.html#integration-with-sglang">Integration with SGLang</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#installation-steps">Installation Steps</a></li>
+<li><a href="en/kt-kernel_intro.html#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
+<li><a href="en/kt-kernel_intro.html#kt-kernel-parameters">KT-Kernel Parameters</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#direct-python-api-usage">Direct Python API Usage</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#advanced-options">Advanced Options</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#build-configuration">Build Configuration</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#manual-installation">Manual Installation</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#error-troubleshooting">Error Troubleshooting</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#cuda-not-found">CUDA Not Found</a></li>
+<li><a href="en/kt-kernel_intro.html#hwloc-not-found">hwloc Not Found</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#weight-quantization">Weight Quantization</a>
+<ul>
+<li><a href="en/kt-kernel_intro.html#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for "cold" experts on CPU)</a></li>
+<li><a href="en/kt-kernel_intro.html#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for "hot" experts on GPU)</a></li>
+</ul>
+</li>
+<li><a href="en/kt-kernel_intro.html#before-commit">Before Commit!</a></li>
+</ul>
+<h2 id="note"><a class="header" href="#note">Note</a></h2>
+<p><strong>Current Support Status:</strong></p>
+<ul>
+<li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported</li>
+<li>⚠️ <strong>Universal CPU with llamafile</strong>: In preview, not yet fully complete</li>
+<li>⚠️ <strong>AMD CPUs with BLIS</strong>: Upcoming, not yet fully integrated</li>
+</ul>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<ul>
+<li><strong>AMX Optimization</strong>: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference</li>
+<li><strong>Multi-Backend</strong>: Unified <code>KTMoEWrapper</code> API supporting multiple backends (AMXINT4, AMXINT8, LLAMAFILE*)</li>
+<li><strong>Flexible Backends</strong>: AVX512, AVX2 via pluggable backend architecture</li>
+<li><strong>Efficient MoE</strong>: Optimized Mixture-of-Experts operations with NUMA-aware memory management</li>
+<li><strong>Async Execution</strong>: Non-blocking <code>submit_forward</code> / <code>sync_forward</code> API for improved pipelining</li>
+<li><strong>Easy Integration</strong>: Clean Python API with automatic backend selection</li>
+</ul>
+<p><strong>Note</strong>: *LLAMAFILE backend support is currently in <em>preview</em> and not yet fully complete.</p>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
-<h3 id="attention"><a class="header" href="#attention">Attention</a></h3>
-<p>If you want to use numa support, not only do you need to set USE_NUMA=1, but you also need to make sure you have installed the libnuma-dev (<code>sudo apt-get install libnuma-dev</code> may help you).</p>
-<p>[Optional] If you want to use the multi-concurrent version, please install the following dependencies.</p>
-<pre><code>sudo apt install libtbb-dev libssl-dev libcurl4-openssl-dev libaio1 libaio-dev libgflags-dev zlib1g-dev libfmt-dev
+<h3 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h3>
+<p>First, initialize git submodules:</p>
+<pre><code class="language-bash">git submodule update --init --recursive
 </code></pre>
-<!-- 1. ~~Use a Docker image, see [documentation for Docker](./doc/en/Docker.md)~~
-   
-   >We are working on the latest docker image, please wait for a while.
+<h3 id="quick-installation-recommended"><a class="header" href="#quick-installation-recommended">Quick Installation (Recommended)</a></h3>
+<p>Step 0: Create and activate a conda environment (recommended):</p>
+<pre><code class="language-bash">conda create -n kt-kernel python=3.11 -y
+conda activate kt-kernel
+</code></pre>
+<p>You can now install in two clear steps using the same script.</p>
+<p>Option A: Two-step (explicit)</p>
+<pre><code class="language-bash"># 1) Install system prerequisites (cmake, hwloc, pkg-config)
+./install.sh deps
 
-2. ~~You can install using Pypi (for linux):~~
-    > We are working on the latest pypi package, please wait for a while.
-   
-   ```
-   pip install ktransformers --no-build-isolation
-   ```
-   
-   for windows we prepare a pre compiled whl package on [ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl](https://github.com/kvcache-ai/ktransformers/releases/download/v0.2.0/ktransformers-0.2.0+cu125torch24avx2-cp312-cp312-win_amd64.whl), which require cuda-12.5, torch-2.4, python-3.11, more pre compiled package are being produced.  -->
-<p>Download source code and compile:</p>
+# 2) Build and install kt-kernel (auto-detects CPU)
+#    By default, the script cleans the local ./build directory before compiling.
+./install.sh build
+</code></pre>
+<p>Option B: One-step (deps + build)</p>
+<pre><code class="language-bash">./install.sh
+</code></pre>
+<p>The install script will:</p>
 <ul>
-<li>
-<p>init source code</p>
-<pre><code class="language-sh">git clone https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers
-git submodule update --init --recursive
-</code></pre>
-</li>
-<li>
-<p>[Optional] If you want to run with website, please <a href="en/./api/server/website.html">compile the website</a> before execute <code>bash install.sh</code></p>
-</li>
-<li>
-<p>For Linux</p>
+<li>Auto-detect CPU capabilities (AMX support)</li>
+<li>Install <code>cmake</code> via conda (if available)</li>
+<li>Install system dependencies (<code>libhwloc-dev</code>, <code>pkg-config</code>) based on your OS</li>
+</ul>
+<p><strong>What gets configured automatically:</strong></p>
 <ul>
-<li>
-<p>For simple install:</p>
-<pre><code class="language-shell">bash install.sh
-</code></pre>
-</li>
-<li>
-<p>For those who have two cpu and 1T RAM:</p>
-<pre><code class="language-shell"># Make sure your system has dual sockets and double size RAM than the model's size (e.g. 1T RAM for 512G model)
- apt install libnuma-dev
- export USE_NUMA=1
- bash install.sh # or #make dev_install
-</code></pre>
-</li>
-<li>
-<p>For Multi-concurrency with 500G RAM:</p>
-<pre><code class="language-shell">USE_BALANCE_SERVE=1 bash ./install.sh
-</code></pre>
-</li>
-<li>
-<p>For Multi-concurrency with two cpu and 1T RAM:</p>
-<pre><code class="language-shell">USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh
-</code></pre>
-</li>
+<li>AMX CPU detected → <code>NATIVE + AMX=ON</code></li>
+<li>No AMX detected → <code>NATIVE + AMX=OFF</code></li>
 </ul>
-</li>
-<li>
-<p>For Windows (Windows native temporarily deprecated, please try WSL)</p>
-<pre><code class="language-shell">install.bat
+<p>⚠️ <strong>Important for LLAMAFILE backend users:</strong> If you have an AMX-capable CPU and plan to use the LLAMAFILE backend, do NOT use auto-detection. Use manual mode with <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
+<h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
+<p>If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):</p>
+<pre><code class="language-bash"># Example for LLAMAFILE backend on AMX CPU with AVX512
+export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
+export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
+
+# Run with manual mode (build only)
+./install.sh build --manual
 </code></pre>
-</li>
-</ul>
+<p>For advanced build options and binary distribution, see the <a href="en/kt-kernel_intro.html#build-configuration">Build Configuration</a> section. If you encounter issues, refer to <a href="en/kt-kernel_intro.html#error-troubleshooting">Error Troubleshooting</a>.</p>
+<h2 id="verification"><a class="header" href="#verification">Verification</a></h2>
+<pre><code class="language-bash">python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
+</code></pre>
+<h2 id="integration-with-sglang"><a class="header" href="#integration-with-sglang">Integration with SGLang</a></h2>
+<p>KT-Kernel can be used standalone via <a href="en/kt-kernel_intro.html#direct-python-api-usage">Direct Python API</a> or integrated with SGLang for production deployment. This section describes SGLang integration to enable CPU-GPU heterogeneous inference, where "hot" experts run on GPU and "cold" experts run on CPU for optimal resource utilization.</p>
+<h3 id="installation-steps"><a class="header" href="#installation-steps">Installation Steps</a></h3>
+<h4 id="1-install-sglang"><a class="header" href="#1-install-sglang">1. Install SGLang</a></h4>
+<pre><code class="language-bash">git clone https://github.com/sgl-project/sglang.git
+cd sglang
+pip install -e "python[all]"
+</code></pre>
+<h4 id="2-prepare-weights"><a class="header" href="#2-prepare-weights">2. Prepare Weights</a></h4>
+<p>You need both GPU weights and CPU weights for heterogeneous inference:</p>
+<p><strong>GPU Weights:</strong> Use the original / quantized model weights.</p>
+<p><strong>CPU Weights:</strong> Quantize to AMX-optimized format using the conversion script:</p>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \  # Depends on your GPU weights type: fp8, fp16, or bf16
+  --output /path/to/cpu-weights \
+  --quant-method int8  # or int4
+</code></pre>
+<p><strong>Supported input formats:</strong> FP8, FP16, BF16 → INT4/INT8.</p>
+<p>For more details, see:</p>
 <ul>
-<li>If you are developer, you can make use of the makefile to compile and format the code. <br> the detailed usage of makefile is <a href="en/./makefile_usage.html">here</a></li>
+<li><a href="en/kt-kernel_intro.html#cpu-weights-for-cold-experts-on-cpu">CPU Weights conversion</a></li>
+<li><a href="en/kt-kernel_intro.html#gpu-weights-for-hot-experts-on-gpu">GPU Weights quantization</a></li>
 </ul>
-<h3 id="local-chat"><a class="header" href="#local-chat">Local Chat</a></h3>
-We provide a simple command-line local chat Python script that you can run for testing.
-<blockquote>
-<p>Note: this is a very simple test tool only support one round chat without any memory about last input, if you want to try full ability of the model, you may go to <a href="en/install.html#id_666">RESTful API and Web UI</a>.</p>
-</blockquote>
-<h4 id="run-example"><a class="header" href="#run-example">Run Example</a></h4>
-<pre><code class="language-shell"># Begin from root of your cloned repo!
-# Begin from root of your cloned repo!!
-# Begin from root of your cloned repo!!! 
-
-# Download mzwing/DeepSeek-V2-Lite-Chat-GGUF from huggingface
-mkdir DeepSeek-V2-Lite-Chat-GGUF
-cd DeepSeek-V2-Lite-Chat-GGUF
-
-wget https://huggingface.co/mradermacher/DeepSeek-V2-Lite-GGUF/resolve/main/DeepSeek-V2-Lite.Q4_K_M.gguf -O DeepSeek-V2-Lite-Chat.Q4_K_M.gguf
-
-cd .. # Move to repo's root dir
-
-# Start local chat
-python -m ktransformers.local_chat --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-
-# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
-# python  ktransformers.local_chat --model_path ./DeepSeek-V2-Lite --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-</code></pre>
-<p>It features the following arguments:</p>
+<p><strong>Note:</strong> LLAMAFILE backend supports GGUF format directly, but this feature is still in preview.</p>
+<h4 id="3-launch-sglang-server"><a class="header" href="#3-launch-sglang-server">3. Launch SGLang Server</a></h4>
+<p>Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:</p>
+<p><strong>KT-Kernel Parameters to Add:</strong></p>
 <ul>
-<li>
-<p><code>--model_path</code> (required): Name of the model (such as "deepseek-ai/DeepSeek-V2-Lite-Chat" which will automatically download configs from <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite">Hugging Face</a>). Or if you already got local files  you may directly use that path to initialize the model.</p>
-<blockquote>
-<p>Note: <strong>.safetensors</strong> files are not required in the directory. We only need config files to build model and tokenizer.</p>
-</blockquote>
-</li>
-<li>
-<p><code>--gguf_path</code> (required): Path of a directory containing GGUF files which could that can be downloaded from <a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">Hugging Face</a>. Note that the directory should only contains GGUF of current model, which means you need one separate directory for each model.</p>
-</li>
-<li>
-<p><code>--optimize_config_path</code> (required except for Qwen2Moe and DeepSeek-V2): Path of YAML file containing optimize rules. There are two rule files pre-written in the <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">ktransformers/optimize/optimize_rules</a> directory for optimizing DeepSeek-V2 and Qwen2-57B-A14, two SOTA MoE models.</p>
-</li>
-<li>
-<p><code>--max_new_tokens</code>: Int (default=1000). Maximum number of new tokens to generate.</p>
-</li>
-<li>
-<p><code>--cpu_infer</code>: Int (default=10). The number of CPUs used for inference. Should ideally be set to the (total number of cores - 2).</p>
-</li>
+<li><code>--kt-method</code>: Backend method (AMXINT4, AMXINT8, or LLAMAFILE)</li>
+<li><code>--kt-weight-path</code>: Path to the converted CPU weights</li>
+<li><code>--kt-cpuinfer</code>: Number of CPU inference threads (set to physical cores)</li>
+<li><code>--kt-threadpool-count</code>: Number of thread pools (set to NUMA node count)</li>
+<li><code>--kt-num-gpu-experts</code>: Number of experts to keep on GPU</li>
+<li><code>--kt-max-deferred-experts-per-token</code>: Deferred experts for pipelined execution</li>
 </ul>
-<h3 id="start-server"><a class="header" href="#start-server">Start Server</a></h3>
-We provide a server script, which supports multi-concurrency functionality in version v0.2.4.
-<pre><code>python ktransformers/server/main.py --model_path /mnt/data/models/DeepSeek-V3 --gguf_path /mnt/data/models/DeepSeek-V3-GGUF/DeepSeek-V3-Q4_K_M/ --cpu_infer 62 --optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-serve.yaml --port 10002 --chunk_size 256 --max_new_tokens 1024 --max_batch_size 4 --port 10002 --cache_lens 32768 --backend_type balance_serve
+<p>Example:</p>
+<pre><code class="language-bash">python -m sglang.launch_server \
+  [your normal SGLang parameters...] \
+  --kt-method AMXINT8 \
+  --kt-weight-path /path/to/cpu-weights \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
 </code></pre>
-<p>It features the following arguments:</p>
+<p>See <a href="en/kt-kernel_intro.html#kt-kernel-parameters">KT-Kernel Parameters</a> section below for detailed parameter tuning guidelines.</p>
+<h3 id="complete-example-qwen3-30b-a3b"><a class="header" href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></h3>
+<p>This example demonstrates the full workflow from downloading weights to launching the server.</p>
+<p><strong>Hardware Configuration:</strong></p>
 <ul>
-<li><code>--chunk_size</code>: Maximum number of tokens processed in a single run by the engine.</li>
-<li><code>--cache_lens</code>: Total length of kvcache allocated by the scheduler. All requests share a kvcache space corresponding to 32768 tokens, and the space occupied will be released after the requests are completed.</li>
-<li><code>--backend_type</code>: <code>balance_serve</code> is a multi-concurrency backend engine introduced in version v0.2.4. The original single-concurrency engine is <code>ktransformers</code>.</li>
-<li><code>--max_batch_size</code>: Maximum number of requests (prefill + decode) processed in a single run by the engine. (Supported only by <code>balance_serve</code>)</li>
+<li><strong>GPU</strong>: NVIDIA RTX 4090 24GB</li>
+<li><strong>CPU</strong>: 2x Intel Xeon Gold 6454S (64 physical cores total, 128 threads, 2 NUMA nodes)</li>
+<li><strong>Model</strong>: <a href="https://huggingface.co/Qwen/Qwen3-30B-A3B">Qwen3-30B-A3B</a></li>
+<li><strong>GPU Weights</strong>: BF16 original weights</li>
+<li><strong>CPU Weights</strong>: AMXINT8 quantized</li>
 </ul>
-<details>
-<summary>Supported Models/quantization</summary>
-<h3 id="supported-models-include"><a class="header" href="#supported-models-include">Supported models include</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>✅<strong>Supported Models</strong></th><th>❌<strong>Deprecated Models</strong></th></tr></thead><tbody>
-<tr><td>DeepSeek-R1</td><td><del>InternLM2.5-7B-Chat-1M</del></td></tr>
-<tr><td>DeepSeek-V3</td><td></td></tr>
-<tr><td>DeepSeek-V2</td><td></td></tr>
-<tr><td>DeepSeek-V2.5</td><td></td></tr>
-<tr><td>Qwen2-57B</td><td></td></tr>
-<tr><td>DeepSeek-V2-Lite</td><td></td></tr>
-<tr><td>Mixtral-8x7B</td><td></td></tr>
-<tr><td>Mixtral-8x22B</td><td></td></tr>
+<p><strong>How to verify your system configuration:</strong></p>
+<pre><code class="language-bash"># Check CPU configuration
+lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core|Socket\(s\)|NUMA node\(s\)"
+# Expected output example:
+CPU(s):                                  128
+Thread(s) per core:                      2
+Socket(s):                               2
+NUMA node(s):                            2
+# → Physical cores = CPU(s) / Thread(s) per core = 128 / 2 = 64
+</code></pre>
+<p><strong>Parameter Rationale:</strong></p>
+<ul>
+<li><code>--kt-cpuinfer 64</code>: Set to physical cores (64), not hyperthreads (128)</li>
+<li><code>--kt-threadpool-count 2</code>: 2 NUMA nodes detected (dual-socket system)</li>
+<li><code>--kt-num-gpu-experts 32</code>: With 24GB GPU memory, we can fit ~32 experts on GPU for this model (varies by model architecture and actual memory usage)</li>
+<li><code>--kt-max-deferred-experts-per-token 2</code>: Enable pipelined execution - allows CPU to process next batch while GPU completes current batch</li>
+</ul>
+<h4 id="step-1-download-model-weights"><a class="header" href="#step-1-download-model-weights">Step 1: Download model weights</a></h4>
+<pre><code class="language-bash"># Install huggingface-cli if not already installed
+pip install huggingface-hub
+
+# Download model from Hugging Face
+hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+</code></pre>
+<h4 id="step-2-convert-to-cpu-weights-amxint8"><a class="header" href="#step-2-convert-to-cpu-weights-amxint8">Step 2: Convert to CPU weights (AMXINT8)</a></h4>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /mnt/data/models/Qwen3-30B-A3B \
+  --input-type bf16 \
+  --output /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --quant-method int8
+</code></pre>
+<h4 id="step-3-launch-sglang-server"><a class="header" href="#step-3-launch-sglang-server">Step 3: Launch SGLang server</a></h4>
+<pre><code class="language-bash">python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /mnt/data/models/Qwen3-30B-A3B \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name Qwen3-30B-A3B \
+  --enable-mixed-chunk \
+  --kt-method AMXINT8 \
+  --kt-weight-path /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+</code></pre>
+<h3 id="kt-kernel-parameters"><a class="header" href="#kt-kernel-parameters">KT-Kernel Parameters</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr></thead><tbody>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, or <code>LLAMAFILE</code> (preview)</td></tr>
+<tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
+<tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
+<tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
+<tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
+<tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-2 recommended)</td></tr>
 </tbody></table>
 </div>
-<h3 id="support-quantize-format"><a class="header" href="#support-quantize-format">Support quantize format</a></h3>
-<div class="table-wrapper"><table><thead><tr><th>✅<strong>Supported Formats</strong></th><th>❌<strong>Deprecated Formats</strong></th></tr></thead><tbody>
-<tr><td>IQ1_S</td><td><del>IQ2_XXS</del></td></tr>
-<tr><td>IQ2_XXS</td><td></td></tr>
-<tr><td>Q2_K_L</td><td></td></tr>
-<tr><td>Q2_K_XS</td><td></td></tr>
-<tr><td>Q3_K_M</td><td></td></tr>
-<tr><td>Q4_K_M</td><td></td></tr>
-<tr><td>Q5_K_M</td><td></td></tr>
-<tr><td>Q6_K</td><td></td></tr>
-<tr><td>Q8_0</td><td></td></tr>
-</tbody></table>
-</div></details>
-<details>
-<summary>Suggested Model</summary>
-<div class="table-wrapper"><table><thead><tr><th>Model Name</th><th>Model Size</th><th>VRAM</th><th>Minimum DRAM</th><th>Recommended DRAM</th></tr></thead><tbody>
-<tr><td>DeepSeek-R1-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
-<tr><td>DeepSeek-V3-q4_k_m</td><td>377G</td><td>14G</td><td>382G</td><td>512G</td></tr>
-<tr><td>DeepSeek-V2-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
-<tr><td>DeepSeek-V2.5-q4_k_m</td><td>133G</td><td>11G</td><td>136G</td><td>192G</td></tr>
-<tr><td>DeepSeek-V2.5-IQ4_XS</td><td>117G</td><td>10G</td><td>107G</td><td>128G</td></tr>
-<tr><td>Qwen2-57B-A14B-Instruct-q4_k_m</td><td>33G</td><td>8G</td><td>34G</td><td>64G</td></tr>
-<tr><td>DeepSeek-V2-Lite-q4_k_m</td><td>9.7G</td><td>3G</td><td>13G</td><td>16G</td></tr>
-<tr><td>Mixtral-8x7B-q4_k_m</td><td>25G</td><td>1.6G</td><td>51G</td><td>64G</td></tr>
-<tr><td>Mixtral-8x22B-q4_k_m</td><td>80G</td><td>4G</td><td>86.1G</td><td>96G</td></tr>
-<tr><td>InternLM2.5-7B-Chat-1M</td><td>15.5G</td><td>15.5G</td><td>8G(32K context)</td><td>150G (1M context)</td></tr>
-</tbody></table>
-</div>
-<p>More will come soon. Please let us know which models you are most interested in.</p>
-<p>Be aware that you need to be subject to their corresponding model licenses when using <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/LICENSE">DeepSeek</a> and <a href="https://huggingface.co/Qwen/Qwen2-72B-Instruct/blob/main/LICENSE">QWen</a>.</p>
-</details>
-<details>
-  <summary>Click To Show how to run other examples</summary>
+<p><strong>Parameter Guidelines:</strong></p>
 <ul>
 <li>
-<p>Qwen2-57B</p>
-<pre><code class="language-sh">pip install flash_attn # For Qwen2
-
-mkdir Qwen2-57B-GGUF &amp;&amp; cd Qwen2-57B-GGUF
-
-wget https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/resolve/main/qwen2-57b-a14b-instruct-q4_k_m.gguf?download=true -O qwen2-57b-a14b-instruct-q4_k_m.gguf
-
-cd ..
-
-python -m ktransformers.local_chat --model_name Qwen/Qwen2-57B-A14B-Instruct --gguf_path ./Qwen2-57B-GGUF
-
-# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct
-# python  ktransformers/local_chat.py --model_path ./Qwen2-57B-A14B-Instruct --gguf_path ./DeepSeek-V2-Lite-Chat-GGUF
-</code></pre>
+<p><strong><code>kt-method</code></strong>: Choose based on your CPU and weight format:</p>
+<ul>
+<li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
+<li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
+<li><code>LLAMAFILE</code>: Preview support for GGUF format (not fully complete)</li>
+</ul>
 </li>
 <li>
-<p>Deepseek-V2</p>
-<pre><code class="language-sh">mkdir DeepSeek-V2-Chat-0628-GGUF &amp;&amp; cd DeepSeek-V2-Chat-0628-GGUF
-# Download weights
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00001-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00002-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00003-of-00004.gguf
-wget https://huggingface.co/bartowski/DeepSeek-V2-Chat-0628-GGUF/resolve/main/DeepSeek-V2-Chat-0628-Q4_K_M/DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf -o DeepSeek-V2-Chat-0628-Q4_K_M-00004-of-00004.gguf
-
-cd ..
-
-python -m ktransformers.local_chat --model_name deepseek-ai/DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
-
-# If you see “OSError: We couldn't connect to 'https://huggingface.co' to load this file”, try：
-
-# GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/deepseek-ai/DeepSeek-V2-Chat-0628
-
-# python -m ktransformers.local_chat --model_path ./DeepSeek-V2-Chat-0628 --gguf_path ./DeepSeek-V2-Chat-0628-GGUF
-</code></pre>
+<p><strong><code>kt-cpuinfer</code></strong>: Set to the number of <strong>physical CPU cores</strong> (not hyperthreads).</p>
+<ul>
+<li>Check physical cores: <code>lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core"</code></li>
+<li>Physical cores = CPU(s) / Thread(s) per core</li>
+<li>Example: If CPU(s)=128 and Thread(s) per core=2, then physical cores = 64</li>
+<li><strong>Important</strong>: Do NOT set to hyperthread count - this will degrade performance</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-threadpool-count</code></strong>: Set to the number of <strong>NUMA nodes</strong>.</p>
+<ul>
+<li>Check NUMA count: <code>lscpu | grep "NUMA node(s)"</code></li>
+<li>Or use: <code>numactl --hardware | grep "available"</code></li>
+<li><strong>Note</strong>: NUMA node count is NOT necessarily the number of physical CPUs
+<ul>
+<li>It represents memory domains, which may be divided within a single CPU or across multiple CPUs</li>
+<li>Use the NUMA node count from <code>lscpu</code>, regardless of physical CPU count</li>
+</ul>
+</li>
+<li>Typical values: 1-2 for single-socket, 2-4 for dual-socket systems</li>
+<li>This enables better memory bandwidth utilization across NUMA domains</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-num-gpu-experts</code></strong>: Determine based on GPU memory and profiling:</p>
+<ul>
+<li>More GPU experts = lower latency but higher GPU memory usage (May cause OOM)</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-max-deferred-experts-per-token</code></strong>: Enables pipelined execution:</p>
+<ul>
+<li><code>0</code>: Synchronous execution (simpler, higher latency)</li>
+<li><code>1-2</code>: Deferred execution (better latency, requires tuning) - recommended</li>
+<li><code>3-4</code>: Higher deferred count (possible but rarely beneficial)</li>
+</ul>
 </li>
 </ul>
-<div class="table-wrapper"><table><thead><tr><th>model name</th><th>weights download link</th></tr></thead><tbody>
-<tr><td>Qwen2-57B</td><td><a href="https://huggingface.co/Qwen/Qwen2-57B-A14B-Instruct-GGUF/tree/main">Qwen2-57B-A14B-gguf-Q4K-M</a></td></tr>
-<tr><td>DeepseekV2-coder</td><td><a href="https://huggingface.co/LoneStriker/DeepSeek-Coder-V2-Instruct-GGUF/tree/main">DeepSeek-Coder-V2-Instruct-gguf-Q4K-M</a></td></tr>
-<tr><td>DeepseekV2-chat</td><td><a href="https://huggingface.co/bullerwins/DeepSeek-V2-Chat-0628-GGUF/tree/main">DeepSeek-V2-Chat-gguf-Q4K-M</a></td></tr>
-<tr><td>DeepseekV2-lite</td><td><a href="https://huggingface.co/mzwing/DeepSeek-V2-Lite-Chat-GGUF/tree/main">DeepSeek-V2-Lite-Chat-GGUF-Q4K-M</a></td></tr>
-<tr><td>DeepSeek-R1</td><td><a href="https://huggingface.co/unsloth/DeepSeek-R1-GGUF/tree/main/DeepSeek-R1-Q4_K_M">DeepSeek-R1-gguf-Q4K-M</a></td></tr>
+<h2 id="direct-python-api-usage"><a class="header" href="#direct-python-api-usage">Direct Python API Usage</a></h2>
+<p>For standalone usage without SGLang, you can use KT-Kernel directly via Python API:</p>
+<pre><code class="language-python">from kt_kernel import KTMoEWrapper
+
+# Initialize the MoE wrapper
+wrapper = KTMoEWrapper(
+    layer_idx=0,
+    num_experts=8,
+    num_experts_per_tok=2,
+    hidden_size=4096,
+    moe_intermediate_size=14336,
+    num_gpu_experts=2,
+    cpuinfer_threads=32,
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE" (preview)
+)
+
+# Load weights (from disk - pre-quantized)
+wrapper.load_weights(physical_to_logical_map)
+
+# Or load weights from tensors (online quantization)
+wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+
+# Run inference
+output = wrapper.forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+
+# Or use async API for better performance
+wrapper.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+# ... do other work ...
+output = wrapper.sync_forward(hidden_states, cuda_stream)
+</code></pre>
+<h3 id="advanced-options"><a class="header" href="#advanced-options">Advanced Options</a></h3>
+<pre><code class="language-python"># Initialize with additional options
+wrapper = KTMoEWrapper(
+    layer_idx=0,
+    num_experts=8,
+    num_experts_per_tok=2,
+    hidden_size=4096,
+    moe_intermediate_size=14336,
+    num_gpu_experts=2,
+    cpuinfer_threads=32,
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4",
+    cpu_save=False,  # Keep weights in CPU memory after loading
+    max_deferred_experts_per_token=0  # Number of experts to defer (for pipelined execution)
+)
+
+# Pre-allocate buffers for specific batch sizes (improves performance)
+KTMoEWrapper.set_capture_batch_sizes([1, 2, 4, 8, 16])
+
+# Query captured batch sizes
+batch_sizes = KTMoEWrapper.get_capture_batch_sizes()
+
+# Clear buffer cache to free memory
+KTMoEWrapper.clear_buffer_cache()
+</code></pre>
+<h2 id="build-configuration"><a class="header" href="#build-configuration">Build Configuration</a></h2>
+<h3 id="manual-installation"><a class="header" href="#manual-installation">Manual Installation</a></h3>
+<p>If you prefer manual installation without the <code>install.sh</code> script, follow these steps:</p>
+<h4 id="1-install-system-dependencies"><a class="header" href="#1-install-system-dependencies">1. Install System Dependencies</a></h4>
+<p><strong>Prerequisites:</strong></p>
+<ul>
+<li><code>cmake</code> (recommended: <code>conda install -y cmake</code>)</li>
+<li><code>libhwloc-dev</code> and <code>pkg-config</code></li>
+</ul>
+<h4 id="2-set-build-configuration"><a class="header" href="#2-set-build-configuration">2. Set Build Configuration</a></h4>
+<p><strong>Core Options:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Options</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>CPUINFER_CPU_INSTRUCT</code></td><td><code>NATIVE</code>, <code>AVX512</code>, <code>AVX2</code>, <code>FANCY</code></td><td>CPU instruction set to use</td></tr>
+<tr><td><code>CPUINFER_ENABLE_AMX</code></td><td><code>ON</code>, <code>OFF</code></td><td>Enable Intel AMX support</td></tr>
+<tr><td><code>CPUINFER_BUILD_TYPE</code></td><td><code>Release</code>, <code>Debug</code>, <code>RelWithDebInfo</code></td><td>Build type (default: <code>Release</code>)</td></tr>
+<tr><td><code>CPUINFER_PARALLEL</code></td><td>Number</td><td>Parallel build jobs (default: auto-detect)</td></tr>
+<tr><td><code>CPUINFER_VERBOSE</code></td><td><code>0</code>, <code>1</code></td><td>Verbose build output (default: <code>0</code>)</td></tr>
 </tbody></table>
-</div></details>
-<!-- pin block for jump -->
-<span id='id_666'>
-<h3 id="restful-api-and-web-ui"><a class="header" href="#restful-api-and-web-ui">RESTful API and Web UI  </a></h3>
-<p>Start without website:</p>
-<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF --port 10002
+</div>
+<p><strong>Instruction Set Details:</strong></p>
+<ul>
+<li><strong><code>NATIVE</code></strong>: Auto-detect and use all available CPU instructions (<code>-march=native</code>) - <strong>Recommended for best performance</strong></li>
+<li><strong><code>AVX512</code></strong>: Explicit AVX512 support for Skylake-SP and Cascade Lake</li>
+<li><strong><code>AVX2</code></strong>: AVX2 support for maximum compatibility</li>
+<li><strong><code>FANCY</code></strong>: AVX512 with full extensions (AVX512F/BW/DQ/VL/VNNI) for Ice Lake+ and Zen 4+. Use this when building pre-compiled binaries to distribute to users with modern CPUs. For local builds, prefer <code>NATIVE</code> for better performance.</li>
+</ul>
+<p><strong>Example Configurations:</strong></p>
+<pre><code class="language-bash"># Maximum performance on AMX CPU
+export CPUINFER_CPU_INSTRUCT=NATIVE
+export CPUINFER_ENABLE_AMX=ON
+
+# AVX512 CPU without AMX
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+
+# Compatibility build
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+
+# Debug build for development
+export CPUINFER_BUILD_TYPE=Debug
+export CPUINFER_VERBOSE=1
 </code></pre>
-<p>Start with website:</p>
-<pre><code class="language-sh">ktransformers --model_path deepseek-ai/DeepSeek-V2-Lite-Chat --gguf_path /path/to/DeepSeek-V2-Lite-Chat-GGUF  --port 10002 --web True
+<h4 id="3-build-and-install"><a class="header" href="#3-build-and-install">3. Build and Install</a></h4>
+<pre><code class="language-bash"># Editable installation (for development)
+pip install -e .
+
+# Standard installation
+pip install .
 </code></pre>
-<p>Or you want to start server with transformers, the model_path should include safetensors</p>
-<pre><code class="language-bash">ktransformers --type transformers --model_path /mnt/data/model/Qwen2-0.5B-Instruct --port 10002 --web True
+<h2 id="error-troubleshooting"><a class="header" href="#error-troubleshooting">Error Troubleshooting</a></h2>
+<h3 id="cuda-not-found"><a class="header" href="#cuda-not-found">CUDA Not Found</a></h3>
+<pre><code> -- Looking for a CUDA compiler - NOTFOUND
+  CMake Error at CMakeLists.txt:389 (message):
+    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
 </code></pre>
-<p>Access website with url <a href="http://localhost:10002/web/index.html#/chat">http://localhost:10002/web/index.html#/chat</a> :</p>
-<p align="center">
-  <picture>
-    <img alt="Web UI" src="https://github.com/user-attachments/assets/615dca9b-a08c-4183-bbd3-ad1362680faf" width=90%>
-  </picture>
-</p>
-<p>More information about the RESTful API server can be found <a href="en/doc/en/api/server/server.html">here</a>. You can also find an example of integrating with Tabby <a href="en/doc/en/api/server/tabby.html">here</a>.</p>
+<p>Make sure you have the CUDA toolkit installed and <code>nvcc</code> is in your system PATH.</p>
+<p>Try <code>export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"</code> and reinstall again.</p>
+<h3 id="hwloc-not-found"><a class="header" href="#hwloc-not-found">hwloc Not Found</a></h3>
+<p>Run <code>sudo apt install libhwloc-dev</code> if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.</p>
+<pre><code>wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
+tar -xzf hwloc-2.12.2.tar.gz
+cd hwloc-2.12.2
+./configure
+make
+sudo make install
+</code></pre>
+<h2 id="weight-quantization"><a class="header" href="#weight-quantization">Weight Quantization</a></h2>
+<p>KT-Kernel provides weight quantization tools for CPU-GPU hybrid inference (e.g., integrating with SGLang). Both tools work together to enable heterogeneous expert placement across CPUs and GPUs.</p>
+<h3 id="cpu-weights-for-cold-experts-on-cpu"><a class="header" href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for "cold" experts on CPU)</a></h3>
+<p>Quantize weights to INT4/INT8 format optimized for AMX inference:</p>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \
+  --output /path/to/output \
+  --quant-method int4
+</code></pre>
+<p><strong>Supported formats:</strong> FP8, FP16, BF16 → INT4/INT8</p>
+<h3 id="gpu-weights-for-hot-experts-on-gpu"><a class="header" href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for "hot" experts on GPU)</a></h3>
+<p>Apply GPTQ quantization to model weights:</p>
+<pre><code class="language-bash"># Install additional dependencies first
+pip install accelerate transformers llmcompressor datasets
+
+# Quantize GPU weights
+python scripts/convert_gpu_weights.py \
+  --model_id /path/to/model \
+  --output_dir /path/to/output \
+  --quant_type W4A16
+</code></pre>
+<p><strong>Supported types:</strong> W4A16 (GPTQ4), W8A16 (GPTQ8)</p>
+<hr />
+<p>For detailed documentation, advanced options, and low-memory mode, see <a href="en/scripts/README.html">scripts/README.md</a>.</p>
+<h2 id="before-commit"><a class="header" href="#before-commit">Before Commit!</a></h2>
+<p>your msg should match: Conventional Commits (https://www.conventionalcommits.org/) <br>and format your code before commit:</p>
+<pre><code class="language-shell">cmake -B build
+cd build
+make format
+</code></pre>
+<p>and you may need a new clang-format at least 18, use this command in conda env:</p>
+<pre><code class="language-shell">conda install -c conda-forge clang-format=18
+rm -rf build
+</code></pre>
+<p>and you may need black for python format:</p>
+<pre><code class="language-shell">conda install black
+</code></pre>
+<div style="break-before: page; page-break-before: always;"></div><ul>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#ktransformers-fine-tuning-x-llama-factory-integration-%E2%80%93-user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></p>
+</li>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#introduction">Introduction</a></p>
+</li>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></p>
+<ul>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#benchmarks">Benchmarks</a>
+<ul>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#translational-style-dataset">Translational-Style dataset</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#afrimed-qa-short-answer">AfriMed-QA (short answer)</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#afrimed-qa-multiple-choice">AfriMed-QA (multiple choice)</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#quick-to-start">Quick to Start</a></p>
+<ul>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#environment-setup">Environment Setup</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></li>
+</ul>
+</li>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></p>
+<ul>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#end-to-end-performance">End-to-End Performance</a></li>
+<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></li>
+</ul>
+</li>
+<li>
+<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#conclusion">Conclusion</a></p>
+</li>
+</ul>
+<h1 id="ktransformers-fine-tuning--llama-factory-integration--user-guide"><a class="header" href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></h1>
+<p><strong>MadSys Lab, KVCache-AI Team, Approaching AI, LLaMA-Factory Team</strong></p>
+<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<p>From <strong>DeepSeek-V3/R1</strong> to <strong>Qwen3-MoE</strong> and <strong>Kimi-K2</strong>, each wave of open-sourced large models brings leaps in performance and scale. However, many researchers and developers are constrained by expensive GPUs and models with tens or even hundreds of billions of parameters, making it <strong>hard to fine-tune very large models under limited resources</strong>. To bridge this gap, we propose a practical approach: combining <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong>. With just <strong>2–4 RTX 4090s</strong> and a high-memory CPU, you can fine-tune ultra-large MoE models like DeepSeek-671B.</p>
+<p>Our goal is to give resource-constrained researchers a <strong>local path to explore fine-tuning ultra-large models</strong>, and also a fast way to customize smaller models (e.g., 14B/30B) for specific scenarios. We validate the setup using <strong>stylized dialogue</strong>, <strong>Westernized translation tone</strong>, and <strong>medical Q&amp;A</strong> as representative tasks, showing that <strong>personalized adaptation can be achieved within hours</strong>.</p>
+<p>As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. <strong>KTransformers</strong> acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient <strong>GPU+CPU heterogeneous cooperation</strong>.</p>
+<p><img src="en/../assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
+<p>Within LLaMA-Factory, we compared LoRA fine-tuning with <strong>HuggingFace</strong>, <strong>Unsloth</strong>, and <strong>KTransformers</strong> backends. KTransformers is the <strong>only workable 4090-class solution</strong> for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).</p>
+<div class="table-wrapper"><table><thead><tr><th>Under LoRA (BF16) + <a href="https://github.com/mindsRiverPonder/LLM-practice">NekoQA-10K stylized dialogue</a></th><th>HuggingFace Backend</th><th>Unsloth Backend</th><th>KTransformers Backend</th></tr></thead><tbody>
+<tr><td>[14B-DeepSeekV2-Lite] LoRA fine-tuning throughput</td><td>303.58 token/s</td><td>455.37 token/s</td><td>530.38 token/s</td></tr>
+<tr><td>[14B-DeepSeekV2-Lite] GPU memory</td><td>32.12 GB</td><td>9.64 GB</td><td>6.08 GB</td></tr>
+<tr><td>[671B-DeepSeekV3] LoRA fine-tuning throughput</td><td><font color='red'>Too Huge to run</font></td><td><font color='red'>NOT SUPPORT</font></td><td>40.35 token/s</td></tr>
+<tr><td>[671B-DeepSeekV3] GPU memory (sum across GPUs)</td><td>theoretical 1400 GB †</td><td><font color='red'>NOT SUPPORT</font></td><td>70 GB †</td></tr>
+</tbody></table>
+</div>
+<p>† <strong>1400 GB</strong> is a <strong>theoretical</strong> FP16 full-parameter resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT strategy (Attention on GPU + layered MoE offload).</p>
+<p><img src="en/../assets/image-compare_model.png" alt="按照模型划分的对比图_02" /></p>
+<h3 id="fine-tuning-results-examples"><a class="header" href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></h3>
+<h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
+<p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. Goal: improve style consistency and recognizability.</p>
+<p>The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of <strong>style-transfer fine-tuning</strong>.</p>
+<p><img src="en/../assets/image-20251016175046882.png" alt="image-20251016175046882" /></p>
+<h4 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h4>
+<p>We use:</p>
+<p>(1) <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>, which asks for an exaggerated, Westernized translation tone—clear, stylized customization.</p>
+<p>(2) <a href="https://aclanthology.org/2025.acl-long.96/">AfriMed-QA</a> (ACL 2025), a medical dataset for African contexts with strong domain specificity, including multiple-choice and short-answer sub-tasks—well-suited for vertical fine-tuning evaluation.</p>
+<p>The tables show metrics before vs. after LoRA fine-tuning. We observe <strong>large improvements</strong> across metrics, verifying fine-tuning effectiveness:</p>
+<div class="table-wrapper"><table><thead><tr><th>Translational-Style dataset</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>20.66</td><td>8.33</td><td>4.54</td><td>2.89</td><td>22.71</td><td>4.52</td><td>19.19</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.41</strong></td><td><strong>22.44</strong></td><td><strong>15.42</strong></td><td><strong>11.18</strong></td><td><strong>42.03</strong></td><td><strong>18.38</strong></td><td><strong>33.10</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>8.49</td><td>3.34</td><td>1.62</td><td>0.96</td><td>15.91</td><td>2.55</td><td>10.07</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>37.02</strong></td><td><strong>23.70</strong></td><td><strong>16.21</strong></td><td><strong>11.49</strong></td><td><strong>43.43</strong></td><td><strong>18.96</strong></td><td><strong>34.54</strong></td></tr>
+</tbody></table>
+</div><div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (short answer)</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>13.58</td><td>11.12</td><td>9.10</td><td>7.23</td><td>22.48</td><td>7.81</td><td>11.73</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.90</strong></td><td><strong>27.63</strong></td><td><strong>22.99</strong></td><td><strong>19.15</strong></td><td><strong>35.25</strong></td><td><strong>17.50</strong></td><td><strong>28.44</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>12.75</td><td>10.27</td><td>8.05</td><td>5.99</td><td>20.33</td><td>5.65</td><td>10.11</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>42.42</strong></td><td><strong>34.12</strong></td><td><strong>28.95</strong></td><td><strong>24.54</strong></td><td><strong>41.97</strong></td><td><strong>22.37</strong></td><td><strong>33.28</strong></td></tr>
+</tbody></table>
+</div><div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (multiple choice)</th><th>Accuracy</th></tr></thead><tbody>
+<tr><td>V2-Lite (no LoRA)</td><td>0.0645</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>0.4812</strong></td></tr>
+<tr><td>V3 base (no LoRA)</td><td>0.5833</td></tr>
+<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>0.7930</strong></td></tr>
+</tbody></table>
+</div>
+<p>Even for ultra-large MoE models, <strong>KTransformers-backed fine-tuning</strong> achieves strong task performance quickly.</p>
+<h2 id="quick-to-start"><a class="header" href="#quick-to-start">Quick to Start</a></h2>
+<p>This section shows how to install and use <strong>LLaMA-Factory + KTransformers</strong> for fine-tuning and inference:</p>
+<ul>
+<li>Environment setup</li>
+<li>Fine-tune ultra-large MoE models with KTransformers backend</li>
+<li>Load the fine-tuned model (base + LoRA adapter) for chat/inference</li>
+<li>Batch inference and metric evaluation</li>
+</ul>
+<h3 id="environment-setup"><a class="header" href="#environment-setup">Environment Setup</a></h3>
+<p>According to the following example, install both the <strong>KTransformers</strong> and <strong>LLaMA-Factory</strong> environments simultaneously.
+This time, to simplify the installation process of KTransformers, we have specially packaged a wheel file to avoid local compilation.
+The detailed installation steps are as follows:
+(Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, <strong>CUDA version</strong>, and the <strong>KTransformers wheel filename</strong> correspond correctly.)</p>
+<pre><code class="language-shell"># 1. Create a conda environment
+conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
+conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
+
+# 2. Install the LLaMA-Factory environment
+git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
+cd LLaMA-Factory
+pip install -e ".[torch,metrics]" --no-build-isolation
+
+# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
+pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
+
+# 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
+pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+# abi=True/False can find from below
+# import torch
+# print(torch._C._GLIBCXX_USE_CXX11_ABI)
+
+# 5. (Optional) If you want to use flash_infer (otherwise it defaults to triton)
+git clone https://github.com/kvcache-ai/custom_flashinfer.git
+pip install custom_flashinfer/
+</code></pre>
+<p><strong>Usage tip:</strong> In LLaMA-Factory YAML, set <code>use_kt: true</code> and pick a <code>kt_optimize_rule</code> file to have KTransformers handle the core compute. The features below show typical configs.</p>
+<h3 id="core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models"><a class="header" href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></h3>
+<p>Run the command: <code>USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml</code>.</p>
+<p>Note: You <strong>must</strong> provide a <strong>BF16</strong> model. DeepSeek-V3-671B is released in FP8 by default; convert with <a href="https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py">DeepSeek-V3/inference/fp8_cast_bf16.py</a>.</p>
+<pre><code class="language-yaml">### model
+model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_target: all
+
+### dataset
+dataset: identity
+template: deepseek
+cutoff_len: 2048
+max_samples: 100000
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/Kllama_deepseekV3
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### ktransformers
+use_kt: true # use KTransformers as LoRA sft backend
+kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
+cpu_infer: 32
+chunk_size: 8192
+</code></pre>
+<p><code>kt_optimize_rule</code> controls <strong>placement strategy</strong>. See also <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">ktransformers/optimize_rules</a>. Naming hints (<code>*</code> = wildcard):</p>
+<div class="table-wrapper"><table><thead><tr><th>Pattern</th><th>Meaning</th></tr></thead><tbody>
+<tr><td>DeepSeek-V2-Lite-Chat-* / DeepSeek-V3-Chat-*</td><td>Target model variants</td></tr>
+<tr><td><em>-sft-</em></td><td>Strategy for fine-tuning; others are for inference</td></tr>
+<tr><td><em>-amx-</em></td><td>Use AMX on CPU; otherwise use <strong>llamafile</strong></td></tr>
+<tr><td><em>-multi-gpu-X</em></td><td>Model parallel on X GPUs (X omitted → default 2 GPUs)</td></tr>
+</tbody></table>
+</div>
+<p>Example: <code>DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml</code> = V3-Chat fine-tuning with AMX and 2-GPU model parallel.</p>
+<p>We recommend <strong>AMX acceleration</strong> where available (<code>lscpu | grep amx</code>). AMX supports BF16/INT8. Example:</p>
+<pre><code class="language-yaml">- match:
+    name: "^model\\.layers\\..*\\.mlp\\.experts$"
+  replace:
+    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert parallelism
+    kwargs:
+      prefill_device: "cpu"
+      prefill_op: "KExpertsTorch"
+      generate_device: "cpu"
+      generate_op: "KSFTExpertsCPU"
+      out_device: "cuda"
+      backend: "AMXInt8" # or "AMXBF16" or "llamafile" (default)
+</code></pre>
+<p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
+<p><img src="en/../assets/image-20251016171537997.png" alt="image-20251016171537997" /></p>
+<h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
+<p>Run the command: <code>llamafactory-cli chat examples/inference/deepseek3_lora_sft_kt.yaml</code>.</p>
+<p>Use the safetensors adapter trained with KT for inference.</p>
+<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
+adapter_name_or_path: saves/Kllama_deepseekV3
+template: deepseek
+infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
+trust_remote_code: true
+
+use_kt: true # use KTransformers as LoRA sft backend to inference
+kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
+cpu_infer: 32
+chunk_size: 8192
+</code></pre>
+<p>We also support <strong>GGUF</strong> adapters: for safetensors, set the <strong>directory</strong>; for GGUF, set the <strong>file path</strong> in <code>adapter_name_or_path</code>.</p>
+<p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
+<p><img src="en/../assets/image-20251016171526210.png" alt="image-20251016171526210" /></p>
+<h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
+<p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/deepseek3_lora_sft_kt.yaml</code>.
+Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>
+<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
+adapter_name_or_path: saves/Kllama_deepseekV3
+template: deepseek
+infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
+trust_remote_code: true
+
+use_kt: true # use KTransformers as LoRA sft backend to inference
+kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
+cpu_infer: 32
+chunk_size: 8192
+</code></pre>
+<h2 id="kt-fine-tuning-speed-user-side-view"><a class="header" href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></h2>
+<h3 id="end-to-end-performance"><a class="header" href="#end-to-end-performance">End-to-End Performance</a></h3>
+<p><strong>Definitions</strong></p>
+<ul>
+<li><code>step_time</code>: wall-clock time for a full optimization step (tensor movement + Attention + MoE + other compute).</li>
+<li><code>tokens_per_step = GAS × qlen</code>; <code>token/s = tokens_per_step / step_time</code>.</li>
+</ul>
+<p><strong>Settings:</strong> <code>GAS=16</code>, <code>qlen=512</code> (→ <code>tokens_per_step = 8192</code>); LoRA (<code>r=8, alpha=32, dropout=0.1</code>); <strong>AMX</strong> enabled; GPU: RTX 4090, CPU: Intel Xeon Platinum 8488C.</p>
+<p><strong>Measured</strong></p>
+<ul>
+<li><strong>DeepSeek-V3-671B:</strong> <code>step_time = 203 s</code> → <code>token/s ≈ 8192 / 203 ≈ 40.35</code></li>
+<li><strong>DeepSeek-V2-Lite-14B:</strong> <code>step_time = 36 s</code> → <code>token/s ≈ 8192 / 36 ≈ 227.6</code></li>
+</ul>
+<h3 id="gpucpu-memory-footprint"><a class="header" href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></h3>
+<ul>
+<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU VRAM (multi-GPU), ~<strong>1.2–1.3 TB</strong> CPU RAM.</li>
+<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU VRAM, ~<strong>30 GB</strong> CPU RAM.</li>
+</ul>
+<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
+<p>By integrating <strong>KTransformers LoRA fine-tuning</strong> into <strong>LLaMA-Factory</strong>, we provide a practical guide for efficient training and deployment of MoE LLMs. KT brings cutting-edge optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization under very low GPU memory. LLaMA-Factory offers a friendly, unified interface.</p>
+<p>This integration (akin to Unsloth-style speedups) means even models with tens to hundreds of billions of parameters can be fine-tuned and deployed with low latency on commodity hardware. You get <strong>memory savings, speed-ups, and usability</strong> together. We encourage you to try LLaMA-Factory + KT for your next MoE project and follow this guide. Feedback is welcome!</p>
 <div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
 <h1 id="gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram"><a class="header" href="#gpt-4o1-level-local-vscode-copilot-on-a-desktop-with-only-24gb-vram">GPT-4/o1-level Local VSCode Copilot on a Desktop with only 24GB VRAM</a></h1>
 <ul>
@@ -1414,7 +1876,7 @@ Current weight loading implementation is provisional - will be refined in future
 <p>📁 Path Specification<br>
 Despite hybrid quantization, merged weights are stored as .safetensors - pass the containing folder path to <code>--gguf_path</code></p>
 <div style="break-before: page; page-break-before: always;"></div><h1 id="rocm-support-for-ktransformers-beta"><a class="header" href="#rocm-support-for-ktransformers-beta">ROCm Support for ktransformers (Beta)</a></h1>
-<h2 id="introduction"><a class="header" href="#introduction">Introduction</a></h2>
+<h2 id="introduction-1"><a class="header" href="#introduction-1">Introduction</a></h2>
 <h3 id="overview-1"><a class="header" href="#overview-1">Overview</a></h3>
 <p>In our effort to expand GPU architecture support beyond NVIDIA, we are excited to introduce <strong>AMD GPU support through ROCm</strong> in ktransformers (Beta release). This implementation has been tested and developed using EPYC 9274F processors and AMD Radeon 7900xtx GPUs.</p>
 <h2 id="installation-guide"><a class="header" href="#installation-guide">Installation Guide</a></h2>
@@ -1501,255 +1963,6 @@ KLinearMarlin → KLinearTorch
 <li>Marlin operations not supported on ROCm platform</li>
 <li>Current Q8 linear implementation shows reduced performance (Beta limitation)</li>
 </ul>
-<div style="break-before: page; page-break-before: always;"></div><ul>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#ktransformers-fine-tuning-x-llama-factory-integration-%E2%80%93-user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></p>
-</li>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#introduction">Introduction</a></p>
-</li>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></p>
-<ul>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#benchmarks">Benchmarks</a>
-<ul>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#translational-style-dataset">Translational-Style dataset</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#afrimed-qa-short-answer">AfriMed-QA (short answer)</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#afrimed-qa-multiple-choice">AfriMed-QA (multiple choice)</a></li>
-</ul>
-</li>
-</ul>
-</li>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#quick-to-start">Quick to Start</a></p>
-<ul>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#environment-setup">Environment Setup</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></li>
-</ul>
-</li>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></p>
-<ul>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#end-to-end-performance">End-to-End Performance</a></li>
-<li><a href="en/KTransformers-Fine-Tuning_User-Guide.html#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></li>
-</ul>
-</li>
-<li>
-<p><a href="en/KTransformers-Fine-Tuning_User-Guide.html#conclusion">Conclusion</a></p>
-</li>
-</ul>
-<h1 id="ktransformers-fine-tuning--llama-factory-integration--user-guide"><a class="header" href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></h1>
-<p><strong>MadSys Lab, KVCache-AI Team, Approaching AI, LLaMA-Factory Team</strong></p>
-<h2 id="introduction-1"><a class="header" href="#introduction-1">Introduction</a></h2>
-<p>From <strong>DeepSeek-V3/R1</strong> to <strong>Qwen3-MoE</strong> and <strong>Kimi-K2</strong>, each wave of open-sourced large models brings leaps in performance and scale. However, many researchers and developers are constrained by expensive GPUs and models with tens or even hundreds of billions of parameters, making it <strong>hard to fine-tune very large models under limited resources</strong>. To bridge this gap, we propose a practical approach: combining <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong>. With just <strong>2–4 RTX 4090s</strong> and a high-memory CPU, you can fine-tune ultra-large MoE models like DeepSeek-671B.</p>
-<p>Our goal is to give resource-constrained researchers a <strong>local path to explore fine-tuning ultra-large models</strong>, and also a fast way to customize smaller models (e.g., 14B/30B) for specific scenarios. We validate the setup using <strong>stylized dialogue</strong>, <strong>Westernized translation tone</strong>, and <strong>medical Q&amp;A</strong> as representative tasks, showing that <strong>personalized adaptation can be achieved within hours</strong>.</p>
-<p>As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. <strong>KTransformers</strong> acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient <strong>GPU+CPU heterogeneous cooperation</strong>.</p>
-<p><img src="en/../assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
-<p>Within LLaMA-Factory, we compared LoRA fine-tuning with <strong>HuggingFace</strong>, <strong>Unsloth</strong>, and <strong>KTransformers</strong> backends. KTransformers is the <strong>only workable 4090-class solution</strong> for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).</p>
-<div class="table-wrapper"><table><thead><tr><th>Under LoRA (BF16) + <a href="https://github.com/mindsRiverPonder/LLM-practice">NekoQA-10K stylized dialogue</a></th><th>HuggingFace Backend</th><th>Unsloth Backend</th><th>KTransformers Backend</th></tr></thead><tbody>
-<tr><td>[14B-DeepSeekV2-Lite] LoRA fine-tuning throughput</td><td>303.58 token/s</td><td>455.37 token/s</td><td>530.38 token/s</td></tr>
-<tr><td>[14B-DeepSeekV2-Lite] GPU memory</td><td>32.12 GB</td><td>9.64 GB</td><td>6.08 GB</td></tr>
-<tr><td>[671B-DeepSeekV3] LoRA fine-tuning throughput</td><td><font color='red'>Too Huge to run</font></td><td><font color='red'>NOT SUPPORT</font></td><td>40.35 token/s</td></tr>
-<tr><td>[671B-DeepSeekV3] GPU memory (sum across GPUs)</td><td>theoretical 1400 GB †</td><td><font color='red'>NOT SUPPORT</font></td><td>70 GB †</td></tr>
-</tbody></table>
-</div>
-<p>† <strong>1400 GB</strong> is a <strong>theoretical</strong> FP16 full-parameter resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT strategy (Attention on GPU + layered MoE offload).</p>
-<p><img src="en/../assets/image-compare_model.png" alt="按照模型划分的对比图_02" /></p>
-<h3 id="fine-tuning-results-examples"><a class="header" href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></h3>
-<h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
-<p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. Goal: improve style consistency and recognizability.</p>
-<p>The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of <strong>style-transfer fine-tuning</strong>.</p>
-<p><img src="en/../assets/image-20251016175046882.png" alt="image-20251016175046882" /></p>
-<h4 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h4>
-<p>We use:</p>
-<p>(1) <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>, which asks for an exaggerated, Westernized translation tone—clear, stylized customization.</p>
-<p>(2) <a href="https://aclanthology.org/2025.acl-long.96/">AfriMed-QA</a> (ACL 2025), a medical dataset for African contexts with strong domain specificity, including multiple-choice and short-answer sub-tasks—well-suited for vertical fine-tuning evaluation.</p>
-<p>The tables show metrics before vs. after LoRA fine-tuning. We observe <strong>large improvements</strong> across metrics, verifying fine-tuning effectiveness:</p>
-<div class="table-wrapper"><table><thead><tr><th>Translational-Style dataset</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>20.66</td><td>8.33</td><td>4.54</td><td>2.89</td><td>22.71</td><td>4.52</td><td>19.19</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.41</strong></td><td><strong>22.44</strong></td><td><strong>15.42</strong></td><td><strong>11.18</strong></td><td><strong>42.03</strong></td><td><strong>18.38</strong></td><td><strong>33.10</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>8.49</td><td>3.34</td><td>1.62</td><td>0.96</td><td>15.91</td><td>2.55</td><td>10.07</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>37.02</strong></td><td><strong>23.70</strong></td><td><strong>16.21</strong></td><td><strong>11.49</strong></td><td><strong>43.43</strong></td><td><strong>18.96</strong></td><td><strong>34.54</strong></td></tr>
-</tbody></table>
-</div><div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (short answer)</th><th>BLEU-1</th><th>BLEU-2</th><th>BLEU-3</th><th>BLEU-4</th><th>ROUGE-1</th><th>ROUGE-2</th><th>ROUGE-L</th></tr></thead><tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>13.58</td><td>11.12</td><td>9.10</td><td>7.23</td><td>22.48</td><td>7.81</td><td>11.73</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>35.90</strong></td><td><strong>27.63</strong></td><td><strong>22.99</strong></td><td><strong>19.15</strong></td><td><strong>35.25</strong></td><td><strong>17.50</strong></td><td><strong>28.44</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>12.75</td><td>10.27</td><td>8.05</td><td>5.99</td><td>20.33</td><td>5.65</td><td>10.11</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>42.42</strong></td><td><strong>34.12</strong></td><td><strong>28.95</strong></td><td><strong>24.54</strong></td><td><strong>41.97</strong></td><td><strong>22.37</strong></td><td><strong>33.28</strong></td></tr>
-</tbody></table>
-</div><div class="table-wrapper"><table><thead><tr><th>AfriMed-QA (multiple choice)</th><th>Accuracy</th></tr></thead><tbody>
-<tr><td>V2-Lite (no LoRA)</td><td>0.0645</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V2-Lite</strong></td><td><strong>0.4812</strong></td></tr>
-<tr><td>V3 base (no LoRA)</td><td>0.5833</td></tr>
-<tr><td><strong>KT-LoRA fine-tuned V3</strong></td><td><strong>0.7930</strong></td></tr>
-</tbody></table>
-</div>
-<p>Even for ultra-large MoE models, <strong>KTransformers-backed fine-tuning</strong> achieves strong task performance quickly.</p>
-<h2 id="quick-to-start"><a class="header" href="#quick-to-start">Quick to Start</a></h2>
-<p>This section shows how to install and use <strong>LLaMA-Factory + KTransformers</strong> for fine-tuning and inference:</p>
-<ul>
-<li>Environment setup</li>
-<li>Fine-tune ultra-large MoE models with KTransformers backend</li>
-<li>Load the fine-tuned model (base + LoRA adapter) for chat/inference</li>
-<li>Batch inference and metric evaluation</li>
-</ul>
-<h3 id="environment-setup"><a class="header" href="#environment-setup">Environment Setup</a></h3>
-<p>According to the following example, install both the <strong>KTransformers</strong> and <strong>LLaMA-Factory</strong> environments simultaneously.
-This time, to simplify the installation process of KTransformers, we have specially packaged a wheel file to avoid local compilation.
-The detailed installation steps are as follows:
-(Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, <strong>CUDA version</strong>, and the <strong>KTransformers wheel filename</strong> correspond correctly.)</p>
-<pre><code class="language-shell"># 1. Create a conda environment
-conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
-conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
-conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
-
-# 2. Install the LLaMA-Factory environment
-git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
-cd LLaMA-Factory
-pip install -e ".[torch,metrics]" --no-build-isolation
-
-# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
-pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
-
-# 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
-# abi=True/False can find from below
-# import torch
-# print(torch._C._GLIBCXX_USE_CXX11_ABI)
-
-# 5. (Optional) If you want to use flash_infer (otherwise it defaults to triton)
-git clone https://github.com/kvcache-ai/custom_flashinfer.git
-pip install custom_flashinfer/
-</code></pre>
-<p><strong>Usage tip:</strong> In LLaMA-Factory YAML, set <code>use_kt: true</code> and pick a <code>kt_optimize_rule</code> file to have KTransformers handle the core compute. The features below show typical configs.</p>
-<h3 id="core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models"><a class="header" href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></h3>
-<p>Run the command: <code>USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml</code>.</p>
-<p>Note: You <strong>must</strong> provide a <strong>BF16</strong> model. DeepSeek-V3-671B is released in FP8 by default; convert with <a href="https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py">DeepSeek-V3/inference/fp8_cast_bf16.py</a>.</p>
-<pre><code class="language-yaml">### model
-model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-trust_remote_code: true
-
-### method
-stage: sft
-do_train: true
-finetuning_type: lora
-lora_rank: 8
-lora_target: all
-
-### dataset
-dataset: identity
-template: deepseek
-cutoff_len: 2048
-max_samples: 100000
-overwrite_cache: true
-preprocessing_num_workers: 16
-dataloader_num_workers: 4
-
-### output
-output_dir: saves/Kllama_deepseekV3
-logging_steps: 10
-save_steps: 500
-plot_loss: true
-overwrite_output_dir: true
-save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
-
-### train
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
-learning_rate: 1.0e-4
-num_train_epochs: 3.0
-lr_scheduler_type: cosine
-warmup_ratio: 0.1
-bf16: true
-ddp_timeout: 180000000
-resume_from_checkpoint: null
-
-### ktransformers
-use_kt: true # use KTransformers as LoRA sft backend
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
-</code></pre>
-<p><code>kt_optimize_rule</code> controls <strong>placement strategy</strong>. See also <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">ktransformers/optimize_rules</a>. Naming hints (<code>*</code> = wildcard):</p>
-<div class="table-wrapper"><table><thead><tr><th>Pattern</th><th>Meaning</th></tr></thead><tbody>
-<tr><td>DeepSeek-V2-Lite-Chat-* / DeepSeek-V3-Chat-*</td><td>Target model variants</td></tr>
-<tr><td><em>-sft-</em></td><td>Strategy for fine-tuning; others are for inference</td></tr>
-<tr><td><em>-amx-</em></td><td>Use AMX on CPU; otherwise use <strong>llamafile</strong></td></tr>
-<tr><td><em>-multi-gpu-X</em></td><td>Model parallel on X GPUs (X omitted → default 2 GPUs)</td></tr>
-</tbody></table>
-</div>
-<p>Example: <code>DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml</code> = V3-Chat fine-tuning with AMX and 2-GPU model parallel.</p>
-<p>We recommend <strong>AMX acceleration</strong> where available (<code>lscpu | grep amx</code>). AMX supports BF16/INT8. Example:</p>
-<pre><code class="language-yaml">- match:
-    name: "^model\\.layers\\..*\\.mlp\\.experts$"
-  replace:
-    class: ktransformers.operators.experts.KTransformersExperts     # custom MoE Kernel with expert parallelism
-    kwargs:
-      prefill_device: "cpu"
-      prefill_op: "KExpertsTorch"
-      generate_device: "cpu"
-      generate_op: "KSFTExpertsCPU"
-      out_device: "cuda"
-      backend: "AMXInt8" # or "AMXBF16" or "llamafile" (default)
-</code></pre>
-<p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
-<p><img src="en/../assets/image-20251016171537997.png" alt="image-20251016171537997" /></p>
-<h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>llamafactory-cli chat examples/inference/deepseek3_lora_sft_kt.yaml</code>.</p>
-<p>Use the safetensors adapter trained with KT for inference.</p>
-<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-adapter_name_or_path: saves/Kllama_deepseekV3
-template: deepseek
-infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
-trust_remote_code: true
-
-use_kt: true # use KTransformers as LoRA sft backend to inference
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
-</code></pre>
-<p>We also support <strong>GGUF</strong> adapters: for safetensors, set the <strong>directory</strong>; for GGUF, set the <strong>file path</strong> in <code>adapter_name_or_path</code>.</p>
-<p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
-<p><img src="en/../assets/image-20251016171526210.png" alt="image-20251016171526210" /></p>
-<h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/deepseek3_lora_sft_kt.yaml</code>.
-Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>
-<pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
-adapter_name_or_path: saves/Kllama_deepseekV3
-template: deepseek
-infer_backend: ktransformers  # choices: [huggingface, vllm, sglang, ktransformers]
-trust_remote_code: true
-
-use_kt: true # use KTransformers as LoRA sft backend to inference
-kt_optimize_rule: examples/kt_optimize_rules/DeepSeek-V3-Chat-sft-amx-multi-gpu.yaml
-cpu_infer: 32
-chunk_size: 8192
-</code></pre>
-<h2 id="kt-fine-tuning-speed-user-side-view"><a class="header" href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></h2>
-<h3 id="end-to-end-performance"><a class="header" href="#end-to-end-performance">End-to-End Performance</a></h3>
-<p><strong>Definitions</strong></p>
-<ul>
-<li><code>step_time</code>: wall-clock time for a full optimization step (tensor movement + Attention + MoE + other compute).</li>
-<li><code>tokens_per_step = GAS × qlen</code>; <code>token/s = tokens_per_step / step_time</code>.</li>
-</ul>
-<p><strong>Settings:</strong> <code>GAS=16</code>, <code>qlen=512</code> (→ <code>tokens_per_step = 8192</code>); LoRA (<code>r=8, alpha=32, dropout=0.1</code>); <strong>AMX</strong> enabled; GPU: RTX 4090, CPU: Intel Xeon Platinum 8488C.</p>
-<p><strong>Measured</strong></p>
-<ul>
-<li><strong>DeepSeek-V3-671B:</strong> <code>step_time = 203 s</code> → <code>token/s ≈ 8192 / 203 ≈ 40.35</code></li>
-<li><strong>DeepSeek-V2-Lite-14B:</strong> <code>step_time = 36 s</code> → <code>token/s ≈ 8192 / 36 ≈ 227.6</code></li>
-</ul>
-<h3 id="gpucpu-memory-footprint"><a class="header" href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></h3>
-<ul>
-<li>DeepSeek-V3 (671B; 61 layers with 58 MoE): ~<strong>70 GB</strong> total GPU VRAM (multi-GPU), ~<strong>1.2–1.3 TB</strong> CPU RAM.</li>
-<li>DeepSeek-V2-Lite (14B; 27 layers with 26 MoE): ~<strong>5.5 GB</strong> GPU VRAM, ~<strong>30 GB</strong> CPU RAM.</li>
-</ul>
-<h2 id="conclusion"><a class="header" href="#conclusion">Conclusion</a></h2>
-<p>By integrating <strong>KTransformers LoRA fine-tuning</strong> into <strong>LLaMA-Factory</strong>, we provide a practical guide for efficient training and deployment of MoE LLMs. KT brings cutting-edge optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization under very low GPU memory. LLaMA-Factory offers a friendly, unified interface.</p>
-<p>This integration (akin to Unsloth-style speedups) means even models with tens to hundreds of billions of parameters can be fine-tuned and deployed with low latency on commodity hardware. You get <strong>memory savings, speed-ups, and usability</strong> together. We encourage you to try LLaMA-Factory + KT for your next MoE project and follow this guide. Feedback is welcome!</p>
 <div style="break-before: page; page-break-before: always;"></div><ul>
 <li>
 <p><a href="en/KTransformers-Fine-Tuning_Developer-Technical-Notes.html#ktransformers-fine-tuning-x-llama-factory-integration-%E2%80%93-developer-technical-notes">KTransformers Fine-Tuning × LLaMA-Factory Integration – Developer Technical Notes</a></p>
@@ -1925,360 +2138,8 @@ $$</li>
 <h2 id="conclusion-1"><a class="header" href="#conclusion-1">Conclusion</a></h2>
 <p>Integrating <strong>KTransformers LoRA</strong> with <strong>LLaMA-Factory</strong> provides a practical path to efficiently train and deploy MoE LLMs. KT contributes placement strategies and operator optimizations (DeepSeek/Qwen/Kimi support with AMX-accelerated kernels), and LoRA enables customization with very low GPU memory; LLaMA-Factory supplies a coherent user-level interface.</p>
 <p>This means even tens-to-hundreds-of-billion-parameter MoE models can be fine-tuned and served with low latency on ordinary hardware. The approach balances <strong>memory savings</strong>, <strong>speed</strong>, and <strong>usability</strong>, turning ultra-large models into tools that developers can actually wield.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="backend-services-server"><a class="header" href="#backend-services-server">Backend Services (Server)</a></h1>
-<p>The Server offers fast heterogeneous inference capabilities of ktransformers through an API for external usage.</p>
-<img src="en/api/server/server-arch.png" height="600" alt="Server architecture">
-<h2 id="api"><a class="header" href="#api">API</a></h2>
-<p>The Server provides model inference services externally through a RESTful API, with two methods of interaction: ChatCompletion and Assistant.</p>
-<ul>
-<li>The ChatCompletion interface requires users to provide all historical dialogues at once, after which the model responds. AI service providers (such as <a href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI</a>) and local inference frameworks (such as <a href="https://github.com/ollama/ollama/blob/main/docs/api.md">Ollama</a>) both offer the ChatCompletion interface. To ensure compatibility with OpenAI and Ollama, the Server offers APIs that are consistent with theirs. Therefore, applications currently using OpenAI and Ollama can seamlessly switch to our Server. For example: <a href="en/api/server/tabby.html">How to use Tabby and ktransformers locally with a 236B model for code completion?</a>.</li>
-<li>The Assistant is suitable for applications that need to reuse a series of resources and call the model. For instance, in educational applications, developers can create an Assistant named "Second Grade Math Teacher" and set an initial prompt ("You are an experienced second-grade math teacher..."), and upload relevant materials (second grade math textbooks). After creating the Assistant, the application needs to create a Thread to store the dialogues between the user and the model (Message). When calling the model, the application creates a Run to obtain the Assistant's response. Compared to ChatCompletion, the Assistant-enabled Server handles the reuse of conversational contexts and multi-turn dialogues, making model calls in complex scenarios more convenient. The <a href="https://platform.openai.com/docs/api-reference/assistants/createAssistant">OpenAI Assistant API</a> introduces such an Assistant interface, and the Server provides a consistent API.</li>
-</ul>
-<p>These API definitions are located in <code>server/api</code>, and their specific usage can be seen <a href="en/api/server/api.html">here</a>.</p>
-<h2 id="integrating-model-inference-frameworks"><a class="header" href="#integrating-model-inference-frameworks">Integrating Model Inference Frameworks</a></h2>
-<p>The Server uses ktransformers for model calling and inference. It also supports other inference frameworks, such as the already supported <a href="https://huggingface.co/docs/transformers/index">transformers</a>, and plans to support <a href="https://github.com/turboderp/exllamav2">exllamav2</a>. These functionalities are implemented in <code>server/backend</code>.</p>
-<p>The model inference functionalities of the frameworks are abstracted into a base class <code>BackendInterfaceBase</code>. This class includes a function: inference. It takes historical dialogue information messages as input and returns the text result from the model. The inference function adopts an async generator design, allowing the Server to return model responses in a streaming manner.</p>
-<pre><code class="language-python">class BackendInterfaceBase:
-  async def inference(self, messages, **kwargs)-&gt;AsyncIterator[str]:
-    ...
-</code></pre>
-<p>This inference function naturally implements the functionality of ChatCompletion because its inputs and outputs are historical dialogues and model responses, respectively. Thus, the ChatCompletion API can directly call the inference function to complete model inference.</p>
-<p>Assistant is more complex than ChatCompletion, requiring the Server to store the related state of the Assistant and call the inference function appropriately. The Server maintains a set of Assistant logic in the database, storing the Assistants, Threads, and Messages created by applications. In memory, the Server maintains a <code>ThreadContext</code> for each Thread, gathering information related to each Thread's Assistant, etc. When a user sends a new Message, the Server calls the get_local_messages function of ThreadContext to obtain messages and then calls the inference function to get the inference results.</p>
-<pre><code class="language-python">class MyThreadContext(ThreadContext):
-    def get_local_messages(self):
-      ...
-</code></pre>
-<p>Since different model inference frameworks have different historical dialogue input formats, <code>ThreadContext</code> and <code>BackendInterface</code> need to be used in pairs. Besides its own ktransformers, the Server also supports transformers. For integrating other model inference frameworks, refer to the implementations of <code>TransformersInterface</code> and <code>TransformersThreadContext</code> in <a href="https://github.com/kvcache-ai/ktransformers-dev/blob/main/ktransformers/server/backend/interfaces/transformers.py">transformers.py</a>.</p>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="start-with-website"><a class="header" href="#start-with-website">Start with website</a></h1>
-<p>This document provides the necessary steps to set up and run the web service for this project.</p>
-<h2 id="1-starting-the-web-service"><a class="header" href="#1-starting-the-web-service">1. Starting the Web Service</a></h2>
-<h3 id="11-compiling-the-web-code"><a class="header" href="#11-compiling-the-web-code">1.1. Compiling the Web Code</a></h3>
-<p>Before you can compile the web code, make sure you have installed <a href="https://nodejs.org">Node.js</a> version 18.3 or higher</p>
-<p>Note: The version of Node.js in the Ubuntu or Debian GNU/Linux software repository is too low, causing compilation errors. Users can also install Node.js through the Nodesource repository, provided they uninstall the outdated version first.</p>
-<pre><code class="language-bash">
-  # sudo apt-get remove nodejs npm -y &amp;&amp; sudo apt-get autoremove -y
-  sudo apt-get update -y &amp;&amp; sudo apt-get install -y apt-transport-https ca-certificates curl gnupg
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
-  sudo chmod 644 /usr/share/keyrings/nodesource.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_23.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list
-  sudo apt-get update -y
-  sudo apt-get install nodejs -y
-
-</code></pre>
-<p>Once npm is installed, navigate to the <code>ktransformers/website</code> directory:</p>
-<pre><code class="language-bash">cd ktransformers/website
-</code></pre>
-<p>Next, install the Vue CLI with the following command:</p>
-<pre><code class="language-bash">npm install @vue/cli
-</code></pre>
-<p>Now you can build the project:</p>
-<pre><code class="language-bash">npm run build
-</code></pre>
-<p>Finally you can build ktransformers with website:</p>
-<pre><code>cd ../../
-pip install .
-</code></pre>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion"><a class="header" href="#how-to-use-tabby-and-ktransformers-locally-with-236b-large-models-for-code-completion">How to Use Tabby and ktransformers Locally with 236B Large Models for Code Completion?</a></h1>
-<p><a href="https://tabby.tabbyml.com/docs/welcome/">Tabby</a> is an open-source code assistant that allows users to manually configure the backend framework and model, and use it across multiple IDEs/editors, such as VSCode and IntelliJ. Since Tabby can interface with Ollama on the framework side, and the ktransformers server provides a consistent API with Ollama, we can connect Tabby to the ktransformers server. This setup allows us to experience fast, heterogeneous inference in code completion scenarios.</p>
-<ol>
-<li>Start ktransformers.</li>
-</ol>
-<pre><code class="language-bash">./ktransformers --port 9112
-</code></pre>
-<ol start="2">
-<li>Install Tabby: Follow the official tutorial to install Tabby on a Linux server or Windows PC with an NVIDIA GPU <a href="https://tabby.tabbyml.com/docs/quick-start/installation/linux/">here</a>.</li>
-<li>Configure Tabby: Create <code>~/.tabby/config.toml</code> and add the following configuration.</li>
-</ol>
-<pre><code class="language-toml">[model.completion.http]
-kind = "ollama/completion"
-api_endpoint = "http://127.0.0.1:9112/"
-model_name = "DeepSeek-Coder-V2-Instruct"
-prompt_template = "&lt;｜fim▁begin｜&gt;{prefix}&lt;｜fim▁hole｜&gt;{suffix}&lt;｜fim▁end｜&gt;" # Prompt Template
-</code></pre>
-<p>In this configuration, <code>kind</code> specifies that ktransformers uses the standard Ollama API to serve Tabby; <code>api_endpoint</code> matches the interface bound when launching ktransformers; <code>model_name</code> is set to the model used by ktransformers, here <code>DeepSeek-Coder-V2-Instruct</code> is the backend inference model; <code>prompt_template</code> is the model's prompt template, which requires a corresponding template for different models to use the Fill In the Middle feature properly.
-Here we demonstrate the relevant configuration for Tabby using the Ollama API to provide the Completion feature. For configuration information about other functions available in Tabby, refer to <a href="https://tabby.tabbyml.com/docs/administration/model/">here</a>.</p>
-<ol start="4">
-<li>
-<p>Start the Tabby service: <code>./tabby serve</code>.
-<img src="en/api/server/run-tabby.png" alt="image-20240709112329577" style="zoom:50%;" /></p>
-<p>After launching, you should see access to the <code>/api/tags</code> interface in the ktransformers command line (in version v0.13.0 of Tabby, this changes to access to the <code>/api/show/</code> interface).
-<img src="en/api/server/visit-api-tags.png" alt="image-20240709111648215" style="zoom:67%;" /></p>
-</li>
-<li>
-<p>Register a Tabby account, obtain a Token: After starting the Tabby service, open the corresponding link in a browser (as shown above at 0.0.0.0:8080), and follow the <a href="https://tabby.tabbyml.com/docs/quick-start/register-account/">tutorial</a> to create a user and get a Token.</p>
-</li>
-<li>
-<p>Start VSCode, install the Tabby extension plugin, and use the Token obtained in the previous step to connect to the Tabby Server, following <a href="https://tabby.tabbyml.com/docs/extensions/installation/vscode/">here</a>.</p>
-</li>
-<li>
-<p>Open any code file and experience the fast heterogeneous inference of ktransformers.</p>
-</li>
-</ol>
-<div style="break-before: page; page-break-before: always;"></div><h1 id="makefile"><a class="header" href="#makefile">Makefile</a></h1>
-<h2 id="target"><a class="header" href="#target">Target</a></h2>
-<h3 id="flake_find"><a class="header" href="#flake_find">flake_find:</a></h3>
-<pre><code class="language-bash">make flake_find
-</code></pre>
-<p>find all the python files under ./ktransformers dir and find the Error, Warning, Fatal... (their codes) into a list that are not consistent with the pep8 standard. For now we have get all this list in the .flake8 file's extend-ignore section in order to let flakes8 ignore them temporarily.(we may improve them in the future)</p>
-<h3 id="format"><a class="header" href="#format">format:</a></h3>
-<pre><code class="language-bash">make format
-</code></pre>
-<p>we use black to format all the python files under ./ktransformers dir. It obeys the pep8 standard
-but we modify the line length to 120 by add</p>
-<pre><code class="language-toml">[tool.black]
-line-length = 120
-preview = true
-unstable = true
-</code></pre>
-<p>in the pyproject.toml file.</p>
-<h3 id="dev_install"><a class="header" href="#dev_install">dev_install:</a></h3>
-<pre><code class="language-bash">make dev_install
-</code></pre>
-<p>install the package in the development mode. It means that the package is installed in the editable mode. So if you modify the code, you don't need to reinstall the package. We recommend the developer to use this method to install the package.</p>
 <div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
-<h1 id="faq-1"><a class="header" href="#faq-1">FAQ</a></h1>
-<ul>
-<li><a href="en/FAQ.html#install">Install</a>
-<ul>
-<li><a href="en/FAQ.html#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></li>
-<li><a href="en/FAQ.html#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial  token</a></li>
-</ul>
-</li>
-<li><a href="en/FAQ.html#usage">Usage</a>
-<ul>
-<li><a href="en/FAQ.html#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></li>
-<li><a href="en/FAQ.html#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></li>
-<li><a href="en/FAQ.html#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></li>
-<li><a href="en/FAQ.html#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></li>
-<li><a href="en/FAQ.html#q-loading-gguf-error">Q: Loading gguf error</a></li>
-<li><a href="en/FAQ.html#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></li>
-<li><a href="en/FAQ.html#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></li>
-<li><a href="en/FAQ.html#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></li>
-<li><a href="en/FAQ.html#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></li>
-</ul>
-</li>
-</ul>
-<h2 id="install"><a class="header" href="#install">Install</a></h2>
-<h3 id="q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found"><a class="header" href="#q-importerror-libx86_64-linux-gnulibstdcso6-version-glibcxx_3432-not-found">Q: ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version GLIBCXX_3.4.32' not found</a></h3>
-<pre><code>in Ubuntu 22.04 installation need to add the:
-sudo add-apt-repository ppa:ubuntu-toolchain-r/test
-sudo apt-get update
-sudo apt-get install --only-upgrade libstdc++6
-</code></pre>
-<p>from-https://github.com/kvcache-ai/ktransformers/issues/117#issuecomment-2647542979</p>
-<h3 id="q-deepseek-r1-not-outputting-initial--token"><a class="header" href="#q-deepseek-r1-not-outputting-initial--token">Q: DeepSeek-R1 not outputting initial <think> token</a></h3>
-<blockquote>
-<p>from deepseek-R1 doc:<br>
-Additionally, we have observed that the DeepSeek-R1 series models tend to bypass thinking pattern (i.e., outputting "&lt;think&gt;\n\n&lt;/think&gt;") when responding to certain queries, which can adversely affect the model's performance. To ensure that the model engages in thorough reasoning, we recommend enforcing the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output.</p>
-</blockquote>
-<p>So we fix this by manually adding "&lt;think&gt;\n" token at prompt end (you can check out at local_chat.py),
-and pass the arg <code>--force_think true </code> can let the local_chat initiate the response with "&lt;think&gt;\n"</p>
-<p>from-https://github.com/kvcache-ai/ktransformers/issues/129#issue-2842799552</p>
-<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
-<h3 id="q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it"><a class="header" href="#q-if-i-got-more-vram-than-the-models-requirement-how-can-i-fully-utilize-it">Q: If I got more VRAM than the model's requirement, how can I fully utilize it?</a></h3>
-<ol>
-<li>
-<p>Get larger context.</p>
-<ol>
-<li>local_chat.py: You can increase the context window size by setting <code>--max_new_tokens</code> to a larger value.</li>
-<li>server: Increase the `--cache_lens' to a larger value.</li>
-</ol>
-</li>
-<li>
-<p>Move more weights to the GPU.
-Refer to the ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu-4.yaml</p>
-<pre><code class="language-yaml">- match:
-   name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$" # inject experts in layer 4~10 as marlin expert
- replace:
-   class: ktransformers.operators.experts.KTransformersExperts  
-   kwargs:
-     generate_device: "cuda:0" # run in cuda:0; marlin only support GPU
-     generate_op:  "KExpertsMarlin" # use marlin expert
- recursive: False
-</code></pre>
-<p>You can modify layer as you want, eg. <code>name: "^model\\.layers\\.([4-10])\\.mlp\\.experts$"</code> to <code>name: "^model\\.layers\\.([4-12])\\.mlp\\.experts$"</code> to move more weights to the GPU.</p>
-<blockquote>
-<p>Note: The first matched rule in yaml will be applied. For example, if you have two rules that match the same layer, only the first rule's replacement will be valid.
-Note：Currently, executing experts on the GPU will conflict with CUDA Graph. Without CUDA Graph, there will be a significant slowdown. Therefore, unless you have a substantial amount of VRAM (placing a single layer of experts for DeepSeek-V3/R1 on the GPU requires at least 5.6GB of VRAM), we do not recommend enabling this feature. We are actively working on optimization.
-Note KExpertsTorch is untested.</p>
-</blockquote>
-</li>
-</ol>
-<h3 id="q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them"><a class="header" href="#q-if-i-dont-have-enough-vram-but-i-have-multiple-gpus-how-can-i-utilize-them">Q: If I don't have enough VRAM, but I have multiple GPUs, how can I utilize them?</a></h3>
-<p>Use the <code>--optimize_config_path ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat-multi-gpu.yaml</code> to load the two optimized rule yaml file. You may also use it as an example to write your own 4/8 gpu optimized rule yaml file.</p>
-<blockquote>
-<p>Note: The ktransformers' multi-gpu stratigy is pipline, which is not able to speed up the model's inference. It's only for the model's weight distribution.</p>
-</blockquote>
-<h3 id="q-how-to-get-the-best-performance"><a class="header" href="#q-how-to-get-the-best-performance">Q: How to get the best performance?</a></h3>
-<p>You have to set <code>--cpu_infer</code> to the number of cores you want to use. The more cores you use, the faster the model will run. But it's not the more the better. Adjust it slightly lower to your actual number of cores.</p>
-<h3 id="q-my-deepseek-r1-model-is-not-thinking"><a class="header" href="#q-my-deepseek-r1-model-is-not-thinking">Q: My DeepSeek-R1 model is not thinking.</a></h3>
-<p>According to DeepSeek, you need to enforce the model to initiate its response with "&lt;think&gt;\n" at the beginning of every output by passing the arg <code>--force_think True </code>.</p>
-<h3 id="q-loading-gguf-error"><a class="header" href="#q-loading-gguf-error">Q: Loading gguf error</a></h3>
-<p>Make sure you:</p>
-<ol>
-<li>Have the <code>gguf</code> file in the <code>--gguf_path</code> directory.</li>
-<li>The directory only contains gguf files from one model. If you have multiple models, you need to separate them into different directories.</li>
-<li>The folder name it self should not end with <code>.gguf</code>, eg. <code>Deep-gguf</code> is correct, <code>Deep.gguf</code> is wrong.</li>
-<li>The file itself is not corrupted; you can verify this by checking that the sha256sum matches the one from huggingface, modelscope, or hf-mirror.</li>
-</ol>
-<h3 id="q-version-glibcxx_3430-not-found"><a class="header" href="#q-version-glibcxx_3430-not-found">Q: Version `GLIBCXX_3.4.30' not found</a></h3>
-<p>The detailed error:</p>
-<blockquote>
-<p>ImportError: /mnt/data/miniconda3/envs/xxx/bin/../lib/libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/xxx/xxx/ktransformers/./cpuinfer_ext.cpython-312-x86_64-linux-gnu.so)</p>
-</blockquote>
-<p>Running <code>conda install -c conda-forge libstdcxx-ng</code> can solve the problem.</p>
-<h3 id="q-when-running-the-bfloat16-moe-model-the-data-shows-nan"><a class="header" href="#q-when-running-the-bfloat16-moe-model-the-data-shows-nan">Q: When running the bfloat16 moe model, the data shows NaN</a></h3>
-<p>The detailed error:</p>
-<pre><code class="language-shell">Traceback (most recent call last):
-  File "/root/ktransformers/ktransformers/local_chat.py", line 183, in &lt;module&gt;
-    fire.Fire(local_chat)
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 135, in Fire
-    component_trace = _Fire(component, args, parsed_flag_args, context, name)
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 468, in _Fire
-    component, remaining_args = _CallAndUpdateTrace(
-  File "/usr/local/lib/python3.10/dist-packages/fire/core.py", line 684, in _CallAndUpdateTrace
-    component = fn(*varargs, **kwargs)
-  File "/root/ktransformers/ktransformers/local_chat.py", line 177, in local_chat
-    generated = prefill_and_generate(
-  File "/root/ktransformers/ktransformers/util/utils.py", line 204, in prefill_and_generate
-    next_token = decode_one_tokens(cuda_graph_runner, next_token.unsqueeze(0), position_ids, cache_position, past_key_values, use_cuda_graph).to(torch_device)
-  File "/root/ktransformers/ktransformers/util/utils.py", line 128, in decode_one_tokens
-    next_token = torch.multinomial(probs, num_samples=1).squeeze(1)
-RuntimeError: probability tensor contains either `inf`, `nan` or element &lt; 0
-</code></pre>
-<p><strong>SOLUTION</strong>: The issue of running ktransformers on Ubuntu 22.04 is caused by the current system's g++ version being too old, and the pre-defined macros do not include avx_bf16. We have tested and confirmed that it works on g++ 11.4 in Ubuntu 22.04.</p>
-<h3 id="q-using-fp8-prefill-very-slow"><a class="header" href="#q-using-fp8-prefill-very-slow">Q: Using fp8 prefill very slow.</a></h3>
-<p>The FP8 kernel is build by JIT, so the first run will be slow. The subsequent runs will be faster.</p>
-<h3 id="q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures"><a class="header" href="#q-possible-ways-to-run-graphics-cards-using-volta-and-turing-architectures">Q: Possible ways to run graphics cards using volta and turing architectures</a></h3>
-<p>From: https://github.com/kvcache-ai/ktransformers/issues/374</p>
-<ol>
-<li>First, download the latest source code using git.</li>
-<li>Then, modify the DeepSeek-V3-Chat-multi-gpu-4.yaml in the source code and all related yaml files, replacing all instances of KLinearMarlin with KLinearTorch.</li>
-<li>Next, you need to compile from the ktransformers source code until it successfully compiles on your local machine.</li>
-<li>Then, install flash-attn. It won't be used, but not installing it will cause an error.</li>
-<li>Then, modify local_chat.py, replacing all instances of flash_attention_2 with eager.</li>
-<li>Then, run local_chat.py. Be sure to follow the official tutorial's commands and adjust according to your local machine's parameters.</li>
-<li>During the running process, check the memory usage. Observe its invocation through the top command. The memory capacity on a single CPU must be greater than the complete size of the model. (For multiple CPUs, it's just a copy.)
-Finally, confirm that the model is fully loaded into memory and specific weight layers are fully loaded into the GPU memory. Then, try to input content in the chat interface and observe if there are any errors.</li>
-</ol>
-<p>Attention, for better perfomance, you can check this <a href="https://github.com/kvcache-ai/ktransformers/issues/374#issuecomment-2667520838">method</a> in the issue</p>
-<blockquote>
-<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L274-L279</p>
-<pre><code class="language-diff">+ original_dtype = query_states.dtype
-+ target_dtype = torch.half
-+ query_states = query_states.to(target_dtype)
-+ compressed_kv_with_k_pe = compressed_kv_with_k_pe.to(target_dtype)
-+ compressed_kv = compressed_kv.to(target_dtype)
-+ attn_output = attn_output.to(target_dtype)
-
-decode_attention_fwd_grouped(query_states, compressed_kv_with_k_pe, compressed_kv, attn_output,
-                            page_table,
-                            position_ids.squeeze(0).to(torch.int32)+1, attn_logits,
-                            4, #num_kv_splits # follow vLLM, fix it TODO
-                            self.softmax_scale,
-                            past_key_value.page_size)
-
-+ attn_output = attn_output.to(original_dtype)
-</code></pre>
-<p>https://github.com/kvcache-ai/ktransformers/blob/89f8218a2ab7ff82fa54dbfe30df741c574317fc/ktransformers/operators/attention.py#L320-L326</p>
-<pre><code class="language-diff">- attn_output = flash_attn_func( 
--     query_states, 
--     key_states, 
--     value_states_padded, 
--     softmax_scale=self.softmax_scale, 
--     causal=True, 
-- )
-+ attn_output = F.scaled_dot_product_attention(
-+     query_states.transpose(1, 2),
-+     key_states.transpose(1, 2),
-+     value_states_padded.transpose(1, 2),
-+     scale=self.softmax_scale,
-+     is_causal=True
-+ ).transpose(1, 2)
-</code></pre>
-</blockquote>
-<div style="break-before: page; page-break-before: always;"></div><h2 id="hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference"><a class="header" href="#hello-everyone-here-is-the-successfully-reproduced-environment-configuration-for-your-reference">Hello everyone, here is the successfully reproduced environment configuration for your reference:</a></h2>
-<h3 id="case-1"><a class="header" href="#case-1">Case 1</a></h3>
-<ul>
-<li>Configuration: l40s 48G + 9654 x2 (192 cores) + 768G DDR5 12-channel</li>
-<li>Performance: prefill 108 tokens/s, decode 10.8 tokens/s</li>
-<li>Used version: main source code compiled</li>
-</ul>
-<h3 id="case-2"><a class="header" href="#case-2">Case 2</a></h3>
-<ul>
-<li>Configuration: Dual Xeon 6430 32C processors, totaling 64 cores and 128 threads, 480GB DDR5 memory, single 4090 24G graphics card</li>
-<li>Performance: Running speed approximately 6-8 tokens per second</li>
-</ul>
-<h2 id="note"><a class="header" href="#note">NOTE</a></h2>
-<p>If there are any other configurations that have been successfully run, please feel free to let us know. We will keep updating for everyone to refer to when reproducing. (It has been found that it also works on 2080, AMD, etc. (doge : )
-<a href="https://docs.qq.com/smartsheet/form/AVxgQOYhhNfl%2FBB08J2%2Fv3rnnq?tab=BB08J2">click here</a></p>
-<div style="break-before: page; page-break-before: always;"></div><h2 id="benchmark"><a class="header" href="#benchmark">Benchmark</a></h2>
-<p>To conduct a quick and convenient check, we have employed a simple Python script available <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/tests">here</a> to assess the precision of our <strong><a href="https://github.com/kvcache-ai/ktransformers">ktransformers</a></strong> project. For this evaluation, we utilized the same dataset, which was shuffled in a consistent manner and limited to the first 1,000 data points, to test our implementation across a variety of CPU kernels, MLA kernels, and quantization formats.</p>
-<p>We selected the DeepSeek-V3 model in its bf16, int8, and q4km versions for this test. The MMLU dataset, which can be found <a href="https://huggingface.co/datasets/cais/mmlu">here</a>, was used (we selected all datasets and shuffled them with a fixed random seed).</p>
-<p><strong>!!! However, we skipped the few-shot part and only chose the first 1,000 data points for a quick check.</strong> Please note that this approach may result in results that are not consistent with the technical report of DeepSeek-V3. And the test of R1 and further more tests are on going.</p>
-<p>To verify our results, we chose <a href="https://cloud.siliconflow.cn/models">cloud service platform</a> as baseline. All tests were conducted using the same script and datasets, allowing us to make a preliminary assessment of our project's precision.</p>
-<p>We set the argument <code>temperature=0.6</code>, and to simplify the test process, we skipped the few-shot part and used the following prompt: <code>There is a single choice question. Answer the question by replying A, B, C, D. No other answers are accepted. Just the letter. \nQuestion: {question}\nA. {option_a}\nB. {option_b}\nC. {option_c}\nD. {option_d}\nAnswer: '</code>. For more details, please refer to the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/tests/mmlu_test.py">script</a>.</p>
-<p>Given that we have only tested 1,000 cases, which provides only a preliminary judgment, some fluctuations in the results are reasonable. We selected all datasets and shuffled them with a fixed random seed to ensure consistency.</p>
-<h2 id="some-details"><a class="header" href="#some-details">Some Details</a></h2>
-<ul>
-<li>
-<p>The bf16 model of DeepSeek-V3 is available <a href="https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16/tree/main">here</a> (you may convert it to gguf by llama.cpp). The q4km model can be found <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a>.</p>
-</li>
-<li>
-<p>The optimization YAML file is located <a href="https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules">here</a>. For the GEMM Kernel, you can change <code>KLinearMarlin</code> to <code>KLinearTorch</code>.</p>
-</li>
-<li>
-<p>To switch the MLA Kernel from Triton to Torch, you can check and modify <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py">this file</a>, specifically by using the <code>forward_windows</code> method.</p>
-</li>
-<li>
-<p>When attempting to conduct the bf16 test (both CPU Weight and GPU Weight), you may encounter issues stemming from older versions of g++ and as, particularly when using Ubuntu 20 or earlier versions. To facilitate a smoother experience and enable you to reproduce our results, we have provided a development container. This container offers a pre-configured environment tailored for this purpose. However, please note that the container does not have the ktrans package installed. Therefore, you may still need to manually install certain packages to ensure everything runs smoothly.</p>
-<ul>
-<li>You may config the model mount dir in <code>devcontainer/devcontainer.json</code>, check the <code>"mouts":</code> config.</li>
-</ul>
-</li>
-</ul>
-<h2 id="the-result-table"><a class="header" href="#the-result-table">The Result Table</a></h2>
-<p>Uses DeepSeek-V3 model (Some specific cases are R1)</p>
-<div class="table-wrapper"><table><thead><tr><th></th><th></th><th></th><th></th><th></th><th></th><th></th><th></th></tr></thead><tbody>
-<tr><td>DataSet</td><td>CPU Weight Format</td><td>CPU Kernel</td><td>GPU Weight Format</td><td>GEMM Kernel</td><td>MLA Kernel</td><td><a href="https://cloud.siliconflow.cn/models">Siliconflow</a><br></td><td>Ktrans Point</td></tr>
-<tr><td>MMLU<br><br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-<tr><td>1</td><td>bf16</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>torch</td><td>81.6</td><td>81.9</td></tr>
-<tr><td>2</td><td>q8_0</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>torch</td><td>81.6</td><td>83.1</td></tr>
-<tr><td>3</td><td>q4km</td><td>cpuinfer</td><td>bf16</td><td>torch</td><td>triton</td><td>81.6</td><td>81.4</td></tr>
-<tr><td>4</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 8</td><td>marlin</td><td>triton</td><td>81.6</td><td>81.1</td></tr>
-<tr><td>5</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>81.6</td><td>81</td></tr>
-<tr><td>6</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>81.6</td><td>81.5</td></tr>
-<tr><td>7 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>78.6</td><td>83.6</td></tr>
-<tr><td>MMLU-pro<br>(shuffle 1k)</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-<tr><td>1</td><td>q4km</td><td>cpuinfer</td><td>fp8</td><td>fp8gemm</td><td>triton</td><td>57.7</td><td>57.6</td></tr>
-<tr><td>2</td><td>q4km</td><td>cpuinfer</td><td>q4km-&gt;marlin 4</td><td>marlin</td><td>triton</td><td>57.7</td><td>57.5</td></tr>
-<tr><td>3 (DeepSeek-R1)</td><td>iq1</td><td>cpuinfer</td><td>fp8</td><td>fp8gem</td><td>triton</td><td>71.9</td><td>tbd</td></tr>
-<tr><td>HumanEval</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
-<tr><td>GSM8K</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td><td>tbd</td></tr>
-</tbody></table>
-</div>
-<p><strong>The details for each case are listed below</strong>:</p>
-<p>By default, The MLA kernel uses triton in linux and torch in windows. But we need to test torch in linux, so we manually modify the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/attention.py#L592">file</a>. Just get rid of all the if branch and force it to use <code>self.forward_windows</code></p>
-<ul>
-<li>MMLU test
-<ol>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a> change all the <code>KLinearMarlin</code> to <code>KLinearTorch</code> (just find all the usage in this file). The source weight comes from <a href="https://huggingface.co/opensourcerelease/DeepSeek-V3-bf16">there</a> (you need to use llama.cpp to convert it to gguf)</li>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122">1</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136">2</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137">3</a> (note in 3, change the path to your local weight file path). The weight file for q8_0 is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q8_0">here</a></li>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You need to modify the code to separately load cpu's expert weight. We leave this as comment in these places: <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L122">1</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L136">2</a>, <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/operators/experts.py#L137">3</a> (note in 3, change the path to your local weight file path). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. You don't need to change the source code as they both use q4km. But note the yaml file <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L29">here</a> and <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml#L18">here</a>, below these lines you need to add <code>num_bits: 8</code> (in other words: add this kwargs to all that use <code>KLinearMarlin</code>). The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
-<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
-<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
-</ol>
-</li>
-<li>MMLU-pro test
-<ol>
-<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
-<li><a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V3-Chat.yaml">v3-chat_yaml</a>. No need to change yaml, just use the default. The weight file for q4km is <a href="https://huggingface.co/unsloth/DeepSeek-V3-GGUF/tree/main/DeepSeek-V3-Q4_K_M">here</a></li>
-<li>You should check the <a href="en/./fp8_kernel.html">doc</a> to learn how to test this case. This is a mixture tensor case.</li>
-</ol>
-</li>
-</ul>
+<h1 id="see-the-issue-faq-page"><a class="header" href="#see-the-issue-faq-page">see the issue <a href="https://github.com/kvcache-ai/ktransformers/issues/1608">FAQ page</a></a></h1>
 
                     </main>
 

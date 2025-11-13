@@ -1,0 +1,678 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Installation Guide for kt-kernel - Ktransformers</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Ktransformers</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
+                            <i id="git-repository-button" class="fa fa-github"></i>
+                        </a>
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/kt-kernel_intro.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <i id="git-edit-button" class="fa fa-edit"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
+<p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
+<ul>
+<li><a href="#note">Note</a></li>
+<li><a href="#features">Features</a></li>
+<li><a href="#installation">Installation</a>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-installation-recommended">Quick Installation (Recommended)</a></li>
+<li><a href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></li>
+</ul>
+</li>
+<li><a href="#verification">Verification</a></li>
+<li><a href="#integration-with-sglang">Integration with SGLang</a>
+<ul>
+<li><a href="#installation-steps">Installation Steps</a></li>
+<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
+<li><a href="#kt-kernel-parameters">KT-Kernel Parameters</a></li>
+</ul>
+</li>
+<li><a href="#direct-python-api-usage">Direct Python API Usage</a>
+<ul>
+<li><a href="#advanced-options">Advanced Options</a></li>
+</ul>
+</li>
+<li><a href="#build-configuration">Build Configuration</a>
+<ul>
+<li><a href="#manual-installation">Manual Installation</a></li>
+</ul>
+</li>
+<li><a href="#error-troubleshooting">Error Troubleshooting</a>
+<ul>
+<li><a href="#cuda-not-found">CUDA Not Found</a></li>
+<li><a href="#hwloc-not-found">hwloc Not Found</a></li>
+</ul>
+</li>
+<li><a href="#weight-quantization">Weight Quantization</a>
+<ul>
+<li><a href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for "cold" experts on CPU)</a></li>
+<li><a href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for "hot" experts on GPU)</a></li>
+</ul>
+</li>
+<li><a href="#before-commit">Before Commit!</a></li>
+</ul>
+<h2 id="note"><a class="header" href="#note">Note</a></h2>
+<p><strong>Current Support Status:</strong></p>
+<ul>
+<li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported</li>
+<li>⚠️ <strong>Universal CPU with llamafile</strong>: In preview, not yet fully complete</li>
+<li>⚠️ <strong>AMD CPUs with BLIS</strong>: Upcoming, not yet fully integrated</li>
+</ul>
+<h2 id="features"><a class="header" href="#features">Features</a></h2>
+<ul>
+<li><strong>AMX Optimization</strong>: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference</li>
+<li><strong>Multi-Backend</strong>: Unified <code>KTMoEWrapper</code> API supporting multiple backends (AMXINT4, AMXINT8, LLAMAFILE*)</li>
+<li><strong>Flexible Backends</strong>: AVX512, AVX2 via pluggable backend architecture</li>
+<li><strong>Efficient MoE</strong>: Optimized Mixture-of-Experts operations with NUMA-aware memory management</li>
+<li><strong>Async Execution</strong>: Non-blocking <code>submit_forward</code> / <code>sync_forward</code> API for improved pipelining</li>
+<li><strong>Easy Integration</strong>: Clean Python API with automatic backend selection</li>
+</ul>
+<p><strong>Note</strong>: *LLAMAFILE backend support is currently in <em>preview</em> and not yet fully complete.</p>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<h3 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h3>
+<p>First, initialize git submodules:</p>
+<pre><code class="language-bash">git submodule update --init --recursive
+</code></pre>
+<h3 id="quick-installation-recommended"><a class="header" href="#quick-installation-recommended">Quick Installation (Recommended)</a></h3>
+<p>Step 0: Create and activate a conda environment (recommended):</p>
+<pre><code class="language-bash">conda create -n kt-kernel python=3.11 -y
+conda activate kt-kernel
+</code></pre>
+<p>You can now install in two clear steps using the same script.</p>
+<p>Option A: Two-step (explicit)</p>
+<pre><code class="language-bash"># 1) Install system prerequisites (cmake, hwloc, pkg-config)
+./install.sh deps
+
+# 2) Build and install kt-kernel (auto-detects CPU)
+#    By default, the script cleans the local ./build directory before compiling.
+./install.sh build
+</code></pre>
+<p>Option B: One-step (deps + build)</p>
+<pre><code class="language-bash">./install.sh
+</code></pre>
+<p>The install script will:</p>
+<ul>
+<li>Auto-detect CPU capabilities (AMX support)</li>
+<li>Install <code>cmake</code> via conda (if available)</li>
+<li>Install system dependencies (<code>libhwloc-dev</code>, <code>pkg-config</code>) based on your OS</li>
+</ul>
+<p><strong>What gets configured automatically:</strong></p>
+<ul>
+<li>AMX CPU detected → <code>NATIVE + AMX=ON</code></li>
+<li>No AMX detected → <code>NATIVE + AMX=OFF</code></li>
+</ul>
+<p>⚠️ <strong>Important for LLAMAFILE backend users:</strong> If you have an AMX-capable CPU and plan to use the LLAMAFILE backend, do NOT use auto-detection. Use manual mode with <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
+<h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
+<p>If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):</p>
+<pre><code class="language-bash"># Example for LLAMAFILE backend on AMX CPU with AVX512
+export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
+export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
+
+# Run with manual mode (build only)
+./install.sh build --manual
+</code></pre>
+<p>For advanced build options and binary distribution, see the <a href="#build-configuration">Build Configuration</a> section. If you encounter issues, refer to <a href="#error-troubleshooting">Error Troubleshooting</a>.</p>
+<h2 id="verification"><a class="header" href="#verification">Verification</a></h2>
+<pre><code class="language-bash">python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
+</code></pre>
+<h2 id="integration-with-sglang"><a class="header" href="#integration-with-sglang">Integration with SGLang</a></h2>
+<p>KT-Kernel can be used standalone via <a href="#direct-python-api-usage">Direct Python API</a> or integrated with SGLang for production deployment. This section describes SGLang integration to enable CPU-GPU heterogeneous inference, where "hot" experts run on GPU and "cold" experts run on CPU for optimal resource utilization.</p>
+<h3 id="installation-steps"><a class="header" href="#installation-steps">Installation Steps</a></h3>
+<h4 id="1-install-sglang"><a class="header" href="#1-install-sglang">1. Install SGLang</a></h4>
+<pre><code class="language-bash">git clone https://github.com/sgl-project/sglang.git
+cd sglang
+pip install -e "python[all]"
+</code></pre>
+<h4 id="2-prepare-weights"><a class="header" href="#2-prepare-weights">2. Prepare Weights</a></h4>
+<p>You need both GPU weights and CPU weights for heterogeneous inference:</p>
+<p><strong>GPU Weights:</strong> Use the original / quantized model weights.</p>
+<p><strong>CPU Weights:</strong> Quantize to AMX-optimized format using the conversion script:</p>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \  # Depends on your GPU weights type: fp8, fp16, or bf16
+  --output /path/to/cpu-weights \
+  --quant-method int8  # or int4
+</code></pre>
+<p><strong>Supported input formats:</strong> FP8, FP16, BF16 → INT4/INT8.</p>
+<p>For more details, see:</p>
+<ul>
+<li><a href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights conversion</a></li>
+<li><a href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights quantization</a></li>
+</ul>
+<p><strong>Note:</strong> LLAMAFILE backend supports GGUF format directly, but this feature is still in preview.</p>
+<h4 id="3-launch-sglang-server"><a class="header" href="#3-launch-sglang-server">3. Launch SGLang Server</a></h4>
+<p>Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:</p>
+<p><strong>KT-Kernel Parameters to Add:</strong></p>
+<ul>
+<li><code>--kt-method</code>: Backend method (AMXINT4, AMXINT8, or LLAMAFILE)</li>
+<li><code>--kt-weight-path</code>: Path to the converted CPU weights</li>
+<li><code>--kt-cpuinfer</code>: Number of CPU inference threads (set to physical cores)</li>
+<li><code>--kt-threadpool-count</code>: Number of thread pools (set to NUMA node count)</li>
+<li><code>--kt-num-gpu-experts</code>: Number of experts to keep on GPU</li>
+<li><code>--kt-max-deferred-experts-per-token</code>: Deferred experts for pipelined execution</li>
+</ul>
+<p>Example:</p>
+<pre><code class="language-bash">python -m sglang.launch_server \
+  [your normal SGLang parameters...] \
+  --kt-method AMXINT8 \
+  --kt-weight-path /path/to/cpu-weights \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+</code></pre>
+<p>See <a href="#kt-kernel-parameters">KT-Kernel Parameters</a> section below for detailed parameter tuning guidelines.</p>
+<h3 id="complete-example-qwen3-30b-a3b"><a class="header" href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></h3>
+<p>This example demonstrates the full workflow from downloading weights to launching the server.</p>
+<p><strong>Hardware Configuration:</strong></p>
+<ul>
+<li><strong>GPU</strong>: NVIDIA RTX 4090 24GB</li>
+<li><strong>CPU</strong>: 2x Intel Xeon Gold 6454S (64 physical cores total, 128 threads, 2 NUMA nodes)</li>
+<li><strong>Model</strong>: <a href="https://huggingface.co/Qwen/Qwen3-30B-A3B">Qwen3-30B-A3B</a></li>
+<li><strong>GPU Weights</strong>: BF16 original weights</li>
+<li><strong>CPU Weights</strong>: AMXINT8 quantized</li>
+</ul>
+<p><strong>How to verify your system configuration:</strong></p>
+<pre><code class="language-bash"># Check CPU configuration
+lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core|Socket\(s\)|NUMA node\(s\)"
+# Expected output example:
+CPU(s):                                  128
+Thread(s) per core:                      2
+Socket(s):                               2
+NUMA node(s):                            2
+# → Physical cores = CPU(s) / Thread(s) per core = 128 / 2 = 64
+</code></pre>
+<p><strong>Parameter Rationale:</strong></p>
+<ul>
+<li><code>--kt-cpuinfer 64</code>: Set to physical cores (64), not hyperthreads (128)</li>
+<li><code>--kt-threadpool-count 2</code>: 2 NUMA nodes detected (dual-socket system)</li>
+<li><code>--kt-num-gpu-experts 32</code>: With 24GB GPU memory, we can fit ~32 experts on GPU for this model (varies by model architecture and actual memory usage)</li>
+<li><code>--kt-max-deferred-experts-per-token 2</code>: Enable pipelined execution - allows CPU to process next batch while GPU completes current batch</li>
+</ul>
+<h4 id="step-1-download-model-weights"><a class="header" href="#step-1-download-model-weights">Step 1: Download model weights</a></h4>
+<pre><code class="language-bash"># Install huggingface-cli if not already installed
+pip install huggingface-hub
+
+# Download model from Hugging Face
+hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+</code></pre>
+<h4 id="step-2-convert-to-cpu-weights-amxint8"><a class="header" href="#step-2-convert-to-cpu-weights-amxint8">Step 2: Convert to CPU weights (AMXINT8)</a></h4>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /mnt/data/models/Qwen3-30B-A3B \
+  --input-type bf16 \
+  --output /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --quant-method int8
+</code></pre>
+<h4 id="step-3-launch-sglang-server"><a class="header" href="#step-3-launch-sglang-server">Step 3: Launch SGLang server</a></h4>
+<pre><code class="language-bash">python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /mnt/data/models/Qwen3-30B-A3B \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name Qwen3-30B-A3B \
+  --enable-mixed-chunk \
+  --kt-method AMXINT8 \
+  --kt-weight-path /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+</code></pre>
+<h3 id="kt-kernel-parameters"><a class="header" href="#kt-kernel-parameters">KT-Kernel Parameters</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr></thead><tbody>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, or <code>LLAMAFILE</code> (preview)</td></tr>
+<tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
+<tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
+<tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
+<tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
+<tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-2 recommended)</td></tr>
+</tbody></table>
+</div>
+<p><strong>Parameter Guidelines:</strong></p>
+<ul>
+<li>
+<p><strong><code>kt-method</code></strong>: Choose based on your CPU and weight format:</p>
+<ul>
+<li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
+<li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
+<li><code>LLAMAFILE</code>: Preview support for GGUF format (not fully complete)</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-cpuinfer</code></strong>: Set to the number of <strong>physical CPU cores</strong> (not hyperthreads).</p>
+<ul>
+<li>Check physical cores: <code>lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core"</code></li>
+<li>Physical cores = CPU(s) / Thread(s) per core</li>
+<li>Example: If CPU(s)=128 and Thread(s) per core=2, then physical cores = 64</li>
+<li><strong>Important</strong>: Do NOT set to hyperthread count - this will degrade performance</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-threadpool-count</code></strong>: Set to the number of <strong>NUMA nodes</strong>.</p>
+<ul>
+<li>Check NUMA count: <code>lscpu | grep "NUMA node(s)"</code></li>
+<li>Or use: <code>numactl --hardware | grep "available"</code></li>
+<li><strong>Note</strong>: NUMA node count is NOT necessarily the number of physical CPUs
+<ul>
+<li>It represents memory domains, which may be divided within a single CPU or across multiple CPUs</li>
+<li>Use the NUMA node count from <code>lscpu</code>, regardless of physical CPU count</li>
+</ul>
+</li>
+<li>Typical values: 1-2 for single-socket, 2-4 for dual-socket systems</li>
+<li>This enables better memory bandwidth utilization across NUMA domains</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-num-gpu-experts</code></strong>: Determine based on GPU memory and profiling:</p>
+<ul>
+<li>More GPU experts = lower latency but higher GPU memory usage (May cause OOM)</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-max-deferred-experts-per-token</code></strong>: Enables pipelined execution:</p>
+<ul>
+<li><code>0</code>: Synchronous execution (simpler, higher latency)</li>
+<li><code>1-2</code>: Deferred execution (better latency, requires tuning) - recommended</li>
+<li><code>3-4</code>: Higher deferred count (possible but rarely beneficial)</li>
+</ul>
+</li>
+</ul>
+<h2 id="direct-python-api-usage"><a class="header" href="#direct-python-api-usage">Direct Python API Usage</a></h2>
+<p>For standalone usage without SGLang, you can use KT-Kernel directly via Python API:</p>
+<pre><code class="language-python">from kt_kernel import KTMoEWrapper
+
+# Initialize the MoE wrapper
+wrapper = KTMoEWrapper(
+    layer_idx=0,
+    num_experts=8,
+    num_experts_per_tok=2,
+    hidden_size=4096,
+    moe_intermediate_size=14336,
+    num_gpu_experts=2,
+    cpuinfer_threads=32,
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE" (preview)
+)
+
+# Load weights (from disk - pre-quantized)
+wrapper.load_weights(physical_to_logical_map)
+
+# Or load weights from tensors (online quantization)
+wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+
+# Run inference
+output = wrapper.forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+
+# Or use async API for better performance
+wrapper.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+# ... do other work ...
+output = wrapper.sync_forward(hidden_states, cuda_stream)
+</code></pre>
+<h3 id="advanced-options"><a class="header" href="#advanced-options">Advanced Options</a></h3>
+<pre><code class="language-python"># Initialize with additional options
+wrapper = KTMoEWrapper(
+    layer_idx=0,
+    num_experts=8,
+    num_experts_per_tok=2,
+    hidden_size=4096,
+    moe_intermediate_size=14336,
+    num_gpu_experts=2,
+    cpuinfer_threads=32,
+    threadpool_count=2,
+    weight_path="/path/to/weights",
+    chunked_prefill_size=512,
+    method="AMXINT4",
+    cpu_save=False,  # Keep weights in CPU memory after loading
+    max_deferred_experts_per_token=0  # Number of experts to defer (for pipelined execution)
+)
+
+# Pre-allocate buffers for specific batch sizes (improves performance)
+KTMoEWrapper.set_capture_batch_sizes([1, 2, 4, 8, 16])
+
+# Query captured batch sizes
+batch_sizes = KTMoEWrapper.get_capture_batch_sizes()
+
+# Clear buffer cache to free memory
+KTMoEWrapper.clear_buffer_cache()
+</code></pre>
+<h2 id="build-configuration"><a class="header" href="#build-configuration">Build Configuration</a></h2>
+<h3 id="manual-installation"><a class="header" href="#manual-installation">Manual Installation</a></h3>
+<p>If you prefer manual installation without the <code>install.sh</code> script, follow these steps:</p>
+<h4 id="1-install-system-dependencies"><a class="header" href="#1-install-system-dependencies">1. Install System Dependencies</a></h4>
+<p><strong>Prerequisites:</strong></p>
+<ul>
+<li><code>cmake</code> (recommended: <code>conda install -y cmake</code>)</li>
+<li><code>libhwloc-dev</code> and <code>pkg-config</code></li>
+</ul>
+<h4 id="2-set-build-configuration"><a class="header" href="#2-set-build-configuration">2. Set Build Configuration</a></h4>
+<p><strong>Core Options:</strong></p>
+<div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Options</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>CPUINFER_CPU_INSTRUCT</code></td><td><code>NATIVE</code>, <code>AVX512</code>, <code>AVX2</code>, <code>FANCY</code></td><td>CPU instruction set to use</td></tr>
+<tr><td><code>CPUINFER_ENABLE_AMX</code></td><td><code>ON</code>, <code>OFF</code></td><td>Enable Intel AMX support</td></tr>
+<tr><td><code>CPUINFER_BUILD_TYPE</code></td><td><code>Release</code>, <code>Debug</code>, <code>RelWithDebInfo</code></td><td>Build type (default: <code>Release</code>)</td></tr>
+<tr><td><code>CPUINFER_PARALLEL</code></td><td>Number</td><td>Parallel build jobs (default: auto-detect)</td></tr>
+<tr><td><code>CPUINFER_VERBOSE</code></td><td><code>0</code>, <code>1</code></td><td>Verbose build output (default: <code>0</code>)</td></tr>
+</tbody></table>
+</div>
+<p><strong>Instruction Set Details:</strong></p>
+<ul>
+<li><strong><code>NATIVE</code></strong>: Auto-detect and use all available CPU instructions (<code>-march=native</code>) - <strong>Recommended for best performance</strong></li>
+<li><strong><code>AVX512</code></strong>: Explicit AVX512 support for Skylake-SP and Cascade Lake</li>
+<li><strong><code>AVX2</code></strong>: AVX2 support for maximum compatibility</li>
+<li><strong><code>FANCY</code></strong>: AVX512 with full extensions (AVX512F/BW/DQ/VL/VNNI) for Ice Lake+ and Zen 4+. Use this when building pre-compiled binaries to distribute to users with modern CPUs. For local builds, prefer <code>NATIVE</code> for better performance.</li>
+</ul>
+<p><strong>Example Configurations:</strong></p>
+<pre><code class="language-bash"># Maximum performance on AMX CPU
+export CPUINFER_CPU_INSTRUCT=NATIVE
+export CPUINFER_ENABLE_AMX=ON
+
+# AVX512 CPU without AMX
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+
+# Compatibility build
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+
+# Debug build for development
+export CPUINFER_BUILD_TYPE=Debug
+export CPUINFER_VERBOSE=1
+</code></pre>
+<h4 id="3-build-and-install"><a class="header" href="#3-build-and-install">3. Build and Install</a></h4>
+<pre><code class="language-bash"># Editable installation (for development)
+pip install -e .
+
+# Standard installation
+pip install .
+</code></pre>
+<h2 id="error-troubleshooting"><a class="header" href="#error-troubleshooting">Error Troubleshooting</a></h2>
+<h3 id="cuda-not-found"><a class="header" href="#cuda-not-found">CUDA Not Found</a></h3>
+<pre><code> -- Looking for a CUDA compiler - NOTFOUND
+  CMake Error at CMakeLists.txt:389 (message):
+    KTRANSFORMERS_USE_CUDA=ON but CUDA compiler not found
+</code></pre>
+<p>Make sure you have the CUDA toolkit installed and <code>nvcc</code> is in your system PATH.</p>
+<p>Try <code>export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"</code> and reinstall again.</p>
+<h3 id="hwloc-not-found"><a class="header" href="#hwloc-not-found">hwloc Not Found</a></h3>
+<p>Run <code>sudo apt install libhwloc-dev</code> if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.</p>
+<pre><code>wget https://download.open-mpi.org/release/hwloc/v2.12/hwloc-2.12.2.tar.gz
+tar -xzf hwloc-2.12.2.tar.gz
+cd hwloc-2.12.2
+./configure
+make
+sudo make install
+</code></pre>
+<h2 id="weight-quantization"><a class="header" href="#weight-quantization">Weight Quantization</a></h2>
+<p>KT-Kernel provides weight quantization tools for CPU-GPU hybrid inference (e.g., integrating with SGLang). Both tools work together to enable heterogeneous expert placement across CPUs and GPUs.</p>
+<h3 id="cpu-weights-for-cold-experts-on-cpu"><a class="header" href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for "cold" experts on CPU)</a></h3>
+<p>Quantize weights to INT4/INT8 format optimized for AMX inference:</p>
+<pre><code class="language-bash">python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \
+  --output /path/to/output \
+  --quant-method int4
+</code></pre>
+<p><strong>Supported formats:</strong> FP8, FP16, BF16 → INT4/INT8</p>
+<h3 id="gpu-weights-for-hot-experts-on-gpu"><a class="header" href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for "hot" experts on GPU)</a></h3>
+<p>Apply GPTQ quantization to model weights:</p>
+<pre><code class="language-bash"># Install additional dependencies first
+pip install accelerate transformers llmcompressor datasets
+
+# Quantize GPU weights
+python scripts/convert_gpu_weights.py \
+  --model_id /path/to/model \
+  --output_dir /path/to/output \
+  --quant_type W4A16
+</code></pre>
+<p><strong>Supported types:</strong> W4A16 (GPTQ4), W8A16 (GPTQ8)</p>
+<hr />
+<p>For detailed documentation, advanced options, and low-memory mode, see <a href="scripts/README.html">scripts/README.md</a>.</p>
+<h2 id="before-commit"><a class="header" href="#before-commit">Before Commit!</a></h2>
+<p>your msg should match: Conventional Commits (https://www.conventionalcommits.org/) <br>and format your code before commit:</p>
+<pre><code class="language-shell">cmake -B build
+cd build
+make format
+</code></pre>
+<p>and you may need a new clang-format at least 18, use this command in conda env:</p>
+<pre><code class="language-shell">conda install -c conda-forge clang-format=18
+rm -rf build
+</code></pre>
+<p>and you may need black for python format:</p>
+<pre><code class="language-shell">conda install black
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../en/KTransformers-Fine-Tuning_User-Guide.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../en/KTransformers-Fine-Tuning_User-Guide.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>
