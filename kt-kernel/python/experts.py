@@ -19,7 +19,7 @@ import ctypes
 
 # Import the C++ extension module (compiled as kt_kernel_ext)
 import kt_kernel_ext
-from kt_kernel_ext.moe import MOEConfig, AMXInt4_MOE, AMXInt8_MOE
+from kt_kernel_ext.moe import MOEConfig, AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE
 
 
 class SafeTensorLoader:
@@ -85,7 +85,7 @@ class SafeTensorLoader:
             handle.close()
         self.file_handle_map.clear()
 
-    def load_experts(self, base_key: str, device: str = "cpu"):
+    def load_amx_experts(self, base_key: str, device: str = "cpu"):
         # base_key: blk.{layer_index}
         # blk.{layer_index}.ffn_[up, down, gate]_exps.{expert_id}.numa.{numa_id}.weight
         up_base_key = f"{base_key}.ffn_up_exps"
@@ -136,6 +136,68 @@ class SafeTensorLoader:
             "gate_scale": gate_scales,
             "down_scale": down_scales,
         }
+
+    def load_raw_experts(self, base_key: str, device: str = "cpu"):
+        # base_key = model.layers.{self.layer_idx}
+        # model.layers.{self.layer_idx}.mlp.experts.{experts}.[gate|up|down]_proj.weight_packed
+        # model.layers.{self.layer_idx}.mlp.experts.{experts}.[gate|up|down]_proj.weight_scale
+        experts_prefix = f"{base_key}.mlp.experts"
+
+        expert_idx = 0
+        while self.has_tensor(f"{experts_prefix}.{expert_idx}.up_proj.weight_packed"):
+            expert_idx += 1
+
+        if expert_idx == 0:
+            raise ValueError(f"No experts found for key {experts_prefix}")
+            
+        # Initialize empty lists to store tensors for each projection type
+        up_weights = []
+        gate_weights = []
+        down_weights = []
+
+        up_scales = []
+        gate_scales = []
+        down_scales = []
+
+        def load_projection(proj_name: str):
+            weight_entries = []
+            scale_entries = []
+
+            for exp_id in range(expert_idx):
+                weight_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_packed"
+                scale_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_scale"
+
+                if not self.has_tensor(weight_key):
+                    raise KeyError(f"Missing tensor: {weight_key}")
+                if not self.has_tensor(scale_key):
+                    raise KeyError(f"Missing tensor: {scale_key}")
+
+                weight_tensor = self.load_tensor(weight_key, device).contiguous()
+                scale_tensor = self.load_tensor(scale_key, device).contiguous()
+
+                weight_entries.append(weight_tensor)
+                scale_entries.append(scale_tensor)
+
+            return weight_entries, scale_entries
+        
+        gate_weights, gate_scales = load_projection("gate")
+        up_weights, up_scales = load_projection("up")
+        down_weights, down_scales = load_projection("down")
+
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": gate_scales,
+            "up_scale": up_scales,
+            "down_scale": down_scales,
+        }
+    
+    def load_experts(self, base_key: str, device: str = "cpu", method: str = "AMXINT4"):
+        if method in ["AMXINT4", "AMXINT8"]:
+            return self.load_amx_experts(base_key, device)
+        elif method == "RAWINT4":
+            return self.load_raw_experts(base_key, device)
 
     def has_tensor(self, name: str):
         return name in self.tensor_file_map
@@ -245,7 +307,7 @@ class AMXMoEWrapper:
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer on this layer. Defaults to 0 (no defer).
-            amx_method: AMX quantization method ("AMXINT4" or "AMXINT8")
+            amx_method: AMX quantization method ("AMXINT4" or "AMXINT8" or "RAWINT4")
         """
 
         self.layer_idx = layer_idx
@@ -368,6 +430,10 @@ class AMXMoEWrapper:
         up_ptr = 0
         down_ptr = 0
 
+        gate_scale_ptr = 0
+        up_scale_ptr = 0
+        down_scale_ptr = 0
+
         gate_ptrs = []
         up_ptrs = []
         down_ptrs = []
@@ -377,65 +443,87 @@ class AMXMoEWrapper:
         down_scale_ptrs = []
 
         if self.load_merged_weight:
-            base_key = f"blk.{self.layer_idx}"
-            w = self.safetensor_loader.load_experts(base_key)
+            w = dict()
+            if self.amx_method in ["AMXINT4", "AMXINT8"]:
+                base_key = f"blk.{self.layer_idx}"
+                w = self.safetensor_loader.load_experts(base_key)
 
-            self.gate_weights = w["gate"]
-            self.up_weights = w["up"]
-            self.down_weights = w["down"]
-            self.gate_scales = w["gate_scale"]
-            self.up_scales = w["up_scale"]
-            self.down_scales = w["down_scale"]
+                self.gate_weights = w["gate"]
+                self.up_weights = w["up"]
+                self.down_weights = w["down"]
+                self.gate_scales = w["gate_scale"]
+                self.up_scales = w["up_scale"]
+                self.down_scales = w["down_scale"]
 
-            # Get pointers to weight arrays
-            gate_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                # Get pointers to weight arrays
+                gate_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.gate_weights
                 ]
-                for numa_array in self.gate_weights
-            ]
 
-            up_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                up_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.up_weights
                 ]
-                for numa_array in self.up_weights
-            ]
 
-            down_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                down_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.down_weights
                 ]
-                for numa_array in self.down_weights
-            ]
 
-            gate_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                gate_scale_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.gate_scales
                 ]
-                for numa_array in self.gate_scales
-            ]
 
-            up_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                up_scale_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.up_scales
                 ]
-                for numa_array in self.up_scales
-            ]
 
-            down_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
+                down_scale_ptrs = [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in self.down_scales
                 ]
-                for numa_array in self.down_scales
-            ]
+            elif self.amx_method in ["RAWINT4"]:
+                base_key = f"model.layers.{self.layer_idx}"
+                w = self.safetensor_loader.load_experts(base_key, method="RAWINT4")
 
+                self.gate_weights = torch.stack(w["gate"], dim=0).contiguous()
+                self.up_weights = torch.stack(w["up"], dim=0).contiguous()
+                self.down_weights = torch.stack(w["down"], dim=0).contiguous()
+
+                self.gate_scales = torch.stack(w["gate_scale"], dim=0).to(torch.bfloat16).contiguous()
+                self.up_scales = torch.stack(w["up_scale"], dim=0).to(torch.bfloat16).contiguous()
+                self.down_scales = torch.stack(w["down_scale"], dim=0).to(torch.bfloat16).contiguous()
+
+                gate_ptr = self.gate_weights.data_ptr()
+                up_ptr = self.up_weights.data_ptr()
+                down_ptr = self.down_weights.data_ptr()
+
+                gate_scale_ptr = self.gate_scales.data_ptr()
+                up_scale_ptr = self.up_scales.data_ptr()
+                down_scale_ptr = self.down_scales.data_ptr()
+            else:
+                raise NotImplementedError(f"Unsupported AMX method: {self.amx_method}")
         # Configure MoE
         moe_config = MOEConfig(
             self.num_experts,
@@ -448,9 +536,26 @@ class AMXMoEWrapper:
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
 
+        if self.amx_method == "RAWINT4":
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = 32
+            moe_config.quant_config.zero_point = False
+        elif self.amx_method == "AMXINT4":
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = 128
+            moe_config.quant_config.zero_point = True
+        elif self.amx_method == "AMXINT8":
+            moe_config.quant_config.bits = 8
+            moe_config.quant_config.group_size = 0
+            moe_config.quant_config.zero_point = True
+
         moe_config.gate_proj = gate_ptr
         moe_config.up_proj = up_ptr
         moe_config.down_proj = down_ptr
+        moe_config.gate_scale = gate_scale_ptr
+        moe_config.up_scale = up_scale_ptr
+        moe_config.down_scale = down_scale_ptr
+
         moe_config.gate_projs = gate_ptrs
         moe_config.up_projs = up_ptrs
         moe_config.down_projs = down_ptrs
@@ -482,6 +587,8 @@ class AMXMoEWrapper:
             self.moe = AMXInt4_MOE(moe_config)
         elif self.amx_method == "AMXINT8":
             self.moe = AMXInt8_MOE(moe_config)
+        elif self.amx_method == "RAWINT4":
+            self.moe = AMXInt4_KGroup_MOE(moe_config)
         else:
             raise NotImplementedError(f"Unsupported AMX method: {self.amx_method}")
 
