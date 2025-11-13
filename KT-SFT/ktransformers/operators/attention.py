@@ -998,7 +998,6 @@ class KQwen3MoeAttention(BaseInjectedModule, Qwen3MoeAttention ):
                                     **kwargs)
         self.orig_module.__init__(self.orig_module.config,
                                   orig_module.layer_idx)
-        self.rotary_emb = Qwen3MoeRotaryEmbedding(config)
         self.chunck_size = chunck_size  # TODO, generate chunck_size automatically.
 
     # Copied from transformers.models.mistral.modeling_mistral.apply_rotary_pos_emb
@@ -1058,7 +1057,6 @@ class KQwen3MoeAttention(BaseInjectedModule, Qwen3MoeAttention ):
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         attention_interface: Callable = eager_attention_forward
-        self.config._attn_implementation = "flash_attention_2"
         if self.config._attn_implementation != "eager":
             if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
                 logger.warning_once(

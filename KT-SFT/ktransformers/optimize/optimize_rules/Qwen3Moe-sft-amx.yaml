@@ -65,12 +65,6 @@
       generate_device: "cuda"
       prefill_device: "cuda"
 - match:
-    name: "^model$"
-  replace:
-    class: "ktransformers.operators.models.KQwen2MoeModel"
-    kwargs:
-      per_layer_prefill_intput_threshold: 0 # 0 is close layer wise prefill
-- match:
     name: "^model.embed_tokens"
   replace:
     class: "default"
