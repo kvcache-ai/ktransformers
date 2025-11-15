@@ -8,7 +8,7 @@
 
 </p>
   <h3>一个用于体验尖端 LLM 推理/微调优化的灵活框架</h3>
-  <strong><a href="#-概览">🎯 概览</a> | <a href="#-kt-kernel---高性能推理内核">🚀 kt-kernel</a> | <a href="#-kt-sft---微调框架">🎓 KT-SFT</a> | <a href="#-引用">🔥 引用</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬 讨论</a></strong>
+  <strong><a href="#-概览">🎯 概览</a> | <a href="#-kt-kernel---高性能推理内核">🚀 kt-kernel</a> | <a href="#-kt-sft---微调框架">🎓 KT-SFT</a> | <a href="#-引用">🔥 引用</a> </strong>
 </div>
 
 ## 🎯 概览
@@ -134,7 +134,6 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 ## 💬 社区与支持
 
 - **GitHub Issues**：[报告问题或请求功能](https://github.com/kvcache-ai/ktransformers/issues)
-- **GitHub Discussions**：[提问和分享想法](https://github.com/kvcache-ai/ktransformers/discussions)
 - **微信群**：请参见 [archive/WeChatGroup.png](./archive/WeChatGroup.png)
 
 ## 📦 KT原仓库
