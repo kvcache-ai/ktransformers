@@ -110,13 +110,13 @@ def test_moe(quant_mode: str):
                 CPUInfer.submit(moe.warm_up_task())
                 CPUInfer.sync()
             elif quant_mode == "int8":
-                moe = kt_kernel_ext.moe.KMLInt8_MOE(config)
+                moe = kt_kernel_ext.moe.Int8_KERNEL_MOE(config)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 # CPUInfer.submit(moe.warm_up_task())
                 # CPUInfer.sync()
             elif quant_mode == "int4":
-                moe = kt_kernel_ext.moe.KMLInt4_MOE(config)
+                moe = kt_kernel_ext.moe.Int4_KERNEL_MOE(config)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 CPUInfer.submit(moe.warm_up_task())
