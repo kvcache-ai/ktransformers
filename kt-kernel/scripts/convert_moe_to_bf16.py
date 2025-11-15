@@ -48,9 +48,7 @@ def _dequantize_tensor(
         if scales.numel() == weight.numel():
             scales = scales.reshape_as(weight)
         else:
-            raise ValueError(
-                f"Scale shape {scales.shape} incompatible with weight shape {weight.shape}"
-            )
+            raise ValueError(f"Scale shape {scales.shape} incompatible with weight shape {weight.shape}")
     bf16 = (weight.to(torch.float32) * scales).to(torch.bfloat16)
     return bf16.contiguous()
 
@@ -128,9 +126,7 @@ def convert_file(
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     save_file(tensors, output_path)
-    print(
-        f"[done] wrote {output_path} (converted={stats['converted']}, skipped={stats['skipped']})"
-    )
+    print(f"[done] wrote {output_path} (converted={stats['converted']}, skipped={stats['skipped']})")
 
 
 def parse_args() -> argparse.Namespace:
@@ -174,9 +170,7 @@ def main():
         targets = [os.path.join(model_dir, fname) for fname in args.files]
     else:
         targets = [
-            os.path.join(model_dir, name)
-            for name in sorted(os.listdir(model_dir))
-            if name.endswith(".safetensors")
+            os.path.join(model_dir, name) for name in sorted(os.listdir(model_dir)) if name.endswith(".safetensors")
         ]
 
     if not targets:
