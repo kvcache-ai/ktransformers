@@ -9,10 +9,10 @@
  **/
 #include "shared_mem_buffer.h"
 
+#include <errno.h>
 #include <numa.h>
 
 #include <cstdio>
-#include <errno.h>
 
 size_t MemoryRequest::total_size() {
   size_t total = 0;

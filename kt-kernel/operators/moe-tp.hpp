@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <type_traits>
 
+#include "../cpu_backend/shared_mem_buffer.h"
 #include "common.hpp"
 
 // Forward declaration for Llamafile backend type checking
