@@ -1,12 +1,34 @@
 # KT-Kernel
 
-High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, and KML support.
+High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.
 
+- [Note](#note)
+- [Features](#features)
+- [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Quick Installation (Recommended)](#quick-installation-recommended)
+  - [Manual Configuration (Advanced)](#manual-configuration-advanced)
+- [Verification](#verification)
+- [Integration with SGLang](#integration-with-sglang)
+  - [Installation Steps](#installation-steps)
+  - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
+  - [KT-Kernel Parameters](#kt-kernel-parameters)
+- [Direct Python API Usage](#direct-python-api-usage)
+  - [Advanced Options](#advanced-options)
+- [Build Configuration](#build-configuration)
+  - [Manual Installation](#manual-installation)
+- [Error Troubleshooting](#error-troubleshooting)
+  - [CUDA Not Found](#cuda-not-found)
+  - [hwloc Not Found](#hwloc-not-found)
+- [Weight Quantization](#weight-quantization)
+  - [CPU Weights (for "cold" experts on CPU)](#cpu-weights-for-cold-experts-on-cpu)
+  - [GPU Weights (for "hot" experts on GPU)](#gpu-weights-for-hot-experts-on-gpu)
+- [Before Commit!](#before-commit)
 ## Note
 
 **Current Support Status:**
 - ✅ **Intel CPUs with AMX**: Fully supported
-- ⚠️ **LLAMAFILE backend**: In preview, not yet fully complete
+- ⚠️ **Universal CPU with llamafile**: In preview, not yet fully complete
 - ⚠️ **AMD CPUs with BLIS**: Upcoming, not yet fully integrated
 
 ## Features
@@ -54,10 +76,7 @@ Option A: Two-step (explicit)
 Option B: One-step (deps + build)
 
 ```bash
-# Simple one-command installation
-./install.sh            # same as: ./install.sh all
-# Skip deps step if you already installed them
-./install.sh all --skip-deps
+./install.sh
 ```
 
 The install script will:
@@ -92,7 +111,183 @@ For advanced build options and binary distribution, see the [Build Configuration
 python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
 
-## Usage
+## Integration with SGLang
+
+KT-Kernel can be used standalone via [Direct Python API](#direct-python-api-usage) or integrated with SGLang for production deployment. This section describes SGLang integration to enable CPU-GPU heterogeneous inference, where "hot" experts run on GPU and "cold" experts run on CPU for optimal resource utilization.
+
+### Installation Steps
+
+#### 1. Install SGLang
+
+```bash
+git clone https://github.com/sgl-project/sglang.git
+cd sglang
+pip install -e "python[all]"
+```
+
+#### 2. Prepare Weights
+
+You need both GPU weights and CPU weights for heterogeneous inference:
+
+**GPU Weights:** Use the original / quantized model weights.
+
+**CPU Weights:** Quantize to AMX-optimized format using the conversion script:
+
+```bash
+python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \  # Depends on your GPU weights type: fp8, fp16, or bf16
+  --output /path/to/cpu-weights \
+  --quant-method int8  # or int4
+```
+
+**Supported input formats:** FP8, FP16, BF16 → INT4/INT8.
+
+For more details, see:
+- [CPU Weights conversion](#cpu-weights-for-cold-experts-on-cpu)
+- [GPU Weights quantization](#gpu-weights-for-hot-experts-on-gpu)
+
+**Note:** LLAMAFILE backend supports GGUF format directly, but this feature is still in preview.
+
+#### 3. Launch SGLang Server
+
+Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:
+
+**KT-Kernel Parameters to Add:**
+- `--kt-method`: Backend method (AMXINT4, AMXINT8, or LLAMAFILE)
+- `--kt-weight-path`: Path to the converted CPU weights
+- `--kt-cpuinfer`: Number of CPU inference threads (set to physical cores)
+- `--kt-threadpool-count`: Number of thread pools (set to NUMA node count)
+- `--kt-num-gpu-experts`: Number of experts to keep on GPU
+- `--kt-max-deferred-experts-per-token`: Deferred experts for pipelined execution
+
+Example:
+```bash
+python -m sglang.launch_server \
+  [your normal SGLang parameters...] \
+  --kt-method AMXINT8 \
+  --kt-weight-path /path/to/cpu-weights \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+```
+
+See [KT-Kernel Parameters](#kt-kernel-parameters) section below for detailed parameter tuning guidelines.
+
+### Complete Example: Qwen3-30B-A3B
+
+This example demonstrates the full workflow from downloading weights to launching the server.
+
+**Hardware Configuration:**
+- **GPU**: NVIDIA RTX 4090 24GB
+- **CPU**: 2x Intel Xeon Gold 6454S (64 physical cores total, 128 threads, 2 NUMA nodes)
+- **Model**: [Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B)
+- **GPU Weights**: BF16 original weights
+- **CPU Weights**: AMXINT8 quantized
+
+**How to verify your system configuration:**
+```bash
+# Check CPU configuration
+lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core|Socket\(s\)|NUMA node\(s\)"
+# Expected output example:
+CPU(s):                                  128
+Thread(s) per core:                      2
+Socket(s):                               2
+NUMA node(s):                            2
+# → Physical cores = CPU(s) / Thread(s) per core = 128 / 2 = 64
+```
+
+**Parameter Rationale:**
+- `--kt-cpuinfer 64`: Set to physical cores (64), not hyperthreads (128)
+- `--kt-threadpool-count 2`: 2 NUMA nodes detected (dual-socket system)
+- `--kt-num-gpu-experts 32`: With 24GB GPU memory, we can fit ~32 experts on GPU for this model (varies by model architecture and actual memory usage)
+- `--kt-max-deferred-experts-per-token 2`: Enable pipelined execution - allows CPU to process next batch while GPU completes current batch
+
+#### Step 1: Download model weights
+
+```bash
+# Install huggingface-cli if not already installed
+pip install huggingface-hub
+
+# Download model from Hugging Face
+hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+```
+
+#### Step 2: Convert to CPU weights (AMXINT8)
+
+```bash
+python scripts/convert_cpu_weights.py \
+  --input-path /mnt/data/models/Qwen3-30B-A3B \
+  --input-type bf16 \
+  --output /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --quant-method int8
+```
+
+#### Step 3: Launch SGLang server
+
+```bash
+python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /mnt/data/models/Qwen3-30B-A3B \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name Qwen3-30B-A3B \
+  --enable-mixed-chunk \
+  --kt-method AMXINT8 \
+  --kt-weight-path /mnt/data/models/Qwen3-30B-A3B-INT8 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+```
+
+### KT-Kernel Parameters
+
+| Parameter | Description | Example Value |
+|-----------|-------------|---------------|
+| `--kt-method` | CPU inference backend method | `AMXINT4`, `AMXINT8`, or `LLAMAFILE` (preview) |
+| `--kt-weight-path` | Path to quantized CPU weights | `/path/to/cpu-weights` |
+| `--kt-cpuinfer` | Number of CPU inference threads | `64` (adjust based on CPU cores) |
+| `--kt-threadpool-count` | Number of thread pools for parallel execution | `2` (typically 1-4) |
+| `--kt-num-gpu-experts` | Number of experts to keep on GPU | `32` (remaining experts go to CPU) |
+| `--kt-max-deferred-experts-per-token` | Number of experts per token to defer for pipelined execution | `2` (0 to disable, 1-2 recommended) |
+
+**Parameter Guidelines:**
+
+- **`kt-method`**: Choose based on your CPU and weight format:
+  - `AMXINT4`: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)
+  - `AMXINT8`: Higher accuracy with INT8 quantized weights on AMX CPUs
+  - `LLAMAFILE`: Preview support for GGUF format (not fully complete)
+
+- **`kt-cpuinfer`**: Set to the number of **physical CPU cores** (not hyperthreads).
+  - Check physical cores: `lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core"`
+  - Physical cores = CPU(s) / Thread(s) per core
+  - Example: If CPU(s)=128 and Thread(s) per core=2, then physical cores = 64
+  - **Important**: Do NOT set to hyperthread count - this will degrade performance
+
+- **`kt-threadpool-count`**: Set to the number of **NUMA nodes**.
+  - Check NUMA count: `lscpu | grep "NUMA node(s)"`
+  - Or use: `numactl --hardware | grep "available"`
+  - **Note**: NUMA node count is NOT necessarily the number of physical CPUs
+    - It represents memory domains, which may be divided within a single CPU or across multiple CPUs
+    - Use the NUMA node count from `lscpu`, regardless of physical CPU count
+  - Typical values: 1-2 for single-socket, 2-4 for dual-socket systems
+  - This enables better memory bandwidth utilization across NUMA domains
+
+- **`kt-num-gpu-experts`**: Determine based on GPU memory and profiling:
+  - More GPU experts = lower latency but higher GPU memory usage (May cause OOM)
+
+- **`kt-max-deferred-experts-per-token`**: Enables pipelined execution:
+  - `0`: Synchronous execution (simpler, higher latency)
+  - `1-2`: Deferred execution (better latency, requires tuning) - recommended
+  - `3-4`: Higher deferred count (possible but rarely beneficial)
+
+## Direct Python API Usage
+
+For standalone usage without SGLang, you can use KT-Kernel directly via Python API:
 
 ```python
 from kt_kernel import KTMoEWrapper
