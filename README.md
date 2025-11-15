@@ -135,7 +135,6 @@ We welcome contributions! Please feel free to submit issues and pull requests.
 ## 💬 Community & Support
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/kvcache-ai/ktransformers/issues)
-- **GitHub Discussions**: [Ask questions and share ideas](https://github.com/kvcache-ai/ktransformers/discussions)
 - **WeChat Group**: See [archive/WeChatGroup.png](./archive/WeChatGroup.png)
 
 ## 📦 KT original Code
