@@ -4,10 +4,16 @@
 
 ## TL;DR
 This tutorial will guide you through the process of injecting custom operators into a model using the KTransformers framework. We will use the DeepSeekV2-Chat model as an example to demonstrate how to inject custom operators into the model step by step. The tutorial will cover the following topics:
-* [How to write injection rules](#how-to-write-injection-rules)
-    * [Understanding the structure of the model](#understanding-model-structure)
-* [Multi-GPU](#muti-gpu)    
-* [How to write a new operator and inject it into the model](#how-to-write-a-new-operator-and-inject-into-the-model)
+- [TL;DR](#tldr)
+- [How to Write Injection Rules](#how-to-write-injection-rules)
+- [Understanding Model Structure](#understanding-model-structure)
+- [Matrix Absorption-based MLA Injection](#matrix-absorption-based-mla-injection)
+- [Injection of Routed Experts](#injection-of-routed-experts)
+- [Injection of Linear Layers](#injection-of-linear-layers)
+- [Injection of Modules with Pre-calculated Buffers](#injection-of-modules-with-pre-calculated-buffers)
+- [Specifying Running Devices for Modules](#specifying-running-devices-for-modules)
+- [Muti-GPU](#muti-gpu)
+- [How to Write a New Operator and Inject into the Model](#how-to-write-a-new-operator-and-inject-into-the-model)
 
 ## How to Write Injection Rules
 The basic form of the injection rules for the Inject framework is as follows:
@@ -38,7 +44,7 @@ Using [deepseek-ai/DeepSeek-V2-Lite-Chat](https://huggingface.co/deepseek-ai/Dee
 Fortunately, knowing the structure of a model is very simple. Open the file list on the [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/tree/main) homepage, and you can see the following files:
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/model_structure_guild.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/model_structure_guild.png" width=60%>
   </picture>
 </p>
 
@@ -48,7 +54,7 @@ From the `modeling_deepseek.py` file, we can see the specific implementation of 
 The structure of the DeepSeekV2 model from the `.saftensors` and `modeling_deepseek.py` files is as follows:
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/deepseekv2_structure.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/deepseekv2_structure.png" width=60%>
   </picture>
 </p>
 
@@ -171,7 +177,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/multi_gpu.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/multi_gpu.png" width=60%>
   </picture>
 </p>
 

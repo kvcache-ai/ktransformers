@@ -1,26 +1,13 @@
-- [KTransformers Fine-Tuning × LLaMA-Factory Integration – Developer Technical Notes](#ktransformers-fine-tuning-x-llama-factory-integration-–-developer-technical-notes)
 - [Introduction](#introduction)
-
 - [Overall View of the KT Fine-Tuning Framework](#overall-view-of-the-kt-fine-tuning-framework)
   - [Attention (LoRA + KT coexist)](#attention-lora--kt-coexist)
   - [MoE (operator encapsulation + backward)](#moe-operator-encapsulation--backward)
-    - [Encapsulation](#encapsulation)
-    - [Backward (CPU)](#backward-cpu)
   - [Multi-GPU Loading/Training: Placement strategy instead of DataParallel](#multi-gpu-loadingtraining-placement-strategy-instead-of-dataparallel)
-
 - [KT-LoRA Fine-Tuning Evaluation](#kt-lora-fine-tuning-evaluation)
   - [Setup](#setup)
   - [Results](#results)
-    - [Stylized Dialogue (CatGirl tone)](#stylized-dialogue-catgirl-tone)
-    - [Translational-Style benchmark (generative)](#translational-style-benchmark-generative)
-    - [Medical Vertical Benchmark (AfriMed-SAQ/MCQ)](#medical-vertical-benchmark-afrimed-saqmcq)
-    - [Limitations](#limitations)
-
-- [Speed Tests](#speed-tests)
-  - [End-to-End Performance](#end-to-end-performance)
-  - [MoE Compute (DeepSeek-V3-671B)](#moe-compute-deepseek-v3-671b)
+  - [Speed Tests](#speed-tests)
   - [Memory Footprint](#memory-footprint)
-
 - [Conclusion](#conclusion)
 
 
@@ -36,7 +23,7 @@ This architecture bridges resource gaps, enabling **local fine-tuning of ultra-l
 
 Architecturally, LLaMA-Factory orchestrates data/config/training, LoRA insertion, and inference; KTransformers is a pluggable, high-performance operator backend that takes over Attention and MoE under the same training code, enabling **GPU+CPU heterogeneity** to accelerate training and reduce GPU memory.
 
-![image-20251011010558909](../assets/image-20251011010558909.png)
+![image-20251011010558909](../../assets/image-20251011010558909.png)
 
 We evaluated LoRA fine-tuning with HuggingFace default, Unsloth, and KTransformers backends (same settings and data). **KTransformers** is currently the only solution feasible on **2–4×24GB 4090s** for **671B-scale MoE**, and also shows higher throughput and lower GPU memory for 14B MoEs.
 
@@ -51,7 +38,7 @@ We evaluated LoRA fine-tuning with HuggingFace default, Unsloth, and KTransforme
 
 From the table above, it can be seen that for the 14B model, the KTransformers backend achieves approximately 75% higher throughput than the default HuggingFace solution, while using only about one-fifth of the GPU memory. For the 671B model, both HuggingFace and Unsloth fail to run on a single 4090 GPU, whereas KTransformers is able to perform LoRA fine-tuning at 40 tokens/s, keeping the GPU memory usage within 70 GB.
 
-![按照模型划分的对比图_02](../assets/image-compare_model.png)
+![按照模型划分的对比图_02](../../assets/image-compare_model.png)
 
 
 
@@ -68,11 +55,11 @@ KTransformers provides operator injection (`BaseInjectedModule`), and PEFT provi
 - **Inheritance:** `KTransformersLinearLora` retains KT’s high-performance paths (`prefill_linear`/`generate_linear`) while accepting LoRA parameters (`lora_A/lora_B`).
 - **Replacement:** During preparation, we replace original `KTransformersLinear` layers (Q/K/V/O) with `KTransformersLinearLora`, preserving KT optimizations while enabling LoRA trainability.
 
-![image-20251016182810716](../assets/image-20251016182810716.png)
+![image-20251016182810716](../../assets/image-20251016182810716.png)
 
 After replacement, LoRA is inserted at Q/K/V/O linear transforms (left), and `KTransformersLinearLora` contains both KT fast paths and LoRA matrices (right).
 
-![image-20251016182920722](../assets/image-20251016182920722.png)
+![image-20251016182920722](../../assets/image-20251016182920722.png)
 
 ### MoE (operator encapsulation + backward)
 
@@ -83,13 +70,13 @@ Given large parameters and sparse compute, we encapsulate the expert computation
 - **Upstream (PyTorch graph):** we register a custom Autograd Function so the MoE layer appears as **a single node**. In the left figure (red box), only `KSFTExpertsCPU` is visible; on the right, the unencapsulated graph expands routing, dispatch, and FFN experts. Encapsulation makes the MoE layer behave like a standard `nn.Module` with gradients.
 - **Downstream (backend):** inside the Autograd Function, pybind11 calls C++ extensions for forward/backward. Multiple **pluggable backends** exist (AMX BF16/INT8; **llamafile**). The backend can be switched via YAML (e.g., `"backend": "AMXBF16"` vs. `"llamafile"`).
 
-![image-20250801174623919](../assets/image-20250801174623919.png)
+![image-20250801174623919](../../assets/image-20250801174623919.png)
 
 #### Backward (CPU)
 
 MoE backward frequently needs the transposed weights $W^\top$. To avoid repeated runtime transposes, we **precompute/cache** $W^\top$ at load time (blue box). We also **cache necessary intermediate activations** (e.g., expert projections, red box) to reuse in backward and reduce recomputation. We provide backward implementations for **llamafile** and **AMX (INT8/BF16)**, with NUMA-aware optimizations.
 
-<img src="../assets/image-20251016182942726.png" alt="image-20251016182942726" style="zoom:33%;" />
+<img src="../../assets/image-20251016182942726.png" alt="image-20251016182942726" style="zoom:33%;" />
 
 ### Multi-GPU Loading/Training: Placement strategy instead of DataParallel
 
@@ -117,7 +104,7 @@ LLaMA-Factory orchestration, KTransformers backend, LoRA (rank=8, α=32, dropout
 
 Dataset: [NekoQA-10K](https://zhuanlan.zhihu.com/p/1934983798233231689). The fine-tuned model consistently exhibits the target style (red boxes) versus neutral/rational base (blue). This shows **KT-LoRA injects style features** into the generation distribution with low GPU cost.
 
-![image-20251016175848143](../assets/image-20251016175848143.png)
+![image-20251016175848143](../../assets/image-20251016175848143.png)
 
 #### Translational-Style benchmark (generative)
 
