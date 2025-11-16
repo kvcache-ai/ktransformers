@@ -1,4 +1,4 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: 📚 FAQs | 常见问题
     url: https://github.com/kvcache-ai/ktransformers/issues/1608
