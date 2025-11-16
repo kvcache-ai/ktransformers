@@ -9,6 +9,7 @@
  **/
 #include "shared_mem_buffer.h"
 
+#include <errno.h>
 #include <numa.h>
 
 #include <cstdio>
@@ -53,12 +54,15 @@ void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
     if (buffer) {
       free(buffer);
     }
-    buffer = std::aligned_alloc(64, total_size);
-    if (!buffer) {
-      printf("cannot aligned alloc %ld bytes\n", total_size);
-      perror("aligned_alloc");  // errno == ENOMEM/EINVAL
+    void* newbuf = nullptr;
+    int rc = posix_memalign(&newbuf, 64, total_size);
+    if (rc != 0 || !newbuf) {
+      errno = rc;  // posix_memalign returns error code instead of setting errno
+      printf("cannot aligned alloc %zu bytes (align=%d)\n", (size_t)total_size, 64);
+      perror("posix_memalign");  // ENOMEM/EINVAL
       exit(1);
     }
+    buffer = newbuf;
     size = total_size;
     for (auto& req : object_requests) {
       req.update_base_ptr(buffer);

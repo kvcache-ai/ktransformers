@@ -8,7 +8,7 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/discussions">💬 Discussion</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
 </div>
 
 ## 🎯 Overview
@@ -135,7 +135,6 @@ We welcome contributions! Please feel free to submit issues and pull requests.
 ## 💬 Community & Support
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/kvcache-ai/ktransformers/issues)
-- **GitHub Discussions**: [Ask questions and share ideas](https://github.com/kvcache-ai/ktransformers/discussions)
 - **WeChat Group**: See [archive/WeChatGroup.png](./archive/WeChatGroup.png)
 
 ## 📦 KT original Code

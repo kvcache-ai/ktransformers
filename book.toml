@@ -1,0 +1,18 @@
+[book]
+authors = ["kvcache-ai"]
+language = "zh-CN"
+title = "Ktransformers"
+src = "doc"
+
+[output.html]
+git-repository-url = "https://github.com/kvcache-ai/ktransformers"
+edit-url-template = "https://github.com/kvcache-ai/ktransformers/edit/main/{path}"
+
+[output.html.playground]
+editable = true
+copy-js = true
+# line-numbers = true
+
+[output.html.fold]
+enable = true
+level = 0

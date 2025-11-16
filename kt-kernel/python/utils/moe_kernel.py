@@ -9,18 +9,21 @@ from kt_kernel_ext.moe import MOEConfig
 
 try:
     from kt_kernel_ext.moe import Int8_KERNEL_MOE
+
     _HAS_INT8_SUPPORT = True
 except (ImportError, AttributeError):
     Int8_KERNEL_MOE = None
     _HAS_INT8_SUPPORT = False
 try:
     from kt_kernel_ext.moe import Int4_KERNEL_MOE
+
     _HAS_INT4_SUPPORT = True
 except (ImportError, AttributeError):
     Int4_KERNEL_MOE = None
     _HAS_INT4_SUPPORT = False
 
 from typing import Optional
+
 
 class GeneralMoEWrapper(BaseMoEWrapper):
     """

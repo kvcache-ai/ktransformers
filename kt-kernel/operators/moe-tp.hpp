@@ -7,8 +7,8 @@
 #include <cstdio>
 #include <type_traits>
 
-#include "common.hpp"
 #include "../cpu_backend/shared_mem_buffer.h"
+#include "common.hpp"
 
 // Forward declaration for Llamafile backend type checking
 class LLAMA_MOE_TP;

@@ -79,27 +79,40 @@ if(USE_CONDA_TOOLCHAIN)
     set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
 endif()
 
-## Ensure git hooks are installed when configuring the project
-# If this is a git working copy and the installer exists, run it and fail the CMake configure
-# when installation fails. If no .git directory is present (e.g. source tarball), skip.
-if(EXISTS "${CMAKE_SOURCE_DIR}/.git" AND IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
-        message(STATUS "Detected .git; installing git hooks using scripts/install-git-hooks.sh")
-        execute_process(
-            COMMAND sh "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh"
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            RESULT_VARIABLE _INSTALL_GIT_HOOKS_RESULT
-            OUTPUT_VARIABLE _INSTALL_GIT_HOOKS_OUT
-            ERROR_VARIABLE _INSTALL_GIT_HOOKS_ERR
+## Ensure git hooks are installed when configuring the project (monorepo-aware)
+# If we are inside a git worktree (repo root is outside kt-kernel now), invoke the installer
+# which will link kt-kernel/.githooks into the top-level .git/hooks. Otherwise, skip.
+find_program(GIT_BIN git)
+if(GIT_BIN)
+    execute_process(
+        COMMAND "${GIT_BIN}" rev-parse --show-toplevel
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _GIT_TOP
+        RESULT_VARIABLE _GIT_RV
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_GIT_RV EQUAL 0 AND EXISTS "${_GIT_TOP}/.git" AND IS_DIRECTORY "${_GIT_TOP}/.git")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
+            message(STATUS "Detected git worktree at ${_GIT_TOP}; installing hooks from kt-kernel/.githooks")
+            execute_process(
+                COMMAND sh "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                RESULT_VARIABLE _INSTALL_GIT_HOOKS_RESULT
+                OUTPUT_VARIABLE _INSTALL_GIT_HOOKS_OUT
+                ERROR_VARIABLE _INSTALL_GIT_HOOKS_ERR
             )
-        if(NOT _INSTALL_GIT_HOOKS_RESULT EQUAL 0)
-            message(FATAL_ERROR "Installing git hooks failed (exit ${_INSTALL_GIT_HOOKS_RESULT}).\nOutput:\n${_INSTALL_GIT_HOOKS_OUT}\nError:\n${_INSTALL_GIT_HOOKS_ERR}")
+            if(NOT _INSTALL_GIT_HOOKS_RESULT EQUAL 0)
+                message(FATAL_ERROR "Installing git hooks failed (exit ${_INSTALL_GIT_HOOKS_RESULT}).\nOutput:\n${_INSTALL_GIT_HOOKS_OUT}\nError:\n${_INSTALL_GIT_HOOKS_ERR}")
+            endif()
+        else()
+            message(FATAL_ERROR "Required script 'scripts/install-git-hooks.sh' not found in kt-kernel; cannot install hooks.")
         endif()
     else()
-        message(FATAL_ERROR "Repository appears to be a git repo but required script 'scripts/install-git-hooks.sh' was not found. Please ensure hooks installer is present.")
+        message(STATUS "No git worktree detected; skipping git hooks installation")
     endif()
 else()
-    message(STATUS "No .git directory found; skipping git hooks installation")
+    message(STATUS "git not found; skipping git hooks installation")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)

@@ -2071,3 +2071,124 @@ class KQwen3MoeSparseMoeBlockV2(BaseInjectedModule, Qwen3MoeSparseMoeBlock):
             .type(new_x.dtype)
         )
         return final_out
+
+
+class KQwen3MoeSparseMoeBlock(BaseInjectedModule, Qwen3MoeSparseMoeBlock):
+    def forward(self, hidden_states):
+
+        orig_shape = hidden_states.shape
+        sequence_length = orig_shape[1]
+
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
+        router_logits = self.gate(hidden_states)
+
+        if router_logits.device.type == "xpu":
+            from ipex_llm.transformers.models.common import moe_softmax_topk
+            selected_experts, routing_weights = moe_softmax_topk(
+                router_logits.half(), self.top_k, self.norm_topk_prob
+            )
+        else:
+            routing_weights = torch.nn.functional.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+            if self.norm_topk_prob:
+                routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # we cast back to the input dtype
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        # only for generate phase
+        if sequence_length == 1 and hasattr(self.experts.generate_experts,
+                                            "submit_for_one_decode") and torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():  # TODO: this branch cause jit bug
+            self.experts.generate_experts.submit_for_one_decode(hidden_states[0], selected_experts[0],
+                                                                routing_weights[0])
+            # y_ = self.shared_expert(hidden_states).squeeze(0)
+            # y_ = F.sigmoid(self.shared_expert_gate(hidden_states)) * y_
+
+            y = self.experts.generate_experts.sync_for_one_decode().unsqueeze(0)
+
+            # y += y_
+            y.resize_(*orig_shape)
+            return y
+
+        # y_ = self.shared_expert(hidden_states).squeeze(0)
+        # y_ = (
+        #     F.sigmoid(self.shared_expert_gate(hidden_states)) * y_
+        # )
+
+        if isinstance(self.experts, KExpertsBase):
+            y = self.moe_kexperts(hidden_states, selected_experts, routing_weights).view(*orig_shape).to(
+                device=hidden_states.device)
+        elif hidden_states.size(0) > 10:
+            # TODO may bugs here
+            y = (
+                self.moe_infer(hidden_states, selected_experts, routing_weights)
+                .view(*orig_shape)
+                .to(device=hidden_states.device)
+            )
+        else:
+            # TODO may bugs here
+            y = (
+                self.moe_infer_simple(hidden_states, selected_experts, routing_weights)
+                .view(*orig_shape)
+                .to(device=hidden_states.device)
+            )
+            # y += y_
+        return y
+
+    @maybe_no_grad()
+    def moe_kexperts(self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
+        outs = self.experts(x, topk_ids, topk_weight)
+        return outs
+
+    @maybe_no_grad()
+    # TODO may bugs here
+    def moe_infer_simple(
+            self, x: torch.Tensor, topk_ids: torch.Tensor, topk_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        x: [num_tokens, hidden_size]
+        topk_ids, topk_weight: [num_tokens, num_selected_experts]
+        """
+        outs = torch.zeros_like(x)
+        for token_idx in range(topk_ids.size(0)):
+            for expert_idx in range(topk_ids.size(1)):
+                expert = self.experts[topk_ids[token_idx, expert_idx]]
+                outs[token_idx] += (
+                        expert.forward(x[token_idx]) * topk_weight[token_idx, expert_idx]
+                )
+        return outs
+
+    @maybe_no_grad()
+    # TODO may bugs here
+    def moe_infer(self, x, topk_ids, topk_weight):
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        cnts.scatter_(1, topk_ids, 1)
+        tokens_per_expert = cnts.sum(dim=0)
+        idxs = topk_ids.view(-1).argsort()
+        sorted_tokens = x[idxs // topk_ids.shape[1]]
+        tokens_per_expert = tokens_per_expert.cpu().numpy()
+
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            end_idx = start_idx + num_tokens
+            if num_tokens == 0:
+                continue
+            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert.forward(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+
+        new_x = torch.empty_like(outs)
+        new_x[idxs] = outs
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(new_x.dtype)
+        )
+        return final_out

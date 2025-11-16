@@ -21,6 +21,7 @@ from .utils.amx import AMXMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
 from .utils.moe_kernel import GeneralMoEWrapper
 
+
 class KTMoEWrapper:
     """
     Factory interface for MoE CPU inference operations.
