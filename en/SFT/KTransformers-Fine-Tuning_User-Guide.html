@@ -182,27 +182,12 @@
                 <div id="content" class="content">
                     <main>
                         <ul>
-<li>
-<p><a href="#ktransformers-fine-tuning-x-llama-factory-integration-%E2%80%93-user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></p>
-</li>
-<li>
-<p><a href="#introduction">Introduction</a></p>
-</li>
-<li>
-<p><a href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></p>
+<li><a href="#introduction">Introduction</a>
 <ul>
-<li><a href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></li>
-<li><a href="#benchmarks">Benchmarks</a>
-<ul>
-<li><a href="#translational-style-dataset">Translational-Style dataset</a></li>
-<li><a href="#afrimed-qa-short-answer">AfriMed-QA (short answer)</a></li>
-<li><a href="#afrimed-qa-multiple-choice">AfriMed-QA (multiple choice)</a></li>
+<li><a href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></li>
 </ul>
 </li>
-</ul>
-</li>
-<li>
-<p><a href="#quick-to-start">Quick to Start</a></p>
+<li><a href="#quick-to-start">Quick to Start</a>
 <ul>
 <li><a href="#environment-setup">Environment Setup</a></li>
 <li><a href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></li>
@@ -210,16 +195,13 @@
 <li><a href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></li>
 </ul>
 </li>
-<li>
-<p><a href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a></p>
+<li><a href="#kt-fine-tuning-speed-user-side-view">KT Fine-Tuning Speed (User-Side View)</a>
 <ul>
 <li><a href="#end-to-end-performance">End-to-End Performance</a></li>
 <li><a href="#gpucpu-memory-footprint">GPU/CPU Memory Footprint</a></li>
 </ul>
 </li>
-<li>
-<p><a href="#conclusion">Conclusion</a></p>
-</li>
+<li><a href="#conclusion">Conclusion</a></li>
 </ul>
 <h1 id="ktransformers-fine-tuning--llama-factory-integration--user-guide"><a class="header" href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">KTransformers Fine-Tuning × LLaMA-Factory Integration – User Guide</a></h1>
 <p><strong>MadSys Lab, KVCache-AI Team, Approaching AI, LLaMA-Factory Team</strong></p>
@@ -227,7 +209,7 @@
 <p>From <strong>DeepSeek-V3/R1</strong> to <strong>Qwen3-MoE</strong> and <strong>Kimi-K2</strong>, each wave of open-sourced large models brings leaps in performance and scale. However, many researchers and developers are constrained by expensive GPUs and models with tens or even hundreds of billions of parameters, making it <strong>hard to fine-tune very large models under limited resources</strong>. To bridge this gap, we propose a practical approach: combining <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong>. With just <strong>2–4 RTX 4090s</strong> and a high-memory CPU, you can fine-tune ultra-large MoE models like DeepSeek-671B.</p>
 <p>Our goal is to give resource-constrained researchers a <strong>local path to explore fine-tuning ultra-large models</strong>, and also a fast way to customize smaller models (e.g., 14B/30B) for specific scenarios. We validate the setup using <strong>stylized dialogue</strong>, <strong>Westernized translation tone</strong>, and <strong>medical Q&amp;A</strong> as representative tasks, showing that <strong>personalized adaptation can be achieved within hours</strong>.</p>
 <p>As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. <strong>KTransformers</strong> acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient <strong>GPU+CPU heterogeneous cooperation</strong>.</p>
-<p><img src="../assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
+<p><img src="../../assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
 <p>Within LLaMA-Factory, we compared LoRA fine-tuning with <strong>HuggingFace</strong>, <strong>Unsloth</strong>, and <strong>KTransformers</strong> backends. KTransformers is the <strong>only workable 4090-class solution</strong> for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).</p>
 <div class="table-wrapper"><table><thead><tr><th>Under LoRA (BF16) + <a href="https://github.com/mindsRiverPonder/LLM-practice">NekoQA-10K stylized dialogue</a></th><th>HuggingFace Backend</th><th>Unsloth Backend</th><th>KTransformers Backend</th></tr></thead><tbody>
 <tr><td>[14B-DeepSeekV2-Lite] LoRA fine-tuning throughput</td><td>303.58 token/s</td><td>455.37 token/s</td><td>530.38 token/s</td></tr>
@@ -237,12 +219,12 @@
 </tbody></table>
 </div>
 <p>† <strong>1400 GB</strong> is a <strong>theoretical</strong> FP16 full-parameter resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT strategy (Attention on GPU + layered MoE offload).</p>
-<p><img src="../assets/image-compare_model.png" alt="按照模型划分的对比图_02" /></p>
+<p><img src="../../assets/image-compare_model.png" alt="按照模型划分的对比图_02" /></p>
 <h3 id="fine-tuning-results-examples"><a class="header" href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></h3>
 <h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
 <p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. Goal: improve style consistency and recognizability.</p>
 <p>The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of <strong>style-transfer fine-tuning</strong>.</p>
-<p><img src="../assets/image-20251016175046882.png" alt="image-20251016175046882" /></p>
+<p><img src="../../assets/image-20251016175046882.png" alt="image-20251016175046882" /></p>
 <h4 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h4>
 <p>We use:</p>
 <p>(1) <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>, which asks for an exaggerated, Westernized translation tone—clear, stylized customization.</p>
@@ -377,7 +359,7 @@ chunk_size: 8192
       backend: "AMXInt8" # or "AMXBF16" or "llamafile" (default)
 </code></pre>
 <p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
-<p><img src="../assets/image-20251016171537997.png" alt="image-20251016171537997" /></p>
+<p><img src="../../assets/image-20251016171537997.png" alt="image-20251016171537997" /></p>
 <h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
 <p>Run the command: <code>llamafactory-cli chat examples/inference/deepseek3_lora_sft_kt.yaml</code>.</p>
 <p>Use the safetensors adapter trained with KT for inference.</p>
@@ -394,7 +376,7 @@ chunk_size: 8192
 </code></pre>
 <p>We also support <strong>GGUF</strong> adapters: for safetensors, set the <strong>directory</strong>; for GGUF, set the <strong>file path</strong> in <code>adapter_name_or_path</code>.</p>
 <p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
-<p><img src="../assets/image-20251016171526210.png" alt="image-20251016171526210" /></p>
+<p><img src="../../assets/image-20251016171526210.png" alt="image-20251016171526210" /></p>
 <h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
 <p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/deepseek3_lora_sft_kt.yaml</code>.
 Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>

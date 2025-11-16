@@ -188,13 +188,16 @@
 <h2 id="tldr"><a class="header" href="#tldr">TL;DR</a></h2>
 <p>This tutorial will guide you through the process of injecting custom operators into a model using the KTransformers framework. We will use the DeepSeekV2-Chat model as an example to demonstrate how to inject custom operators into the model step by step. The tutorial will cover the following topics:</p>
 <ul>
-<li><a href="#how-to-write-injection-rules">How to write injection rules</a>
-<ul>
-<li><a href="#understanding-model-structure">Understanding the structure of the model</a></li>
-</ul>
-</li>
-<li><a href="#muti-gpu">Multi-GPU</a></li>
-<li><a href="#how-to-write-a-new-operator-and-inject-into-the-model">How to write a new operator and inject it into the model</a></li>
+<li><a href="#tldr">TL;DR</a></li>
+<li><a href="#how-to-write-injection-rules">How to Write Injection Rules</a></li>
+<li><a href="#understanding-model-structure">Understanding Model Structure</a></li>
+<li><a href="#matrix-absorption-based-mla-injection">Matrix Absorption-based MLA Injection</a></li>
+<li><a href="#injection-of-routed-experts">Injection of Routed Experts</a></li>
+<li><a href="#injection-of-linear-layers">Injection of Linear Layers</a></li>
+<li><a href="#injection-of-modules-with-pre-calculated-buffers">Injection of Modules with Pre-calculated Buffers</a></li>
+<li><a href="#specifying-running-devices-for-modules">Specifying Running Devices for Modules</a></li>
+<li><a href="#muti-gpu">Muti-GPU</a></li>
+<li><a href="#how-to-write-a-new-operator-and-inject-into-the-model">How to Write a New Operator and Inject into the Model</a></li>
 </ul>
 <h2 id="how-to-write-injection-rules"><a class="header" href="#how-to-write-injection-rules">How to Write Injection Rules</a></h2>
 <p>The basic form of the injection rules for the Inject framework is as follows:</p>
@@ -229,7 +232,7 @@
 <p>Fortunately, knowing the structure of a model is very simple. Open the file list on the <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/tree/main">deepseek-ai/DeepSeek-V2-Lite</a> homepage, and you can see the following files:</p>
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/model_structure_guild.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/model_structure_guild.png" width=60%>
   </picture>
 </p>
 <p>From the <code>.saftensors</code> file, we can see the name of each layer’s weights, corresponding to the match.name attribute in the injection rules.
@@ -237,7 +240,7 @@ From the <code>modeling_deepseek.py</code> file, we can see the specific impleme
 <p>The structure of the DeepSeekV2 model from the <code>.saftensors</code> and <code>modeling_deepseek.py</code> files is as follows:</p>
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/deepseekv2_structure.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/deepseekv2_structure.png" width=60%>
   </picture>
 </p>
 <p>Supported operators and their corresponding classes are as follows:</p>
@@ -335,7 +338,7 @@ From the <code>modeling_deepseek.py</code> file, we can see the specific impleme
 DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to each GPU. Complete multi GPU rule examples <a href="https://github.com/kvcache-ai/ktransformers/blob/main/ktransformers/optimize/optimize_rules/DeepSeek-V2-Chat-multi-gpu.yaml">here</a>.</p>
 <p align="center">
   <picture>
-    <img alt="Inject-Struction" src="../assets/multi_gpu.png" width=60%>
+    <img alt="Inject-Struction" src="../../assets/multi_gpu.png" width=60%>
   </picture>
 </p>
 <p>First of all, for multi-GPU, we have to inject an new operator <code>KDeepseekV2Model</code>. And set division of the layers to different GPUs. For our case, we have to set the <code>transfer_map</code> in the <code>KDeepseekV2Model</code> operatoras as follows:</p>
