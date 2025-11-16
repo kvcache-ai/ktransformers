@@ -1,1 +1,0 @@
-../../kt-kernel/README.md
