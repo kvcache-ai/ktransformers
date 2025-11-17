@@ -411,7 +411,7 @@ def report_meta_tensors(model):
     # gradients = collect_gradients(model, input_ids)
     '''
     
-    # with open(f"/home/lpl/KT-SFT/tmp/KSFTExpertsCPU_grads.txt", "w") as f:
+    # with open(f"/home/lpl/kt-sft/tmp/KSFTExpertsCPU_grads.txt", "w") as f:
     #     f.write("\n".join(gradients))
     # print(xx)
     

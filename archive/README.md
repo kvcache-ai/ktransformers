@@ -9,7 +9,7 @@
 
 ## 🎯 Overview
 
-KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [KT-SFT](./KT-SFT/).
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [kt-sft](./kt-sft/).
 
 ## 🔥 Updates
 
@@ -67,7 +67,7 @@ pip install .
 
 ---
 
-### 🎓 [KT-SFT](./KT-SFT/) - Fine-Tuning Framework
+### 🎓 [kt-sft](./kt-sft/) - Fine-Tuning Framework
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
@@ -89,12 +89,12 @@ KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning
 
 **Quick Start:**
 ```bash
-cd KT-SFT
-# Install environment following KT-SFT/README.md
+cd kt-sft
+# Install environment following kt-sft/README.md
 USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 ```
 
-👉 **[Full Documentation →](./KT-SFT/README.md)**
+👉 **[Full Documentation →](./kt-sft/README.md)**
 
 ---
 

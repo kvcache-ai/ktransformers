@@ -9,7 +9,7 @@
 
 ## 🎯 项目概述
 
-KTransformers 是一个专注于大语言模型高效推理和微调的研究项目，通过 CPU-GPU 异构计算实现资源受限环境下的模型部署。项目已演进为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [KT-SFT](./KT-SFT/)。
+KTransformers 是一个专注于大语言模型高效推理和微调的研究项目，通过 CPU-GPU 异构计算实现资源受限环境下的模型部署。项目已演进为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [kt-sft](./kt-sft/)。
 
 ## 🔥 更新
 
@@ -66,7 +66,7 @@ pip install .
 
 ---
 
-### 🎓 [KT-SFT](./KT-SFT/) - 微调框架
+### 🎓 [kt-sft](./kt-sft/) - 微调框架
 
 KTransformers × LLaMA-Factory 集成，支持超大 MoE 模型微调。
 
@@ -86,12 +86,12 @@ KTransformers × LLaMA-Factory 集成，支持超大 MoE 模型微调。
 
 **快速开始：**
 ```bash
-cd KT-SFT
-# 按照 KT-SFT/README.md 安装环境
+cd kt-sft
+# 按照 kt-sft/README.md 安装环境
 USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 ```
 
-👉 **[完整文档 →](./KT-SFT/README.md)**
+👉 **[完整文档 →](./kt-sft/README.md)**
 
 ---
 

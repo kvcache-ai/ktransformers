@@ -8,12 +8,12 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
 </div>
 
 ## 🎯 Overview
 
-KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [KT-SFT](./KT-SFT/).
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](./kt-kernel/) and [kt-sft](./kt-sft/).
 
 ## 🔥 Updates
 
@@ -79,7 +79,7 @@ pip install .
 
 ---
 
-### 🎓 [KT-SFT](./KT-SFT/) - Fine-Tuning Framework
+### 🎓 [kt-sft](./kt-sft/) - Fine-Tuning Framework
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
@@ -101,12 +101,12 @@ KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning
 
 **Quick Start:**
 ```bash
-cd KT-SFT
-# Install environment following KT-SFT/README.md
+cd kt-sft
+# Install environment following kt-sft/README.md
 USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 ```
 
-👉 **[Full Documentation →](./KT-SFT/README.md)**
+👉 **[Full Documentation →](./kt-sft/README.md)**
 
 ---
 
