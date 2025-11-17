@@ -1,1 +1,1 @@
-# SFT Docs
+# kt-sft Docs
