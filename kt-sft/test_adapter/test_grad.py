@@ -1,6 +1,6 @@
 import torch, glob
 
-records = sorted(glob.glob("/home/lpl/KT-SFT/tmp/train_logs/step_*.pt"))
+records = sorted(glob.glob("/home/lpl/kt-sft/tmp/train_logs/step_*.pt"))
 example = torch.load(records[1])
 
 # print("step:", example["step"])
