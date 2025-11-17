@@ -3,11 +3,11 @@
 [Introduction](./README.md)
 # Install & Usage
 - [For kt-kernel](en/kt-kernel/kt-kernel_intro.md)
-- [For SFT](en/SFT/KTransformers-Fine-Tuning_User-Guide.md)
+- [For kt-sft](en/SFT/KTransformers-Fine-Tuning_User-Guide.md)
 
 # Tutorial 
-- [SFT part](en/SFT/README.md)
-  - [SFT developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
+- [kt-sft part](en/SFT/README.md)
+  - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
   <!-- - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md) -->
   <!-- - [Use FP8 GPU Kernel](en/fp8_kernel.md) -->

@@ -8,12 +8,12 @@
 
 </p>
   <h3>一个用于体验尖端 LLM 推理/微调优化的灵活框架</h3>
-  <strong><a href="#-概览">🎯 概览</a> | <a href="#-kt-kernel---高性能推理内核">🚀 kt-kernel</a> | <a href="#-kt-sft---微调框架">🎓 KT-SFT</a> | <a href="#-引用">🔥 引用</a> </strong>
+  <strong><a href="#-概览">🎯 概览</a> | <a href="#-kt-kernel---高性能推理内核">🚀 kt-kernel</a> | <a href="#-kt-sft---微调框架">🎓 kt-sft</a> | <a href="#-引用">🔥 引用</a> </strong>
 </div>
 
 ## 🎯 概览
 
-KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。该项目已发展为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [KT-SFT](./KT-SFT/)。
+KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。该项目已发展为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [kt-sft](./kt-sft/)。
 
 ## 🔥 更新
 
@@ -78,7 +78,7 @@ pip install .
 
 ---
 
-### 🎓 [KT-SFT](./KT-SFT/) - 微调框架
+### 🎓 [kt-sft](./kt-sft/) - 微调框架
 
 KTransformers × LLaMA-Factory 集成，用于超大型 MoE 模型微调。
 
@@ -100,12 +100,12 @@ KTransformers × LLaMA-Factory 集成，用于超大型 MoE 模型微调。
 
 **快速开始：**
 ```bash
-cd KT-SFT
-# 按照 KT-SFT/README.md 安装环境
+cd kt-sft
+# 按照 kt-sft/README.md 安装环境
 USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 ```
 
-👉 **[完整文档 →](./KT-SFT/README.md)**
+👉 **[完整文档 →](./kt-sft/README.md)**
 
 ---
 

@@ -35,7 +35,7 @@ gradtype = torch.bfloat16
 # torch.backends.cuda.matmul.allow_tf32 = False
 
 import shutil
-folder_path = "/home/lpl/KT-SFT/debug"
+folder_path = "/home/lpl/kt-sft/debug"
 if os.path.exists(folder_path):
     shutil.rmtree(folder_path)
 os.makedirs(folder_path)
@@ -650,13 +650,13 @@ def manual_check(experts_ids):
         
         down_ba_ori = get_tensor(f"cpp_layer0_E_End{experts_idx}_down_ba_ori_", (expert_token_counts[experts_idx], intermediate_size))
 
-        # with open(f"/home/lpl/KT-SFT/debug/cpp_{experts_idx}_down_ba_ori_view.txt", "w") as f:
+        # with open(f"/home/lpl/kt-sft/debug/cpp_{experts_idx}_down_ba_ori_view.txt", "w") as f:
         #     f.write(str(down_ba_ori))   
         
     
         down_output_grad = get_tensor(f"cpp_layer0_E_End{experts_idx}_down_output_grad_", (expert_token_counts[experts_idx], hidden_size))
 
-        # with open(f"/home/lpl/KT-SFT/debug/cpp_{experts_idx}_down_t_ba_ori_view.txt", "w") as f:
+        # with open(f"/home/lpl/kt-sft/debug/cpp_{experts_idx}_down_t_ba_ori_view.txt", "w") as f:
         #     f.write(str(down_output_grad))
             
         
@@ -674,10 +674,10 @@ def manual_check(experts_ids):
         py_down_t_ba = torch.load(f"debug/py_layer0_E_End{experts_idx}_down_output_grad_.pt")
         py_down_ba = torch.load(f"debug/py_layer0_E_End{experts_idx}_gate_output_.pt")
 
-        # with open(f"/home/lpl/KT-SFT/debug/py_{experts_idx}_down_t_ba_ori_view.txt", "w") as f:
+        # with open(f"/home/lpl/kt-sft/debug/py_{experts_idx}_down_t_ba_ori_view.txt", "w") as f:
         #     f.write(str(py_down_t_ba))
         
-        # with open(f"/home/lpl/KT-SFT/debug/py_{experts_idx}_down_ba_ori_view.txt", "w") as f:
+        # with open(f"/home/lpl/kt-sft/debug/py_{experts_idx}_down_ba_ori_view.txt", "w") as f:
         #     f.write(str(py_down_ba))
             
         print(f"cpp_{experts_idx}_down_ba_ori_:{down_ba_ori}") 
