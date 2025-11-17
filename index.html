@@ -188,10 +188,10 @@
 </picture>
 </p>
   <h3 id="a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations"><a class="header" href="#a-flexible-framework-for-experiencing-cutting-edge-llm-inferencefine-tune-optimizations">A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</a></h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 KT-SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
 </div>
 <h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
-<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="./kt-kernel/">kt-kernel</a> and <a href="./KT-SFT/">KT-SFT</a>.</p>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="./kt-kernel/">kt-kernel</a> and <a href="./kt-sft/">kt-sft</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
 <li><strong>Nov 6, 2025</strong>: Support Kimi-K2-Thinking inference (<a href="./doc/en/Kimi-K2-Thinking.html">Tutorial</a>) and fine-tune (<a href="./doc/en/SFT_Installation_Guide_KimiK2.html">Tutorial</a>)</li>
@@ -247,7 +247,7 @@ pip install .
 </div>
 <p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr />
-<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./KT-SFT/">KT-SFT</a> - Fine-Tuning Framework</a></h3>
+<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./kt-sft/">kt-sft</a> - Fine-Tuning Framework</a></h3>
 <p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
 <p><img src="./doc/assets/image-20251011010558909.png" alt="image-20251011010558909" /></p>
 <p><strong>Key Features:</strong></p>
@@ -264,11 +264,11 @@ pip install .
 </tbody></table>
 </div>
 <p><strong>Quick Start:</strong></p>
-<pre><code class="language-bash">cd KT-SFT
-# Install environment following KT-SFT/README.md
+<pre><code class="language-bash">cd kt-sft
+# Install environment following kt-sft/README.md
 USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="./KT-SFT/README.html">Full Documentation →</a></strong></p>
+<p>👉 <strong><a href="./kt-sft/README.html">Full Documentation →</a></strong></p>
 <hr />
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
 <p>If you use KTransformers in your research, please cite our paper:</p>
