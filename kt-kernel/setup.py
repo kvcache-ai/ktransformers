@@ -266,7 +266,7 @@ class CMakeBuild(build_ext):
         # Note: We no longer set CMAKE_CUDA_ARCHITECTURES by default.
         # If users want to specify CUDA archs, they can set env CPUINFER_CUDA_ARCHS
         # (e.g. "89" or "86;89") or pass it via CMAKE_ARGS.
-
+        auto_moe_kernel_ = False
         # Normalize CPUINFER_USE_CUDA: if unset, auto-detect; otherwise respect truthy/falsey values
         cuda_env = _env_get_bool("CPUINFER_USE_CUDA", None)
         if cuda_env is None:
@@ -296,12 +296,14 @@ class CMakeBuild(build_ext):
         # AMD MoE: explicit env overrides; otherwise default ON on AMD CPU
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AMD", "KTRANSFORMERS_CPU_MOE_AMD"):
             if d.get("vendor") == "amd":
+                auto_moe_kernel_ = True
                 cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
                 print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
 
         # KML: explicit env overrides; otherwise default ON on ARM
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_KML", "KTRANSFORMERS_CPU_USE_KML"):
             if d.get("vendor") == "arm":
+                auto_moe_kernel_ = True
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
                 print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
 
@@ -315,6 +317,17 @@ class CMakeBuild(build_ext):
             if "AMX" in d["features"] or "AVX512" in d["features"]:
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
                 print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
+
+        # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
+        # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)
+        amd_env = _env_get_bool("CPUINFER_ENABLE_AMD", None)
+        kml_env = _env_get_bool("CPUINFER_ENABLE_KML", None)
+        if amd_env or kml_env:
+            auto_moe_kernel_ = True
+        already_set = any("KTRANSFORMERS_CPU_MOE_KERNEL" in a for a in cmake_args)
+        if not already_set and auto_moe_kernel_:
+            cmake_args.append("-DKTRANSFORMERS_CPU_MOE_KERNEL=ON")
+            print("-- Auto-enabling MOE kernel (-DKTRANSFORMERS_CPU_MOE_KERNEL=ON) because CPUINFER_ENABLE_AMD or CPUINFER_ENABLE_KML is ON")
 
         # Friendly summary
         print(

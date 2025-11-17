@@ -606,6 +606,8 @@ class OnlineQuantConverter(ConverterBase):
         quant_to_amx_map = {
             "int4": "INT4",
             "int8": "INT8",
+            "moe_int4": "MOE_INT4",
+            "moe_int8": "MOE_INT8",
         }
         amx_method = quant_to_amx_map.get(self.quant_method, "INT4")
 
@@ -613,6 +615,7 @@ class OnlineQuantConverter(ConverterBase):
         for numa_idx in range(self.threadpool_count):
             numa_folder = os.path.join(layer_path, f"_numa_{numa_idx}")
             if not os.path.exists(numa_folder):
+                print(f"  Warning: NUMA folder not found: {numa_folder}, skipping...")
                 continue
 
             # Iterate through all experts
@@ -746,6 +749,8 @@ class OnlineQuantConverter(ConverterBase):
         quant_to_amx_map = {
             "int4": "AMXINT4",
             "int8": "AMXINT8",
+            "moe_int4": "MOE_INT4",
+            "moe_int8": "MOE_INT8",
         }
         amx_method = quant_to_amx_map.get(self.quant_method, "AMXINT4")
 
@@ -817,7 +822,7 @@ def main():
     parser.add_argument("--output", "-o", required=True, help="Output directory for converted safetensors")
     parser.add_argument(
         "--quant-method",
-        choices=["int4", "int8", "awq"],
+        choices=["int4", "int8", "awq", "moe_int4", "moe_int8"],
         default="int4",
         help="Quantization method for output (default: int4)",
     )
@@ -875,7 +880,7 @@ def main():
                 input_type=None,
                 merge_to_safetensor=merge_to_safetensor,
             )
-        elif quant_method in ["int4", "int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
+        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
             # Use OnlineQuantConverter for both INT4 and INT8 quantization
             converter = OnlineQuantConverter(
                 args.input_path,
