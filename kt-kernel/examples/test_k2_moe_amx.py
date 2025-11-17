@@ -160,9 +160,8 @@ def quantize_k2_tensor(weights: torch.Tensor, group_size: int):
     q = torch.round(reshaped / scales.unsqueeze(-1)).clamp(-8, 7).to(torch.int8)
     q = q.view(e, rows, cols)
     packed = pack_tensor_per_row(q, num_bits=4).view(e, rows, cols // 8).contiguous()
-    scales = scales.to(torch.bfloat16).contiguous().view(e, rows, cols // group_size)
-    # Reorder to match C++ expectation: [expert, groups, rows], then flatten
-    scales = scales.permute(0, 2, 1).contiguous().view(e, -1)
+    scales = scales.to(torch.bfloat16).contiguous().view(e, rows, cols // group_size).contiguous()
+
     print(f"Quantized weights: {packed.shape}, scales: {scales.shape}")
     print(f"Quantized tensors: \n{packed},\n {scales}")
     return packed, scales

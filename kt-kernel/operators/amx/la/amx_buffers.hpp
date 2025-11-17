@@ -971,7 +971,7 @@ struct BufferBInt4KGroupImpl {
   // Get scale pointer for a specific row and k_group
   float* get_scale(int n, int n_begin, int k, int k_begin) {
       int k_group_idx = k_begin / k_group_size;
-      return d + k_group_idx * n + n_begin;
+      return d + n_begin * (k / k_group_size) +  k_group_idx;
   }
 
   // Split range for parallel processing

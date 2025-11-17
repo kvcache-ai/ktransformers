@@ -303,7 +303,7 @@ class AMX_K2_MOE_TP {
                           scale_elem_count);
         },
         nullptr);
-    dump_buffer_b("native", 0, "gate", gate_bb_[0].get());
+    dump_buffer_b("native", 0, "down", down_bb_[0].get());
   }
 
   void warm_up() {
@@ -413,13 +413,25 @@ class AMX_K2_MOE_TP {
 
 #ifdef DEBUG_K2_MOE
     if (activated_expert > 0) {
-      int sample_expert = m_expert_id_map_[0];
-      ggml_bf16_t *gate_ptr = m_local_gate_output_ptr_[sample_expert];
-      if (gate_ptr != nullptr) {
-        int print_elems = std::min(config_.intermediate_size, 16);
+      int print_elems = std::min(config_.intermediate_size, 16);
+      for (int dbg = 0; dbg < activated_expert; ++dbg) {
+        int sample_expert = m_expert_id_map_[dbg];
+        ggml_bf16_t* gate_ptr = m_local_gate_output_ptr_[sample_expert];
+        if (gate_ptr == nullptr) {
+          continue;
+        }
+
         printf("[K2][TP %d] gate_out (expert %d, first %d elems): ", tp_part_idx, sample_expert, print_elems);
         for (int idx = 0; idx < print_elems; idx++) {
           float val = ggml_bf16_to_fp32(gate_ptr[idx]);
+          printf("%.6f ", val);
+        }
+        printf("\n");
+
+        int tail_start = config_.intermediate_size > print_elems ? config_.intermediate_size - print_elems : 0;
+        printf("[K2][TP %d] gate_out (expert %d, last %d elems): ", tp_part_idx, sample_expert, print_elems);
+        for (int idx = 0; idx < print_elems; idx++) {
+          float val = ggml_bf16_to_fp32(gate_ptr[tail_start + idx]);
           printf("%.6f ", val);
         }
         printf("\n");
@@ -492,6 +504,34 @@ class AMX_K2_MOE_TP {
           down_bc_[expert_idx]->to_mat(qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
+
+#ifdef DEBUG_K2_MOE
+    if (activated_expert > 0) {
+      int print_elems = std::min(config_.hidden_size, 16);
+      for (int dbg = 0; dbg < activated_expert; ++dbg) {
+        int sample_expert = m_expert_id_map_[dbg];
+        ggml_bf16_t* down_ptr = m_local_down_output_ptr_[sample_expert];
+        if (down_ptr == nullptr) {
+          continue;
+        }
+
+        printf("[K2][TP %d] down_out (expert %d, first %d elems): ", tp_part_idx, sample_expert, print_elems);
+        for (int idx = 0; idx < print_elems; idx++) {
+          float val = ggml_bf16_to_fp32(down_ptr[idx]);
+          printf("%.6f ", val);
+        }
+        printf("\n");
+
+        int tail_start = config_.hidden_size > print_elems ? config_.hidden_size - print_elems : 0;
+        printf("[K2][TP %d] down_out (expert %d, last %d elems): ", tp_part_idx, sample_expert, print_elems);
+        for (int idx = 0; idx < print_elems; idx++) {
+          float val = ggml_bf16_to_fp32(down_ptr[tail_start + idx]);
+          printf("%.6f ", val);
+        }
+        printf("\n");
+      }
+    }
+#endif
 
 #ifdef FORWARD_TIME_PROFILE
     {
@@ -570,13 +610,13 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
       tpc.up_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
       tpc.down_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
 
-      if (tps[i]->config_.load == false) { // TODO: 此处的 tp 切分中，weight 是 col majored，scale 是 row majored。可能需要重新写。
+      if (tps[i]->config_.load == false) {
         pool->get_subpool(i)->do_work_stealing_job(
             tpc.expert_num, nullptr,
-            [&](int expert_id_) {
+            [&](int expert_id_) { // weight and scale are all in col majored.
               size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
-              // weight TP-slicing for gate and up
+              // weight and scale TP-slicing for gate and up
               memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
                       (uint8_t*)config.gate_proj +
                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
@@ -587,35 +627,29 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
                       ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
-              // scale TP-slicing for down
-              memcpy((ggml_bf16_t*)tpc.down_scale + (expert_id * scales_elem_count),
-                      (ggml_bf16_t*)config.down_scale +
-                          (expert_id * (config.intermediate_size / group_size) * config.hidden_size +
+              memcpy((ggml_bf16_t*)tpc.gate_scale + (expert_id * scales_elem_count),
+                      (ggml_bf16_t*)config.gate_scale + 
+                          (expert_id * (config.hidden_size / group_size) * config.intermediate_size + 
                           i * scales_elem_count),
-                      sizeof(ggml_bf16_t) * scales_elem_count);
+                        sizeof(ggml_bf16_t) * scales_elem_count);
 
-              // scale TP-slicing for gate and up (by group)
-              for (size_t kg = 0; kg < config.hidden_size / group_size; kg++) {
-                memcpy((ggml_bf16_t*)tpc.gate_scale + (expert_id * scales_elem_count) + kg * tpc.intermediate_size,
-                        (ggml_bf16_t*)config.gate_scale +
-                            (expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
-                            kg * config.intermediate_size + i * tpc.intermediate_size),
-                        (sizeof(ggml_bf16_t) * tpc.intermediate_size));
+              memcpy((ggml_bf16_t*)tpc.up_scale + (expert_id * scales_elem_count),
+                      (ggml_bf16_t*)config.up_scale + 
+                          (expert_id * (config.hidden_size / group_size) * config.intermediate_size + 
+                          i * scales_elem_count),
+                        sizeof(ggml_bf16_t) * scales_elem_count);
 
-                memcpy((ggml_bf16_t*)tpc.up_scale + (expert_id * scales_elem_count) + kg * tpc.intermediate_size,
-                        (ggml_bf16_t*)config.up_scale +
-                            (expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
-                            kg * config.intermediate_size + i * tpc.intermediate_size),
-                        (sizeof(ggml_bf16_t) * tpc.intermediate_size));
-              }
-
-              // weight TP-slicing for down (by column)
+              // weight and scale TP-slicing for down (by column)
               for (size_t col = 0; col < config.hidden_size; col++) {
                 memcpy((uint8_t*)tpc.down_proj + ((expert_id * weight_elem_count + col * tpc.intermediate_size) >> 1),
                         (uint8_t*)config.down_proj + ((expert_id * config.intermediate_size * config.hidden_size +
                                                       col * config.intermediate_size + i * tpc.intermediate_size) >>
                                                       1),
                         (sizeof(uint8_t) * tpc.intermediate_size) >> 1);
+                memcpy((ggml_bf16_t*)tpc.down_scale + (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
+                        (ggml_bf16_t*)config.down_scale + ((expert_id * (config.intermediate_size / group_size) * config.hidden_size) + 
+                                                            col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
+                        sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
               }
             },
             nullptr);
