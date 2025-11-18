@@ -57,6 +57,9 @@ class MOE_KERNEL_TP
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
 
+  std::vector<void*> gate_up_owner_ptr_;
+  std::vector<void*> down_owner_ptr_;
+
   inline void write_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
                             size_t scale_size) {
     // printf("expert %d, size %ld, scale size %ld\n", expert_idx, size, scale_size);
@@ -182,6 +185,7 @@ class MOE_KERNEL_TP
       down_ba_.push_back(std::make_shared<typename T::BufferA>(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(std::make_shared<typename T::BufferC>(config_.max_len, config_.hidden_size, nullptr));
       void* gate_up_down_per_exp_ptr = std::aligned_alloc(64, gate_up_exp_size);
+      gate_up_owner_ptr_.push_back(gate_up_down_per_exp_ptr);
 
       gate_bb_.push_back(std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size,
                                                                gate_up_down_per_exp_ptr, PACKED, 'u', PLAIN));
@@ -193,6 +197,7 @@ class MOE_KERNEL_TP
 
       void* down_bb_ptr = std::aligned_alloc(
           64, T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN));
+      down_owner_ptr_.push_back(down_bb_ptr);
       down_bb_.push_back(std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size,
                                                                down_bb_ptr, PACKED, 'd', PLAIN));
     }
@@ -220,6 +225,12 @@ class MOE_KERNEL_TP
 
   ~MOE_KERNEL_TP() {
     // printf("  Destroying KML_MOE_TP %lx\n", (intptr_t)(this));
+    for (void* ptr : gate_up_owner_ptr_) {
+      std::free(ptr);
+    }
+    for (void* ptr : down_owner_ptr_) {
+      std::free(ptr);
+    }
   }
 
   void load_weights() {
@@ -703,6 +714,10 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
         delete[] (ggml_bf16_t*)(tpc.gate_proj);
         delete[] (ggml_bf16_t*)(tpc.up_proj);
         delete[] (ggml_bf16_t*)(tpc.down_proj);
+      }
+      if (config.save) {
+        // free the bf16 weights after saving
+        tps.clear();
       }
 
       this->weights_loaded = true;
