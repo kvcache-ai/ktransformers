@@ -107,6 +107,20 @@ output_dir/
 - Need to process very large models on memory-constrained systems
 - Want to preserve intermediate layer-wise quantized weights
 
+### Resume Layer
+
+For memory-constrained systems that are unable to complete quantization despite enabling low memory mode with `--no-merge-safetensor`, restart the script with the `--resume-layer` arg to specify the layer from which to continue the conversion process. In the example below, we skip layers 0-11 and resume conversion starting with layer 12.
+
+```bash
+python scripts/convert_cpu_weights.py \
+  --input-path /path/to/model \
+  --input-type bf16 \
+  --output /path/to/output \
+  --quant-method int4 \
+  --no-merge-safetensor
+  --resume-layer 12
+```
+
 ## Examples
 
 ### Example 1: Quantize DeepSeek-V3.1 (FP8 → INT4)

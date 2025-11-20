@@ -331,7 +331,12 @@ class ConverterBase:
         raise NotImplementedError("Subclasses must implement _convert_layer_experts")
 
     def convert(self, resume_layer: int = 0):
-        """Convert all expert layers using subclass-specific logic."""
+        """Convert all expert layers using subclass-specific logic.
+        
+        Args:
+            resume_layer (int, optional): The layer index to resume conversion from.
+                Layers with an index lower than this will be skipped. Defaults to 0.
+        """
         print("Starting conversion...")
         print(f"Input: {self.input_path}")
         print(f"Output: {self.output_path}")
