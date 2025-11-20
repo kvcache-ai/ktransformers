@@ -332,7 +332,7 @@ class ConverterBase:
 
     def convert(self, resume_layer: int = 0):
         """Convert all expert layers using subclass-specific logic.
-        
+
         Args:
             resume_layer (int, optional): The layer index to resume conversion from.
                 Layers with an index lower than this will be skipped. Defaults to 0.
@@ -340,7 +340,8 @@ class ConverterBase:
         print("Starting conversion...")
         print(f"Input: {self.input_path}")
         print(f"Output: {self.output_path}")
-        print(f"Resuming from layer: {resume_layer}")
+        if resume_layer > 0:
+            print(f"Resuming from layer: {resume_layer}")
 
         # Create output directory
         os.makedirs(self.output_path, exist_ok=True)
