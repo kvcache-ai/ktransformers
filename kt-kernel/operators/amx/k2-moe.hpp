@@ -306,6 +306,101 @@ class AMX_K2_MOE_TP {
     dump_buffer_b("native", 0, "down", down_bb_[0].get());
   }
 
+  // Reconstruct weights for all experts to the output buffers
+  // This function handles the TP-specific portion of the reconstruction for all experts
+  void write_weights_to_buffer(int num_experts, const GeneralMOEConfig& full_config,
+                               uint8_t* gate_weight_ptr, ggml_bf16_t* gate_scale_ptr,
+                               uint8_t* up_weight_ptr, ggml_bf16_t* up_scale_ptr,
+                               uint8_t* down_weight_ptr, ggml_bf16_t* down_scale_ptr) const {
+    const int group_size = config_.quant_config.group_size;
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    // Calculate sizes for this TP part
+    size_t tp_weight_elem_count = (size_t)config_.intermediate_size * config_.hidden_size;
+    size_t tp_weight_bytes = tp_weight_elem_count / 2;
+    size_t tp_scale_elem_count = tp_weight_elem_count / group_size;
+
+    // Calculate sizes for the full matrix
+    size_t full_weight_elem_count = (size_t)full_config.intermediate_size * full_config.hidden_size;
+    size_t full_weight_bytes = full_weight_elem_count / 2;
+    size_t full_scale_elem_count = full_weight_elem_count / group_size;
+
+    // Process Gate and Up weights in parallel (row-wise split)
+    // Each expert is processed independently
+    pool->do_work_stealing_job(
+        num_experts * 2, nullptr,
+        [&, this](int task_id) {
+          int expert_id = task_id / 2;
+          bool do_up = task_id % 2;
+
+          if (do_up) {
+            // Up weight and scale
+            uint8_t* up_weight_base = up_weight_ptr + expert_id * full_weight_bytes;
+            ggml_bf16_t* up_scale_base = up_scale_ptr + expert_id * full_scale_elem_count;
+
+            uint8_t* up_weight_src = (uint8_t*)up_bb_[expert_id]->b;
+            float* up_scale_src = up_bb_[expert_id]->d;
+
+            uint8_t* up_weight_dst = up_weight_base + tp_part_idx * tp_weight_bytes;
+            ggml_bf16_t* up_scale_dst = up_scale_base + tp_part_idx * tp_scale_elem_count;
+
+            std::memcpy(up_weight_dst, up_weight_src, tp_weight_bytes);
+            convert_or_copy(up_scale_dst, up_scale_src, tp_scale_elem_count);
+          } else {
+            // Gate weight and scale
+            uint8_t* gate_weight_base = gate_weight_ptr + expert_id * full_weight_bytes;
+            ggml_bf16_t* gate_scale_base = gate_scale_ptr + expert_id * full_scale_elem_count;
+
+            uint8_t* gate_weight_src = (uint8_t*)gate_bb_[expert_id]->b;
+            float* gate_scale_src = gate_bb_[expert_id]->d;
+
+            uint8_t* gate_weight_dst = gate_weight_base + tp_part_idx * tp_weight_bytes;
+            ggml_bf16_t* gate_scale_dst = gate_scale_base + tp_part_idx * tp_scale_elem_count;
+
+            std::memcpy(gate_weight_dst, gate_weight_src, tp_weight_bytes);
+            convert_or_copy(gate_scale_dst, gate_scale_src, tp_scale_elem_count);
+          }
+        },
+        nullptr);
+
+    // Process Down weights in parallel (column-wise split)
+    // Use recommended number of threads based on hidden size
+    int nth = T::recommended_nth(full_config.hidden_size);
+    pool->do_work_stealing_job(
+        nth * num_experts, nullptr,
+        [&, this](int task_id) {
+          int expert_id = task_id / nth;
+          int ith = task_id % nth;
+
+          // Calculate column range for this thread
+          auto [col_start, col_end] = T::split_range_n(full_config.hidden_size, ith, nth);
+
+          uint8_t* down_weight_base = down_weight_ptr + expert_id * full_weight_bytes;
+          ggml_bf16_t* down_scale_base = down_scale_ptr + expert_id * full_scale_elem_count;
+
+          uint8_t* down_weight_src = (uint8_t*)down_bb_[expert_id]->b;
+          float* down_scale_src = down_bb_[expert_id]->d;
+
+          for (size_t col = col_start; col < col_end; col++) {
+            // Down weight (column-wise)
+            uint8_t* down_weight_dst = down_weight_base +
+                                      ((col * full_config.intermediate_size + tp_part_idx * config_.intermediate_size) >> 1);
+            uint8_t* down_weight_src_col = down_weight_src + ((col * config_.intermediate_size) >> 1);
+
+            std::memcpy(down_weight_dst, down_weight_src_col, (config_.intermediate_size >> 1));
+
+            // Down scale (column-wise)
+            ggml_bf16_t* down_scale_dst = down_scale_base +
+                                          col * (full_config.intermediate_size / group_size) +
+                                          tp_part_idx * (config_.intermediate_size / group_size);
+            float* down_scale_src_col = down_scale_src + col * (config_.intermediate_size / group_size);
+
+            convert_or_copy(down_scale_dst, down_scale_src_col, (config_.intermediate_size / group_size));
+          }
+        },
+        nullptr);
+  }
+
   void warm_up() {
     int qlen = config_.max_len;
     std::vector<uint8_t> input(sizeof(ggml_bf16_t) * qlen * config_.hidden_size);
@@ -671,6 +766,27 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
     }
 
     this->weights_loaded = true;
+  }
+
+  void write_weight_scale_to_buffer(int gpu_experts,
+                                    uintptr_t gate_weight_ptr, uintptr_t gate_scale_ptr,
+                                    uintptr_t up_weight_ptr, uintptr_t up_scale_ptr,
+                                    uintptr_t down_weight_ptr, uintptr_t down_scale_ptr) {
+    if (this->weights_loaded == false) {
+      throw std::runtime_error("Not Loaded");
+    }
+    if (this->tps.empty()) {
+      throw std::runtime_error("No TP parts initialized");
+    }
+
+    // Let each TP handle all experts (0 to gpu_experts-1)
+    for (int tp_idx = 0; tp_idx < this->tp_count; tp_idx++) {
+      this->tps[tp_idx]->write_weights_to_buffer(
+          gpu_experts, this->config,
+          (uint8_t*)gate_weight_ptr, (ggml_bf16_t*)gate_scale_ptr,
+          (uint8_t*)up_weight_ptr, (ggml_bf16_t*)up_scale_ptr,
+          (uint8_t*)down_weight_ptr, (ggml_bf16_t*)down_scale_ptr);
+    }
   }
 
   void merge_results(int qlen, void* output, bool incremental) {
