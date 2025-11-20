@@ -9,6 +9,7 @@ from safetensors.torch import load_file, save_file
 
 import gc
 
+
 def weight_dequant_cpu(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> torch.Tensor:
     assert x.dim() == 2 and s.dim() == 2, "Expect 2D tensors for x and s"
     M, N = x.shape
@@ -27,6 +28,7 @@ def weight_dequant_cpu(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) 
             y[m0:m1, n0:n1] = sub.to(torch.bfloat16)
     return y
 
+
 def main(fp8_path, bf16_path):
     torch.set_default_dtype(torch.bfloat16)
     os.makedirs(bf16_path, exist_ok=True)
@@ -34,7 +36,7 @@ def main(fp8_path, bf16_path):
     with open(model_index_file, "r") as f:
         model_index = json.load(f)
     weight_map = model_index["weight_map"]
-    
+
     loaded_files = {}
     fp8_weight_names = []
 
@@ -51,7 +53,7 @@ def main(fp8_path, bf16_path):
         file_name = os.path.basename(safetensor_file)
         current_state_dict = load_file(safetensor_file, device="cpu")
         loaded_files[file_name] = current_state_dict
-        
+
         new_state_dict = {}
         for weight_name, weight in current_state_dict.items():
             if weight_name.endswith("_scale_inv"):
@@ -67,17 +69,17 @@ def main(fp8_path, bf16_path):
                     new_state_dict[weight_name] = weight
             else:
                 new_state_dict[weight_name] = weight
-                
+
         new_safetensor_file = os.path.join(bf16_path, file_name)
         save_file(new_state_dict, new_safetensor_file)
-        
+
         if len(loaded_files) > 2:
             oldest_file = next(iter(loaded_files))
             del loaded_files[oldest_file]
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-    
+
     new_model_index_file = os.path.join(bf16_path, "model.safetensors.index.json")
     for weight_name in fp8_weight_names:
         scale_inv_name = f"{weight_name}_scale_inv"
@@ -86,6 +88,7 @@ def main(fp8_path, bf16_path):
     with open(new_model_index_file, "w") as f:
         json.dump({"metadata": {}, "weight_map": weight_map}, f, indent=2)
     print(f"Finish, Result in: {bf16_path}")
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()

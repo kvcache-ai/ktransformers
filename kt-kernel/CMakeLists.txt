@@ -79,27 +79,40 @@ if(USE_CONDA_TOOLCHAIN)
     set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
 endif()
 
-## Ensure git hooks are installed when configuring the project
-# If this is a git working copy and the installer exists, run it and fail the CMake configure
-# when installation fails. If no .git directory is present (e.g. source tarball), skip.
-if(EXISTS "${CMAKE_SOURCE_DIR}/.git" AND IS_DIRECTORY "${CMAKE_SOURCE_DIR}/.git")
-    if(EXISTS "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
-        message(STATUS "Detected .git; installing git hooks using scripts/install-git-hooks.sh")
-        execute_process(
-            COMMAND sh "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh"
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-            RESULT_VARIABLE _INSTALL_GIT_HOOKS_RESULT
-            OUTPUT_VARIABLE _INSTALL_GIT_HOOKS_OUT
-            ERROR_VARIABLE _INSTALL_GIT_HOOKS_ERR
+## Ensure git hooks are installed when configuring the project (monorepo-aware)
+# If we are inside a git worktree (repo root is outside kt-kernel now), invoke the installer
+# which will link kt-kernel/.githooks into the top-level .git/hooks. Otherwise, skip.
+find_program(GIT_BIN git)
+if(GIT_BIN)
+    execute_process(
+        COMMAND "${GIT_BIN}" rev-parse --show-toplevel
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _GIT_TOP
+        RESULT_VARIABLE _GIT_RV
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_GIT_RV EQUAL 0 AND EXISTS "${_GIT_TOP}/.git" AND IS_DIRECTORY "${_GIT_TOP}/.git")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
+            message(STATUS "Detected git worktree at ${_GIT_TOP}; installing hooks from kt-kernel/.githooks")
+            execute_process(
+                COMMAND sh "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                RESULT_VARIABLE _INSTALL_GIT_HOOKS_RESULT
+                OUTPUT_VARIABLE _INSTALL_GIT_HOOKS_OUT
+                ERROR_VARIABLE _INSTALL_GIT_HOOKS_ERR
             )
-        if(NOT _INSTALL_GIT_HOOKS_RESULT EQUAL 0)
-            message(FATAL_ERROR "Installing git hooks failed (exit ${_INSTALL_GIT_HOOKS_RESULT}).\nOutput:\n${_INSTALL_GIT_HOOKS_OUT}\nError:\n${_INSTALL_GIT_HOOKS_ERR}")
+            if(NOT _INSTALL_GIT_HOOKS_RESULT EQUAL 0)
+                message(FATAL_ERROR "Installing git hooks failed (exit ${_INSTALL_GIT_HOOKS_RESULT}).\nOutput:\n${_INSTALL_GIT_HOOKS_OUT}\nError:\n${_INSTALL_GIT_HOOKS_ERR}")
+            endif()
+        else()
+            message(FATAL_ERROR "Required script 'scripts/install-git-hooks.sh' not found in kt-kernel; cannot install hooks.")
         endif()
     else()
-        message(FATAL_ERROR "Repository appears to be a git repo but required script 'scripts/install-git-hooks.sh' was not found. Please ensure hooks installer is present.")
+        message(STATUS "No git worktree detected; skipping git hooks installation")
     endif()
 else()
-    message(STATUS "No .git directory found; skipping git hooks installation")
+    message(STATUS "git not found; skipping git hooks installation")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -332,17 +345,17 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     )
 
     if(NOT BLIS_INCLUDE_DIR OR NOT BLIS_LIBRARY)
-        message(FATAL_ERROR "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
+        message(WARNING "BLIS not found; set BLIS_ROOT or specify BLIS_INCLUDE_DIR/BLIS_LIBRARY")
     else()
         message(STATUS "Found BLIS include at ${BLIS_INCLUDE_DIR}")
         message(STATUS "Found BLIS library ${BLIS_LIBRARY}")
+        set(_KT_BLIS_INCLUDE_DIR ${BLIS_INCLUDE_DIR})
+        set(_KT_BLIS_LIBRARY ${BLIS_LIBRARY})
     endif()
     # The Python extension target (${PROJECT_NAME}) is created later by
     # pybind11_add_module(). Calling target_include_directories/target_link_libraries
     # here would fail because the target doesn't exist yet. Save the discovered
     # BLIS paths and apply them after the module target is created.
-    set(_KT_BLIS_INCLUDE_DIR ${BLIS_INCLUDE_DIR})
-    set(_KT_BLIS_LIBRARY ${BLIS_LIBRARY})
 endif()
 
 
@@ -374,10 +387,10 @@ message(STATUS "ARCH_FLAGS: ${ARCH_FLAGS}")
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 if(KTRANSFORMERS_USE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
@@ -425,7 +438,7 @@ endif()
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/llamafile SOURCE_DIR4)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
 # message(STATUS "SOURCE_DIR3: ${SOURCE_DIR3}")
 

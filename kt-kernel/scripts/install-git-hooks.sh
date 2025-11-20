@@ -1,24 +1,29 @@
 #!/usr/bin/env sh
-# Install git hooks from .githooks into .git/hooks by creating symlinks (or copying if symlink fails).
+# Install git hooks from kt-kernel/.githooks into the monorepo's .git/hooks by
+# creating symlinks (or copying if symlink fails).
 
 set -eu
 
+# This script lives in kt-kernel/scripts/, so REPO_ROOT = kt-kernel
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GIT_DIR="$REPO_ROOT/.git"
 HOOKS_SRC="$REPO_ROOT/.githooks"
+
+# Detect the top-level Git worktree (the monorepo root: ktransformers)
+GIT_TOP="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$GIT_TOP" ] || [ ! -d "$GIT_TOP/.git" ]; then
+  echo "[install-git-hooks] Not inside a git worktree; skipping hooks installation." >&2
+  exit 0
+fi
+
+GIT_DIR="$GIT_TOP/.git"
 HOOKS_DEST="$GIT_DIR/hooks"
 
-if [ ! -d "$GIT_DIR" ]; then
-  echo "Not a git repository (no .git directory) at $REPO_ROOT" >&2
-  exit 1
-fi
-
 if [ ! -d "$HOOKS_SRC" ]; then
-  echo "No .githooks directory found at $HOOKS_SRC" >&2
+  echo "[install-git-hooks] No .githooks directory found at $HOOKS_SRC" >&2
   exit 1
 fi
 
-echo "Installing git hooks from $HOOKS_SRC to $HOOKS_DEST"
+echo "[install-git-hooks] Installing git hooks from $HOOKS_SRC to $HOOKS_DEST (repo: $GIT_TOP)"
 
 # Ensure all source hook files are executable so that even if copied (not symlinked) they run.
 for src_hook in "$HOOKS_SRC"/*; do
@@ -49,4 +54,4 @@ for hook in "$HOOKS_SRC"/*; do
   fi
 done
 
-echo "Done. Hooks installed."
+echo "[install-git-hooks] Done. Hooks installed."

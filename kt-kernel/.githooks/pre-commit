@@ -1,10 +1,12 @@
 #!/usr/bin/bash
-# Pre-commit hook: run clang-format via CMake 'format' target and Black for Python before allowing commit.
-# If formatting makes changes, stage them and abort so user can review.
+# Pre-commit hook: run clang-format via kt-kernel's CMake 'format' target and Black for Python
+# before allowing commit. If formatting makes changes, stage them and abort so user can review.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-BUILD_DIR="$REPO_ROOT/build"
+# kt-kernel project directory within the monorepo
+KERNEL_DIR="$REPO_ROOT/kt-kernel"
+BUILD_DIR="$KERNEL_DIR/build"
 FORMAT_TARGET="format"
 CLANG_FORMAT_BIN="${CLANG_FORMAT_BIN:-clang-format}"
 BLACK_BIN="${BLACK_BIN:-black}"
@@ -20,10 +22,10 @@ if ! command -v "$BLACK_BIN" >/dev/null 2>&1; then
   echo "[pre-commit] black not found (looked for $BLACK_BIN). Skipping Python format." >&2
 fi
 
-# Configure build directory if missing (quiet)
-if [ ! -d "$BUILD_DIR" ] || [ ! -f "$BUILD_DIR/Makefile" ] && [ ! -f "$BUILD_DIR/build.ninja" ]; then
-  echo "[pre-commit] configuring project (cmake) ..." >&2
-  cmake -S "$REPO_ROOT" -B "$BUILD_DIR" >/dev/null
+# Configure kt-kernel build directory if missing (quiet)
+if [ ! -d "$BUILD_DIR" ] || { [ ! -f "$BUILD_DIR/Makefile" ] && [ ! -f "$BUILD_DIR/build.ninja" ]; }; then
+  echo "[pre-commit] configuring kt-kernel (cmake) ..." >&2
+  cmake -S "$KERNEL_DIR" -B "$BUILD_DIR" >/dev/null
 fi
 
 # Run format target (prefer ninja if present)
@@ -38,15 +40,18 @@ fi
 
 # Run black on staged python files (or entire repo if you prefer)
 if command -v "$BLACK_BIN" >/dev/null 2>&1; then
-  # Get staged python files; if none, skip
-  PY_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
-  if [ -n "$PY_FILES" ]; then
-    echo "[pre-commit] running black on staged python files..." >&2
-    $BLACK_BIN $PY_FILES
-  else
-    # Optionally format all python files; comment out if not desired
-    # $BLACK_BIN "$REPO_ROOT"
-    :
+  # Run black only on kt-kernel's python and scripts directories
+  BLACK_PATHS=""
+  if [ -d "$KERNEL_DIR/python" ]; then
+    BLACK_PATHS="$BLACK_PATHS $KERNEL_DIR/python"
+  fi
+  if [ -d "$KERNEL_DIR/scripts" ]; then
+    BLACK_PATHS="$BLACK_PATHS $KERNEL_DIR/scripts"
+  fi
+  if [ -n "$BLACK_PATHS" ]; then
+    echo "[pre-commit] running black on:$BLACK_PATHS" >&2
+    # shellcheck disable=SC2086
+    $BLACK_BIN $BLACK_PATHS
   fi
 fi
 

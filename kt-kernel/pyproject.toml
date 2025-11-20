@@ -8,7 +8,7 @@ name = "kt-kernel"
 version = "0.1.0"
 description = "KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)"
 readme = "README.md"
-authors = [ { name = "kvcache-ai" } ]
+authors = [{ name = "kvcache-ai" }]
 # Use SPDX string form (table form deprecated in newer setuptools)
 license = "Apache-2.0"
 classifiers = [
@@ -25,6 +25,7 @@ dependencies = [
   "compressed-tensors>=0.7.0",
   "numpy>=1.24.0",
   "triton>=2.0.0",
+  "gguf>=0.17.0",
   # Development dependencies
   "black>=25.9.0",
 ]
@@ -35,9 +36,12 @@ dependencies = [
 Homepage = "https://github.com/kvcache-ai"
 
 [tool.setuptools]
-# Enable Python package (kt_kernel) and compiled extension (kt_kernel_ext)
-packages = ["kt_kernel"]
+packages = ["kt_kernel", "kt_kernel.utils"]
 include-package-data = true
+
+[tool.setuptools.package-dir]
+kt_kernel = "python"
+"kt_kernel.utils" = "python/utils"
 
 [tool.setuptools.package-data]
 # (empty) placeholder if you later add resources

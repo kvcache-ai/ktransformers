@@ -8,6 +8,6 @@ safetensors>=0.4.0
 compressed-tensors>=0.7.0
 numpy>=1.24.0
 triton>=2.0.0
-
+gguf>=0.17.0
 # Development dependencies
 black>=25.9.0

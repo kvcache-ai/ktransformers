@@ -24,7 +24,7 @@ Download the AMX INT4 quantized weights from https://huggingface.co/KVCache-ai/K
 
 ## How to start
 ```
-python -m sglang.launch_server   --host 0.0.0.0   --port 60000   --model path/to/Kimi-K2-Thinking/   --kt-amx-weight-path path/to/Kimi-K2-Instruct-CPU-weight/   --kt-cpuinfer 56   --kt-threadpool-count 2   --kt-num-gpu-experts 200   --kt-amx-method AMXINT4   --attention-backend triton   --trust-remote-code   --mem-fraction-static 0.98   --chunked-prefill-size 4096   --max-running-requests 37   --max-total-tokens 37000   --enable-mixed-chunk   --tensor-parallel-size 8   --enable-p2p-check   --disable-shared-experts-fusion
+python -m sglang.launch_server   --host 0.0.0.0   --port 60000   --model path/to/Kimi-K2-Thinking/   --kt-weight-path path/to/Kimi-K2-Instruct-CPU-weight/   --kt-cpuinfer 56   --kt-threadpool-count 2   --kt-num-gpu-experts 200   --kt-method AMXINT4   --attention-backend flashinfer   --trust-remote-code   --mem-fraction-static 0.98   --chunked-prefill-size 4096   --max-running-requests 37   --max-total-tokens 37000   --enable-mixed-chunk   --tensor-parallel-size 8   --enable-p2p-check   --disable-shared-experts-fusion
 ```
 tips:
 
