@@ -35,6 +35,7 @@ from tqdm import tqdm
 import os, json
 from pathlib import Path
 from accelerate import Accelerator
+from ktransformers.util.trainer_utils import KAccelerator
 if is_accelerate_available("0.28.0"):
     from accelerate.utils import DataLoaderConfiguration
 from accelerate import __version__ as accelerate_version
@@ -46,23 +47,6 @@ if is_sagemaker_mp_enabled():
 from ktransformers.sft.peft_utils.mapping import get_peft_model
 
 logger = logging.get_logger(__name__)
-
-class KAccelerator(Accelerator):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("device_placement", False)
-        super().__init__(*args, **kwargs)
-        
-    def prepare_model(self, model, *args, **kwargs):
-        return model
-    
-    def prepare(self, *args, **kwargs):
-        prepped = []
-        for obj in args:
-            if isinstance(obj, nn.Module):
-                prepped.append(self.prepare_model(obj, **kwargs))
-            else:
-                prepped.append(super().prepare(obj, **kwargs))
-        return tuple(prepped) if len(prepped) > 1 else prepped[0]
 
 class KTrainer(Trainer):
     def save_model(self, output_dir=None, _internal_call=False):

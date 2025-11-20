@@ -164,7 +164,7 @@ def get_all_used_cuda_device(device_map:dict):
     return all_device_list
 
 def load_cur_state_dict(module: nn.Module, gguf_loader: ModelLoader, prefix: str = "", device="cuda", adapter_gguf: bool = False):
-    if GLOBAL_CONFIG._config["mod"] == 'sft':
+    if GLOBAL_CONFIG._config["mod"] == 'train':
         prefix = prefix.replace("orig_module.", "")
         persistent_buffers = {k: v for k, v in module._buffers.items() if k not in module._non_persistent_buffers_set}
         local_name_params = itertools.chain(module._parameters.items(), persistent_buffers.items())
