@@ -40,7 +40,7 @@ if is_sagemaker_mp_enabled():
 
 logger = logging.get_logger(__name__)
 
-class KTDporainer(DPOTrainer):
+class KTDpoTrainer(DPOTrainer):
     def save_model(self, output_dir=None, _internal_call=False):
         output_dir = output_dir or self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -186,7 +186,7 @@ class KTDporainer(DPOTrainer):
 
     def post_training_step(self, loss):
         if loss.device != self.args.device:
-            ret = loss.to(self.args.device, non_blocking=True)
+            loss = loss.to(self.args.device, non_blocking=True)
         return loss
 
     def training_step(
