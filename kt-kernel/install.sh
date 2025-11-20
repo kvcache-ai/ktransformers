@@ -1,68 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_dependencies() {
-  echo "Checking and installing system dependencies..."
-
-  # Determine if we need to use sudo
-  SUDO=""
-  if [ "$EUID" -ne 0 ]; then
-    if command -v sudo &> /dev/null; then
-      SUDO="sudo"
-    else
-      echo "Warning: Not running as root and sudo not found. Package installation may fail."
-      echo "Please run as root or install sudo."
-    fi
-  fi
-
-  if command -v conda &> /dev/null; then
-    echo "Installing cmake via conda..."
-    conda install -y cmake
-  else
-    echo "Warning: conda not found. Skipping cmake installation via conda."
-    echo "Please install conda or manually install cmake."
-  fi
-
-  # Detect OS type
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-  elif [ -f /etc/debian_version ]; then
-    OS="debian"
-  elif [ -f /etc/redhat-release ]; then
-    OS="rhel"
-  else
-    echo "Warning: Unable to detect OS type. Skipping dependency installation."
-    return 0
-  fi
-
-  # Install dependencies based on OS
-  case "$OS" in
-    debian|ubuntu|linuxmint|pop)
-      echo "Detected Debian-based system. Installing libhwloc-dev and pkg-config..."
-      $SUDO apt update
-      $SUDO apt install -y libhwloc-dev pkg-config
-      ;;
-    fedora|rhel|centos|rocky|almalinux)
-      echo "Detected Red Hat-based system. Installing hwloc-devel and pkgconfig..."
-      $SUDO dnf install -y hwloc-devel pkgconfig || $SUDO yum install -y hwloc-devel pkgconfig
-      ;;
-    arch|manjaro)
-      echo "Detected Arch-based system. Installing hwloc and pkgconf..."
-      $SUDO pacman -S --noconfirm hwloc pkgconf
-      ;;
-    opensuse*|sles)
-      echo "Detected openSUSE-based system. Installing hwloc-devel and pkg-config..."
-      $SUDO zypper install -y hwloc-devel pkg-config
-      ;;
-    *)
-      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev and pkg-config."
-      ;;
-  esac
-}
-
-install_dependencies
-
 usage() {
   cat <<EOF
 Usage: $0 [SUBCOMMAND] [BUILD_OPTIONS]
@@ -78,7 +16,6 @@ SUBCOMMANDS:
 BUILD_OPTIONS (for "build" or "all"):
   (none)          Auto-detect CPU and configure automatically (recommended)
   --manual        Skip auto-detection, use manual configuration (see below)
-  --skip-deps     Skip deps step even with subcommand "all"
   --no-clean      Do not delete local build/ before building (default cleans)
 
 AUTO-DETECTION (Default):
@@ -90,7 +27,7 @@ MANUAL CONFIGURATION:
   Use --manual flag and set these environment variables before running:
 
   CPUINFER_CPU_INSTRUCT   - CPU instruction set
-                            Options: NATIVE, AVX512, AVX2
+                            Options: NATIVE, AVX512, AVX2, FANCY
   CPUINFER_ENABLE_AMX     - Enable Intel AMX support
                             Options: ON, OFF
 
@@ -107,7 +44,7 @@ Manual configuration examples:
   Example manual build:
     export CPUINFER_CPU_INSTRUCT=AVX512
     export CPUINFER_ENABLE_AMX=OFF
-    $0 --manual
+    $0 build --manual
 
 Advanced option (for binary distribution):
   FANCY - AVX512 with full extensions for Ice Lake+/Zen 4+
@@ -206,7 +143,6 @@ build_step() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --manual) MANUAL_MODE=1; shift ;;
-      --skip-deps) shift ;; # ignore here
       --no-clean) CLEAN_BUILD=0; shift ;;
       -h|--help) usage ;;
       *) break ;;
@@ -241,9 +177,9 @@ build_step() {
     echo "  Configuration: NATIVE + AMX=ON (best performance)"
     echo ""
     echo "  ⚠️  Note: If you plan to use LLAMAFILE backend, use manual mode:"
-    echo "     export CPUINFER_CPU_INSTRUCT=AVX512(AVX2/FANCY)"
+    echo "     export CPUINFER_CPU_INSTRUCT=AVX512  # or AVX2/FANCY"
     echo "     export CPUINFER_ENABLE_AMX=OFF"
-    echo "     ./install.sh --manual"
+    echo "     ./install.sh build --manual"
   else
     echo "ℹ AMX instructions not detected"
     export CPUINFER_CPU_INSTRUCT=NATIVE
@@ -252,7 +188,7 @@ build_step() {
   fi
 
   echo ""
-  echo "To use manual configuration instead, run: $0 --manual"
+  echo "To use manual configuration instead, run: $0 build --manual"
   echo ""
   else
   # Manual mode - validate user configuration (no exports)
@@ -336,11 +272,7 @@ case "$SUBCMD" in
     build_step "$@"
     ;;
   all)
-    if [[ " ${*:-} " == *" --skip-deps "* ]]; then
-      build_step "$@"
-    else
-      install_dependencies
-      build_step "$@"
-    fi
+    install_dependencies
+    build_step "$@"
     ;;
 esac

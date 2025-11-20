@@ -96,7 +96,7 @@ If you need specific build options (e.g., for LLAMAFILE backend, compatibility, 
 
 ```bash
 # Example for LLAMAFILE backend on AMX CPU with AVX512
-export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2
+export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2, FANCY
 export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
 
 # Run with manual mode (build only)
