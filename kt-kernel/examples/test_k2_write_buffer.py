@@ -57,8 +57,10 @@ def allocate_weights(expert_num, hidden_size, intermediate_size, group_size):
 def main():
     torch.manual_seed(123)
 
-    expert_num = 384  # Total experts
-    gpu_experts = 384  # Number of experts on GPU
+    expert_num = 256 # Total experts
+    gpu_experts = expert_num  # Number of experts on GPU
+    gpu_tp_count = 2  # Number of TP parts
+    
     num_experts_per_tok = 8
     hidden_size = 7168
     intermediate_size = 2048
@@ -93,98 +95,229 @@ def main():
     cpuinfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     cpuinfer.sync()
 
-    # Allocate buffers for GPU experts (first gpu_experts experts)
-    total_weight_bytes = gpu_experts * per_mat_weight_bytes
-    total_scale_elems = gpu_experts * per_mat_scale_elems
+    # TP configuration
 
-    gate_weight_buf = torch.empty(total_weight_bytes, dtype=torch.uint8)
-    gate_scale_buf = torch.empty(total_scale_elems, dtype=torch.bfloat16)
-    up_weight_buf = torch.empty(total_weight_bytes, dtype=torch.uint8)
-    up_scale_buf = torch.empty(total_scale_elems, dtype=torch.bfloat16)
-    down_weight_buf = torch.empty(total_weight_bytes, dtype=torch.uint8)
-    down_scale_buf = torch.empty(total_scale_elems, dtype=torch.bfloat16)
+    # Since weights are col-major, we can directly divide the total size by tp_count
+    # Each matrix is divided into gpu_tp_count parts in memory order
 
-    for i in range(3):
+    # Calculate sizes per TP part (direct division since col-major)
+    weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
+    scale_elems_per_expert_per_tp = per_mat_scale_elems // gpu_tp_count
+
+    # Total sizes for all gpu_experts
+    total_weight_bytes_per_tp = gpu_experts * weight_bytes_per_expert_per_tp
+    total_scale_elems_per_tp = gpu_experts * scale_elems_per_expert_per_tp
+
+    # Create buffer lists for w13 (gate+up) and w2 (down)
+    w13_weight_bufs = []
+    w13_scale_bufs = []
+    w2_weight_bufs = []
+    w2_scale_bufs = []
+
+    for tp_idx in range(gpu_tp_count):
+        # w13 combines gate and up, so needs 2x the size
+        w13_weight_bufs.append(torch.empty(2 * total_weight_bytes_per_tp, dtype=torch.uint8))
+        w13_scale_bufs.append(torch.empty(2 * total_scale_elems_per_tp, dtype=torch.bfloat16))
+        w2_weight_bufs.append(torch.empty(total_weight_bytes_per_tp, dtype=torch.uint8))
+        w2_scale_bufs.append(torch.empty(total_scale_elems_per_tp, dtype=torch.bfloat16))
+
+    # Get data pointers for all buffers
+    w13_weight_ptrs = [buf.data_ptr() for buf in w13_weight_bufs]
+    w13_scale_ptrs = [buf.data_ptr() for buf in w13_scale_bufs]
+    w2_weight_ptrs = [buf.data_ptr() for buf in w2_weight_bufs]
+    w2_scale_ptrs = [buf.data_ptr() for buf in w2_scale_bufs]
+
+    print(f"Total experts: {expert_num}, GPU experts: {gpu_experts}")
+    print(f"GPU TP count: {gpu_tp_count}")
+    print(f"Original per matrix weight bytes: {per_mat_weight_bytes}")
+    print(f"Original per matrix scale elements: {per_mat_scale_elems}")
+    print(f"Weight bytes per expert per TP: {weight_bytes_per_expert_per_tp}")
+    print(f"Scale elements per expert per TP: {scale_elems_per_expert_per_tp}")
+    print(f"Total weight bytes per TP (w13): {2 * total_weight_bytes_per_tp}")
+    print(f"Total weight bytes per TP (w2): {total_weight_bytes_per_tp}")
+    print(f"Total scale elements per TP (w13): {2 * total_scale_elems_per_tp}")
+    print(f"Total scale elements per TP (w2): {total_scale_elems_per_tp}")
+
+    for i in range(5):
         cpuinfer.submit(
             moe.write_weight_scale_to_buffer_task(
-                gpu_experts=gpu_experts,
-                gate_weight_ptr=gate_weight_buf.data_ptr(),
-                gate_scale_ptr=gate_scale_buf.data_ptr(),
-                up_weight_ptr=up_weight_buf.data_ptr(),
-                up_scale_ptr=up_scale_buf.data_ptr(),
-                down_weight_ptr=down_weight_buf.data_ptr(),
-                down_scale_ptr=down_scale_buf.data_ptr(),
+                gpu_tp_count=gpu_tp_count,
+                gpu_experts_num=gpu_experts,
+                w13_weight_ptrs=w13_weight_ptrs,
+                w13_scale_ptrs=w13_scale_ptrs,
+                w2_weight_ptrs=w2_weight_ptrs,
+                w2_scale_ptrs=w2_scale_ptrs,
             )
         )
         cpuinfer.sync()
 
-    print(f"Total experts: {expert_num}, GPU experts: {gpu_experts}")
-    print(f"Per matrix weight bytes: {per_mat_weight_bytes}")
-    print(f"Per matrix scale elements: {per_mat_scale_elems}")
-    print(f"Total weight bytes per matrix: {total_weight_bytes}")
-    print(f"Total scale elements per matrix: {total_scale_elems}")
-
     begin_time = time.perf_counter_ns()
     cpuinfer.submit(
         moe.write_weight_scale_to_buffer_task(
-            gpu_experts=gpu_experts,
-            gate_weight_ptr=gate_weight_buf.data_ptr(),
-            gate_scale_ptr=gate_scale_buf.data_ptr(),
-            up_weight_ptr=up_weight_buf.data_ptr(),
-            up_scale_ptr=up_scale_buf.data_ptr(),
-            down_weight_ptr=down_weight_buf.data_ptr(),
-            down_scale_ptr=down_scale_buf.data_ptr(),
+            gpu_tp_count=gpu_tp_count,
+            gpu_experts_num=gpu_experts,
+            w13_weight_ptrs=w13_weight_ptrs,
+            w13_scale_ptrs=w13_scale_ptrs,
+            w2_weight_ptrs=w2_weight_ptrs,
+            w2_scale_ptrs=w2_scale_ptrs,
         )
     )
     cpuinfer.sync()
     end_time = time.perf_counter_ns()
-    elapsed_ns = (end_time - begin_time)
-    print(f"write_weight_scale_to_buffer time: {elapsed_ns:.2f} ns")
-
-    def split_tensor(tensor, chunk):
+    elapsed_ms = (end_time - begin_time) / 1000000
+    total_weights = hidden_size * intermediate_size * expert_num * 3
+    total_bytes = total_weights // group_size + total_weights // 2
+    print(f"write_weight_scale_to_buffer time: {elapsed_ms:.2f} ms")
+    print(f"Throughput: {total_bytes / (elapsed_ms * 1e6):.2f} GB/s")
+    def split_expert_tensor(tensor, chunk):
+        """Split tensor by experts"""
         return [tensor[i * chunk : (i + 1) * chunk] for i in range(expert_num)]
 
-    gate_q_slices = split_tensor(gate_q, per_mat_weight_bytes)
-    up_q_slices = split_tensor(up_q, per_mat_weight_bytes)
-    down_q_slices = split_tensor(down_q, per_mat_weight_bytes)
+    # Split by experts first
+    gate_q_experts = split_expert_tensor(gate_q, per_mat_weight_bytes)
+    up_q_experts = split_expert_tensor(up_q, per_mat_weight_bytes)
+    down_q_experts = split_expert_tensor(down_q, per_mat_weight_bytes)
 
-    gate_s_slices = split_tensor(gate_scale, per_mat_scale_elems)
-    up_s_slices = split_tensor(up_scale, per_mat_scale_elems)
-    down_s_slices = split_tensor(down_scale, per_mat_scale_elems)
+    gate_scale_experts = split_expert_tensor(gate_scale, per_mat_scale_elems)
+    up_scale_experts = split_expert_tensor(up_scale, per_mat_scale_elems)
+    down_scale_experts = split_expert_tensor(down_scale, per_mat_scale_elems)
 
-    # Get GPU experts (first gpu_experts experts)
-    gpu_expert_indices = list(range(gpu_experts))
+    # CPU TP count is always 2 in this test setup (one TP per NUMA node)
+    cpu_tp_count = 2
 
-    expected_gate_weight = torch.cat([gate_q_slices[e] for e in gpu_expert_indices])
-    expected_gate_scale = torch.cat([gate_s_slices[e] for e in gpu_expert_indices])
-    expected_up_weight = torch.cat([up_q_slices[e] for e in gpu_expert_indices])
-    expected_up_scale = torch.cat([up_s_slices[e] for e in gpu_expert_indices])
-    expected_down_weight = torch.cat([down_q_slices[e] for e in gpu_expert_indices])
-    expected_down_scale = torch.cat([down_s_slices[e] for e in gpu_expert_indices])
+    # Verify buffers for each TP part
+    for tp_idx in range(gpu_tp_count):
+        expected_w13_weights = []
+        expected_w13_scales = []
+        expected_w2_weights = []
+        expected_w2_scales = []
 
-    print(f"Gate weight buf size: {gate_weight_buf.shape}, expected size: {expected_gate_weight.shape}")
-    print(f"Gate scale buf size: {gate_scale_buf.shape}, expected size: {expected_gate_scale.shape}")
+        weight13_per_tp = per_mat_weight_bytes // gpu_tp_count
+        scale13_per_tp = per_mat_scale_elems // gpu_tp_count
+        # Process each GPU expert
+        for expert_idx in range(gpu_experts):
+            # For w13 (gate and up), the slicing is straightforward
 
-    # Check first few bytes for debugging
-    print(f"First 10 bytes of gate_weight_buf: {gate_weight_buf[:10].tolist()}")
-    print(f"First 10 bytes of expected_gate_weight: {expected_gate_weight[:10].tolist()}")
+            start_weight = tp_idx * weight13_per_tp
+            end_weight = (tp_idx + 1) * weight13_per_tp
+            start_scale = tp_idx * scale13_per_tp
+            end_scale = (tp_idx + 1) * scale13_per_tp
 
-    # Try to see if data is there but shifted
-    if not torch.equal(gate_weight_buf, expected_gate_weight):
-        print("Gate weight mismatch detected. Checking if all zeros...")
-        if torch.all(gate_weight_buf == 0):
-            print("ERROR: gate_weight_buf is all zeros!")
-        else:
-            print(f"gate_weight_buf has data, but doesn't match expected")
+            # Gate
+            gate_weight_tp = gate_q_experts[expert_idx][start_weight:end_weight]
+            gate_scale_tp = gate_scale_experts[expert_idx][start_scale:end_scale]
 
-    assert torch.equal(gate_weight_buf, expected_gate_weight), "Gate weight bytes mismatch"
-    assert torch.allclose(gate_scale_buf, expected_gate_scale), "Gate scale values mismatch"
-    assert torch.equal(up_weight_buf, expected_up_weight), "Up weight bytes mismatch"
-    assert torch.allclose(up_scale_buf, expected_up_scale), "Up scale values mismatch"
-    assert torch.equal(down_weight_buf, expected_down_weight), "Down weight bytes mismatch"
-    assert torch.allclose(down_scale_buf, expected_down_scale), "Down scale values mismatch"
+            # Up
+            up_weight_tp = up_q_experts[expert_idx][start_weight:end_weight]
+            up_scale_tp = up_scale_experts[expert_idx][start_scale:end_scale]
 
-    print(f"write_weight_scale_to_buffer passed: extracted {gpu_experts} GPU experts from total {expert_num} experts")
+            # Down matrix needs special handling because it's sliced column-wise
+            # We need to reconstruct it from column slices
+            down_weight_tp_parts = []
+            down_scale_tp_parts = []
+
+            # Iterate through each column to extract the corresponding parts
+            for col_idx in range(hidden_size):
+                col_weight_start = col_idx * (intermediate_size // 2)
+                col_scale_start = col_idx * (intermediate_size // group_size)
+
+                # Direct mapping: each CPU TP corresponds to a GPU TP
+                tp_slice_weight_size = (intermediate_size // gpu_tp_count) // 2
+                tp_slice_scale_size = (intermediate_size // gpu_tp_count) // group_size
+
+                tp_weight_offset = col_weight_start + tp_idx * tp_slice_weight_size
+                tp_scale_offset = col_scale_start + tp_idx * tp_slice_scale_size
+
+                down_weight_tp_parts.append(
+                    down_q_experts[expert_idx][tp_weight_offset:tp_weight_offset + tp_slice_weight_size]
+                )
+                down_scale_tp_parts.append(
+                    down_scale_experts[expert_idx][tp_scale_offset:tp_scale_offset + tp_slice_scale_size]
+                )
+
+            # Concatenate all column slices for this TP
+            down_weight_tp = torch.cat(down_weight_tp_parts)
+            down_scale_tp = torch.cat(down_scale_tp_parts)
+
+            expected_w13_weights.append(gate_weight_tp)
+            expected_w13_weights.append(up_weight_tp)
+            expected_w13_scales.append(gate_scale_tp)
+            expected_w13_scales.append(up_scale_tp)
+            expected_w2_weights.append(down_weight_tp)
+            expected_w2_scales.append(down_scale_tp)
+
+        # Concatenate all experts for this TP part
+        expected_w13_weight = torch.cat(expected_w13_weights)
+        expected_w13_scale = torch.cat(expected_w13_scales)
+        expected_w2_weight = torch.cat(expected_w2_weights)
+        expected_w2_scale = torch.cat(expected_w2_scales)
+
+        print(f"=== Checking TP part {tp_idx} ===")
+        # print(f"w13 weight buf size: {w13_weight_bufs[tp_idx].shape}, expected size: {expected_w13_weight.shape}")
+        # print(f"w13 scale buf size: {w13_scale_bufs[tp_idx].shape}, expected size: {expected_w13_scale.shape}")
+        # print(f"w2 weight buf size: {w2_weight_bufs[tp_idx].shape}, expected size: {expected_w2_weight.shape}")
+        # print(f"w2 scale buf size: {w2_scale_bufs[tp_idx].shape}, expected size: {expected_w2_scale.shape}")
+
+        # # Check first few bytes for debugging
+        # print(f"First 10 bytes of w13_weight_buf[{tp_idx}]: {w13_weight_bufs[tp_idx][:10].tolist()}")
+        # print(f"First 10 bytes of expected_w13_weight: {expected_w13_weight[:10].tolist()}")
+        # print(f"First 10 bytes of w2_weight_buf[{tp_idx}]: {w2_weight_bufs[tp_idx][:10].tolist()}")
+        # print(f"First 10 bytes of expected_w2_weight: {expected_w2_weight[:10].tolist()}")
+
+        # # Check where the mismatch starts
+        # for i in range(0, min(len(w2_weight_bufs[tp_idx]), len(expected_w2_weight)), 10):
+        #     if not torch.equal(w2_weight_bufs[tp_idx][i:i+10], expected_w2_weight[i:i+10]):
+        #         print(f"w2 mismatch starts at byte {i}")
+        #         print(f"  Actual: {w2_weight_bufs[tp_idx][i:i+10].tolist()}")
+        #         print(f"  Expected: {expected_w2_weight[i:i+10].tolist()}")
+        #         break
+
+        # # Check at the boundary of first expert (3670016 bytes per expert per TP)
+        # expert_boundary = weight_bytes_per_expert_per_tp
+        # if expert_boundary < len(w2_weight_bufs[tp_idx]):
+        #     print(f"At expert boundary ({expert_boundary} bytes):")
+        #     print(f"  Actual: {w2_weight_bufs[tp_idx][expert_boundary:expert_boundary+10].tolist()}")
+        #     print(f"  Expected: {expected_w2_weight[expert_boundary:expert_boundary+10].tolist()}")
+
+        #     # Check if second expert data is all zeros
+        #     second_expert_start = expert_boundary
+        #     second_expert_end = min(expert_boundary + 100, len(w2_weight_bufs[tp_idx]))
+        #     if torch.all(w2_weight_bufs[tp_idx][second_expert_start:second_expert_end] == 0):
+        #         print(f"ERROR: Second expert data is all zeros!")
+        #     else:
+        #         print(f"Second expert has non-zero data")
+
+        # # Validate w13 (gate+up) buffers
+        # if not torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight):
+        #     print(f"w13 weight mismatch for TP {tp_idx}. Checking if all zeros...")
+        #     if torch.all(w13_weight_bufs[tp_idx] == 0):
+        #         print(f"ERROR: w13_weight_buf[{tp_idx}] is all zeros!")
+        #     else:
+        #         print(f"w13_weight_buf[{tp_idx}] has data, but doesn't match expected")
+        #         # Show more detail about mismatch
+        #         diff_count = (w13_weight_bufs[tp_idx] != expected_w13_weight).sum().item()
+        #         print(f"  Number of mismatched bytes: {diff_count}/{len(expected_w13_weight)}")
+        # else:
+        #     print(f"✓ w13 weight matches for TP {tp_idx}")
+
+        # # Validate w2 (down) buffers
+        # if not torch.equal(w2_weight_bufs[tp_idx], expected_w2_weight):
+        #     print(f"w2 weight mismatch for TP {tp_idx}")
+        #     if torch.all(w2_weight_bufs[tp_idx] == 0):
+        #         print(f"ERROR: w2_weight_buf[{tp_idx}] is all zeros!")
+        #     else:
+        #         diff_count = (w2_weight_bufs[tp_idx] != expected_w2_weight).sum().item()
+        #         print(f"  Number of mismatched bytes: {diff_count}/{len(expected_w2_weight)}")
+        # else:
+        #     print(f"✓ w2 weight matches for TP {tp_idx}")
+
+        # Assert all checks pass
+        assert torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight), f"w13 weight bytes mismatch for TP {tp_idx}"
+        assert torch.allclose(w13_scale_bufs[tp_idx], expected_w13_scale), f"w13 scale values mismatch for TP {tp_idx}"
+        assert torch.equal(w2_weight_bufs[tp_idx], expected_w2_weight), f"w2 weight bytes mismatch for TP {tp_idx}"
+        assert torch.allclose(w2_scale_bufs[tp_idx], expected_w2_scale), f"w2 scale values mismatch for TP {tp_idx}"
+
+    print(f"\n✓ write_weight_scale_to_buffer passed: extracted {gpu_experts} GPU experts across {gpu_tp_count} TP parts from total {expert_num} experts")
 
 
 if __name__ == "__main__":

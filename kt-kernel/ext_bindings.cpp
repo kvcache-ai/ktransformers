@@ -255,36 +255,44 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       struct Args {
         CPUInfer* cpuinfer;
         MoeClass* moe;
-        int gpu_experts;
-        uintptr_t gate_weight_ptr;
-        uintptr_t gate_scale_ptr;
-        uintptr_t up_weight_ptr;
-        uintptr_t up_scale_ptr;
-        uintptr_t down_weight_ptr;
-        uintptr_t down_scale_ptr;
+        int gpu_tp_count;
+        int gpu_experts_num;
+        std::vector<uintptr_t> w13_weight_ptrs;
+        std::vector<uintptr_t> w13_scale_ptrs;
+        std::vector<uintptr_t> w2_weight_ptrs;
+        std::vector<uintptr_t> w2_scale_ptrs;
       };
 
       static void inner(void* args) {
         Args* args_ = (Args*)args;
-        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe, args_->gpu_experts,
-                                 args_->gate_weight_ptr, args_->gate_scale_ptr, args_->up_weight_ptr,
-                                 args_->up_scale_ptr, args_->down_weight_ptr, args_->down_scale_ptr);
+        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe,
+                                 args_->gpu_tp_count, args_->gpu_experts_num,
+                                 args_->w13_weight_ptrs, args_->w13_scale_ptrs,
+                                 args_->w2_weight_ptrs, args_->w2_scale_ptrs);
       }
 
-      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, int gpu_experts,
-                                                              uintptr_t gate_weight_ptr, uintptr_t gate_scale_ptr,
-                                                              uintptr_t up_weight_ptr, uintptr_t up_scale_ptr,
-                                                              uintptr_t down_weight_ptr, uintptr_t down_scale_ptr) {
-        Args* args = new Args{nullptr, moe.get(),          gpu_experts,     gate_weight_ptr, gate_scale_ptr,
-                              up_weight_ptr, up_scale_ptr, down_weight_ptr, down_scale_ptr};
+      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe,
+                                                              int gpu_tp_count, int gpu_experts_num,
+                                                              py::list w13_weight_ptrs, py::list w13_scale_ptrs,
+                                                              py::list w2_weight_ptrs, py::list w2_scale_ptrs) {
+        // Convert Python lists to std::vector<uintptr_t>
+        std::vector<uintptr_t> w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec;
+
+        for (auto item : w13_weight_ptrs) w13_weight_vec.push_back(py::cast<uintptr_t>(item));
+        for (auto item : w13_scale_ptrs) w13_scale_vec.push_back(py::cast<uintptr_t>(item));
+        for (auto item : w2_weight_ptrs) w2_weight_vec.push_back(py::cast<uintptr_t>(item));
+        for (auto item : w2_scale_ptrs) w2_scale_vec.push_back(py::cast<uintptr_t>(item));
+
+        Args* args = new Args{nullptr, moe.get(), gpu_tp_count, gpu_experts_num,
+                              w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec};
         return std::make_pair((intptr_t)&inner, (intptr_t)args);
       }
     };
 
     moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
-             py::arg("gpu_experts"), py::arg("gate_weight_ptr"), py::arg("gate_scale_ptr"),
-             py::arg("up_weight_ptr"), py::arg("up_scale_ptr"),
-             py::arg("down_weight_ptr"), py::arg("down_scale_ptr"));
+             py::arg("gpu_tp_count"), py::arg("gpu_experts_num"),
+             py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
+             py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
 #endif
 }
