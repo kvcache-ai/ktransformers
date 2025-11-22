@@ -248,7 +248,6 @@ class MOE_KERNEL_TP
                   T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
               size_t size = whole_size_ - scale_size;
               void* dst_ = PLAIN ? gate_bb_[expert_id]->b : gate_bb_[expert_id]->b_pack[0];
-              printf("dst ptr: %p,PLAIN: %d\n", dst_, PLAIN);
 
               memcpy(dst_, config_.gate_projs[tp_part_idx][logical_expert_id], size);
 
