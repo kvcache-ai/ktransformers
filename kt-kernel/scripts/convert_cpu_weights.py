@@ -363,7 +363,6 @@ class ConverterBase:
         # Process layers with memory cleanup
         for i, (layer_idx, expert_ids) in enumerate(sorted(expert_layers.items())):
             if layer_idx < resume_layer:
-                print(f"Skipping layer {layer_idx} (resume_layer={resume_layer})")
                 continue
             print(f"Processing layer {layer_idx} ({i+1}/{len(expert_layers)})...")
 
