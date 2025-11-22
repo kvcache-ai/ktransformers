@@ -27,8 +27,8 @@ from typing import Optional
 
 class GeneralMoEWrapper(BaseMoEWrapper):
     """
-    AMX-based MoE wrapper implementation.
-    Supports AMXINT4 and AMXINT8 quantization methods.
+    moe-based MoE wrapper implementation.
+    Supports MOE_INT4 and MOE_INT8 quantization methods.
     """
 
     _safetensor_loader_instance = None  # Singleton SafeTensorLoader
@@ -95,7 +95,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
             method=method,
         )
 
-        # AMX-specific: Check if we should load merged safetensor weights
+        # moe-specific: Check if we should load merged safetensor weights
         self.load_merged_weight = False
         import glob
 
@@ -108,7 +108,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
                 GeneralMoEWrapper._safetensor_loader_instance = SafeTensorLoader(weight_path)
             self.safetensor_loader = GeneralMoEWrapper._safetensor_loader_instance
 
-        # AMX-specific weight storage
+        # moe-specific weight storage
         self.gate_weights = None
         self.up_weights = None
         self.down_weights = None
@@ -293,7 +293,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         if not self.load_merged_weight:
             moe_config.path = self.weight_path
 
-        # Create MoE module based on AMX method
+        # Create MoE module based on moe method
         if self.method == "MOE_INT4":
             self.moe = Int4_KERNEL_MOE(moe_config)
         elif self.method == "MOE_INT8":

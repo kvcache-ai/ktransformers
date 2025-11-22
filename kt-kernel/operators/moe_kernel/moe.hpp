@@ -247,7 +247,8 @@ class MOE_KERNEL_TP
               size_t whole_size_ =
                   T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
               size_t size = whole_size_ - scale_size;
-              void* dst_ = PLAIN ? gate_bb_[expert_id]->b_pack[0] : gate_bb_[expert_id]->b;
+              void* dst_ = PLAIN ? gate_bb_[expert_id]->b : gate_bb_[expert_id]->b_pack[0];
+              printf("dst ptr: %p,PLAIN: %d\n", dst_, PLAIN);
 
               memcpy(dst_, config_.gate_projs[tp_part_idx][logical_expert_id], size);
 
@@ -258,7 +259,7 @@ class MOE_KERNEL_TP
               whole_size_ =
                   T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
               size = whole_size_ - scale_size;
-              dst_ = PLAIN ? up_bb_[expert_id]->b_pack[0] : up_bb_[expert_id]->b;
+              dst_ = PLAIN ? up_bb_[expert_id]->b : up_bb_[expert_id]->b_pack[0];
               memcpy(dst_, config_.up_projs[tp_part_idx][logical_expert_id], size);
 
               if constexpr (T::BufferB::SCALE) {
@@ -271,7 +272,7 @@ class MOE_KERNEL_TP
               size_t whole_size_ =
                   T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN);
               size_t size = whole_size_ - scale_size;
-              void* dst_ = PLAIN ? down_bb_[expert_id]->b_pack[0] : down_bb_[expert_id]->b;
+              void* dst_ = PLAIN ? down_bb_[expert_id]->b : down_bb_[expert_id]->b_pack[0];
               memcpy(dst_, config_.down_projs[tp_part_idx][logical_expert_id], size);
 
               if constexpr (T::BufferB::SCALE) {
@@ -290,21 +291,22 @@ class MOE_KERNEL_TP
           uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
           uint8_t mat_split_idex = task_id % mat_split;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+          void* src_;
           if (mat_class == 0) {  // the up matrix
+            src_ = PLAIN ? up_bb_[expert_idx]->b : up_bb_[expert_idx]->b_pack[0];
             size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
             size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b_pack[0], logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
+            read_weights(prefix, "_up_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           } else if (mat_class == 1) {
+            void* src_ = PLAIN ? gate_bb_[expert_idx]->b : gate_bb_[expert_idx]->b_pack[0];
             size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
             size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b_pack[0], logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
+            read_weights(prefix, "_gate_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           } else {
+            void* src_ = PLAIN ? down_bb_[expert_idx]->b : down_bb_[expert_idx]->b_pack[0];
             size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN);
             size_t scale_size = config_.hidden_size * sizeof(float);
-            read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b_pack[0], logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
+            read_weights(prefix, "_down_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           }
         }
       }
