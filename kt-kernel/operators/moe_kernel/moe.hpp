@@ -457,6 +457,9 @@ class MOE_KERNEL_TP
     }
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+          continue;
+        }
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
       }
     }
@@ -485,6 +488,9 @@ class MOE_KERNEL_TP
     // Copy inputs into expert-local buffers
     MOE_DIRECT_OR_POOL_BY_VAR(qlen, [&](int i) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+          continue;
+        }
         memcpy(m_local_input_ptr_[expert_ids[i * k + j]] + m_local_pos_[i][j] * config_.hidden_size,
                (input_t*)input + i * config_.hidden_size, sizeof(input_t) * config_.hidden_size);
       }
@@ -633,6 +639,10 @@ class MOE_KERNEL_TP
           for (int e = e_start; e < e_end; e++) {
             float sum = 0;
             for (int j = 0; j < k; j++) {
+              if (expert_ids[q_idx * k + j] < config_.num_gpu_experts ||
+                  expert_ids[q_idx * k + j] >= config_.expert_num) {
+                continue;
+              }
               sum += weights[q_idx * k + j] * ((float*)m_local_down_output_ptr_[expert_ids[q_idx * k + j]])
                                                   [m_local_pos_[q_idx][j] * config_.hidden_size + e];
             }
