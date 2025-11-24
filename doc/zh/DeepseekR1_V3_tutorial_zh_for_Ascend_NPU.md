@@ -28,7 +28,7 @@
 
 ## HDK安装
 
-选择[Ascend HDK 25.3.RC1](https://support.huawei.com/enterprise/zh/ascend-computing/ascend-hdk-pid-252764743/software/264672545?idAbsPath=fixnode01|23710424|251366513|254884019|261408772|252764743)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_0005.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
+选择[Ascend HDK 25.3.RC1](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=32&cann=8.3.RC1&driver=Ascend+HDK+25.3.RC1)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_0005.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
 
 
 ## Conda部署
@@ -59,7 +59,7 @@ pip3 install transformers==4.57.1 #此处注意运行时transformers版本要求
 
 ## CANN安装
 
-选择[CANN 8.3.RC1.alpha003](https://www.hiascend.com/developer/download/community/result?cann=8.3.RC1.alpha003&product=4&model=32)进行安装，安装方式参考[昇腾社区CANN安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_quick.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
+选择[CANN 8.3.RC1.alpha001](https://www.hiascend.com/developer/download/community/result?cann=8.3.RC1.alpha003&product=4&model=32)进行安装，安装方式参考[昇腾社区CANN安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_quick.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
 
 需要安装ToolKit，Kernel和NNAL。
 
@@ -109,7 +109,7 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
 - 初始化third_party。由于此过程耗时较多，且容易受网络影响导致仓库克隆失败，建议初始化一次后，将相关文件进行打包，以便后续直接解压使用。
   ```bash
   git clone https://github.com/kvcache-ai/ktransformers.git
-  cd ktransformers
+  cd archive
   git submodule update --init --recursive
   ```
 - 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的
