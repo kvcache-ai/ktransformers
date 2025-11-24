@@ -330,11 +330,18 @@ class ConverterBase:
         """
         raise NotImplementedError("Subclasses must implement _convert_layer_experts")
 
-    def convert(self):
-        """Convert all expert layers using subclass-specific logic."""
+    def convert(self, resume_layer: int = 0):
+        """Convert all expert layers using subclass-specific logic.
+
+        Args:
+            resume_layer (int, optional): The layer index to resume conversion from.
+                Layers with an index lower than this will be skipped. Defaults to 0.
+        """
         print("Starting conversion...")
         print(f"Input: {self.input_path}")
         print(f"Output: {self.output_path}")
+        if resume_layer > 0:
+            print(f"Resuming from layer: {resume_layer}")
 
         # Create output directory
         os.makedirs(self.output_path, exist_ok=True)
@@ -355,6 +362,8 @@ class ConverterBase:
 
         # Process layers with memory cleanup
         for i, (layer_idx, expert_ids) in enumerate(sorted(expert_layers.items())):
+            if layer_idx < resume_layer:
+                continue
             print(f"Processing layer {layer_idx} ({i+1}/{len(expert_layers)})...")
 
             layer_tensors = self._convert_layer_experts(layer_idx, expert_ids)
@@ -845,6 +854,12 @@ def main():
         default=False,
         help="Keep layer folders without merging to safetensor files (default: False)",
     )
+    parser.add_argument(
+        "--resume-layer",
+        type=int,
+        default=0,
+        help="Resume conversion starting at this layer index (default: 0)",
+    )
 
     args = parser.parse_args()
 
@@ -898,7 +913,7 @@ def main():
             )
 
         # Run conversion
-        converter.convert()
+        converter.convert(resume_layer=args.resume_layer)
 
         # Cleanup
         converter.close()
