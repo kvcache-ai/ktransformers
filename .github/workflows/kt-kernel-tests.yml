@@ -63,7 +63,7 @@ jobs:
       - name: Install KT-Kernel
         run: |
           cd kt-kernel
-          bash install.sh
+          bash install.sh build
 
       - name: Run KT-Kernel CPU tests
         timeout-minutes: 30
