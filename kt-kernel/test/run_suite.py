@@ -32,6 +32,8 @@ def _filter_tests(
 
 def run_per_commit(hw: HWBackend, suite: str):
     files = glob.glob("per_commit/**/*.py", recursive=True)
+    # Exclude __init__.py files as they don't contain test registrations
+    files = [f for f in files if not f.endswith("__init__.py")]
     ci_tests = _filter_tests(collect_tests(files), hw, suite)
     test_files = [TestFile(t.filename, t.est_time) for t in ci_tests]
 
