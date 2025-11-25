@@ -282,10 +282,10 @@ list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/cmake")
 add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
 
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party)
 if (WIN32)
     include_directories("$ENV{CUDA_PATH}/include")
     add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
@@ -335,11 +335,11 @@ endif()
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
-# aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/llamafile SOURCE_DIR4)
-file(GLOB LLAMAFILE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/llamafile/*.cpp")
+# aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile SOURCE_DIR4)
+file(GLOB LLAMAFILE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/*.cpp")
 list(REMOVE_ITEM LLAMAFILE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/llamafile/sgemm_arm.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../../third_party/llamafile/sgemm_x86.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/sgemm_arm.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llamafile/sgemm_x86.cpp"
 )
 set(SOURCE_DIR4 ${LLAMAFILE_SOURCES})
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
