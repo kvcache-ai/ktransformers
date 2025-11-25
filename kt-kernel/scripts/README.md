@@ -22,6 +22,8 @@ Convert weights to INT4/INT8 format optimized for AMX inference on CPU. These qu
 - **FP16**: 16-bit floating point
 - **BF16**: BFloat16 format
 
+> **⚠️ Precision Warning:** Quantizing directly from FP8 to INT4/INT8 may cause significant accuracy degradation. For best results, use the original **BF16** model as the source for INT4/INT8 quantization.
+
 ## Basic Usage
 
 ### Quantize BF16 model to INT4
@@ -212,6 +214,37 @@ python scripts/convert_gpu_weights.py \
 - `--max_sequence_length`: Maximum sequence length (default: 2048)
 - `--dataset`: HuggingFace dataset for calibration
 - `--dataset_split`: Dataset split to use
+
+#### Memory Management (Avoiding OOM)
+
+GPTQ quantization requires additional GPU memory for Hessian matrix computation beyond model weights. Use `--max_gpu_memory` to limit GPU memory usage and offload remaining layers to CPU:
+
+```bash
+python scripts/convert_gpu_weights.py \
+  --model_id /path/to/model \
+  --output_dir /path/to/output \
+  --quant_type W4A16 \
+  --max_gpu_memory "40GiB"
+```
+
+**Recommended settings:**
+
+| GPU VRAM | Suggested `--max_gpu_memory` |
+|----------|------------------------------|
+| 24 GiB   | 14-16 GiB                    |
+| 48 GiB   | 30-35 GiB                    |
+| 80 GiB   | 50-60 GiB                    |
+
+Reserve 40-50% of GPU memory for GPTQ's Hessian matrix computation.
+
+**Options:**
+- `--max_gpu_memory`: Maximum GPU memory for model weights per device (e.g., '40GiB')
+- `--max_cpu_memory`: Maximum CPU memory (default: 1000GiB when `--max_gpu_memory` is set)
+
+**Important:** llmcompressor does not support disk offloading. Ensure your machine has enough GPU + CPU memory to load the entire model. If you still encounter OOM:
+1. Reduce `--num_calibration_samples` (e.g., 256)
+2. Reduce `--max_sequence_length` (e.g., 1024)
+3. Use `--force_cpu` to run entirely on CPU (slower but avoids GPU OOM)
 
 ### Examples
 
