@@ -741,17 +741,22 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
     }
   }
 
-  void merge_results(int qlen, void* output) {
+  void merge_results(int qlen, void* output, bool incremental) {
     // #ifdef FORWARD_TIME_PROFILE
     //     forward_perf_start();
     // #endif
     auto pool = this->config.pool;
-    auto merge_fn = [this, output](int token_nth) {
+    auto merge_fn = [this, output, incremental](int token_nth) {
       auto& local_output_numa = this->local_output_numa;
       auto& tp_configs = this->tp_configs;
       auto& tp_count = this->tp_count;
       auto& config = this->config;
       float* merge_to = local_output_numa[0] + token_nth * tp_configs[0].hidden_size;
+      if (incremental) {
+        for (int e = 0; e < config.hidden_size; e++) {
+          merge_to[e] += ggml_bf16_to_fp32(((ggml_bf16_t*)output + token_nth * config.hidden_size)[e]);
+        }
+      }
 
       for (int i = 1; i < tp_count; i++) {
         float* merge_from = local_output_numa[i] + token_nth * tp_configs[i].hidden_size;
@@ -789,6 +794,8 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
     //     perf_report();
     // #endif
   }
+
+  void merge_results(int qlen, void* output) { merge_results(qlen, output, false); }
 };
 
 #endif
