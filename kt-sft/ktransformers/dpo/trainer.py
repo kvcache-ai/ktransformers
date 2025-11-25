@@ -4,6 +4,7 @@ from packaging import version
 import inspect
 import functools
 from typing import Union, Any, Dict, List
+from typing_extensions import override
 
 import torch
 from torch.utils.data import DataLoader, IterableDataset
@@ -27,7 +28,7 @@ from transformers.utils import (
     logging,
 )
 
-from ktransformers.util.trainer_utils import KAccelerator
+from ktransformers.util.trainer_utils import KAccelerator, nested_detach, get_batch_logps
 
 
 if is_accelerate_available("0.28.0"):
@@ -184,6 +185,53 @@ class KTDpoTrainer(DPOTrainer):
             dataloader_config.dispatch_batches = False
             dataloader_config.even_batches = False
 
+    def get_train_dataloader(self) -> DataLoader:
+        """
+        Returns the training DataLoader with per_device_train_batch_size
+        (no implicit multipliers by number of visible GPUs).
+        """
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+
+        if is_datasets_available():
+            try:
+                import datasets
+                if isinstance(train_dataset, datasets.Dataset):
+                    train_dataset = self._remove_unused_columns(train_dataset, description="training")
+                else:
+                    data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+            except Exception:
+                data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+
+        dataloader_params = {
+            "batch_size": self.args.per_device_train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(train_dataset, IterableDataset):
+            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            if self.args.dataloader_num_workers > 0 and self.args.dataloader_prefetch_factor is not None:
+                dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
+        dl = DataLoader(train_dataset, **dataloader_params)
+
+        try:
+            prepared = self.accelerator.prepare(dl, device_placement=[False])
+        except TypeError:
+            prepared = self.accelerator.prepare(dl)
+
+        return prepared
+
     def post_training_step(self, loss):
         if loss.device != self.args.device:
             loss = loss.to(self.args.device, non_blocking=True)
@@ -199,3 +247,35 @@ class KTDpoTrainer(DPOTrainer):
         ret = super().training_step(model, inputs,  num_items_in_batch=num_items_in_batch)
         ret = self.post_training_step(ret)
         return ret
+
+    @override
+    def concatenated_forward(
+            self, model: "PreTrainedModel", batch: dict[str, "torch.Tensor"], is_ref_model: bool = False
+    ) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+        r"""Compute the sum log probabilities of the labels under given logits if loss_type is not IPO, ORPO or SimPO.
+
+        Otherwise the average log probabilities.
+        """
+        if self.finetuning_args.use_ref_model:
+            batch = nested_detach(batch, clone=True)  # avoid error
+        labels = batch["labels"]
+        # dpo not need compute loss in forward, waste mem
+        del batch["labels"]
+        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
+        all_logits = all_logits.to("cpu")
+        labels = labels.to(all_logits.device)
+        all_logps, valid_length = get_batch_logps(
+            logits=all_logits, labels=labels, ld_alpha=(self.ld_alpha if not is_ref_model else None)
+        )
+        if self.loss_type in ["ipo", "orpo", "simpo"]:
+            all_logps = all_logps / valid_length
+
+        batch_size = batch["input_ids"].size(0) // 2
+        chosen_logps, rejected_logps = all_logps.split(batch_size, dim=0)
+        chosen_logits, rejected_logits = all_logits.split(batch_size, dim=0)
+        chosen_length, _ = valid_length.split(batch_size, dim=0)
+
+        if self.loss_type in ["ipo", "orpo", "simpo"]:
+            return chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_logps
+        else:
+            return chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_logps / chosen_length
