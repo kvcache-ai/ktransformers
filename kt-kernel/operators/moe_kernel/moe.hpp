@@ -12,8 +12,8 @@
 #include <iostream>
 #include <vector>
 
+#include "../../cpu_backend/shared_mem_buffer.h"
 #include "../common.hpp"
-#include "../cpu_backend/shared_mem_buffer.h"
 #include "../moe-tp.hpp"
 #include "api/common.h"
 #include "api/mat_kernel.h"
