@@ -45,7 +45,7 @@ test_iter = 2000
 worker_config_dict = {
     "subpool_count": 2,
     "subpool_numa_map": [0, 1],
-    "subpool_thread_count": [80, 80],
+    "subpool_thread_count": [45, 45],
 }
 CPUINFER_PARAM = 90
 
