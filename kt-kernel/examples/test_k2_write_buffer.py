@@ -253,63 +253,6 @@ def main():
         expected_w2_scale = torch.cat(expected_w2_scales)
 
         print(f"=== Checking TP part {tp_idx} ===")
-        # print(f"w13 weight buf size: {w13_weight_bufs[tp_idx].shape}, expected size: {expected_w13_weight.shape}")
-        # print(f"w13 scale buf size: {w13_scale_bufs[tp_idx].shape}, expected size: {expected_w13_scale.shape}")
-        # print(f"w2 weight buf size: {w2_weight_bufs[tp_idx].shape}, expected size: {expected_w2_weight.shape}")
-        # print(f"w2 scale buf size: {w2_scale_bufs[tp_idx].shape}, expected size: {expected_w2_scale.shape}")
-
-        # # Check first few bytes for debugging
-        # print(f"First 10 bytes of w13_weight_buf[{tp_idx}]: {w13_weight_bufs[tp_idx][:10].tolist()}")
-        # print(f"First 10 bytes of expected_w13_weight: {expected_w13_weight[:10].tolist()}")
-        # print(f"First 10 bytes of w2_weight_buf[{tp_idx}]: {w2_weight_bufs[tp_idx][:10].tolist()}")
-        # print(f"First 10 bytes of expected_w2_weight: {expected_w2_weight[:10].tolist()}")
-
-        # # Check where the mismatch starts
-        # for i in range(0, min(len(w2_weight_bufs[tp_idx]), len(expected_w2_weight)), 10):
-        #     if not torch.equal(w2_weight_bufs[tp_idx][i:i+10], expected_w2_weight[i:i+10]):
-        #         print(f"w2 mismatch starts at byte {i}")
-        #         print(f"  Actual: {w2_weight_bufs[tp_idx][i:i+10].tolist()}")
-        #         print(f"  Expected: {expected_w2_weight[i:i+10].tolist()}")
-        #         break
-
-        # # Check at the boundary of first expert (3670016 bytes per expert per TP)
-        # expert_boundary = weight_bytes_per_expert_per_tp
-        # if expert_boundary < len(w2_weight_bufs[tp_idx]):
-        #     print(f"At expert boundary ({expert_boundary} bytes):")
-        #     print(f"  Actual: {w2_weight_bufs[tp_idx][expert_boundary:expert_boundary+10].tolist()}")
-        #     print(f"  Expected: {expected_w2_weight[expert_boundary:expert_boundary+10].tolist()}")
-
-        #     # Check if second expert data is all zeros
-        #     second_expert_start = expert_boundary
-        #     second_expert_end = min(expert_boundary + 100, len(w2_weight_bufs[tp_idx]))
-        #     if torch.all(w2_weight_bufs[tp_idx][second_expert_start:second_expert_end] == 0):
-        #         print(f"ERROR: Second expert data is all zeros!")
-        #     else:
-        #         print(f"Second expert has non-zero data")
-
-        # # Validate w13 (gate+up) buffers
-        # if not torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight):
-        #     print(f"w13 weight mismatch for TP {tp_idx}. Checking if all zeros...")
-        #     if torch.all(w13_weight_bufs[tp_idx] == 0):
-        #         print(f"ERROR: w13_weight_buf[{tp_idx}] is all zeros!")
-        #     else:
-        #         print(f"w13_weight_buf[{tp_idx}] has data, but doesn't match expected")
-        #         # Show more detail about mismatch
-        #         diff_count = (w13_weight_bufs[tp_idx] != expected_w13_weight).sum().item()
-        #         print(f"  Number of mismatched bytes: {diff_count}/{len(expected_w13_weight)}")
-        # else:
-        #     print(f"✓ w13 weight matches for TP {tp_idx}")
-
-        # # Validate w2 (down) buffers
-        # if not torch.equal(w2_weight_bufs[tp_idx], expected_w2_weight):
-        #     print(f"w2 weight mismatch for TP {tp_idx}")
-        #     if torch.all(w2_weight_bufs[tp_idx] == 0):
-        #         print(f"ERROR: w2_weight_buf[{tp_idx}] is all zeros!")
-        #     else:
-        #         diff_count = (w2_weight_bufs[tp_idx] != expected_w2_weight).sum().item()
-        #         print(f"  Number of mismatched bytes: {diff_count}/{len(expected_w2_weight)}")
-        # else:
-        #     print(f"✓ w2 weight matches for TP {tp_idx}")
 
         # Assert all checks pass
         assert torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight), f"w13 weight bytes mismatch for TP {tp_idx}"

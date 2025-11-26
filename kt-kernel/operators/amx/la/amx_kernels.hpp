@@ -2891,93 +2891,16 @@ struct GemmKernel224Int4SmallKGroup {
   using BufferC = BufferCReduceImpl<GemmKernel224Int4SmallKGroup>;
 
   // K-group aware AVX kernel for signed int4
-  // TODO: Implement signed int4 quantization logic
-
-  // static inline int32_t dot_product_i8_i32_avx512(__m256i a, __m256i b) {
-  //   // AVX512 implementation of dot product for 32 int8 inputs
-  //   __m512i a_lo = _mm512_cvtepi8_epi32(_mm256_castsi256_si128(a));
-  //   __m512i b_lo = _mm512_cvtepi8_epi32(_mm256_castsi256_si128(b));
-  //   __m512i prod_lo = _mm512_mullo_epi32(a_lo, b_lo);
-
-  //   __m512i a_hi = _mm512_cvtepi8_epi32(_mm256_extracti128_si256(a, 1));
-  //   __m512i b_hi = _mm512_cvtepi8_epi32(_mm256_extracti128_si256(b, 1));
-  //   __m512i prod_hi = _mm512_mullo_epi32(a_hi, b_hi);
-
-  //   __m512i prod = _mm512_add_epi32(prod_lo, prod_hi);
-  //   return _mm512_reduce_add_epi32(prod);
-  // }
-  // static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, int32_t* int_c, BufferA* ba,
-  //                        BufferB* bb, int k_group_size) {
-  //   // M_STEP * N_STEP = 1 * 32;; K_STEP = 32
-  //   // int m_block_end = std::min(m - m_begin, M_STEP);
-  //   assert(M_STEP == 1);
-  //   if (k_block_begin % k_group_size == 0) {
-  //     __m512i* c512 = (__m512i*)int_c;
-  //     c512[0] = _mm512_setzero_si512();
-  //     c512[1] = _mm512_setzero_si512();
-  //   }
-  //   int8_t *b = (int8_t*)bb->get_submat(n, k, n_begin, k_block_begin);
-  //   __m256i a256 = *(__m256i*)ba->get_submat(m, k, m_begin, k_block_begin);
-
-  //   size_t stride = k >> 1;
-  //   for (int i = 0; i < N_STEP; i ++) {
-  //     __m128i b128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b + stride * i));
-  //     int_c[i] += dot_product_i8_i32_avx512(a256, compressed_int4_to_int8_avx2(b128)) >> 4;
-  //     // printf("%d\n", int_c[i]);
-  //   }
-  // }
-  // static void apply_scale_kgroup(int m, int n, int m_begin, int n_begin, int k_begin, float* c, int32_t* int_c,
-  //                                BufferA* ba, BufferB* bb, int k, int k_group_size) {
-  //   // for M_STEP
-  //   __m512 as = _mm512_set1_ps(*ba->get_scale(m, m_begin, k, k_begin));
-  //   __m512 bs = _mm512_load_ps(bb->get_scale(n, n_begin, k, k_begin));
-  //   __m512i now = _mm512_load_epi32((__m512i*)(int_c));
-  //   __m512 result = _mm512_mul_ps(_mm512_mul_ps(as, bs), _mm512_cvtepi32_ps(now));
-  //   __m512 existing = _mm512_load_ps((__m512*)(c));
-  //   result = _mm512_add_ps(existing, result);
-  //   _mm512_store_ps((__m512*)(c), result);
-    
-  //   bs = _mm512_load_ps(bb->get_scale(n, n_begin, k, k_begin) + 16);
-  //   now = _mm512_load_si512((__m512i*)(int_c + 16));
-  //   result = _mm512_mul_ps(_mm512_mul_ps(as, bs), _mm512_cvtepi32_ps(now));
-  //   existing = _mm512_load_ps((__m512*)(c + 16));
-  //   result = _mm512_add_ps(existing, result);
-  //   _mm512_store_ps((__m512*)(c + 16), result);
-  // }
-
-  // static inline __m256i compressed_int4_to_int8_avx2(__m128i b128) {
-  //   b128 = _mm_xor_si128(b128, sign_xor_mask());
-  //   __m128i b_hi = _mm_and_si128(b128, hi_mask());
-  //   __m128i b_lo = _mm_slli_epi16(_mm_and_si128(b128, lo_mask()), 4);
-
-  //   __m128i lo = _mm_unpacklo_epi8(b_lo, b_hi);
-  //   __m128i hi = _mm_unpackhi_epi8(b_lo, b_hi);
-
-  //   return _mm256_set_m128i(hi, lo);
-  // }
   static inline __m512i compressed_int4_to_int8_avx512(__m256i b256) {
     b256 = _mm256_xor_si256(b256, sign_xor_mask());
     __m256i b_hi = _mm256_and_si256(b256, hi_mask());
     __m256i b_lo = _mm256_slli_epi16(_mm256_andnot_si256(hi_mask(), b256), 4);
-
-    // __m512i lo512 = _mm512_zextsi256_si512(b_lo);
-    // __m512i hi512 = _mm512_zextsi256_si512(b_hi);
-    // __m512i even = _mm512_maskz_expand_epi8(0x5555555555555555ULL, lo512);
-    // __m512i odd = _mm512_maskz_expand_epi8(0xAAAAAAAAAAAAAAAAULL, hi512);
-    // return _mm512_or_si512(even, odd);
 
     __m256i unpack_lo = _mm256_unpacklo_epi8(b_lo, b_hi);
     __m256i unpack_hi = _mm256_unpackhi_epi8(b_lo, b_hi);
     __m512i result = _mm512_inserti64x4(_mm512_castsi256_si512(unpack_lo), unpack_hi, 1);
     const __m512i lane_shuffle = _mm512_set_epi64(7, 6, 3, 2, 5, 4, 1, 0);
     return _mm512_permutexvar_epi64(lane_shuffle, result);
-
-    // __m256i first32 = _mm256_permute2x128_si256(unpack_lo, unpack_hi, 0x20);
-    // __m256i second32 = _mm256_permute2x128_si256(unpack_lo, unpack_hi, 0x31);
-
-    // __m512i result = _mm512_castsi256_si512(first32);
-    // result = _mm512_inserti64x4(result, second32, 1);
-    // return result;
   }
   static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB *bb, BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
@@ -3004,43 +2927,21 @@ struct GemmKernel224Int4SmallKGroup {
         for (int k_block = 0; k_block < k / 64; k_block += 2) {
           WORK_K_BLOCK(k_block);
           WORK_K_BLOCK(k_block + 1);
-          
-          // __m256 abscale0 = _mm256_set1_ps(as[k_block*2] * bs[k_block*2]);
-          // __m256 abscale1 = _mm256_set1_ps(as[k_block*2+1] * bs[k_block*2+1]);
-          // __m512 abscale = _mm512_castps256_ps512(abscale0);
-          // abscale        = _mm512_insertf32x8(abscale, abscale1, 1);
-          
-          // __m512i zeros = _mm512_setzero_si512();
-          // __m512i mul = _mm512_dpbssd_epi32(zeros, a512[k_block], compressed_int4_to_int8_avx512(b256[k_block]));
-          // sum = _mm512_add_ps(sum, _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));
         }
+
         c[n_block_begin] = _mm512_reduce_add_ps(sum) / 16;
-        // printf("%d : %f\n", n_block_begin, c[n_block_begin]);
       }
     }
   }
 };
-//   inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB *bb, BufferB* bc, int ith, int nth) {
-//     auto [n_start, n_end] = split_range_n(n, ith, nth);
-//     for (int m_begin = 0; m_begin < m; m_begin ++) {
-//       float* c = bc->get_submat(m, n, m_begin, n_begin);
-//       __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
-      
-//       for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin ++) {
-//         __m512i* b512 = (__m512i*)bb->get_submat(n, k, n_block_begin, k_group_begin);
-        
-//         __m512i sum = _mm512_setzero_si512();
-//         for (int k_group_begin = 0; k_group_begin < k; k_group_begin += 64) {
-//           float* as_ptr = ba->get_scale(m, m_begin, k, k_begin);
-//           __m512i* as = _mm512_sset4_ps()
-//         }
-//         c[i] = 0; //TODO: reduce
-//       }
-//     }
-//   }
-// };
 
 inline void vec_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferB> bb,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferC> bc, int ith, int nth) {
+  GemmKernel224Int4SmallKGroup::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+}
+
+inline void mat_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferC> bc, int ith, int nth) {
   GemmKernel224Int4SmallKGroup::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
