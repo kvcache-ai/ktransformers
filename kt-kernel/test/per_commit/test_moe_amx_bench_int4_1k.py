@@ -48,7 +48,7 @@ worker_config_dict = {
     "subpool_numa_map": [0, 1],
     "subpool_thread_count": [80, 80],
 }
-CPUINFER_PARAM = 160
+CPUINFER_PARAM = 90
 
 
 def get_git_commit():
