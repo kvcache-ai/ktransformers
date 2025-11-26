@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ebc63eb8.js";
+            window.path_to_searchindex_js = "searchindex-032b6de4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-8ca7a795.js"></script>
@@ -318,6 +318,8 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
 <p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
 <ul>
+<li><a href="#kt-kernel">KT-Kernel</a>
+<ul>
 <li><a href="#note">Note</a></li>
 <li><a href="#features">Features</a></li>
 <li><a href="#installation">Installation</a>
@@ -330,8 +332,19 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li><a href="#verification">Verification</a></li>
 <li><a href="#integration-with-sglang">Integration with SGLang</a>
 <ul>
-<li><a href="#installation-steps">Installation Steps</a></li>
-<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
+<li><a href="#installation-steps">Installation Steps</a>
+<ul>
+<li><a href="#1-install-sglang">1. Install SGLang</a></li>
+<li><a href="#2-prepare-weights">2. Prepare Weights</a></li>
+<li><a href="#3-launch-sglang-server">3. Launch SGLang Server</a></li>
+</ul>
+</li>
+<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a>
+<ul>
+<li><a href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></li>
+<li><a href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></li>
+</ul>
+</li>
 <li><a href="#kt-kernel-parameters">KT-Kernel Parameters</a></li>
 </ul>
 </li>
@@ -342,7 +355,13 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </li>
 <li><a href="#build-configuration">Build Configuration</a>
 <ul>
-<li><a href="#manual-installation">Manual Installation</a></li>
+<li><a href="#manual-installation">Manual Installation</a>
+<ul>
+<li><a href="#1-install-system-dependencies">1. Install System Dependencies</a></li>
+<li><a href="#2-set-build-configuration">2. Set Build Configuration</a></li>
+<li><a href="#3-build-and-install">3. Build and Install</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#error-troubleshooting">Error Troubleshooting</a>
@@ -351,31 +370,25 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li><a href="#hwloc-not-found">hwloc Not Found</a></li>
 </ul>
 </li>
-<li><a href="#weight-quantization">Weight Quantization</a>
-<ul>
-<li><a href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for “cold” experts on CPU)</a></li>
-<li><a href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for “hot” experts on GPU)</a></li>
+<li><a href="#weight-quantization">Weight Quantization</a></li>
+<li><a href="#before-commit">Before Commit!</a></li>
 </ul>
 </li>
-<li><a href="#before-commit">Before Commit!</a></li>
 </ul>
 <h2 id="note"><a class="header" href="#note">Note</a></h2>
 <p><strong>Current Support Status:</strong></p>
 <ul>
-<li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported</li>
-<li>⚠️ <strong>Universal CPU with llamafile</strong>: In preview, not yet fully complete</li>
-<li>⚠️ <strong>AMD CPUs with BLIS</strong>: Upcoming, not yet fully integrated</li>
+<li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
+<li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
+<li>⚠️ <strong>AMD CPUs with BLIS</strong>: In progress, not yet fully integrated</li>
 </ul>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
-<li><strong>AMX Optimization</strong>: Intel AMX (Advanced Matrix Extensions) support for INT4/INT8 quantized MoE inference</li>
-<li><strong>Multi-Backend</strong>: Unified <code>KTMoEWrapper</code> API supporting multiple backends (AMXINT4, AMXINT8, LLAMAFILE*)</li>
-<li><strong>Flexible Backends</strong>: AVX512, AVX2 via pluggable backend architecture</li>
-<li><strong>Efficient MoE</strong>: Optimized Mixture-of-Experts operations with NUMA-aware memory management</li>
-<li><strong>Async Execution</strong>: Non-blocking <code>submit_forward</code> / <code>sync_forward</code> API for improved pipelining</li>
-<li><strong>Easy Integration</strong>: Clean Python API with automatic backend selection</li>
+<li><strong>CPU-Optimized MoE Kernels</strong>: High-throughput MoE expert kernels optimized for instruction sets.</li>
+<li><strong>AMX INT4/INT8 Backend</strong>: INT4 / INT8 quantized expert inference backend for AMX-capable servers.</li>
+<li><strong>Llamafile CPU Backend</strong>: AVX2/AVX512-based MoE backend built on Llamafile for universal CPU deployment.</li>
+<li><strong>NUMA-Aware Execution</strong>: Thread pool and memory layout designed for multi-socket / multi-NUMA machines.</li>
 </ul>
-<p><strong>Note</strong>: *LLAMAFILE backend support is currently in <em>preview</em> and not yet fully complete.</p>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <h3 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h3>
 <p>First, initialize git submodules:</p>
@@ -387,15 +400,15 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 conda activate kt-kernel
 </code></pre>
 <p>You can now install in two clear steps using the same script.</p>
-<p>Option A: Two-step (explicit)</p>
+<p>Option A: Two-step (specify dependencies installation and build separately)</p>
 <pre><code class="language-bash"># 1) Install system prerequisites (cmake, hwloc, pkg-config)
 ./install.sh deps
 
-# 2) Build and install kt-kernel (auto-detects CPU)
-#    By default, the script cleans the local ./build directory before compiling.
+# 2) Build and install kt-kernel (auto-detects CPU instruction set)
+#    By default, the script cleans the local ./build directory before compiling
 ./install.sh build
 </code></pre>
-<p>Option B: One-step (deps + build)</p>
+<p>Option B: One-step</p>
 <pre><code class="language-bash">./install.sh
 </code></pre>
 <p>The install script will:</p>
@@ -409,14 +422,16 @@ conda activate kt-kernel
 <li>AMX CPU detected → <code>NATIVE + AMX=ON</code></li>
 <li>No AMX detected → <code>NATIVE + AMX=OFF</code></li>
 </ul>
-<p>⚠️ <strong>Important for LLAMAFILE backend users:</strong> If you have an AMX-capable CPU and plan to use the LLAMAFILE backend, do NOT use auto-detection. Use manual mode with <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
+<p>⚠️ <strong>Important for LLAMAFILE backend users:</strong>
+If you have an AMX-capable CPU but plan to use the LLAMAFILE backend, do NOT use the default auto-detection build.
+Use “manual mode” with <code>CPUINFER_CPU_INSTRUCT</code> set to <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
 <h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
 <p>If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):</p>
 <pre><code class="language-bash"># Example for LLAMAFILE backend on AMX CPU with AVX512
 export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2, FANCY
 export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
 
-# Run with manual mode (build only)
+# Build only (skip auto-detection of instruction set)
 ./install.sh build --manual
 </code></pre>
 <p>For advanced build options and binary distribution, see the <a href="#build-configuration">Build Configuration</a> section. If you encounter issues, refer to <a href="#error-troubleshooting">Error Troubleshooting</a>.</p>
@@ -432,22 +447,29 @@ cd sglang
 pip install -e "python[all]"
 </code></pre>
 <h4 id="2-prepare-weights"><a class="header" href="#2-prepare-weights">2. Prepare Weights</a></h4>
-<p>You need both GPU weights and CPU weights for heterogeneous inference:</p>
-<p><strong>GPU Weights:</strong> Use the original / quantized model weights.</p>
-<p><strong>CPU Weights:</strong> Quantize to AMX-optimized format using the conversion script:</p>
+<p>You need both GPU weights and CPU-side expert weights for heterogeneous inference. The exact format depends on the backend:</p>
+<p><strong>GPU Weights (for all backends):</strong><br>Use the model weights required by SGLang for GPU inference (for example, the original or already-quantized model directory from Hugging Face).</p>
+<p><strong>CPU Weights (AMX backend: <code>AMXINT4</code> / <code>AMXINT8</code>):</strong>
+Quantize weights to AMX-optimized INT4/INT8 format using the provided script:</p>
 <pre><code class="language-bash">python scripts/convert_cpu_weights.py \
   --input-path /path/to/model \
-  --input-type bf16 \  # Depends on your GPU weights type: fp8, fp16, or bf16
+  --input-type bf16 \
   --output /path/to/cpu-weights \
   --quant-method int8  # or int4
 </code></pre>
-<p><strong>Supported input formats:</strong> FP8, FP16, BF16 → INT4/INT8.</p>
-<p>For more details, see:</p>
 <ul>
-<li><a href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights conversion</a></li>
-<li><a href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights quantization</a></li>
+<li><code>--input-path</code>: Path to GPU-side original weights</li>
+<li><code>--input-type</code>: Depends on your GPU weights type (<code>fp8</code>, <code>fp16</code>, or <code>bf16</code>)</li>
 </ul>
-<p><strong>Note:</strong> LLAMAFILE backend supports GGUF format directly, but this feature is still in preview.</p>
+<p>In SGLang integration, <code>--kt-weight-path</code> should point to this converted CPU weights directory.</p>
+<p><strong>Supported input formats:</strong> FP8, FP16, BF16 → INT4/INT8.</p>
+<p><strong>CPU Weights (LLAMAFILE backend: <code>LLAMAFILE</code>):</strong>
+LLAMAFILE uses pre-quantized <strong>GGUF</strong> weights on the CPU side directly, without running <code>convert_cpu_weights.py</code>. You need to:</p>
+<ul>
+<li>Download a GGUF model directly from the web (e.g., GGUF repos on Hugging Face / Modelscope);</li>
+<li>In SGLang integration, use that GGUF directory as <code>--kt-weight-path</code>.
+KT-Kernel supports multiple GGUF quantization formats such as <code>Q4_KM</code>, <code>Q4_K</code>, <code>Q5_K</code>, etc. Choose based on your latency and accuracy requirements.</li>
+</ul>
 <h4 id="3-launch-sglang-server"><a class="header" href="#3-launch-sglang-server">3. Launch SGLang Server</a></h4>
 <p>Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:</p>
 <p><strong>KT-Kernel Parameters to Add:</strong></p>
@@ -471,14 +493,12 @@ pip install -e "python[all]"
 </code></pre>
 <p>See <a href="#kt-kernel-parameters">KT-Kernel Parameters</a> section below for detailed parameter tuning guidelines.</p>
 <h3 id="complete-example-qwen3-30b-a3b"><a class="header" href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></h3>
-<p>This example demonstrates the full workflow from downloading weights to launching the server.</p>
+<p>This example demonstrates the full workflow from downloading weights to launching the server, showing both <strong>AMX backend</strong> and <strong>LLAMAFILE backend</strong> options.</p>
 <p><strong>Hardware Configuration:</strong></p>
 <ul>
 <li><strong>GPU</strong>: NVIDIA RTX 4090 24GB</li>
 <li><strong>CPU</strong>: 2x Intel Xeon Gold 6454S (64 physical cores total, 128 threads, 2 NUMA nodes)</li>
 <li><strong>Model</strong>: <a href="https://huggingface.co/Qwen/Qwen3-30B-A3B">Qwen3-30B-A3B</a></li>
-<li><strong>GPU Weights</strong>: BF16 original weights</li>
-<li><strong>CPU Weights</strong>: AMXINT8 quantized</li>
 </ul>
 <p><strong>How to verify your system configuration:</strong></p>
 <pre><code class="language-bash"># Check CPU configuration
@@ -495,23 +515,26 @@ NUMA node(s):                            2
 <li><code>--kt-cpuinfer 64</code>: Set to physical cores (64), not hyperthreads (128)</li>
 <li><code>--kt-threadpool-count 2</code>: 2 NUMA nodes detected (dual-socket system)</li>
 <li><code>--kt-num-gpu-experts 32</code>: With 24GB GPU memory, we can fit ~32 experts on GPU for this model (varies by model architecture and actual memory usage)</li>
-<li><code>--kt-max-deferred-experts-per-token 2</code>: Enable pipelined execution - allows CPU to process next batch while GPU completes current batch</li>
+<li><code>--kt-max-deferred-experts-per-token 2</code>: Enable pipelined execution; allows CPU to process next batch while GPU completes current batch</li>
 </ul>
-<h4 id="step-1-download-model-weights"><a class="header" href="#step-1-download-model-weights">Step 1: Download model weights</a></h4>
+<hr>
+<h4 id="option-a-amx-backend-amxint8"><a class="header" href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></h4>
+<p>For Intel CPUs with AMX instruction set support.</p>
+<p><strong>Step 1: Download model weights</strong></p>
 <pre><code class="language-bash"># Install huggingface-cli if not already installed
 pip install huggingface-hub
 
 # Download model from Hugging Face
-hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
 </code></pre>
-<h4 id="step-2-convert-to-cpu-weights-amxint8"><a class="header" href="#step-2-convert-to-cpu-weights-amxint8">Step 2: Convert to CPU weights (AMXINT8)</a></h4>
+<p><strong>Step 2: Convert to CPU weights (AMXINT8)</strong></p>
 <pre><code class="language-bash">python scripts/convert_cpu_weights.py \
   --input-path /mnt/data/models/Qwen3-30B-A3B \
   --input-type bf16 \
   --output /mnt/data/models/Qwen3-30B-A3B-INT8 \
   --quant-method int8
 </code></pre>
-<h4 id="step-3-launch-sglang-server"><a class="header" href="#step-3-launch-sglang-server">Step 3: Launch SGLang server</a></h4>
+<p><strong>Step 3: Launch SGLang server</strong></p>
 <pre><code class="language-bash">python -m sglang.launch_server \
   --host 0.0.0.0 \
   --port 8000 \
@@ -528,6 +551,35 @@ hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
   --kt-num-gpu-experts 32 \
   --kt-max-deferred-experts-per-token 2
 </code></pre>
+<hr>
+<h4 id="option-b-llamafile-backend-gguf"><a class="header" href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></h4>
+<p>For universal CPUs (no AMX required), using pre-quantized GGUF weights directly.</p>
+<p><strong>Step 1: Download GPU weights (original model)</strong></p>
+<pre><code class="language-bash">pip install huggingface-hub
+
+huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+</code></pre>
+<p><strong>Step 2: Download CPU weights (GGUF format)</strong></p>
+<pre><code class="language-bash">huggingface-cli download Qwen/Qwen3-30B-A3B-GGUF Qwen3-30B-A3B-Q4_K_M.gguf \
+  --local-dir /mnt/data/models/Qwen3-30B-A3B-Q4_K_M
+</code></pre>
+<p><strong>Step 3: Launch SGLang server</strong></p>
+<pre><code class="language-bash">python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /mnt/data/models/Qwen3-30B-A3B \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name Qwen3-30B-A3B \
+  --enable-mixed-chunk \
+  --kt-method LLAMAFILE \
+  --kt-weight-path /mnt/data/models/Qwen3-30B-A3B-Q4_K_M \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 2 \
+  --kt-num-gpu-experts 32 \
+  --kt-max-deferred-experts-per-token 2
+</code></pre>
 <h3 id="kt-kernel-parameters"><a class="header" href="#kt-kernel-parameters">KT-Kernel Parameters</a></h3>
 <div class="table-wrapper">
 <table>
@@ -535,12 +587,12 @@ hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
 <tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr>
 </thead>
 <tbody>
-<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, or <code>LLAMAFILE</code> (preview)</td></tr>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, or <code>LLAMAFILE</code></td></tr>
 <tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
 <tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
 <tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
 <tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
-<tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-2 recommended)</td></tr>
+<tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-4 recommended)</td></tr>
 </tbody>
 </table>
 </div>
@@ -551,7 +603,7 @@ hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
 <ul>
 <li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
 <li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
-<li><code>LLAMAFILE</code>: Preview support for GGUF format (not fully complete)</li>
+<li><code>LLAMAFILE</code>: GGUF-based backend</li>
 </ul>
 </li>
 <li>
@@ -588,8 +640,8 @@ hf download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
 <p><strong><code>kt-max-deferred-experts-per-token</code></strong>: Enables pipelined execution:</p>
 <ul>
 <li><code>0</code>: Synchronous execution (simpler, higher latency)</li>
-<li><code>1-2</code>: Deferred execution (better latency, requires tuning) - recommended</li>
-<li><code>3-4</code>: Higher deferred count (possible but rarely beneficial)</li>
+<li><code>1-4</code>: Deferred execution (recommended range; good latency/quality balance, requires tuning)</li>
+<li><code>5-7</code>: Highest latency reduction but may introduce noticeable accuracy loss; use with care</li>
 </ul>
 </li>
 </ul>
@@ -609,7 +661,7 @@ wrapper = KTMoEWrapper(
     threadpool_count=2,
     weight_path="/path/to/weights",
     chunked_prefill_size=512,
-    method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE" (preview)
+    method="AMXINT4"  # Options: "AMXINT4", "AMXINT8", "LLAMAFILE"
 )
 
 # Load weights (from disk - pre-quantized)
@@ -727,9 +779,7 @@ make
 sudo make install
 </code></pre>
 <h2 id="weight-quantization"><a class="header" href="#weight-quantization">Weight Quantization</a></h2>
-<p>KT-Kernel provides weight quantization tools for CPU-GPU hybrid inference (e.g., integrating with SGLang). Both tools work together to enable heterogeneous expert placement across CPUs and GPUs.</p>
-<h3 id="cpu-weights-for-cold-experts-on-cpu"><a class="header" href="#cpu-weights-for-cold-experts-on-cpu">CPU Weights (for “cold” experts on CPU)</a></h3>
-<p>Quantize weights to INT4/INT8 format optimized for AMX inference:</p>
+<p>For AMX backends (<code>AMXINT4</code> / <code>AMXINT8</code>), CPU-side experts must be converted to AMX-friendly INT4/INT8 format using the provided script:</p>
 <pre><code class="language-bash">python scripts/convert_cpu_weights.py \
   --input-path /path/to/model \
   --input-type bf16 \
@@ -737,31 +787,21 @@ sudo make install
   --quant-method int4
 </code></pre>
 <p><strong>Supported formats:</strong> FP8, FP16, BF16 → INT4/INT8</p>
-<h3 id="gpu-weights-for-hot-experts-on-gpu"><a class="header" href="#gpu-weights-for-hot-experts-on-gpu">GPU Weights (for “hot” experts on GPU)</a></h3>
-<p>Apply GPTQ quantization to model weights:</p>
-<pre><code class="language-bash"># Install additional dependencies first
-pip install accelerate transformers llmcompressor datasets
-
-# Quantize GPU weights
-python scripts/convert_gpu_weights.py \
-  --model_id /path/to/model \
-  --output_dir /path/to/output \
-  --quant_type W4A16
-</code></pre>
-<p><strong>Supported types:</strong> W4A16 (GPTQ4), W8A16 (GPTQ8)</p>
+<p>For LLAMAFILE backend (<code>LLAMAFILE</code>), CPU-side experts are loaded directly from <strong>GGUF</strong> weights. You do <strong>not</strong> need to run the AMX conversion script; instead, download a GGUF model from the web (e.g., a GGUF repo on Hugging Face) and point <code>weight_path</code> / SGLang <code>--kt-weight-path</code> (or <code>--model</code> when appropriate) to that GGUF directory. KT-Kernel supports multiple GGUF quantization types such as <code>Q4_KM</code>, <code>Q4_K</code>, <code>Q5_K</code>, etc.</p>
 <hr>
 <p>For detailed documentation, advanced options, and low-memory mode, see <a href="en/kt-kernel/scripts/README.html">scripts/README.md</a>.</p>
 <h2 id="before-commit"><a class="header" href="#before-commit">Before Commit!</a></h2>
-<p>your msg should match: Conventional Commits (https://www.conventionalcommits.org/) <br>and format your code before commit:</p>
+<p>Commit messages should follow the Conventional Commits specification: https://www.conventionalcommits.org/</p>
+<p>Please format your code before committing:</p>
 <pre><code class="language-shell">cmake -B build
 cd build
 make format
 </code></pre>
-<p>and you may need a new clang-format at least 18, use this command in conda env:</p>
+<p>You may need a newer clang-format (at least version 18). In a conda environment:</p>
 <pre><code class="language-shell">conda install -c conda-forge clang-format=18
 rm -rf build
 </code></pre>
-<p>and you may need black for python format:</p>
+<p>It’s also recommended to install black for Python code formatting:</p>
 <pre><code class="language-shell">conda install black
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
