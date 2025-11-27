@@ -21,6 +21,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_AMD=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MOE_AMD
   CPUINFER_ENABLE_KML=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_KML
   CPUINFER_ENABLE_AVX512=OFF      ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX_AVX512
+  CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
 
 
   CPUINFER_ENABLE_LTO=ON          ON/OFF -> -DCPUINFER_ENABLE_LTO (your added option)
@@ -299,6 +300,7 @@ class CMakeBuild(build_ext):
                 auto_moe_kernel_ = True
                 cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
                 print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+                _forward_str_env(cmake_args, "CPUINFER_BLIS_ROOT", "BLIS_ROOT")
 
         # KML: explicit env overrides; otherwise default ON on ARM
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_KML", "KTRANSFORMERS_CPU_USE_KML"):
