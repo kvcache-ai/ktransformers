@@ -408,3 +408,45 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         del self.gate_scales
         del self.up_scales
         del self.down_scales
+
+    def submit_write_weight_scale_to_buffer(
+        self,
+        gpu_tp_count: int,
+        gpu_experts_num: int,
+        w13_weight_ptrs,
+        w13_scale_ptrs,
+        w2_weight_ptrs,
+        w2_scale_ptrs,
+    ):
+        """
+        Submit the write_weight_scale_to_buffer task for RAWINT4 KGroup AMX implementation.
+
+        This method submits the C++-exposed task `write_weight_scale_to_buffer_task` to the
+        shared CPUInfer queue. The pointer lists should be plain integer lists (e.g. from
+        tensor.data_ptr()).
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot submit write_weight_scale_to_buffer task.")
+
+        if not hasattr(self.moe, "write_weight_scale_to_buffer_task"):
+            raise NotImplementedError(
+                "write_weight_scale_to_buffer_task is not available for this backend implementation."
+            )
+
+        self.cpu_infer.submit(
+            self.moe.write_weight_scale_to_buffer_task(
+                gpu_tp_count,
+                gpu_experts_num,
+                w13_weight_ptrs,
+                w13_scale_ptrs,
+                w2_weight_ptrs,
+                w2_scale_ptrs,
+            )
+        )
+
+    def sync_write_weight_scale_to_buffer(self):
+        """
+        Block until previously submitted write_weight_scale_to_buffer tasks finish.
+        """
+        # The CPUInfer.sync() call blocks until pending tasks complete.
+        self.cpu_infer.sync()
