@@ -1,5 +1,6 @@
 import argparse
 import glob
+import sys
 from typing import List
 
 from ci.ci_register import HWBackend, CIRegistry, collect_tests
@@ -37,7 +38,7 @@ def run_per_commit(hw: HWBackend, suite: str):
     ci_tests = _filter_tests(collect_tests(files), hw, suite)
     test_files = [TestFile(t.filename, t.est_time) for t in ci_tests]
 
-    run_unittest_files(
+    return run_unittest_files(
         test_files,
         timeout_per_file=1200,
         continue_on_error=False,
@@ -61,7 +62,10 @@ def main():
     )
     args = parser.parse_args()
     hw = HW_MAPPING[args.hw]
-    run_per_commit(hw, args.suite)
+    exit_code = run_per_commit(hw, args.suite)
+    # run_unittest_files returns 0 for success, -1 for failure
+    # Convert to standard exit codes: 0 for success, 1 for failure
+    sys.exit(0 if exit_code == 0 else 1)
 
 
 if __name__ == "__main__":
