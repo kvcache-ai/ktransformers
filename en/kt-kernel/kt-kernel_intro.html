@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-032b6de4.js";
+            window.path_to_searchindex_js = "../../searchindex-947113ac.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-8ca7a795.js"></script>
@@ -183,8 +183,6 @@
                         <h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
 <p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
 <ul>
-<li><a href="#kt-kernel">KT-Kernel</a>
-<ul>
 <li><a href="#note">Note</a></li>
 <li><a href="#features">Features</a></li>
 <li><a href="#installation">Installation</a>
@@ -197,19 +195,8 @@
 <li><a href="#verification">Verification</a></li>
 <li><a href="#integration-with-sglang">Integration with SGLang</a>
 <ul>
-<li><a href="#installation-steps">Installation Steps</a>
-<ul>
-<li><a href="#1-install-sglang">1. Install SGLang</a></li>
-<li><a href="#2-prepare-weights">2. Prepare Weights</a></li>
-<li><a href="#3-launch-sglang-server">3. Launch SGLang Server</a></li>
-</ul>
-</li>
-<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a>
-<ul>
-<li><a href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></li>
-<li><a href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></li>
-</ul>
-</li>
+<li><a href="#installation-steps">Installation Steps</a></li>
+<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
 <li><a href="#kt-kernel-parameters">KT-Kernel Parameters</a></li>
 </ul>
 </li>
@@ -220,13 +207,7 @@
 </li>
 <li><a href="#build-configuration">Build Configuration</a>
 <ul>
-<li><a href="#manual-installation">Manual Installation</a>
-<ul>
-<li><a href="#1-install-system-dependencies">1. Install System Dependencies</a></li>
-<li><a href="#2-set-build-configuration">2. Set Build Configuration</a></li>
-<li><a href="#3-build-and-install">3. Build and Install</a></li>
-</ul>
-</li>
+<li><a href="#manual-installation">Manual Installation</a></li>
 </ul>
 </li>
 <li><a href="#error-troubleshooting">Error Troubleshooting</a>
@@ -238,14 +219,12 @@
 <li><a href="#weight-quantization">Weight Quantization</a></li>
 <li><a href="#before-commit">Before Commit!</a></li>
 </ul>
-</li>
-</ul>
 <h2 id="note"><a class="header" href="#note">Note</a></h2>
 <p><strong>Current Support Status:</strong></p>
 <ul>
 <li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
-<li>⚠️ <strong>AMD CPUs with BLIS</strong>: In progress, not yet fully integrated</li>
+<li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode)</li>
 </ul>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
@@ -320,7 +299,7 @@ Quantize weights to AMX-optimized INT4/INT8 format using the provided script:</p
   --input-path /path/to/model \
   --input-type bf16 \
   --output /path/to/cpu-weights \
-  --quant-method int8  # or int4
+  --quant-method int8  # or int4 or moe_int8 (for amd now) 
 </code></pre>
 <ul>
 <li><code>--input-path</code>: Path to GPU-side original weights</li>
