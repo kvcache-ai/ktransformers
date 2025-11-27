@@ -66,7 +66,7 @@ jobs:
           bash install.sh build
 
       - name: Run KT-Kernel CPU tests
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           cd kt-kernel/test
           python3 run_suite.py --hw cpu --suite default
