@@ -2,42 +2,33 @@
 
 高性能 KTransformers 内核库，提供面向 CPU 的高效 MoE 推理内核，支持 AMX 和 AVX 等后端。
 
-- [KT-Kernel](#kt-kernel)
-  - [说明](#说明)
-  - [特性](#特性)
-  - [安装](#安装)
-    - [先决条件](#先决条件)
-    - [快速安装（推荐）](#快速安装推荐)
-    - [手动配置（进阶）](#手动配置进阶)
-  - [验证安装](#验证安装)
-  - [与 SGLang 集成](#与-sglang-集成)
-    - [安装步骤](#安装步骤)
-      - [1. 安装 SGLang](#1-安装-sglang)
-      - [2. 准备权重](#2-准备权重)
-      - [3. 启动 SGLang Server](#3-启动-sglang-server)
-    - [完整示例：Qwen3-30B-A3B](#完整示例qwen3-30b-a3b)
-      - [方案 A：AMX 后端（AMXINT8）](#方案-aamx-后端amxint8)
-      - [方案 B：LLAMAFILE 后端（GGUF）](#方案-bllamafile-后端gguf)
-    - [KT-Kernel 参数](#kt-kernel-参数)
-  - [直接使用 Python API](#直接使用-python-api)
-    - [高级选项](#高级选项)
-  - [构建配置](#构建配置)
-    - [手动安装](#手动安装)
-      - [1. 安装系统依赖](#1-安装系统依赖)
-      - [2. 配置构建参数](#2-配置构建参数)
-      - [3. 构建并安装](#3-构建并安装)
-  - [错误排查](#错误排查)
-    - [找不到 CUDA](#找不到-cuda)
-    - [找不到 hwloc](#找不到-hwloc)
-  - [权重量化](#权重量化)
-  - [提交前必读](#提交前必读)
+- [说明](#说明)
+- [特性](#特性)
+- [安装](#安装)
+  - [先决条件](#先决条件)
+  - [快速安装（推荐）](#快速安装推荐)
+  - [手动配置（进阶）](#手动配置进阶)
+- [验证安装](#验证安装)
+- [与 SGLang 集成](#与-sglang-集成)
+  - [安装步骤](#安装步骤)
+  - [完整示例：Qwen3-30B-A3B](#完整示例qwen3-30b-a3b)
+  - [KT-Kernel 参数](#kt-kernel-参数)
+- [直接使用 Python API](#直接使用-python-api)
+  - [高级选项](#高级选项)
+- [构建配置](#构建配置)
+  - [手动安装](#手动安装)
+- [错误排查](#错误排查)
+  - [找不到 CUDA](#找不到-cuda)
+  - [找不到 hwloc](#找不到-hwloc)
+- [权重量化](#权重量化)
+- [提交前必读](#提交前必读)
 
 ## 说明
 
 **当前支持状态：**
 - ✅ **带 AMX 的 Intel CPU**：已支持（基于转换为 INT4/INT8 格式的权重）
 - ✅ **通用 CPU（llamafile 后端）**：已支持（基于 GGUF 格式的权重）
-- ⚠️ **带 BLIS 的 AMD CPU**：进行中，尚未完全集成
+- ✅ **带 BLIS 的 AMD CPU**：已支持（int8 的 prefill 和 decode）
 
 ## 特性
 
@@ -149,7 +140,7 @@ python scripts/convert_cpu_weights.py \
   --input-path /path/to/model \
   --input-type bf16 \
   --output /path/to/cpu-weights \
-  --quant-method int8  # 或 int4
+  --quant-method int8  # 或 int4 或 moe_int8（用于 amd 的）
 ```
 
 - `--input-path`：GPU 侧原始权重路径

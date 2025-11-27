@@ -2372,9 +2372,7 @@ bool ggml_compute_forward_mul_mat_use_amx(struct ggml_tensor* dst) {
   static thread_local bool is_first_time = true;
   if (is_first_time) {
 #pragma omp single
-    {
-      ggml_amx_init();
-    }
+    { ggml_amx_init(); }
 
     // load tile config
     ggml_tile_config_init();

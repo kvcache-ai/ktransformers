@@ -14,15 +14,15 @@
 // #include <utility>
 // #include <vector>
 
-// #define DIRECT_OR_POOL_BY(what, threshold, var, fn)                                                                    \
-//   do {                                                                                                                 \
-//     if ((what) < (threshold)) {                                                                                        \
-//       for (int i = 0; i < (var); i++) {                                                                                \
-//         (fn)(i);                                                                                                       \
-//       }                                                                                                                \
-//     } else {                                                                                                           \
-//       pool->do_work_stealing_job((var), nullptr, (fn), nullptr);                                                       \
-//     }                                                                                                                  \
+// #define DIRECT_OR_POOL_BY(what, threshold, var, fn) \
+//   do { \
+//     if ((what) < (threshold)) { \
+//       for (int i = 0; i < (var); i++) { \
+//         (fn)(i); \
+//       } \
+//     } else { \
+//       pool->do_work_stealing_job((var), nullptr, (fn), nullptr); \
+//     } \
 //   } while (0)
 
 // #define VEC_DOT_TYPE(type) (ggml_internal_get_type_traits((ggml_type)(type)).vec_dot_type)
@@ -31,19 +31,20 @@
 // #define QUANT_OFFSET(ptr, type, n, n_elements) \
 //   (offset_pointer((ptr), (size_t)(n) * QUANT_BLCK_SIZE((n_elements), (type))))
 
-// #define LLAMAFILE_SGEMM_QUANT_FULL_MATMUL(m, n, k, a, a_type, b, b_col, c, c_col)                                      \
-//   do {                                                                                                                 \
-//     llamafile_sgemm((m), (n), QUANT_BLCK_COUNT((k), (a_type)), (a), QUANT_BLCK_COUNT((k), (a_type)),                   \
-//                     QUANT_OFFSET((b), VEC_DOT_TYPE((a_type)), (b_col), (k)),                                           \
-//                     QUANT_BLCK_COUNT((k), VEC_DOT_TYPE((a_type))), offset_pointer((c), (c_col) * (m) * sizeof(float)), \
-//                     (k), 0, 1, GGML_TASK_TYPE_COMPUTE, (a_type), VEC_DOT_TYPE((a_type)), GGML_TYPE_F32,                \
-//                     GGML_PREC_DEFAULT);                                                                                \
+// #define LLAMAFILE_SGEMM_QUANT_FULL_MATMUL(m, n, k, a, a_type, b, b_col, c, c_col) \
+//   do { \
+//     llamafile_sgemm((m), (n), QUANT_BLCK_COUNT((k), (a_type)), (a), QUANT_BLCK_COUNT((k), (a_type)), \
+//                     QUANT_OFFSET((b), VEC_DOT_TYPE((a_type)), (b_col), (k)), \
+//                     QUANT_BLCK_COUNT((k), VEC_DOT_TYPE((a_type))), offset_pointer((c), (c_col) * (m) *
+//                     sizeof(float)), \
+//                     (k), 0, 1, GGML_TASK_TYPE_COMPUTE, (a_type), VEC_DOT_TYPE((a_type)), GGML_TYPE_F32, \
+//                     GGML_PREC_DEFAULT); \
 //   } while (0)
 
-// #define LLAMAFILE_SGEMM_MATMUL_F32(m, n, k, a, lda, b, ldb, c, ldc)                                                    \
-//   do {                                                                                                                 \
-//     llamafile_sgemm((m), (n), (k), (a), (lda), (b), (ldb), (c), (ldc), 0, 1, GGML_TASK_TYPE_COMPUTE, GGML_TYPE_F32,    \
-//                     GGML_TYPE_F32, GGML_TYPE_F32, GGML_PREC_DEFAULT);                                                  \
+// #define LLAMAFILE_SGEMM_MATMUL_F32(m, n, k, a, lda, b, ldb, c, ldc) \
+//   do { \
+//     llamafile_sgemm((m), (n), (k), (a), (lda), (b), (ldb), (c), (ldc), 0, 1, GGML_TASK_TYPE_COMPUTE, GGML_TYPE_F32, \
+//                     GGML_TYPE_F32, GGML_TYPE_F32, GGML_PREC_DEFAULT); \
 //   } while (0)
 
 // // bool decide_absorb(size_t a,int a_type,size_t b,int b_type,size_t c,int c_type,size_t d,int d_type){

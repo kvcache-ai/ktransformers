@@ -495,7 +495,7 @@ if(NOT DEFINED CLANG_FORMAT_BIN)
     )
 endif()
 if(NOT CLANG_FORMAT_BIN)
-    message(WARNING "clang-format not found. Please install clang-format (>=18) or pass -DCLANG_FORMAT_BIN=/full/path and reconfigure.")
+    message(WARNING "ONLY for developer: clang-format not found. Please install clang-format (>=18) or pass -DCLANG_FORMAT_BIN=/full/path and reconfigure.")
 else()
     execute_process(
         COMMAND ${CLANG_FORMAT_BIN} --version

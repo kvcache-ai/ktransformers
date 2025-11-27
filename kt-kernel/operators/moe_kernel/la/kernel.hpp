@@ -340,7 +340,7 @@ struct GemmKernelInt8 {
   static inline const int PACK_SIZE_M = 8;
   static inline const int PACK_SIZE_K = 32;
 
-  static std::string name() { return "INT8"; }
+  static std::string name() { return "MOE_INT8"; }
   static int recommended_nth(int n) { return (n + N_BLOCK - 1) / N_BLOCK; }
   // type_: d for decode, p for prefill
   static int recommended_nth_down(int n, char type_ = 'd') {
@@ -833,7 +833,7 @@ struct GemmKernelInt4 {
   static inline const int PACK_SIZE_K = 32;
   static inline const int PACK_SIZE_M = 8;
 
-  static std::string name() { return "INT4"; }
+  static std::string name() { return "MOE_INT4"; }
   static int recommended_nth(int n) { return (n + N_BLOCK - 1) / N_BLOCK; }
 
   static int recommended_nth_down(int n, char type_ = 'd') {
