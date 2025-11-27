@@ -2,41 +2,32 @@
 
 High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.
 
-- [KT-Kernel](#kt-kernel)
-  - [Note](#note)
-  - [Features](#features)
-  - [Installation](#installation)
-    - [Prerequisites](#prerequisites)
-    - [Quick Installation (Recommended)](#quick-installation-recommended)
-    - [Manual Configuration (Advanced)](#manual-configuration-advanced)
-  - [Verification](#verification)
-  - [Integration with SGLang](#integration-with-sglang)
-    - [Installation Steps](#installation-steps)
-      - [1. Install SGLang](#1-install-sglang)
-      - [2. Prepare Weights](#2-prepare-weights)
-      - [3. Launch SGLang Server](#3-launch-sglang-server)
-    - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
-      - [Option A: AMX Backend (AMXINT8)](#option-a-amx-backend-amxint8)
-      - [Option B: LLAMAFILE Backend (GGUF)](#option-b-llamafile-backend-gguf)
-    - [KT-Kernel Parameters](#kt-kernel-parameters)
-  - [Direct Python API Usage](#direct-python-api-usage)
-    - [Advanced Options](#advanced-options)
-  - [Build Configuration](#build-configuration)
-    - [Manual Installation](#manual-installation)
-      - [1. Install System Dependencies](#1-install-system-dependencies)
-      - [2. Set Build Configuration](#2-set-build-configuration)
-      - [3. Build and Install](#3-build-and-install)
-  - [Error Troubleshooting](#error-troubleshooting)
-    - [CUDA Not Found](#cuda-not-found)
-    - [hwloc Not Found](#hwloc-not-found)
-  - [Weight Quantization](#weight-quantization)
-  - [Before Commit!](#before-commit)
+- [Note](#note)
+- [Features](#features)
+- [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Quick Installation (Recommended)](#quick-installation-recommended)
+  - [Manual Configuration (Advanced)](#manual-configuration-advanced)
+- [Verification](#verification)
+- [Integration with SGLang](#integration-with-sglang)
+  - [Installation Steps](#installation-steps)
+  - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
+  - [KT-Kernel Parameters](#kt-kernel-parameters)
+- [Direct Python API Usage](#direct-python-api-usage)
+  - [Advanced Options](#advanced-options)
+- [Build Configuration](#build-configuration)
+  - [Manual Installation](#manual-installation)
+- [Error Troubleshooting](#error-troubleshooting)
+  - [CUDA Not Found](#cuda-not-found)
+  - [hwloc Not Found](#hwloc-not-found)
+- [Weight Quantization](#weight-quantization)
+- [Before Commit!](#before-commit)
 ## Note
 
 **Current Support Status:**
 - ✅ **Intel CPUs with AMX**: Fully supported (using weights converted to INT4/INT8 format)
 - ✅ **Universal CPU (llamafile backend)**: Supported (using GGUF-format weights)
-- ⚠️ **AMD CPUs with BLIS**: In progress, not yet fully integrated
+- ✅ **AMD CPUs with BLIS**: Supported (for int8 prefill & decode)
 
 ## Features
 
@@ -145,7 +136,7 @@ python scripts/convert_cpu_weights.py \
   --input-path /path/to/model \
   --input-type bf16 \
   --output /path/to/cpu-weights \
-  --quant-method int8  # or int4
+  --quant-method int8  # or int4 or moe_int8 (for amd now) 
 ```
 
 - `--input-path`: Path to GPU-side original weights
