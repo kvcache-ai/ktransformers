@@ -30,7 +30,11 @@ dependencies = [
   "black>=25.9.0",
 ]
 
-# No optional dev group needed for formatting; using custom git hooks instead of pre-commit
+[project.optional-dependencies]
+test = [
+  "pytest>=7.0.0",
+  "psutil>=5.9.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/kvcache-ai"
