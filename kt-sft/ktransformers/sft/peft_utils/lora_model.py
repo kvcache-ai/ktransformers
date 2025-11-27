@@ -289,14 +289,15 @@ class LoraModel(nn.Module, ABC):
                     else child.weight
                     if hasattr(child, "weight")
                     else child.generate_linear.weight
-                    if hasattr(child.generate_linear, "weight")
-                    else next(child.parameters())
+                    if hasattr(child, "generate_linear") and hasattr(child.generate_linear, "weight")
+                    else next(child.parameters(), None)  # Return None if no parameters
                 )
                 # (orig_module): Lora.Linear(
                     # (orig_module): Linear(..),
                     # (Lora_A): Linear(..)...)
-                
-                if not any(p.device == meta for p in module.parameters()):
+
+                # Skip if no weight found (e.g., custom KTransformers modules without direct parameters)
+                if weight is not None and not any(p.device == meta for p in module.parameters()):
                     module.to(weight.device)
 
     def _mark_only_adapters_as_trainable(self, model: nn.Module) -> None:

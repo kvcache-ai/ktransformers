@@ -328,6 +328,43 @@ class KTrainer(Trainer):
                 pass
             self._kt_dbg_once = True
 
+        # Debug: Print LoRA parameters for routed experts
+        try:
+            print(f"\n[DEBUG] Step {self.state.global_step} - Loss: {ret.item():.6f}")
+
+            # Access the base model: PeftModelForCausalLM -> LoraModel -> DeepseekV2ForCausalLM -> DeepseekV2Model
+            base_model = model
+            if hasattr(model, 'base_model'):
+                base_model = model.base_model
+            if hasattr(base_model, 'model'):
+                base_model = base_model.model
+            # DeepseekV2ForCausalLM has a .model attribute that contains DeepseekV2Model with .layers
+            if hasattr(base_model, 'model'):
+                base_model = base_model.model
+
+            # Print LoRA A and B for first 3 routed experts in layer 1
+            layer_idx = 1
+            if hasattr(base_model, 'layers') and len(base_model.layers) > layer_idx:
+                layer = base_model.layers[layer_idx]
+                if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
+                    experts_wrapper = layer.mlp.experts
+                    if hasattr(experts_wrapper, 'orig_module'):
+                        experts_list = experts_wrapper.orig_module
+                        for expert_idx in range(min(3, len(experts_list))):
+                            expert = experts_list[expert_idx]
+                            if hasattr(expert, 'gate_proj'):
+                                gate_proj = expert.gate_proj
+                                if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
+                                    lora_A_weight = gate_proj.lora_A['default'].weight
+                                    lora_B_weight = gate_proj.lora_B['default'].weight
+                                    print(f"  Expert {expert_idx} gate_proj:")
+                                    print(f"    lora_A: {lora_A_weight}")
+                                    print(f"    lora_B: {lora_B_weight}")
+        except Exception as e:
+            import traceback
+            print(f"[DEBUG] Failed to print LoRA parameters: {e}")
+            traceback.print_exc()
+
         return ret
 
 class SFTJsonListDataset(TorchDataset):
@@ -397,12 +434,15 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
             "kv_a_proj_with_mqa",
             "kv_b_proj",
             "o_proj",
-            "mlp.gate_proj",
-            "mlp.up_proj",
-            "mlp.down_proj",
-            "shared_experts.gate_proj",
-            "shared_experts.up_proj",
-            "shared_experts.down_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            # "mlp.gate_proj",
+            # "mlp.up_proj",
+            # "mlp.down_proj",
+            # "shared_experts.gate_proj",
+            # "shared_experts.up_proj",
+            # "shared_experts.down_proj",
         ],
         r=8,
         lora_alpha=32,
@@ -410,7 +450,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    
+    print(model)
     train_dataset = SFTJsonListDataset(sft_data_path, tokenizer, max_len=512)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
@@ -431,12 +471,13 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
     debug_path = os.path.join(save_adapter_path, "model_infra_debug.json")
     with open(debug_path, "w", encoding="utf-8") as f:
         json.dump({"model": str(model)}, f, ensure_ascii=False, indent=2)
-    
-    # output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"))
-    # loss = output.logits.mean()
+
+    output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"), use_cache=False)
+    loss = output.logits.mean()
         
-    # dot = make_dot(loss, params=dict(model.named_parameters()))
-    # dot.render("KT_compute_cpuinfer_moe_model_graph", format="svg")
+    dot = make_dot(loss, params=dict(model.named_parameters()))
+    dot.render("KT_compute_route_moe_model_graph", format="svg")
+    print(xx)
     
     trainer = KTrainer(
         model=model,

@@ -1170,14 +1170,20 @@ PYBIND11_MODULE(cpuinfer_ext, m) {
                          intptr_t gate_lora_A, intptr_t gate_lora_B,
                          intptr_t up_lora_A, intptr_t up_lora_B,
                          intptr_t down_lora_A, intptr_t down_lora_B,
-                         int lora_rank, float lora_scaling) {
+                         int lora_rank, float lora_scaling,
+                         intptr_t grad_gate_lora_A, intptr_t grad_gate_lora_B,
+                         intptr_t grad_up_lora_A, intptr_t grad_up_lora_B,
+                         intptr_t grad_down_lora_A, intptr_t grad_down_lora_B) {
             return SFT_ROUTE_MOEConfig(expert_num, routed_expert_num, hidden_size,
                                        intermediate_size, max_len,
                                        (void *)gate_proj_base, (void *)up_proj_base, (void *)down_proj_base,
                                        (void *)gate_lora_A, (void *)gate_lora_B,
                                        (void *)up_lora_A, (void *)up_lora_B,
                                        (void *)down_lora_A, (void *)down_lora_B,
-                                       lora_rank, lora_scaling);
+                                       lora_rank, lora_scaling,
+                                       (void *)grad_gate_lora_A, (void *)grad_gate_lora_B,
+                                       (void *)grad_up_lora_A, (void *)grad_up_lora_B,
+                                       (void *)grad_down_lora_A, (void *)grad_down_lora_B);
         }));
 
     py::class_<SFT_ROUTE_MOE<amx::GemmKernel224BF>>(sft_route_moe_module, "SFT_ROUTE_AMXBF16_MOE")
