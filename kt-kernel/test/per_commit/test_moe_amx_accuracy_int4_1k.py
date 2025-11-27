@@ -100,7 +100,7 @@ def test_moe_amx_int4_1k_accuracy():
         data=range(expert_num), device="cpu", dtype=torch.int64
     ).contiguous()
 
-    CPUInfer = kt_kernel_ext.CPUInfer(60)
+    CPUInfer = kt_kernel_ext.CPUInfer(90)
 
     with torch.inference_mode(mode=True):
         # Initialize MoE layers

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # coding=utf-8
-"""AMX MOE INT4 benchmark tests for KT-Kernel.
+"""AMX MOE INT4_1K benchmark tests for KT-Kernel.
 
-Benchmarks performance (bandwidth and FLOPS) of AMX-accelerated INT4 MOE operations.
+Benchmarks performance (bandwidth and FLOPS) of AMX-accelerated INT4_1K group quantization MOE operations.
 """
 
 import os
@@ -40,20 +40,15 @@ layer_num = 2
 qlen = 2048
 warm_up_iter = 1000
 test_iter = 2000
+k_group_size = 64
 
 # Worker configuration
 worker_config_dict = {
     "subpool_count": 2,
     "subpool_numa_map": [0, 1],
-<<<<<<< HEAD
-    "subpool_thread_count": [30, 30],
-}
-CPUINFER_PARAM = 60
-=======
     "subpool_thread_count": [45, 45],
 }
 CPUINFER_PARAM = 90
->>>>>>> main
 
 
 def get_git_commit():
@@ -138,17 +133,17 @@ def record_results(result, filename):
 
 
 @pytest.mark.cpu
-def test_moe_amx_int4_benchmark():
-    """Benchmark AMX INT4 MOE performance."""
+def test_moe_amx_int4_1k_benchmark():
+    """Benchmark AMX INT4_1K MOE performance."""
     if not HAS_DEPS:
         pytest.skip(f"Dependencies not available: {import_error}")
 
-    quant_mode = "int4"
+    quant_mode = "int4_1k"
     bytes_per_elem = 0.5
 
     # Setup output file
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    json_path = os.path.join(script_dir, "bench_moe_amx_int4.jsonl")
+    json_path = os.path.join(script_dir, "bench_moe_amx_int4_1k.jsonl")
 
     with torch.inference_mode():
         # Initialize CPUInfer with worker config
@@ -183,7 +178,12 @@ def test_moe_amx_int4_benchmark():
             config.down_proj = down_proj.data_ptr()
             config.pool = CPUInfer.backend_
 
-            moe = kt_kernel_ext.moe.AMXInt4_MOE(config)
+            # Configure INT4_1K quantization settings
+            config.quant_config.bits = 4
+            config.quant_config.group_size = k_group_size
+            config.quant_config.zero_point = True
+
+            moe = kt_kernel_ext.moe.AMXInt4_1KGroup_MOE(config)
             CPUInfer.submit(moe.load_weights_task())
             CPUInfer.sync()
             moes.append(moe)
@@ -286,6 +286,7 @@ def test_moe_amx_int4_benchmark():
                 "qlen": qlen,
                 "warm_up_iter": warm_up_iter,
                 "test_iter": test_iter,
+                "k_group_size": k_group_size,
                 "CPUInfer_parameter": CPUINFER_PARAM,
             },
         }
@@ -300,13 +301,13 @@ def run_all_tests():
     """Run all tests in this file (for standalone execution)."""
     if not HAS_DEPS:
         print(f"⚠ Dependencies not available: {import_error}")
-        print("Skipping AMX MOE INT4 benchmark tests")
+        print("Skipping AMX MOE INT4_1K benchmark tests")
         return
 
     try:
-        print("Running AMX MOE INT4 benchmark test...")
-        test_moe_amx_int4_benchmark()
-        print("✓ AMX MOE INT4 benchmark test passed")
+        print("Running AMX MOE INT4_1K benchmark test...")
+        test_moe_amx_int4_1k_benchmark()
+        print("✓ AMX MOE INT4_1K benchmark test passed")
         print("\n✓ All tests passed!")
     except Exception as e:
         print(f"\n✗ Test failed: {e}")
