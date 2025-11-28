@@ -498,7 +498,6 @@ class KSFTExpertsCPU(torch.autograd.Function):
             )
             self.moe = SFT_MOE(moe_config)
         elif self.backend == "AMXBF16":
-            print("GO INTO AMXBF16!!")
             from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXBF16_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
@@ -517,7 +516,6 @@ class KSFTExpertsCPU(torch.autograd.Function):
             self.cpu_infer.submit(self.moe.load_weights())
             self.cpu_infer.sync()
         elif self.backend == "AMXInt8":
-            print("GO INTO AMXInt8!!")
             from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXInt8_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
@@ -1385,43 +1383,27 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
         Lazy LoRA initialization - called on first forward pass.
         Detects LoRA and replaces the legacy MOE operator with SFT_ROUTE_MOE if LoRA is found.
         """
-        print(f"[{instance.key}] === _initialize_lora() called (layer_idx={layer_idx}) ===")
-        print(f"[{instance.key}] orig_module type: {type(instance.orig_module)}")
-        print(f"[{instance.key}] orig_module is None: {instance.orig_module is None}")
-
         has_lora = False
         lora_rank = 0
         lora_scaling = 1.0
 
         if instance.orig_module is not None:
-            # NO try-except - let errors surface!
-            print(f"[{instance.key}] orig_module is ModuleList: {isinstance(instance.orig_module, nn.ModuleList)}")
-
             if isinstance(instance.orig_module, nn.ModuleList) and len(instance.orig_module) > 0:
-                print(f"[{instance.key}] orig_module length: {len(instance.orig_module)}")
                 experts_list = instance.orig_module
 
-                # ✅ Move all experts to CPU for AMX compatibility
-                print(f"[{instance.key}] Moving {len(experts_list)} experts to CPU for AMX compatibility...")
+                # Move all experts to CPU for AMX compatibility
                 for expert in experts_list:
                     expert.to('cpu')
-                print(f"[{instance.key}] All experts now on CPU")
 
                 first_expert = experts_list[0]
 
-                print(f"[{instance.key}] first_expert type: {type(first_expert)}")
-                print(f"[{instance.key}] first_expert has gate_proj: {hasattr(first_expert, 'gate_proj')}")
-
                 if hasattr(first_expert, 'gate_proj'):
                     gate_proj = first_expert.gate_proj
-                    print(f"[{instance.key}] gate_proj type: {type(gate_proj)}")
-                    print(f"[{instance.key}] gate_proj has lora_A: {hasattr(gate_proj, 'lora_A')}")
-                    print(f"[{instance.key}] gate_proj has lora_B: {hasattr(gate_proj, 'lora_B')}")
 
                     if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
-                        print(f"[{instance.key}] ✅ LoRA detected!")
-                        print(f"[{instance.key}] lora_A keys: {gate_proj.lora_A.keys()}")
-                        print(f"[{instance.key}] lora_B keys: {gate_proj.lora_B.keys()}")
+                        # TODO: Optional debug output - can be removed if not needed
+                        print(f"[{instance.key}] LoRA adapters detected in gate_proj")
+                        print(f"  LoRA keys: {gate_proj.lora_A.keys()}")
 
                         has_lora = True
                         lora_rank = gate_proj.lora_A['default'].weight.shape[0]
@@ -1432,20 +1414,11 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                             lora_alpha = instance.config.lora_alpha
                         lora_scaling = float(lora_alpha) / float(lora_rank)
 
-                        print(f"[{instance.key}] LoRA detected on first forward: rank={lora_rank}, alpha={lora_alpha}, scaling={lora_scaling}")
-                    else:
-                        print(f"[{instance.key}] ❌ gate_proj does NOT have lora_A/lora_B")
-                else:
-                    print(f"[{instance.key}] ❌ first_expert does NOT have gate_proj")
-            else:
-                print(f"[{instance.key}] ❌ orig_module is NOT ModuleList or is empty")
-        else:
-            print(f"[{instance.key}] ❌ orig_module is None")
+                        # TODO: Optional debug output - can be removed if not needed
+                        print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}, scaling: {lora_scaling:.2f}")
 
         # Extract LoRA weights if available
         if has_lora:
-            print(f"[{instance.key}] === Extracting LoRA weights ===")
-            # NO try-except - let errors surface!
             experts_list = instance.orig_module
             gate_lora_A_list = []
             gate_lora_B_list = []
@@ -1455,7 +1428,6 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
             down_lora_B_list = []
 
             for i, expert in enumerate(experts_list):
-                print(f"[{instance.key}] Extracting LoRA from expert {i}...")
                 # Do NOT use .detach() - we need gradient flow!
                 gate_lora_A_list.append(expert.gate_proj.lora_A['default'].weight)
                 gate_lora_B_list.append(expert.gate_proj.lora_B['default'].weight)
@@ -1464,16 +1436,15 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 down_lora_A_list.append(expert.down_proj.lora_A['default'].weight)
                 down_lora_B_list.append(expert.down_proj.lora_B['default'].weight)
 
+                # TODO: Optional debug output - can be removed if not needed
                 if i < 3:  # Print first 3 experts
-                    print(f"[{instance.key}]   Expert {i} gate_lora_A shape: {gate_lora_A_list[-1].shape}")
-                    print(f"[{instance.key}]   Expert {i} gate_lora_B shape: {gate_lora_B_list[-1].shape}")
+                    print(f"  Expert {i}: gate_lora_A {gate_lora_A_list[-1].shape}, gate_lora_B {gate_lora_B_list[-1].shape}")
 
             # Save reference to expert list
             instance.experts_list = experts_list
 
             # Create buffer tensors (will be updated before each forward)
             # NOTE: No need for .cpu() since experts are already on CPU (moved above)
-            print(f"[{instance.key}] Stacking LoRA weights into buffers...")
             instance.gate_lora_A = torch.stack(gate_lora_A_list, dim=0).contiguous()
             instance.gate_lora_B = torch.stack(gate_lora_B_list, dim=0).contiguous()
             instance.up_lora_A = torch.stack(up_lora_A_list, dim=0).contiguous()
@@ -1481,7 +1452,8 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
             instance.down_lora_A = torch.stack(down_lora_A_list, dim=0).contiguous()
             instance.down_lora_B = torch.stack(down_lora_B_list, dim=0).contiguous()
 
-            print(f"[{instance.key}] LoRA weights extracted: {len(experts_list)} experts")
+            # TODO: Optional debug output - can be removed if not needed
+            print(f"[{instance.key}] LoRA weights stacked:")
             print(f"  gate_lora_A: {instance.gate_lora_A.shape}, dtype={instance.gate_lora_A.dtype}, device={instance.gate_lora_A.device}")
             print(f"  gate_lora_B: {instance.gate_lora_B.shape}, dtype={instance.gate_lora_B.dtype}, device={instance.gate_lora_B.device}")
             print(f"  up_lora_A: {instance.up_lora_A.shape}, dtype={instance.up_lora_A.dtype}, device={instance.up_lora_A.device}")
@@ -1490,7 +1462,6 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
             print(f"  down_lora_B: {instance.down_lora_B.shape}, dtype={instance.down_lora_B.dtype}, device={instance.down_lora_B.device}")
 
             # Initialize gradient buffers (CPU, same dtype as weights)
-            print(f"[{instance.key}] Initializing LoRA gradient buffers...")
             instance.grad_gate_lora_A = torch.zeros_like(instance.gate_lora_A).contiguous()
             instance.grad_gate_lora_B = torch.zeros_like(instance.gate_lora_B).contiguous()
             instance.grad_up_lora_A = torch.zeros_like(instance.up_lora_A).contiguous()
@@ -1503,24 +1474,10 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                                      up_lora_B_list, down_lora_A_list, down_lora_B_list]
 
             # Replace the legacy MOE operator with SFT_ROUTE_MOE
-            print(f"[{instance.key}] === Replacing MOE operator ===")
             n_routed_experts = instance.n_routed_experts
             max_len = max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size
 
             if instance.backend == "AMXInt8":
-                print(f"[{instance.key}] Creating SFT_ROUTE_AMXInt8_MOE config...")
-                print(f"[{instance.key}] Config parameters:")
-                print(f"  expert_num (n_routed_experts): {n_routed_experts}")
-                print(f"  routed_expert_num (num_experts_per_tok): {instance.config.num_experts_per_tok}")
-                print(f"  hidden_size: {instance.config.hidden_size}")
-                print(f"  moe_intermediate_size: {instance.config.moe_intermediate_size}")
-                print(f"  max_len: {max_len}")
-                print(f"  gate_ptr: {hex(instance.gate_ptr) if instance.gate_ptr else 'NULL'}")
-                print(f"  gate has self.gate: {hasattr(instance, 'gate') and instance.gate is not None}")
-                if hasattr(instance, 'gate') and instance.gate is not None:
-                    print(f"  self.gate shape: {instance.gate.shape}, dtype: {instance.gate.dtype}, device: {instance.gate.device}")
-                print(f"  lora_rank: {lora_rank}")
-                print(f"  lora_scaling: {lora_scaling}")
                 from cpuinfer_ext.sft_route_moe import SFT_ROUTE_MOEConfig, SFT_ROUTE_AMXInt8_MOE
                 moe_config = SFT_ROUTE_MOEConfig(
                     n_routed_experts,
@@ -1546,15 +1503,10 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                     instance.grad_down_lora_A.data_ptr(),
                     instance.grad_down_lora_B.data_ptr()
                 )
-                print(f"[{instance.key}] Config created successfully")
-                print(f"[{instance.key}] Creating SFT_ROUTE_AMXInt8_MOE operator...")
                 instance.moe = SFT_ROUTE_AMXInt8_MOE(moe_config)
-                print(f"[{instance.key}] Loading weights into new operator...")
                 instance.cpu_infer.submit(instance.moe.load_weights())
                 instance.cpu_infer.sync()
-                print(f"[{instance.key}] ✅ SFT_ROUTE_AMXInt8_MOE ready!")
             elif instance.backend == "AMXBF16":
-                print(f"[{instance.key}] Creating SFT_ROUTE_AMXBF16_MOE...")
                 from cpuinfer_ext.sft_route_moe import SFT_ROUTE_MOEConfig, SFT_ROUTE_AMXBF16_MOE
                 moe_config = SFT_ROUTE_MOEConfig(
                     n_routed_experts,
@@ -1583,7 +1535,6 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 instance.moe = SFT_ROUTE_AMXBF16_MOE(moe_config)
                 instance.cpu_infer.submit(instance.moe.load_weights())
                 instance.cpu_infer.sync()
-                print(f"[{instance.key}] ✅ SFT_ROUTE_AMXBF16_MOE ready!")
 
         # Update instance map
         KSFTRouteExpertsCPU._instance_map[layer_idx]['lora_initialized'] = True
@@ -1603,9 +1554,6 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
             KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_up_lora_B'] = instance.grad_up_lora_B
             KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_down_lora_A'] = instance.grad_down_lora_A
             KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_down_lora_B'] = instance.grad_down_lora_B
-            print(f"[{instance.key}] LoRA initialization complete!")
-        else:
-            print(f"[{instance.key}] No LoRA detected, continuing with legacy operator")
 
 
     @staticmethod
@@ -1614,7 +1562,6 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
         if layer_idx in KSFTRouteExpertsCPU._instance_map:
             instance_info = KSFTRouteExpertsCPU._instance_map[layer_idx]
             if not instance_info['lora_initialized']:
-                print(f"[Layer {layer_idx}] === First forward, initializing LoRA... ===")
                 instance = instance_info['instance']
                 KSFTRouteExpertsCPU._initialize_lora(layer_idx, instance)
                 # Update moe and cpu_infer references (might have been replaced)

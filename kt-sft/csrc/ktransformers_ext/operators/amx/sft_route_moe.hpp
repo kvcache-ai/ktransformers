@@ -219,13 +219,6 @@ private:
 
 public:
   SFT_ROUTE_MOE(SFT_ROUTE_MOEConfig config) {
-    printf("\n[DEBUG SFT_ROUTE_MOE Constructor] ==== Starting construction ====\n");
-    printf("  this=%p\n", (void*)this);
-    printf("  expert_num=%d, routed_expert_num=%d\n", config.expert_num, config.routed_expert_num);
-    printf("  hidden_size=%d, intermediate_size=%d, max_len=%d\n",
-           config.hidden_size, config.intermediate_size, config.max_len);
-    printf("  lora_rank=%d, lora_scaling=%.4f\n\n", config.lora_rank, config.lora_scaling);
-
     config_ = config;
     gate_proj_base_ = config_.gate_proj_base;
     up_proj_base_ = config_.up_proj_base;
@@ -243,20 +236,15 @@ public:
     // multiple SFT_ROUTE_MOE objects (different layers) exist simultaneously
     // and cannot share the same memory space.
 
-    printf("[DEBUG Constructor] Allocating buffers with std::aligned_alloc...\n");
-
     // Helper lambda to allocate and track buffers
     auto alloc_buffer = [this](size_t size, const char* name) -> void* {
       // Align size to 64 bytes
       size_t aligned_size = (size + 63) & ~63ULL;
       void* ptr = std::aligned_alloc(64, aligned_size);
       if (!ptr) {
-        printf("[ERROR] Failed to allocate %s (%zu bytes)\n", name, aligned_size);
         throw std::bad_alloc();
       }
       allocated_buffers_.push_back(ptr);
-      printf("  Allocated %s: %p (%zu bytes, %.2f MB)\n",
-             name, ptr, aligned_size, aligned_size / 1024.0 / 1024.0);
       return ptr;
     };
 
@@ -337,7 +325,6 @@ public:
     std::vector<void *> down_t_ba_ptr(config_.expert_num);
     std::vector<void *> down_t_bc_ptr(config_.expert_num);
 
-    printf("[DEBUG Constructor] Allocating AMX buffers for %d experts...\n", config_.expert_num);
     for (int i = 0; i < config_.expert_num; i++) {
       // Forward pass buffers
       gate_up_ba_ptr[i] = alloc_buffer(
@@ -377,27 +364,7 @@ public:
           "down_t_bc");
     }
 
-    printf("[DEBUG Constructor] All memory allocated successfully\n");
-    printf("  Total buffers allocated: %zu\n\n", allocated_buffers_.size());
-
-    // Verify critical pointers after allocation
-    std::cout << "[DEBUG Constructor] Verifying allocated pointers:" << std::endl;
-    std::cout << "  gate_proj_merged_: " << (void*)gate_proj_merged_ << " (alignment: " << ((uintptr_t)gate_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "  up_proj_merged_: " << (void*)up_proj_merged_ << " (alignment: " << ((uintptr_t)up_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "  down_proj_merged_: " << (void*)down_proj_merged_ << " (alignment: " << ((uintptr_t)down_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "  gate_proj_t_: " << (void*)gate_proj_t_ << " (alignment: " << ((uintptr_t)gate_proj_t_ % 64) << ")" << std::endl;
-    std::cout << "  up_proj_t_: " << (void*)up_proj_t_ << " (alignment: " << ((uintptr_t)up_proj_t_ % 64) << ")" << std::endl;
-    std::cout << "  down_proj_t_: " << (void*)down_proj_t_ << " (alignment: " << ((uintptr_t)down_proj_t_ % 64) << ")" << std::endl;
-
-    // Verify sizes
-    size_t gate_up_size = config_.expert_num * config_.intermediate_size * config_.hidden_size * sizeof(ggml_bf16_t);
-    size_t down_size = config_.expert_num * config_.hidden_size * config_.intermediate_size * sizeof(ggml_bf16_t);
-    std::cout << "  Expected buffer sizes:" << std::endl;
-    std::cout << "    gate/up merged & transposed: " << (gate_up_size / 1024 / 1024) << " MB each" << std::endl;
-    std::cout << "    down merged & transposed: " << (down_size / 1024 / 1024) << " MB each" << std::endl;
-
     // Initialize metadata structures
-    std::cout << "[DEBUG Constructor] Initializing metadata structures..." << std::endl;
     m_local_pos_.resize(config_.max_len);
     for (int i = 0; i < config_.max_len; i++) {
       m_local_pos_[i].resize(config_.routed_expert_num);
@@ -509,26 +476,17 @@ public:
   }
 
   ~SFT_ROUTE_MOE() {
-    printf("[DEBUG Destructor] Freeing %zu allocated buffers for object %p\n",
-           allocated_buffers_.size(), (void*)this);
     for (void* ptr : allocated_buffers_) {
       if (ptr) {
         free(ptr);
       }
     }
-    printf("[DEBUG Destructor] All buffers freed successfully\n");
   }
 
   /**
    * Transpose expert weights
    */
   void transpose_expert(const void* src, void* dst, int R, int C, Backend* backend) {
-    // Debug: Print transpose parameters (OUTSIDE lambda to avoid thread safety issues)
-    std::cout << "[DEBUG transpose_expert] Transposing " << config_.expert_num << " experts, R=" << R << ", C=" << C << std::endl;
-    std::cout << "  Total elements per expert: " << (R * C) << std::endl;
-    std::cout << "  Total elements all experts: " << (config_.expert_num * R * C) << std::endl;
-    std::cout << "  Buffer size: " << (config_.expert_num * R * C * sizeof(ggml_bf16_t) / 1024 / 1024) << " MB" << std::endl;
-
     backend->do_work_stealing_job(
         config_.expert_num, nullptr,
         [&](int expert_idx) {
@@ -547,14 +505,12 @@ public:
           }
         },
         nullptr);
-    std::cout << "[DEBUG transpose_expert] Completed transpose for all experts" << std::endl;
   }
 
   /**
    * Merge LoRA adapters with base weights: W = W_base + scaling * B @ A
    */
   void merge_lora_weights(Backend *backend) {
-    std::cout << "[DEBUG merge_lora_weights] Starting LoRA weight merging for " << config_.expert_num << " experts..." << std::endl;
     backend->do_work_stealing_job(
         config_.expert_num, nullptr,
         [&](int expert_idx) {
@@ -625,58 +581,19 @@ public:
           }
         },
         nullptr);
-    std::cout << "[DEBUG merge_lora_weights] Completed LoRA weight merging for all experts" << std::endl;
   }
 
   /**
    * Load and prepare weights for inference
    */
   void load_weights(Backend *backend) {
-    // Debug: Validate configuration parameters
-    std::cout << "[DEBUG load_weights] Starting weight loading..." << std::endl;
-    std::cout << "  Config parameters:" << std::endl;
-    std::cout << "    expert_num: " << config_.expert_num << std::endl;
-    std::cout << "    hidden_size: " << config_.hidden_size << std::endl;
-    std::cout << "    intermediate_size: " << config_.intermediate_size << std::endl;
-    std::cout << "    lora_rank: " << config_.lora_rank << std::endl;
-    std::cout << "    max_len: " << config_.max_len << std::endl;
-    std::cout << "    lora_scaling: " << config_.lora_scaling << std::endl;
-
-    // Debug: Check memory pointers and alignment
-    std::cout << "  Memory pointers:" << std::endl;
-    std::cout << "    gate_proj_merged_: " << (void*)gate_proj_merged_
-              << " (alignment: " << ((uintptr_t)gate_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "    up_proj_merged_: " << (void*)up_proj_merged_
-              << " (alignment: " << ((uintptr_t)up_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "    down_proj_merged_: " << (void*)down_proj_merged_
-              << " (alignment: " << ((uintptr_t)down_proj_merged_ % 64) << ")" << std::endl;
-    std::cout << "    gate_proj_base_: " << (void*)gate_proj_base_ << std::endl;
-    std::cout << "    gate_lora_A_: " << (void*)gate_lora_A_ << std::endl;
-    std::cout << "    gate_lora_B_: " << (void*)gate_lora_B_ << std::endl;
-
     // Merge LoRA with base weights
-    std::cout << "[DEBUG load_weights] Starting merge_lora_weights..." << std::endl;
     merge_lora_weights(backend);
-    std::cout << "[DEBUG load_weights] Finished merge_lora_weights" << std::endl;
 
     // Transpose merged weights for backward pass
-    std::cout << "[DEBUG load_weights] Starting transpose_expert for gate_proj..." << std::endl;
-    std::cout << "  src: " << (void*)gate_proj_merged_ << ", dst: " << (void*)gate_proj_t_
-              << ", R=" << config_.intermediate_size << ", C=" << config_.hidden_size << std::endl;
     transpose_expert(gate_proj_merged_, gate_proj_t_, config_.intermediate_size, config_.hidden_size, backend);
-    std::cout << "[DEBUG load_weights] Finished transpose_expert for gate_proj" << std::endl;
-
-    std::cout << "[DEBUG load_weights] Starting transpose_expert for up_proj..." << std::endl;
-    std::cout << "  src: " << (void*)up_proj_merged_ << ", dst: " << (void*)up_proj_t_
-              << ", R=" << config_.intermediate_size << ", C=" << config_.hidden_size << std::endl;
     transpose_expert(up_proj_merged_, up_proj_t_, config_.intermediate_size, config_.hidden_size, backend);
-    std::cout << "[DEBUG load_weights] Finished transpose_expert for up_proj" << std::endl;
-
-    std::cout << "[DEBUG load_weights] Starting transpose_expert for down_proj..." << std::endl;
-    std::cout << "  src: " << (void*)down_proj_merged_ << ", dst: " << (void*)down_proj_t_
-              << ", R=" << config_.hidden_size << ", C=" << config_.intermediate_size << std::endl;
     transpose_expert(down_proj_merged_, down_proj_t_, config_.hidden_size, config_.intermediate_size, backend);
-    std::cout << "[DEBUG load_weights] Finished transpose_expert for down_proj" << std::endl;
 
     // Load weights into AMX buffers
     int nth = T::recommended_nth(config_.intermediate_size);
@@ -1086,27 +1003,12 @@ public:
       // Compute LoRA gradients for gate, up, and down projections
       // This section calculates gradients w.r.t. LoRA adapters
 
-      printf("[DEBUG backward] Starting LoRA gradient computation...\n");
-      printf("  lora_rank: %d, lora_scaling: %.2f\n", config_.lora_rank, config_.lora_scaling);
-      printf("  Activated experts: %d\n", activated_expert);
-
       backend->do_work_stealing_job(
           activated_expert, nullptr,
           [&](int task_id) {
             int expert_idx = m_expert_id_map_[task_id];
             int num_tokens = m_local_num_[expert_idx];
             if (num_tokens == 0) return;
-
-            if (expert_idx < 3) {  // Debug first 3 experts
-              printf("[DEBUG Expert %d] Processing %d tokens\n", expert_idx, num_tokens);
-              // Print first token's weight
-              if (num_tokens > 0) {
-                int tok_idx = m_local_token_indices_ptr_[expert_idx][0];
-                int exp_pos = m_local_expert_positions_ptr_[expert_idx][0];
-                float w = weights[tok_idx * k + exp_pos];
-                printf("  First token weight: %.4f (token_idx=%d, expert_pos=%d)\n", w, tok_idx, exp_pos);
-              }
-            }
 
             // Compute intermediate = silu(gate) * up for down_proj LoRA gradients
             ggml_bf16_t *intermediate = (ggml_bf16_t *)aligned_alloc(64, sizeof(ggml_bf16_t) * num_tokens * config_.intermediate_size);
@@ -1275,7 +1177,8 @@ public:
               free(lora_inter_down);
             }
 
-            // Print gradient statistics for first expert
+            // TODO: Optional debug output - can be removed if not needed
+            // Print gradient statistics for first expert to verify training
             if (expert_idx == 0) {
               float gate_A_sum = 0.0f, gate_A_max = 0.0f;
               for (int i = 0; i < config_.lora_rank * config_.hidden_size; i++) {
@@ -1290,9 +1193,6 @@ public:
             free(intermediate);
           },
           nullptr);
-
-      printf("[DEBUG backward] LoRA gradient computation completed\n");
-      printf("  Gradient buffers updated for all %d activated experts\n", activated_expert);
     }
     // ==================== End LoRA Gradient Computation ====================
 
