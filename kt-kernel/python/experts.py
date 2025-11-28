@@ -19,6 +19,7 @@ from .experts_base import BaseMoEWrapper, KExpertsCPUBuffer
 # Import backend implementations
 from .utils.amx import AMXMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
+from .utils.moe_kernel import GeneralMoEWrapper
 
 
 class KTMoEWrapper:
@@ -76,7 +77,7 @@ class KTMoEWrapper:
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
-            method: Backend method ("AMXINT4", "AMXINT8", "LLAMAFILE")
+            method: Backend method ("AMXINT4", "AMXINT8", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
 
         Returns:
             An instance of the appropriate backend implementation (e.g., AMXMoEWrapper)
@@ -86,6 +87,8 @@ class KTMoEWrapper:
             backend_cls = AMXMoEWrapper
         elif method == "LLAMAFILE":
             backend_cls = LlamafileMoEWrapper
+        elif method in ["MOE_INT4", "MOE_INT8"]:
+            backend_cls = GeneralMoEWrapper
         else:
             raise NotImplementedError(f"Unsupported method: {method}")
 
