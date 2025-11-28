@@ -472,12 +472,12 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
     with open(debug_path, "w", encoding="utf-8") as f:
         json.dump({"model": str(model)}, f, ensure_ascii=False, indent=2)
 
-    output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"), use_cache=False)
-    loss = output.logits.mean()
+    # output = model(input_ids=torch.tensor([[1,2,3]], dtype=torch.int32, device="cuda:0"), use_cache=False)
+    # loss = output.logits.mean()
         
-    dot = make_dot(loss, params=dict(model.named_parameters()))
-    dot.render("KT_compute_route_moe_model_graph", format="svg")
-    print(xx)
+    # dot = make_dot(loss, params=dict(model.named_parameters()))
+    # dot.render("KT_compute_route_moe_model_graph", format="svg")
+    # print(xx)
     
     trainer = KTrainer(
         model=model,
