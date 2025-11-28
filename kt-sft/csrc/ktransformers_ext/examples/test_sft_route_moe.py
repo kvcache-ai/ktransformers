@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # coding=utf-8
 '''
-Description  : Test script for routed_experts with LoRA fine-tuning
+Description  : Complete unit test for LoRA gradient computation in routed_experts
 Author       : KT-SFT Team
-Date         : 2025-01-25
-Version      : 1.0.0
+Date         : 2025-01-27
+Version      : 2.0.0
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 '''
 import os, sys
@@ -24,7 +24,6 @@ max_len = 1024  # Maximum sequence length
 n_routed_experts = 2  # Number of routed experts per token
 qlen = 128  # Sequence length for testing
 num_threads = 112  # Number of CPU threads
-validation_iter = 1  # Number of validation iterations
 LAYER_IDX = 0  # Layer index for debugging
 
 # LoRA configuration
@@ -36,7 +35,7 @@ dtype = torch.bfloat16
 gradtype = torch.bfloat16
 
 import shutil
-folder_path = "/home/lpl/kt-sft/debug_route_moe"
+folder_path = "/home/lpl/kt-sft/debug_route_moe_lora_grads"
 if os.path.exists(folder_path):
     shutil.rmtree(folder_path)
 os.makedirs(folder_path)
@@ -138,18 +137,60 @@ def moe_lora_torch(x, eid, w, mlp_experts):
     out = (out_restore * w.unsqueeze(-1)).sum(1)
     return out
 
+# ==================== Gradient Comparison Utility ====================
+def compare_gradients(grad_cpp, grad_ref, name, threshold=5e-2):
+    """Compare C++ and PyTorch gradients and return detailed statistics"""
+    if grad_ref is None:
+        print(f"  ❌ {name}: PyTorch gradient is None!")
+        return False
+
+    if grad_cpp is None:
+        print(f"  ❌ {name}: C++ gradient is None!")
+        return False
+
+    grad_cpp_f32 = grad_cpp.to(torch.float32)
+    grad_ref_f32 = grad_ref.to(torch.float32)
+
+    diff = (grad_cpp_f32 - grad_ref_f32).abs()
+    max_diff = diff.max().item()
+    mean_diff = diff.mean().item()
+    std_diff = diff.std().item()
+
+    # Relative error
+    ref_mean = grad_ref_f32.abs().mean().item()
+    rel_error = mean_diff / ref_mean if ref_mean > 1e-8 else mean_diff
+
+    # Value ranges
+    ref_min, ref_max = grad_ref_f32.min().item(), grad_ref_f32.max().item()
+    ref_mean_val = grad_ref_f32.mean().item()
+    cpp_min, cpp_max = grad_cpp_f32.min().item(), grad_cpp_f32.max().item()
+    cpp_mean_val = grad_cpp_f32.mean().item()
+
+    passed = rel_error < threshold
+
+    print(f"\n  {name}:")
+    print(f"    Shape: {grad_ref.shape}")
+    print(f"    PyTorch: range=[{ref_min:.6f}, {ref_max:.6f}], mean={ref_mean_val:.6f}")
+    print(f"    C++:     range=[{cpp_min:.6f}, {cpp_max:.6f}], mean={cpp_mean_val:.6f}")
+    print(f"    Diff:    mean={mean_diff:.6f}, max={max_diff:.6f}, std={std_diff:.6f}")
+    print(f"    Relative error: {rel_error:.3e} {'✅' if passed else '❌'}")
+
+    return passed
+
 # ==================== Main Test ====================
-def test_sft_route_moe():
-    print("=" * 80)
-    print("Testing SFT Routed Experts with LoRA Fine-tuning")
-    print("=" * 80)
+def test_sft_route_moe_lora_gradients():
+    print("=" * 100)
+    print("Complete Unit Test: SFT Routed Experts with LoRA Gradient Computation")
+    print("=" * 100)
     print(f"Configuration:")
     print(f"  Experts: {expert_num}, Routed per token: {n_routed_experts}")
     print(f"  Hidden: {hidden_size}, Intermediate: {intermediate_size}")
-    print(f"  Sequence length: {qlen}, LoRA rank: {lora_rank}")
-    print("=" * 80)
+    print(f"  Sequence length: {qlen}, LoRA rank: {lora_rank}, LoRA scaling: {lora_scaling}")
+    print("=" * 100)
 
     # ==================== Initialize Weights ====================
+    print("\n[Initializing Weights]")
+
     # Base weights (frozen during LoRA training)
     gate_proj_base = torch.randn(expert_num, intermediate_size, hidden_size,
                                  dtype=torch.bfloat16, requires_grad=False).contiguous()
@@ -157,20 +198,36 @@ def test_sft_route_moe():
     down_proj_base = torch.randn(expert_num, hidden_size, intermediate_size,
                                  dtype=torch.bfloat16, requires_grad=False).contiguous()
 
-    # LoRA adapters (trainable)
+    # LoRA adapters (trainable) - these will have gradients computed
     gate_lora_A = torch.randn(expert_num, lora_rank, hidden_size,
                              dtype=torch.bfloat16, requires_grad=True).contiguous()
     gate_lora_B = torch.randn(expert_num, intermediate_size, lora_rank,
                              dtype=torch.bfloat16, requires_grad=True).contiguous()
-    up_lora_A = torch.randn_like(gate_lora_A)
-    up_lora_B = torch.randn_like(gate_lora_B)
+    up_lora_A = torch.randn_like(gate_lora_A).requires_grad_(True)
+    up_lora_B = torch.randn_like(gate_lora_B).requires_grad_(True)
     down_lora_A = torch.randn(expert_num, lora_rank, intermediate_size,
                              dtype=torch.bfloat16, requires_grad=True).contiguous()
     down_lora_B = torch.randn(expert_num, hidden_size, lora_rank,
                              dtype=torch.bfloat16, requires_grad=True).contiguous()
 
+    print(f"  Base weights initialized (frozen)")
+    print(f"  LoRA adapters initialized (trainable, 6 parameter sets)")
+
+    # ==================== Initialize Gradient Buffers for C++ ====================
+    print("\n[Initializing C++ Gradient Buffers]")
+
+    grad_gate_lora_A_cpp = torch.zeros_like(gate_lora_A).contiguous()
+    grad_gate_lora_B_cpp = torch.zeros_like(gate_lora_B).contiguous()
+    grad_up_lora_A_cpp = torch.zeros_like(up_lora_A).contiguous()
+    grad_up_lora_B_cpp = torch.zeros_like(up_lora_B).contiguous()
+    grad_down_lora_A_cpp = torch.zeros_like(down_lora_A).contiguous()
+    grad_down_lora_B_cpp = torch.zeros_like(down_lora_B).contiguous()
+
+    print(f"  Gradient buffers created for 6 LoRA parameter sets")
+
     # ==================== Setup C++ MoE ====================
-    # Use the new SFT_ROUTE_MOE interface with separate base and LoRA weights
+    print("\n[Setting up C++ MoE Operator]")
+
     cfg = cpuinfer_ext.sft_route_moe.SFT_ROUTE_MOEConfig(
         expert_num, n_routed_experts,
         hidden_size, intermediate_size,
@@ -185,15 +242,25 @@ def test_sft_route_moe():
         down_lora_A.data_ptr(),
         down_lora_B.data_ptr(),
         lora_rank,
-        lora_scaling
+        lora_scaling,
+        grad_gate_lora_A_cpp.data_ptr(),
+        grad_gate_lora_B_cpp.data_ptr(),
+        grad_up_lora_A_cpp.data_ptr(),
+        grad_up_lora_B_cpp.data_ptr(),
+        grad_down_lora_A_cpp.data_ptr(),
+        grad_down_lora_B_cpp.data_ptr()
     )
-    moe_cpp = cpuinfer_ext.sft_route_moe.SFT_ROUTE_AMXInt8_MOE(cfg)
+    moe_cpp = cpuinfer_ext.sft_route_moe.SFT_ROUTE_AMXBF16_MOE(cfg)
 
     cpu_infer = cpuinfer_ext.CPUInfer(num_threads)
     cpu_infer.submit(moe_cpp.load_weights())
     cpu_infer.sync()
 
+    print(f"  SFT_ROUTE_AMXBF16_MOE created and weights loaded")
+
     # ==================== Setup PyTorch MoE ====================
+    print("\n[Setting up PyTorch Reference MoE]")
+
     mlp_experts = []
     for e in range(expert_num):
         mlp = LoRAMLP(
@@ -204,7 +271,12 @@ def test_sft_route_moe():
         )
         mlp_experts.append(mlp)
 
+    print(f"  {expert_num} LoRAMLP experts created")
+
     # ==================== Generate Test Data ====================
+    print("\n[Generating Test Data]")
+
+    torch.manual_seed(42)
     expert_ids = torch.stack(
         [torch.randperm(expert_num)[:n_routed_experts] for _ in range(qlen)]).contiguous()
     weights = torch.rand(qlen, n_routed_experts, dtype=torch.float32).contiguous()
@@ -213,14 +285,9 @@ def test_sft_route_moe():
                .detach().requires_grad_(True).contiguous()
     input_cpp = input_pt.detach().clone().requires_grad_(True).contiguous()
 
-    # Print input data statistics
-    print("\n[Input Data Statistics]")
-    print(f"  Expert IDs shape: {expert_ids.shape}")
-    print(f"  Expert IDs (first 3 tokens): {expert_ids[:3].tolist()}")
     expert_counts = torch.bincount(expert_ids.view(-1), minlength=expert_num)
     print(f"  Expert usage distribution: {expert_counts.tolist()}")
-    print(f"  Weights shape: {weights.shape}, range: [{weights.min():.4f}, {weights.max():.4f}], mean: {weights.mean():.4f}")
-    print(f"  Input shape: {input_pt.shape}, range: [{input_pt.min():.4f}, {input_pt.max():.4f}], mean: {input_pt.mean():.4f}")
+    print(f"  Input shape: {input_pt.shape}, range: [{input_pt.min():.4f}, {input_pt.max():.4f}]")
 
     # ==================== Forward Pass ====================
     print("\n[Forward Pass]")
@@ -241,48 +308,35 @@ def test_sft_route_moe():
     cpu_infer.sync()
     t3 = time.time()
 
-    # Compare results
+    # Compare forward results
     diff_fwd = (out_cpp.to(torch.float32) - out_ref.to(torch.float32)).abs()
     rel_fwd = diff_fwd.mean() / out_ref.abs().mean()
 
     flop_fwd = 6 * qlen * n_routed_experts * hidden_size * intermediate_size
     print(f"  PyTorch time: {t1-t0:.4f}s | TFLOPS: {flop_fwd/(t1-t0)/1e12:.2f}")
     print(f"  C++ AMX time: {t3-t2:.4f}s | TFLOPS: {flop_fwd/(t3-t2)/1e12:.2f}")
-    print(f"  Output shape: {out_ref.shape}")
-    print(f"  PyTorch output range: [{out_ref.min():.4f}, {out_ref.max():.4f}], mean: {out_ref.mean():.4f}")
-    print(f"  C++ output range: [{out_cpp.min():.4f}, {out_cpp.max():.4f}], mean: {out_cpp.mean():.4f}")
-    print(f"  Abs diff - mean: {diff_fwd.mean():.6f}, max: {diff_fwd.max():.6f}, std: {diff_fwd.std():.6f}")
-    print(f"  Relative error: {rel_fwd.item():.3e}")
-
-    if rel_fwd.item() < 5e-2:
-        print("  ✅ Forward pass matches!")
-        print(f"  Sample outputs (PyTorch) : {out_ref}")
-        print(f"  Sample outputs (C++)     : {out_cpp}")
-    else:
-        print("  ❌ Forward pass mismatch!")
-        print(f"  Sample outputs (PyTorch) : {out_ref}")
-        print(f"  Sample outputs (C++)     : {out_cpp}")
+    print(f"  Speedup: {(t1-t0)/(t3-t2):.2f}x")
+    print(f"  Relative error: {rel_fwd.item():.3e} {'✅' if rel_fwd.item() < 5e-2 else '❌'}")
 
     # ==================== Backward Pass ====================
-    print("\n[Backward Pass]")
+    print("\n[Backward Pass - Computing Gradients]")
 
     grad_out = torch.randn_like(out_ref, dtype=gradtype).contiguous()
     grad_out_cpp = grad_out.clone().contiguous()
     grad_in_cpp = torch.zeros_like(input_cpp, dtype=gradtype).contiguous()
 
-    print(f"  Grad output shape: {grad_out.shape}, range: [{grad_out.min():.4f}, {grad_out.max():.4f}], mean: {grad_out.mean():.4f}")
-
-    # PyTorch backward
+    # Zero out gradients for PyTorch
     for p in (gate_lora_A, gate_lora_B, up_lora_A, up_lora_B,
               down_lora_A, down_lora_B, input_pt):
         if p.grad is not None:
             p.grad.zero_()
 
+    # PyTorch backward
     t4 = time.time()
     out_ref.backward(grad_out, retain_graph=True)
     t5 = time.time()
 
-    # C++ backward
+    # C++ backward - also computes LoRA gradients
     t6 = time.time()
     cpu_infer.submit(moe_cpp.backward(
         qlen, n_routed_experts,
@@ -293,40 +347,67 @@ def test_sft_route_moe():
     cpu_infer.sync()
     t7 = time.time()
 
-    # Compare results
     flop_bwd = 18 * qlen * n_routed_experts * hidden_size * intermediate_size
-    gcpp = grad_in_cpp.to(torch.float32)
-    gref = input_pt.grad.to(torch.float32) if input_pt.grad is not None else torch.zeros_like(input_pt, dtype=torch.float32)
-
-    grad_diff = (gcpp - gref).abs()
-    rel_bwd_cpp = grad_diff.mean() / gref.abs().mean()
-
     print(f"  PyTorch time: {t5-t4:.4f}s | TFLOPS: {flop_bwd/(t5-t4)/1e12:.2f}")
     print(f"  C++ AMX time: {t7-t6:.4f}s | TFLOPS: {flop_bwd/(t7-t6)/1e12:.2f}")
-    print(f"  Grad input shape: {gref.shape}")
-    print(f"  PyTorch grad range: [{gref.min():.6f}, {gref.max():.6f}], mean: {gref.mean():.6f}")
-    print(f"  C++ grad range: [{gcpp.min():.6f}, {gcpp.max():.6f}], mean: {gcpp.mean():.6f}")
-    print(f"  Grad diff - mean: {grad_diff.mean():.6f}, max: {grad_diff.max():.6f}, std: {grad_diff.std():.6f}")
-    print(f"  Relative error: {rel_bwd_cpp.item():.3e}")
+    print(f"  Speedup: {(t5-t4)/(t7-t6):.2f}x")
 
-    if rel_bwd_cpp.item() < 5e-2:
-        print("  ✅ Backward pass matches!")
-        print(f"  Sample gradients (PyTorch) : {gref}")
-        print(f"  Sample gradients (C++)     : {gcpp}")
+    # ==================== Gradient Validation ====================
+    print("\n" + "=" * 100)
+    print("GRADIENT VALIDATION - Comparing All LoRA Gradients")
+    print("=" * 100)
+
+    results = {}
+
+    # Compare input gradients
+    results['input'] = compare_gradients(
+        grad_in_cpp, input_pt.grad, "Input Gradient (∂L/∂input)")
+
+    # Compare all 6 LoRA parameter gradients
+    results['gate_lora_A'] = compare_gradients(
+        grad_gate_lora_A_cpp, gate_lora_A.grad, "Gate LoRA A Gradient (∂L/∂gate_lora_A)")
+
+    results['gate_lora_B'] = compare_gradients(
+        grad_gate_lora_B_cpp, gate_lora_B.grad, "Gate LoRA B Gradient (∂L/∂gate_lora_B)")
+
+    results['up_lora_A'] = compare_gradients(
+        grad_up_lora_A_cpp, up_lora_A.grad, "Up LoRA A Gradient (∂L/∂up_lora_A)")
+
+    results['up_lora_B'] = compare_gradients(
+        grad_up_lora_B_cpp, up_lora_B.grad, "Up LoRA B Gradient (∂L/∂up_lora_B)")
+
+    results['down_lora_A'] = compare_gradients(
+        grad_down_lora_A_cpp, down_lora_A.grad, "Down LoRA A Gradient (∂L/∂down_lora_A)")
+
+    results['down_lora_B'] = compare_gradients(
+        grad_down_lora_B_cpp, down_lora_B.grad, "Down LoRA B Gradient (∂L/∂down_lora_B)")
+
+    # ==================== Final Summary ====================
+    print("\n" + "=" * 100)
+    print("FINAL TEST SUMMARY")
+    print("=" * 100)
+
+    all_passed = all(results.values()) and rel_fwd.item() < 5e-2
+
+    print(f"\nForward Pass:")
+    print(f"  Relative error: {rel_fwd.item():.3e} {'✅ PASSED' if rel_fwd.item() < 5e-2 else '❌ FAILED'}")
+    print(f"  Speedup: {(t1-t0)/(t3-t2):.2f}x")
+
+    print(f"\nBackward Pass (Gradients):")
+    for name, passed in results.items():
+        status = '✅ PASSED' if passed else '❌ FAILED'
+        print(f"  {name:20s}: {status}")
+
+    print(f"\n{'='*100}")
+    if all_passed:
+        print("🎉 ALL TESTS PASSED! LoRA gradient computation is working correctly!")
     else:
-        print("  ❌ Backward pass mismatch!")
-        print(f"  Sample gradients (PyTorch) : {gref}")
-        print(f"  Sample gradients (C++)     : {gcpp}")
+        print("❌ SOME TESTS FAILED! Please check the gradient computation implementation.")
+    print(f"{'='*100}\n")
 
-    # ==================== Summary ====================
-    print("\n" + "=" * 80)
-    print("Test Summary:")
-    print(f"  Forward error:  {rel_fwd.item():.3e} {'✅' if rel_fwd.item() < 5e-2 else '❌'}")
-    print(f"  Backward error: {rel_bwd_cpp.item():.3e} {'✅' if rel_bwd_cpp.item() < 5e-2 else '❌'}")
-    print(f"  Speedup (Forward):  {(t1-t0)/(t3-t2):.2f}x")
-    print(f"  Speedup (Backward): {(t5-t4)/(t7-t6):.2f}x")
-    print("=" * 80)
+    return all_passed
 
 if __name__ == "__main__":
     torch.manual_seed(42)
-    test_sft_route_moe()
+    success = test_sft_route_moe_lora_gradients()
+    sys.exit(0 if success else 1)
