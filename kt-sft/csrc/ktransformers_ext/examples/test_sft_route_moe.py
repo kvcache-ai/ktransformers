@@ -358,29 +358,37 @@ def test_sft_route_moe_lora_gradients():
     print("=" * 100)
 
     results = {}
+    gradient_tensors = {}
 
     # Compare input gradients
     results['input'] = compare_gradients(
         grad_in_cpp, input_pt.grad, "Input Gradient (∂L/∂input)")
+    gradient_tensors['input'] = (grad_in_cpp, input_pt.grad)
 
     # Compare all 6 LoRA parameter gradients
     results['gate_lora_A'] = compare_gradients(
         grad_gate_lora_A_cpp, gate_lora_A.grad, "Gate LoRA A Gradient (∂L/∂gate_lora_A)")
+    gradient_tensors['gate_lora_A'] = (grad_gate_lora_A_cpp, gate_lora_A.grad)
 
     results['gate_lora_B'] = compare_gradients(
         grad_gate_lora_B_cpp, gate_lora_B.grad, "Gate LoRA B Gradient (∂L/∂gate_lora_B)")
+    gradient_tensors['gate_lora_B'] = (grad_gate_lora_B_cpp, gate_lora_B.grad)
 
     results['up_lora_A'] = compare_gradients(
         grad_up_lora_A_cpp, up_lora_A.grad, "Up LoRA A Gradient (∂L/∂up_lora_A)")
+    gradient_tensors['up_lora_A'] = (grad_up_lora_A_cpp, up_lora_A.grad)
 
     results['up_lora_B'] = compare_gradients(
         grad_up_lora_B_cpp, up_lora_B.grad, "Up LoRA B Gradient (∂L/∂up_lora_B)")
+    gradient_tensors['up_lora_B'] = (grad_up_lora_B_cpp, up_lora_B.grad)
 
     results['down_lora_A'] = compare_gradients(
         grad_down_lora_A_cpp, down_lora_A.grad, "Down LoRA A Gradient (∂L/∂down_lora_A)")
+    gradient_tensors['down_lora_A'] = (grad_down_lora_A_cpp, down_lora_A.grad)
 
     results['down_lora_B'] = compare_gradients(
         grad_down_lora_B_cpp, down_lora_B.grad, "Down LoRA B Gradient (∂L/∂down_lora_B)")
+    gradient_tensors['down_lora_B'] = (grad_down_lora_B_cpp, down_lora_B.grad)
 
     # ==================== Final Summary ====================
     print("\n" + "=" * 100)
@@ -404,6 +412,34 @@ def test_sft_route_moe_lora_gradients():
     else:
         print("❌ SOME TESTS FAILED! Please check the gradient computation implementation.")
     print(f"{'='*100}\n")
+
+    # # ==================== Print All Gradient Tensors ====================
+    # print("\n" + "=" * 100)
+    # print("DETAILED GRADIENT TENSOR VALUES")
+    # print("=" * 100)
+
+    # for name, (grad_cpp, grad_ref) in gradient_tensors.items():
+    #     print(f"\n{'='*100}")
+    #     print(f"Gradient: {name}")
+    #     print(f"{'='*100}")
+
+    #     if grad_cpp is not None:
+    #         print(f"\nC++ Gradient ({name}):")
+    #         print(grad_cpp)
+    #     else:
+    #         print(f"\n❌ C++ Gradient ({name}): None")
+
+    #     if grad_ref is not None:
+    #         print(f"\nPyTorch Reference Gradient ({name}):")
+    #         print(grad_ref)
+    #     else:
+    #         print(f"\n❌ PyTorch Reference Gradient ({name}): None")
+
+    #     print(f"\n{'-'*100}")
+
+    # print("\n" + "=" * 100)
+    # print("END OF GRADIENT TENSOR PRINTOUT")
+    # print("=" * 100 + "\n")
 
     return all_passed
 

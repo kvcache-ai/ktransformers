@@ -321,49 +321,49 @@ class KTrainer(Trainer):
         if ret.device != self.args.device:
             ret = ret.to(self.args.device, non_blocking=True)
 
-        if os.environ.get("KT_DBG_STEP", "0") == "1" and not hasattr(self, "_kt_dbg_once"):
-            try:
-                print(f"[KT-DBG] args.device={self.args.device}  loss(before)={loss.device}  loss(return)={ret.device}")
-            except Exception:
-                pass
-            self._kt_dbg_once = True
+        # if os.environ.get("KT_DBG_STEP", "0") == "1" and not hasattr(self, "_kt_dbg_once"):
+        #     try:
+        #         print(f"[KT-DBG] args.device={self.args.device}  loss(before)={loss.device}  loss(return)={ret.device}")
+        #     except Exception:
+        #         pass
+        #     self._kt_dbg_once = True
 
-        # Debug: Print LoRA parameters for routed experts
-        try:
-            print(f"\n[DEBUG] Step {self.state.global_step} - Loss: {ret.item():.6f}")
+        # # Debug: Print LoRA parameters for routed experts
+        # try:
+        #     print(f"\n[DEBUG] Step {self.state.global_step} - Loss: {ret.item():.6f}")
 
-            # Access the base model: PeftModelForCausalLM -> LoraModel -> DeepseekV2ForCausalLM -> DeepseekV2Model
-            base_model = model
-            if hasattr(model, 'base_model'):
-                base_model = model.base_model
-            if hasattr(base_model, 'model'):
-                base_model = base_model.model
-            # DeepseekV2ForCausalLM has a .model attribute that contains DeepseekV2Model with .layers
-            if hasattr(base_model, 'model'):
-                base_model = base_model.model
+        #     # Access the base model: PeftModelForCausalLM -> LoraModel -> DeepseekV2ForCausalLM -> DeepseekV2Model
+        #     base_model = model
+        #     if hasattr(model, 'base_model'):
+        #         base_model = model.base_model
+        #     if hasattr(base_model, 'model'):
+        #         base_model = base_model.model
+        #     # DeepseekV2ForCausalLM has a .model attribute that contains DeepseekV2Model with .layers
+        #     if hasattr(base_model, 'model'):
+        #         base_model = base_model.model
 
-            # Print LoRA A and B for first 3 routed experts in layer 1
-            layer_idx = 1
-            if hasattr(base_model, 'layers') and len(base_model.layers) > layer_idx:
-                layer = base_model.layers[layer_idx]
-                if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
-                    experts_wrapper = layer.mlp.experts
-                    if hasattr(experts_wrapper, 'orig_module'):
-                        experts_list = experts_wrapper.orig_module
-                        for expert_idx in range(min(3, len(experts_list))):
-                            expert = experts_list[expert_idx]
-                            if hasattr(expert, 'gate_proj'):
-                                gate_proj = expert.gate_proj
-                                if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
-                                    lora_A_weight = gate_proj.lora_A['default'].weight
-                                    lora_B_weight = gate_proj.lora_B['default'].weight
-                                    print(f"  Expert {expert_idx} gate_proj:")
-                                    print(f"    lora_A: {lora_A_weight}")
-                                    print(f"    lora_B: {lora_B_weight}")
-        except Exception as e:
-            import traceback
-            print(f"[DEBUG] Failed to print LoRA parameters: {e}")
-            traceback.print_exc()
+        #     # Print LoRA A and B for first 3 routed experts in layer 1
+        #     layer_idx = 1
+        #     if hasattr(base_model, 'layers') and len(base_model.layers) > layer_idx:
+        #         layer = base_model.layers[layer_idx]
+        #         if hasattr(layer, 'mlp') and hasattr(layer.mlp, 'experts'):
+        #             experts_wrapper = layer.mlp.experts
+        #             if hasattr(experts_wrapper, 'orig_module'):
+        #                 experts_list = experts_wrapper.orig_module
+        #                 for expert_idx in range(min(3, len(experts_list))):
+        #                     expert = experts_list[expert_idx]
+        #                     if hasattr(expert, 'gate_proj'):
+        #                         gate_proj = expert.gate_proj
+        #                         if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
+        #                             lora_A_weight = gate_proj.lora_A['default'].weight
+        #                             lora_B_weight = gate_proj.lora_B['default'].weight
+        #                             print(f"  Expert {expert_idx} gate_proj:")
+        #                             print(f"    lora_A: {lora_A_weight}")
+        #                             print(f"    lora_B: {lora_B_weight}")
+        # except Exception as e:
+        #     import traceback
+        #     print(f"[DEBUG] Failed to print LoRA parameters: {e}")
+        #     traceback.print_exc()
 
         return ret
 
@@ -440,7 +440,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
             # "mlp.gate_proj",
             # "mlp.up_proj",
             # "mlp.down_proj",
-            # "shared_experts.gate_proj",
+            # "shared_experts.gate_proj",l
             # "shared_experts.up_proj",
             # "shared_experts.down_proj",
         ],
@@ -462,7 +462,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
         # max_steps=30, # TODO: FOR TEST, will override any value given in num_train_epochs
         learning_rate=1e-4,
         fp16=False,
-        logging_steps=10,
+        logging_steps=1,
         save_steps=200,
         dataloader_drop_last=True,
         ddp_find_unused_parameters=False,
@@ -486,6 +486,7 @@ def lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path):
         train_dataset=train_dataset,
         data_collator=data_collator,
     )
+    trainer.model_accepts_loss_kwargs = False
     model.config.use_cache = False
     # model.gradient_checkpointing_enable()
     # if hasattr(model, "enable_input_require_grads"):

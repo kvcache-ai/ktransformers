@@ -1348,12 +1348,11 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 (self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16
             )
 
-        # NOTE: DO NOT set these to None! The pointers (gate_ptr, up_ptr, down_ptr)
-        # still reference these tensors. If LoRA is initialized later in _initialize_lora(),
-        # we need these tensors to stay alive to avoid segfault.
-        # self.gate = None
-        # self.up = None
-        # self.down = None
+        # NOTE: Base weights (self.gate, self.up, self.down) must stay alive here because
+        # the pointers (gate_ptr, up_ptr, down_ptr) reference them.
+        # If LoRA is detected in _initialize_lora(), the weights will be released there
+        # AFTER C++ has copied them to merged buffers in load_weights()->merge_lora_weights().
+        # If no LoRA (legacy SFT_MOE path), base weights must remain for inference.
 
     def submit_for_one_decode(self, input_tensor, expert_ids, weights):
         KSFTRouteExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
@@ -1401,20 +1400,27 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                     gate_proj = first_expert.gate_proj
 
                     if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
-                        # TODO: Optional debug output - can be removed if not needed
-                        print(f"[{instance.key}] LoRA adapters detected in gate_proj")
-                        print(f"  LoRA keys: {gate_proj.lora_A.keys()}")
+                        # # TODO: Optional debug output - can be removed if not needed
+                        # print(f"[{instance.key}] LoRA adapters detected in gate_proj")
+                        # print(f"  LoRA keys: {gate_proj.lora_A.keys()}")
 
                         has_lora = True
                         lora_rank = gate_proj.lora_A['default'].weight.shape[0]
 
-                        # Get lora_alpha from config if available
-                        lora_alpha = 16  # default
-                        if hasattr(instance.config, 'lora_alpha'):
-                            lora_alpha = instance.config.lora_alpha
-                        lora_scaling = float(lora_alpha) / float(lora_rank)
+                        # Get lora_scaling directly from PEFT layer (preferred)
+                        # This ensures consistency with training configuration
+                        if hasattr(gate_proj, 'scaling') and 'default' in gate_proj.scaling:
+                            lora_scaling = gate_proj.scaling['default']
+                            lora_alpha = gate_proj.lora_alpha.get('default', 16)
+                            print(f"  Using PEFT layer scaling: alpha={lora_alpha}, scaling={lora_scaling}")
+                        else:
+                            # Fallback for non-standard setups
+                            lora_alpha = 16
+                            if hasattr(instance.config, 'lora_alpha'):
+                                lora_alpha = instance.config.lora_alpha
+                            lora_scaling = float(lora_alpha) / float(lora_rank)
+                            print(f"  Using fallback scaling: alpha={lora_alpha}, scaling={lora_scaling}")
 
-                        # TODO: Optional debug output - can be removed if not needed
                         print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}, scaling: {lora_scaling:.2f}")
 
         # Extract LoRA weights if available
@@ -1436,9 +1442,9 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 down_lora_A_list.append(expert.down_proj.lora_A['default'].weight)
                 down_lora_B_list.append(expert.down_proj.lora_B['default'].weight)
 
-                # TODO: Optional debug output - can be removed if not needed
-                if i < 3:  # Print first 3 experts
-                    print(f"  Expert {i}: gate_lora_A {gate_lora_A_list[-1].shape}, gate_lora_B {gate_lora_B_list[-1].shape}")
+                # # TODO: Optional debug output - can be removed if not needed
+                # if i < 3:  # Print first 3 experts
+                #     print(f"  Expert {i}: gate_lora_A {gate_lora_A_list[-1].shape}, gate_lora_B {gate_lora_B_list[-1].shape}")
 
             # Save reference to expert list
             instance.experts_list = experts_list
@@ -1452,14 +1458,14 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
             instance.down_lora_A = torch.stack(down_lora_A_list, dim=0).contiguous()
             instance.down_lora_B = torch.stack(down_lora_B_list, dim=0).contiguous()
 
-            # TODO: Optional debug output - can be removed if not needed
-            print(f"[{instance.key}] LoRA weights stacked:")
-            print(f"  gate_lora_A: {instance.gate_lora_A.shape}, dtype={instance.gate_lora_A.dtype}, device={instance.gate_lora_A.device}")
-            print(f"  gate_lora_B: {instance.gate_lora_B.shape}, dtype={instance.gate_lora_B.dtype}, device={instance.gate_lora_B.device}")
-            print(f"  up_lora_A: {instance.up_lora_A.shape}, dtype={instance.up_lora_A.dtype}, device={instance.up_lora_A.device}")
-            print(f"  up_lora_B: {instance.up_lora_B.shape}, dtype={instance.up_lora_B.dtype}, device={instance.up_lora_B.device}")
-            print(f"  down_lora_A: {instance.down_lora_A.shape}, dtype={instance.down_lora_A.dtype}, device={instance.down_lora_A.device}")
-            print(f"  down_lora_B: {instance.down_lora_B.shape}, dtype={instance.down_lora_B.dtype}, device={instance.down_lora_B.device}")
+            # # TODO: Optional debug output - can be removed if not needed
+            # print(f"[{instance.key}] LoRA weights stacked:")
+            # print(f"  gate_lora_A: {instance.gate_lora_A.shape}, dtype={instance.gate_lora_A.dtype}, device={instance.gate_lora_A.device}")
+            # print(f"  gate_lora_B: {instance.gate_lora_B.shape}, dtype={instance.gate_lora_B.dtype}, device={instance.gate_lora_B.device}")
+            # print(f"  up_lora_A: {instance.up_lora_A.shape}, dtype={instance.up_lora_A.dtype}, device={instance.up_lora_A.device}")
+            # print(f"  up_lora_B: {instance.up_lora_B.shape}, dtype={instance.up_lora_B.dtype}, device={instance.up_lora_B.device}")
+            # print(f"  down_lora_A: {instance.down_lora_A.shape}, dtype={instance.down_lora_A.dtype}, device={instance.down_lora_A.device}")
+            # print(f"  down_lora_B: {instance.down_lora_B.shape}, dtype={instance.down_lora_B.dtype}, device={instance.down_lora_B.device}")
 
             # Initialize gradient buffers (CPU, same dtype as weights)
             instance.grad_gate_lora_A = torch.zeros_like(instance.gate_lora_A).contiguous()
@@ -1535,6 +1541,14 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                 instance.moe = SFT_ROUTE_AMXBF16_MOE(moe_config)
                 instance.cpu_infer.submit(instance.moe.load_weights())
                 instance.cpu_infer.sync()
+
+            # Release base weights after C++ has copied them to merged buffer
+            # This saves significant memory (~8GB for DeepSeek-V2-Lite)
+            # Safe because C++ only reads base weights once in load_weights()->merge_lora_weights()
+            instance.gate = None
+            instance.up = None
+            instance.down = None
+            print(f"[{instance.key}] Base weights released after LoRA merge (memory saved)")
 
         # Update instance map
         KSFTRouteExpertsCPU._instance_map[layer_idx]['lora_initialized'] = True
@@ -1637,6 +1651,17 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
         output_grad = output_grad.contiguous().cpu()
         input_grad = torch.empty_like(input_tensor).contiguous()
 
+        # Clear gradient buffers before backward pass (avoid accumulating stale gradients)
+        if ctx.layer_idx in KSFTRouteExpertsCPU._instance_map:
+            instance_info = KSFTRouteExpertsCPU._instance_map[ctx.layer_idx]
+            if 'grad_gate_lora_A' in instance_info:
+                instance_info['grad_gate_lora_A'].zero_()
+                instance_info['grad_gate_lora_B'].zero_()
+                instance_info['grad_up_lora_A'].zero_()
+                instance_info['grad_up_lora_B'].zero_()
+                instance_info['grad_down_lora_A'].zero_()
+                instance_info['grad_down_lora_B'].zero_()
+
         bw_start = time.time()
         ctx.cpu_infer.submit(
             ctx.moe.backward(
@@ -1685,6 +1710,14 @@ class KSFTRouteExpertsCPU(torch.autograd.Function):
                             param.grad = grad_converted.clone()
                         else:
                             param.grad.add_(grad_converted)
+
+                # Lightweight monitoring: print parameter and gradient stats (only for layer 1)
+                if ctx.layer_idx == 1:
+                    with torch.no_grad():
+                        # Monitor gate_lora_B (index 1 in param_lists)
+                        gate_B_mean = param_lists[1][0].abs().mean().item()
+                        gate_B_grad_mean = param_lists[1][0].grad.abs().mean().item() if param_lists[1][0].grad is not None else 0.0
+                        # print(f"[Layer {ctx.layer_idx} Backward] lora_B: mean={gate_B_mean:.6f}, grad_mean={gate_B_grad_mean:.6f}")
 
         return input_grad.to(device=ctx.out_device), None, None, None, None, None, None
 
