@@ -6,6 +6,8 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 # kt-kernel project directory within the monorepo
 KERNEL_DIR="$REPO_ROOT/kt-kernel"
+# Relative path for matching staged files under repo root
+REL_KERNEL_DIR="kt-kernel"
 BUILD_DIR="$KERNEL_DIR/build"
 FORMAT_TARGET="format"
 CLANG_FORMAT_BIN="${CLANG_FORMAT_BIN:-clang-format}"
@@ -22,44 +24,48 @@ if ! command -v "$BLACK_BIN" >/dev/null 2>&1; then
   echo "[pre-commit] black not found (looked for $BLACK_BIN). Skipping Python format." >&2
 fi
 
-# Configure kt-kernel build directory if missing (quiet)
-if [ ! -d "$BUILD_DIR" ] || { [ ! -f "$BUILD_DIR/Makefile" ] && [ ! -f "$BUILD_DIR/build.ninja" ]; }; then
-  echo "[pre-commit] configuring kt-kernel (cmake) ..." >&2
-  cmake -S "$KERNEL_DIR" -B "$BUILD_DIR" >/dev/null
+## Format only staged changes within kt-kernel
+# Collect staged files (Added/Modified/Copied/Renamed)
+mapfile -d '' STAGED < <(git diff --cached --name-only -z --diff-filter=AMCR)
+
+PY_CHANGED=()
+CPP_CHANGED=()
+
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    "$REL_KERNEL_DIR"/*)
+      ext="${f##*.}"
+      case "$ext" in
+        py)
+          PY_CHANGED+=("$f")
+          ;;
+        c|cc|cpp|cxx|h|hh|hpp|hxx|cu|cuh)
+          CPP_CHANGED+=("$f")
+          ;;
+      esac
+      ;;
+  esac
+done
+
+# Run clang-format only on staged C/C++ files
+if command -v "$CLANG_FORMAT_BIN" >/dev/null 2>&1 && [ ${#CPP_CHANGED[@]} -gt 0 ]; then
+  echo "[pre-commit] clang-format on ${#CPP_CHANGED[@]} files" >&2
+  for f in "${CPP_CHANGED[@]}"; do
+    "$CLANG_FORMAT_BIN" -i "$f"
+  done
 fi
 
-# Run format target (prefer ninja if present)
-# Run clang-format target when available and tool present
-if command -v "$CLANG_FORMAT_BIN" >/dev/null 2>&1; then
-  if [ -f "$BUILD_DIR/build.ninja" ]; then
-    (cd "$BUILD_DIR" && ninja -k0 "$FORMAT_TARGET" >/dev/null)
-  else
-    (cd "$BUILD_DIR" && make "$FORMAT_TARGET")
-  fi
+## Run black only on staged Python files
+if command -v "$BLACK_BIN" >/dev/null 2>&1 && [ ${#PY_CHANGED[@]} -gt 0 ]; then
+  echo "[pre-commit] black on ${#PY_CHANGED[@]} files" >&2
+  "$BLACK_BIN" "${PY_CHANGED[@]}"
 fi
 
-# Run black on staged python files (or entire repo if you prefer)
-if command -v "$BLACK_BIN" >/dev/null 2>&1; then
-  # Run black only on kt-kernel's python and scripts directories
-  BLACK_PATHS=""
-  if [ -d "$KERNEL_DIR/python" ]; then
-    BLACK_PATHS="$BLACK_PATHS $KERNEL_DIR/python"
-  fi
-  if [ -d "$KERNEL_DIR/scripts" ]; then
-    BLACK_PATHS="$BLACK_PATHS $KERNEL_DIR/scripts"
-  fi
-  if [ -n "$BLACK_PATHS" ]; then
-    echo "[pre-commit] running black on:$BLACK_PATHS" >&2
-    # shellcheck disable=SC2086
-    $BLACK_BIN $BLACK_PATHS
-  fi
-fi
-
-# Stage any formatting changes for tracked files
-if ! git diff --quiet --exit-code; then
+# Stage any formatting changes for tracked, formatted files only
+FMT_FILES=("${PY_CHANGED[@]}" "${CPP_CHANGED[@]}")
+if [ ${#FMT_FILES[@]} -gt 0 ] && ! git diff --quiet --exit-code -- "${FMT_FILES[@]}"; then
   echo "[pre-commit] Formatting applied; updating index." >&2
-  # Add only modified tracked files (exclude untracked new files not staged yet unless user staged them)
-  git add -u
+  git add "${FMT_FILES[@]}"
   echo "[pre-commit] Re-run git commit to proceed after reviewing changes." >&2
   exit 1
 fi
