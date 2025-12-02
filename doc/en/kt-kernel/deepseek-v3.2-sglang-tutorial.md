@@ -172,7 +172,6 @@ curl -s http://localhost:30000/v1/chat/completions \
 
 ## Additional Resources
 
-- [KT-Kernel Documentation](./kt-kernel_intro.md)
-- [SGLang Documentation](https://github.com/sgl-project/sglang)
+- [KT-Kernel Documentation](../../../kt-kernel/README.md)
 - [DeepSeek V3.2 Model Card](https://huggingface.co/deepseek-ai/DeepSeek-V3.2)
-- [KTransformers GitHub](https://github.com/kvcache-ai/ktransformers)
+- [SGLang GitHub](https://github.com/sgl-project/sglang)
