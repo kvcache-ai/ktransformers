@@ -76,7 +76,7 @@ class KTMoEWrapper:
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
-            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "LLAMAFILE")
+            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
 
         Returns:
             An instance of the appropriate backend implementation (e.g., AMXMoEWrapper)
