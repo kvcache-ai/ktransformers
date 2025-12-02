@@ -19,6 +19,7 @@ from .experts_base import BaseMoEWrapper, KExpertsCPUBuffer
 # Import backend implementations
 from .utils.amx import AMXMoEWrapper, RAWAMXMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
+from .utils.moe_kernel import GeneralMoEWrapper
 
 
 class KTMoEWrapper:
@@ -88,6 +89,8 @@ class KTMoEWrapper:
             backend_cls = RAWAMXMoEWrapper
         elif method == "LLAMAFILE":
             backend_cls = LlamafileMoEWrapper
+        elif method in ["MOE_INT4", "MOE_INT8"]:
+            backend_cls = GeneralMoEWrapper
         else:
             raise NotImplementedError(f"Unsupported method: {method}")
 

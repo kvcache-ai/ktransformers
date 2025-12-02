@@ -111,7 +111,7 @@ According to the following example, install both the **KTransformers** and **LLa
 
 ```shell
 # 1. Create a conda environment
-conda create -n Kllama python=3.10 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 # ATTENTION: DO NOT skip this step, even if your cuda version is not 11.8! Otherwise, you will get this error: ImportError: libcudart.so.11.0: cannot open shared object file: No such file or directory.
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
@@ -121,11 +121,11 @@ git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. Install the KTransformers wheel that matches your Torch and Python versions (Note: The CUDA version can differ from that in the wheel filename.)
-pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
+# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
+pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
 
 # 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl
+pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 # abi=True/False can find from below
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)

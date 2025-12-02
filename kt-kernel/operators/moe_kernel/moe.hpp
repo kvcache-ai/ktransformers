@@ -12,8 +12,8 @@
 #include <iostream>
 #include <vector>
 
+#include "../../cpu_backend/shared_mem_buffer.h"
 #include "../common.hpp"
-#include "../cpu_backend/shared_mem_buffer.h"
 #include "../moe-tp.hpp"
 #include "api/common.h"
 #include "api/mat_kernel.h"
@@ -56,6 +56,9 @@ class MOE_KERNEL_TP
   std::vector<std::shared_ptr<typename T::BufferA>> down_ba_;
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
+
+  std::vector<void*> gate_up_owner_ptr_;
+  std::vector<void*> down_owner_ptr_;
 
   inline void write_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
                             size_t scale_size) {
@@ -182,6 +185,7 @@ class MOE_KERNEL_TP
       down_ba_.push_back(std::make_shared<typename T::BufferA>(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(std::make_shared<typename T::BufferC>(config_.max_len, config_.hidden_size, nullptr));
       void* gate_up_down_per_exp_ptr = std::aligned_alloc(64, gate_up_exp_size);
+      gate_up_owner_ptr_.push_back(gate_up_down_per_exp_ptr);
 
       gate_bb_.push_back(std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size,
                                                                gate_up_down_per_exp_ptr, PACKED, 'u', PLAIN));
@@ -193,6 +197,7 @@ class MOE_KERNEL_TP
 
       void* down_bb_ptr = std::aligned_alloc(
           64, T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN));
+      down_owner_ptr_.push_back(down_bb_ptr);
       down_bb_.push_back(std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size,
                                                                down_bb_ptr, PACKED, 'd', PLAIN));
     }
@@ -220,27 +225,41 @@ class MOE_KERNEL_TP
 
   ~MOE_KERNEL_TP() {
     // printf("  Destroying KML_MOE_TP %lx\n", (intptr_t)(this));
+    for (void* ptr : gate_up_owner_ptr_) {
+      std::free(ptr);
+    }
+    for (void* ptr : down_owner_ptr_) {
+      std::free(ptr);
+    }
   }
 
   void load_weights() {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     if (config_.gate_projs.size()) {
+      printf("load from safetensor");
       pool->do_work_stealing_job(
           config_.expert_num, nullptr,
           [this, physical_to_logical_map](int expert_id) {
             uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_id);
             {
               size_t scale_size = config_.intermediate_size * sizeof(float);
-              size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size) - scale_size;
+              size_t whole_size_ =
+                  T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
+              size_t size = whole_size_ - scale_size;
+              void* dst_ = PLAIN ? gate_bb_[expert_id]->b : gate_bb_[expert_id]->b_pack[0];
 
-              memcpy(gate_bb_[expert_id]->b, config_.gate_projs[tp_part_idx][logical_expert_id], size);
+              memcpy(dst_, config_.gate_projs[tp_part_idx][logical_expert_id], size);
 
               if constexpr (T::BufferB::SCALE) {
                 memcpy(gate_bb_[expert_id]->d, config_.gate_scales[tp_part_idx][logical_expert_id], scale_size);
               }
 
-              memcpy(up_bb_[expert_id]->b, config_.up_projs[tp_part_idx][logical_expert_id], size);
+              whole_size_ =
+                  T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
+              size = whole_size_ - scale_size;
+              dst_ = PLAIN ? up_bb_[expert_id]->b : up_bb_[expert_id]->b_pack[0];
+              memcpy(dst_, config_.up_projs[tp_part_idx][logical_expert_id], size);
 
               if constexpr (T::BufferB::SCALE) {
                 memcpy(up_bb_[expert_id]->d, config_.up_scales[tp_part_idx][logical_expert_id], scale_size);
@@ -249,9 +268,11 @@ class MOE_KERNEL_TP
 
             {
               size_t scale_size = config_.hidden_size * sizeof(float);
-              size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
-
-              memcpy(down_bb_[expert_id]->b, config_.down_projs[tp_part_idx][logical_expert_id], size);
+              size_t whole_size_ =
+                  T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN);
+              size_t size = whole_size_ - scale_size;
+              void* dst_ = PLAIN ? down_bb_[expert_id]->b : down_bb_[expert_id]->b_pack[0];
+              memcpy(dst_, config_.down_projs[tp_part_idx][logical_expert_id], size);
 
               if constexpr (T::BufferB::SCALE) {
                 memcpy(down_bb_[expert_id]->d, config_.down_scales[tp_part_idx][logical_expert_id], scale_size);
@@ -269,21 +290,22 @@ class MOE_KERNEL_TP
           uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
           uint8_t mat_split_idex = task_id % mat_split;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+          void* src_;
           if (mat_class == 0) {  // the up matrix
-            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+            src_ = PLAIN ? up_bb_[expert_idx]->b : up_bb_[expert_idx]->b_pack[0];
+            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
             size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, logical_expert_id, size, scale_size, mat_split,
-                         mat_split_idex);
+            read_weights(prefix, "_up_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           } else if (mat_class == 1) {
-            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+            void* src_ = PLAIN ? gate_bb_[expert_idx]->b : gate_bb_[expert_idx]->b_pack[0];
+            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
             size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
+            read_weights(prefix, "_gate_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           } else {
-            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+            void* src_ = PLAIN ? down_bb_[expert_idx]->b : down_bb_[expert_idx]->b_pack[0];
+            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN);
             size_t scale_size = config_.hidden_size * sizeof(float);
-            read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
+            read_weights(prefix, "_down_", (char*)src_, logical_expert_id, size, scale_size, mat_split, mat_split_idex);
           }
         }
       }
@@ -342,17 +364,20 @@ class MOE_KERNEL_TP
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
               if (mat_class == 0) {  // the up matrix
-                size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+                size_t size =
+                    T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b_pack[0], expert_idx, size, scale_size);
               } else if (mat_class == 1) {
-                size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+                size_t size =
+                    T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, PACKED, 'u', PLAIN);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b_pack[0], expert_idx, size, scale_size);
               } else if (mat_class == 2) {
-                size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+                size_t size =
+                    T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, PACKED, 'd', PLAIN);
                 size_t scale_size = config_.hidden_size * sizeof(float);
-                write_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b_pack[0], expert_idx, size, scale_size);
               }
             },
             nullptr);
@@ -432,6 +457,9 @@ class MOE_KERNEL_TP
     }
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+          continue;
+        }
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
       }
     }
@@ -460,6 +488,9 @@ class MOE_KERNEL_TP
     // Copy inputs into expert-local buffers
     MOE_DIRECT_OR_POOL_BY_VAR(qlen, [&](int i) {
       for (int j = 0; j < k; j++) {
+        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+          continue;
+        }
         memcpy(m_local_input_ptr_[expert_ids[i * k + j]] + m_local_pos_[i][j] * config_.hidden_size,
                (input_t*)input + i * config_.hidden_size, sizeof(input_t) * config_.hidden_size);
       }
@@ -608,6 +639,10 @@ class MOE_KERNEL_TP
           for (int e = e_start; e < e_end; e++) {
             float sum = 0;
             for (int j = 0; j < k; j++) {
+              if (expert_ids[q_idx * k + j] < config_.num_gpu_experts ||
+                  expert_ids[q_idx * k + j] >= config_.expert_num) {
+                continue;
+              }
               sum += weights[q_idx * k + j] * ((float*)m_local_down_output_ptr_[expert_ids[q_idx * k + j]])
                                                   [m_local_pos_[q_idx][j] * config_.hidden_size + e];
             }
@@ -691,6 +726,10 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
         delete[] (ggml_bf16_t*)(tpc.up_proj);
         delete[] (ggml_bf16_t*)(tpc.down_proj);
       }
+      if (config.save) {
+        // free the bf16 weights after saving
+        tps.clear();
+      }
 
       this->weights_loaded = true;
     } else if (config.path != "") {
@@ -702,17 +741,22 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
     }
   }
 
-  void merge_results(int qlen, void* output) {
+  void merge_results(int qlen, void* output, bool incremental) {
     // #ifdef FORWARD_TIME_PROFILE
     //     forward_perf_start();
     // #endif
     auto pool = this->config.pool;
-    auto merge_fn = [this, output](int token_nth) {
+    auto merge_fn = [this, output, incremental](int token_nth) {
       auto& local_output_numa = this->local_output_numa;
       auto& tp_configs = this->tp_configs;
       auto& tp_count = this->tp_count;
       auto& config = this->config;
       float* merge_to = local_output_numa[0] + token_nth * tp_configs[0].hidden_size;
+      if (incremental) {
+        for (int e = 0; e < config.hidden_size; e++) {
+          merge_to[e] += ggml_bf16_to_fp32(((ggml_bf16_t*)output + token_nth * config.hidden_size)[e]);
+        }
+      }
 
       for (int i = 1; i < tp_count; i++) {
         float* merge_from = local_output_numa[i] + token_nth * tp_configs[i].hidden_size;
@@ -750,6 +794,8 @@ class TP_MOE<MOE_KERNEL_TP<K, T>> : public TP_MOE_Common<MOE_KERNEL_TP<K, T>> {
     //     perf_report();
     // #endif
   }
+
+  void merge_results(int qlen, void* output) { merge_results(qlen, output, false); }
 };
 
 #endif
