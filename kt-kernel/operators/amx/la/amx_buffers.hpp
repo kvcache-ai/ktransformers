@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -344,9 +345,6 @@ struct BufferAKGroupImpl {
   static constexpr int K_STEP = K::K_STEP;
   static constexpr int K_BLOCK = K::K_BLOCK;
 
-  using index_t = Packed2DLayout::index_t;
-  Packed2DLayout pack;
-
   static size_t required_size(int max_m, int k, int k_group_size) {
     ASSERT_RELEASE(k % k_group_size == 0, "k must be multiple of k_group_size");
     return sizeof(int8_t) * max_m * k + sizeof(float) * max_m * (k / k_group_size);
@@ -355,18 +353,12 @@ struct BufferAKGroupImpl {
   BufferAKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
       : max_m(max_m),
         k(k),
-        k_group_size(k_group_size),
-        pack({{static_cast<index_t>(K_STEP), 'c'},
-              {static_cast<index_t>(M_STEP), 'r'},
-              {static_cast<index_t>(k_group_size / K_STEP), 'c'},
-              {static_cast<index_t>(K_BLOCK / k_group_size), 'c'},
-              {static_cast<index_t>(max_m / M_STEP), 'r'},
-              {static_cast<index_t>(k / K_BLOCK), 'c'}}) {
+        k_group_size(k_group_size) {
     ASSERT_RELEASE(k % k_group_size == 0, "k must be multiple of k_group_size");
     ASSERT_RELEASE(max_m % M_STEP == 0, "max_m must be multiple of M_STEP");
     ASSERT_RELEASE(k % K_STEP == 0, "k must be multiple of K_STEP");
     ASSERT_RELEASE(K_BLOCK % k_group_size == 0, "K_BLOCK must be multiple of k_group_size");
-    ASSERT_RELEASE(k % K_BLOCK == 0, "k must be multiple of K_BLOCK");
+    // ASSERT_RELEASE(k % K_BLOCK == 0, "k must be multiple of K_BLOCK");
     k_group_count = k / k_group_size;
 
     set_data(ptr);
@@ -920,6 +912,77 @@ struct BufferBInt4WithZeroImpl {
 
   float* get_scale(int n, int n_begin) { return d + n_begin; }
   float* get_min(int n, int n_begin) { return mins + n_begin; }
+};
+
+// BufferB for Signed Int4 with KGroup Scale (no zero point)
+// Used for K2 MoE - signed int4 range: [-8, 7]
+template <typename K>
+struct BufferBInt4KGroupImpl {
+  using dt = typename K::dt;
+  dt* b;      // packed signed int4 weights, col majored
+  float* d;   // scales only (no mins/zero-points), row majored
+  int n, k, k_group_size, k_group_count;
+
+  static constexpr int N_STEP = K::N_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr bool SCALE = true;
+
+  // Size calculation: packed int4 weights + scales (NO mins)
+  static size_t required_size(int n, int k, int k_group_size) {
+    return sizeof(int8_t) * n * k / 2 + sizeof(float) * n * (k / k_group_size);
+  }
+
+  BufferBInt4KGroupImpl(int n, int k, int k_group_size, void* ptr) : n(n), k(k), k_group_size(k_group_size) {
+    assert(reinterpret_cast<intptr_t>(ptr) % 64 == 0);
+    assert(n % N_STEP == 0);
+    assert(k % K_STEP == 0);
+    if (n % N_STEP || k % K_STEP || k % k_group_size) {
+      printf("BufferBInt4KGroupImpl: n: %d, k: %d, N_STEP: %d, K_STEP: %d, k_group_size: %d\n", n, k, N_STEP,
+             K_STEP, k_group_size);
+      throw std::runtime_error("n or k is not aligned to N_STEP or K_STEP");
+    }
+    k_group_count = k / k_group_size;
+    b = reinterpret_cast<dt*>(ptr);
+    d = reinterpret_cast<float*>(offset_pointer(b, n * k / 2));
+  }
+
+  // Load from packed signed int4 format
+  // Input: proj is packed int4 weights (2 int4 values per byte)
+  // Each int4 value is in range [-8, 7] (signed)
+  void from_raw_mat(uint8_t* proj, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    if (n_start >= n_end) {
+      return;
+    }
+    const size_t row_bytes = static_cast<size_t>(k) / 2;
+    const size_t rows = static_cast<size_t>(n_end - n_start);
+    uint8_t* dst_weights = reinterpret_cast<uint8_t*>(b) + n_start * row_bytes;
+    const uint8_t* src_weights = proj + n_start * row_bytes;
+    std::memcpy(dst_weights, src_weights, rows * row_bytes);
+  }
+
+  // Get pointer to submatrix for computation
+  dt* get_submat(int n, int k, int n_begin, int k_begin) {
+    const size_t row_bytes = static_cast<size_t>(k) / 2;
+    const size_t row_offset = static_cast<size_t>(n_begin) * row_bytes;
+    const size_t col_offset = static_cast<size_t>(k_begin) / 2;
+    return reinterpret_cast<dt*>(reinterpret_cast<uint8_t*>(b) + row_offset + col_offset);
+  }
+
+  // Get scale pointer for a specific row and k_group
+  float* get_scale(int n, int n_begin, int k, int k_begin) {
+      int k_group_idx = k_begin / k_group_size;
+      return d + n_begin * (k / k_group_size) +  k_group_idx;
+  }
+
+  // Split range for parallel processing
+  static std::pair<int, int> split_range_n(int n, int ith, int nth) {
+    int n_per_thread = (n + nth - 1) / nth;
+    n_per_thread = (n_per_thread + N_STEP - 1) / N_STEP * N_STEP;
+    int n_start = std::min(ith * n_per_thread, n);
+    int n_end = std::min(n_start + n_per_thread, n);
+    return {n_start, n_end};
+  }
 };
 
 template <typename K>
