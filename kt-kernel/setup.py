@@ -292,6 +292,7 @@ class CMakeBuild(build_ext):
         cmake_args += cpu_feature_flags()
         d = self.detect_cpu_info()
         print(f"Detected CPU info: {d}")
+        cpu_mode = os.environ.get("CPUINFER_CPU_INSTRUCT", "NATIVE").upper()
 
         # Vendor / feature specific toggles
         # AMD MoE: explicit env overrides; otherwise default ON on AMD CPU
@@ -314,11 +315,18 @@ class CMakeBuild(build_ext):
             if "AMX" in d["features"]:
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX=ON")
                 print("-- AMX support detected; enabling (-DKTRANSFORMERS_CPU_USE_AMX=ON)")
-        # AVX512 umbrella: explicit env overrides; else enable if AMX or AVX512 detected
+
+        # AVX512 umbrella (AMX/AVX512 kernels):
+        # - If user explicitly sets CPUINFER_ENABLE_AVX512 -> honor it
+        # - Otherwise, only auto-enable when CPU mode actually wants AVX512
+        #   (NATIVE/FANCY/AVX512). In AVX2 mode we do NOT enable this, so
+        #   RAWINT4 / K2 kernels are not compiled.
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512", "KTRANSFORMERS_CPU_USE_AMX_AVX512"):
-            if "AMX" in d["features"] or "AVX512" in d["features"]:
+            if cpu_mode in ("NATIVE", "FANCY", "AVX512") and ("AMX" in d["features"] or "AVX512" in d["features"]):
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
                 print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
+            else:
+                print(f"-- CPUINFER_CPU_INSTRUCT={cpu_mode}; not auto-enabling AMX/AVX512 umbrella")
 
         # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
         # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)

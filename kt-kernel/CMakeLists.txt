@@ -268,7 +268,7 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
             list(APPEND ARCH_FLAGS -mavx2 -mfma -msse3 -mf16c)
         endif()
         if(LLAMA_AVX512)
-            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mfma -mf16c -msse3)
+            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mavx512dq -mfma -mf16c -msse3)
         endif()
         if(LLAMA_AVX512_VBMI)
             list(APPEND ARCH_FLAGS -mavx512vbmi)
@@ -638,5 +638,4 @@ if(NUMA_LIBRARY)
 else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
-
 
