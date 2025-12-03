@@ -870,7 +870,7 @@ struct GemmKernelInt4 {
     int n_end = std::min(n, N_BLOCK * (ith + 1));
     return {n_start, n_end};
   }
-  static std::pair<int, int> split_range_m(int m, int ith, int mth) {
+  static std::pair<int, int> split_range_m(int m, int ith, int mth = 0) {
     int n_start = M_BLOCK * ith;
     int n_end = std::min(m, M_BLOCK * (ith + 1));
     return {n_start, n_end};
@@ -1106,12 +1106,18 @@ struct GemmKernelInt4 {
     }
   }
   // 对第二个维度分块的 apply scale
-  static void apply_scale(int m, int n, float *c, BufferA *ba, BufferB *bb, BufferC *bc, int ith, int nth, int block) {
+  static void apply_scale(int m, int n, float *c, BufferA *ba, BufferB *bb, BufferC *bc, int ith, int nth, int block, int jth = -1) {
     // printf("use split apply scale\n");
     auto [n_start, n_end] = split_range_n_block(n, ith, nth, block);
+    int m_start = 0, m_end = m;
+    if (jth != -1) {
+      auto tmp = split_range_m(m, jth);
+      m_start = tmp.first;
+      m_end = tmp.second;
+    }
     // TODO: 后续用 SVE 来加速
-    for (int m_begin = 0; m_begin < m; m_begin += M_STEP) {
-      for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
+    for (int m_begin = m_start; m_begin < m_end; m_begin += M_STEP) {
+      for (int i = 0; i < M_STEP && m_begin + i < m_end; i++) {
         float *scale_a = ba->get_scale(m, m_begin + i);
         for (int n_begin = n_start; n_begin < n_end; n_begin += N_STEP) {
           for (int j = 0; j < N_STEP && n_begin + j < n_end; j++) {
