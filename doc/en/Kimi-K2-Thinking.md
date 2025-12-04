@@ -1,5 +1,5 @@
 # KTransformers+SGLang Inference Deployment
-Please Note This is Quantization Deployment. For Native Kimi K2 Thinking deployment please refer to [here](doc/en/Kimi-K2-Thinking-Native.md).
+Please Note This is Quantization Deployment. For Native Kimi K2 Thinking deployment please refer to [here](./Kimi-K2-Thinking-Native.md).
 
 ## Installation
 
