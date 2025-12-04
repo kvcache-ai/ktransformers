@@ -1,0 +1,36 @@
+name: Release Fake Tag
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "version.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.repository == 'kvcache-ai/ktransformers'
+    runs-on: ubuntu-latest
+    environment: 'prod'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version
+        id: get_version
+        run: |
+          version=$(cat version.py | grep '__version__' | cut -d'"' -f2)
+          echo "TAG=v$version" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          git config user.name "ktransformers-bot"
+          git config user.email "ktransformers-bot@users.noreply.github.com"
+          git tag ${{ steps.get_version.outputs.TAG }}
+          git push origin ${{ steps.get_version.outputs.TAG }}
