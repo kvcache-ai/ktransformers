@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f7d48525.js";
+            window.path_to_searchindex_js = "searchindex-29459ff8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-8ca7a795.js"></script>
@@ -405,6 +405,8 @@ conda activate kt-kernel
 <p>⚠️ <strong>Important for LLAMAFILE backend users:</strong>
 If you have an AMX-capable CPU but plan to use the LLAMAFILE backend, do NOT use the default auto-detection build.
 Use “manual mode” with <code>CPUINFER_CPU_INSTRUCT</code> set to <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
+<p>⚠️ <strong>Important for BLIS AMD backend users:</strong>
+for the installation guide, see this <a href="https://github.com/kvcache-ai/ktransformers/issues/1601">issue</a></p>
 <h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
 <p>If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):</p>
 <pre><code class="language-bash"># Example for LLAMAFILE backend on AMX CPU with AVX512
