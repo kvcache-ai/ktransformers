@@ -304,7 +304,22 @@ class CMakeBuild(build_ext):
                 # Rename the generated .so file to include variant suffix
                 # Original: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
                 # Renamed:  _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
-                built_candidates = list(Path(extdir).glob(f"{ext.name}*.so"))
+
+                # Find the newly built .so file (should match kt_kernel_ext*.so but not _kt_kernel_ext_*.so)
+                import time
+                time.sleep(0.5)  # Give filesystem time to sync
+
+                built_candidates = [
+                    f for f in Path(extdir).glob("*.so")
+                    if f.name.startswith(ext.name) and not f.name.startswith(f"_{ext.name}_")
+                ]
+
+                if not built_candidates:
+                    print(f"WARNING: No .so file found for {ext.name} in {extdir}")
+                    print(f"Files in {extdir}:")
+                    for f in Path(extdir).glob("*.so"):
+                        print(f"  {f.name}")
+
                 for so_file in built_candidates:
                     # Extract the python tag part (e.g., ".cpython-311-x86_64-linux-gnu.so")
                     suffix = so_file.name.replace(ext.name, "")
@@ -312,7 +327,11 @@ class CMakeBuild(build_ext):
                     new_path = extdir / new_name
 
                     print(f"-- Renaming {so_file.name} -> {new_name}")
+                    if new_path.exists():
+                        print(f"   WARNING: Target file already exists, removing: {new_path}")
+                        new_path.unlink()
                     so_file.rename(new_path)
+                    print(f"   ✓ Successfully renamed to {new_name}")
 
             finally:
                 # Restore build_temp for next iteration
