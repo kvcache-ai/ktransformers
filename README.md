@@ -128,6 +128,7 @@ If you use KTransformers in your research, please cite our paper:
 Developed and maintained by:
 - [MADSys Lab](https://madsys.cs.tsinghua.edu.cn/) @ Tsinghua University
 - [Approaching.AI](http://approaching.ai/)
+- [9#AISoft](https://github.com/aisoft9)
 - Community contributors
 
 We welcome contributions! Please feel free to submit issues and pull requests.
