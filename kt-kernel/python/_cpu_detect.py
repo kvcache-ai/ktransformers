@@ -131,26 +131,20 @@ def load_extension(variant):
     Raises:
         ImportError: If all variants fail to load
     """
+    import importlib
+
     module_name = f'_kt_kernel_ext_{variant}'
 
     try:
-        if variant == 'amx':
-            from . import _kt_kernel_ext_amx as ext
-            if os.environ.get('KT_KERNEL_DEBUG') == '1':
-                print(f"[kt-kernel] Successfully loaded AMX variant")
-            return ext
-        elif variant == 'avx512':
-            from . import _kt_kernel_ext_avx512 as ext
-            if os.environ.get('KT_KERNEL_DEBUG') == '1':
-                print(f"[kt-kernel] Successfully loaded AVX512 variant")
-            return ext
-        else:  # avx2
-            from . import _kt_kernel_ext_avx2 as ext
-            if os.environ.get('KT_KERNEL_DEBUG') == '1':
-                print(f"[kt-kernel] Successfully loaded AVX2 variant")
-            return ext
+        # Use importlib to avoid circular import during kt_kernel.__init__
+        # The extension modules are at the top level of the kt_kernel package
+        ext = importlib.import_module(f'kt_kernel.{module_name}')
 
-    except ImportError as e:
+        if os.environ.get('KT_KERNEL_DEBUG') == '1':
+            print(f"[kt-kernel] Successfully loaded {variant.upper()} variant")
+        return ext
+
+    except (ImportError, ModuleNotFoundError) as e:
         if os.environ.get('KT_KERNEL_DEBUG') == '1':
             print(f"[kt-kernel] Failed to load {variant} variant: {e}")
 
