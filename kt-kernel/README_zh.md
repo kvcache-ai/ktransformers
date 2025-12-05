@@ -2,26 +2,35 @@
 
 高性能 KTransformers 内核库，提供面向 CPU 的高效 MoE 推理内核，支持 AMX 和 AVX 等后端。
 
-- [说明](#说明)
-- [特性](#特性)
-- [安装](#安装)
-  - [先决条件](#先决条件)
-  - [快速安装（推荐）](#快速安装推荐)
-  - [手动配置（进阶）](#手动配置进阶)
-- [验证安装](#验证安装)
-- [与 SGLang 集成](#与-sglang-集成)
-  - [安装步骤](#安装步骤)
-  - [完整示例：Qwen3-30B-A3B](#完整示例qwen3-30b-a3b)
-  - [KT-Kernel 参数](#kt-kernel-参数)
-- [直接使用 Python API](#直接使用-python-api)
-  - [高级选项](#高级选项)
-- [构建配置](#构建配置)
-  - [手动安装](#手动安装)
-- [错误排查](#错误排查)
-  - [找不到 CUDA](#找不到-cuda)
-  - [找不到 hwloc](#找不到-hwloc)
-- [权重量化](#权重量化)
-- [提交前必读](#提交前必读)
+- [KT-Kernel](#kt-kernel)
+  - [说明](#说明)
+  - [特性](#特性)
+  - [安装](#安装)
+    - [先决条件](#先决条件)
+    - [快速安装（推荐）](#快速安装推荐)
+    - [手动配置（进阶）](#手动配置进阶)
+  - [验证安装](#验证安装)
+  - [与 SGLang 集成](#与-sglang-集成)
+    - [安装步骤](#安装步骤)
+      - [1. 安装 SGLang](#1-安装-sglang)
+      - [2. 准备权重](#2-准备权重)
+      - [3. 启动 SGLang Server](#3-启动-sglang-server)
+    - [完整示例：Qwen3-30B-A3B](#完整示例qwen3-30b-a3b)
+      - [方案 A：AMX 后端（AMXINT8）](#方案-aamx-后端amxint8)
+      - [方案 B：LLAMAFILE 后端（GGUF）](#方案-bllamafile-后端gguf)
+    - [KT-Kernel 参数](#kt-kernel-参数)
+  - [直接使用 Python API](#直接使用-python-api)
+    - [高级选项](#高级选项)
+  - [构建配置](#构建配置)
+    - [手动安装](#手动安装)
+      - [1. 安装系统依赖](#1-安装系统依赖)
+      - [2. 配置构建参数](#2-配置构建参数)
+      - [3. 构建并安装](#3-构建并安装)
+  - [错误排查](#错误排查)
+    - [找不到 CUDA](#找不到-cuda)
+    - [找不到 hwloc](#找不到-hwloc)
+  - [权重量化](#权重量化)
+  - [提交前必读](#提交前必读)
 
 ## 说明
 
@@ -301,18 +310,20 @@ python -m sglang.launch_server \
 
 | 参数 | 描述 | 示例值 |
 |------|------|--------|
-| `--kt-method` | CPU 推理后端类型 | `AMXINT4`、`AMXINT8` 或 `LLAMAFILE` |
+| `--kt-method` | CPU 推理后端类型 | `AMXINT4`、`AMXINT8`、`RAWINT4` 或 `LLAMAFILE` |
 | `--kt-weight-path` | 量化后的 CPU 权重路径 | `/path/to/cpu-weights` |
 | `--kt-cpuinfer` | CPU 推理线程数 | `64`（根据 CPU 核心数调整） |
 | `--kt-threadpool-count` | 并行执行的线程池数量 | `2`（通常为 1–4） |
 | `--kt-num-gpu-experts` | 保留在 GPU 上的 experts 数量 | `32`（其余 experts 由 CPU 承担） |
 | `--kt-max-deferred-experts-per-token` | 每个 token 延迟到 CPU 的 experts 数量（用于流水线执行） | `2`（0 关闭，1–4 推荐） |
+| `--kt-gpu-prefill-token-threshold` | Prefill 策略的 token 数量阈值（仅 RAWINT4） | ~`400` |
 
 **参数建议：**
 
 - **`kt-method`**：根据 CPU 能力和权重格式选择：
   - `AMXINT4`：在 AMX CPU 上 INT4 量化时具有最佳性能（但可能对某些模型有较大精度影响，例如 Qwen3-30B-A3B）
   - `AMXINT8`：在 AMX CPU 上提供更高精度的 INT8 量化方案
+  - `RAWINT4`：CPU 和 GPU 共享原生 INT4 权重（仅限 AMX 后端，目前仅支持 Kimi-K2-Thinking 模型）。详见 [Kimi-K2-Thinking 原生推理教程](../doc/en/Kimi-K2-Thinking-Native.md)。
   - `LLAMAFILE`：基于 AVX2/AVX512 的通用 CPU 后端，性能较 AMX 略低，但适用范围更广
 
 - **`kt-cpuinfer`**：设置为 **物理核数**（不是线程数）。
@@ -337,6 +348,11 @@ python -m sglang.launch_server \
   - `0`：完全同步执行（简单但延迟较高）
   - `1–4`：推荐范围，一部分 experts 延迟到 CPU，在延迟和质量之间取得较好平衡（需要按模型调参）
   - `5–7`：可以获得更低延迟，但存在明显精度下降风险，请谨慎使用
+
+- **`kt-gpu-prefill-token-threshold`**（仅 RAWINT4）：控制原生 INT4 推理的 prefill 策略：
+  - **≤ 阈值**：使用 CPU+GPU 混合 prefill。无需额外显存，但随着 token 数量增加性能会缓慢下降。
+  - **> 阈值**：使用分层 GPU prefill。长序列性能更好，但需要约 9GB+ 额外显存。
+  - 仅在使用 `--kt-method RAWINT4` 时生效。目前仅支持 Kimi-K2-Thinking 模型。
 
 ## 直接使用 Python API
 
