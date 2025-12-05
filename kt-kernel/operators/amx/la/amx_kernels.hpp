@@ -2905,7 +2905,7 @@ struct GemmKernel224Int4SmallKGroup {
   static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB *bb, BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
     for (int m_begin = 0; m_begin < m; m_begin ++) {
-      float* c = bc->get_submat(m, n, m_begin, 0);
+      float* c = bc->get_submat(m, n, m_begin, n_start);
       __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
       
       for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin ++) {
@@ -2929,7 +2929,7 @@ struct GemmKernel224Int4SmallKGroup {
           WORK_K_BLOCK(k_block + 1);
         }
 
-        c[n_block_begin] = _mm512_reduce_add_ps(sum) / 16;
+        c[n_block_begin - n_start] = _mm512_reduce_add_ps(sum) / 16;
       }
     }
   }
