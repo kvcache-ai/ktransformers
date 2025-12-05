@@ -35,14 +35,15 @@ Note: Currently, please clone our custom SGLang repository:
 
 ```
 git clone https://github.com/kvcache-ai/sglang.git
+cd sglang
 git checkout kimi_k2
-cd sglang && pip install -e "python[all]"
+pip install -e "python[all]"
 ```
 
 
 
-1. **CUDA toolkit** - Compatible with your GPU (CUDA 11.8+ recommended)
-2. **Hugging Face CLI** - For downloading models:
+3. **CUDA toolkit** - Compatible with your GPU (CUDA 11.8+ recommended)
+4. **Hugging Face CLI** - For downloading models:
    ```bash
    pip install huggingface-hub
    ```
