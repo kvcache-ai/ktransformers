@@ -17,6 +17,7 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 
 ## 🔥 更新
 
+* **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking-Native.md)）
 * **2025 年 11 月 6 日**：支持 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking.md)）和微调（[教程](./doc/en/SFT_Installation_Guide_KimiK2.md)）
 * **2025 年 11 月 4 日**：KTransformers 微调 × LLaMA-Factory 集成（[教程](./doc/en/KTransformers-Fine-Tuning_User-Guide.md)）
 * **2025 年 10 月 27 日**：支持昇腾 NPU（[教程](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md)）
