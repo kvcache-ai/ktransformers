@@ -86,6 +86,10 @@ The install script will:
 If you have an AMX-capable CPU but plan to use the LLAMAFILE backend, do NOT use the default auto-detection build.
 Use "manual mode" with `CPUINFER_CPU_INSTRUCT` set to `AVX512` or `AVX2` instead of `NATIVE` to avoid compilation issues (see below).
 
+⚠️ **Important for BLIS AMD backend users:**
+for the installation guide, see this [issue](https://github.com/kvcache-ai/ktransformers/issues/1601)
+
+
 ### Manual Configuration (Advanced)
 
 If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):
