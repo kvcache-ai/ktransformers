@@ -131,20 +131,44 @@ def load_extension(variant):
     Raises:
         ImportError: If all variants fail to load
     """
-    import importlib
+    import importlib.util
+    import glob
 
-    module_name = f'_kt_kernel_ext_{variant}'
+    # The .so files are named like: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+    # But they export PyInit_kt_kernel_ext (the original module name)
+    # So we need to load them manually with the correct internal name
 
     try:
-        # Use importlib to avoid circular import during kt_kernel.__init__
-        # The extension modules are at the top level of the kt_kernel package
-        ext = importlib.import_module(f'kt_kernel.{module_name}')
+        # Find the kt_kernel package directory
+        # We can't import kt_kernel here (circular import), so use __file__
+        kt_kernel_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Find the .so file for this variant
+        pattern = os.path.join(kt_kernel_dir, f'_kt_kernel_ext_{variant}.*.so')
+        so_files = glob.glob(pattern)
+
+        if not so_files:
+            raise ImportError(f"No .so file found for variant {variant} (pattern: {pattern})")
+
+        so_file = so_files[0]
+
+        if os.environ.get('KT_KERNEL_DEBUG') == '1':
+            print(f"[kt-kernel] Loading {variant} from: {so_file}")
+
+        # Load the module manually
+        # The module exports PyInit_kt_kernel_ext, so we use that as the module name
+        spec = importlib.util.spec_from_file_location('kt_kernel_ext', so_file)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to create spec for {so_file}")
+
+        ext = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ext)
 
         if os.environ.get('KT_KERNEL_DEBUG') == '1':
             print(f"[kt-kernel] Successfully loaded {variant.upper()} variant")
         return ext
 
-    except (ImportError, ModuleNotFoundError) as e:
+    except (ImportError, ModuleNotFoundError, FileNotFoundError) as e:
         if os.environ.get('KT_KERNEL_DEBUG') == '1':
             print(f"[kt-kernel] Failed to load {variant} variant: {e}")
 
