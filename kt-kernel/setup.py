@@ -305,25 +305,29 @@ class CMakeBuild(build_ext):
                 # Original: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
                 # Renamed:  _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
 
-                # Find the newly built .so file (should match kt_kernel_ext*.so but not _kt_kernel_ext_*.so)
+                # Extract the base extension name (without package prefix)
+                # ext.name is "kt_kernel.kt_kernel_ext", we want "kt_kernel_ext"
+                base_ext_name = ext.name.split('.')[-1]
+
+                # Find the newly built .so file
                 import time
                 time.sleep(0.5)  # Give filesystem time to sync
 
                 built_candidates = [
                     f for f in Path(extdir).glob("*.so")
-                    if f.name.startswith(ext.name) and not f.name.startswith(f"_{ext.name}_")
+                    if f.name.startswith(base_ext_name) and not f.name.startswith(f"_{base_ext_name}_")
                 ]
 
                 if not built_candidates:
-                    print(f"WARNING: No .so file found for {ext.name} in {extdir}")
+                    print(f"WARNING: No .so file found for {base_ext_name} in {extdir}")
                     print(f"Files in {extdir}:")
                     for f in Path(extdir).glob("*.so"):
                         print(f"  {f.name}")
 
                 for so_file in built_candidates:
                     # Extract the python tag part (e.g., ".cpython-311-x86_64-linux-gnu.so")
-                    suffix = so_file.name.replace(ext.name, "")
-                    new_name = f"_{ext.name}_{variant['name']}{suffix}"
+                    suffix = so_file.name.replace(base_ext_name, "")
+                    new_name = f"_{base_ext_name}_{variant['name']}{suffix}"
                     new_path = extdir / new_name
 
                     print(f"-- Renaming {so_file.name} -> {new_name}")
@@ -581,7 +585,7 @@ setup(
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
     },
-    ext_modules=[CMakeExtension("kt_kernel_ext", str(REPO_ROOT))],
+    ext_modules=[CMakeExtension("kt_kernel.kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
     classifiers=[
