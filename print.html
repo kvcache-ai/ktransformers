@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-29459ff8.js";
+            window.path_to_searchindex_js = "searchindex-71ae4a2a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-8ca7a795.js"></script>
@@ -197,6 +197,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="kt-kernel">kt-kernel</a> and <a href="kt-sft">kt-sft</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Dec 5, 2025</strong>: Support Native Kimi-K2-Thinking inference (<a href="doc/en/Kimi-K2-Thinking-Native.html">Tutorial</a>)</li>
 <li><strong>Nov 6, 2025</strong>: Support Kimi-K2-Thinking inference (<a href="doc/en/Kimi-K2-Thinking.html">Tutorial</a>) and fine-tune (<a href="doc/en/SFT_Installation_Guide_KimiK2.html">Tutorial</a>)</li>
 <li><strong>Nov 4, 2025</strong>: KTransformers Fine-Tuning × LLaMA-Factory Integration. (<a href="doc/en/KTransformers-Fine-Tuning_User-Guide.html">Tutorial</a>)</li>
 <li><strong>Oct 27, 2025</strong>: Support Ascend NPU. (<a href="doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.html">Tutorial</a>)</li>
@@ -319,6 +320,8 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
 <p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
 <ul>
+<li><a href="#kt-kernel">KT-Kernel</a>
+<ul>
 <li><a href="#note">Note</a></li>
 <li><a href="#features">Features</a></li>
 <li><a href="#installation">Installation</a>
@@ -331,8 +334,19 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li><a href="#verification">Verification</a></li>
 <li><a href="#integration-with-sglang">Integration with SGLang</a>
 <ul>
-<li><a href="#installation-steps">Installation Steps</a></li>
-<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
+<li><a href="#installation-steps">Installation Steps</a>
+<ul>
+<li><a href="#1-install-sglang">1. Install SGLang</a></li>
+<li><a href="#2-prepare-weights">2. Prepare Weights</a></li>
+<li><a href="#3-launch-sglang-server">3. Launch SGLang Server</a></li>
+</ul>
+</li>
+<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a>
+<ul>
+<li><a href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></li>
+<li><a href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></li>
+</ul>
+</li>
 <li><a href="#kt-kernel-parameters">KT-Kernel Parameters</a></li>
 </ul>
 </li>
@@ -343,7 +357,13 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </li>
 <li><a href="#build-configuration">Build Configuration</a>
 <ul>
-<li><a href="#manual-installation">Manual Installation</a></li>
+<li><a href="#manual-installation">Manual Installation</a>
+<ul>
+<li><a href="#1-install-system-dependencies">1. Install System Dependencies</a></li>
+<li><a href="#2-set-build-configuration">2. Set Build Configuration</a></li>
+<li><a href="#3-build-and-install">3. Build and Install</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li><a href="#error-troubleshooting">Error Troubleshooting</a>
@@ -354,6 +374,8 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </li>
 <li><a href="#weight-quantization">Weight Quantization</a></li>
 <li><a href="#before-commit">Before Commit!</a></li>
+</ul>
+</li>
 </ul>
 <h2 id="note"><a class="header" href="#note">Note</a></h2>
 <p><strong>Current Support Status:</strong></p>
@@ -569,12 +591,13 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr>
 </thead>
 <tbody>
-<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, or <code>LLAMAFILE</code></td></tr>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, <code>RAWINT4</code>, or <code>LLAMAFILE</code></td></tr>
 <tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
 <tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
 <tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
 <tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
 <tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-4 recommended)</td></tr>
+<tr><td><code>--kt-gpu-prefill-token-threshold</code></td><td>Token count threshold for prefill strategy (RAWINT4 only)</td><td>~<code>400</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -585,6 +608,7 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <ul>
 <li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
 <li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
+<li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (AMX backend only, currently supports Kimi-K2-Thinking model). See <a href="en/doc/en/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
 <li><code>LLAMAFILE</code>: GGUF-based backend</li>
 </ul>
 </li>
@@ -624,6 +648,14 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <li><code>0</code>: Synchronous execution (simpler, higher latency)</li>
 <li><code>1-4</code>: Deferred execution (recommended range; good latency/quality balance, requires tuning)</li>
 <li><code>5-7</code>: Highest latency reduction but may introduce noticeable accuracy loss; use with care</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-gpu-prefill-token-threshold</code></strong> (RAWINT4 only): Controls prefill strategy for native INT4 inference:</p>
+<ul>
+<li><strong>≤ threshold</strong>: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.</li>
+<li><strong>&gt; threshold</strong>: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires ~9GB+ extra VRAM.</li>
+<li>Only applicable when <code>--kt-method RAWINT4</code> is used. Currently supports Kimi-K2-Thinking model only.</li>
 </ul>
 </li>
 </ul>
