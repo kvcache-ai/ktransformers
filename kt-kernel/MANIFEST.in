@@ -1,0 +1,37 @@
+# MANIFEST.in for kt-kernel
+# Ensures source distribution includes all necessary files for building from source
+
+# Core build files
+include CMakeLists.txt
+include CMakePresets.json
+include setup.py
+include pyproject.toml
+include requirements.txt
+include README.md
+include LICENSE
+
+# CMake modules and configuration
+recursive-include cmake *.cmake *.in
+
+# C++ source files
+recursive-include cpu_backend *.h *.hpp *.cpp *.c *.cc
+recursive-include operators *.h *.hpp *.cpp *.c *.cc
+include ext_bindings.cpp
+
+# Python package
+recursive-include python *.py
+
+# Third-party dependencies (vendored)
+recursive-include third_party *
+
+# Exclude compiled and cache files
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude .git*
+global-exclude *.so
+global-exclude *.o
+global-exclude *.a
+global-exclude build
+global-exclude dist
+global-exclude *.egg-info
