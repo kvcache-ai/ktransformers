@@ -111,7 +111,7 @@ See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main
 This parameter controls the prefill strategy:
 
 - **$\leq$ threshold**: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.
-- **> threshold**: Uses layerwise GPU prefill. Performance scales exponentially up to `chunked-prefill-size`, but requires 9GB+ extra VRAM.
+- **> threshold**: Uses layerwise GPU prefill. Performance scales near-exponentially until reaching the bottleneck, but requires 9GB+ extra VRAM.
 
 ### Troubleshooting OOM
 
@@ -130,21 +130,25 @@ Layerwise prefill requires extra VRAM (~9GB + incremental cost with prefill leng
 
 | GPU Config | `kt-num-gpu-experts` | `max-total-tokens` | `chunked-prefill-size` |
 |------------|----------------------|---------------------|------------------------|
-| 1x RTX 4090 (48GB) | 1 | 32768 | 32768 |
+| 1x RTX 4090 (48GB) | 0 | 30000 | 30000 |
 | 2x RTX 4090 (48GB) | 8 | 65536 | 65536 |
 | 4x RTX 4090 (48GB) | 30 | 80000 | 65536 |
 | 8x RTX 4090 (48GB) | 80 | 100000 | 65536 |
 
+**Tip:** If your prefill and total length requirements are low (e.g., processing short texts), you can reduce `max-total-tokens` and `chunked-prefill-size` to free up VRAM for a larger `kt-num-gpu-experts`, which improves decode performance.
+
 ### Performance
 
-The following performance benchmarks were measured with single concurrency at maximum prefill length (32768 tokens):
+The following prefill throughput (tokens/s) benchmarks were measured with single concurrency:
 
-| GPU Config | Prefill Throughput |
-|------------|-------------------|
-| 1x RTX 4090 (48GB) | 290 tokens/s |
-| 2x RTX 4090 (48GB) | 529 tokens/s |
-| 4x RTX 4090 (48GB) | 775 tokens/s |
-| 8x RTX 4090 (48GB) | 1060 tokens/s |
+| GPU Config | 2048 tokens | 8192 tokens | 32768 tokens |
+|------------|-------------|-------------|--------------|
+| 1x RTX 4090 (48GB) | 53 | 184 | 290* |
+| 2x RTX 4090 (48GB) | 85 | 294 | 529 |
+| 4x RTX 4090 (48GB) | 118 | 415 | 818 |
+| 8x RTX 4090 (48GB) | 130 | 435 | 1055 |
+
+* Note: 1x RTX 4090 with layerwise prefill OOMs at 32768 tokens, so the 290 tokens/s is measured with qlen=30000.
 
 ## Step 3: Send Inference Requests
 
