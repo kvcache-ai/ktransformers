@@ -14,7 +14,7 @@ This tutorial demonstrates how to run Kimi-K2 model inference using SGLang integ
 
 **Minimum Configuration:**
 - **GPU**: NVIDIA RTX 4090 48GB (or equivalent with at least 48GB VRAM available)
-- **CPU**: Intel Xeon with AMX support (e.g., Sapphire Rapids)
+- **CPU**: x86 CPU with AVX512 support (e.g., Sapphire Rapids)
 - **RAM**: At least 650GB system memory
 - **Storage**: ~600GB for model weights (native INT4 weight, same weight dir for CPU and GPU)
 
