@@ -24,7 +24,8 @@ register_cpu_ci(est_time=300, suite="default")
 # Check if dependencies are available
 try:
     import torch
-    import kt_kernel_ext
+    import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+    kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     from tqdm import tqdm
     HAS_DEPS = True
 except ImportError as e:

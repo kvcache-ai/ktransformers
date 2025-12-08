@@ -22,12 +22,17 @@ permissions:
 
 jobs:
   build-kt-kernel:
-    name: Build kt-kernel (Python ${{ matrix.python-version }})
+    name: Build kt-kernel (Python ${{ matrix.python-version }}, CUDA ${{ matrix.cuda.suffix }})
     runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.10', '3.11', '3.12']
+        cuda:
+          - { version: '11.8.0', suffix: 'cu118', home_suffix: '11.8' }
+          - { version: '12.1.0', suffix: 'cu121', home_suffix: '12.1' }
+          - { version: '12.4.0', suffix: 'cu124', home_suffix: '12.4' }
+          - { version: '12.6.0', suffix: 'cu126', home_suffix: '12.6' }
 
     steps:
       - name: Checkout repository
@@ -45,10 +50,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake libhwloc-dev pkg-config
 
-      - name: Setup CUDA 12.6
+      - name: Setup CUDA ${{ matrix.cuda.version }}
         uses: Jimver/cuda-toolkit@v0.2.11
         with:
-          cuda: '12.6.0'
+          cuda: ${{ matrix.cuda.version }}
           method: 'network'
           sub-packages: '["nvcc", "cudart", "cuda-libraries-dev"]'
 
@@ -63,6 +68,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install build wheel setuptools
 
+      - name: Modify version to include CUDA suffix
+        run: |
+          # Read current version
+          VERSION=$(grep '__version__' version.py | cut -d'"' -f2)
+          echo "Original version: $VERSION"
+
+          # Add CUDA suffix (e.g., 0.4.2 -> 0.4.2.cu118)
+          NEW_VERSION="${VERSION}.${{ matrix.cuda.suffix }}"
+          echo "New version: $NEW_VERSION"
+
+          # Update version.py
+          sed -i "s/__version__ = \".*\"/__version__ = \"$NEW_VERSION\"/" version.py
+
+          # Verify change
+          echo "Updated version.py:"
+          cat version.py
+
       - name: Build kt-kernel wheel (multi-variant)
         working-directory: kt-kernel
         env:
@@ -70,10 +92,11 @@ jobs:
           CPUINFER_USE_CUDA: '1'
           CPUINFER_BUILD_TYPE: 'Release'
           CPUINFER_PARALLEL: '4'
-          CUDA_HOME: /usr/local/cuda-12.6
-          PATH: /usr/local/cuda-12.6/bin:${{ env.PATH }}
+          CUDA_HOME: /usr/local/cuda-${{ matrix.cuda.home_suffix }}
+          PATH: /usr/local/cuda-${{ matrix.cuda.home_suffix }}/bin:${{ env.PATH }}
         run: |
-          echo "Building kt-kernel with all CPU variants (AMX, AVX512, AVX2)"
+          echo "Building kt-kernel with CUDA ${{ matrix.cuda.suffix }}"
+          echo "Building with all CPU variants (AMX, AVX512, AVX2)"
           python -m build --wheel --no-isolation -v
 
       - name: List generated wheels
@@ -100,7 +123,7 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v3
         with:
-          name: kt-kernel-wheels-py${{ matrix.python-version }}
+          name: kt-kernel-wheels-py${{ matrix.python-version }}-${{ matrix.cuda.suffix }}
           path: kt-kernel/dist/*.whl
           retention-days: 7
 
@@ -127,15 +150,19 @@ jobs:
           echo "Wheels to publish:"
           ls -lh dist/
 
-      - name: Get version from wheel
+      - name: Get base version from wheel
         id: get_version
         run: |
           # Extract version from first wheel filename
           wheel_name=$(ls dist/*.whl | head -1 | xargs basename)
-          # Extract version (format: kt_kernel-X.Y.Z-...)
-          version=$(echo "$wheel_name" | sed 's/kt_kernel-\([0-9.]*\)-.*/\1/')
+          # Extract version (format: kt_kernel-X.Y.Z.cuXXX-...)
+          version=$(echo "$wheel_name" | sed 's/kt_kernel-\([0-9.]*\.[a-z0-9]*\)-.*/\1/')
+          # Also extract base version without CUDA suffix
+          base_version=$(echo "$version" | sed 's/\.cu[0-9]*//')
           echo "VERSION=$version" >> $GITHUB_OUTPUT
-          echo "Publishing version: $version"
+          echo "BASE_VERSION=$base_version" >> $GITHUB_OUTPUT
+          echo "Publishing versions for base: $base_version"
+          echo "Example version: $version"
 
       - name: Publish to TestPyPI (if requested)
         if: github.event.inputs.test_pypi == 'true'
@@ -156,19 +183,38 @@ jobs:
 
       - name: Create release summary
         run: |
-          echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.BASE_VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo "Choose the version matching your CUDA installation:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "# For CUDA 11.8" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel==${{ steps.get_version.outputs.BASE_VERSION }}.cu118" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# For CUDA 12.1" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel==${{ steps.get_version.outputs.BASE_VERSION }}.cu121" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# For CUDA 12.4" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel==${{ steps.get_version.outputs.BASE_VERSION }}.cu124" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# For CUDA 12.6" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel==${{ steps.get_version.outputs.BASE_VERSION }}.cu126" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY
-          ls -1 dist/ >> $GITHUB_STEP_SUMMARY
+          echo "Total: $(ls -1 dist/*.whl | wc -l) wheels (3 Python versions × 4 CUDA versions)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### CPU Variants Included" >> $GITHUB_STEP_SUMMARY
+          echo "### Features" >> $GITHUB_STEP_SUMMARY
+          echo "**CPU Variants (all wheels include):**" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AMX (Intel Sapphire Rapids+)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVX512 (Intel Skylake-X/Ice Lake/Cascade Lake)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVX2 (Maximum compatibility)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "PyPI link: https://pypi.org/project/kt-kernel/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
+          echo "**CUDA Versions:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CUDA 11.8 (.cu118)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CUDA 12.1 (.cu121)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CUDA 12.4 (.cu124)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CUDA 12.6 (.cu126)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "PyPI link: https://pypi.org/project/kt-kernel/#history" >> $GITHUB_STEP_SUMMARY

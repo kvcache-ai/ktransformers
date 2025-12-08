@@ -43,6 +43,9 @@ _kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
 import sys
 sys.modules['kt_kernel_ext'] = _kt_kernel_ext
 
+# Also expose kt_kernel_ext as an attribute for backward compatibility
+kt_kernel_ext = _kt_kernel_ext
+
 # Import main API
 from .experts import KTMoEWrapper
 
@@ -57,4 +60,4 @@ if os.path.exists(_root_version_file):
 else:
     __version__ = "0.4.2"
 
-__all__ = ["KTMoEWrapper", "__cpu_variant__", "__version__"]
+__all__ = ["KTMoEWrapper", "kt_kernel_ext", "__cpu_variant__", "__version__"]

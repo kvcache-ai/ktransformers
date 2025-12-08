@@ -395,13 +395,12 @@ class CMakeBuild(build_ext):
         # If users want to specify CUDA archs, they can set env CPUINFER_CUDA_ARCHS
         # (e.g. "89" or "86;89") or pass it via CMAKE_ARGS.
         auto_moe_kernel_ = False
-        # Normalize CPUINFER_USE_CUDA: default to enabled (1) for PyPI wheels
-        # kt-kernel requires CUDA but is flexible about CUDA versions
+        # Normalize CPUINFER_USE_CUDA: if unset, auto-detect; otherwise respect truthy/falsey values
         cuda_env = _env_get_bool("CPUINFER_USE_CUDA", None)
         if cuda_env is None:
-            # Default to CUDA enabled for PyPI wheel builds
-            os.environ["CPUINFER_USE_CUDA"] = "1"
-            print("-- CPUINFER_USE_CUDA not set; defaulting to CUDA enabled (flexible about CUDA version)")
+            auto_cuda = detect_cuda_toolkit()
+            os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
+            print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
         elif cuda_env:
             print("-- CPUINFER_USE_CUDA explicitly enabled")
         else:

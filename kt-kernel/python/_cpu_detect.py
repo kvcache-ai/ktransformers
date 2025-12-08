@@ -120,7 +120,10 @@ def load_extension(variant):
     Tries to import the specified variant, with automatic fallback to
     lower-performance variants if the requested one is not available.
 
-    Fallback order: amx -> avx512 -> avx2
+    Supports both multi-variant builds (_kt_kernel_ext_amx.*.so) and
+    single-variant builds (kt_kernel_ext.*.so).
+
+    Fallback order: amx -> avx512 -> avx2 -> single-variant
 
     Args:
         variant (str): 'amx', 'avx512', or 'avx2'
@@ -134,21 +137,30 @@ def load_extension(variant):
     import importlib.util
     import glob
 
-    # The .so files are named like: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
-    # But they export PyInit_kt_kernel_ext (the original module name)
-    # So we need to load them manually with the correct internal name
+    # The .so files can be named in two ways:
+    # Multi-variant: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+    # Single-variant: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
+    # Both export PyInit_kt_kernel_ext (the original module name)
 
     try:
         # Find the kt_kernel package directory
         # We can't import kt_kernel here (circular import), so use __file__
         kt_kernel_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Find the .so file for this variant
+        # Try multi-variant naming first
         pattern = os.path.join(kt_kernel_dir, f'_kt_kernel_ext_{variant}.*.so')
         so_files = glob.glob(pattern)
 
         if not so_files:
-            raise ImportError(f"No .so file found for variant {variant} (pattern: {pattern})")
+            # Try single-variant naming (fallback for builds without CPUINFER_BUILD_ALL_VARIANTS)
+            pattern = os.path.join(kt_kernel_dir, 'kt_kernel_ext.*.so')
+            so_files = glob.glob(pattern)
+
+            if so_files:
+                if os.environ.get('KT_KERNEL_DEBUG') == '1':
+                    print(f"[kt-kernel] Multi-variant {variant} not found, using single-variant build")
+            else:
+                raise ImportError(f"No .so file found for variant {variant} (tried patterns: {kt_kernel_dir}/_kt_kernel_ext_{variant}.*.so and {kt_kernel_dir}/kt_kernel_ext.*.so)")
 
         so_file = so_files[0]
 

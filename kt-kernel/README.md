@@ -40,21 +40,33 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ### Option 1: Install from PyPI (Recommended for Most Users)
 
-The simplest way to install kt-kernel is via pip:
+Choose the version matching your CUDA installation:
 
 ```bash
-pip install kt-kernel
+# For CUDA 11.8
+pip install kt-kernel==0.4.2.cu118
+
+# For CUDA 12.1
+pip install kt-kernel==0.4.2.cu121
+
+# For CUDA 12.4
+pip install kt-kernel==0.4.2.cu124
+
+# For CUDA 12.6
+pip install kt-kernel==0.4.2.cu126
 ```
+
+> **Note**: Replace `0.4.2` with the [latest version](https://pypi.org/project/kt-kernel/#history) if available.
 
 **Features:**
 - ✅ **Automatic CPU detection**: Detects your CPU and loads the optimal kernel variant
 - ✅ **Multi-variant wheel**: Includes AMX, AVX512, and AVX2 variants in a single package
 - ✅ **No compilation needed**: Pre-built wheels for Python 3.10, 3.11, 3.12
-- ✅ **CUDA 12.x support**: Requires CUDA runtime (flexible about exact version)
+- ✅ **Multiple CUDA versions**: Choose the version matching your environment
 
 **Requirements:**
-- CUDA 12.x runtime (flexible about exact version)
-- PyTorch 2.0+ (install separately)
+- CUDA 11.8+ or 12.x runtime (must match the package version you install)
+- PyTorch 2.0+ (install separately, must match CUDA version)
 - Linux x86-64
 
 **CPU Variants Included:**
