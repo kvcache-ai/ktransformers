@@ -228,6 +228,8 @@ class AMX_K2_MOE_TP {
                                                                group_size, down_bb_ptr));
     }
     assert(T::BufferA::M_STEP == T::BufferC::M_STEP);
+    // TODO: need update to all *.hpp
+    // (config_.expert_num * T::BufferA::M_STEP) in pool_count_ is to ensure padding for each experts.
     pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::BufferA::M_STEP;
 
     gate_up_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
