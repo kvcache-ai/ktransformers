@@ -210,7 +210,7 @@ def initialize():
 
     Returns:
         tuple: (extension_module, variant_name)
-            - extension_module: The loaded C++ extension module
+    - extension_module: The loaded C++ extension module
             - variant_name: String indicating which variant was loaded ('amx', 'avx512', 'avx2')
 
     Example:
