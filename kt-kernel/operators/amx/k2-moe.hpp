@@ -507,8 +507,6 @@ class AMX_K2_MOE_TP {
   }
 
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
-    forward_prefill(qlen, k, expert_ids, weights, input, output);
-    return;
     if (qlen > 1) {
       forward_prefill(qlen, k, expert_ids, weights, input, output);
     } else {
