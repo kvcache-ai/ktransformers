@@ -2886,7 +2886,7 @@ struct GemmKernel224Int4SmallKGroup {
   static __m256i lo_mask() { return *((__m256i*)(&lo_mask_arr[0])); }
   static __m256i sign_xor_mask() { return *((__m256i*)(&sign_xor_arr[0])); }
 
-  using BufferA = BufferAKGroupImpl<GemmKernel224Int4SmallKGroup>;
+  using BufferA = BufferASmallKGroupImpl<GemmKernel224Int4SmallKGroup>;
   using BufferB = BufferBInt4KGroupImpl<GemmKernel224Int4SmallKGroup>;  // Use new signed int4 buffer
   using BufferC = BufferCReduceImpl<GemmKernel224Int4SmallKGroup>;
 
