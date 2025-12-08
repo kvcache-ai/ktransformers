@@ -66,6 +66,18 @@ class AMX_K2_MOE_TP {
   std::vector<std::shared_ptr<typename T::BufferA>> down_ba_;
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
+
+  size_t pool_count_ = 0;  // rows reserved in each scratch pool
+  size_t gate_up_ba_pool_bytes_ = 0;
+  size_t gate_bc_pool_bytes_ = 0;
+  size_t up_bc_pool_bytes_ = 0;
+  size_t down_ba_pool_bytes_ = 0;
+  size_t down_bc_pool_bytes_ = 0;
+  void* gate_up_ba_pool_ = nullptr;
+  void* gate_bc_pool_ = nullptr;
+  void* up_bc_pool_ = nullptr;
+  void* down_ba_pool_ = nullptr;
+  void* down_bc_pool_ = nullptr;
 #ifdef CHECK
   char verify_bb[100000000];
   char check_bb[100000000];
@@ -215,18 +227,23 @@ class AMX_K2_MOE_TP {
       down_bb_.push_back(std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size,
                                                                group_size, down_bb_ptr));
     }
-    for (int i = 0; i < config_.expert_num; i++) {
-      mem_requests.append_function([this, i](void* new_ptr) { gate_up_ba_[i]->set_data(new_ptr); },
-      T::BufferA::required_size(config_.max_len, config_.hidden_size, group_size));
-      mem_requests.append_function([this, i](void* new_ptr) { gate_bc_[i]->set_data(new_ptr); },
-                                   T::BufferC::required_size(config_.max_len, config_.intermediate_size));
-      mem_requests.append_function([this, i](void* new_ptr) { up_bc_[i]->set_data(new_ptr); },
-                                   T::BufferC::required_size(config_.max_len, config_.intermediate_size));
-      mem_requests.append_function([this, i](void* new_ptr) { down_ba_[i]->set_data(new_ptr); },
-      T::BufferA::required_size(config_.max_len, config_.intermediate_size, group_size));
-      mem_requests.append_function([this, i](void* new_ptr) { down_bc_[i]->set_data(new_ptr); },
-                                   T::BufferC::required_size(config_.max_len, config_.hidden_size));
-    }
+    assert(T::BufferA::M_STEP == T::BufferC::M_STEP);
+    // TODO: need update to all *.hpp
+    // (config_.expert_num * T::BufferA::M_STEP) in pool_count_ is to ensure padding for each experts.
+    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::BufferA::M_STEP;
+
+    gate_up_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
+    gate_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
+    up_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
+    down_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.intermediate_size, group_size)) + pool_count_ * 64;
+    down_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
+
+    mem_requests.append_pointer(&gate_up_ba_pool_, gate_up_ba_pool_bytes_);
+    mem_requests.append_pointer(&gate_bc_pool_, gate_bc_pool_bytes_);
+    mem_requests.append_pointer(&up_bc_pool_, up_bc_pool_bytes_);
+    mem_requests.append_pointer(&down_ba_pool_, down_ba_pool_bytes_);
+    mem_requests.append_pointer(&down_bc_pool_, down_bc_pool_bytes_);
+
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
@@ -552,13 +569,61 @@ class AMX_K2_MOE_TP {
     // activated_expert 已经统计完成
 
     size_t offset = 0;
+    void* gate_up_ba_pool_ptr = gate_up_ba_pool_;
+    void* gate_bc_pool_ptr = gate_bc_pool_;
+    void* up_bc_pool_ptr = up_bc_pool_;
+    void* down_ba_pool_ptr = down_ba_pool_;
+    void* down_bc_pool_ptr = down_bc_pool_;
+    constexpr size_t M_STEP = T::BufferA::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+    size_t used_pool_m = 0;
+    size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0, used_pool_bytes_ba_down = 0,
+           used_pool_bytes_bc_down = 0;
+
     for (int i = 0; i < config_.expert_num; i++) {
       m_local_input_ptr_[i] = m_local_input_ + offset * config_.hidden_size;
       m_local_gate_output_ptr_[i] = m_local_gate_output_ + offset * config_.intermediate_size;
       m_local_up_output_ptr_[i] = m_local_up_output_ + offset * config_.intermediate_size;
       m_local_down_output_ptr_[i] = m_local_down_output_ + offset * config_.hidden_size;
       offset += m_local_num_[i];
+
+      if (m_local_num_[i] == 0)
+        continue;
+      size_t max_m = (m_local_num_[i] + M_STEP - 1) / M_STEP * M_STEP;
+      gate_up_ba_[i]->max_m = max_m;
+      gate_up_ba_[i]->set_data(gate_up_ba_pool_ptr);
+      size_t ba_size = align64(T::BufferA::required_size(max_m, config_.hidden_size, group_size));
+      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
+      gate_bc_[i]->max_m = max_m;
+      gate_bc_[i]->set_data(gate_bc_pool_ptr);
+      size_t bc_gate_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
+      up_bc_[i]->max_m = max_m;
+      up_bc_[i]->set_data(up_bc_pool_ptr);
+      size_t bc_up_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
+      down_ba_[i]->max_m = max_m;
+      down_ba_[i]->set_data(down_ba_pool_ptr);
+      size_t ba_down_size = align64(T::BufferA::required_size(max_m, config_.intermediate_size, group_size));
+      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
+      down_bc_[i]->max_m = max_m;
+      down_bc_[i]->set_data(down_bc_pool_ptr);
+      size_t bc_down_size = align64(T::BufferC::required_size(max_m, config_.hidden_size));
+      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
+      used_pool_m += max_m;
+      used_pool_bytes_a += ba_size;
+      used_pool_bytes_bc_gate += bc_gate_size;
+      used_pool_bytes_bc_up += bc_up_size;
+      used_pool_bytes_ba_down += ba_down_size;
+      used_pool_bytes_bc_down += bc_down_size;
     }
+    assert(used_pool_m <= pool_count_);
+    assert(used_pool_bytes_a <= gate_up_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_gate <= gate_bc_pool_bytes_);
+    assert(used_pool_bytes_bc_up <= up_bc_pool_bytes_);
+    assert(used_pool_bytes_ba_down <= down_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_down <= down_bc_pool_bytes_);
+
 #ifdef FORWARD_TIME_PROFILE
     {
       auto now_time = std::chrono::high_resolution_clock::now();
@@ -770,6 +835,59 @@ class AMX_K2_MOE_TP {
       m_local_down_output_ptr_[expert_idx] = m_local_down_output_ + offset * config_.hidden_size;
       offset += qlen;
     }
+
+    void* gate_up_ba_pool_ptr = gate_up_ba_pool_;
+    void* gate_bc_pool_ptr = gate_bc_pool_;
+    void* up_bc_pool_ptr = up_bc_pool_;
+    void* down_ba_pool_ptr = down_ba_pool_;
+    void* down_bc_pool_ptr = down_bc_pool_;
+    constexpr size_t M_STEP = T::BufferA::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+    size_t used_pool_m = 0;
+    size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0, used_pool_bytes_ba_down = 0,
+           used_pool_bytes_bc_down = 0;
+    for (int i = 0; i < activated_expert; i++) {
+      auto expert_idx = m_expert_id_map_[i];
+      size_t max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
+
+      gate_up_ba_[expert_idx]->max_m = max_m;
+      gate_up_ba_[expert_idx]->set_data(gate_up_ba_pool_ptr);
+      size_t ba_size = align64(T::BufferA::required_size(max_m, config_.hidden_size, group_size));
+      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
+
+      gate_bc_[expert_idx]->max_m = max_m;
+      gate_bc_[expert_idx]->set_data(gate_bc_pool_ptr);
+      size_t bc_gate_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
+
+      up_bc_[expert_idx]->max_m = max_m;
+      up_bc_[expert_idx]->set_data(up_bc_pool_ptr);
+      size_t bc_up_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
+
+      down_ba_[expert_idx]->max_m = max_m;
+      down_ba_[expert_idx]->set_data(down_ba_pool_ptr);
+      size_t ba_down_size = align64(T::BufferA::required_size(max_m, config_.intermediate_size, group_size));
+      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
+
+      down_bc_[expert_idx]->max_m = max_m;
+      down_bc_[expert_idx]->set_data(down_bc_pool_ptr);
+      size_t bc_down_size = align64(T::BufferC::required_size(max_m, config_.hidden_size));
+      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
+
+      used_pool_m += max_m;
+      used_pool_bytes_a += ba_size;
+      used_pool_bytes_bc_gate += bc_gate_size;
+      used_pool_bytes_bc_up += bc_up_size;
+      used_pool_bytes_ba_down += ba_down_size;
+      used_pool_bytes_bc_down += bc_down_size;
+    }
+    assert(used_pool_m <= pool_count_);
+    assert(used_pool_bytes_a <= gate_up_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_gate <= gate_bc_pool_bytes_);
+    assert(used_pool_bytes_bc_up <= up_bc_pool_bytes_);
+    assert(used_pool_bytes_ba_down <= down_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_down <= down_bc_pool_bytes_);
 
     gate_up_ba_[0]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
 

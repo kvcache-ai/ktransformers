@@ -404,8 +404,16 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
 
+        # Infer group_size from scale shape (column-major layout)
+        # For gate/up projection: in_features = hidden_size
+        # So: group_size = hidden_size / scale.shape[1]
+        scale_shape = self.gate_scales[0].shape
+        group_size = self.hidden_size // scale_shape[1]
+        print(f"[RAWAMXMoEWrapper Layer {self.layer_idx}] Inferred group_size: {group_size}")
+
         moe_config.quant_config.bits = 4
-        moe_config.quant_config.group_size = 32
+        moe_config.quant_config.group_size = group_size
+        
         moe_config.quant_config.zero_point = False
 
         # Use gate_projs instead of gate_proj for per-expert pointers

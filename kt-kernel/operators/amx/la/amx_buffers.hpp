@@ -442,6 +442,78 @@ struct BufferAKGroupImpl {
   }
 };
 
+// BufferASmallKGroupImpl: For kernels with K_STEP=32 (e.g., GemmKernel224Int4SmallKGroup)
+// This fixes the buffer overflow issue where the base class writes 64 bytes per K_STEP iteration
+// but the buffer is only sized for 32-byte steps.
+template <typename K>
+struct BufferASmallKGroupImpl : public BufferAKGroupImpl<K> {
+  using Base = BufferAKGroupImpl<K>;
+  using Base::a;
+  using Base::d;
+  using Base::k;
+  using Base::k_group_count;
+  using Base::k_group_size;
+  using Base::max_m;
+
+  static constexpr int M_STEP = K::M_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr int K_BLOCK = K::K_BLOCK;
+
+  BufferASmallKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
+      : Base(max_m, k, k_group_size, ptr) {}
+
+  // Override from_mat to write only 32 bytes per K_STEP iteration
+  void from_mat(int m, ggml_bf16_t* src, int ith, int nth) {
+    assert(m <= max_m);
+    assert(ith == 0 && nth == 1);
+
+    // Calculate scale for each k_group (same as base class)
+    for (int m_idx = 0; m_idx < m; m_idx++) {
+      for (int kg = 0; kg < k_group_count; kg++) {
+        float amax = 0.0f;
+        int k_start = kg * k_group_size;
+        int k_end = k_start + k_group_size;
+        for (int j = k_start; j < k_end; j += 32) {
+          __m512 f0, f1;
+          avx512_32xbf16_to_32xfp32((__m512i*)(src + m_idx * k + j), &f0, &f1);
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
+        }
+        d[m_idx * k_group_count + kg] = amax / ((1 << 7) - 1);
+      }
+    }
+
+    // Quantization with 32-byte writes per K_STEP iteration
+    int m_block_size = (m + M_STEP - 1) / M_STEP * M_STEP;
+    for (int m_begin = 0; m_begin < m; m_begin += M_STEP) {
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+          for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
+            // Get the scale for this k_group
+            int k_group_idx = (k_block_begin + k_begin) / k_group_size;
+            float scale = d[(m_begin + i) * k_group_count + k_group_idx];
+            __m512 id = _mm512_set1_ps(scale ? 1.0f / scale : 0.0f);
+
+            // Calculate destination - writes K_STEP (32) bytes
+            int8_t* dst = a + k_block_begin * m_block_size + m_begin * k_block_size + k_begin * M_STEP + i * K_STEP;
+
+            // Only process 32 bytes (2 x __m512 -> 2 x __m128i) per iteration
+            __m512 f0, f1;
+            avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + k_block_begin + k_begin), &f0, &f1);
+            __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
+            __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
+            __m128i s0 = _mm512_cvtsepi32_epi8(i0);
+            __m128i s1 = _mm512_cvtsepi32_epi8(i1);
+            _mm_store_si128((__m128i*)dst, s0);
+            _mm_store_si128((__m128i*)(dst + 16), s1);
+          }
+        }
+      }
+    }
+  }
+};
+
 template <typename K>
 struct BufferBInt4Impl {
   using dt = typename K::dt;
