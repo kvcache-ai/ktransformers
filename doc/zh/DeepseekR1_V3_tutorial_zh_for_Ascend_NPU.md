@@ -37,6 +37,7 @@
 
 下载完成镜像后，执行以下命令启动容器：
 
+```bash
 docker run -it -d --net=host --shm-size=500g \
        --name <container-name> \
        -w /home \
@@ -53,6 +54,7 @@ docker run -it -d --net=host --shm-size=500g \
        -v /usr/local/sbin/:/usr/local/sbin:ro \
        -v /home \
        mindie:2.2.RC1-800I-A2-py311-openeuler24.03-lts bash
+```
 
 进入容器
 docker exec -it <container-name> /bin/bash
