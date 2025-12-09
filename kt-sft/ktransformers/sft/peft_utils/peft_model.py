@@ -42,7 +42,7 @@ from transformers.utils import PushToHubMixin
 from peft.utils.constants import DUMMY_MODEL_CONFIG, PEFT_TYPE_TO_PREFIX_MAPPING
 
 from peft.config import PeftConfig
-# from .tuners.tuners_utils import BaseTuner, BaseTunerLayer
+from .lora_layer import BaseTunerLayer
 from peft.utils import (
     SAFETENSORS_WEIGHTS_NAME,
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,
@@ -1695,11 +1695,6 @@ def get_layer_status(model: torch.nn.Module) -> list[TunerLayerStatus]:
     """
     if isinstance(model, PeftModel):
         base_model = model.base_model
-        if not isinstance(base_model, BaseTuner):
-            raise TypeError(
-                "get_layer_status() got an invalid PeftModel instance; prefix tuning and adaption prompt are not "
-                "supported."
-            )
     else:
         base_model = model
 
@@ -1827,11 +1822,6 @@ def get_model_status(model: torch.nn.Module) -> TunerModelStatus:
 
     """
     if isinstance(model, PeftModel):
-        if not isinstance(model.base_model, BaseTuner):
-            raise TypeError(
-                "get_model_status() got an invalid PeftModel instance; prefix tuning and adaption prompt are not "
-                "supported."
-            )
         base_model_type = model.get_base_model().__class__.__name__
         trainable_params, total_params = model.get_nb_trainable_parameters()
         base_model = model.base_model
