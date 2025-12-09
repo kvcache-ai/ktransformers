@@ -57,7 +57,10 @@ docker run -it -d --net=host --shm-size=500g \
 ```
 
 进入容器
+
+```bash
 docker exec -it <container-name> /bin/bash
+```
 
 部署Python环境：
 
