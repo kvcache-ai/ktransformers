@@ -10,6 +10,9 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
     - [Quick Installation (Recommended)](#quick-installation-recommended)
     - [Manual Configuration (Advanced)](#manual-configuration-advanced)
   - [Verification](#verification)
+  - [Docker Usage](#docker-usage)
+    - [Pull the Image](#pull-the-image)
+    - [Create and Start Container](#create-and-start-container)
   - [Integration with SGLang](#integration-with-sglang)
     - [Installation Steps](#installation-steps)
       - [1. Install SGLang](#1-install-sglang)
@@ -119,6 +122,75 @@ For advanced build options and binary distribution, see the [Build Configuration
 ```bash
 python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
+
+## Docker Usage
+
+We provide a pre-built Docker image for quick deployment with SGLang integration.
+
+**Prerequisites:**
+- NVIDIA Driver with CUDA >= 12.9 on the host machine
+- Docker with NVIDIA Container Toolkit installed
+
+### Pull the Image
+
+```bash
+docker pull approachingai/sglang-kt:latest
+```
+
+### Create and Start Container
+
+**Step 1: Create the container**
+
+```bash
+docker run -itd --gpus all \
+  --name sglang-kt \
+  -p 8000:8000 \
+  -v /path/to/models:/models \
+  -v /path/to/cpu-weights:/cpu-weights \
+  --shm-size=32g \
+  approachingai/sglang-kt:latest \
+  /bin/bash
+```
+
+**Parameter Explanation:**
+- `--gpus all`: Enable GPU access for the container
+- `-p 8000:8000`: Map container port 8000 to host port 8000
+- `-v /path/to/models:/models`: Mount GPU model weights directory
+- `-v /path/to/cpu-weights:/cpu-weights`: Mount CPU weights directory
+- `--shm-size=32g`: Set shared memory size
+
+**Step 2: Enter the container**
+
+```bash
+docker exec -it sglang-kt /bin/bash
+```
+
+> **Note:** The image comes with AMX backend pre-installed. If your CPU does not support AMX or you want to use a different backend, reinstall inside the container:
+> ```bash
+> cd /workspace/ktransformers/kt-kernel && ./install.sh
+> ```
+
+**Step 3: Launch SGLang server inside the container**
+
+```bash
+python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /models/<your-model> \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name <your-model-name> \
+  --enable-mixed-chunk \
+  --kt-method <AMXINT4|AMXINT8|LLAMAFILE> \
+  --kt-weight-path /cpu-weights/<your-cpu-weights> \
+  --kt-cpuinfer <physical-cores> \
+  --kt-threadpool-count <numa-nodes> \
+  --kt-num-gpu-experts <num-experts-on-gpu> \
+  --kt-max-deferred-experts-per-token <0-4>
+```
+
+For detailed parameter explanations, see [KT-Kernel Parameters](#kt-kernel-parameters).
 
 ## Integration with SGLang
 

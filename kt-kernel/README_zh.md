@@ -10,6 +10,9 @@
     - [快速安装（推荐）](#快速安装推荐)
     - [手动配置（进阶）](#手动配置进阶)
   - [验证安装](#验证安装)
+  - [Docker 使用](#docker-使用)
+    - [拉取镜像](#拉取镜像)
+    - [创建并启动容器](#创建并启动容器)
   - [与 SGLang 集成](#与-sglang-集成)
     - [安装步骤](#安装步骤)
       - [1. 安装 SGLang](#1-安装-sglang)
@@ -119,10 +122,79 @@ export CPUINFER_ENABLE_AMX=OFF       # 选项: ON, OFF
 python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
 
+## Docker 使用
+
+我们提供预构建的 Docker 镜像，可快速部署集成 SGLang 的推理服务。
+
+**前置条件：**
+- 主机 NVIDIA 驱动 CUDA 版本 >= 12.9
+- 已安装 Docker 及 NVIDIA Container Toolkit
+
+### 拉取镜像
+
+```bash
+docker pull approachingai/sglang-kt:latest
+```
+
+### 创建并启动容器
+
+**步骤 1：创建容器**
+
+```bash
+docker run -itd --gpus all \
+  --name sglang-kt \
+  -p 8000:8000 \
+  -v /path/to/models:/models \
+  -v /path/to/cpu-weights:/cpu-weights \
+  --shm-size=32g \
+  approachingai/sglang-kt:latest \
+  /bin/bash
+```
+
+**参数说明：**
+- `--gpus all`：容器启用 GPU 访问
+- `-p 8000:8000`：将容器端口 8000 映射到主机端口 8000
+- `-v /path/to/models:/models`：挂载 GPU 模型权重目录
+- `-v /path/to/cpu-weights:/cpu-weights`：挂载 CPU 权重目录
+- `--shm-size=32g`：设置共享内存大小
+
+**步骤 2：进入容器**
+
+```bash
+docker exec -it sglang-kt /bin/bash
+```
+
+> **注意：** 镜像默认安装的是 AMX 后端。如果你的 CPU 不支持 AMX 或想使用其他后端，请在容器内重新安装：
+> ```bash
+> cd /workspace/ktransformers/kt-kernel && ./install.sh
+> ```
+
+**步骤 3：在容器内启动 SGLang 服务**
+
+```bash
+python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model /models/<your-model> \
+  --trust-remote-code \
+  --mem-fraction-static 0.92 \
+  --chunked-prefill-size 4096 \
+  --served-model-name <your-model-name> \
+  --enable-mixed-chunk \
+  --kt-method <AMXINT4|AMXINT8|LLAMAFILE> \
+  --kt-weight-path /cpu-weights/<your-cpu-weights> \
+  --kt-cpuinfer <physical-cores> \
+  --kt-threadpool-count <numa-nodes> \
+  --kt-num-gpu-experts <num-experts-on-gpu> \
+  --kt-max-deferred-experts-per-token <0-4>
+```
+
+详细参数说明请参见 [KT-Kernel 参数](#kt-kernel-参数)。
+
 ## 与 SGLang 集成
 
-KT-Kernel 可以单独通过 [Python API](#直接使用-python-api) 使用，也可以集成到 SGLang 中用于生产部署。  
-本节描述如何与 SGLang 集成，实现 CPU-GPU 混合（异构）推理：将“热” experts 放在 GPU 上，“冷” experts 放在 CPU 上，以达到资源利用和性价比的平衡。
+KT-Kernel 可以单独通过 [Python API](#直接使用-python-api) 使用，也可以集成到 SGLang 中用于生产部署。
+本节描述如何与 SGLang 集成，实现 CPU-GPU 混合（异构）推理：将"热" experts 放在 GPU 上，"冷" experts 放在 CPU 上，以达到资源利用和性价比的平衡。
 
 ### 安装步骤
 
