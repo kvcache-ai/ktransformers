@@ -30,14 +30,14 @@
 
 /**
  * @brief K2 Int4 MoE operator using CRTP pattern
- * @tparam T Kernel type, defaults to amx::GemmKernel224
+ * @tparam T Kernel type, defaults to amx::GemmKernel224Int4SmallKGroup
  *
  * This class provides K2-specific GEMM implementations:
  * - do_gate_up_gemm: Int4 weight with KGroup scale + AMX GEMM
  * - do_down_gemm: Same Int4 KGroup GEMM
  * - load_weights: Load Int4 weights with group-wise scales
  */
-template <class T = amx::GemmKernel224>
+template <class T = amx::GemmKernel224Int4SmallKGroup>
 class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
  public:
   using Base = AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>>;
@@ -135,10 +135,10 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     // Dispatch based on qlen threshold
     if (qlen > 4 * config.expert_num / config.num_experts_per_tok) {
       amx::mat_mul_kgroup(m, config.intermediate_size, config.hidden_size, group_size,
-                          ba.get(), bb.get(), bc.get(), ith, nth);
+                          ba, bb, bc, ith, nth);
     } else {
       amx::vec_mul_kgroup(m, config.intermediate_size, config.hidden_size, group_size,
-                          ba.get(), bb.get(), bc.get(), ith, nth);
+                          ba, bb, bc, ith, nth);
     }
   }
 
@@ -149,12 +149,12 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
 
     if (qlen > 4 * config.expert_num / config.num_experts_per_tok) {
       amx::mat_mul_kgroup(m, config.hidden_size, config.intermediate_size, group_size,
-                          Base::down_ba_[expert_idx].get(), Base::down_bb_[expert_idx].get(),
-                          Base::down_bc_[expert_idx].get(), ith, nth);
+                          Base::down_ba_[expert_idx], Base::down_bb_[expert_idx],
+                          Base::down_bc_[expert_idx], ith, nth);
     } else {
       amx::vec_mul_kgroup(m, config.hidden_size, config.intermediate_size, group_size,
-                          Base::down_ba_[expert_idx].get(), Base::down_bb_[expert_idx].get(),
-                          Base::down_bc_[expert_idx].get(), ith, nth);
+                          Base::down_ba_[expert_idx], Base::down_bb_[expert_idx],
+                          Base::down_bc_[expert_idx], ith, nth);
     }
   }
 
@@ -500,7 +500,7 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
         tpc.up_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
         tpc.down_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
 
-        if (tps[i]->config_.load == false) {
+        if (tpc.load == false) {
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
@@ -607,13 +607,50 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
       throw std::runtime_error("Pointer arrays size must match gpu_tp_count");
     }
 
-    pool->dispense_backend()->do_numa_job([&, this](int i) {
+    this->config.pool->dispense_backend()->do_numa_job([&, this](int i) {
       this->tps[i]->write_weights_to_buffer(
           gpu_tp_count, this->tp_count,
           gpu_experts_num, this->config,
           w13_weight_ptrs, w13_scale_ptrs,
           w2_weight_ptrs, w2_scale_ptrs);
     });
+  }
+
+  void merge_results(int qlen, void* output, bool incremental) override {
+    auto& config = this->config;
+    auto& tp_count = this->tp_count;
+    auto& local_output_numa = this->local_output_numa;
+    auto& tp_configs = this->tp_configs;
+
+    auto merge_fn = [this, output, incremental, &config, &tp_count, &local_output_numa, &tp_configs](int token_nth) {
+      float* merge_to = local_output_numa[0] + token_nth * tp_configs[0].hidden_size;
+      if (incremental) {
+        for (int e = 0; e < config.hidden_size; e += 32) {
+          __m512 x0, x1;
+          avx512_32xbf16_to_32xfp32((__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e), &x0, &x1);
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), x0);
+          *((__m512*)(merge_to + e + 16)) = _mm512_add_ps(*((__m512*)(merge_to + e + 16)), x1);
+        }
+      }
+      for (int i = 1; i < tp_count; i++) {
+        float* merge_from = local_output_numa[i] + token_nth * tp_configs[i].hidden_size;
+        for (int e = 0; e < tp_configs[i].hidden_size; e += 16) {
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), *((__m512*)(merge_from + e)));
+        }
+      }
+      for (int e = 0; e < config.hidden_size; e += 32) {
+        __m512 x0 = *(__m512*)(merge_to + e);
+        __m512 x1 = *(__m512*)(merge_to + e + 16);
+        avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
+      }
+    };
+    for (int i = 0; i < qlen; i++) {
+      merge_fn(i);
+    }
+  }
+
+  void merge_results(int qlen, void* output) override {
+    merge_results(qlen, output, false);
   }
 };
 

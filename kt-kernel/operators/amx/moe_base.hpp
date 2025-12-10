@@ -1,9 +1,9 @@
 /**
  * @Description  : Common AMX MoE base class extracted from K2 implementation.
- * @Author       : oql & Codex
+ * @Author       : oql, Codex and Claude
  * @Date         : 2025-12-09
  * @Version      : 0.1.0
- * @LastEditors  : oql & Codex
+ * @LastEditors  : oql, Codex and Claude
  * @LastEditTime : 2025-12-09
  * @Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
  **/
@@ -76,8 +76,8 @@ class AMX_MOE_BASE {
   void* down_ba_pool_ = nullptr;
   void* down_bc_pool_ = nullptr;
 
-  GeneralMOEConfig config_;
  public:
+  GeneralMOEConfig config_;
   using input_t = ggml_bf16_t;
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
@@ -187,9 +187,8 @@ class AMX_MOE_BASE {
   }
 
   template <typename... Args>
-  auto write_weights_to_buffer(Args&&... args) const
-      -> decltype(std::declval<const Derived>().write_weights_to_buffer(std::forward<Args>(args)...)) {
-    return derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
+  void write_weights_to_buffer(Args&&... args) const {
+    derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
   }
 
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
@@ -529,9 +528,16 @@ class AMX_MOE_BASE {
     assert(used_pool_bytes_ba_down <= down_ba_pool_bytes_);
     assert(used_pool_bytes_bc_down <= down_bc_pool_bytes_);
 
-    gate_up_ba_[0]->max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
-    gate_up_ba_[0]->set_data(gate_up_ba_pool_);
-    gate_up_ba_[0]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
+    void* gate_up_ba_pool_ptr = gate_up_ba_pool_;
+    for (int i = 0; i < activated_expert; i++) {
+      auto expert_idx = m_expert_id_map_[i];
+      size_t max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
+      gate_up_ba_[expert_idx]->max_m = max_m;
+      gate_up_ba_[expert_idx]->set_data(gate_up_ba_pool_ptr);
+      size_t ba_size = align64(T::BufferA::required_size(max_m, config_.hidden_size, group_size));
+      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
+      gate_up_ba_[expert_idx]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
+    }
 
 #ifdef FORWARD_TIME_PROFILE
     {
