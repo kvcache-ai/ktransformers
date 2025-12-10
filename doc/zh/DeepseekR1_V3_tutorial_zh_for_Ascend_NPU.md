@@ -102,7 +102,7 @@ source /usr/local/Ascend/nnal/atb/set_env.sh  # 以实际NNAL安装路径为准
 
 Q4权重：[DeepSeek-R1-Q4_K_M](https://modelscope.cn/models/unsloth/DeepSeek-R1-GGUF/files)
 
-W8A8权重：[DeepSeek-R1-W8A8](https://modelers.cn/models/MindSpore-Lab/DeepSeek-R1-W8A8/tree/main)
+W8A8权重：[DeepSeek-R1-W8A8](https://modelers.cn/models/State_Cloud/DeepSeek-R1-W8A8)
 
 使用[merge_safetensor_gguf.py](../../merge_tensors/merge_safetensor_gguf.py)来合并Q4和W8A8权重：
 
