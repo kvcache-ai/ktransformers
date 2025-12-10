@@ -41,13 +41,9 @@
 docker run -it -d --net=host --shm-size=500g \
        --name <container-name> \
        -w /workspace \
-       --device=/dev/davinci0:rwm \
-       --device=/dev/davinci1:rwm \
-       --device=/dev/davinci2:rwm \
-       --device=/dev/davinci3:rwm \
-       --device=/dev/davinci_manager:rwm \
-       --device=/dev/hisi_hdc:rwm \
-       --device=/dev/devmm_svm:rwm \
+       --device=/dev/davinci_manager \
+       --device=/dev/hisi_hdc \
+       --device=/dev/devmm_svm \
        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
        -v /usr/local/dcmi:/usr/local/dcmi:ro \
        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
@@ -65,7 +61,7 @@ docker exec -it <container-name> /bin/bash
 部署Python环境：
 
 ```bash
-apt install zlib1g-dev libtbb-dev libssl-dev libaio-dev libcurl4-openssl-dev
+yum install zlib1g-dev libtbb-dev libssl-dev libaio-dev libcurl4-openssl-dev
 pip3 install numpy==1.26.4  # 适配torch/torch_npu
 pip3 install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
 pip3 install packaging ninja fire protobuf attrs decorator cloudpickle ml-dtypes scipy tornado absl-py psutil
