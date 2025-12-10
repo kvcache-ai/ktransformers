@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -344,9 +345,6 @@ struct BufferAKGroupImpl {
   static constexpr int K_STEP = K::K_STEP;
   static constexpr int K_BLOCK = K::K_BLOCK;
 
-  using index_t = Packed2DLayout::index_t;
-  Packed2DLayout pack;
-
   static size_t required_size(int max_m, int k, int k_group_size) {
     ASSERT_RELEASE(k % k_group_size == 0, "k must be multiple of k_group_size");
     return sizeof(int8_t) * max_m * k + sizeof(float) * max_m * (k / k_group_size);
@@ -355,18 +353,12 @@ struct BufferAKGroupImpl {
   BufferAKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
       : max_m(max_m),
         k(k),
-        k_group_size(k_group_size),
-        pack({{static_cast<index_t>(K_STEP), 'c'},
-              {static_cast<index_t>(M_STEP), 'r'},
-              {static_cast<index_t>(k_group_size / K_STEP), 'c'},
-              {static_cast<index_t>(K_BLOCK / k_group_size), 'c'},
-              {static_cast<index_t>(max_m / M_STEP), 'r'},
-              {static_cast<index_t>(k / K_BLOCK), 'c'}}) {
+        k_group_size(k_group_size) {
     ASSERT_RELEASE(k % k_group_size == 0, "k must be multiple of k_group_size");
     ASSERT_RELEASE(max_m % M_STEP == 0, "max_m must be multiple of M_STEP");
     ASSERT_RELEASE(k % K_STEP == 0, "k must be multiple of K_STEP");
     ASSERT_RELEASE(K_BLOCK % k_group_size == 0, "K_BLOCK must be multiple of k_group_size");
-    ASSERT_RELEASE(k % K_BLOCK == 0, "k must be multiple of K_BLOCK");
+    // ASSERT_RELEASE(k % K_BLOCK == 0, "k must be multiple of K_BLOCK");
     k_group_count = k / k_group_size;
 
     set_data(ptr);
@@ -447,6 +439,78 @@ struct BufferAKGroupImpl {
   float* get_scale(int m, int m_begin, int k, int k_begin) {
     int k_group_idx = k_begin / k_group_size;
     return d + m_begin * k_group_count + k_group_idx;
+  }
+};
+
+// BufferASmallKGroupImpl: For kernels with K_STEP=32 (e.g., GemmKernel224Int4SmallKGroup)
+// This fixes the buffer overflow issue where the base class writes 64 bytes per K_STEP iteration
+// but the buffer is only sized for 32-byte steps.
+template <typename K>
+struct BufferASmallKGroupImpl : public BufferAKGroupImpl<K> {
+  using Base = BufferAKGroupImpl<K>;
+  using Base::a;
+  using Base::d;
+  using Base::k;
+  using Base::k_group_count;
+  using Base::k_group_size;
+  using Base::max_m;
+
+  static constexpr int M_STEP = K::M_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr int K_BLOCK = K::K_BLOCK;
+
+  BufferASmallKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
+      : Base(max_m, k, k_group_size, ptr) {}
+
+  // Override from_mat to write only 32 bytes per K_STEP iteration
+  void from_mat(int m, ggml_bf16_t* src, int ith, int nth) {
+    assert(m <= max_m);
+    assert(ith == 0 && nth == 1);
+
+    // Calculate scale for each k_group (same as base class)
+    for (int m_idx = 0; m_idx < m; m_idx++) {
+      for (int kg = 0; kg < k_group_count; kg++) {
+        float amax = 0.0f;
+        int k_start = kg * k_group_size;
+        int k_end = k_start + k_group_size;
+        for (int j = k_start; j < k_end; j += 32) {
+          __m512 f0, f1;
+          avx512_32xbf16_to_32xfp32((__m512i*)(src + m_idx * k + j), &f0, &f1);
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
+        }
+        d[m_idx * k_group_count + kg] = amax / ((1 << 7) - 1);
+      }
+    }
+
+    // Quantization with 32-byte writes per K_STEP iteration
+    int m_block_size = (m + M_STEP - 1) / M_STEP * M_STEP;
+    for (int m_begin = 0; m_begin < m; m_begin += M_STEP) {
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+          for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
+            // Get the scale for this k_group
+            int k_group_idx = (k_block_begin + k_begin) / k_group_size;
+            float scale = d[(m_begin + i) * k_group_count + k_group_idx];
+            __m512 id = _mm512_set1_ps(scale ? 1.0f / scale : 0.0f);
+
+            // Calculate destination - writes K_STEP (32) bytes
+            int8_t* dst = a + k_block_begin * m_block_size + m_begin * k_block_size + k_begin * M_STEP + i * K_STEP;
+
+            // Only process 32 bytes (2 x __m512 -> 2 x __m128i) per iteration
+            __m512 f0, f1;
+            avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + k_block_begin + k_begin), &f0, &f1);
+            __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
+            __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
+            __m128i s0 = _mm512_cvtsepi32_epi8(i0);
+            __m128i s1 = _mm512_cvtsepi32_epi8(i1);
+            _mm_store_si128((__m128i*)dst, s0);
+            _mm_store_si128((__m128i*)(dst + 16), s1);
+          }
+        }
+      }
+    }
   }
 };
 
@@ -920,6 +984,77 @@ struct BufferBInt4WithZeroImpl {
 
   float* get_scale(int n, int n_begin) { return d + n_begin; }
   float* get_min(int n, int n_begin) { return mins + n_begin; }
+};
+
+// BufferB for Signed Int4 with KGroup Scale (no zero point)
+// Used for K2 MoE - signed int4 range: [-8, 7]
+template <typename K>
+struct BufferBInt4KGroupImpl {
+  using dt = typename K::dt;
+  dt* b;      // packed signed int4 weights, col majored
+  float* d;   // scales only (no mins/zero-points), row majored
+  int n, k, k_group_size, k_group_count;
+
+  static constexpr int N_STEP = K::N_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr bool SCALE = true;
+
+  // Size calculation: packed int4 weights + scales (NO mins)
+  static size_t required_size(int n, int k, int k_group_size) {
+    return sizeof(int8_t) * n * k / 2 + sizeof(float) * n * (k / k_group_size);
+  }
+
+  BufferBInt4KGroupImpl(int n, int k, int k_group_size, void* ptr) : n(n), k(k), k_group_size(k_group_size) {
+    assert(reinterpret_cast<intptr_t>(ptr) % 64 == 0);
+    assert(n % N_STEP == 0);
+    assert(k % K_STEP == 0);
+    if (n % N_STEP || k % K_STEP || k % k_group_size) {
+      printf("BufferBInt4KGroupImpl: n: %d, k: %d, N_STEP: %d, K_STEP: %d, k_group_size: %d\n", n, k, N_STEP,
+             K_STEP, k_group_size);
+      throw std::runtime_error("n or k is not aligned to N_STEP or K_STEP");
+    }
+    k_group_count = k / k_group_size;
+    b = reinterpret_cast<dt*>(ptr);
+    d = reinterpret_cast<float*>(offset_pointer(b, n * k / 2));
+  }
+
+  // Load from packed signed int4 format
+  // Input: proj is packed int4 weights (2 int4 values per byte)
+  // Each int4 value is in range [-8, 7] (signed)
+  void from_raw_mat(uint8_t* proj, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    if (n_start >= n_end) {
+      return;
+    }
+    const size_t row_bytes = static_cast<size_t>(k) / 2;
+    const size_t rows = static_cast<size_t>(n_end - n_start);
+    uint8_t* dst_weights = reinterpret_cast<uint8_t*>(b) + n_start * row_bytes;
+    const uint8_t* src_weights = proj + n_start * row_bytes;
+    std::memcpy(dst_weights, src_weights, rows * row_bytes);
+  }
+
+  // Get pointer to submatrix for computation
+  dt* get_submat(int n, int k, int n_begin, int k_begin) {
+    const size_t row_bytes = static_cast<size_t>(k) / 2;
+    const size_t row_offset = static_cast<size_t>(n_begin) * row_bytes;
+    const size_t col_offset = static_cast<size_t>(k_begin) / 2;
+    return reinterpret_cast<dt*>(reinterpret_cast<uint8_t*>(b) + row_offset + col_offset);
+  }
+
+  // Get scale pointer for a specific row and k_group
+  float* get_scale(int n, int n_begin, int k, int k_begin) {
+      int k_group_idx = k_begin / k_group_size;
+      return d + n_begin * (k / k_group_size) +  k_group_idx;
+  }
+
+  // Split range for parallel processing
+  static std::pair<int, int> split_range_n(int n, int ith, int nth) {
+    int n_per_thread = (n + nth - 1) / nth;
+    n_per_thread = (n_per_thread + N_STEP - 1) / N_STEP * N_STEP;
+    int n_start = std::min(ith * n_per_thread, n);
+    int n_end = std::min(n_start + n_per_thread, n);
+    return {n_start, n_end};
+  }
 };
 
 template <typename K>

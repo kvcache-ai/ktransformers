@@ -62,7 +62,8 @@ class KExpertsCPUBuffer:
             for _ in range(cls.buffer_depth)
         ]
         bsz_tensor_cpu = [
-            torch.zeros((1,), device="cpu", dtype=torch.int32, pin_memory=True) for _ in range(cls.buffer_depth)
+            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=True)
+            for _ in range(cls.buffer_depth)
         ]
         output_gpu = [
             torch.zeros((batch_size, hidden_size), device=hidden_states.device, dtype=hidden_states.dtype)
@@ -256,8 +257,6 @@ class BaseMoEWrapper(ABC):
         next_slot = (current_slot + 1) % KExpertsCPUBuffer.buffer_depth
 
         bsz_slot_tensor = bsz_tensor_cpu[current_slot]
-        bsz_slot_tensor.fill_(batch_size)
-        deferred_experts_ids_cpu[current_slot].fill_(-1)
 
         topk_ids_long = topk_ids.to(torch.long)
         immediate_ids: torch.Tensor

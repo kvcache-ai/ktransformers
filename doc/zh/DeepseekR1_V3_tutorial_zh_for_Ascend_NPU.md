@@ -122,7 +122,7 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
 - 初始化third_party。由于此过程耗时较多，且容易受网络影响导致仓库克隆失败，建议初始化一次后，将相关文件进行打包，以便后续直接解压使用。
   ```bash
   git clone https://github.com/kvcache-ai/ktransformers.git
-  cd ktransformers/archive
+  cd ktransformers
   git submodule update --init --recursive
   ```
 - 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的

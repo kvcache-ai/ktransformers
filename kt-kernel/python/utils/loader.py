@@ -237,6 +237,56 @@ class SafeTensorLoader:
         return name in self.tensor_file_map
 
 
+class CompressedSafeTensorLoader(SafeTensorLoader):
+    """Loader for compressed SafeTensor layouts (RAWINT4 weights)."""
+
+    def load_experts(self, base_key: str, device: str = "cpu"):
+        """Load raw expert weights stored in compressed safetensor format."""
+
+        experts_prefix = f"{base_key}.mlp.experts"
+
+        expert_idx = 0
+        while self.has_tensor(f"{experts_prefix}.{expert_idx}.up_proj.weight_packed"):
+            expert_idx += 1
+
+        if expert_idx == 0:
+            raise ValueError(f"No experts found for key {experts_prefix}")
+
+        def load_projection(proj_name: str):
+            weight_entries = []
+            scale_entries = []
+
+            for exp_id in range(expert_idx):
+                weight_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_packed"
+                scale_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_scale"
+
+                if not self.has_tensor(weight_key):
+                    raise KeyError(f"Missing tensor: {weight_key}")
+                if not self.has_tensor(scale_key):
+                    raise KeyError(f"Missing tensor: {scale_key}")
+
+                weight_tensor = self.load_tensor(weight_key, device).contiguous()
+                scale_tensor = self.load_tensor(scale_key, device).contiguous()
+
+                weight_entries.append(weight_tensor)
+                scale_entries.append(scale_tensor)
+
+            return weight_entries, scale_entries
+
+        gate_weights, gate_scales = load_projection("gate")
+        up_weights, up_scales = load_projection("up")
+        down_weights, down_scales = load_projection("down")
+
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": gate_scales,
+            "up_scale": up_scales,
+            "down_scale": down_scales,
+        }
+
+
 class GGUFLoader:
     """
     GGUF format loader using the official gguf library (gguf.gguf_reader.GGUFReader)

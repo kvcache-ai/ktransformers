@@ -1,0 +1,104 @@
+name: PR KT-Kernel Test
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types: [synchronize, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-kt-kernel-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =============================================== check changes ====================================================
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      kt_kernel: ${{ steps.filter.outputs.kt_kernel }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fail if the PR does not have the 'run-ci' label
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'run-ci')
+        run: |
+          echo "This pull request does not have the 'run-ci' label. Failing the workflow."
+          exit 1
+
+      - name: Fail if the PR is a draft
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+        run: |
+          echo "This pull request is a draft. Failing the workflow."
+          exit 1
+
+      - name: Detect file changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            kt_kernel:
+              - "kt-kernel/**"
+              - ".github/workflows/kt-kernel-tests.yml"
+
+  # =============================================== KT-Kernel tests ====================================================
+  per-commit-kt-kernel-cpu:
+    needs: [check-changes]
+    if: always() && !failure() && !cancelled() &&
+      (needs.check-changes.outputs.kt_kernel == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: kt-cpu
+    continue-on-error: false
+    steps:
+      - name: Cleanup
+        run: |
+          sudo rm -rf $GITHUB_WORKSPACE/* || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install KT-Kernel
+        run: |
+          cd kt-kernel
+          bash install.sh build
+
+      - name: Run KT-Kernel CPU tests
+        timeout-minutes: 60
+        run: |
+          cd kt-kernel/test
+          python3 run_suite.py --hw cpu --suite default
+
+  # =============================================== finish ====================================================
+  pr-test-kt-kernel-finish:
+    needs: [check-changes, per-commit-kt-kernel-cpu]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all dependent job statuses
+        run: |
+          # Convert the 'needs' context to a JSON string
+          json_needs='${{ toJson(needs) }}'
+
+          # Get a list of all job names from the JSON keys
+          job_names=$(echo "$json_needs" | jq -r 'keys_unsorted[]')
+
+          for job in $job_names; do
+            # For each job, extract its result
+            result=$(echo "$json_needs" | jq -r --arg j "$job" '.[$j].result')
+
+            # Print the job name and its result
+            echo "$job: $result"
+
+            # Check for failure or cancellation and exit if found
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "The above jobs failed."
+              exit 1
+            fi
+          done
+
+          # If the loop completes, all jobs were successful
+          echo "All jobs completed successfully"
+          exit 0
