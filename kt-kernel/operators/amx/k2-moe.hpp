@@ -11,20 +11,7 @@
 #ifndef CPUINFER_OPERATOR_AMX_K2_MOE_H
 #define CPUINFER_OPERATOR_AMX_K2_MOE_H
 
-// #define DEBUG_K2_MOE
-// #define FORWARD_TIME_PROFILE
-#define LOAD_TIME_PROFILE
-
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <immintrin.h>
-
-#include <algorithm>
-#include <chrono>
-#include <memory>
-#include <string>
-#include <vector>
+// #define LOAD_TIME_PROFILE
 
 #include "moe_base.hpp"
 
@@ -39,122 +26,92 @@
  */
 template <class T = amx::GemmKernel224Int4SmallKGroup>
 class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
- public:
   using Base = AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>>;
+  using Base::config_;
+  using Base::tp_part_idx;
+  using Base::gate_bb_;
+  using Base::up_bb_;
+  using Base::down_bb_;
+  using Base::gate_up_ba_;
+  using Base::gate_bc_;
+  using Base::up_bc_;
+  using Base::down_ba_;
+  using Base::down_bc_;
+  using Base::m_local_num_;
+
+ public:
   using typename Base::input_t;
   using typename Base::output_t;
 
- private:
-#ifdef DEBUG_K2_MOE
-  inline void dump_buffer_b(const std::string& quantization_type, int expert_idx, const std::string& matrix_type,
-                            typename T::BufferB* buffer) {
-    auto& config = Base::config_;
-    auto& quant_config = config.quant_config;
-    int& group_size = quant_config.group_size;
-
-    printf("[DUMP_BUFFER_B] TP%d %s Expert%d %s:\n", Base::tp_part_idx, quantization_type.c_str(), expert_idx,
-           matrix_type.c_str());
-
-    // Calculate dimensions based on matrix type
-    int rows, cols, num_groups;
-    size_t scale_elem_count;
-    if (matrix_type == "gate" || matrix_type == "up") {
-      rows = config.intermediate_size;
-      cols = config.hidden_size;
-      num_groups = cols / group_size;
-      scale_elem_count = num_groups * rows;
-    } else {  // down
-      rows = config.hidden_size;
-      cols = config.intermediate_size;
-      num_groups = cols / group_size;
-      scale_elem_count = num_groups * rows;
-    }
-
-    // Dump scales (as float)
-    printf("  Scales[first 16]: ");
-    for (int i = 0; i < std::min(16, (int)scale_elem_count); i++) {
-      printf("%.6f ", buffer->d[i]);
-    }
-    printf("\n");
-
-    if (scale_elem_count > 16) {
-      printf("  Scales[last 16]: ");
-      int start_idx = std::max(0, (int)scale_elem_count - 16);
-      for (int i = start_idx; i < (int)scale_elem_count; i++) {
-        printf("%.6f ", buffer->d[i]);
-      }
-      printf("\n");
-    }
-    // Dump quantized weights (as hex uint8)
-    size_t weight_size = (rows * cols) / 2;  // INT4 packed
-    uint8_t* weight_ptr = (uint8_t*)buffer->b;
-
-    printf("  Weights[first 32 bytes]: ");
-    for (int i = 0; i < std::min(32, (int)weight_size); i++) {
-      printf("%02x ", weight_ptr[i]);
-    }
-    printf("\n");
-
-    if (weight_size > 32) {
-      printf("  Weights[last 32 bytes]: ");
-      int start_idx = std::max(32, (int)weight_size - 32);
-      for (int i = start_idx; i < (int)weight_size; i++) {
-        printf("%02x ", weight_ptr[i]);
-      }
-      printf("\n");
-    }
-
-    printf("  Matrix dimensions: %dx%d, Groups: %d, Group size: %d, Scale elements: %zu\n", rows, cols, num_groups,
-           group_size, scale_elem_count);
-    printf("\n");
-    fflush(stdout);
-  }
-#endif
-
- public:
   AMX_K2_MOE_TP() = default;
 
   AMX_K2_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
+    auto& quant_config = config_.quant_config;
+    if (quant_config.group_size == 0 || quant_config.zero_point) {
+      throw std::runtime_error("Kimi-K2 MoE only support KGroup Int4");
+    }
     printf("Creating AMX_K2_MOE_TP %d at numa %d\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
   }
 
   ~AMX_K2_MOE_TP() = default;
 
   // ============================================================================
+  // CRTP buffer creation - with group_size
+  // ============================================================================
+
+  size_t buffer_a_required_size_impl(size_t m, size_t k) const {
+    return T::BufferA::required_size(m, k, config_.quant_config.group_size);
+  }
+  size_t buffer_b_required_size_impl(size_t n, size_t k) const {
+    return T::BufferB::required_size(n, k, config_.quant_config.group_size);
+  }
+  size_t buffer_c_required_size_impl(size_t m, size_t n) const {
+    return T::BufferC::required_size(m, n);
+  }
+
+  std::shared_ptr<typename T::BufferA> make_buffer_a_impl(size_t m, size_t k, void* data) const {
+    return std::make_shared<typename T::BufferA>(m, k, config_.quant_config.group_size, data);
+  }
+  std::shared_ptr<typename T::BufferB> make_buffer_b_impl(size_t n, size_t k, void* data) const {
+    return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size, data);
+  }
+  std::shared_ptr<typename T::BufferC> make_buffer_c_impl(size_t m, size_t n, void* data) const {
+    return std::make_shared<typename T::BufferC>(m, n, data);
+  }
+
+  // ============================================================================
   // CRTP virtual points - GEMM dispatch
   // ============================================================================
 
   void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int qlen) {
-    auto& config = Base::config_;
-    auto& group_size = config.quant_config.group_size;
-    int m = Base::m_local_num_[expert_idx];
-    auto& ba = Base::gate_up_ba_[expert_idx];
-    auto& bb = do_up ? Base::up_bb_[expert_idx] : Base::gate_bb_[expert_idx];
-    auto& bc = do_up ? Base::up_bc_[expert_idx] : Base::gate_bc_[expert_idx];
+    auto& group_size = config_.quant_config.group_size;
+    int m = m_local_num_[expert_idx];
+    auto& ba = gate_up_ba_[expert_idx];
+    auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+    auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
     // Dispatch based on qlen threshold
-    if (qlen > 4 * config.expert_num / config.num_experts_per_tok) {
-      amx::mat_mul_kgroup(m, config.intermediate_size, config.hidden_size, group_size,
+    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+      amx::mat_mul_kgroup(m, config_.intermediate_size, config_.hidden_size, group_size,
                           ba, bb, bc, ith, nth);
     } else {
-      amx::vec_mul_kgroup(m, config.intermediate_size, config.hidden_size, group_size,
+      amx::vec_mul_kgroup(m, config_.intermediate_size, config_.hidden_size, group_size,
                           ba, bb, bc, ith, nth);
     }
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
-    auto& config = Base::config_;
-    auto& group_size = config.quant_config.group_size;
-    int m = Base::m_local_num_[expert_idx];
+    auto& group_size = config_.quant_config.group_size;
+    int m = m_local_num_[expert_idx];
 
-    if (qlen > 4 * config.expert_num / config.num_experts_per_tok) {
-      amx::mat_mul_kgroup(m, config.hidden_size, config.intermediate_size, group_size,
-                          Base::down_ba_[expert_idx], Base::down_bb_[expert_idx],
-                          Base::down_bc_[expert_idx], ith, nth);
+    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+      amx::mat_mul_kgroup(m, config_.hidden_size, config_.intermediate_size, group_size,
+                          down_ba_[expert_idx], down_bb_[expert_idx],
+                          down_bc_[expert_idx], ith, nth);
     } else {
-      amx::vec_mul_kgroup(m, config.hidden_size, config.intermediate_size, group_size,
-                          Base::down_ba_[expert_idx], Base::down_bb_[expert_idx],
-                          Base::down_bc_[expert_idx], ith, nth);
+      amx::vec_mul_kgroup(m, config_.hidden_size, config_.intermediate_size, group_size,
+                          down_ba_[expert_idx], down_bb_[expert_idx],
+                          down_bc_[expert_idx], ith, nth);
     }
   }
 
@@ -165,80 +122,76 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
    * from config_.gate_scale, up_scale, down_scale.
    */
   void load_weights() {
-    auto& config = Base::config_;
-    auto& quant_config = config.quant_config;
+    auto& quant_config = config_.quant_config;
     int& group_size = quant_config.group_size;
-    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
-    auto pool = config.pool->get_subpool(Base::tp_part_idx);
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+    auto pool = config_.pool->get_subpool(tp_part_idx);
 
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("Kimi AVX MOE only support KGroup Int4.");
     }
-    if (config.gate_scale == nullptr) {
+    if (config_.gate_scale == nullptr) {
       throw std::runtime_error("Kimi AVX MOE only support load native weight.");
     }
 
     // load weight
-    int nth = T::recommended_nth(config.intermediate_size);
+    int nth = T::recommended_nth(config_.intermediate_size);
     pool->do_work_stealing_job(
-        nth * config.expert_num, nullptr,
+        nth * config_.expert_num, nullptr,
         [this, nth, physical_to_logical_map](int task_id) {
-          auto& config = Base::config_;
           uint64_t expert_idx = task_id / nth;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
           // gate part
-          Base::gate_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config.gate_proj +
-                  ((logical_expert_id * config.intermediate_size * config.hidden_size) >> 1),
+          gate_bb_[expert_idx]->from_raw_mat(
+              (uint8_t*)config_.gate_proj +
+                  ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
               ith, nth);
           // up part
-          Base::up_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config.up_proj +
-                  ((logical_expert_id * config.intermediate_size * config.hidden_size) >> 1),
+          up_bb_[expert_idx]->from_raw_mat(
+              (uint8_t*)config_.up_proj +
+                  ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
               ith, nth);
         },
         nullptr);
 
-    nth = T::recommended_nth(config.hidden_size);
+    nth = T::recommended_nth(config_.hidden_size);
     pool->do_work_stealing_job(
-        nth * config.expert_num, nullptr,
+        nth * config_.expert_num, nullptr,
         [this, nth, physical_to_logical_map](int task_id) {
-          auto& config = Base::config_;
           uint64_t expert_idx = task_id / nth;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
           // down part
-          Base::down_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config.down_proj +
-                  ((logical_expert_id * config.hidden_size * config.intermediate_size) >> 1),
+          down_bb_[expert_idx]->from_raw_mat(
+              (uint8_t*)config_.down_proj +
+                  ((logical_expert_id * config_.hidden_size * config_.intermediate_size) >> 1),
               ith, nth);
         },
         nullptr);
 
     pool->do_work_stealing_job(
-        config.expert_num, nullptr,
+        config_.expert_num, nullptr,
         [this, physical_to_logical_map](int task_id) {
-          auto& config = Base::config_;
           uint64_t expert_idx = task_id;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           size_t scale_elem_count =
-              (config.hidden_size * config.intermediate_size) / config.quant_config.group_size;
+              (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
 
           // convert scales from BF16 to FP32
-          convert_or_copy(Base::gate_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config.gate_scale + (logical_expert_id * scale_elem_count),
+          convert_or_copy(gate_bb_[expert_idx]->d,
+                          (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count),
                           scale_elem_count);
-          convert_or_copy(Base::up_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config.up_scale + (logical_expert_id * scale_elem_count),
+          convert_or_copy(up_bb_[expert_idx]->d,
+                          (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count),
                           scale_elem_count);
-          convert_or_copy(Base::down_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config.down_scale + (logical_expert_id * scale_elem_count),
+          convert_or_copy(down_bb_[expert_idx]->d,
+                          (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count),
                           scale_elem_count);
         },
         nullptr);
 #ifdef DEBUG_K2_MOE
-    dump_buffer_b("native", 0, "down", Base::down_bb_[0].get());
+    dump_buffer_b("native", 0, "down", down_bb_[0].get());
 #endif
   }
 
@@ -253,9 +206,9 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
                                const std::vector<uintptr_t>& w13_scale_ptrs,
                                const std::vector<uintptr_t>& w2_weight_ptrs,
                                const std::vector<uintptr_t>& w2_scale_ptrs) const {
-    auto& config = Base::config_;
+    auto& config = config_;
     const int group_size = config.quant_config.group_size;
-    auto pool = config.pool->get_subpool(Base::tp_part_idx);
+    auto pool = config.pool->get_subpool(tp_part_idx);
 
     // Calculate sizes for CPU TP part (this instance)
     size_t cpu_tp_weight_elem_count = (size_t)config.intermediate_size * config.hidden_size;
@@ -269,8 +222,8 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
 
     if (cpu_tp_count >= gpu_tp_count) {
       // Multiple CPU TPs map to one GPU TP
-      int target_gpu_tp = Base::tp_part_idx / (cpu_tp_count / gpu_tp_count);
-      int local_idx = Base::tp_part_idx % (cpu_tp_count / gpu_tp_count);
+      int target_gpu_tp = tp_part_idx / (cpu_tp_count / gpu_tp_count);
+      int local_idx = tp_part_idx % (cpu_tp_count / gpu_tp_count);
 
       // Get pointers for this GPU TP part
       uint8_t* w13_weight_dst = (uint8_t*)w13_weight_ptrs[target_gpu_tp];
@@ -294,16 +247,16 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
             size_t w2_expert_base_scale = expert_id * gpu_tp_scale_elem_count;
 
             // Gate
-            uint8_t* gate_weight_src = (uint8_t*)Base::gate_bb_[expert_id]->b;
-            float* gate_scale_src = Base::gate_bb_[expert_id]->d;
+            uint8_t* gate_weight_src = (uint8_t*)gate_bb_[expert_id]->b;
+            float* gate_scale_src = gate_bb_[expert_id]->d;
             std::memcpy(w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight,
                         gate_weight_src, cpu_tp_weight_bytes);
             convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale),
                             gate_scale_src, cpu_tp_scale_elem_count);
 
             // Up
-            uint8_t* up_weight_src = (uint8_t*)Base::up_bb_[expert_id]->b;
-            float* up_scale_src = Base::up_bb_[expert_id]->d;
+            uint8_t* up_weight_src = (uint8_t*)up_bb_[expert_id]->b;
+            float* up_scale_src = up_bb_[expert_id]->d;
             std::memcpy(w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight + gpu_tp_weight_bytes,
                         up_weight_src, cpu_tp_weight_bytes);
             convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale + gpu_tp_scale_elem_count),
@@ -316,7 +269,7 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
               size_t gpu_col_slice_offset = local_idx * (config.intermediate_size >> 1);
 
               std::memcpy(w2_weight_dst + w2_expert_base_weight + gpu_col_offset + gpu_col_slice_offset,
-                          (uint8_t*)Base::down_bb_[expert_id]->b + cpu_col_offset,
+                          (uint8_t*)down_bb_[expert_id]->b + cpu_col_offset,
                           config.intermediate_size / 2);
 
               size_t gpu_scale_col_offset = col * ((full_config.intermediate_size / gpu_tp_count) / group_size);
@@ -324,7 +277,7 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
               size_t gpu_scale_slice_offset = local_idx * (config.intermediate_size / group_size);
 
               convert_or_copy((ggml_bf16_t*)(w2_scale_dst + w2_expert_base_scale + gpu_scale_col_offset + gpu_scale_slice_offset),
-                              Base::down_bb_[expert_id]->d + cpu_scale_col_offset,
+                              down_bb_[expert_id]->d + cpu_scale_col_offset,
                               config.intermediate_size / group_size);
             }
           },
@@ -332,7 +285,7 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     } else {
       // cpu_tp_count < gpu_tp_count: one CPU TP writes to multiple GPU TPs
       int gpu_tps_per_cpu_tp = gpu_tp_count / cpu_tp_count;
-      int start_gpu_tp = Base::tp_part_idx * gpu_tps_per_cpu_tp;
+      int start_gpu_tp = tp_part_idx * gpu_tps_per_cpu_tp;
 
       size_t data_per_gpu_tp_weight = cpu_tp_weight_bytes / gpu_tps_per_cpu_tp;
       size_t data_per_gpu_tp_scale = cpu_tp_scale_elem_count / gpu_tps_per_cpu_tp;
@@ -358,16 +311,16 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
             size_t w2_gpu_expert_offset_scale = expert_id * gpu_tp_scale_elem_count;
 
             // Gate
-            uint8_t* gate_weight_src = (uint8_t*)Base::gate_bb_[expert_id]->b + cpu_offset_weight;
-            float* gate_scale_src = Base::gate_bb_[expert_id]->d + cpu_offset_scale;
+            uint8_t* gate_weight_src = (uint8_t*)gate_bb_[expert_id]->b + cpu_offset_weight;
+            float* gate_scale_src = gate_bb_[expert_id]->d + cpu_offset_scale;
             std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight,
                         gate_weight_src, data_per_gpu_tp_weight);
             convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_gpu_expert_offset_scale),
                             gate_scale_src, data_per_gpu_tp_scale);
 
             // Up
-            uint8_t* up_weight_src = (uint8_t*)Base::up_bb_[expert_id]->b + cpu_offset_weight;
-            float* up_scale_src = Base::up_bb_[expert_id]->d + cpu_offset_scale;
+            uint8_t* up_weight_src = (uint8_t*)up_bb_[expert_id]->b + cpu_offset_weight;
+            float* up_scale_src = up_bb_[expert_id]->d + cpu_offset_scale;
             std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight + gpu_tp_weight_bytes,
                         up_weight_src, data_per_gpu_tp_weight);
             convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_gpu_expert_offset_scale + gpu_tp_scale_elem_count),
@@ -379,32 +332,29 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
               size_t col_offset_scale = (col * (config.intermediate_size / group_size)) + (local_gpu_idx * data_per_gpu_tp_scale / config.hidden_size);
 
               std::memcpy(w2_weight_dst + w2_gpu_expert_offset_weight + (col * (config.intermediate_size / gpu_tps_per_cpu_tp) / 2),
-                          (uint8_t*)Base::down_bb_[expert_id]->b + col_offset_weight,
+                          (uint8_t*)down_bb_[expert_id]->b + col_offset_weight,
                           (config.intermediate_size / gpu_tps_per_cpu_tp) / 2);
 
               convert_or_copy((ggml_bf16_t*)(w2_scale_dst + w2_gpu_expert_offset_scale + col * ((config.intermediate_size / gpu_tps_per_cpu_tp) / group_size)),
-                              Base::down_bb_[expert_id]->d + col_offset_scale,
+                              down_bb_[expert_id]->d + col_offset_scale,
                               (config.intermediate_size / gpu_tps_per_cpu_tp) / group_size);
             }
           },
           nullptr);
     }
   }
-
-  // Accessors for weight buffers
-  const std::vector<std::shared_ptr<typename T::BufferB>>& get_gate_bb() const { return Base::gate_bb_; }
-  const std::vector<std::shared_ptr<typename T::BufferB>>& get_up_bb() const { return Base::up_bb_; }
-  const std::vector<std::shared_ptr<typename T::BufferB>>& get_down_bb() const { return Base::down_bb_; }
 };
 
 // ============================================================================
 // TP_MOE specialization for AMX_K2_MOE_TP
+// Inherits from TP_MOE<AMX_MOE_BASE<...>> to reuse merge_results implementation
 // ============================================================================
 
 template <typename K>
-class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
+class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>>> {
  public:
-  using TP_MOE_Common<AMX_K2_MOE_TP<K>>::TP_MOE_Common;
+  using Base = TP_MOE<AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>>>;
+  using Base::Base;
 
   void load_weights() override {
     auto& config = this->config;
@@ -616,42 +566,7 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
     });
   }
 
-  void merge_results(int qlen, void* output, bool incremental) override {
-    auto& config = this->config;
-    auto& tp_count = this->tp_count;
-    auto& local_output_numa = this->local_output_numa;
-    auto& tp_configs = this->tp_configs;
-
-    auto merge_fn = [this, output, incremental, &config, &tp_count, &local_output_numa, &tp_configs](int token_nth) {
-      float* merge_to = local_output_numa[0] + token_nth * tp_configs[0].hidden_size;
-      if (incremental) {
-        for (int e = 0; e < config.hidden_size; e += 32) {
-          __m512 x0, x1;
-          avx512_32xbf16_to_32xfp32((__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e), &x0, &x1);
-          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), x0);
-          *((__m512*)(merge_to + e + 16)) = _mm512_add_ps(*((__m512*)(merge_to + e + 16)), x1);
-        }
-      }
-      for (int i = 1; i < tp_count; i++) {
-        float* merge_from = local_output_numa[i] + token_nth * tp_configs[i].hidden_size;
-        for (int e = 0; e < tp_configs[i].hidden_size; e += 16) {
-          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), *((__m512*)(merge_from + e)));
-        }
-      }
-      for (int e = 0; e < config.hidden_size; e += 32) {
-        __m512 x0 = *(__m512*)(merge_to + e);
-        __m512 x1 = *(__m512*)(merge_to + e + 16);
-        avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
-      }
-    };
-    for (int i = 0; i < qlen; i++) {
-      merge_fn(i);
-    }
-  }
-
-  void merge_results(int qlen, void* output) override {
-    merge_results(qlen, output, false);
-  }
+  // merge_results is inherited from TP_MOE<AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>>>
 };
 
 #endif  // CPUINFER_OPERATOR_AMX_K2_MOE_H

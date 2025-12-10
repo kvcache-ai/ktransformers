@@ -10,9 +10,7 @@
 #ifndef CPUINFER_OPERATOR_AMX_MOE_BASE_H
 #define CPUINFER_OPERATOR_AMX_MOE_BASE_H
 
-// #define DEBUG_AMX_MOE_BASE
 // #define FORWARD_TIME_PROFILE
-#define LOAD_TIME_PROFILE
 
 #include <cstddef>
 #include <cstdint>
@@ -39,7 +37,7 @@
 
 template <class T, class Derived>
 class AMX_MOE_BASE {
- protected:
+ public:
   int tp_part_idx = 0;
 
   ggml_bf16_t* m_local_input_ = nullptr;
@@ -76,18 +74,16 @@ class AMX_MOE_BASE {
   void* down_ba_pool_ = nullptr;
   void* down_bc_pool_ = nullptr;
 
- public:
   GeneralMOEConfig config_;
   using input_t = ggml_bf16_t;
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
   AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
-    auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
-    if (quant_config.group_size == 0 || quant_config.zero_point) {
-      throw std::runtime_error("Kimi-K2 MoE only support KGroup Int4");
-    }
+    init();
+  }
+
+  void init() {
     if (config_.load && config_.path == "") {
       config_.load = false;
     }
@@ -114,40 +110,30 @@ class AMX_MOE_BASE {
     m_local_down_output_ptr_.resize(config_.expert_num);
 
     for (size_t i = 0; i < config_.expert_num; i++) {
-      gate_up_ba_.push_back(
-          std::make_shared<typename T::BufferA>(config_.max_len, config_.hidden_size, group_size, nullptr));
-      gate_bc_.push_back(std::make_shared<typename T::BufferC>(config_.max_len, config_.intermediate_size, nullptr));
-      up_bc_.push_back(std::make_shared<typename T::BufferC>(config_.max_len, config_.intermediate_size, nullptr));
-      down_ba_.push_back(
-          std::make_shared<typename T::BufferA>(config_.max_len, config_.intermediate_size, group_size, nullptr));
-      down_bc_.push_back(std::make_shared<typename T::BufferC>(config_.max_len, config_.hidden_size, nullptr));
+      gate_up_ba_.push_back(make_buffer_a(config_.max_len, config_.hidden_size, nullptr));
+      gate_bc_.push_back(make_buffer_c(config_.max_len, config_.intermediate_size, nullptr));
+      up_bc_.push_back(make_buffer_c(config_.max_len, config_.intermediate_size, nullptr));
+      down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
+      down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
-      // BufferB initialization with aligned allocation (for K2 Int4)
-      void* gate_bb_ptr =
-          std::aligned_alloc(64, T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, group_size));
-      gate_bb_.push_back(std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size,
-                                                               group_size, gate_bb_ptr));
+      void* gate_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr =
-          std::aligned_alloc(64, T::BufferB::required_size(config_.intermediate_size, config_.hidden_size, group_size));
-      up_bb_.push_back(
-          std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size, group_size, up_bb_ptr));
+      void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
-      void* down_bb_ptr =
-          std::aligned_alloc(64, T::BufferB::required_size(config_.hidden_size, config_.intermediate_size, group_size));
-      down_bb_.push_back(std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size,
-                                                               group_size, down_bb_ptr));
+      void* down_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
-    assert(T::BufferA::M_STEP == T::BufferC::M_STEP);
     // TODO: need update to all *.hpp
-    // (config_.expert_num * T::BufferA::M_STEP) in pool_count_ is to ensure padding for each experts.
-    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::BufferA::M_STEP;
+    // (config_.expert_num * T::M_STEP) in pool_count_ is to ensure padding for each experts.
+    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::M_STEP;
 
-    gate_up_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
-    gate_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
-    up_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
-    down_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.intermediate_size, group_size)) + pool_count_ * 64;
-    down_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
+    gate_up_ba_pool_bytes_ = buffer_a_required_size(pool_count_, config_.hidden_size) + pool_count_ * 64;
+    gate_bc_pool_bytes_ = buffer_c_required_size(pool_count_, config_.intermediate_size) + pool_count_ * 64;
+    up_bc_pool_bytes_ = buffer_c_required_size(pool_count_, config_.intermediate_size) + pool_count_ * 64;
+    down_ba_pool_bytes_ = buffer_a_required_size(pool_count_, config_.intermediate_size) + pool_count_ * 64;
+    down_bc_pool_bytes_ = buffer_c_required_size(pool_count_, config_.hidden_size) + pool_count_ * 64;
 
     mem_requests.append_pointer(&gate_up_ba_pool_, gate_up_ba_pool_bytes_);
     mem_requests.append_pointer(&gate_bc_pool_, gate_bc_pool_bytes_);
@@ -194,8 +180,6 @@ class AMX_MOE_BASE {
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
 #ifdef FORWARD_TIME_PROFILE
     auto start_time = std::chrono::high_resolution_clock::now();
     auto last = start_time;
@@ -231,7 +215,7 @@ class AMX_MOE_BASE {
     void* up_bc_pool_ptr = up_bc_pool_;
     void* down_ba_pool_ptr = down_ba_pool_;
     void* down_bc_pool_ptr = down_bc_pool_;
-    constexpr size_t M_STEP = T::BufferA::M_STEP;
+    constexpr size_t M_STEP = T::M_STEP;
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
     size_t used_pool_m = 0;
     size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0, used_pool_bytes_ba_down = 0,
@@ -251,27 +235,27 @@ class AMX_MOE_BASE {
       size_t max_m = (m_local_num_[i] + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[i]->max_m = max_m;
       gate_up_ba_[i]->set_data(gate_up_ba_pool_ptr);
-      size_t ba_size = align64(T::BufferA::required_size(max_m, config_.hidden_size, group_size));
+      size_t ba_size = align64(buffer_a_required_size(max_m, config_.hidden_size));
       gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
 
       gate_bc_[i]->max_m = max_m;
       gate_bc_[i]->set_data(gate_bc_pool_ptr);
-      size_t bc_gate_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      size_t bc_gate_size = align64(buffer_c_required_size(max_m, config_.intermediate_size));
       gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
 
       up_bc_[i]->max_m = max_m;
       up_bc_[i]->set_data(up_bc_pool_ptr);
-      size_t bc_up_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      size_t bc_up_size = align64(buffer_c_required_size(max_m, config_.intermediate_size));
       up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
 
       down_ba_[i]->max_m = max_m;
       down_ba_[i]->set_data(down_ba_pool_ptr);
-      size_t ba_down_size = align64(T::BufferA::required_size(max_m, config_.intermediate_size, group_size));
+      size_t ba_down_size = align64(buffer_a_required_size(max_m, config_.intermediate_size));
       down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
 
       down_bc_[i]->max_m = max_m;
       down_bc_[i]->set_data(down_bc_pool_ptr);
-      size_t bc_down_size = align64(T::BufferC::required_size(max_m, config_.hidden_size));
+      size_t bc_down_size = align64(buffer_c_required_size(max_m, config_.hidden_size));
       down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
 
       used_pool_m += max_m;
@@ -454,8 +438,6 @@ class AMX_MOE_BASE {
   void forward_decode(int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
     int qlen = 1;
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
 #ifdef FORWARD_TIME_PROFILE
     auto start_time = std::chrono::high_resolution_clock::now();
     auto last = start_time;
@@ -487,7 +469,7 @@ class AMX_MOE_BASE {
     void* up_bc_pool_ptr = up_bc_pool_;
     void* down_ba_pool_ptr = down_ba_pool_;
     void* down_bc_pool_ptr = down_bc_pool_;
-    constexpr size_t M_STEP = T::BufferA::M_STEP;
+    constexpr size_t M_STEP = T::M_STEP;
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
     size_t used_pool_m = 0;
     size_t used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0, used_pool_bytes_ba_down = 0,
@@ -498,22 +480,22 @@ class AMX_MOE_BASE {
 
       gate_bc_[expert_idx]->max_m = max_m;
       gate_bc_[expert_idx]->set_data(gate_bc_pool_ptr);
-      size_t bc_gate_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      size_t bc_gate_size = align64(buffer_c_required_size(max_m, config_.intermediate_size));
       gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
 
       up_bc_[expert_idx]->max_m = max_m;
       up_bc_[expert_idx]->set_data(up_bc_pool_ptr);
-      size_t bc_up_size = align64(T::BufferC::required_size(max_m, config_.intermediate_size));
+      size_t bc_up_size = align64(buffer_c_required_size(max_m, config_.intermediate_size));
       up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
 
       down_ba_[expert_idx]->max_m = max_m;
       down_ba_[expert_idx]->set_data(down_ba_pool_ptr);
-      size_t ba_down_size = align64(T::BufferA::required_size(max_m, config_.intermediate_size, group_size));
+      size_t ba_down_size = align64(buffer_a_required_size(max_m, config_.intermediate_size));
       down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
 
       down_bc_[expert_idx]->max_m = max_m;
       down_bc_[expert_idx]->set_data(down_bc_pool_ptr);
-      size_t bc_down_size = align64(T::BufferC::required_size(max_m, config_.hidden_size));
+      size_t bc_down_size = align64(buffer_c_required_size(max_m, config_.hidden_size));
       down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
 
       used_pool_m += max_m;
@@ -534,7 +516,7 @@ class AMX_MOE_BASE {
       size_t max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[expert_idx]->max_m = max_m;
       gate_up_ba_[expert_idx]->set_data(gate_up_ba_pool_ptr);
-      size_t ba_size = align64(T::BufferA::required_size(max_m, config_.hidden_size, group_size));
+      size_t ba_size = align64(buffer_a_required_size(max_m, config_.hidden_size));
       gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
       gate_up_ba_[expert_idx]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
     }
@@ -657,6 +639,32 @@ class AMX_MOE_BASE {
  protected:
   Derived* derived() { return static_cast<Derived*>(this); }
   const Derived* derived_const() const { return static_cast<const Derived*>(this); }
+
+  // ============================================================================
+  // Virtual points for buffer creation and size calculation
+  // Default implementations use group_size (for KGroup quantization like K2)
+  // Derived classes (like moe.hpp) can override to not use group_size
+  // ============================================================================
+
+  size_t buffer_a_required_size(size_t m, size_t k) const {
+    return derived_const()->buffer_a_required_size_impl(m, k);
+  }
+  size_t buffer_b_required_size(size_t n, size_t k) const {
+    return derived_const()->buffer_b_required_size_impl(n, k);
+  }
+  size_t buffer_c_required_size(size_t m, size_t n) const {
+    return derived_const()->buffer_c_required_size_impl(m, n);
+  }
+
+  std::shared_ptr<typename T::BufferA> make_buffer_a(size_t m, size_t k, void* data) const {
+    return derived_const()->make_buffer_a_impl(m, k, data);
+  }
+  std::shared_ptr<typename T::BufferB> make_buffer_b(size_t n, size_t k, void* data) const {
+    return derived_const()->make_buffer_b_impl(n, k, data);
+  }
+  std::shared_ptr<typename T::BufferC> make_buffer_c(size_t m, size_t n, void* data) const {
+    return derived_const()->make_buffer_c_impl(m, n, data);
+  }
 
   void apply_activation(int activated_expert, int nth, int qlen) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
