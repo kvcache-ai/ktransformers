@@ -40,7 +40,7 @@
 ```bash
 docker run -it -d --net=host --shm-size=500g \
        --name <container-name> \
-       -w /home \
+       -w /workspace \
        --device=/dev/davinci0:rwm \
        --device=/dev/davinci1:rwm \
        --device=/dev/davinci2:rwm \
@@ -52,7 +52,7 @@ docker run -it -d --net=host --shm-size=500g \
        -v /usr/local/dcmi:/usr/local/dcmi:ro \
        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
        -v /usr/local/sbin/:/usr/local/sbin:ro \
-       -v /home \
+       -v <path_to_your_project>:/workspace \
        mindie:2.2.RC1-800I-A2-py311-openeuler24.03-lts bash
 ```
 
