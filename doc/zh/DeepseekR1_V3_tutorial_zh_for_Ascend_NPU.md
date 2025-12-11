@@ -31,24 +31,37 @@
 选择[Ascend HDK 25.3.RC1](https://www.hiascend.com/hardware/firmware-drivers/community?product=4&model=32&cann=8.3.RC1&driver=Ascend+HDK+25.3.RC1)进行安装，安装方式参考[昇腾社区HDK安装指导](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha003/softwareinst/instg/instg_0005.html?Mode=PmIns&OS=Ubuntu&Software=cannToolKit)。
 
 
-## Conda部署
+## 镜像部署
 
-建议按照最新[Installation Guide - kTransformers](https://kvcache-ai.github.io/ktransformers/en/install.html)部署开发环境，此处注意Python版本要求3.11（其他版本未验证），arm平台不需要安装cpufeature包。
+建议使用昇腾MindIE镜像[昇腾社区镜像下载](https://www.hiascend.com/developer/ascendhub/detail/af85b724a7e5469ebd7ea13c3439d48f)部署开发环境，选择2.2.RC1-800I-A2-py311-openeuler24.03-lts下载。
 
-安装conda/miniconda
+下载完成镜像后，执行以下命令启动容器：
 
 ```bash
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh
-bash ~/Miniconda3-latest-Linux-aarch64.sh
+docker run -it -d --net=host --shm-size=500g \
+       --name <container-name> \
+       -w /workspace \
+       --device=/dev/davinci_manager \
+       --device=/dev/hisi_hdc \
+       --device=/dev/devmm_svm \
+       -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+       -v /usr/local/dcmi:/usr/local/dcmi:ro \
+       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+       -v /usr/local/sbin/:/usr/local/sbin:ro \
+       -v <path_to_your_project>:/workspace \
+       mindie:2.2.RC1-800I-A2-py311-openeuler24.03-lts bash
+```
+
+进入容器
+
+```bash
+docker exec -it <container-name> /bin/bash
 ```
 
 部署Python环境：
 
 ```bash
-conda create -n py311 python=3.11
-conda activate py311
-conda install -c conda-forge libstdcxx-ng  # 安装`GLIBCXX-3.4.32`
-apt install zlib1g-dev libtbb-dev libssl-dev libaio-dev libcurl4-openssl-dev
+yum install zlib1g-dev libtbb-dev libssl-dev libaio-dev libcurl4-openssl-dev
 pip3 install numpy==1.26.4  # 适配torch/torch_npu
 pip3 install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
 pip3 install packaging ninja fire protobuf attrs decorator cloudpickle ml-dtypes scipy tornado absl-py psutil
@@ -85,7 +98,7 @@ source /usr/local/Ascend/nnal/atb/set_env.sh  # 以实际NNAL安装路径为准
 
 Q4权重：[DeepSeek-R1-Q4_K_M](https://modelscope.cn/models/unsloth/DeepSeek-R1-GGUF/files)
 
-W8A8权重：[DeepSeek-R1-W8A8](https://modelers.cn/models/MindSpore-Lab/DeepSeek-R1-W8A8/tree/main)
+W8A8权重：[DeepSeek-R1-W8A8](https://modelers.cn/models/State_Cloud/DeepSeek-R1-W8A8)
 
 使用[merge_safetensor_gguf.py](../../merge_tensors/merge_safetensor_gguf.py)来合并Q4和W8A8权重：
 
@@ -109,7 +122,7 @@ export TASK_QUEUE_ENABLE=0  # 保证算子下发顺序有序
 - 初始化third_party。由于此过程耗时较多，且容易受网络影响导致仓库克隆失败，建议初始化一次后，将相关文件进行打包，以便后续直接解压使用。
   ```bash
   git clone https://github.com/kvcache-ai/ktransformers.git
-  cd archive
+  cd ktransformers
   git submodule update --init --recursive
   ```
 - 对于arm平台，注释掉`./third_party/llamafile/iqk_mul_mat_arm82.cpp`中的
