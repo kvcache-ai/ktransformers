@@ -1,0 +1,89 @@
+- match:
+    class: ktransformers.models.modeling_qwen2_moe.Qwen2MoeRotaryEmbedding
+  replace:
+    class: ktransformers.operators.RoPE.RotaryEmbedding
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+
+- match:
+    name: "^lm_head$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.ascend.ascend_linear.KTransformersLinearW8A8A2
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      generate_op: "KLinearTorchW8A8A2"
+      prefill_op: "KLinearTorchW8A8A2"
+
+- match:
+    name: "^model\\.layers\\.(?!.*mlp\\.shared_expert_gate)(?!.*mlp\\.gate)(?!.*mlp\\.experts).*$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.ascend.ascend_linear.KTransformersLinearW8A8A2
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      generate_op: "KLinearTorchW8A8A2"
+      prefill_op: "KLinearTorchW8A8A2"
+
+- match:
+    name: "^model\\.layers\\.(?!.*mlp\\.gate)(?!.*self_attn\\.kv_b_proj)(?!.*mlp\\.experts).*$"
+    class: torch.nn.Linear
+  replace:
+    class: ktransformers.operators.ascend.ascend_linear.KTransformersLinearW8A8A2
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      generate_op: "KLinearTorchW8A8A2"
+      prefill_op: "KLinearTorchW8A8A2"
+
+- match:
+    name: "^model\\.layers\\..*\\.mlp$"
+    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock
+  replace:
+    class: ktransformers.operators.ascend.ascend_experts.KQwen3MoeSparseMoeBlockW8A8
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      dump_enable: False
+      dump_dir: "/mnt/dump_from_mindie/dump_from_kt_moe"
+
+- match:
+    name: "^model\\.layers\\..*\\.self_attn$"
+  replace:
+    class: ktransformers.operators.ascend.ascend_attention.KQwen3MoeAttentionW8A8A2Serve
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      absorb_for_prefill: False
+      dump_enable: False
+      dump_dir: "/mnt/dump_from_mindie/dump_from_kt_attn"
+
+- match:
+    name: "^model$"
+  replace:
+    class: "ktransformers.operators.models.KQwen2MoeModel"
+    kwargs:
+      per_layer_prefill_intput_threshold: 0
+
+
+- match:
+    name: "^model.embed_tokens"
+  replace:
+    class: "default"
+    kwargs:
+      generate_device: "cpu"
+      prefill_device: "cpu"
+
+- match:
+    class: ktransformers.models.modeling_qwen3_moe.Qwen3MoeRMSNorm
+  replace:
+    class: ktransformers.operators.ascend.ascend_layernorm.KQwen3MoeRMSNormW8A8
+    kwargs:
+      generate_device: "npu"
+      prefill_device: "npu"
+      dump_enable: False
+      dump_dir: "/mnt/dump_from_mindie/dump_from_kt_rms"
+
