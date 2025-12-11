@@ -28,7 +28,6 @@ import torch.nn.functional as F
 
 from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size, get_tensor_parallel_group
-from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.operators.experts import cuda_graphs, KExpertsBase, KExpertsCPU, KTransformersExperts, EXPERTS_MAP, KDeepseekV3MoE
 from ktransformers.models.modeling_deepseek_v3 import DeepseekV3MoE
 from ktransformers.operators.base_operator import BaseInjectedModule
@@ -385,5 +384,6 @@ class KQwen3MoeSparseMoeBlockW8A8(BaseInjectedModule):
             num_experts = router_logits.shape[-1]
             router_logits_bs = router_logits.view(B, S, num_experts)
             return y, router_logits_bs
+
 
         return y
