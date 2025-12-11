@@ -1,3 +1,19 @@
+# coding=utf-8
+# Copyright (c) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright 2025 The ZhipuAI Inc. team and HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 from datetime import timedelta
 
@@ -148,24 +164,35 @@ def get_safetensors_cut_weight(name: str, weights: torch.Tensor):
 
 
 def get_absort_weight(model, config):
-    # 新增q_absorb， out_absorb属性
-    local_rank = torch.distributed.get_rank()
+    if not dist.is_initialized():
+        return
+    local_rank = dist.get_rank()
     tp = get_tensor_parallel_size()
     local_rank %= tp
     tp_heads = config.num_attention_heads // tp
     for i in range(config.num_hidden_layers):
-        self = model.model.layers[i].self_attn
-        if not (hasattr(self, 'q_absorb') and hasattr(self, 'out_absorb')):
-            kv_b_proj = self.kv_b_proj.weight.view(config.num_attention_heads, -1, self.kv_lora_rank)
-            q_absorb = kv_b_proj[:, :self.qk_nope_head_dim, :].clone()
-            out_absorb = kv_b_proj[:, self.qk_nope_head_dim:, :].clone()
-            q_absorb = q_absorb[local_rank * tp_heads: (local_rank + 1) * tp_heads, :, :].contiguous()
-            out_absorb = out_absorb[local_rank * tp_heads: (local_rank + 1) * tp_heads, :, :].contiguous()
-            out_absorb = out_absorb.transpose(1, 2).contiguous()
-            setattr(self, "q_absorb", q_absorb)
-            setattr(self, "out_absorb", out_absorb)
-            del self.orig_module.kv_b_proj
-    torch.distributed.barrier(get_tensor_parallel_group())
+        attn = model.model.layers[i].self_attn
+        if hasattr(attn, "q_absorb") and hasattr(attn, "out_absorb"):
+            continue
+        if not (hasattr(attn, "kv_b_proj")
+                and hasattr(attn, "kv_lora_rank")
+                and hasattr(attn, "qk_nope_head_dim")):
+            continue
+
+        kv_b_proj = attn.kv_b_proj.weight.view(config.num_attention_heads, -1, attn.kv_lora_rank)
+        q_absorb = kv_b_proj[:, :attn.qk_nope_head_dim, :].clone()
+        out_absorb = kv_b_proj[:, attn.qk_nope_head_dim:, :].clone()
+
+        q_absorb = q_absorb[local_rank * tp_heads: (local_rank + 1) * tp_heads, :, :].contiguous()
+        out_absorb = out_absorb[local_rank * tp_heads: (local_rank + 1) * tp_heads, :, :].contiguous()
+        out_absorb = out_absorb.transpose(1, 2).contiguous()
+
+        setattr(attn, "q_absorb", q_absorb)
+        setattr(attn, "out_absorb", out_absorb)
+
+        if hasattr(attn, "orig_module") and hasattr(attn.orig_module, "kv_b_proj"):
+            del attn.orig_module.kv_b_proj
+    dist.barrier(get_tensor_parallel_group())
 
 
 def allredeuce_warpper(func):

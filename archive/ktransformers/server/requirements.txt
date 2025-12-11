@@ -1,5 +1,5 @@
 torch >= 2.3.0
-transformers == 4.51.3
+transformers >= 4.51.3
 fastapi >= 0.111.0
 langchain >= 0.2.0
 blessed >= 1.20.0

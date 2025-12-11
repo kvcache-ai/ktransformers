@@ -666,6 +666,33 @@ def translate_name_to_gguf(name):
 
     name = translate_name_to_gguf_mixtral(name)
 
+    if ".ffn_gate_exp." in name:
+    name = name.replace(".ffn_gate_exp.", ".ffn_gate_exps.")
+    if ".ffn_up_exp." in name:
+        name = name.replace(".ffn_up_exp.", ".ffn_up_exps.")
+    if ".ffn_down_exp." in name:
+        name = name.replace(".ffn_down_exp.", ".ffn_down_exps.")
+    
+    m = re.match(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)", name)
+    if m:
+        layer, expert, proj = m.groups()
+        if proj == "gate_proj":
+            return f"blk.{layer}.{expert}.ffn_gate_exps"
+        elif proj == "up_proj":
+            return f"blk.{layer}.{expert}.ffn_up_exps"
+        else:
+            return f"blk.{layer}.{expert}.ffn_down_exps"
+
+    m = re.match(r"blk\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)", name)
+    if m:
+        layer, expert, proj = m.groups()
+        if proj == "gate_proj":
+            return f"blk.{layer}.{expert}.ffn_gate_exps"
+        elif proj == "up_proj":
+            return f"blk.{layer}.{expert}.ffn_up_exps"
+        else:
+            return f"blk.{layer}.{expert}.ffn_down_exps"
+
     name = name.replace("lm_head.", "output.")
     name = name.replace("model.embed_tokens.", "token_embd.")
     name = name.replace("model.norm.", "output_norm.")
