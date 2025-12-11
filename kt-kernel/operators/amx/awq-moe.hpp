@@ -683,68 +683,68 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_AWQ_MOE_TP<K
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
-                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
+                size_t logical_expert_id = expert_map(physical_to_logical_map, expert_id_);
 
-                // weight TP-slicing
-                memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
+                // weight TP-slicing - use expert_id_ for destination, logical_expert_id for source
+                memcpy((uint8_t*)tpc.gate_proj + ((expert_id_ * weight_elem_count) >> 1),
                        (uint8_t*)config.gate_proj +
-                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                           ((logical_expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
                        ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
-                memcpy((uint8_t*)tpc.up_proj + ((expert_id * weight_elem_count) >> 1),
+                memcpy((uint8_t*)tpc.up_proj + ((expert_id_ * weight_elem_count) >> 1),
                        (uint8_t*)config.up_proj +
-                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                           ((logical_expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
                        ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
-                // down scales and zeros TP-slicing
-                memcpy((ggml_fp16_t*)tpc.down_scale + (expert_id * scales_elem_count),
+                // down scales and zeros TP-slicing - use expert_id_ for destination, logical_expert_id for source
+                memcpy((ggml_fp16_t*)tpc.down_scale + (expert_id_ * scales_elem_count),
                        (ggml_fp16_t*)config.down_scale +
-                           (expert_id * (config.intermediate_size / group_size) * config.hidden_size +
+                           (logical_expert_id * (config.intermediate_size / group_size) * config.hidden_size +
                             i * scales_elem_count),
                        sizeof(ggml_fp16_t) * scales_elem_count);
 
-                memcpy((uint8_t*)tpc.down_zero + ((expert_id * scales_elem_count) >> 1),
+                memcpy((uint8_t*)tpc.down_zero + ((expert_id_ * scales_elem_count) >> 1),
                        (uint8_t*)config.down_zero +
-                           ((expert_id * (config.intermediate_size / group_size) * config.hidden_size +
+                           ((logical_expert_id * (config.intermediate_size / group_size) * config.hidden_size +
                              i * scales_elem_count) >>
                             1),
                        (sizeof(uint8_t) * scales_elem_count) >> 1);
 
                 for (size_t kg = 0; kg < config.hidden_size / group_size; kg++) {
-                  // copy gate/up scales
-                  memcpy((ggml_fp16_t*)tpc.gate_scale + (expert_id * scales_elem_count) + kg * tpc.intermediate_size,
+                  // copy gate/up scales - use expert_id_ for destination, logical_expert_id for source
+                  memcpy((ggml_fp16_t*)tpc.gate_scale + (expert_id_ * scales_elem_count) + kg * tpc.intermediate_size,
                          (ggml_fp16_t*)config.gate_scale +
-                             (expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
+                             (logical_expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
                               kg * config.intermediate_size + i * tpc.intermediate_size),
                          (sizeof(ggml_fp16_t) * tpc.intermediate_size));
 
-                  memcpy((ggml_fp16_t*)tpc.up_scale + (expert_id * scales_elem_count) + kg * tpc.intermediate_size,
+                  memcpy((ggml_fp16_t*)tpc.up_scale + (expert_id_ * scales_elem_count) + kg * tpc.intermediate_size,
                          (ggml_fp16_t*)config.up_scale +
-                             (expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
+                             (logical_expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
                               kg * config.intermediate_size + i * tpc.intermediate_size),
                          (sizeof(ggml_fp16_t) * tpc.intermediate_size));
 
-                  // copy gate/up zeros TP-slicing
+                  // copy gate/up zeros TP-slicing - use expert_id_ for destination, logical_expert_id for source
                   memcpy(
-                      (uint8_t*)tpc.gate_zero + (((expert_id * scales_elem_count) + kg * tpc.intermediate_size) >> 1),
+                      (uint8_t*)tpc.gate_zero + (((expert_id_ * scales_elem_count) + kg * tpc.intermediate_size) >> 1),
                       (uint8_t*)config.gate_zero +
-                          ((expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
+                          ((logical_expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
                             kg * config.intermediate_size + i * tpc.intermediate_size) >>
                            1),
                       ((sizeof(uint8_t) * tpc.intermediate_size) >> 1));
 
-                  memcpy((uint8_t*)tpc.up_zero + (((expert_id * scales_elem_count) + kg * tpc.intermediate_size) >> 1),
+                  memcpy((uint8_t*)tpc.up_zero + (((expert_id_ * scales_elem_count) + kg * tpc.intermediate_size) >> 1),
                          (uint8_t*)config.up_zero +
-                             ((expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
+                             ((logical_expert_id * ((config.hidden_size / group_size) * config.intermediate_size) +
                                kg * config.intermediate_size + i * tpc.intermediate_size) >>
                               1),
                          ((sizeof(uint8_t) * tpc.intermediate_size) >> 1));
                 }
 
-                // down weights TP-slicing (column-wise)
+                // down weights TP-slicing (column-wise) - use expert_id_ for destination, logical_expert_id for source
                 for (size_t col = 0; col < config.hidden_size; col++) {
-                  memcpy((uint8_t*)tpc.down_proj + ((expert_id * weight_elem_count + col * tpc.intermediate_size) >> 1),
-                         (uint8_t*)config.down_proj + ((expert_id * config.intermediate_size * config.hidden_size +
+                  memcpy((uint8_t*)tpc.down_proj + ((expert_id_ * weight_elem_count + col * tpc.intermediate_size) >> 1),
+                         (uint8_t*)config.down_proj + ((logical_expert_id * config.intermediate_size * config.hidden_size +
                                                         col * config.intermediate_size + i * tpc.intermediate_size) >>
                                                        1),
                          (sizeof(uint8_t) * tpc.intermediate_size) >> 1);
@@ -785,19 +785,20 @@ class TP_MOE<AMX_AWQ_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_AWQ_MOE_TP<K
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
               [&](int expert_id_) {
-                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
-                memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
+                size_t logical_expert_id = expert_map(physical_to_logical_map, expert_id_);
+                // Use expert_id_ for destination, logical_expert_id for source
+                memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id_ * gate_up_elcount,
+                       (ggml_bf16_t*)config.gate_proj + logical_expert_id * config.intermediate_size * config.hidden_size +
                            i * gate_up_elcount,
                        sizeof(ggml_bf16_t) * gate_up_elcount);
-                memcpy((ggml_bf16_t*)tpc.up_proj + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
+                memcpy((ggml_bf16_t*)tpc.up_proj + expert_id_ * gate_up_elcount,
+                       (ggml_bf16_t*)config.up_proj + logical_expert_id * config.intermediate_size * config.hidden_size +
                            i * gate_up_elcount,
                        sizeof(ggml_bf16_t) * gate_up_elcount);
                 for (size_t col = 0; col < config.hidden_size; col++) {
-                  memcpy((ggml_bf16_t*)tpc.down_proj + expert_id * tpc.hidden_size * tpc.intermediate_size +
+                  memcpy((ggml_bf16_t*)tpc.down_proj + expert_id_ * tpc.hidden_size * tpc.intermediate_size +
                              col * tpc.intermediate_size,
-                         (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
+                         (ggml_bf16_t*)config.down_proj + logical_expert_id * config.intermediate_size * config.hidden_size +
                              col * config.intermediate_size + i * tpc.intermediate_size,
                          sizeof(ggml_bf16_t) * tpc.intermediate_size);
                 }
