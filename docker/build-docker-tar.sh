@@ -287,10 +287,12 @@ build_image() {
 
     # Display build command
     log_info "Build command:"
-    echo "  ${build_cmd[*]}"
+    printf '  %s \\\n' "${build_cmd[@]:0:${#build_cmd[@]}-1}"
+    printf '  %s\n' "${build_cmd[-1]}"
 
     if [ "$DRY_RUN" = true ]; then
         log_warning "DRY RUN: Skipping actual build"
+        echo "$temp_tag"
         return 0
     fi
 
@@ -442,14 +444,26 @@ main() {
     # Build image
     TEMP_TAG=$(build_image)
 
-    if [ "$DRY_RUN" = true ]; then
-        log_warning "DRY RUN: Preview complete"
-        exit 0
-    fi
-
     # Generate tar name
     TAR_NAME=$(generate_tar_name "$TEMP_TAG" "$TIMESTAMP")
     log_info "Generated tar name: $TAR_NAME.tar"
+
+    if [ "$DRY_RUN" = true ]; then
+        # Display dry-run summary
+        display_summary "DRY RUN Preview" \
+            "This is what would be built:" \
+            "" \
+            "Temporary Docker tag: $TEMP_TAG" \
+            "Tar filename: $TAR_NAME.tar" \
+            "Output path: $OUTPUT_DIR/$TAR_NAME.tar" \
+            "" \
+            "After build, you would run:" \
+            "  docker load -i $OUTPUT_DIR/$TAR_NAME.tar" \
+            "  docker run -it --rm ${TAR_NAME} /bin/bash"
+
+        log_success "DRY RUN: Preview complete. Remove --dry-run to build."
+        exit 0
+    fi
 
     # Export to tar
     TAR_PATH=$(export_to_tar "$TEMP_TAG" "$TAR_NAME")
