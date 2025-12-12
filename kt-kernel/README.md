@@ -192,6 +192,13 @@ python -m sglang.launch_server \
 
 See [KT-Kernel Parameters](#kt-kernel-parameters) section below for detailed parameter tuning guidelines.
 
+**Load from Specified CPU Cores:**
+- Uses the `KT_NUMA_CPU_OFFSET` environment variable to load models from specified CPU cores.
+- Example: Load models from cores with cpuid 8 (NUMA 0) and 48 (NUMA 1), while cores with cpuid 0-7 and 40-47 remain idle:
+```bash
+export KT_NUMA_CPU_OFFSET=8
+```
+
 ### Complete Example: Qwen3-30B-A3B
 
 This example demonstrates the full workflow from downloading weights to launching the server, showing both **AMX backend** and **LLAMAFILE backend** options.
