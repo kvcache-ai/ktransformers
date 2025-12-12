@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdio>
 #include <stdexcept>
+#include <cstdlib> // Added for getenv
 
 #include "hwloc.h"
 
@@ -45,7 +46,20 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
   hwloc_bitmap_t cpuset;
   hwloc_topology_init(&topology);
   hwloc_topology_load(topology);
-  printf("In Numa Worker Pool at NUMA %d, %d threads\n", numa_node_of_cpu(sched_getcpu()), max_thread_num);
+  
+  // Calculate the physical CPU ID for log display
+  int real_cpu_id = -1;
+  hwloc_obj_t display_numa_obj = hwloc_get_obj_by_type(topology, HWLOC_OBJ_NUMANODE, numa_id);
+  if (display_numa_obj) {
+    hwloc_obj_t start_core_obj = hwloc_get_obj_inside_cpuset_by_type(topology, display_numa_obj->cpuset, HWLOC_OBJ_CORE, threads_id_start);
+    if (start_core_obj) {
+      // Get the first physical CPU index from the core's cpuset
+      real_cpu_id = hwloc_bitmap_first(start_core_obj->cpuset);
+    }
+  }
+  
+  printf("In Numa Worker Pool at NUMA %d, %d threads, loading model from CPU %d\n", numa_id, max_thread_num, real_cpu_id != -1 ? real_cpu_id : threads_id_start);
+
   total_worker_count = max_thread_num;
   set_restricted_worker_count(total_worker_count);
   thread_state_ = std::unique_ptr<ThreadState[]>(new ThreadState[max_thread_num]);
@@ -62,7 +76,7 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
     if (res_set_name != 0) {
       fprintf(stderr, "Failed to set thread name: %s\n", strerror(res_set_name));
     }
-    // æ£€æŸ¥çº¿ç¨‹æ˜¯å¦æˆåŠŸå‘½å
+    // ¼ì²éÏß³ÌÊÇ·ñ³É¹¦ÃüÃû
     char name[16];
     pthread_getname_np(native_handle, name, sizeof(name));
     if (strcmp(name, thread_name.c_str()) == 0) {
@@ -205,7 +219,7 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
     set_memory_to_numa(numa_id);
   }
   auto start = std::chrono::high_resolution_clock::now();
-  WorkerPool::thread_local_id = thread_id;  // è®¾ç½®çº¿ç¨‹æœ¬åœ°å˜é‡
+  WorkerPool::thread_local_id = thread_id;  // ÉèÖÃÏß³Ì±¾µØ±äÁ¿
   while (true) {
     ThreadStatus status = thread_state_[thread_id].status.load(std::memory_order_acquire);
     if (status == ThreadStatus::WORKING) {
@@ -266,7 +280,14 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
   }
 
   workers.resize(numa_count);
-  std::vector<int> numa_threads_count(numa_count, 0);
+  
+  // Set offset from environment variable
+  int offset = 0;
+  if (const char* env_p = std::getenv("KT_NUMA_CPU_OFFSET")) {
+    offset = std::atoi(env_p);
+  }
+
+  std::vector<int> numa_threads_count(numa_count, offset);
   for (int i = 0; i < numa_count; i++) {
     workers[i] = std::thread(&NumaJobDistributor::worker_thread, this, i);
     auto this_numa = numa_ids[i];
@@ -289,11 +310,11 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
       // throw std::runtime_error("Core not found inside NUMA node");
       continue;
     }
-    // ç²¾ç®€ cpuset
+    // ¾«¼ò cpuset
     auto cpuset_simple = hwloc_bitmap_alloc();
     hwloc_bitmap_copy(cpuset_simple, core_obj->cpuset);
     hwloc_bitmap_singlify(cpuset_simple);
-    // æ‰“å°ç»‘å®šçš„å…·ä½“çš„ CPU ç‰©ç†ç´¢å¼•
+    // ´òÓ¡°ó¶¨µÄ¾ßÌåµÄ CPU ÎïÀíË÷Òı
     unsigned long i_in;
     // hwloc_bitmap_foreach_begin(i_in, cpuset_simple) { printf("Thread %d bound to CPU %ld\n", start_id, i_in); }
     // hwloc_bitmap_foreach_end();
@@ -301,7 +322,7 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
     if (res != 0) {
       fprintf(stderr, "Failed to set thread CPU binding: %s\n", strerror(errno));
     }
-    // æ£€æŸ¥çº¿ç¨‹æ˜¯å¦ç»‘å®šåˆ°æŒ‡å®šçš„ æ ¸ä¸Šäº†
+    // ¼ì²éÏß³ÌÊÇ·ñ°ó¶¨µ½Ö¸¶¨µÄ ºËÉÏÁË
     hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
     hwloc_get_thread_cpubind(topology, native_handle, cpuset, HWLOC_CPUBIND_THREAD);
     // hwloc_bitmap_foreach_begin(i_in, cpuset) { printf("Thread %d is bound to CPU %ld\n", start_id, i_in); }
@@ -390,11 +411,20 @@ void WorkerPool::init(WorkerPoolConfig config) {
   for (int i = 0; i < config.subpool_count; i++) {
     numa_worker_pools.push_back(nullptr);
   }
-  std::vector<int> numa_threads_count(config.subpool_count, 0);
+
+  // Set offset from environment variable
+  int offset = 0;
+  if (const char* env_p = std::getenv("KT_NUMA_CPU_OFFSET")) {
+    offset = std::atoi(env_p);
+    printf("KT_NUMA_CPU_OFFSET successfully set to %d\n", offset);
+  }
+
+  std::vector<int> numa_threads_count(config.subpool_count, offset);
   for (int i = 0; i < config.subpool_count; i++) {
     auto this_numa = config.subpool_numa_map[i];
     auto this_thread_count = config.subpool_thread_count[i];
     auto this_thread_id_start = numa_threads_count[this_numa];
+
     std::thread([this, i, this_numa, this_thread_count, this_thread_id_start]() {
       set_to_numa(this_numa);
       numa_worker_pools[i] =
