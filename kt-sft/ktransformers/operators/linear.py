@@ -159,7 +159,7 @@ class KLinearTorch(KLinearBase):
         dtype = x.dtype
         out_device = x.device
 
-        if (not x.requires_grad) and GLOBAL_CONFIG._config["mod"] == "sft":
+        if (not x.requires_grad) and GLOBAL_CONFIG._config["mod"] == "train":
             x = x.requires_grad_(True)
         # TODO: support CUDA Graph when using cpu, but CPUInfer is recommended.
         x = x.to(device=self.device, dtype=self.dtype)
