@@ -299,7 +299,7 @@ build_image() {
     # Execute build
     log_info "Starting Docker build (this may take 30-60 minutes)..."
     if "${build_cmd[@]}"; then
-        log_success "Docker image built successfully"
+        log_success "Docker image built successfully" >&2
         echo "$temp_tag"
     else
         log_error "Docker build failed"
