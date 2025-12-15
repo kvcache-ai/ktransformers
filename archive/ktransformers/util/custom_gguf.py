@@ -667,7 +667,7 @@ def translate_name_to_gguf(name):
     name = translate_name_to_gguf_mixtral(name)
 
     if ".ffn_gate_exp." in name:
-    name = name.replace(".ffn_gate_exp.", ".ffn_gate_exps.")
+        name = name.replace(".ffn_gate_exp.", ".ffn_gate_exps.")
     if ".ffn_up_exp." in name:
         name = name.replace(".ffn_up_exp.", ".ffn_up_exps.")
     if ".ffn_down_exp." in name:
