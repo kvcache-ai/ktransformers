@@ -343,9 +343,14 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
             method=method,
         )
 
-        if RAWAMXMoEWrapper._compressed_loader_instance is None:
-            RAWAMXMoEWrapper._compressed_loader_instance = CompressedSafeTensorLoader(weight_path)
-        self.loader = RAWAMXMoEWrapper._compressed_loader_instance
+        if RAWAMXMoEWrapper._raw_loader_instance is None:
+            if method == "RAWINT4":
+                RAWAMXMoEWrapper._raw_loader_instance = CompressedSafeTensorLoader(weight_path)
+            elif method == "RAWFP8":
+                RAWAMXMoEWrapper._raw_loader_instance = RawFP8SafeTensorLoader(weight_path)
+            else:
+                raise NotImplementedError(f"Unsupported method for RAWAMXMoEWrapper: {method}")
+        self.loader = RAWAMXMoEWrapper._raw_loader_instance
 
         self.gate_weights = None
         self.up_weights = None
@@ -378,9 +383,11 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         self.down_weights = weights["down"]
 
         # Convert scales to bf16 individually
-        self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
-        self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
-        self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
+        assert weights["gate_scale"][0].dtype == torch.bfloat16, "Expected bfloat16 scales."
+        self.gate_scales = weights["gate_scale"]
+        self.up_scales = weights["up_scale"]
+        self.down_scales = weights["down_scale"]
+
         t2 = time.time()
 
         # Build pointer lists: [numa_id][expert_id] -> pointer
@@ -404,18 +411,6 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
 
-        # Infer group_size from scale shape (column-major layout)
-        # For gate/up projection: in_features = hidden_size
-        # So: group_size = hidden_size / scale.shape[1]
-        scale_shape = self.gate_scales[0].shape
-        group_size = self.hidden_size // scale_shape[1]
-        print(f"[RAWAMXMoEWrapper Layer {self.layer_idx}] Inferred group_size: {group_size}")
-
-        moe_config.quant_config.bits = 4
-        moe_config.quant_config.group_size = group_size
-        
-        moe_config.quant_config.zero_point = False
-
         # Use gate_projs instead of gate_proj for per-expert pointers
         moe_config.gate_projs = gate_ptrs
         moe_config.up_projs = up_ptrs
@@ -424,7 +419,22 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
 
-        self.moe = AMXInt4_KGroup_MOE(moe_config)
+        # Infer group_size from scale shape (column-major layout)
+        # For gate/up projection: in_features = hidden_size
+        # So: group_size = hidden_size / scale.shape[1]
+
+
+        if self.method == "RAWINT4":
+            group_size = self.hidden_size // self.gate_scales[0].shape[1]
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = group_size
+            moe_config.quant_config.zero_point = False
+            self.moe = AMXInt4_KGroup_MOE(moe_config)
+        elif self.method == "RAWFP8":
+            moe_config.quant_config.bits = 8
+            moe_config.quant_config.group_size = 128
+            moe_config.quant_config.zero_point = False
+            self.moe = AMXRAWFp8_MOE(moe_config)
         t4 = time.time()
 
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))

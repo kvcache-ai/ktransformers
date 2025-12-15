@@ -236,6 +236,67 @@ class SafeTensorLoader:
     def has_tensor(self, name: str):
         return name in self.tensor_file_map
 
+class RawFP8SafeTensorLoader(SafeTensorLoader):
+    """Loader for raw FP8 expert weights (DeepSeek V3.2 style).
+
+    Expected layout (per expert):
+    - {base_key}.mlp.experts.{expert_id}.{gate,up,down}_proj.weight
+    - {base_key}.mlp.experts.{expert_id}.{gate,up,down}_proj.weight_scale_inv
+    """
+
+    def load_tensor(self, key: str, device: str = "cpu"):
+        if key not in self.tensor_file_map:
+            raise KeyError(f"Key {key} not found in Safetensor files")
+        file = self.tensor_file_map[key]
+        f = self.file_handle_map.get(file)
+        if f is None:
+            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+        tensor = f.get_tensor(key)
+        if device == "cpu":
+            return tensor
+        return tensor.to(device)
+
+    def load_experts(self, base_key: str, device: str = "cpu"):
+        """Load FP8 expert weights and their block-wise scale_inv tensors."""
+        experts_prefix = f"{base_key}.mlp.experts"
+
+        expert_count = 0
+        while self.has_tensor(f"{experts_prefix}.{expert_count}.gate_proj.weight"):
+            expert_count += 1
+
+        if expert_count == 0:
+            raise ValueError(f"No experts found for key {experts_prefix}")
+
+        gate_weights = [None] * expert_count
+        up_weights = [None] * expert_count
+        down_weights = [None] * expert_count
+        gate_scales = [None] * expert_count
+        up_scales = [None] * expert_count
+        down_scales = [None] * expert_count
+
+        for exp_id in range(expert_count):
+            gate_w_key = f"{experts_prefix}.{exp_id}.gate_proj.weight"
+            up_w_key = f"{experts_prefix}.{exp_id}.up_proj.weight"
+            down_w_key = f"{experts_prefix}.{exp_id}.down_proj.weight"
+            gate_s_key = f"{experts_prefix}.{exp_id}.gate_proj.weight_scale_inv"
+            up_s_key = f"{experts_prefix}.{exp_id}.up_proj.weight_scale_inv"
+            down_s_key = f"{experts_prefix}.{exp_id}.down_proj.weight_scale_inv"
+
+            gate_weights[exp_id] = self.load_tensor(gate_w_key, device).contiguous()
+            up_weights[exp_id] = self.load_tensor(up_w_key, device).contiguous()
+            down_weights[exp_id] = self.load_tensor(down_w_key, device).contiguous()
+            gate_scales[exp_id] = self.load_tensor(gate_s_key, device).contiguous()
+            up_scales[exp_id] = self.load_tensor(up_s_key, device).contiguous()
+            down_scales[exp_id] = self.load_tensor(down_s_key, device).contiguous()
+
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": gate_scales,
+            "up_scale": up_scales,
+            "down_scale": down_scales,
+        }
 
 class CompressedSafeTensorLoader(SafeTensorLoader):
     """Loader for compressed SafeTensor layouts (RAWINT4 weights)."""

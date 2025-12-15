@@ -371,7 +371,7 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>>
 
     bool use_per_expert_ptrs = !config.gate_projs.empty();
 
-    if (!use_per_expert_ptrs && config.gate_scale == nullptr) {
+    if (config.gate_projs.empty() && config.gate_scale == nullptr) {
       throw std::runtime_error("K2 MoE only supports Packed Int4 with KGroup Scale");
     }
 
