@@ -217,3 +217,6 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
+
+        # Drop original weights after loading
+        self.weights_to_keep = None

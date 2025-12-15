@@ -84,7 +84,7 @@ pip install .
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
-![image-20251011010558909](./doc/assets/image-20251011010558909.png)
+![image-20251011010558909](https://github.com/kvcache-ai/ktransformers/blob/main/doc/assets/image-20251011010558909.png)
 
 **Key Features:**
 

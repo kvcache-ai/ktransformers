@@ -104,7 +104,11 @@ class SafeTensorLoader(ModelLoader):
         f = self.file_handle_map.get(file)
         if f is None:
             raise FileNotFoundError(f"File {file} not found in Safetensor files")
-        tensor = f.get_tensor(key)
+        if use_torch_npu:
+            tensor = f.get_tensor(key).to(torch.float16)
+        else:
+            tensor = f.get_tensor(key)
+
         return tensor.to(device)
 
     def load_experts(self, key: str, device: str="cpu"):

@@ -1,18 +1,35 @@
+# coding=utf-8
+# Copyright (c) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright 2025 The ZhipuAI Inc. team and HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
+import warnings
+from typing import Optional, Tuple
 
 import torch
 import torch_npu
-import warnings
-from typing import Optional, Tuple
 from torch import nn
+import torch.nn.functional as F
+from transformers.configuration_utils import PretrainedConfig
 
 from ktransformers.models.modeling_deepseek import DeepseekV2Attention, apply_rotary_pos_emb
-from typing import Optional, Tuple
+from ktransformers.models.modeling_qwen3_moe import Qwen3MoeAttention, apply_rotary_pos_emb
 from ktransformers.operators.base_operator import BaseInjectedModule
 from ktransformers.util.custom_loader import GGUFLoader
 from ktransformers.util.utils import get_compute_capability, get_use_npu_graph, get_current_device
-from transformers.configuration_utils import PretrainedConfig
-from ktransformers.models.custom_cache import KVC2StaticCache, StaticCache
+from ktransformers.models.custom_cache import StaticCache
 from ktransformers.server.balance_serve.inference.forward_batch import ForwardMiniBatchSplit
 from ktransformers.util.ascend.ascend_utils import get_tensor_parallel_size, allredeuce_warpper, get_tensor_parallel_group
 from ktransformers.util.vendors import device_manager, GPUVendor
@@ -46,7 +63,7 @@ class MatMulOps(object):
 
 class DynamicQuantOps(object):
     """
-        :param x, scale, offset
+        :param x
         :return
     """
     def execute(self, x_input):
@@ -830,3 +847,418 @@ class KDeepseekV2AttentionW8A8A2Serve(BaseInjectedModule, DeepseekV2Attention):
         attn_output = self.matmulDequant_operation_aclnn.execute([attn_output, self.o_proj.weight,
                                                                   self.o_proj.quant_bias, self.o_proj.deq_scale])[0]
         return attn_output, None, past_key_value
+
+def rotate_half(x):
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+class KQwen3MoeAttentionW8A8A2Serve(BaseInjectedModule, Qwen3MoeAttention):
+
+    attn_mask: Optional[torch.Tensor] = None
+
+    def __init__(self,
+                 key: str,
+                 gguf_loader: GGUFLoader,
+                 config: PretrainedConfig,
+                 orig_module: nn.Module,
+                 prefill_device: str = "npu",
+                 generate_device: str = "npu",
+                 chunck_size: int = 1024,
+                 absorb_for_prefill: bool = False,
+                 **kwargs):
+
+        BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module,
+                                    prefill_device, generate_device, **kwargs)
+
+        self.orig_module.__init__(orig_module.config, orig_module.layer_idx)
+
+        self.absorb_for_prefill = absorb_for_prefill
+
+        self.elewise_quant = DynamicQuantOps()
+        self.matmulDequant_operation = MatMulOps()
+        self.matmulDequant_operation_aclnn = MatMulOps()
+
+        self.softmax_scale = self.scaling
+        self.sparse_mode = 0
+
+        self._prefill_step = 0
+        self._cur_prefill_dir: Optional[str] = None
+
+        if hasattr(self, "rotary_emb"):
+            if hasattr(self.rotary_emb, "cos_cached"):
+                self.rotary_emb.cos_cached = self.rotary_emb.cos_cached.to(torch.float16)
+                self.rotary_emb.sin_cached = self.rotary_emb.sin_cached.to(torch.float16)
+            if hasattr(self.rotary_emb, "inv_freq"):
+                self.rotary_emb.inv_freq = self.rotary_emb.inv_freq.to(torch.float16)
+
+    def _linear_w8a8a2(self, x: torch.Tensor, proj: nn.Module, name: str) -> torch.Tensor:
+        if x.dtype == torch.bfloat16:
+            x = x.to(torch.float16)
+        B, Q, H_in = x.shape
+        x_2d = x.view(-1, H_in)   # [T, H_in], T = B * Q
+        x_q = self.elewise_quant.execute([
+            x_2d,
+            proj.input_scale,
+            proj.input_offset
+        ])[0]
+        y_2d = self.matmulDequant_operation.execute([
+            x_q,
+            proj.weight,
+            proj.quant_bias,
+            proj.deq_scale
+        ])[0]
+        return y_2d.view(B, Q, -1)
+    # -------------------------------------------------------
+    # forward
+    # -------------------------------------------------------
+    def forward(self,
+                hidden_states: torch.Tensor,
+                attention_mask=None,
+                position_ids=None,
+                past_key_value=None,
+                output_attentions=False,
+                use_cache=False,
+                cache_position=None,
+                is_prefill=None,
+                page_idx=None,
+                page_offset=None,
+                block_table=None,
+                q_len_raw=None,
+                kv_len_raw=None,
+                stream=None,
+                **kwargs):
+
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(0)
+        bsz, q_len, hidden = hidden_states.shape
+
+        # -------- QKV --------
+        q_proj_out = self._linear_w8a8a2(hidden_states, self.q_proj, "Q")
+        B, S, _ = q_proj_out.shape
+        q = q_proj_out.view(B, S, self.num_heads, self.head_dim)  # [B, S, H, Dh]
+        q = self.q_norm(q)
+        q_in = q.view(B, S, -1)
+
+        k_proj_out = self._linear_w8a8a2(hidden_states, self.k_proj, "K")
+        k = k_proj_out.view(B, S, self.num_key_value_heads, self.head_dim)
+        k = self.k_norm(k)
+        k_in = k.view(B, S, -1)
+
+        v_in = self._linear_w8a8a2(hidden_states, self.v_proj, "V")
+
+        q = q_in.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k_in.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        v = v_in.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        # -------- RoPE --------
+        cos, sin = self.rotary_emb(v, position_ids)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1)
+
+        # -------- prefill / decode --------
+        if is_prefill:
+            out = self._forward_prefill(
+                q, k, v,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                q_len_raw=q_len_raw,
+                kv_len_raw=kv_len_raw,
+                page_idx=page_idx,
+                page_offset=page_offset,
+                block_table=block_table,
+            )
+            return out
+        else:
+            return self.forward_paged(
+                q=q, k=k, v=v,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
+                block_table=block_table,
+                page_size=getattr(past_key_value, "page_size", None),
+                q_len_raw=q_len_raw,
+                kv_len_raw=kv_len_raw,
+                page_idx=page_idx,
+                page_offset=page_offset,
+                stream=stream
+            )
+
+    # -------------------------------------------------------
+    # Prefill
+    # -------------------------------------------------------
+    def _forward_prefill(
+        self,
+        q: torch.Tensor,   # [B, H, Q, Dh]
+        k: torch.Tensor,   # [B, KvH, Q, Dh]
+        v: torch.Tensor,   # [B, KvH, Q, Dh]
+        attention_mask=None,
+        position_ids=None,
+        past_key_value=None,
+        q_len_raw=None,
+        kv_len_raw=None,
+        page_idx=None,
+        page_offset=None,
+        block_table=None,
+        **kwargs,
+    ) -> torch.Tensor:
+
+        B, H, Q, Dh = q.shape
+        KvH = k.shape[1]
+
+        # ---------- 1) 写 KV cache ----------
+        if (
+            past_key_value is not None
+            and page_idx is not None
+            and page_offset is not None
+        ):
+            try:
+                past_key_value.update(
+                    key_states=k,
+                    value_states=v,
+                    layer_idx=self.layer_idx,
+                    cache_kwargs={
+                        "page_idx": page_idx,
+                        "page_offset": page_offset,
+                    },
+                )
+            except Exception as e:
+                print(f"[PREFILL-QWEN3][WARN] KV cache update failed: {e}", flush=True)
+
+        # ---------- 2) GQA：4 KV → 32 Q heads ----------
+        if KvH != self.num_key_value_heads:
+            print(
+                f"[PREFILL-QWEN3][WARN] KvH ({KvH}) != config.num_key_value_heads "
+                f"({self.num_key_value_heads}), 使用 k.shape[1] 作为 KvH",
+                flush=True,
+            )
+            KvH = k.shape[1]
+
+        if H % KvH != 0:
+            raise ValueError(
+                f"[PREFILL-QWEN3] num_heads={H} 不是 num_kv_heads={KvH} 的整数倍"
+            )
+
+        group_size = H // KvH
+        k_full = k.repeat_interleave(group_size, dim=1)
+        v_full = v.repeat_interleave(group_size, dim=1)
+
+        print("[PREFILL-QWEN3] k_full/v_full:", k_full.shape, v_full.shape, flush=True)
+
+        # ---------- 3) BSND + causal mask ----------
+        q_bsnd = q.permute(0, 2, 1, 3).contiguous()      # [B, Q, H, Dh]
+        k_bsnd = k_full.permute(0, 2, 1, 3).contiguous()
+        v_bsnd = v_full.permute(0, 2, 1, 3).contiguous()
+
+        if q_len_raw is None:
+            seq_len_data = [Q for _ in range(B)]
+            kv_len_list = [Q for _ in range(B)]
+        else:
+            seq_len_data = []
+            kv_len_list = []
+            for b_idx in range(B):
+                cur_q = int(q_len_raw[b_idx].item())
+                if kv_len_raw is not None:
+                    cur_kv = int(kv_len_raw[b_idx].item())
+                else:
+                    cur_kv = cur_q
+                cur_q = max(1, cur_q)
+                cur_kv = max(1, cur_kv)
+                seq_len_data.append(cur_q)
+                kv_len_list.append(cur_kv)
+
+        def create_causal_mask(q_lens, kv_lens):
+            q_lens_t = torch.tensor(q_lens, device=q_bsnd.device)
+            kv_lens_t = torch.tensor(kv_lens, device=q_bsnd.device)
+            bsz = q_lens_t.size(0)
+            max_q = int(q_lens_t.max().item())
+            max_kv = int(kv_lens_t.max().item())
+            base_causal = torch.tril(
+                torch.ones((max_q, max_kv), dtype=torch.bool, device=q_bsnd.device)
+            )
+            mask = torch.zeros(
+                (bsz, max_q, max_kv), dtype=torch.bool, device=q_bsnd.device
+            )
+            for i in range(bsz):
+                ql = int(q_lens_t[i].item())
+                kl = int(kv_lens_t[i].item())
+                mask[i, :ql, :kl] = base_causal[:ql, :kl]
+            return mask
+
+        max_q_len = max(seq_len_data) if len(seq_len_data) > 0 else Q
+        max_kv_len = max(kv_len_list) if len(kv_len_list) > 0 else Q
+
+        q_list, k_list, v_list = [], [], []
+        for b_idx in range(B):
+            cur_q = seq_len_data[b_idx]
+            cur_kv = kv_len_list[b_idx]
+
+            q_sample = q_bsnd[b_idx, :cur_q, :, :].contiguous()
+            k_sample = k_bsnd[b_idx, :cur_kv, :, :].contiguous()
+            v_sample = v_bsnd[b_idx, :cur_kv, :, :].contiguous()
+
+            q_list.append(q_sample)
+            k_list.append(k_sample)
+            v_list.append(v_sample)
+
+        qTensor = torch.nn.utils.rnn.pad_sequence(
+            q_list, batch_first=True, padding_value=0.0
+        ).contiguous()
+        kTensor = torch.nn.utils.rnn.pad_sequence(
+            k_list, batch_first=True, padding_value=0.0
+        ).contiguous()
+        vTensor = torch.nn.utils.rnn.pad_sequence(
+            v_list, batch_first=True, padding_value=0.0
+        ).contiguous()
+
+        causal_mask = create_causal_mask(seq_len_data, kv_len_list)
+        atten_mask = (~causal_mask).to(torch.int8)
+
+        print("[PREFILL-QWEN3] qTensor/kTensor/vTensor:",
+              qTensor.shape, kTensor.shape, vTensor.shape, flush=True)
+
+        # ---------- 4) NPU fused attention ----------
+        infer_attention_output, _ = torch_npu.npu_fused_infer_attention_score(
+            qTensor, kTensor, vTensor,
+            atten_mask=atten_mask,
+            actual_seq_lengths=seq_len_data,
+            scale=self.softmax_scale,
+            num_heads=H,
+            num_key_value_heads=H,
+            input_layout="BSND",
+        )
+
+        attn_output = infer_attention_output
+
+        # ---------- 5) reshape + W8A8 o_proj ----------
+        attn_output = attn_output.contiguous().view(B, max_q_len, H * Dh)
+
+        attn_output_q = self.elewise_quant.execute(
+            [attn_output, self.o_proj.input_scale, self.o_proj.input_offset]
+        )[0]
+
+        attn_output = self.matmulDequant_operation_aclnn.execute(
+            [attn_output_q, self.o_proj.weight, self.o_proj.quant_bias, self.o_proj.deq_scale]
+        )[0]
+
+        print("[PREFILL-QWEN3] attn_output(after o_proj):", attn_output.shape, attn_output.dtype, flush=True)
+
+        return attn_output
+
+    def forward_paged(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        past_key_value,
+        cache_position,
+        block_table,
+        page_size,
+        q_len_raw,
+        kv_len_raw,
+        page_idx,
+        page_offset,
+        stream,
+        **kwargs,
+    ):
+        B, H, Q, Dh = q.shape
+        KvH = k.shape[1]
+
+        # ========= 1) 更新 KV cache =========
+        past_key_value.update(
+            key_states=k,
+            value_states=v,
+            layer_idx=self.layer_idx,
+            cache_kwargs={
+                "page_idx": page_idx,
+                "page_offset": page_offset,
+            },
+        )
+
+        Kcache = past_key_value.get_k_cache(self.layer_idx)
+        Vcache = past_key_value.get_v_cache(self.layer_idx)
+        
+        q_bnsd = q.contiguous()
+        k_bnsd = Kcache.contiguous().to(torch.float16).transpose(1, 2)
+        v_bnsd = Vcache.contiguous().to(torch.float16).transpose(1, 2)
+
+        use_graph = get_use_npu_graph()
+        device = get_current_device()
+
+        if use_graph:
+            from ktransformers.server.balance_serve.inference.model_runner import get_or_create_model_runner
+            npu_graph_runner = get_or_create_model_runner(device=device)
+            npu_graph_idx = B - 1
+
+            if npu_graph_runner.workspace[npu_graph_idx] is None:
+                workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                q_bnsd,
+                k_bnsd,
+                v_bnsd,
+                num_heads=H,
+                num_key_value_heads=KvH,
+                input_layout="BNSD",
+                scale=self.softmax_scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                block_table=block_table,
+                block_size=page_size,
+                actual_seq_lengths_kv=kv_len_raw,
+                sparse_mode=self.sparse_mode,
+            )
+                npu_graph_runner.workspace[npu_graph_idx] = workspace
+
+            attn_output = torch.zeros_like(q_bnsd, dtype=torch.float16, device=device)
+            softmax_lse = torch.empty(1, dtype=torch.float16, device=device)
+            torch_npu.npu_fused_infer_attention_score.out(
+                q_bnsd,
+                k_bnsd,
+                v_bnsd,
+                workspace=npu_graph_runner.workspace[npu_graph_idx],
+                num_heads=H,
+                num_key_value_heads=KvH,
+                input_layout="BNSD",
+                scale=self.softmax_scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                block_table=block_table,
+                block_size=page_size,
+                actual_seq_lengths_kv=kv_len_raw,
+                sparse_mode=self.sparse_mode,
+                out=[attn_output, softmax_lse]
+            )
+        else:
+            attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+                q_bnsd,
+                k_bnsd,
+                v_bnsd,
+                num_heads=H,
+                num_key_value_heads=KvH,
+                input_layout="BNSD",
+                scale=self.softmax_scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                block_table=block_table,
+                block_size=page_size,
+                actual_seq_lengths_kv=kv_len_raw,
+                sparse_mode=self.sparse_mode,
+            )
+
+        attn_output = attn_output.permute(0, 2, 1, 3).contiguous().view(B, -1, H * Dh)
+
+        attn_output_q = self.elewise_quant.execute(
+            [attn_output, self.o_proj.input_scale, self.o_proj.input_offset]
+        )[0]
+
+        attn_output = self.matmulDequant_operation_aclnn.execute(
+            [attn_output_q, self.o_proj.weight, self.o_proj.quant_bias, self.o_proj.deq_scale]
+        )[0]
+
+        return attn_output
