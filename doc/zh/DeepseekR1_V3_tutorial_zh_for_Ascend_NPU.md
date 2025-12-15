@@ -1,5 +1,7 @@
 # 基准测试结果
 
+我们在Batchsize=4，输出长度为1024的条件下测试出了以下性能结果：
+
 | Prompt length                     | 1K     | 2K     | 4K     |
 | --------------------------------- | ------ | ------ | ------ |
 | KTrans Prefill token/s | 174.68 | 169.52 | 167.15 |
@@ -8,7 +10,7 @@
 ## 先决条件
 我们在以下配置下进行了Deepseek-R1最佳性能测试：
 - 服务器型号：Atlas 2UP
-- NPU：300I A2
+- NPU：Atlas 300I A2
 - CPU: HUAWEI Kunpeng 920 7270Z
 - 内存: DDR5服务器内存（1TB）
 
