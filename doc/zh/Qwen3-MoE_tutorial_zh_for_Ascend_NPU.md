@@ -8,7 +8,7 @@
 ## 先决条件
 我们在以下配置下进行了Qwen3-235B-A22B MoE最佳性能测试：
 - 服务器型号：Atlas 2UP
-- NPU：300I A2
+- NPU：Atlas 300I A2
 - CPU: HUAWEI Kunpeng 920 7270Z
 - 内存: DDR5服务器内存（1TB）
 
@@ -33,7 +33,7 @@ Q4权重：[Qwen3-235B-A22B-Instruct-2507-GGUF](https://modelscope.cn/models/uns
 
 W8A8权重：[Qwen3-235B-A22B-w8a8](https://modelers.cn/models/Modelers_Park/Qwen3-235B-A22B-w8a8)
 
-使用[merge_safetensor_gguf.py](../../merge_tensors/merge_safetensor_gguf.py)来合并Q4和W8A8权重：
+使用[merge_safetensor_gguf_for_qwen3.py](../../merge_tensors/merge_safetensor_gguf_for_qwen3.py)来合并Q4和W8A8权重：
 
 ```bash
 python merge_safetensor_gguf_for_qwen3.py --safetensor_path /mnt/weights/Qwen3-235B-A22B-Q4_K_M --gguf_path /mnt/weights/Qwen3-235B-A22B-W8A8 --output_path /mnt/weights/Qwen3-235B-A22B-q4km-w8a8
@@ -58,7 +58,7 @@ python merge_safetensor_gguf_for_qwen3.py --safetensor_path /mnt/weights/Qwen3-2
 - 执行`apt install cmake libhwloc-dev pkg-config`安装依赖。
 - 修改项目目录下 /ktransformers/config/config.yaml 中attn部分的page_size: 128  chunk_size: 16384
 - 执行`USE_BALANCE_SERVE=1 USE_NUMA=1 bash ./install.sh`，等待安装完成。
-    ***执行安装命令之前，需要将`./ktransformes/configs/config.yaml`中对于page size的设置改为page size=128(因为attn计算算子`torch_npu.npu_fused_infer_attention_score`支持page_size=16/128)***
+    ***执行安装命令之前，需要将`./ktransformers/configs/config.yaml`中对于page size的设置改为page size=128(因为attn计算算子`torch_npu.npu_fused_infer_attention_score`支持page_size=16/128)***
 
 此处给出示例balance_serve的启动脚本（由于使用了相对路径，需将该脚本放至项目的根路径下）：
 
