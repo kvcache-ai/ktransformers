@@ -252,8 +252,8 @@ validate_config() {
 build_image() {
     local temp_tag="ktransformers:temp-build-$(get_beijing_timestamp)"
 
-    log_step "Building Docker image"
-    log_info "Temporary tag: $temp_tag"
+    log_step "Building Docker image" >&2
+    log_info "Temporary tag: $temp_tag" >&2
 
     # Prepare build arguments
     local build_args=()
@@ -286,23 +286,25 @@ build_image() {
     )
 
     # Display build command
-    log_info "Build command:"
-    printf '  %s \\\n' "${build_cmd[@]:0:${#build_cmd[@]}-1}"
-    printf '  %s\n' "${build_cmd[-1]}"
+    {
+        log_info "Build command:"
+        printf '  %s \\\n' "${build_cmd[@]:0:${#build_cmd[@]}-1}"
+        printf '  %s\n' "${build_cmd[-1]}"
+    } >&2
 
     if [ "$DRY_RUN" = true ]; then
-        log_warning "DRY RUN: Skipping actual build"
+        log_warning "DRY RUN: Skipping actual build" >&2
         echo "$temp_tag"
         return 0
     fi
 
     # Execute build
-    log_info "Starting Docker build (this may take 30-60 minutes)..."
-    if "${build_cmd[@]}"; then
+    log_info "Starting Docker build (this may take 30-60 minutes)..." >&2
+    if "${build_cmd[@]}" >&2; then
         log_success "Docker image built successfully" >&2
         echo "$temp_tag"
     else
-        log_error "Docker build failed"
+        log_error "Docker build failed" >&2
         exit 1
     fi
 }
@@ -359,37 +361,44 @@ export_to_tar() {
     local tar_name="$2"
     local tar_path="$OUTPUT_DIR/${tar_name}.tar"
 
-    log_step "Exporting image to tar file"
-    log_info "Output: $tar_path"
+    log_step "Exporting image to tar file" >&2
+    log_info "Output: $tar_path" >&2
 
     if [ "$DRY_RUN" = true ]; then
-        log_warning "DRY RUN: Skipping actual export"
+        log_warning "DRY RUN: Skipping actual export" >&2
         return 0
     fi
 
     # Check if tar file already exists
     if [ -f "$tar_path" ]; then
-        log_warning "Tar file already exists: $tar_path"
+        log_warning "Tar file already exists: $tar_path" >&2
         read -p "Overwrite? (y/N) " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_error "Export cancelled by user"
+            log_error "Export cancelled by user" >&2
             exit 1
         fi
         rm -f "$tar_path"
     fi
 
-    # Export image
-    log_info "Exporting image (this may take several minutes)..."
-    if docker save -o "$tar_path" "$image_tag"; then
-        log_success "Image exported successfully"
+    # Tag image with the standardized name before saving
+    log_info "Tagging image with standardized name: $tar_name" >&2
+    if ! docker tag "$image_tag" "$tar_name"; then
+        log_error "Failed to tag image" >&2
+        exit 1
+    fi
+
+    # Export image with the standardized tag
+    log_info "Exporting image (this may take several minutes)..." >&2
+    if docker save -o "$tar_path" "$tar_name"; then
+        log_success "Image exported successfully" >&2
 
         # Get file size
         local size
         size=$(du -h "$tar_path" | cut -f1)
-        log_info "Tar file size: $size"
+        log_info "Tar file size: $size" >&2
     else
-        log_error "Failed to export image"
+        log_error "Failed to export image" >&2
         exit 1
     fi
 

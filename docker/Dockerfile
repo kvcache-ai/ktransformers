@@ -218,7 +218,7 @@ RUN git clone https://${GITHUB_ARTIFACTORY}/kvcache-ai/sglang.git /workspace/sgl
     && cd /workspace/sglang && git checkout kimi_k2
 
 RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory \
-    && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
+    && git clone -b add-cd-djw --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
     && cd /workspace/ktransformers && git submodule update --init --recursive
 
 # Download ktransformers wheel and flash_attn wheel for fine-tune env
@@ -380,9 +380,9 @@ RUN echo '\n# Conda environment aliases\nalias serve="conda activate serve"\nali
 
 # Extract versions from each component and save to versions.env
 RUN set -x && \
-    # SGLang version (from serve environment)
-    . /opt/miniconda3/etc/profile.d/conda.sh && conda activate serve && \
-    SGLANG_VERSION=$(python -c "import sglang; print(sglang.__version__)" 2>/dev/null || echo "unknown") && \
+    # SGLang version (from version.py file)
+    cd /workspace/sglang/python/sglang && \
+    SGLANG_VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown") && \
     echo "SGLANG_VERSION=$SGLANG_VERSION" > /workspace/versions.env && \
     echo "Extracted SGLang version: $SGLANG_VERSION" && \
     \
@@ -393,7 +393,7 @@ RUN set -x && \
     echo "Extracted KTransformers version: $KTRANSFORMERS_VERSION" && \
     \
     # LLaMA-Factory version (from fine-tune environment)
-    conda activate fine-tune && \
+    . /opt/miniconda3/etc/profile.d/conda.sh && conda activate fine-tune && \
     cd /workspace/LLaMA-Factory && \
     LLAMAFACTORY_VERSION=$(python -c "import sys; sys.path.insert(0, 'src'); from llamafactory import __version__; print(__version__)" 2>/dev/null || echo "unknown") && \
     echo "LLAMAFACTORY_VERSION=$LLAMAFACTORY_VERSION" >> /workspace/versions.env && \
