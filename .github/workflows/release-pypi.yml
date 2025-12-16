@@ -23,7 +23,7 @@ permissions:
 jobs:
   build-kt-kernel:
     name: Build kt-kernel CPU-only (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-20.04
+    runs-on: [self-hosted, linux, x64]
     strategy:
       fail-fast: false
       matrix:
@@ -93,7 +93,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build-kt-kernel
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     environment: prod
     permissions:
