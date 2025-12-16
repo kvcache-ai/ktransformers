@@ -84,7 +84,7 @@ jobs:
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "✗ AVX2 variant missing"
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: kt-kernel-wheels-py${{ matrix.python-version }}
           path: kt-kernel/dist/*.whl
@@ -102,7 +102,7 @@ jobs:
 
     steps:
       - name: Download all wheel artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts/
 
