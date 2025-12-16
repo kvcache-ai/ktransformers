@@ -184,17 +184,17 @@ class TP_MOE_Common : public MoE_Interface {
 #ifdef FORWARD_TIME_REPORT
     auto end = std::chrono::high_resolution_clock::now();
     auto forward_time = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-    auto band_width = (1.0 * config.routed_expert_num * config.hidden_size * config.intermediate_size * 3 / 1e9) /
+    auto band_width = (1.0 * config.num_experts_per_tok * config.hidden_size * config.intermediate_size * 3 / 1e9) /
                       (1.0 * forward_time / 1e6);
     auto GFLOPS =
-        (1.0 * config.hidden_size * config.intermediate_size * qlen * 3 * config.routed_expert_num * 2 / 1e9) /
+        (1.0 * config.hidden_size * config.intermediate_size * qlen * 3 * config.num_experts_per_tok  * 2 / 1e9) /
         (1.0 * forward_time / 1e6);
     if (qlen <= 10) {
       forward_time_sum_ns += forward_time;
       forward_count++;
     }
     auto average_bandwidth =
-        (1.0 * forward_count * config.routed_expert_num * config.hidden_size * config.intermediate_size * 3 / 1e9) /
+        (1.0 * forward_count * config.num_experts_per_tok   * config.hidden_size * config.intermediate_size * 3 / 1e9) /
         (1.0 * forward_time_sum_ns / 1e6);
     printf(
         "forward time %ld, time stamp:%ld, band width %f GElement/s, ave bandwidth %f GElement/s (only "
