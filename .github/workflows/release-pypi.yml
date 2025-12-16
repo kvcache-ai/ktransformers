@@ -60,7 +60,7 @@ jobs:
           CPUINFER_FORCE_REBUILD: '1'
         run: |
           echo "Building kt-kernel CPU-only with all CPU variants (AMX, AVX512, AVX2)"
-          python -m build --wheel --no-isolation -v
+          python -m build --wheel -v
 
       - name: List generated wheels
         working-directory: kt-kernel
