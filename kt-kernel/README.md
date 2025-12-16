@@ -2,26 +2,35 @@
 
 High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.
 
-- [Note](#note)
-- [Features](#features)
-- [Installation](#installation)
-  - [Prerequisites](#prerequisites)
-  - [Quick Installation (Recommended)](#quick-installation-recommended)
-  - [Manual Configuration (Advanced)](#manual-configuration-advanced)
-- [Verification](#verification)
-- [Integration with SGLang](#integration-with-sglang)
-  - [Installation Steps](#installation-steps)
-  - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
-  - [KT-Kernel Parameters](#kt-kernel-parameters)
-- [Direct Python API Usage](#direct-python-api-usage)
-  - [Advanced Options](#advanced-options)
-- [Build Configuration](#build-configuration)
-  - [Manual Installation](#manual-installation)
-- [Error Troubleshooting](#error-troubleshooting)
-  - [CUDA Not Found](#cuda-not-found)
-  - [hwloc Not Found](#hwloc-not-found)
-- [Weight Quantization](#weight-quantization)
-- [Before Commit!](#before-commit)
+- [KT-Kernel](#kt-kernel)
+  - [Note](#note)
+  - [Features](#features)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Quick Installation (Recommended)](#quick-installation-recommended)
+    - [Manual Configuration (Advanced)](#manual-configuration-advanced)
+  - [Verification](#verification)
+  - [Integration with SGLang](#integration-with-sglang)
+    - [Installation Steps](#installation-steps)
+      - [1. Install SGLang](#1-install-sglang)
+      - [2. Prepare Weights](#2-prepare-weights)
+      - [3. Launch SGLang Server](#3-launch-sglang-server)
+    - [Complete Example: Qwen3-30B-A3B](#complete-example-qwen3-30b-a3b)
+      - [Option A: AMX Backend (AMXINT8)](#option-a-amx-backend-amxint8)
+      - [Option B: LLAMAFILE Backend (GGUF)](#option-b-llamafile-backend-gguf)
+    - [KT-Kernel Parameters](#kt-kernel-parameters)
+  - [Direct Python API Usage](#direct-python-api-usage)
+    - [Advanced Options](#advanced-options)
+  - [Build Configuration](#build-configuration)
+    - [Manual Installation](#manual-installation)
+      - [1. Install System Dependencies](#1-install-system-dependencies)
+      - [2. Set Build Configuration](#2-set-build-configuration)
+      - [3. Build and Install](#3-build-and-install)
+  - [Error Troubleshooting](#error-troubleshooting)
+    - [CUDA Not Found](#cuda-not-found)
+    - [hwloc Not Found](#hwloc-not-found)
+  - [Weight Quantization](#weight-quantization)
+  - [Before Commit!](#before-commit)
 ## Note
 
 **Current Support Status:**
@@ -146,6 +155,10 @@ The install script will:
 ⚠️ **Important for LLAMAFILE backend users:**
 If you have an AMX-capable CPU but plan to use the LLAMAFILE backend, do NOT use the default auto-detection build.
 Use "manual mode" with `CPUINFER_CPU_INSTRUCT` set to `AVX512` or `AVX2` instead of `NATIVE` to avoid compilation issues (see below).
+
+⚠️ **Important for BLIS AMD backend users:**
+for the installation guide, see this [issue](https://github.com/kvcache-ai/ktransformers/issues/1601)
+
 
 ### Manual Configuration (Advanced)
 
@@ -358,18 +371,20 @@ python -m sglang.launch_server \
 
 | Parameter | Description | Example Value |
 |-----------|-------------|---------------|
-| `--kt-method` | CPU inference backend method | `AMXINT4`, `AMXINT8`, or `LLAMAFILE` |
+| `--kt-method` | CPU inference backend method | `AMXINT4`, `AMXINT8`, `RAWINT4`, or `LLAMAFILE` |
 | `--kt-weight-path` | Path to quantized CPU weights | `/path/to/cpu-weights` |
 | `--kt-cpuinfer` | Number of CPU inference threads | `64` (adjust based on CPU cores) |
 | `--kt-threadpool-count` | Number of thread pools for parallel execution | `2` (typically 1-4) |
 | `--kt-num-gpu-experts` | Number of experts to keep on GPU | `32` (remaining experts go to CPU) |
 | `--kt-max-deferred-experts-per-token` | Number of experts per token to defer for pipelined execution | `2` (0 to disable, 1-4 recommended) |
+| `--kt-gpu-prefill-token-threshold` | Token count threshold for prefill strategy (RAWINT4 only) | ~`400` |
 
 **Parameter Guidelines:**
 
 - **`kt-method`**: Choose based on your CPU and weight format:
   - `AMXINT4`: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)
   - `AMXINT8`: Higher accuracy with INT8 quantized weights on AMX CPUs
+  - `RAWINT4`: Native INT4 weights shared by CPU and GPU (AMX backend only, currently supports Kimi-K2-Thinking model). See [Kimi-K2-Thinking Native Tutorial](../doc/en/Kimi-K2-Thinking-Native.md) for details.
   - `LLAMAFILE`: GGUF-based backend
 
 - **`kt-cpuinfer`**: Set to the number of **physical CPU cores** (not hyperthreads).
@@ -394,6 +409,11 @@ python -m sglang.launch_server \
   - `0`: Synchronous execution (simpler, higher latency)
   - `1-4`: Deferred execution (recommended range; good latency/quality balance, requires tuning)
   - `5-7`: Highest latency reduction but may introduce noticeable accuracy loss; use with care
+
+- **`kt-gpu-prefill-token-threshold`** (RAWINT4 only): Controls prefill strategy for native INT4 inference:
+  - **≤ threshold**: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.
+  - **> threshold**: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires ~9GB+ extra VRAM.
+  - Only applicable when `--kt-method RAWINT4` is used. Currently supports Kimi-K2-Thinking model only.
 
 ## Direct Python API Usage
 

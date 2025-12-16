@@ -33,7 +33,7 @@ from peft.utils import ModulesToSaveWrapper, _get_submodules
 from peft.tuners.tuners_utils import check_target_module_exists
 from peft.config import PeftConfig
 
-from ktransformers.sft.peft_utils.lora_layer import dispatch_default, LoraLayer
+from ktransformers.sft.peft_utils.lora_layer import dispatch_default, LoraLayer, BaseTunerLayer
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +372,28 @@ class LoraModel(nn.Module, ABC):
         """
         pass
 
+    def _set_adapter_layers(self, enabled: bool = True) -> None:
+        for module in self.model.modules():
+            if isinstance(module, BaseTunerLayer):
+                module.enable_adapters(enabled)
+
+    def disable_adapter_layers(self) -> None:
+        """
+        Disable all adapters in-place.
+
+        When disabling all adapters, the model output corresponds to the output of the base model.
+        """
+        # TODO: deprecate in favor of enable_adapters
+        self._set_adapter_layers(enabled=False)
+
+    def enable_adapter_layers(self) -> None:
+        """
+        Enable all adapters in-place
+        """
+        # TODO: deprecate in favor of enable_adapters
+        self._set_adapter_layers(enabled=True)
+        
+        
     # def set_adapter(self, adapter_names: str | list[str]) -> None:
     #     """Set the active adapter(s).
 

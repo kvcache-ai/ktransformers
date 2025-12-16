@@ -18,7 +18,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_CPU_INSTRUCT=FANCY     One of: NATIVE|FANCY|AVX512|AVX2 (maps to CMake flags)
   CPUINFER_ENABLE_AMX=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX
   CPUINFER_ENABLE_MLA=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MLA
-  CPUINFER_ENABLE_AMD=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MOE_AMD
+  CPUINFER_ENABLE_BLIS=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MOE_AMD
   CPUINFER_ENABLE_KML=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_KML
   CPUINFER_ENABLE_AVX512=OFF      ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX_AVX512
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
@@ -52,6 +52,7 @@ from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import shutil
+
 
 # -------------------------
 # Env parsing helpers
@@ -89,6 +90,7 @@ def _forward_str_env(cmake_args: list[str], env_name: str, cmake_flag: str) -> b
     cmake_args.append(f"-D{cmake_flag}={v}")
     print(f"-- Forward {env_name} -> -D{cmake_flag}={v}")
     return True
+
 
 ################################################################################
 # Helpers
@@ -427,19 +429,19 @@ class CMakeBuild(build_ext):
 
         # Vendor / feature specific toggles
         # AMD MoE: explicit env overrides; otherwise default ON on AMD CPU
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AMD", "KTRANSFORMERS_CPU_MOE_AMD"):
-            if d.get("vendor") == "amd":
-                auto_moe_kernel_ = True
-                cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
-                print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
-                _forward_str_env(cmake_args, "CPUINFER_BLIS_ROOT", "BLIS_ROOT")
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_BLIS", "KTRANSFORMERS_CPU_MOE_AMD")
+        # if d.get("vendor") == "amd":
+        #     auto_moe_kernel_ = True
+        #     cmake_args.append("-DKTRANSFORMERS_CPU_MOE_AMD=ON")
+        #     print("-- Detected AMD CPU; enabling AMD MoE kernel (-DKTRANSFORMERS_CPU_MOE_AMD=ON)")
+        #     _forward_str_env(cmake_args, "CPUINFER_BLIS_ROOT", "BLIS_ROOT")
 
         # KML: explicit env overrides; otherwise default ON on ARM
-        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_KML", "KTRANSFORMERS_CPU_USE_KML"):
-            if d.get("vendor") == "arm":
-                auto_moe_kernel_ = True
-                cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
-                print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_KML", "KTRANSFORMERS_CPU_USE_KML")
+        # if d.get("vendor") == "arm":
+        #     auto_moe_kernel_ = True
+        #     cmake_args.append("-DKTRANSFORMERS_CPU_USE_KML=ON")
+        #     print("-- Detected ARM CPU; enabling KML (-DKTRANSFORMERS_CPU_USE_KML=ON)")
 
         # AMX: explicit env overrides; else enable if detected
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AMX", "KTRANSFORMERS_CPU_USE_AMX"):
@@ -461,14 +463,16 @@ class CMakeBuild(build_ext):
 
         # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
         # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)
-        amd_env = _env_get_bool("CPUINFER_ENABLE_AMD", None)
+        amd_env = _env_get_bool("CPUINFER_ENABLE_BLIS", None)
         kml_env = _env_get_bool("CPUINFER_ENABLE_KML", None)
         if amd_env or kml_env:
             auto_moe_kernel_ = True
         already_set = any("KTRANSFORMERS_CPU_MOE_KERNEL" in a for a in cmake_args)
         if not already_set and auto_moe_kernel_:
             cmake_args.append("-DKTRANSFORMERS_CPU_MOE_KERNEL=ON")
-            print("-- Auto-enabling MOE kernel (-DKTRANSFORMERS_CPU_MOE_KERNEL=ON) because CPUINFER_ENABLE_AMD or CPUINFER_ENABLE_KML is ON")
+            print(
+                "-- Auto-enabling MOE kernel (-DKTRANSFORMERS_CPU_MOE_KERNEL=ON) because CPUINFER_ENABLE_BLIS or CPUINFER_ENABLE_KML is ON"
+            )
 
         # Friendly summary
         print(

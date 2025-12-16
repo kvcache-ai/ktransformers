@@ -175,7 +175,7 @@ class ForwardMiniBatchCombine:
 
 
 class ForwardMiniBatchSplit:
-    # NPU流程prefill和decode无法合并，需单独统计
+    # NPU 流程 prefill 和 decode 分开打包
     prefill_batch: int
     p_q_len: torch.Tensor               # (bsz)
     p_kv_len: torch.Tensor              # (bsz)
@@ -183,99 +183,261 @@ class ForwardMiniBatchSplit:
     p_tokens: torch.Tensor              # (sum(q_len))
     p_temperatures: torch.Tensor        # (bsz)
     p_top_ps: torch.Tensor              # (bsz)
-    p_block_tables: torch.Tensor        # (bsz * maxBlockNum)
+    p_block_tables: torch.Tensor        # (bsz, max_page_num)
     p_logits_start: list
 
     decode_batch: int
+    d_q_len: torch.Tensor
     d_kv_len: torch.Tensor
     d_position_ids: torch.Tensor
     d_tokens: torch.Tensor
     d_temperatures: torch.Tensor
     d_top_ps: torch.Tensor
-    d_block_tables: torch.Tensor        # (bsz * maxBlockNum)
+    d_block_tables: torch.Tensor        # (bsz, max_page_num)
     d_logits_start: list
 
     chunk_size: int
     is_last_prefill_chunk: bool
 
-    def __init__(self, prefill_querys_info: list[QueryInfo], decode_querys_info: list[QueryInfo],
-                 prefill_s: list[int] = None, prefill_l: list[int] = None,
-                 device=None, page_size=256, max_page_num=64,
-                 decode_padding_len: int = 1):
+    def __init__(
+        self,
+        prefill_querys_info: list[QueryInfo],
+        decode_querys_info: list[QueryInfo],
+        prefill_s: list[int] = None,
+        prefill_l: list[int] = None,
+        device=None,
+        page_size: int = 256,
+        max_page_num: int = 64,
+        decode_padding_len: int = 1,
+    ):
+        # 统一 NPU 设备
         device = torch.device('npu')
-        batch_decode = len(decode_querys_info)
-        # batch_prefill = len(prefill_querys_info)
-        # update valid prefill batch
-        new_prefill_querys_info = []
-        for info in prefill_querys_info:
-            if info is not None:
-                new_prefill_querys_info.append(info)
-        batch_prefill = len(new_prefill_querys_info)
 
-        self.num_tokens = batch_decode * decode_padding_len + sum(prefill_l)
+        if prefill_s is None or prefill_l is None:
+            raise ValueError(
+                "[ForwardMiniBatchSplit.__init__] prefill_s / prefill_l 不能为空，chunk prefill 需要这两个参数"
+            )
+
+        # 过滤掉 None
+        new_prefill_querys_info: list[QueryInfo] = [
+            info for info in prefill_querys_info if info is not None
+        ]
+        batch_prefill = len(new_prefill_querys_info)
+        batch_decode = len(decode_querys_info)
+
         self.prefill_batch = batch_prefill
         self.decode_batch = batch_decode
-        self.batch_size = batch_decode + batch_prefill
+        self.batch_size = batch_prefill + batch_decode
+        self.num_tokens = batch_decode * decode_padding_len + sum(prefill_l)
 
+        self.chunk_size = prefill_l[0] if prefill_l else 0
+
+        self.is_last_prefill_chunk = True
+        for i, q in enumerate(new_prefill_querys_info):
+            end_pos = prefill_s[i] + prefill_l[i]
+            if end_pos < q.query_length:
+                self.is_last_prefill_chunk = False
+                break
+
+        # ====================== Prefill 部分 ======================
         self.p_q_len = torch.tensor([], device=device, dtype=torch.int32)
         self.p_kv_len = torch.tensor([], device=device, dtype=torch.int32)
         self.p_position_ids = torch.tensor([], device=device, dtype=torch.int32)
-        self.p_block_tables = -1 * torch.ones([self.prefill_batch, max_page_num], device=device, dtype=torch.int32)
-        # self.p_kv_page_offset = torch.tensor([], device=device, dtype=torch.int32)
+        self.p_block_tables = -1 * torch.ones(
+            [self.prefill_batch, max_page_num], device=device, dtype=torch.int32
+        )
         self.p_tokens = torch.tensor([], device=device, dtype=torch.int32)
 
         self.p_temperatures = torch.tensor([], device=device, dtype=torch.float32)
         self.p_top_ps = torch.tensor([], device=device, dtype=torch.float32)
-        self.p_logits_start = []
+        self.p_logits_start: list[int] = []
 
         for i, prefill_query_info in enumerate(new_prefill_querys_info):
-            prefill_kv_block_len = (prefill_query_info.active_position + prefill_l[i] + page_size - 1) // page_size if prefill_query_info is not None else 0
-            assert prefill_query_info.active_position == 0, '[ERROR] currently do not support prefix cache or chunk prefill in balance serving!'
-            # print(f"block_len: {prefill_kv_block_len}, page_size: {page_size}")
-            self.p_q_len = torch.concat((self.p_q_len, torch.tensor([prefill_l[i]], device=device, dtype=torch.int32)), dim=0)
-            self.p_kv_len = torch.concat((self.p_kv_len, torch.tensor([prefill_query_info.active_position + prefill_l[i]], device=device, dtype=torch.int32)), dim=0)
-            self.p_block_tables[i, :prefill_kv_block_len] = prefill_query_info.block_index[:prefill_kv_block_len]
-            # self.p_kv_page_offset = torch.concat((self.p_kv_page_offset, torch.tensor([(prefill_query_info.active_position + prefill_l[i]) % page_size if (prefill_query_info.active_position + prefill_l[i]) % page_size != 0 else page_size], device=device, dtype=torch.int32)), dim=0)
-            self.p_position_ids = torch.concat((self.p_position_ids, torch.arange(prefill_s[i], prefill_l[i] + prefill_s[i], device=device, dtype=torch.int32)), dim=0)
-            self.p_tokens = torch.concat((self.p_tokens, prefill_query_info.query_tokens[prefill_s[i]:prefill_s[i] + prefill_l[i]]), dim=0)
-            self.p_logits_start.append(prefill_l[i] - 1 if len(self.p_logits_start) == 0 else sum(prefill_l[:i+1])-1)
+            qid = getattr(prefill_query_info, "id", -1)
 
-            self.p_temperatures = torch.concat((self.p_temperatures, torch.tensor([prefill_query_info.temperature], device=device, dtype=torch.float32)), dim=0)
-            self.p_top_ps = torch.concat((self.p_top_ps, torch.tensor([prefill_query_info.top_p], device=device, dtype=torch.float32)), dim=0)
+            past_len = int(prefill_query_info.active_position)
+            start = int(prefill_s[i])                            # current chunk's start position in query_tokens
+            chunk_len = int(prefill_l[i])
+            kv_len = past_len + chunk_len
+            prefill_kv_block_len = (kv_len + page_size - 1) // page_size
 
+            # Q length = current chunk length
+            self.p_q_len = torch.concat(
+                (
+                    self.p_q_len,
+                    torch.tensor([chunk_len], device=device, dtype=torch.int32),
+                ),
+                dim=0,
+            )
+            self.p_kv_len = torch.concat(
+                (
+                    self.p_kv_len,
+                    torch.tensor([kv_len], device=device, dtype=torch.int32),
+                ),
+                dim=0,
+            )
+
+            self.p_block_tables[i, :prefill_kv_block_len] = prefill_query_info.block_index[
+                :prefill_kv_block_len
+            ]
+
+            self.p_position_ids = torch.concat(
+                (
+                    self.p_position_ids,
+                    torch.arange(
+                        start,
+                        start + chunk_len,
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+
+            self.p_tokens = torch.concat(
+                (
+                    self.p_tokens,
+                    prefill_query_info.query_tokens[start : start + chunk_len],
+                ),
+                dim=0,
+            )
+
+            self.p_logits_start.append(
+                chunk_len - 1
+                if len(self.p_logits_start) == 0
+                else sum(prefill_l[: i + 1]) - 1
+            )
+
+            self.p_temperatures = torch.concat(
+                (
+                    self.p_temperatures,
+                    torch.tensor(
+                        [prefill_query_info.temperature],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+            self.p_top_ps = torch.concat(
+                (
+                    self.p_top_ps,
+                    torch.tensor(
+                        [prefill_query_info.top_p],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+
+        # ====================== Decode ======================
         self.d_q_len = torch.tensor([], device=device, dtype=torch.int32)
         self.d_kv_len = torch.tensor([], device=device, dtype=torch.int32)
         self.d_position_ids = torch.tensor([], device=device, dtype=torch.int32)
-        self.d_block_tables = -1 * torch.ones([self.decode_batch, max_page_num], device=device, dtype=torch.int32)
-        # self.p_kv_page_offset = torch.tensor([], device=device, dtype=torch.int32)
+        self.d_block_tables = -1 * torch.ones(
+            [self.decode_batch, max_page_num], device=device, dtype=torch.int32
+        )
         self.d_tokens = torch.tensor([], device=device, dtype=torch.int32)
 
         self.d_temperatures = torch.tensor([], device=device, dtype=torch.float32)
         self.d_top_ps = torch.tensor([], device=device, dtype=torch.float32)
-        self.d_logits_start = []
+        self.d_logits_start: list[int] = []
 
-        #  1 2 ...
-        # 1
-        # postion
-        # page table
         for i, decode_query_info in enumerate(decode_querys_info):
-            # print("decode_query_info.active_position is ", decode_query_info.active_position)
+            qid = getattr(decode_query_info, "id", -1)
+            past_len = int(decode_query_info.active_position)
+            decode_kv_block_len = (past_len + decode_padding_len + page_size - 1) // page_size
 
-            decode_kv_block_len = (decode_query_info.active_position + decode_padding_len + page_size - 1) // page_size
-            self.d_q_len = torch.concat((self.d_q_len, torch.tensor([decode_padding_len], device=device, dtype=torch.int32)), dim=0)
-            self.d_kv_len = torch.concat((self.d_kv_len, torch.tensor([decode_query_info.active_position + decode_padding_len], device=device, dtype=torch.int32)), dim=0)
-            self.d_block_tables[i, :decode_kv_block_len] = decode_query_info.block_index[:decode_kv_block_len]
-            # self.d_kv_page_offset = torch.concat((self.d_kv_page_offset, torch.tensor([(decode_query_info.active_position + decode_padding_len) % page_size if (decode_query_info.active_position + 1) % page_size != 0 else page_size], device=device, dtype=torch.int32)), dim=0)
-            self.d_position_ids = torch.concat((self.d_position_ids, torch.arange(decode_query_info.active_position, decode_query_info.active_position + decode_padding_len, device=device, dtype=torch.int32)), dim=0)
-            if decode_query_info.active_position > 0:
-                self.d_tokens = torch.concat((self.d_tokens, decode_query_info.query_tokens[decode_query_info.active_position:decode_query_info.active_position+decode_padding_len]), dim=0)
+            self.d_q_len = torch.concat(
+                (
+                    self.d_q_len,
+                    torch.tensor(
+                        [decode_padding_len], device=device, dtype=torch.int32
+                    ),
+                ),
+                dim=0,
+            )
+            self.d_kv_len = torch.concat(
+                (
+                    self.d_kv_len,
+                    torch.tensor(
+                        [past_len + decode_padding_len],
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+
+            self.d_block_tables[i, :decode_kv_block_len] = decode_query_info.block_index[
+                :decode_kv_block_len
+            ]
+
+            self.d_position_ids = torch.concat(
+                (
+                    self.d_position_ids,
+                    torch.arange(
+                        past_len,
+                        past_len + decode_padding_len,
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+
+            if past_len > 0:
+                self.d_tokens = torch.concat(
+                    (
+                        self.d_tokens,
+                        decode_query_info.query_tokens[
+                            past_len : past_len + decode_padding_len
+                        ],
+                    ),
+                    dim=0,
+                )
             else:
-                self.d_tokens = torch.concat((self.d_tokens, torch.tensor([0] * decode_padding_len, device=device, dtype=torch.int32)), dim=0)
-            self.d_logits_start.append(0 if len(self.d_logits_start) == 0 else self.d_logits_start[-1]+decode_padding_len)
-            # print("self.d_position_ids is ", self.d_position_ids)
+                self.d_tokens = torch.concat(
+                    (
+                        self.d_tokens,
+                        torch.tensor(
+                            [0] * decode_padding_len,
+                            device=device,
+                            dtype=torch.int32,
+                        ),
+                    ),
+                    dim=0,
+                )
 
-            self.d_temperatures = torch.concat((self.d_temperatures, torch.tensor([decode_query_info.temperature], device=device, dtype=torch.float32)), dim=0)
-            self.d_top_ps = torch.concat((self.d_top_ps, torch.tensor([decode_query_info.top_p], device=device, dtype=torch.float32)), dim=0)
+            self.d_logits_start.append(
+                0
+                if len(self.d_logits_start) == 0
+                else self.d_logits_start[-1] + decode_padding_len
+            )
+
+            self.d_temperatures = torch.concat(
+                (
+                    self.d_temperatures,
+                    torch.tensor(
+                        [decode_query_info.temperature],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+            self.d_top_ps = torch.concat(
+                (
+                    self.d_top_ps,
+                    torch.tensor(
+                        [decode_query_info.top_p],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
 
         self.p_q_len = self.p_q_len.contiguous()
         self.p_kv_len = self.p_kv_len.contiguous()
@@ -291,7 +453,6 @@ class ForwardMiniBatchSplit:
             self.d_position_ids = self.d_position_ids.reshape(self.decode_batch, -1).contiguous()
             self.d_tokens = self.d_tokens.reshape(self.decode_batch, -1).contiguous()
         else:
-            # TODO remove this
             self.d_q_len = self.d_q_len.contiguous()
             self.d_kv_len = self.d_kv_len.contiguous()
             self.d_kv_len_list = self.d_kv_len.flatten().tolist()
@@ -301,30 +462,53 @@ class ForwardMiniBatchSplit:
 
         self.bsz_tensor = torch.tensor([self.batch_size], device=device, dtype=torch.int32)
 
-    def fill(self, prefill_querys_info: list[QueryInfo], decode_querys_info: list[QueryInfo], prefill_s: list[int] = None, prefill_l: list[int] = None, decode_padding_len=1, device = None, page_size = 256, max_page_num=64):
-        device = torch.device('npu')
-        
-        page_size = 128
-        
-        batch_decode = len(decode_querys_info)
-        # batch_prefill = len(prefill_querys_info)
-        # update valid prefill batch
-        new_prefill_querys_info = []
-        for info in prefill_querys_info:
-            if info is not None:
-                new_prefill_querys_info.append(info)
-        batch_prefill = len(new_prefill_querys_info)
 
-        self.num_tokens = batch_decode + sum(prefill_l)
+    def fill(
+        self,
+        prefill_querys_info: list[QueryInfo],
+        decode_querys_info: list[QueryInfo],
+        prefill_s: list[int] = None,
+        prefill_l: list[int] = None,
+        decode_padding_len: int = 1,
+        device=None,
+        page_size: int = 256,
+        max_page_num: int = 64,
+    ):
+        device = torch.device('npu')
+
+        if prefill_s is None or prefill_l is None:
+            raise ValueError(
+                "[ForwardMiniBatchSplit.fill] prefill_s / prefill_l 不能为空，chunk prefill 需要这两个参数"
+            )
+
+        page_size = 128
+
+        new_prefill_querys_info: list[QueryInfo] = [
+            info for info in prefill_querys_info if info is not None
+        ]
+        batch_prefill = len(new_prefill_querys_info)
+        batch_decode = len(decode_querys_info)
+
         self.prefill_batch = batch_prefill
         self.decode_batch = batch_decode
-        self.batch_size = batch_decode + batch_prefill
+        self.batch_size = batch_prefill + batch_decode
+        self.num_tokens = batch_decode * decode_padding_len + sum(prefill_l)
 
+        self.chunk_size = prefill_l[0] if prefill_l else 0
+        self.is_last_prefill_chunk = True
+        for i, q in enumerate(new_prefill_querys_info):
+            end_pos = prefill_s[i] + prefill_l[i]
+            if end_pos < q.query_length:
+                self.is_last_prefill_chunk = False
+                break
+
+        # ---------- Prefill ----------
         self.p_q_len = torch.tensor([], device=device, dtype=torch.int32)
         self.p_kv_len = torch.tensor([], device=device, dtype=torch.int32)
         new_p_position_ids = torch.tensor([], device=device, dtype=torch.int32)
-        self.p_block_tables = torch.zeros([self.prefill_batch, max_page_num], device=device, dtype=torch.int32)
-        # self.p_kv_page_offset = torch.tensor([], device=device, dtype=torch.int32)
+        self.p_block_tables = torch.zeros(
+            [self.prefill_batch, max_page_num], device=device, dtype=torch.int32
+        )
         new_p_tokens = torch.tensor([], device=device, dtype=torch.int32)
 
         self.p_temperatures = torch.tensor([], device=device, dtype=torch.float32)
@@ -332,58 +516,190 @@ class ForwardMiniBatchSplit:
         self.p_logits_start = []
 
         for i, prefill_query_info in enumerate(new_prefill_querys_info):
-            prefill_kv_block_len = (prefill_query_info.active_position + prefill_l[i] + page_size - 1) // page_size if prefill_query_info is not None else 0
-            assert prefill_query_info.active_position == 0, '[ERROR] currently do not support prefix cache or chunk prefill in balance serving!'
-            # print(f"block_len: {prefill_kv_block_len}, page_size: {page_size}")
-            self.p_q_len = torch.concat((self.p_q_len, torch.tensor([prefill_l[i]], device=device, dtype=torch.int32)), dim=0)
-            self.p_kv_len = torch.concat((self.p_kv_len, torch.tensor([prefill_query_info.active_position + prefill_l[i]], device=device, dtype=torch.int32)), dim=0)
-            self.p_block_tables[i, :prefill_kv_block_len] = prefill_query_info.block_index[:prefill_kv_block_len]
-            # self.p_kv_page_offset = torch.concat((self.p_kv_page_offset, torch.tensor([(prefill_query_info.active_position + prefill_l[i]) % page_size if (prefill_query_info.active_position + prefill_l[i]) % page_size != 0 else page_size], device=device, dtype=torch.int32)), dim=0)
-            new_p_position_ids = torch.concat((new_p_position_ids, torch.arange(prefill_s[i], prefill_l[i] + prefill_s[i], device=device, dtype=torch.int32)), dim=0)
-            new_p_tokens = torch.concat((new_p_tokens, prefill_query_info.query_tokens[prefill_s[i]:prefill_s[i] + prefill_l[i]]), dim=0)
-            self.p_logits_start.append(prefill_l[i] - 1 if len(self.p_logits_start) == 0 else sum(prefill_l[:i+1])-1)
+            qid = getattr(prefill_query_info, "id", -1)
+            past_len = int(prefill_query_info.active_position)
+            start = int(prefill_s[i])
+            chunk_len = int(prefill_l[i])
 
-            self.p_temperatures = torch.concat((self.p_temperatures, torch.tensor([prefill_query_info.temperature], device=device, dtype=torch.float32)), dim=0)
-            self.p_top_ps = torch.concat((self.p_top_ps, torch.tensor([prefill_query_info.top_p], device=device, dtype=torch.float32)), dim=0)
+            kv_len = past_len + chunk_len
+            prefill_kv_block_len = (kv_len + page_size - 1) // page_size
 
-        self.d_q_len = torch.zeros([1] * self.decode_batch, device=device, dtype=torch.int32)
+            self.p_q_len = torch.concat(
+                (
+                    self.p_q_len,
+                    torch.tensor([chunk_len], device=device, dtype=torch.int32),
+                ),
+                dim=0,
+            )
+            self.p_kv_len = torch.concat(
+                (
+                    self.p_kv_len,
+                    torch.tensor([kv_len], device=device, dtype=torch.int32),
+                ),
+                dim=0,
+            )
+            self.p_block_tables[i, :prefill_kv_block_len] = prefill_query_info.block_index[
+                :prefill_kv_block_len
+            ]
+
+            new_p_position_ids = torch.concat(
+                (
+                    new_p_position_ids,
+                    torch.arange(
+                        start,
+                        start + chunk_len,
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+            new_p_tokens = torch.concat(
+                (
+                    new_p_tokens,
+                    prefill_query_info.query_tokens[start : start + chunk_len],
+                ),
+                dim=0,
+            )
+
+            self.p_logits_start.append(
+                chunk_len - 1 if len(self.p_logits_start) == 0 else sum(prefill_l[: i + 1]) - 1
+            )
+
+            self.p_temperatures = torch.concat(
+                (
+                    self.p_temperatures,
+                    torch.tensor(
+                        [prefill_query_info.temperature],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+            self.p_top_ps = torch.concat(
+                (
+                    self.p_top_ps,
+                    torch.tensor(
+                        [prefill_query_info.top_p],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+
+        if new_p_position_ids.numel() > 0:
+            self.p_position_ids = new_p_position_ids.contiguous()
+        if new_p_tokens.numel() > 0:
+            self.p_tokens = new_p_tokens.contiguous()
+
+        # ---------- Decode ----------
+        self.d_q_len = torch.zeros(
+            [1] * self.decode_batch, device=device, dtype=torch.int32
+        )
         self.d_kv_len = torch.tensor([], device=device, dtype=torch.int32)
         new_d_position_ids = torch.tensor([], device=device, dtype=torch.int32)
-        new_d_block_tables = -1 * torch.ones([self.decode_batch, max_page_num], device=device, dtype=torch.int32)
-        # self.p_kv_page_offset = torch.tensor([], device=device, dtype=torch.int32)
+        new_d_block_tables = -1 * torch.ones(
+            [self.decode_batch, max_page_num], device=device, dtype=torch.int32
+        )
         new_d_tokens = torch.tensor([], device=device, dtype=torch.int32)
-        self.d_logits_start = []
 
+        self.d_logits_start = []
         self.d_temperatures = torch.tensor([], device=device, dtype=torch.float32)
         self.d_top_ps = torch.tensor([], device=device, dtype=torch.float32)
 
         for i, decode_query_info in enumerate(decode_querys_info):
-            decode_kv_block_len = (decode_query_info.active_position + 1 + page_size - 1) // page_size
-            self.d_kv_len = torch.concat((self.d_kv_len, torch.tensor([decode_query_info.active_position + 1], device=device, dtype=torch.int32)), dim=0)
-            # print("fill self.d_block_tables is ", self.d_block_tables)
-            new_d_block_tables[i, :decode_kv_block_len] = decode_query_info.block_index[:decode_kv_block_len]
-            # print("decode_query_info.block_index[:decode_kv_block_len] is ", decode_query_info.block_index[:decode_kv_block_len])
-            # self.d_kv_page_offset = torch.concat((self.d_kv_page_offset, torch.tensor([(decode_query_info.active_position + 1) % page_size if (decode_query_info.active_position + 1) % page_size != 0 else page_size], device=device, dtype=torch.int32)), dim=0)
-            new_d_position_ids = torch.concat((new_d_position_ids, torch.arange(decode_query_info.active_position, decode_query_info.active_position + 1, device=device, dtype=torch.int32)), dim=0)
-            # print("decode_query_info.active_position is ", decode_query_info.active_position)
+            qid = getattr(decode_query_info, "id", -1)
+            past_len = int(decode_query_info.active_position)
+            decode_kv_block_len = (past_len + decode_padding_len + page_size - 1) // page_size
 
-            if decode_query_info.active_position > 0:
-                new_d_tokens = torch.concat((new_d_tokens, decode_query_info.query_tokens[decode_query_info.active_position:decode_query_info.active_position+1]), dim=0)
+            self.d_kv_len = torch.concat(
+                (
+                    self.d_kv_len,
+                    torch.tensor(
+                        [past_len + decode_padding_len],
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+            new_d_block_tables[i, :decode_kv_block_len] = decode_query_info.block_index[
+                :decode_kv_block_len
+            ]
+
+            new_d_position_ids = torch.concat(
+                (
+                    new_d_position_ids,
+                    torch.arange(
+                        past_len,
+                        past_len + decode_padding_len,
+                        device=device,
+                        dtype=torch.int32,
+                    ),
+                ),
+                dim=0,
+            )
+
+            if past_len > 0:
+                new_d_tokens = torch.concat(
+                    (
+                        new_d_tokens,
+                        decode_query_info.query_tokens[
+                            past_len : past_len + decode_padding_len
+                        ],
+                    ),
+                    dim=0,
+                )
             else:
-                new_d_tokens = torch.concat((new_d_tokens, torch.tensor([0], device=device, dtype=torch.int32)), dim=0)
-            self.d_logits_start.append(0 if len(self.d_logits_start) == 0 else self.d_logits_start[-1]+1)
+                new_d_tokens = torch.concat(
+                    (
+                        new_d_tokens,
+                        torch.tensor(
+                            [0] * decode_padding_len,
+                            device=device,
+                            dtype=torch.int32,
+                        ),
+                    ),
+                    dim=0,
+                )
 
-            self.d_temperatures = torch.concat((self.d_temperatures, torch.tensor([decode_query_info.temperature], device=device, dtype=torch.float32)), dim=0)
-            self.d_top_ps = torch.concat((self.d_top_ps, torch.tensor([decode_query_info.top_p], device=device, dtype=torch.float32)), dim=0)
+            self.d_logits_start.append(
+                0
+                if len(self.d_logits_start) == 0
+                else self.d_logits_start[-1] + decode_padding_len
+            )
+
+            self.d_temperatures = torch.concat(
+                (
+                    self.d_temperatures,
+                    torch.tensor(
+                        [decode_query_info.temperature],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
+            self.d_top_ps = torch.concat(
+                (
+                    self.d_top_ps,
+                    torch.tensor(
+                        [decode_query_info.top_p],
+                        device=device,
+                        dtype=torch.float32,
+                    ),
+                ),
+                dim=0,
+            )
 
             if len(decode_querys_info) > 1:
                 self.d_position_ids[i].copy_(new_d_position_ids[i])
-                # self.d_position_ids[i:].zero_()
                 self.d_tokens[i].copy_(new_d_tokens[i])
                 self.d_block_tables[i].copy_(new_d_block_tables[i])
             else:
                 self.d_position_ids[:new_d_position_ids.size(0)].copy_(new_d_position_ids)
-                # self.d_position_ids[new_d_position_ids.size(0):].zero_()
                 self.d_tokens[:new_d_tokens.size(0)].copy_(new_d_tokens)
                 self.d_block_tables[0].copy_(new_d_block_tables[0])
 
@@ -391,15 +707,10 @@ class ForwardMiniBatchSplit:
         self.p_q_len = self.p_q_len.contiguous()
         self.p_kv_len = self.p_kv_len.contiguous()
         self.p_block_tables = self.p_block_tables.contiguous()
-        # self.p_position_ids = self.p_position_ids.contiguous()
-        # self.p_tokens = self.p_tokens.contiguous()
 
         self.d_q_len = self.d_q_len.contiguous()
         self.d_kv_len = self.d_kv_len.contiguous()
         self.d_kv_len_list = self.d_kv_len.flatten().tolist()
-        # self.d_block_tables = self.d_block_tables.contiguous()
-        # self.d_position_ids = self.d_position_ids.contiguous()
-        # self.d_tokens = self.d_tokens.contiguous()
 
         self.bsz_tensor = torch.tensor([self.batch_size], device=device, dtype=torch.int32)
 
@@ -407,12 +718,13 @@ class ForwardMiniBatchSplit:
 
     def __str__(self):
         ret = ''
-        ret += f'=======Prefill forward info:\n'
-        ret += f'batch: {self.prefill_batch=}, qLen: {self.p_q_len=}, kvLen: {self.p_kv_len=}\n'
-        ret += f'tokens: {self.p_tokens=}, posIdx: {self.p_position_ids=}, block_tables: {self.p_block_tables=}\n'
-        ret += f'=======Decode forward info:\n'
-        ret += f'batch: {self.decode_batch=}, qLen: {self.d_q_len=}, kvLen: {self.d_kv_len=}\n'
-        ret += f'tokens: {self.d_tokens=}, posIdx: {self.d_position_ids=}, block_tables: {self.d_block_tables=}\n'
+        ret += '=======Prefill forward info:\n'
+        ret += f'batch: {self.prefill_batch}, qLen: {self.p_q_len}, kvLen: {self.p_kv_len}\n'
+        ret += f'tokens: {self.p_tokens}, posIdx: {self.p_position_ids}, block_tables: {self.p_block_tables}\n'
+        ret += '=======Decode forward info:\n'
+        ret += f'batch: {self.decode_batch}, qLen: {self.d_q_len}, kvLen: {self.d_kv_len}\n'
+        ret += f'tokens: {self.d_tokens}, posIdx: {self.d_position_ids}, block_tables: {self.d_block_tables}\n'
+        ret += f'chunk_size={self.chunk_size}, is_last_prefill_chunk={self.is_last_prefill_chunk}\n'
         return ret
 
 
@@ -437,14 +749,15 @@ class ForwardBatchInput:
         prefill_l = []
         decode_querys_info = []
         self.batch_size = 1
-        for (id, s, l) in prefill_minibatches:
-            prefill_querys_info.append(query_manager.query_map[id])
+        for (qid, s, l) in prefill_minibatches:
+            prefill_querys_info.append(query_manager.query_map[qid])
             prefill_s.append(s)
             prefill_l.append(l)
-        for decode_batch_idx in decode_mini_batches:
-            if query_manager.query_map[decode_batch_idx].decode_start_time is None:
-                query_manager.query_map[decode_batch_idx].decode_start_time =time.time()
-            decode_querys_info.append(query_manager.query_map[decode_batch_idx])
+        for decode_qid in decode_mini_batches:
+            qinfo = query_manager.query_map[decode_qid]
+            if qinfo.decode_start_time is None:
+                qinfo.decode_start_time = time.time()
+            decode_querys_info.append(qinfo)
 
         if use_torch_npu:
             minibatch = ForwardMiniBatchSplit(prefill_querys_info, decode_querys_info, prefill_s, prefill_l, device = query_manager.device, page_size = query_manager.page_size)
@@ -493,7 +806,7 @@ class ForwardBatchInput:
 
             decode_querys_info.append(query_info)
         
-        if prefill_query_length*Config().max_prefill_batch_size + len(decode_querys_info) < cuda_lens:
+        if prefill_query_length * Config().max_prefill_batch_size + len(decode_querys_info) < cuda_lens:
             decode_querys_info.append(query_info)
         if use_torch_npu:
             instance.minibatch = ForwardMiniBatchSplit(prefill_query_info, decode_querys_info, [0, 0],
