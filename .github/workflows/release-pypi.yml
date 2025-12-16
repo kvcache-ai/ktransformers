@@ -83,6 +83,28 @@ jobs:
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx512.cpython" && echo "✓ AVX512 variant found" || echo "✗ AVX512 variant missing"
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "✗ AVX2 variant missing"
 
+      - name: Repair wheel for manylinux compatibility
+        working-directory: kt-kernel
+        run: |
+          pip install auditwheel patchelf
+          echo "Repairing wheels for manylinux compatibility..."
+          mkdir -p wheelhouse
+          for wheel in dist/*.whl; do
+            echo "Processing $wheel..."
+            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 -w wheelhouse/ || {
+              echo "Warning: auditwheel repair failed, trying to rename platform tag..."
+              # Fallback: rename the wheel file with manylinux tag
+              wheel_name=$(basename "$wheel")
+              new_name=$(echo "$wheel_name" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+              cp "$wheel" "wheelhouse/$new_name"
+            }
+          done
+          echo "Repaired wheels:"
+          ls -lh wheelhouse/
+          # Replace original wheels with repaired ones
+          rm -f dist/*.whl
+          cp wheelhouse/*.whl dist/
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
