@@ -123,22 +123,33 @@ jobs:
           echo "VERSION=$version" >> $GITHUB_OUTPUT
           echo "Publishing version: $version"
 
+      - name: Install twine
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+
       - name: Publish to TestPyPI (if requested)
         if: github.event.inputs.test_pypi == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-          skip-existing: true
-          print-hash: true
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --repository testpypi \
+            --skip-existing \
+            --verbose \
+            dist/*.whl
 
       - name: Publish to PyPI
         if: github.event.inputs.test_pypi != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          skip-existing: true
-          print-hash: true
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --skip-existing \
+            --verbose \
+            dist/*.whl
 
       - name: Create release summary
         run: |
