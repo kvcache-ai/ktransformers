@@ -11,6 +11,8 @@
 #ifndef CPUINFER_OPERATOR_AMX_FP8_MOE_H
 #define CPUINFER_OPERATOR_AMX_FP8_MOE_H
 
+#define DEBUG_FP8_MOE
+
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -51,7 +53,9 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
   using Base::m_local_num_;
   
  public:
-
+  using typename Base::input_t;
+  using typename Base::output_t;
+  
   AMX_FP8_MOE_TP() = default;
 
   AMX_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
@@ -62,12 +66,14 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
     }
     printf("Created AMX_FP8_MOE_TP %d at numa %d\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
   }
+
+  ~AMX_FP8_MOE_TP() = default;
   // ============================================================================
   // CRTP buffer creation - with group_size
   // ============================================================================
 
   size_t buffer_a_required_size_impl(size_t m, size_t k) const {
-    return T::BufferA::required_size(m, k, config_.quant_config.group_size);
+    return T::BufferA::required_size(m, k);
   }
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
     return T::BufferB::required_size(n, k, config_.quant_config.group_size);
@@ -77,7 +83,7 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
   }
 
   std::shared_ptr<typename T::BufferA> make_buffer_a_impl(size_t m, size_t k, void* data) const {
-    return std::make_shared<typename T::BufferA>(m, k, config_.quant_config.group_size, data);
+    return std::make_shared<typename T::BufferA>(m, k, data);
   }
   std::shared_ptr<typename T::BufferB> make_buffer_b_impl(size_t n, size_t k, void* data) const {
     return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size, data);
@@ -98,28 +104,81 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
     // Dispatch based on qlen threshold
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul_fp8(m, config_.intermediate_size, config_.hidden_size,
-                       ba.get(), bb.get(), bc.get(), ith, nth);
-    } else {
-      amx::vec_mul_fp8(m, config_.intermediate_size, config_.hidden_size,
-                       ba.get(), bb.get(), bc.get(), ith, nth);
-    }
+    amx::vec_mul_kgroup(m, config_.intermediate_size, config_.hidden_size, group_size,
+                       ba, bb, bc, ith, nth);
   }
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     auto& group_size = config_.quant_config.group_size;
     int m = m_local_num_[expert_idx];
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul_fp8(m, config_.hidden_size, config_.intermediate_size,
-                       down_ba_[expert_idx].get(), down_bb_[expert_idx].get(),
-                       down_bc_[expert_idx].get(), ith, nth);
-    } else {
-      amx::vec_mul_fp8(m, config_.hidden_size, config_.intermediate_size,
-                       down_ba_[expert_idx].get(), down_bb_[expert_idx].get(),
-                       down_bc_[expert_idx].get(), ith, nth);
-    }
+    amx::vec_mul_kgroup(m, config_.hidden_size, config_.intermediate_size, group_size,
+                      down_ba_[expert_idx], down_bb_[expert_idx],
+                      down_bc_[expert_idx], ith, nth);
   }
+
+#ifdef DEBUG_FP8_MOE
+  // Function to dump Buffer B data for debugging FP8 quantization results
+  inline void dump_buffer_b(const std::string& quantization_type, int expert_idx, const std::string& matrix_type,
+                            typename T::BufferB* buffer) {
+    auto& quant_config = config_.quant_config;
+    int& group_size = quant_config.group_size;
+
+    printf("[DUMP_BUFFER_B] TP%d %s Expert%d %s:\n", tp_part_idx, quantization_type.c_str(), expert_idx,
+           matrix_type.c_str());
+
+    // Calculate dimensions based on matrix type
+    int rows, cols;
+    size_t scale_elem_count;
+    if (matrix_type == "gate" || matrix_type == "up") {
+      rows = config_.intermediate_size;
+      cols = config_.hidden_size;
+    } else {  // down
+      rows = config_.hidden_size;
+      cols = config_.intermediate_size;
+    }
+    int n_blocks_n = (rows + group_size - 1) / group_size;
+    int n_blocks_k = (cols + group_size - 1) / group_size;
+    scale_elem_count = n_blocks_n * n_blocks_k;
+
+    // Dump scales (as BF16 converted to float)
+    printf("  Scales[first 16]: ");
+    for (int i = 0; i < std::min(16, (int)scale_elem_count); i++) {
+      printf("%.6f ", GGML_BF16_TO_FP32(buffer->d[i]));
+    }
+    printf("\n");
+
+    if (scale_elem_count > 16) {
+      printf("  Scales[last 16]: ");
+      int start_idx = std::max(0, (int)scale_elem_count - 16);
+      for (int i = start_idx; i < (int)scale_elem_count; i++) {
+        printf("%.6f ", GGML_BF16_TO_FP32(buffer->d[i]));
+      }
+      printf("\n");
+    }
+
+    // Dump FP8 weights (as hex uint8)
+    size_t weight_size = (size_t)rows * cols;  // FP8 is 1 byte per element
+    uint8_t* weight_ptr = (uint8_t*)buffer->b;
+
+    printf("  FP8 Weights[first 32 bytes]: ");
+    for (int i = 0; i < std::min(32, (int)weight_size); i++) {
+      printf("%02x ", weight_ptr[i]);
+    }
+    printf("\n");
+
+    if (weight_size > 32) {
+      printf("  FP8 Weights[last 32 bytes]: ");
+      int start_idx = std::max(32, (int)weight_size - 32);
+      for (int i = start_idx; i < (int)weight_size; i++) {
+        printf("%02x ", weight_ptr[i]);
+      }
+      printf("\n");
+    }
+
+    printf("  Matrix dimensions: %dx%d (n x k), Scale blocks: %dx%d, Group size: %d, Scale elements: %zu\n",
+           rows, cols, n_blocks_n, n_blocks_k, group_size, scale_elem_count);
+  }
+#endif
 
     /**
    * @brief Load FP8 weights from contiguous memory layout
@@ -141,7 +200,7 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
     int nth = T::recommended_nth(config_.intermediate_size);
     pool->do_work_stealing_job(
       nth * config_.expert_num, nullptr,
-      [this, nth, physical_to_logical_map](int task_id) {
+      [this, nth, physical_to_logical_map, group_size](int task_id) {
         uint64_t expert_idx = task_id / nth;
         uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
         int ith = task_id % nth;
@@ -161,11 +220,11 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
             ith, nth);
       },
       nullptr);
-      
+
       nth = T::recommended_nth(config_.hidden_size);
       pool->do_work_stealing_job(
         nth * config_.expert_num, nullptr,
-        [this, nth, physical_to_logical_map](int task_id) {
+        [this, nth, physical_to_logical_map, group_size](int task_id) {
           uint64_t expert_idx = task_id / nth;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
@@ -178,7 +237,7 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
             ith, nth);
         },
         nullptr);
-  #ifdef DEBUG_K2_MOE
+  #ifdef DEBUG_FP8_MOE
     dump_buffer_b("Native FP8", 0, "gate", gate_bb_[0].get());
     dump_buffer_b("Native FP8", 0, "down", down_bb_[0].get());
   #endif

@@ -217,10 +217,8 @@ struct BufferBFP8Impl {
     * @param b_src FP8 权重源数据 (n-major, n×k)
     * @param d_src BF16 scale_inv 源数据 (n-major, ceil(n/128)×ceil(k/128))
     */
-  void from_mat(const uint8_t* b_src, const float* d_src, int n_src, int k_src, int ith, int nth) {
-    // correct !
+  void from_mat(const uint8_t* b_src, const ggml_bf16_t* d_src, int ith, int nth) {
     assert(b != nullptr && d != nullptr);
-    assert(n_src == n && k_src == k);
     assert(N_STEP == 32 && K_STEP == 32); // from mat block copy assumes this
 
     // Copy scales (per 128x128 block). Each thread copies its own n-block range.

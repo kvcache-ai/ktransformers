@@ -28,7 +28,6 @@
 #include "llama.cpp/ggml-impl.h"
 
 namespace amx {
-namespace fp8 {
 
 // FP8 e4m3 格式常量
 constexpr int FP8_E4M3_EXPONENT_BITS = 4;
@@ -387,7 +386,7 @@ ALWAYS_INLINE void fp8x32_to_bf16x32(const uint8_t* fp8_ptr, ggml_bf16_t* bf16_p
     __m512 v1 = _mm512_load_ps(fp32_1);
 
     // FP32 -> BF16
-    __m512i bf16_combined = _mm512_cvtne2ps_pbh(v1, v0);
+    __m512i bf16_combined = (__m512i)_mm512_cvtne2ps_pbh(v1, v0);
     _mm512_store_si512((__m512i*)bf16_ptr, bf16_combined);
 }
 
@@ -517,7 +516,6 @@ ALWAYS_INLINE float compute_amax_bf16_avx512(const ggml_bf16_t* data, int count)
     return _mm512_reduce_max_ps(amax_v);
 }
 
-}  // namespace fp8
 }  // namespace amx
 
 #endif  // AMX_RAW_UTILS_HPP

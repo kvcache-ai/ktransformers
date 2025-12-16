@@ -4,16 +4,16 @@ import ctypes
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader
+from .loader import SafeTensorLoader, CompressedSafeTensorLoader, RawFP8SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
 
 try:
-    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE
+    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXRAWFp8_MOE
 
     _HAS_AMX_SUPPORT = True
 except (ImportError, AttributeError):
     _HAS_AMX_SUPPORT = False
-    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE = None, None, None
+    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXRAWFp8_MOE = None, None, None, None
 
 from typing import Optional
 
@@ -306,7 +306,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
 class RAWAMXMoEWrapper(BaseMoEWrapper):
     """Wrapper for RAWINT4 experts stored in compressed SafeTensor format."""
 
-    _compressed_loader_instance = None
+    _raw_loader_instance = None
 
     def __init__(
         self,
@@ -324,8 +324,12 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
     ):
-        if not _HAS_AMX_SUPPORT or AMXInt4_KGroup_MOE is None:
+        if not _HAS_AMX_SUPPORT:
+            raise RuntimeError("AMX backend is not available.")
+        if method == "RAWINT4" and AMXInt4_KGroup_MOE is None:
             raise RuntimeError("AMX backend with RAWINT4 support is not available.")
+        if method == "RAWFP8" and AMXRAWFp8_MOE is None:
+            raise RuntimeError("AMX backend with RAWFP8 support is not available.")
 
         super().__init__(
             layer_idx=layer_idx,
@@ -383,10 +387,9 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         self.down_weights = weights["down"]
 
         # Convert scales to bf16 individually
-        assert weights["gate_scale"][0].dtype == torch.bfloat16, "Expected bfloat16 scales."
-        self.gate_scales = weights["gate_scale"]
-        self.up_scales = weights["up_scale"]
-        self.down_scales = weights["down_scale"]
+        self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
+        self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
+        self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
 
         t2 = time.time()
 

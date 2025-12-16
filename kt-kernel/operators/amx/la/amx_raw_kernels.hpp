@@ -8,6 +8,7 @@
 #include <string>
 
 #include "amx_config.hpp"
+#include "amx_raw_buffers.hpp"
 #include "amx_raw_utils.hpp"
 #include "amx_utils.hpp"
 #include "llama.cpp/ggml-impl.h"
@@ -181,7 +182,8 @@ struct GemmKernel224FP8 {
     0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
     0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
   };
-  alignas(64) static constexpr __m512i sign_mask_val = _mm512_set1_epi8(0x80);
+  // _mm512_set1_epi8 is not constexpr; keep it as a static cached value
+  alignas(64) static const __m512i sign_mask_val;
   static inline __m512i bf16_hi_0_mask() {
     return _mm512_load_si512((__m512i const*)bf16_hi_0_val);
   }
@@ -195,7 +197,7 @@ struct GemmKernel224FP8 {
     return _mm512_load_si512((__m512i const*)bf16_lo_1_val);
   }
   static inline __m512i sign_mask() {
-    return sign_mask_val;
+    return _mm512_set1_epi8(0x80);
   }
 
  public:
@@ -211,9 +213,9 @@ struct GemmKernel224FP8 {
   // bfp8_512 -> repack format 2*512 bbf_16
   static inline std::pair<__m512i, __m512i> fp8x64_to_bf16x64(__m512i bfp8_512) {
     // fp8->bf16
-    __m512i b_hi = _mm512_permutex2var_epi8(K::bf16_hi_0_mask(), bfp8_512, K::bf16_hi_1_mask());
-    __m512i b_lo = _mm512_permutex2var_epi8(K::bf16_lo_0_mask(), bfp8_512, K::bf16_lo_1_mask());
-    b_hi = _mm512_or_si512(_mm512_and_si512(K::sign_mask(), bfp8_512), b_hi);
+    __m512i b_hi = _mm512_permutex2var_epi8(bf16_hi_0_mask(), bfp8_512, bf16_hi_1_mask());
+    __m512i b_lo = _mm512_permutex2var_epi8(bf16_lo_0_mask(), bfp8_512, bf16_lo_1_mask());
+    b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask(), bfp8_512), b_hi);
     __m512i bbf16_0 = _mm512_unpacklo_epi8(b_lo, b_hi);
     __m512i bbf16_1 = _mm512_unpackhi_epi8(b_lo, b_hi);
     return {bbf16_0, bbf16_1};
@@ -223,49 +225,46 @@ struct GemmKernel224FP8 {
   static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
                          BufferB* bb, int k_group_size) {
     // TODO: not done yet
-    using K = GemmKernel224BF8;
-    __m512i* c512 = (__m512i*)c;
+    __m512* c512 = (__m512*)c;
     int m_block_end = std::min(m - m_begin, M_STEP);
     if (k_block_begin % k_group_size == 0) {
       for (int m_i = 0; m_i < m_block_end; m_i++) { // N_STEP=32, so we have 2 * __m512
-        c512[m_i * 2] = _mm512_setzero_si512();
-        c512[m_i * 2 + 1] = _mm512_setzero_si512();
+        c512[m_i * 2] = _mm512_setzero_ps();
+        c512[m_i * 2 + 1] = _mm512_setzero_ps();
       }
     }
     ggml_bf16_t* abf16 = (ggml_bf16_t*)ba->get_submat(m, k, m_begin, k_block_begin);
     __m512i* bfp8_512 = (__m512i*)bb->get_submat(n, k, n_begin, k_block_begin);
     for (int m_i = 0; m_i < m_block_end; m_i ++) {
       for (int k_i = 0; k_i < 16; k_i ++) {
-        __m512i bf16_hi_0 = K::bf16_hi_0_mask(), bf16_hi_1 = K::bf16_hi_1_mask();
-        __m512i bf16_lo_0 = K::bf16_lo_0_mask(), bf16_lo_1 = K::bf16_lo_1_mask();
-        __m512i sign_mask = K::sign_mask();
+        __m512i bf16_hi_0_val = bf16_hi_0_mask(), bf16_hi_1_val = bf16_hi_1_mask();
+        __m512i bf16_lo_0_val = bf16_lo_0_mask(), bf16_lo_1_val = bf16_lo_1_mask();
+        __m512i sign_mask_val = sign_mask();
 
         // DO_BLOCK(k_i_0 * 2), DO_BLOCK(k_i_0 * 2 + 1);
         {
-          __m512bh ma = _mm512_set1_epi32(abf16[m_i * 16 + k_i]);
+          // Broadcast two consecutive BF16 values (as a 32-bit pair) for DPBF16PS
+          // k_i loops 0..15, each iteration processes 2 k positions, so use k_i * 2
+          __m512bh ma = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + k_i * 2]);
           // int k_i = k_i_0 * 2;
           __m512i bfp8 = bfp8_512[k_i];
-          __m512i b_hi = _mm512_permutex2var_epi8(bf16_hi_0, bfp8, bf16_hi_1);
-          __m512i b_lo = _mm512_permutex2var_epi8(bf16_lo_0, bfp8, bf16_lo_1);
-          b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask, bfp8), b_hi);
-          __m512i bbf16_0 = _mm512_unpacklo_epi8(b_lo, b_hi);
-          __m512i bbf16_1 = _mm512_unpackhi_epi8(b_lo, b_hi);
+          __m512i b_hi = _mm512_permutex2var_epi8(bf16_hi_0_val, bfp8, bf16_hi_1_val);
+          __m512i b_lo = _mm512_permutex2var_epi8(bf16_lo_0_val, bfp8, bf16_lo_1_val);
+          b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask_val, bfp8), b_hi);
+          __m512bh bbf16_0 = (__m512bh)_mm512_unpacklo_epi8(b_lo, b_hi);
+          __m512bh bbf16_1 = (__m512bh)_mm512_unpackhi_epi8(b_lo, b_hi);
           c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma, bbf16_0);
           c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma, bbf16_1);
         }
-        // TODO: fp8 里，共一个 512，存对应两个的 fp8 值，因此。
-      //   for (int n_i = 0; n_i < 2; n_i ++) {
-      //     c512[m_i * 2 + n_i] = _mm512_dpbf16_ps(c512[m_i * 2 + n_i], ma, bfp8_512[k_i * 2 + n_i]);
-      //   }
-      // }
+      }
     }
-  } 
+  }
 
   static void amx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
                          BufferB* bb, int k_group_size) {
     throw std::runtime_error("GemmKernel224FP8::amx_kernel not implemented yet");
   }
-  
+
   static void apply_scale_kgroup(int m, int n, int m_begin, int n_begin, int k_block_begin, float* c,
                                  float* reduce_c, BufferA* ba, BufferB* bb, int k, int k_group_size) {
     using K = GemmKernel224FP8;
@@ -273,19 +272,18 @@ struct GemmKernel224FP8 {
 
     for (int i = 0; i < to; i ++) {
       // Get scale for this k_group
-      
-      __m512 bs = _mm512_set1_ps(GGML_BF16_TO_FP32(bb->get_scale(n, n_begin, k, k_begin)));
-      __m512 now = _mm512_load_ps((__m512i*)(reduce_c + i * K::N_STEP));
+      __m512 bs = _mm512_set1_ps(GGML_BF16_TO_FP32(*bb->get_scale(n, n_begin, k, k_block_begin)));
+      __m512 now = _mm512_load_ps(reduce_c + i * K::N_STEP);
       __m512 result = _mm512_mul_ps(now, bs);
-      __m512 existing = _mm512_load_ps((__m512*)(c + i * K::N_STEP));
+      __m512 existing = _mm512_load_ps(c + i * K::N_STEP);
       result = _mm512_add_ps(result, existing);
-      _mm512_store_ps((__m512*)(c + i * K::N_STEP), result);
+      _mm512_store_ps(c + i * K::N_STEP, result);
 
-      now = _mm512_load_ps((__m512i*)(reduce_c + i * K::N_STEP + K::TILE_N));
+      now = _mm512_load_ps(reduce_c + i * K::N_STEP + K::TILE_N);
       result = _mm512_mul_ps(now, bs);
-      existing = _mm512_load_ps((__m512*)(c + i * K::N_STEP + K::TILE_N));
+      existing = _mm512_load_ps(c + i * K::N_STEP + K::TILE_N);
       result = _mm512_add_ps(result, existing);
-      _mm512_store_ps((__m512*)(c + i * K::N_STEP + K::TILE_N), result);
+      _mm512_store_ps(c + i * K::N_STEP + K::TILE_N, result);
     }
   }
 };
