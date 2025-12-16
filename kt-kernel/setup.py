@@ -452,7 +452,16 @@ class CMakeBuild(build_ext):
 # Version (simple). If you later add a python package dir, you can read from it.
 ################################################################################
 
-VERSION = os.environ.get("CPUINFER_VERSION", "0.4.4")
+
+# Import version from shared version.py at project root
+_version_file = Path(__file__).resolve().parent.parent / "version.py"
+if _version_file.exists():
+    _version_ns = {}
+    with open(_version_file, "r", encoding="utf-8") as f:
+        exec(f.read(), _version_ns)
+    VERSION = os.environ.get("CPUINFER_VERSION", _version_ns.get("__version__", "0.4.2"))
+else:
+    VERSION = os.environ.get("CPUINFER_VERSION", "0.4.2")
 
 ################################################################################
 # Setup
@@ -470,7 +479,7 @@ setup(
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
     },
-    ext_modules=[CMakeExtension("kt_kernel_ext", str(REPO_ROOT))],
+    ext_modules=[CMakeExtension("kt_kernel.kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},
     zip_safe=False,
     classifiers=[
