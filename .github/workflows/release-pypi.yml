@@ -42,8 +42,8 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
+          apt-get update
+          apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
 
       - name: Install Python build tools
         run: |
