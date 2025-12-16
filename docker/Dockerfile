@@ -218,7 +218,7 @@ RUN git clone https://${GITHUB_ARTIFACTORY}/kvcache-ai/sglang.git /workspace/sgl
     && cd /workspace/sglang && git checkout kimi_k2
 
 RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory \
-    && git clone -b add-cd-djw --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
+    && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
     && cd /workspace/ktransformers && git submodule update --init --recursive
 
 # Download ktransformers wheel and flash_attn wheel for fine-tune env

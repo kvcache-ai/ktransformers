@@ -79,7 +79,7 @@ cd docker
   --cuda-version 12.8.1 \
   --ubuntu-mirror 1
 
-# With proxy (for China mainland)
+# With proxy
 ./build-docker-tar.sh \
   --cuda-version 12.8.1 \
   --ubuntu-mirror 1 \
@@ -342,22 +342,6 @@ docker run --rm <image> /bin/bash -c "
 2. **Check repository name**: Must include namespace (e.g., `kvcache/ktransformers`, not just `ktransformers`)
 3. **Network issues**: Use `--max-retries` and `--retry-delay` options
 4. **Rate limiting**: DockerHub has pull/push rate limits for free accounts
-
-### Proxy Configuration Issues
-
-For builds in China mainland, use Tsinghua mirrors:
-
-```bash
-./build-docker-tar.sh \
-  --ubuntu-mirror 1 \
-  --http-proxy "http://127.0.0.1:16981" \
-  --https-proxy "http://127.0.0.1:16981"
-```
-
-Verify proxy is working:
-```bash
-curl -x http://127.0.0.1:16981 https://www.google.com
-```
 
 ## Advanced Topics
 
