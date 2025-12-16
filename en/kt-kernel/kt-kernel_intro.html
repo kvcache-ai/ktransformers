@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-71ae4a2a.js";
+            window.path_to_searchindex_js = "../../searchindex-60c07ede.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-78fe5878.js"></script>
@@ -255,17 +255,76 @@
 <li><strong>NUMA-Aware Execution</strong>: Thread pool and memory layout designed for multi-socket / multi-NUMA machines.</li>
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
-<h3 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h3>
+<h3 id="option-1-install-from-pypi-recommended-for-most-users"><a class="header" href="#option-1-install-from-pypi-recommended-for-most-users">Option 1: Install from PyPI (Recommended for Most Users)</a></h3>
+<p>Choose the version matching your CUDA installation:</p>
+<pre><code class="language-bash"># For CUDA 11.8
+pip install kt-kernel==0.4.2.cu118
+
+# For CUDA 12.1
+pip install kt-kernel==0.4.2.cu121
+
+# For CUDA 12.4
+pip install kt-kernel==0.4.2.cu124
+
+# For CUDA 12.6
+pip install kt-kernel==0.4.2.cu126
+</code></pre>
+<blockquote>
+<p><strong>Note</strong>: Replace <code>0.4.2</code> with the <a href="https://pypi.org/project/kt-kernel/#history">latest version</a> if available.</p>
+</blockquote>
+<p><strong>Features:</strong></p>
+<ul>
+<li>✅ <strong>Automatic CPU detection</strong>: Detects your CPU and loads the optimal kernel variant</li>
+<li>✅ <strong>Multi-variant wheel</strong>: Includes AMX, AVX512, and AVX2 variants in a single package</li>
+<li>✅ <strong>No compilation needed</strong>: Pre-built wheels for Python 3.10, 3.11, 3.12</li>
+<li>✅ <strong>Multiple CUDA versions</strong>: Choose the version matching your environment</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>CUDA 11.8+ or 12.x runtime (must match the package version you install)</li>
+<li>PyTorch 2.0+ (install separately, must match CUDA version)</li>
+<li>Linux x86-64</li>
+</ul>
+<p><strong>CPU Variants Included:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variant</th><th>CPU Support</th><th>Use Case</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>AMX</strong></td><td>Intel Sapphire Rapids+</td><td>Best performance on latest Intel CPUs</td></tr>
+<tr><td><strong>AVX512</strong></td><td>Intel Skylake-X/Ice Lake/Cascade Lake</td><td>AVX512-capable CPUs without AMX</td></tr>
+<tr><td><strong>AVX2</strong></td><td>Intel Haswell+, AMD Zen+</td><td>Maximum compatibility</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Check which variant is loaded:</strong></p>
+<pre><code class="language-python">import kt_kernel
+print(f"CPU variant: {kt_kernel.__cpu_variant__}")  # 'amx', 'avx512', or 'avx2'
+print(f"Version: {kt_kernel.__version__}")
+</code></pre>
+<p><strong>Environment Variables:</strong></p>
+<pre><code class="language-bash"># Override automatic CPU detection
+export KT_KERNEL_CPU_VARIANT=avx2  # or 'avx512', 'amx'
+
+# Enable debug output
+export KT_KERNEL_DEBUG=1
+python -c "import kt_kernel"
+</code></pre>
+<hr>
+<h3 id="option-2-install-from-source-for-amd-arm-or-custom-builds"><a class="header" href="#option-2-install-from-source-for-amd-arm-or-custom-builds">Option 2: Install from Source (For AMD, ARM, or Custom Builds)</a></h3>
+<p>If you need AMD (BLIS), ARM (KML), or custom CUDA versions, build from source:</p>
+<h4 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h4>
 <p>First, initialize git submodules:</p>
 <pre><code class="language-bash">git submodule update --init --recursive
 </code></pre>
-<h3 id="quick-installation-recommended"><a class="header" href="#quick-installation-recommended">Quick Installation (Recommended)</a></h3>
+<h4 id="quick-installation"><a class="header" href="#quick-installation">Quick Installation</a></h4>
 <p>Step 0: Create and activate a conda environment (recommended):</p>
 <pre><code class="language-bash">conda create -n kt-kernel python=3.11 -y
 conda activate kt-kernel
 </code></pre>
 <p>You can now install in two clear steps using the same script.</p>
-<p>Option A: Two-step (specify dependencies installation and build separately)</p>
+<p><strong>Option A: Two-step</strong> (specify dependencies installation and build separately)</p>
 <pre><code class="language-bash"># 1) Install system prerequisites (cmake, hwloc, pkg-config)
 ./install.sh deps
 
@@ -273,7 +332,7 @@ conda activate kt-kernel
 #    By default, the script cleans the local ./build directory before compiling
 ./install.sh build
 </code></pre>
-<p>Option B: One-step</p>
+<p><strong>Option B: One-step</strong></p>
 <pre><code class="language-bash">./install.sh
 </code></pre>
 <p>The install script will:</p>
