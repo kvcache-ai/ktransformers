@@ -47,14 +47,75 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ## Installation
 
-### Prerequisites
+### Option 1: Install from PyPI (Recommended for Most Users)
+
+Choose the version matching your CUDA installation:
+
+```bash
+# For CUDA 11.8
+pip install kt-kernel==0.4.2.cu118
+
+# For CUDA 12.1
+pip install kt-kernel==0.4.2.cu121
+
+# For CUDA 12.4
+pip install kt-kernel==0.4.2.cu124
+
+# For CUDA 12.6
+pip install kt-kernel==0.4.2.cu126
+```
+
+> **Note**: Replace `0.4.2` with the [latest version](https://pypi.org/project/kt-kernel/#history) if available.
+
+**Features:**
+- ✅ **Automatic CPU detection**: Detects your CPU and loads the optimal kernel variant
+- ✅ **Multi-variant wheel**: Includes AMX, AVX512, and AVX2 variants in a single package
+- ✅ **No compilation needed**: Pre-built wheels for Python 3.10, 3.11, 3.12
+- ✅ **Multiple CUDA versions**: Choose the version matching your environment
+
+**Requirements:**
+- CUDA 11.8+ or 12.x runtime (must match the package version you install)
+- PyTorch 2.0+ (install separately, must match CUDA version)
+- Linux x86-64
+
+**CPU Variants Included:**
+| Variant | CPU Support | Use Case |
+|---------|-------------|----------|
+| **AMX** | Intel Sapphire Rapids+ | Best performance on latest Intel CPUs |
+| **AVX512** | Intel Skylake-X/Ice Lake/Cascade Lake | AVX512-capable CPUs without AMX |
+| **AVX2** | Intel Haswell+, AMD Zen+ | Maximum compatibility |
+
+**Check which variant is loaded:**
+```python
+import kt_kernel
+print(f"CPU variant: {kt_kernel.__cpu_variant__}")  # 'amx', 'avx512', or 'avx2'
+print(f"Version: {kt_kernel.__version__}")
+```
+
+**Environment Variables:**
+```bash
+# Override automatic CPU detection
+export KT_KERNEL_CPU_VARIANT=avx2  # or 'avx512', 'amx'
+
+# Enable debug output
+export KT_KERNEL_DEBUG=1
+python -c "import kt_kernel"
+```
+
+---
+
+### Option 2: Install from Source (For AMD, ARM, or Custom Builds)
+
+If you need AMD (BLIS), ARM (KML), or custom CUDA versions, build from source:
+
+#### Prerequisites
 
 First, initialize git submodules:
 ```bash
 git submodule update --init --recursive
 ```
 
-### Quick Installation (Recommended)
+#### Quick Installation
 
 Step 0: Create and activate a conda environment (recommended):
 
@@ -65,7 +126,7 @@ conda activate kt-kernel
 
 You can now install in two clear steps using the same script.
 
-Option A: Two-step (specify dependencies installation and build separately)
+**Option A: Two-step** (specify dependencies installation and build separately)
 
 ```bash
 # 1) Install system prerequisites (cmake, hwloc, pkg-config)
@@ -76,7 +137,7 @@ Option A: Two-step (specify dependencies installation and build separately)
 ./install.sh build
 ```
 
-Option B: One-step
+**Option B: One-step**
 
 ```bash
 ./install.sh

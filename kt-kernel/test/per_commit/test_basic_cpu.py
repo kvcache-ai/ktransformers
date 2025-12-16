@@ -16,7 +16,8 @@ register_cpu_ci(est_time=30, suite="default")
 
 # Check if kt_kernel_ext is available
 try:
-    import kt_kernel_ext
+    import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+    kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     HAS_KT_KERNEL = True
 except ImportError:
     HAS_KT_KERNEL = False

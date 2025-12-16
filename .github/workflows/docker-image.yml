@@ -5,9 +5,24 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      choose:
-        description: 'Will you push the image to DockerHub? 0 for No, 1 for Yes'
+      push_to_dockerhub:
+        description: 'Push image to DockerHub? (true/false)'
         required: true
+        default: 'false'
+        type: boolean
+      cuda_version:
+        description: 'CUDA version (e.g., 12.8.1)'
+        required: false
+        default: '12.8.1'
+        type: string
+      push_simplified_tag:
+        description: 'Also push simplified tag? (true/false)'
+        required: false
+        default: 'true'
+        type: boolean
+      ubuntu_mirror:
+        description: 'Use Tsinghua Ubuntu mirror? (0/1)'
+        required: false
         default: '0'
         type: string
 
@@ -20,79 +35,108 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Run tests
         run: |
           if [ -f docker-compose.test.yml ]; then
             docker-compose --file docker-compose.test.yml build
             docker-compose --file docker-compose.test.yml run sut
           else
-            docker build . --file Dockerfile
+            docker build . --file docker/Dockerfile
           fi
 
-  docker_task:
+  build-and-push:
     needs: test
-    name: ${{ matrix.instruct}}
+    name: Build and Push Multi-Variant Docker Image
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        # for amd64
-          - {instruct: "FANCY",   platform: "linux/amd64"}
-          - {instruct: "AVX512",  platform: "linux/amd64"}
-          - {instruct: "AVX2",    platform: "linux/amd64"}   
-          - {instruct: "NATIVE",  platform: "linux/amd64"}
-        # for arm64
-          - {instruct: "NATIVE",  platform: "linux/arm64"}
 
     steps:
-        - name: Move Docker data directory
-          run: |
-            sudo systemctl stop docker
-            sudo mkdir -p /mnt/docker
-            sudo rsync -avz /var/lib/docker/ /mnt/docker
-            sudo rm -rf /var/lib/docker 
-            sudo ln -s /mnt/docker /var/lib/docker
-            sudo systemctl start docker
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        -
-          name: Set up QEMU
-          uses: docker/setup-qemu-action@v3
+      - name: Move Docker data directory
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker
+          sudo rsync -avz /var/lib/docker/ /mnt/docker
+          sudo rm -rf /var/lib/docker
+          sudo ln -s /mnt/docker /var/lib/docker
+          sudo systemctl start docker
 
-        -
-          name: Set up Docker Buildx
-          uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-        -
-          name: Login to Docker Hub
-          uses: docker/login-action@v3
-          with:
-            username: ${{ secrets.DOCKERHUB_USERNAME }}
-            password: ${{ secrets.DOCKERHUB_TOKEN }}
-        -
-          name: Build and push for amd64
-          if: matrix.platform == 'linux/amd64'
-          uses: docker/build-push-action@v6
-          with:
-            push: true
-            platforms: |
-              linux/amd64
-            tags: |
-              ${{ env.DOCKERHUB_REPO }}:latest-${{ matrix.instruct }}
-              ${{ env.DOCKERHUB_REPO }}:${{ github.event.release.tag_name }}-${{ matrix.instruct }}
-            build-args: |
-              CPU_INSTRUCT=${{ matrix.instruct }}
-        -
-          name: Build and push for arm64
-          if: matrix.platform == 'linux/arm64'
-          uses: docker/build-push-action@v6
-          with:
-            push: true
-            platforms: |
-              linux/arm64
-            tags: |
-              ${{ env.DOCKERHUB_REPO }}:latest-${{ matrix.instruct }}
-              ${{ env.DOCKERHUB_REPO }}:${{ github.event.release.tag_name }}-${{ matrix.instruct }}
-            build-args: |
-              CPU_INSTRUCT=${{ matrix.instruct }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine build parameters
+        id: params
+        run: |
+          # Determine if we should push
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "should_push=true" >> $GITHUB_OUTPUT
+            echo "push_simplified=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_push=${{ inputs.push_to_dockerhub }}" >> $GITHUB_OUTPUT
+            echo "push_simplified=${{ inputs.push_simplified_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "should_push=false" >> $GITHUB_OUTPUT
+            echo "push_simplified=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Determine CUDA version
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.cuda_version }}" ]; then
+            echo "cuda_version=${{ inputs.cuda_version }}" >> $GITHUB_OUTPUT
+          else
+            echo "cuda_version=12.8.1" >> $GITHUB_OUTPUT
+          fi
+
+          # Determine Ubuntu mirror setting
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.ubuntu_mirror }}" ]; then
+            echo "ubuntu_mirror=${{ inputs.ubuntu_mirror }}" >> $GITHUB_OUTPUT
+          else
+            echo "ubuntu_mirror=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        run: |
+          cd docker
+
+          # Build command arguments
+          BUILD_ARGS=(
+            --cuda-version "${{ steps.params.outputs.cuda_version }}"
+            --ubuntu-mirror "${{ steps.params.outputs.ubuntu_mirror }}"
+            --repository "${{ env.DOCKERHUB_REPO }}"
+          )
+
+          # Add simplified tag option if enabled
+          if [ "${{ steps.params.outputs.push_simplified }}" = "true" ]; then
+            BUILD_ARGS+=(--also-push-simplified)
+          fi
+
+          # Add HTTP proxy if available
+          if [ -n "${{ secrets.HTTP_PROXY }}" ]; then
+            BUILD_ARGS+=(--http-proxy "${{ secrets.HTTP_PROXY }}")
+          fi
+
+          # Add HTTPS proxy if available
+          if [ -n "${{ secrets.HTTPS_PROXY }}" ]; then
+            BUILD_ARGS+=(--https-proxy "${{ secrets.HTTPS_PROXY }}")
+          fi
+
+          # Dry run if not pushing
+          if [ "${{ steps.params.outputs.should_push }}" != "true" ]; then
+            BUILD_ARGS+=(--dry-run)
+          fi
+
+          # Execute build script
+          ./push-to-dockerhub.sh "${BUILD_ARGS[@]}"
+
+      - name: Display image information
+        if: steps.params.outputs.should_push == 'true'
+        run: |
+          echo "::notice title=Docker Image::Image pushed successfully to ${{ env.DOCKERHUB_REPO }}"
+          echo "Pull command: docker pull ${{ env.DOCKERHUB_REPO }}:v\$(VERSION)-cu\$(CUDA_SHORT)"

@@ -161,6 +161,34 @@ build_step() {
     echo "Skipping clean of $REPO_ROOT/build (requested by --no-clean)"
   fi
 
+  # Check for multi-variant build mode (Docker environment)
+  if [ "${CPUINFER_BUILD_ALL_VARIANTS:-0}" = "1" ]; then
+    echo "=========================================="
+    echo "Building ALL CPU variants (AMX/AVX512/AVX2)"
+    echo "=========================================="
+    echo ""
+    echo "This will build three variants in a single wheel:"
+    echo "  - AMX variant (Intel Sapphire Rapids+)"
+    echo "  - AVX512 variant (Intel Skylake-X/Ice Lake+)"
+    echo "  - AVX2 variant (maximum compatibility)"
+    echo ""
+    echo "Runtime CPU detection will automatically select the best variant."
+    echo ""
+
+    export CPUINFER_FORCE_REBUILD=1
+    export CPUINFER_BUILD_TYPE=${CPUINFER_BUILD_TYPE:-Release}
+    export CPUINFER_PARALLEL=${CPUINFER_PARALLEL:-8}
+
+    echo "Building with:"
+    echo "  CPUINFER_BUILD_ALL_VARIANTS=1"
+    echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
+    echo "  CPUINFER_PARALLEL=$CPUINFER_PARALLEL"
+    echo ""
+
+    pip install . -v
+    return 0
+  fi
+
   if [ "$MANUAL_MODE" = "0" ]; then
   # Auto-detection mode
   echo "=========================================="
