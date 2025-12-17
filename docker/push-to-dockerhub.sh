@@ -289,18 +289,18 @@ build_image() {
 
     # Check if we should skip build
     if [ "$SKIP_BUILD" = true ]; then
-        log_info "Checking for existing local image..."
+        log_info "Checking for existing local image..." >&2
         # Try to find an existing image
         # This is a best-effort search for recent builds
         local existing_image
         existing_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "ktransformers:temp-" | head -1 || echo "")
 
         if [ -n "$existing_image" ]; then
-            log_info "Found existing image: $existing_image"
+            log_info "Found existing image: $existing_image" >&2
             echo "$existing_image"
             return 0
         else
-            log_warning "No existing image found, will build"
+            log_warning "No existing image found, will build" >&2
         fi
     fi
 
@@ -860,18 +860,18 @@ build_image() {
 
     # Check if we should skip build
     if [ "$SKIP_BUILD" = true ]; then
-        log_info "Checking for existing local image..."
+        log_info "Checking for existing local image..." >&2
         # Try to find an existing image
         # This is a best-effort search for recent builds
         local existing_image
         existing_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "ktransformers:temp-" | head -1 || echo "")
 
         if [ -n "$existing_image" ]; then
-            log_info "Found existing image: $existing_image"
+            log_info "Found existing image: $existing_image" >&2
             echo "$existing_image"
             return 0
         else
-            log_warning "No existing image found, will build"
+            log_warning "No existing image found, will build" >&2
         fi
     fi
 
