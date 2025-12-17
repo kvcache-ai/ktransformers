@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 import os
 import ctypes
 
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 
 
 class KExpertsCPUBuffer:

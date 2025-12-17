@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Description  :  
+Description  :
 Author       : Jianwei Dong
 Date         : 2024-08-28 10:32:05
 Version      : 1.0.0
-LastEditors  : Jianwei Dong 
+LastEditors  : Jianwei Dong
 LastEditTime : 2024-08-28 10:32:05
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 import torch
 
 layer_num = 10
@@ -61,11 +61,7 @@ def bench_linear(cache_seqlen: int):
             max_thread_num,
         )
         local_kvcache = kt_kernel_ext.kvcache.KVCache(config)
-        block_table = (
-            torch.arange(max_block_num, dtype=torch.int32, device="cpu")
-            .contiguous()
-            .view(1, -1)
-        )
+        block_table = torch.arange(max_block_num, dtype=torch.int32, device="cpu").contiguous().view(1, -1)
 
         for layer_idx in range(layer_num):
             k_cache = torch.randn(
@@ -93,17 +89,11 @@ def bench_linear(cache_seqlen: int):
             )
             CPUInfer.sync()
 
-        input = torch.randn(
-            (1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
-        output = torch.empty(
-            (1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
+        input = torch.randn((1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
+        output = torch.empty((1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
 
         # attn_lse: (bsz, q_len, q_head_num)
-        attn_lse = torch.empty(
-            (1, 1, q_head_num), dtype=torch.float32, device="cpu"
-        ).contiguous()
+        attn_lse = torch.empty((1, 1, q_head_num), dtype=torch.float32, device="cpu").contiguous()
         input = input / 100
 
         # warm up
@@ -156,16 +146,7 @@ def bench_linear(cache_seqlen: int):
         print("Time(us) per iteration: ", total_time / test_iter * 1000000)
         print(
             "Bandwidth: ",
-            cache_seqlen
-            * kv_head_num
-            * head_dim
-            * 2
-            * 2
-            * test_iter
-            / total_time
-            / 1000
-            / 1000
-            / 1000,
+            cache_seqlen * kv_head_num * head_dim * 2 * 2 * test_iter / total_time / 1000 / 1000 / 1000,
             "GB/s",
         )
         print("")

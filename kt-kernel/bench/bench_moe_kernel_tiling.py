@@ -26,7 +26,7 @@ os.environ.setdefault("BLAS_NUM_THREADS", "1")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
 import torch  # noqa: E402
-import kt_kernel_ext as ce  # noqa: E402
+from kt_kernel import kt_kernel_ext as ce  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
 
