@@ -120,20 +120,38 @@ install_dependencies() {
 }
 
 # Function to detect CPU features
+# Returns: "has_amx has_avx512_vnni has_avx512_bf16" (space-separated 0/1 values)
 detect_cpu_features() {
   local has_amx=0
+  local has_avx512_vnni=0
+  local has_avx512_bf16=0
 
   if [ -f /proc/cpuinfo ]; then
+    local cpu_flags
+    cpu_flags=$(grep -m1 "^flags" /proc/cpuinfo | tr ' ' '\n')
+
     # Check for AMX support on Linux
-    if grep -q "amx_tile\|amx_int8\|amx_bf16" /proc/cpuinfo; then
+    if echo "$cpu_flags" | grep -qE "amx_tile|amx_int8|amx_bf16"; then
       has_amx=1
+    fi
+
+    # Check for AVX512_VNNI support
+    if echo "$cpu_flags" | grep -qE "avx512_vnni|avx512vnni"; then
+      has_avx512_vnni=1
+    fi
+
+    # Check for AVX512_BF16 support
+    if echo "$cpu_flags" | grep -qE "avx512_bf16|avx512bf16"; then
+      has_avx512_bf16=1
     fi
   elif [ "$(uname)" = "Darwin" ]; then
     # macOS doesn't have AMX (ARM or Intel without AMX)
     has_amx=0
+    has_avx512_vnni=0
+    has_avx512_bf16=0
   fi
 
-  echo "$has_amx"
+  echo "$has_amx $has_avx512_vnni $has_avx512_bf16"
 }
 
 build_step() {
@@ -161,34 +179,6 @@ build_step() {
     echo "Skipping clean of $REPO_ROOT/build (requested by --no-clean)"
   fi
 
-  # Check for multi-variant build mode (Docker environment)
-  if [ "${CPUINFER_BUILD_ALL_VARIANTS:-0}" = "1" ]; then
-    echo "=========================================="
-    echo "Building ALL CPU variants (AMX/AVX512/AVX2)"
-    echo "=========================================="
-    echo ""
-    echo "This will build three variants in a single wheel:"
-    echo "  - AMX variant (Intel Sapphire Rapids+)"
-    echo "  - AVX512 variant (Intel Skylake-X/Ice Lake+)"
-    echo "  - AVX2 variant (maximum compatibility)"
-    echo ""
-    echo "Runtime CPU detection will automatically select the best variant."
-    echo ""
-
-    export CPUINFER_FORCE_REBUILD=1
-    export CPUINFER_BUILD_TYPE=${CPUINFER_BUILD_TYPE:-Release}
-    export CPUINFER_PARALLEL=${CPUINFER_PARALLEL:-8}
-
-    echo "Building with:"
-    echo "  CPUINFER_BUILD_ALL_VARIANTS=1"
-    echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
-    echo "  CPUINFER_PARALLEL=$CPUINFER_PARALLEL"
-    echo ""
-
-    pip install . -v
-    return 0
-  fi
-
   if [ "$MANUAL_MODE" = "0" ]; then
   # Auto-detection mode
   echo "=========================================="
@@ -196,11 +186,16 @@ build_step() {
   echo "=========================================="
   echo ""
 
-  HAS_AMX=$(detect_cpu_features)
+  # detect_cpu_features returns "has_amx has_avx512_vnni has_avx512_bf16"
+  CPU_FEATURES=$(detect_cpu_features)
+  HAS_AMX=$(echo "$CPU_FEATURES" | cut -d' ' -f1)
+  HAS_AVX512_VNNI=$(echo "$CPU_FEATURES" | cut -d' ' -f2)
+  HAS_AVX512_BF16=$(echo "$CPU_FEATURES" | cut -d' ' -f3)
+
+  export CPUINFER_CPU_INSTRUCT=NATIVE
 
   if [ "$HAS_AMX" = "1" ]; then
     echo "✓ AMX instructions detected"
-    export CPUINFER_CPU_INSTRUCT=NATIVE
     export CPUINFER_ENABLE_AMX=ON
     echo "  Configuration: NATIVE + AMX=ON (best performance)"
     echo ""
@@ -210,9 +205,25 @@ build_step() {
     echo "     ./install.sh build --manual"
   else
     echo "ℹ AMX instructions not detected"
-    export CPUINFER_CPU_INSTRUCT=NATIVE
     export CPUINFER_ENABLE_AMX=OFF
     echo "  Configuration: NATIVE + AMX=OFF"
+  fi
+
+  # Fine-grained AVX512 subset detection
+  if [ "$HAS_AVX512_VNNI" = "1" ]; then
+    echo "✓ AVX512_VNNI instructions detected"
+    export CPUINFER_ENABLE_AVX512_VNNI=ON
+  else
+    echo "ℹ AVX512_VNNI instructions not detected"
+    export CPUINFER_ENABLE_AVX512_VNNI=OFF
+  fi
+
+  if [ "$HAS_AVX512_BF16" = "1" ]; then
+    echo "✓ AVX512_BF16 instructions detected"
+    export CPUINFER_ENABLE_AVX512_BF16=ON
+  else
+    echo "ℹ AVX512_BF16 instructions not detected"
+    export CPUINFER_ENABLE_AVX512_BF16=OFF
   fi
 
   echo ""

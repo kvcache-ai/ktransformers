@@ -211,6 +211,30 @@ inline __m256i merge_q8K_bsum(block_q8_K* b) {
   return _mm256_madd_epi16(_mm256_loadu_si256((__m256i*)b->bsums), _mm256_set1_epi16(1));
 }
 
+// AVX512_VNNI compatible dpbusd: unsigned * signed byte dot product
+// When AVX512_VNNI is available, uses hardware instruction (1 cycle)
+// Otherwise falls back to AVX512BW emulation (3 instructions, ~2-3x slower)
+inline __m512i _mm512_dpbusd_epi32_compat(__m512i src, __m512i a, __m512i b) {
+#if defined(__AVX512VNNI__)
+  // Hardware VNNI instruction (fastest)
+  return _mm512_dpbusd_epi32(src, a, b);
+#else
+  // Software fallback using AVX512BW:
+  // dpbusd computes: src + sum of (a[4i+j] * b[4i+j]) for j=0..3, for each i
+  // Step 1: maddubs multiplies unsigned*signed bytes and adds adjacent pairs to int16
+  //         result[i] = a[2i]*b[2i] + a[2i+1]*b[2i+1]
+  __m512i dot = _mm512_maddubs_epi16(a, b);
+  // Step 2: madd with ones sums adjacent int16 pairs to int32
+  //         result[i] = dot[2i] + dot[2i+1]
+  __m512i ones = _mm512_set1_epi16(1);
+  __m512i sum = _mm512_madd_epi16(ones, dot);
+  // Step 3: add to accumulator
+  return _mm512_add_epi32(src, sum);
+#endif
+}
+
+// Signed * signed byte dot product (dpbssd)
+// Converts signed*signed to unsigned*signed by adjusting signs, then calls dpbusd
 inline __m512i _mm512_dpbssd_epi32(__m512i src, __m512i a, __m512i b) {
   // 提取高低256-bit部分
   __m256i a_lo = _mm512_extracti64x4_epi64(a, 0);
@@ -226,11 +250,11 @@ inline __m512i _mm512_dpbssd_epi32(__m512i src, __m512i a, __m512i b) {
   b = _mm512_inserti64x4(b, b_lo, 0);
   b = _mm512_inserti64x4(b, b_hi, 1);
 
-  // 取绝对值
+  // 取绝对值，将 signed a 转为 unsigned
   a = _mm512_abs_epi8(a);
 
-  // 进行dot-product计算
-  return _mm512_dpbusd_epi32(src, a, b);
+  // 使用兼容版本的 dpbusd (自动选择硬件或软件实现)
+  return _mm512_dpbusd_epi32_compat(src, a, b);
 }
 
 }  // namespace amx

@@ -28,7 +28,7 @@ option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.4.2)
+project(kt_kernel_ext VERSION 0.4.4)
 # Choose compilers BEFORE project() so CMake honors them
 if(USE_CONDA_TOOLCHAIN)
     if(NOT DEFINED ENV{CONDA_PREFIX} OR NOT EXISTS "$ENV{CONDA_PREFIX}")
@@ -378,7 +378,20 @@ if(HOST_IS_X86)
                 target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
             endforeach()
         endif()
-        list(APPEND ARCH_FLAGS -mfma -mf16c -mavx512bf16 -mavx512vnni)
+        # Note: AVX512 subset flags (-mavx512vnni, -mavx512bf16) are already added
+        # in the generic x86 detection block above (lines 276-289) when corresponding
+        # LLAMA_AVX512_* options are enabled. No need to add them again here.
+        # -mfma is already added by LLAMA_NATIVE (line 254), LLAMA_AVX*, or LLAMA_FMA blocks.
+        # Only add -mf16c if LLAMA_F16C is not already enabled.
+        if(NOT LLAMA_F16C)
+            list(APPEND ARCH_FLAGS -mf16c)
+        endif()
+        if(LLAMA_AVX512_VNNI)
+            message(STATUS "AVX512_VNNI enabled")
+        endif()
+        if(LLAMA_AVX512_BF16)
+            message(STATUS "AVX512_BF16 enabled")
+        endif()
     endif()
 endif()
 
