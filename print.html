@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-60c07ede.js";
+            window.path_to_searchindex_js = "searchindex-b538aa0e.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78fe5878.js"></script>
@@ -383,6 +383,7 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
 <li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode)</li>
+<li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="en/doc/en/Kimi-K2-Thinking-Native.html">Guide</a></li>
 </ul>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
@@ -393,6 +394,7 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <h3 id="option-1-install-from-pypi-recommended-for-most-users"><a class="header" href="#option-1-install-from-pypi-recommended-for-most-users">Option 1: Install from PyPI (Recommended for Most Users)</a></h3>
+<p>Coming soon…</p>
 <p>Choose the version matching your CUDA installation:</p>
 <pre><code class="language-bash"># For CUDA 11.8
 pip install kt-kernel==0.4.2.cu118
@@ -449,55 +451,50 @@ export KT_KERNEL_DEBUG=1
 python -c "import kt_kernel"
 </code></pre>
 <hr>
-<h3 id="option-2-install-from-source-for-amd-arm-or-custom-builds"><a class="header" href="#option-2-install-from-source-for-amd-arm-or-custom-builds">Option 2: Install from Source (For AMD, ARM, or Custom Builds)</a></h3>
-<p>If you need AMD (BLIS), ARM (KML), or custom CUDA versions, build from source:</p>
+<h3 id="option-2-install-from-source-for-local-use-or-custom-builds"><a class="header" href="#option-2-install-from-source-for-local-use-or-custom-builds">Option 2: Install from Source (For Local Use or Custom Builds)</a></h3>
+<p>Build from source for local installation or when you need AMD (BLIS), ARM (KML), or custom CUDA versions.</p>
 <h4 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h4>
-<p>First, initialize git submodules:</p>
+<p>First, initialize git submodules and create a conda environment:</p>
 <pre><code class="language-bash">git submodule update --init --recursive
-</code></pre>
-<h4 id="quick-installation"><a class="header" href="#quick-installation">Quick Installation</a></h4>
-<p>Step 0: Create and activate a conda environment (recommended):</p>
-<pre><code class="language-bash">conda create -n kt-kernel python=3.11 -y
+conda create -n kt-kernel python=3.11 -y
 conda activate kt-kernel
 </code></pre>
-<p>You can now install in two clear steps using the same script.</p>
-<p><strong>Option A: Two-step</strong> (specify dependencies installation and build separately)</p>
-<pre><code class="language-bash"># 1) Install system prerequisites (cmake, hwloc, pkg-config)
-./install.sh deps
-
-# 2) Build and install kt-kernel (auto-detects CPU instruction set)
-#    By default, the script cleans the local ./build directory before compiling
-./install.sh build
-</code></pre>
-<p><strong>Option B: One-step</strong></p>
+<h4 id="quick-installation-recommended"><a class="header" href="#quick-installation-recommended">Quick Installation (Recommended)</a></h4>
+<p>Simply run the install script - it will auto-detect your CPU and optimize for best performance:</p>
 <pre><code class="language-bash">./install.sh
 </code></pre>
-<p>The install script will:</p>
+<p><strong>What happens automatically:</strong></p>
 <ul>
-<li>Auto-detect CPU capabilities (AMX support)</li>
-<li>Install <code>cmake</code> via conda (if available)</li>
-<li>Install system dependencies (<code>libhwloc-dev</code>, <code>pkg-config</code>) based on your OS</li>
+<li>Auto-detects CPU capabilities (AMX, AVX512_VNNI, AVX512_BF16)</li>
+<li>Installs system dependencies (<code>cmake</code>, <code>libhwloc-dev</code>, <code>pkg-config</code>)</li>
+<li>Builds optimized binary for <strong>your CPU only</strong> (using <code>-march=native</code>)</li>
+<li><strong>Software fallbacks</strong>: Automatically enabled for CPUs without VNNI/BF16</li>
 </ul>
-<p><strong>What gets configured automatically:</strong></p>
-<ul>
-<li>AMX CPU detected → <code>NATIVE + AMX=ON</code></li>
-<li>No AMX detected → <code>NATIVE + AMX=OFF</code></li>
-</ul>
-<p>⚠️ <strong>Important for LLAMAFILE backend users:</strong>
-If you have an AMX-capable CPU but plan to use the LLAMAFILE backend, do NOT use the default auto-detection build.
-Use “manual mode” with <code>CPUINFER_CPU_INSTRUCT</code> set to <code>AVX512</code> or <code>AVX2</code> instead of <code>NATIVE</code> to avoid compilation issues (see below).</p>
-<p>⚠️ <strong>Important for BLIS AMD backend users:</strong>
-for the installation guide, see this <a href="https://github.com/kvcache-ai/ktransformers/issues/1601">issue</a></p>
-<h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
-<p>If you need specific build options (e.g., for LLAMAFILE backend, compatibility, or binary distribution):</p>
-<pre><code class="language-bash"># Example for LLAMAFILE backend on AMX CPU with AVX512
-export CPUINFER_CPU_INSTRUCT=AVX512  # Options: NATIVE, AVX512, AVX2, FANCY
-export CPUINFER_ENABLE_AMX=OFF       # Options: ON, OFF
-
-# Build only (skip auto-detection of instruction set)
-./install.sh build --manual
+<p><strong>Optional: Two-step installation</strong></p>
+<pre><code class="language-bash">./install.sh deps   # Install dependencies only
+./install.sh build  # Build and install kt-kernel
 </code></pre>
-<p>For advanced build options and binary distribution, see the <a href="#build-configuration">Build Configuration</a> section. If you encounter issues, refer to <a href="#error-troubleshooting">Error Troubleshooting</a>.</p>
+<p><strong>CPU Requirements by Backend:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Backend</th><th>Minimum CPU Requirement</th><th>Example CPUs</th><th>Notes</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>LLAMAFILE</strong></td><td>AVX2</td><td>Intel Haswell (2013+), AMD Zen+</td><td>Universal compatibility</td></tr>
+<tr><td><strong>RAWINT4</strong></td><td>AVX512F + AVX512BW</td><td>Intel Skylake-X (2017+), Ice Lake, Cascade Lake</td><td>Software fallbacks for VNNI/BF16</td></tr>
+<tr><td><strong>AMXINT4/INT8</strong></td><td>AMX</td><td>Intel Sapphire Rapids (2023+)</td><td>Best performance, requires AMX hardware</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Software Fallback Support (AVX512 backends):</strong></p>
+<ul>
+<li>✅ VNNI fallback: Uses AVX512BW instructions</li>
+<li>✅ BF16 fallback: Uses AVX512F instructions</li>
+<li>✅ Older AVX512 CPUs (Skylake-X, Cascade Lake) can run RAWINT4 with fallbacks</li>
+</ul>
+<p>⚠️ <strong>Portability Note:</strong> The default build is optimized for your specific CPU and may not work on different/older CPUs. For portable builds or binary distribution, see <a href="#manual-configuration-advanced">Manual Configuration</a> below.</p>
+<p>⚠️ <strong>AMD BLIS backend users:</strong> See <a href="https://github.com/kvcache-ai/ktransformers/issues/1601">installation guide</a> for AMD-specific setup.</p>
 <h2 id="verification"><a class="header" href="#verification">Verification</a></h2>
 <pre><code class="language-bash">python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 </code></pre>
@@ -778,9 +775,34 @@ batch_sizes = KTMoEWrapper.get_capture_batch_sizes()
 # Clear buffer cache to free memory
 KTMoEWrapper.clear_buffer_cache()
 </code></pre>
+<h3 id="manual-configuration-advanced"><a class="header" href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></h3>
+<p>For portable builds, binary distribution, or cross-machine deployment, you need to manually specify target instruction sets:</p>
+<pre><code class="language-bash"># General distribution (works on any AVX512 CPU from 2017+)
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+
+# Maximum compatibility (works on any CPU from 2013+)
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+
+# Modern CPUs only (Ice Lake+, Zen 4+)
+export CPUINFER_CPU_INSTRUCT=FANCY
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+</code></pre>
+<p><strong>Optional: Override VNNI/BF16 detection</strong></p>
+<pre><code class="language-bash"># Force enable/disable VNNI and BF16 (for testing fallbacks)
+export CPUINFER_ENABLE_AVX512_VNNI=OFF
+export CPUINFER_ENABLE_AVX512_BF16=OFF
+./install.sh
+</code></pre>
+<p>See <code>./install.sh --help</code> for all available options.</p>
+<hr>
 <h2 id="build-configuration"><a class="header" href="#build-configuration">Build Configuration</a></h2>
-<h3 id="manual-installation"><a class="header" href="#manual-installation">Manual Installation</a></h3>
-<p>If you prefer manual installation without the <code>install.sh</code> script, follow these steps:</p>
+<h3 id="manual-installation-without-installsh"><a class="header" href="#manual-installation-without-installsh">Manual Installation (Without install.sh)</a></h3>
+<p>If you prefer manual installation without the <code>install.sh</code> script:</p>
 <h4 id="1-install-system-dependencies"><a class="header" href="#1-install-system-dependencies">1. Install System Dependencies</a></h4>
 <p><strong>Prerequisites:</strong></p>
 <ul>
@@ -804,26 +826,33 @@ KTMoEWrapper.clear_buffer_cache()
 </table>
 </div>
 <p><strong>Instruction Set Details:</strong></p>
-<ul>
-<li><strong><code>NATIVE</code></strong>: Auto-detect and use all available CPU instructions (<code>-march=native</code>) - <strong>Recommended for best performance</strong></li>
-<li><strong><code>AVX512</code></strong>: Explicit AVX512 support for Skylake-SP and Cascade Lake</li>
-<li><strong><code>AVX2</code></strong>: AVX2 support for maximum compatibility</li>
-<li><strong><code>FANCY</code></strong>: AVX512 with full extensions (AVX512F/BW/DQ/VL/VNNI) for Ice Lake+ and Zen 4+. Use this when building pre-compiled binaries to distribute to users with modern CPUs. For local builds, prefer <code>NATIVE</code> for better performance.</li>
-</ul>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Option</th><th>Target CPUs</th><th>Use Case</th></tr>
+</thead>
+<tbody>
+<tr><td><strong><code>NATIVE</code></strong></td><td>Your specific CPU only</td><td>Local builds (best performance, <strong>default</strong>)</td></tr>
+<tr><td><strong><code>AVX512</code></strong></td><td>Skylake-X, Ice Lake, Cascade Lake, Zen 4+</td><td>General distribution</td></tr>
+<tr><td><strong><code>AVX2</code></strong></td><td>Haswell (2013) and newer</td><td>Maximum compatibility</td></tr>
+<tr><td><strong><code>FANCY</code></strong></td><td>Ice Lake+, Zen 4+</td><td>Modern CPUs with full AVX512 extensions</td></tr>
+</tbody>
+</table>
+</div>
 <p><strong>Example Configurations:</strong></p>
-<pre><code class="language-bash"># Maximum performance on AMX CPU
+<pre><code class="language-bash"># Local use - maximum performance (default behavior)
 export CPUINFER_CPU_INSTRUCT=NATIVE
-export CPUINFER_ENABLE_AMX=ON
+export CPUINFER_ENABLE_AMX=ON  # or OFF
 
-# AVX512 CPU without AMX
+# Distribution build - works on any AVX512 CPU
 export CPUINFER_CPU_INSTRUCT=AVX512
 export CPUINFER_ENABLE_AMX=OFF
 
-# Compatibility build
+# Maximum compatibility - works on CPUs since 2013
 export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 
-# Debug build for development
+# Debug build
 export CPUINFER_BUILD_TYPE=Debug
 export CPUINFER_VERBOSE=1
 </code></pre>
