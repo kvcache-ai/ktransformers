@@ -14,7 +14,7 @@ import os, sys, time, json, subprocess, platform
 os.environ["BLAS_NUM_THREADS"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 import numpy as np
 from tqdm import tqdm
 

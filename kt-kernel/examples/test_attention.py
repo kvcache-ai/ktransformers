@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Description  :  
+Description  :
 Author       : Jianwei Dong
 Date         : 2024-08-28 10:32:05
 Version      : 1.0.0
-LastEditors  : chenht2022 
+LastEditors  : chenht2022
 LastEditTime : 2024-08-28 10:32:05
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
 import os, sys
 import time
 
 sys.path.append(os.path.dirname(__file__) + "/../build")
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 from flash_attn import flash_attn_with_kvcache
 import torch
 
@@ -59,19 +59,11 @@ with torch.inference_mode(mode=True):
     local_kvcache = kt_kernel_ext.kvcache.KVCache(config)
 
     kvcaches = []
-    block_table = (
-        torch.arange(max_block_num, dtype=torch.int32, device="cpu")
-        .contiguous()
-        .view(1, -1)
-    )
+    block_table = torch.arange(max_block_num, dtype=torch.int32, device="cpu").contiguous().view(1, -1)
 
     for layer_idx in range(layer_num):
-        k_cache = torch.randn(
-            (1, cache_seqlen, kv_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
-        v_cache = torch.randn(
-            (1, cache_seqlen, kv_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
+        k_cache = torch.randn((1, cache_seqlen, kv_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
+        v_cache = torch.randn((1, cache_seqlen, kv_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
 
         CPUInfer.submit(
             local_kvcache.update_kvcache_fp16(
@@ -94,17 +86,11 @@ with torch.inference_mode(mode=True):
 
         k_cache = kvcaches[i % layer_num][0]
         v_cache = kvcaches[i % layer_num][1]
-        input = torch.randn(
-            (1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
-        output = torch.empty(
-            (1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu"
-        ).contiguous()
+        input = torch.randn((1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
+        output = torch.empty((1, 1, q_head_num, head_dim), dtype=torch.float16, device="cpu").contiguous()
 
         # attn_lse: (bsz, q_len, q_head_num)
-        attn_lse = torch.empty(
-            (1, 1, q_head_num), dtype=torch.float32, device="cpu"
-        ).contiguous()
+        attn_lse = torch.empty((1, 1, q_head_num), dtype=torch.float32, device="cpu").contiguous()
         input = input / 100
 
         CPUInfer.submit(
@@ -135,8 +121,6 @@ with torch.inference_mode(mode=True):
         )
         # print("torch output", t_output)
 
-        diff = torch.mean(torch.abs(output.to("cuda") - t_output)) / torch.mean(
-            torch.abs(t_output)
-        )
+        diff = torch.mean(torch.abs(output.to("cuda") - t_output)) / torch.mean(torch.abs(t_output))
         print("diff = ", diff)
         assert diff < 0.001

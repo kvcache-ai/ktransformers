@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 print("sys.path:", sys.path)
 
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 
 expert_num = 256
 hidden_size = 7168
