@@ -22,10 +22,10 @@ static inline void avx512_32xfp32_to_32xbf16(__m512* src0, __m512* src1, __m512i
   __m512i i1 = _mm512_castps_si512(*src1);
 
   // Round to nearest even: add 0x7FFF + ((val >> 16) & 1)
-  __m512i round0 = _mm512_add_epi32(_mm512_set1_epi32(0x7FFF),
-                                    _mm512_and_epi32(_mm512_srli_epi32(i0, 16), _mm512_set1_epi32(1)));
-  __m512i round1 = _mm512_add_epi32(_mm512_set1_epi32(0x7FFF),
-                                    _mm512_and_epi32(_mm512_srli_epi32(i1, 16), _mm512_set1_epi32(1)));
+  __m512i round0 =
+      _mm512_add_epi32(_mm512_set1_epi32(0x7FFF), _mm512_and_epi32(_mm512_srli_epi32(i0, 16), _mm512_set1_epi32(1)));
+  __m512i round1 =
+      _mm512_add_epi32(_mm512_set1_epi32(0x7FFF), _mm512_and_epi32(_mm512_srli_epi32(i1, 16), _mm512_set1_epi32(1)));
 
   i0 = _mm512_add_epi32(i0, round0);
   i1 = _mm512_add_epi32(i1, round1);

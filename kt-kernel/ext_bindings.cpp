@@ -229,8 +229,7 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 
   auto moe_cls = py::class_<MoeClass, MoE_Interface, std::shared_ptr<MoeClass>>(moe_module, name);
 
-  moe_cls
-      .def(py::init<GeneralMOEConfig>())
+  moe_cls.def(py::init<GeneralMOEConfig>())
       .def("warm_up_task", &MoeBindings::WarmUpBindings::cpuinfer_interface)
       .def("load_weights_task",
            py::overload_cast<std::shared_ptr<MoeClass>>(&MoeBindings::LoadWeightsBindings::cpuinfer_interface))
@@ -265,16 +264,15 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 
       static void inner(void* args) {
         Args* args_ = (Args*)args;
-        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe,
-                                 args_->gpu_tp_count, args_->gpu_experts_num,
-                                 args_->w13_weight_ptrs, args_->w13_scale_ptrs,
+        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe, args_->gpu_tp_count,
+                                 args_->gpu_experts_num, args_->w13_weight_ptrs, args_->w13_scale_ptrs,
                                  args_->w2_weight_ptrs, args_->w2_scale_ptrs);
       }
 
-      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe,
-                                                              int gpu_tp_count, int gpu_experts_num,
-                                                              py::list w13_weight_ptrs, py::list w13_scale_ptrs,
-                                                              py::list w2_weight_ptrs, py::list w2_scale_ptrs) {
+      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, int gpu_tp_count,
+                                                              int gpu_experts_num, py::list w13_weight_ptrs,
+                                                              py::list w13_scale_ptrs, py::list w2_weight_ptrs,
+                                                              py::list w2_scale_ptrs) {
         // Convert Python lists to std::vector<uintptr_t>
         std::vector<uintptr_t> w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec;
 
@@ -283,16 +281,15 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
         for (auto item : w2_weight_ptrs) w2_weight_vec.push_back(py::cast<uintptr_t>(item));
         for (auto item : w2_scale_ptrs) w2_scale_vec.push_back(py::cast<uintptr_t>(item));
 
-        Args* args = new Args{nullptr, moe.get(), gpu_tp_count, gpu_experts_num,
+        Args* args = new Args{nullptr,        moe.get(),     gpu_tp_count,  gpu_experts_num,
                               w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec};
         return std::make_pair((intptr_t)&inner, (intptr_t)args);
       }
     };
 
     moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
-             py::arg("gpu_tp_count"), py::arg("gpu_experts_num"),
-             py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
-             py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
+                py::arg("gpu_tp_count"), py::arg("gpu_experts_num"), py::arg("w13_weight_ptrs"),
+                py::arg("w13_scale_ptrs"), py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
 #endif
 }
