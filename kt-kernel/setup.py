@@ -194,7 +194,7 @@ class CMakeBuild(build_ext):
                 info["raw"]["flags"] = flags
 
                 # feature summary
-                if any(f in flags or f in low for f in ["avx512f", "avx512bw", "avx512dq", "avx512vl", "avx512vnni"]):
+                if any(f in flags or f in low for f in ["avx512f", "avx512bw", "avx512dq", "avx512vl"]):
                     info["features"].add("AVX512")
                 if "avx2" in flags or "avx2" in low:
                     info["features"].add("AVX2")
@@ -204,6 +204,16 @@ class CMakeBuild(build_ext):
                     for f in ["amx_bf16", "amx_int8", "amx_tile", "amx-bf16", "amx-int8", "amx-tile"]
                 ):
                     info["features"].add("AMX")
+
+                # Fine-grained AVX512 subset detection
+                if any(f in flags for f in ["avx512_vnni", "avx512vnni"]):
+                    info["features"].add("AVX512_VNNI")
+                if any(f in flags for f in ["avx512_bf16", "avx512bf16"]):
+                    info["features"].add("AVX512_BF16")
+                if any(f in flags for f in ["avx512_vbmi", "avx512vbmi"]):
+                    info["features"].add("AVX512_VBMI")
+                if any(f in flags for f in ["avx512_vpopcntdq", "avx512vpopcntdq"]):
+                    info["features"].add("AVX512_VPOPCNTDQ")
 
             elif sysname == "Darwin":
                 # macOS: Apple Silicon (arm64) vs Intel
@@ -229,133 +239,6 @@ class CMakeBuild(build_ext):
         return info
 
     def build_extension(self, ext: CMakeExtension):
-        """
-        Main entry point for building the extension.
-
-        Checks if multi-variant build is requested (CPUINFER_BUILD_ALL_VARIANTS=1)
-        and routes to the appropriate build method.
-        """
-        if _env_get_bool("CPUINFER_BUILD_ALL_VARIANTS", False):
-            # Build all 3 variants (AMX, AVX512, AVX2)
-            self.build_multi_variants(ext)
-        else:
-            # Build single variant (original behavior)
-            self._build_single_variant(ext)
-
-    def build_multi_variants(self, ext: CMakeExtension):
-        """
-        Build all 3 CPU variants (AMX, AVX512, AVX2) in a single wheel.
-
-        This method is called when CPUINFER_BUILD_ALL_VARIANTS=1 is set.
-        It builds three separate extensions with different CPU instruction sets
-        and renames the output .so files with variant suffixes.
-        """
-        print("=" * 80)
-        print("Building kt-kernel with ALL CPU variants (AMX, AVX512, AVX2)")
-        print("=" * 80)
-
-        # Define the 3 variants to build
-        variants = [
-            {
-                'name': 'amx',
-                'env': {
-                    'CPUINFER_CPU_INSTRUCT': 'NATIVE',
-                    'CPUINFER_ENABLE_AMX': 'ON',
-                },
-                'description': 'AMX variant (Intel Sapphire Rapids+)'
-            },
-            {
-                'name': 'avx512',
-                'env': {
-                    'CPUINFER_CPU_INSTRUCT': 'AVX512',
-                    'CPUINFER_ENABLE_AMX': 'OFF',
-                },
-                'description': 'AVX512 variant (Intel Skylake-X/Ice Lake/Cascade Lake)'
-            },
-            {
-                'name': 'avx2',
-                'env': {
-                    'CPUINFER_CPU_INSTRUCT': 'AVX2',
-                    'CPUINFER_ENABLE_AMX': 'OFF',
-                },
-                'description': 'AVX2 variant (maximum compatibility)'
-            }
-        ]
-
-        # Save original environment
-        original_env = os.environ.copy()
-
-        extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
-
-        for i, variant in enumerate(variants, 1):
-            print(f"\n{'=' * 80}")
-            print(f"Building variant {i}/3: {variant['description']}")
-            print(f"{'=' * 80}\n")
-
-            # Set variant-specific environment variables
-            os.environ.update(variant['env'])
-
-            # Use a unique build directory for this variant
-            original_build_temp = self.build_temp
-            self.build_temp = str(Path(self.build_temp) / f"variant_{variant['name']}")
-
-            try:
-                # Build this variant (calls the single-variant build logic)
-                self._build_single_variant(ext)
-
-                # Rename the generated .so file to include variant suffix
-                # Original: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
-                # Renamed:  _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
-
-                # Extract the base extension name (without package prefix)
-                # ext.name is "kt_kernel.kt_kernel_ext", we want "kt_kernel_ext"
-                base_ext_name = ext.name.split('.')[-1]
-
-                # Find the newly built .so file
-                import time
-                time.sleep(0.5)  # Give filesystem time to sync
-
-                built_candidates = [
-                    f for f in Path(extdir).glob("*.so")
-                    if f.name.startswith(base_ext_name) and not f.name.startswith(f"_{base_ext_name}_")
-                ]
-
-                if not built_candidates:
-                    print(f"WARNING: No .so file found for {base_ext_name} in {extdir}")
-                    print(f"Files in {extdir}:")
-                    for f in Path(extdir).glob("*.so"):
-                        print(f"  {f.name}")
-
-                for so_file in built_candidates:
-                    # Extract the python tag part (e.g., ".cpython-311-x86_64-linux-gnu.so")
-                    suffix = so_file.name.replace(base_ext_name, "")
-                    new_name = f"_{base_ext_name}_{variant['name']}{suffix}"
-                    new_path = extdir / new_name
-
-                    print(f"-- Renaming {so_file.name} -> {new_name}")
-                    if new_path.exists():
-                        print(f"   WARNING: Target file already exists, removing: {new_path}")
-                        new_path.unlink()
-                    so_file.rename(new_path)
-                    print(f"   ✓ Successfully renamed to {new_name}")
-
-            finally:
-                # Restore build_temp for next iteration
-                self.build_temp = original_build_temp
-
-        # Restore original environment
-        os.environ.clear()
-        os.environ.update(original_env)
-
-        print(f"\n{'=' * 80}")
-        print("✓ Successfully built all 3 CPU variants")
-        print(f"{'=' * 80}\n")
-
-    def _build_single_variant(self, ext: CMakeExtension):
-        """
-        Build a single CPU variant. This contains the core build logic
-        extracted from the original build_extension method.
-        """
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
@@ -403,10 +286,6 @@ class CMakeBuild(build_ext):
             auto_cuda = detect_cuda_toolkit()
             os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
             print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
-        elif cuda_env:
-            print("-- CPUINFER_USE_CUDA explicitly enabled")
-        else:
-            print("-- CPUINFER_USE_CUDA explicitly disabled")
 
         extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
         cfg = default_build_type()
@@ -460,6 +339,17 @@ class CMakeBuild(build_ext):
                 print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
             else:
                 print(f"-- CPUINFER_CPU_INSTRUCT={cpu_mode}; not auto-enabling AMX/AVX512 umbrella")
+
+        # Fine-grained AVX512 subset flags: only enable if CPU actually supports them
+        # These are passed to CMake to conditionally add compiler flags
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VNNI", "LLAMA_AVX512_VNNI"):
+            if "AVX512_VNNI" in d["features"]:
+                cmake_args.append("-DLLAMA_AVX512_VNNI=ON")
+                print("-- AVX512_VNNI detected; enabling (-DLLAMA_AVX512_VNNI=ON)")
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_BF16", "LLAMA_AVX512_BF16"):
+            if "AVX512_BF16" in d["features"]:
+                cmake_args.append("-DLLAMA_AVX512_BF16=ON")
+                print("-- AVX512_BF16 detected; enabling (-DLLAMA_AVX512_BF16=ON)")
 
         # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
         # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)
@@ -561,6 +451,7 @@ class CMakeBuild(build_ext):
 ################################################################################
 # Version (simple). If you later add a python package dir, you can read from it.
 ################################################################################
+
 
 # Import version from shared version.py at project root
 _version_file = Path(__file__).resolve().parent.parent / "version.py"

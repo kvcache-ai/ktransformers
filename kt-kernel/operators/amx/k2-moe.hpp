@@ -94,10 +94,10 @@ class AMX_K2_MOE_TP {
   }
 #endif
 
-  inline void dump_buffer_b(const std::string &quantization_type, int expert_idx, const std::string &matrix_type,
-                            typename T::BufferB *buffer) {
-    auto &quant_config = config_.quant_config;
-    int &group_size = quant_config.group_size;
+  inline void dump_buffer_b(const std::string& quantization_type, int expert_idx, const std::string& matrix_type,
+                            typename T::BufferB* buffer) {
+    auto& quant_config = config_.quant_config;
+    int& group_size = quant_config.group_size;
 
     printf("[DUMP_BUFFER_B] TP%d %s Expert%d %s:\n", tp_part_idx, quantization_type.c_str(), expert_idx,
            matrix_type.c_str());
@@ -110,7 +110,7 @@ class AMX_K2_MOE_TP {
       cols = config_.hidden_size;
       num_groups = cols / group_size;
       scale_elem_count = num_groups * rows;
-    } else { // down
+    } else {  // down
       rows = config_.hidden_size;
       cols = config_.intermediate_size;
       num_groups = cols / group_size;
@@ -133,8 +133,8 @@ class AMX_K2_MOE_TP {
       printf("\n");
     }
     // Dump quantized weights (as hex uint8)
-    size_t weight_size = (rows * cols) / 2; // INT4 packed
-    uint8_t *weight_ptr = (uint8_t *)buffer->b;
+    size_t weight_size = (rows * cols) / 2;  // INT4 packed
+    uint8_t* weight_ptr = (uint8_t*)buffer->b;
 
     printf("  Weights[first 32 bytes]: ");
     for (int i = 0; i < std::min(32, (int)weight_size); i++) {
@@ -232,10 +232,12 @@ class AMX_K2_MOE_TP {
     // (config_.expert_num * T::BufferA::M_STEP) in pool_count_ is to ensure padding for each experts.
     pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::BufferA::M_STEP;
 
-    gate_up_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
+    gate_up_ba_pool_bytes_ =
+        (T::BufferA::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
     gate_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
     up_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
-    down_ba_pool_bytes_ = (T::BufferA::required_size(pool_count_, config_.intermediate_size, group_size)) + pool_count_ * 64;
+    down_ba_pool_bytes_ =
+        (T::BufferA::required_size(pool_count_, config_.intermediate_size, group_size)) + pool_count_ * 64;
     down_bc_pool_bytes_ = (T::BufferC::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
 
     mem_requests.append_pointer(&gate_up_ba_pool_, gate_up_ba_pool_bytes_);
@@ -276,8 +278,7 @@ class AMX_K2_MOE_TP {
               ith, nth);
           // up part
           up_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config_.up_proj +
-                  ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
+              (uint8_t*)config_.up_proj + ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
               ith, nth);
         },
         nullptr);
@@ -302,19 +303,15 @@ class AMX_K2_MOE_TP {
         [this, physical_to_logical_map](int task_id) {
           uint64_t expert_idx = task_id;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-          size_t scale_elem_count =
-              (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
+          size_t scale_elem_count = (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
 
           // convert scales from BF16 to FP32
           convert_or_copy(gate_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
+                          (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
           convert_or_copy(up_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
+                          (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
           convert_or_copy(down_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
+                          (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count), scale_elem_count);
         },
         nullptr);
     // dump_buffer_b("native", 0, "down", down_bb_[0].get());
@@ -323,10 +320,10 @@ class AMX_K2_MOE_TP {
   // Reconstruct weights for all experts to the output buffers
   // This function handles the TP-specific portion of the reconstruction for all experts
   void write_weights_to_buffer(int gpu_tp_count, int cpu_tp_count, int num_experts, const GeneralMOEConfig& full_config,
-                                const std::vector<uintptr_t>& w13_weight_ptrs,
-                                const std::vector<uintptr_t>& w13_scale_ptrs,
-                                const std::vector<uintptr_t>& w2_weight_ptrs,
-                                const std::vector<uintptr_t>& w2_scale_ptrs) const {
+                               const std::vector<uintptr_t>& w13_weight_ptrs,
+                               const std::vector<uintptr_t>& w13_scale_ptrs,
+                               const std::vector<uintptr_t>& w2_weight_ptrs,
+                               const std::vector<uintptr_t>& w2_scale_ptrs) const {
     const int group_size = config_.quant_config.group_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -379,18 +376,19 @@ class AMX_K2_MOE_TP {
             // Gate (first part of w13 for this expert)
             uint8_t* gate_weight_src = (uint8_t*)gate_bb_[expert_id]->b;
             float* gate_scale_src = gate_bb_[expert_id]->d;
-            std::memcpy(w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight,
-                       gate_weight_src, cpu_tp_weight_bytes);
-            convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale),
-                           gate_scale_src, cpu_tp_scale_elem_count);
+            std::memcpy(w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight, gate_weight_src,
+                        cpu_tp_weight_bytes);
+            convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale), gate_scale_src,
+                            cpu_tp_scale_elem_count);
 
             // Up (second part of w13 for this expert, immediately after gate)
             uint8_t* up_weight_src = (uint8_t*)up_bb_[expert_id]->b;
             float* up_scale_src = up_bb_[expert_id]->d;
             std::memcpy(w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight + gpu_tp_weight_bytes,
-                       up_weight_src, cpu_tp_weight_bytes);
-            convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale + gpu_tp_scale_elem_count),
-                           up_scale_src, cpu_tp_scale_elem_count);
+                        up_weight_src, cpu_tp_weight_bytes);
+            convert_or_copy(
+                (ggml_bf16_t*)(w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale + gpu_tp_scale_elem_count),
+                up_scale_src, cpu_tp_scale_elem_count);
 
             // Down (w2) - need to handle column-wise slicing
             // The down matrix is transposed compared to gate/up, so we need to extract by columns
@@ -406,17 +404,16 @@ class AMX_K2_MOE_TP {
               size_t gpu_col_slice_offset = local_idx * (config_.intermediate_size >> 1);
 
               std::memcpy(w2_weight_dst + w2_expert_base_weight + gpu_col_offset + gpu_col_slice_offset,
-                         (uint8_t*)down_bb_[expert_id]->b + cpu_col_offset,
-                         config_.intermediate_size / 2);
+                          (uint8_t*)down_bb_[expert_id]->b + cpu_col_offset, config_.intermediate_size / 2);
 
               // Same for scales
               size_t gpu_scale_col_offset = col * ((full_config.intermediate_size / gpu_tp_count) / group_size);
               size_t cpu_scale_col_offset = col * (config_.intermediate_size / group_size);
               size_t gpu_scale_slice_offset = local_idx * (config_.intermediate_size / group_size);
 
-              convert_or_copy((ggml_bf16_t*)(w2_scale_dst + w2_expert_base_scale + gpu_scale_col_offset + gpu_scale_slice_offset),
-                             down_bb_[expert_id]->d + cpu_scale_col_offset,
-                             config_.intermediate_size / group_size);
+              convert_or_copy(
+                  (ggml_bf16_t*)(w2_scale_dst + w2_expert_base_scale + gpu_scale_col_offset + gpu_scale_slice_offset),
+                  down_bb_[expert_id]->d + cpu_scale_col_offset, config_.intermediate_size / group_size);
             }
           },
           nullptr);
@@ -460,16 +457,15 @@ class AMX_K2_MOE_TP {
             // Gate (first part of w13 for this expert)
             uint8_t* gate_weight_src = (uint8_t*)gate_bb_[expert_id]->b + cpu_offset_weight;
             float* gate_scale_src = gate_bb_[expert_id]->d + cpu_offset_scale;
-            std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight,
-                        gate_weight_src, data_per_gpu_tp_weight);
-            convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_gpu_expert_offset_scale),
-                            gate_scale_src, data_per_gpu_tp_scale);
+            std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight, gate_weight_src, data_per_gpu_tp_weight);
+            convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_gpu_expert_offset_scale), gate_scale_src,
+                            data_per_gpu_tp_scale);
 
             // Up (second part of w13 for this expert, immediately after gate)
             uint8_t* up_weight_src = (uint8_t*)up_bb_[expert_id]->b + cpu_offset_weight;
             float* up_scale_src = up_bb_[expert_id]->d + cpu_offset_scale;
-            std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight + gpu_tp_weight_bytes,
-                        up_weight_src, data_per_gpu_tp_weight);
+            std::memcpy(w13_weight_dst + w13_gpu_expert_offset_weight + gpu_tp_weight_bytes, up_weight_src,
+                        data_per_gpu_tp_weight);
             convert_or_copy((ggml_bf16_t*)(w13_scale_dst + w13_gpu_expert_offset_scale + gpu_tp_scale_elem_count),
                             up_scale_src, data_per_gpu_tp_scale);
 
@@ -477,16 +473,20 @@ class AMX_K2_MOE_TP {
             // The down matrix is transposed compared to gate/up, so we need to extract by columns
             for (size_t col = 0; col < config_.hidden_size; col++) {
               // Calculate the offset within the column for this GPU TP part
-              size_t col_offset_weight = (col * config_.intermediate_size / 2) + (local_gpu_idx * data_per_gpu_tp_weight / config_.hidden_size);
-              size_t col_offset_scale = (col * (config_.intermediate_size / group_size)) + (local_gpu_idx * data_per_gpu_tp_scale / config_.hidden_size);
+              size_t col_offset_weight = (col * config_.intermediate_size / 2) +
+                                         (local_gpu_idx * data_per_gpu_tp_weight / config_.hidden_size);
+              size_t col_offset_scale = (col * (config_.intermediate_size / group_size)) +
+                                        (local_gpu_idx * data_per_gpu_tp_scale / config_.hidden_size);
 
               // Copy weights column by column
-              std::memcpy(w2_weight_dst + w2_gpu_expert_offset_weight + (col * (config_.intermediate_size / gpu_tps_per_cpu_tp) / 2),
+              std::memcpy(w2_weight_dst + w2_gpu_expert_offset_weight +
+                              (col * (config_.intermediate_size / gpu_tps_per_cpu_tp) / 2),
                           (uint8_t*)down_bb_[expert_id]->b + col_offset_weight,
                           (config_.intermediate_size / gpu_tps_per_cpu_tp) / 2);
 
               // Copy scales column by column
-              convert_or_copy((ggml_bf16_t*)(w2_scale_dst + w2_gpu_expert_offset_scale + col * ((config_.intermediate_size / gpu_tps_per_cpu_tp) / group_size)),
+              convert_or_copy((ggml_bf16_t*)(w2_scale_dst + w2_gpu_expert_offset_scale +
+                                             col * ((config_.intermediate_size / gpu_tps_per_cpu_tp) / group_size)),
                               down_bb_[expert_id]->d + col_offset_scale,
                               (config_.intermediate_size / gpu_tps_per_cpu_tp) / group_size);
             }
@@ -587,8 +587,7 @@ class AMX_K2_MOE_TP {
       m_local_down_output_ptr_[i] = m_local_down_output_ + offset * config_.hidden_size;
       offset += m_local_num_[i];
 
-      if (m_local_num_[i] == 0)
-        continue;
+      if (m_local_num_[i] == 0) continue;
       size_t max_m = (m_local_num_[i] + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[i]->max_m = max_m;
       gate_up_ba_[i]->set_data(gate_up_ba_pool_ptr);
@@ -801,7 +800,8 @@ class AMX_K2_MOE_TP {
         down_time, weight_time, forward_total_time, max_local_num, qlen);
 #endif
     // for (int i = 0; i < qlen; i ++)
-    //   forward_decode(k, expert_ids + i * k, weights + i * k, (ggml_bf16_t*)input + i * config_.hidden_size, (float*)output + i * config_.hidden_size);
+    //   forward_decode(k, expert_ids + i * k, weights + i * k, (ggml_bf16_t*)input + i * config_.hidden_size,
+    //   (float*)output + i * config_.hidden_size);
   }
 
   void forward_decode(int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
@@ -826,7 +826,7 @@ class AMX_K2_MOE_TP {
       m_expert_id_map_[activated_expert] = expert_ids[i];
       activated_expert++;
     }
-    
+
     size_t offset = 0;
     for (int i = 0; i < activated_expert; i++) {
       auto expert_idx = m_expert_id_map_[i];
@@ -912,9 +912,9 @@ class AMX_K2_MOE_TP {
             amx::vec_mul_kgroup(qlen, config_.intermediate_size, config_.hidden_size, group_size, gate_up_ba_[0],
                                 gate_bb_[expert_idx], gate_bc_[expert_idx], ith, nth);
             gate_bc_[expert_idx]->to_mat(qlen, m_local_gate_output_ptr_[expert_idx], ith, nth);
-      }
-    },
-    nullptr);
+          }
+        },
+        nullptr);
 
 #ifdef DEBUG_K2_MOE
     if (activated_expert > 0) {
@@ -971,7 +971,6 @@ class AMX_K2_MOE_TP {
       }
     }
 
-    
 #ifdef FORWARD_TIME_PROFILE
     {
       auto now_time = std::chrono::high_resolution_clock::now();
@@ -1056,9 +1055,9 @@ class AMX_K2_MOE_TP {
         }
         __m512 weight = _mm512_set1_ps(weights[j]);
         __m512 down_output0, down_output1;
-        avx512_32xbf16_to_32xfp32((__m512i*)(m_local_down_output_ptr_[expert_ids[j]] +
-                                              m_local_pos_[0][j] * config_.hidden_size + e),
-                                  &down_output0, &down_output1);
+        avx512_32xbf16_to_32xfp32(
+            (__m512i*)(m_local_down_output_ptr_[expert_ids[j]] + m_local_pos_[0][j] * config_.hidden_size + e),
+            &down_output0, &down_output1);
         x0 = _mm512_fmadd_ps(down_output0, weight, x0);
         x1 = _mm512_fmadd_ps(down_output1, weight, x1);
       }
@@ -1151,28 +1150,26 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
 
               // TP-slicing for gate and up (row-major slicing)
               memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
-                     src_gate + ((i * weight_elem_count) >> 1),
-                     (weight_elem_count >> 1));
+                     src_gate + ((i * weight_elem_count) >> 1), (weight_elem_count >> 1));
 
               memcpy((uint8_t*)tpc.up_proj + ((expert_id * weight_elem_count) >> 1),
-                     src_up + ((i * weight_elem_count) >> 1),
-                     (weight_elem_count >> 1));
+                     src_up + ((i * weight_elem_count) >> 1), (weight_elem_count >> 1));
 
               memcpy((ggml_bf16_t*)tpc.gate_scale + (expert_id * scales_elem_count),
-                     src_gate_scale + (i * scales_elem_count),
-                     sizeof(ggml_bf16_t) * scales_elem_count);
+                     src_gate_scale + (i * scales_elem_count), sizeof(ggml_bf16_t) * scales_elem_count);
 
               memcpy((ggml_bf16_t*)tpc.up_scale + (expert_id * scales_elem_count),
-                     src_up_scale + (i * scales_elem_count),
-                     sizeof(ggml_bf16_t) * scales_elem_count);
+                     src_up_scale + (i * scales_elem_count), sizeof(ggml_bf16_t) * scales_elem_count);
 
               // TP-slicing for down (by column)
               for (size_t col = 0; col < config.hidden_size; col++) {
                 memcpy((uint8_t*)tpc.down_proj + ((expert_id * weight_elem_count + col * tpc.intermediate_size) >> 1),
                        src_down + ((col * config.intermediate_size + i * tpc.intermediate_size) >> 1),
                        (tpc.intermediate_size >> 1));
-                memcpy((ggml_bf16_t*)tpc.down_scale + (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
-                       src_down_scale + (col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
+                memcpy((ggml_bf16_t*)tpc.down_scale +
+                           (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
+                       src_down_scale +
+                           (col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
                        sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
               }
             },
@@ -1197,43 +1194,45 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
         if (tps[i]->config_.load == false) {
           pool->get_subpool(i)->do_work_stealing_job(
               tpc.expert_num, nullptr,
-              [&](int expert_id_) { // weight and scale are all in col majored.
+              [&](int expert_id_) {  // weight and scale are all in col majored.
                 size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
                 // weight and scale TP-slicing for gate and up
                 memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
-                        (uint8_t*)config.gate_proj +
-                            ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
-                        ((sizeof(uint8_t) * weight_elem_count) >> 1));
+                       (uint8_t*)config.gate_proj +
+                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                       ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
                 memcpy((uint8_t*)tpc.up_proj + ((expert_id * weight_elem_count) >> 1),
-                        (uint8_t*)config.up_proj +
-                            ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
-                        ((sizeof(uint8_t) * weight_elem_count) >> 1));
+                       (uint8_t*)config.up_proj +
+                           ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                       ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
                 memcpy((ggml_bf16_t*)tpc.gate_scale + (expert_id * scales_elem_count),
-                        (ggml_bf16_t*)config.gate_scale +
-                            (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+                       (ggml_bf16_t*)config.gate_scale +
+                           (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
                             i * scales_elem_count),
-                          sizeof(ggml_bf16_t) * scales_elem_count);
+                       sizeof(ggml_bf16_t) * scales_elem_count);
 
                 memcpy((ggml_bf16_t*)tpc.up_scale + (expert_id * scales_elem_count),
-                        (ggml_bf16_t*)config.up_scale +
-                            (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+                       (ggml_bf16_t*)config.up_scale +
+                           (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
                             i * scales_elem_count),
-                          sizeof(ggml_bf16_t) * scales_elem_count);
+                       sizeof(ggml_bf16_t) * scales_elem_count);
 
                 // weight and scale TP-slicing for down (by column)
                 for (size_t col = 0; col < config.hidden_size; col++) {
                   memcpy((uint8_t*)tpc.down_proj + ((expert_id * weight_elem_count + col * tpc.intermediate_size) >> 1),
-                          (uint8_t*)config.down_proj + ((expert_id * config.intermediate_size * config.hidden_size +
+                         (uint8_t*)config.down_proj + ((expert_id * config.intermediate_size * config.hidden_size +
                                                         col * config.intermediate_size + i * tpc.intermediate_size) >>
-                                                        1),
-                          (sizeof(uint8_t) * tpc.intermediate_size) >> 1);
-                  memcpy((ggml_bf16_t*)tpc.down_scale + (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
-                          (ggml_bf16_t*)config.down_scale + ((expert_id * (config.intermediate_size / group_size) * config.hidden_size) +
-                                                              col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
-                          sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
+                                                       1),
+                         (sizeof(uint8_t) * tpc.intermediate_size) >> 1);
+                  memcpy((ggml_bf16_t*)tpc.down_scale +
+                             (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
+                         (ggml_bf16_t*)config.down_scale +
+                             ((expert_id * (config.intermediate_size / group_size) * config.hidden_size) +
+                              col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
+                         sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
                 }
               },
               nullptr);
@@ -1245,7 +1244,8 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
 #ifdef LOAD_TIME_PROFILE
     {
       auto load_now_time = std::chrono::high_resolution_clock::now();
-      alloc_and_tp_slice_time = std::chrono::duration_cast<std::chrono::microseconds>(load_now_time - load_last).count();
+      alloc_and_tp_slice_time =
+          std::chrono::duration_cast<std::chrono::microseconds>(load_now_time - load_last).count();
       load_last = load_now_time;
     }
 #endif
@@ -1277,9 +1277,11 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
       cleanup_time = std::chrono::duration_cast<std::chrono::microseconds>(load_now_time - load_last).count();
     }
     auto load_end_time = std::chrono::high_resolution_clock::now();
-    auto load_total_time = std::chrono::duration_cast<std::chrono::microseconds>(load_end_time - load_start_time).count();
+    auto load_total_time =
+        std::chrono::duration_cast<std::chrono::microseconds>(load_end_time - load_start_time).count();
     printf(
-        "[K2 MoE Load Weights] tp_count: %d, alloc_and_tp_slice: %ld us, tps_load_weights: %ld us, cleanup: %ld us, total: %ld us\n",
+        "[K2 MoE Load Weights] tp_count: %d, alloc_and_tp_slice: %ld us, tps_load_weights: %ld us, cleanup: %ld us, "
+        "total: %ld us\n",
         tp_count, alloc_and_tp_slice_time, tps_load_time, cleanup_time, load_total_time);
 #endif
 
@@ -1307,15 +1309,13 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE_Common<AMX_K2_MOE_TP<K>> {
     auto& config = this->config;
     auto pool = config.pool;
     // Each TP part writes to its corresponding buffer
-    pool->dispense_backend()->do_numa_job([this, pool, gpu_tp_count, gpu_experts_num,
-      w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs](int numa_id) {
+    pool->dispense_backend()->do_numa_job([this, pool, gpu_tp_count, gpu_experts_num, w13_weight_ptrs, w13_scale_ptrs,
+                                           w2_weight_ptrs, w2_scale_ptrs](int numa_id) {
       // Note: w13 combines gate and up projections
       // Split w13 pointers for gate and up
-      this->tps[numa_id]->write_weights_to_buffer(
-          gpu_tp_count, this->tp_count,
-          gpu_experts_num, this->config,
-          w13_weight_ptrs, w13_scale_ptrs, //gate + up use w13
-          w2_weight_ptrs, w2_scale_ptrs);    // down uses w2
+      this->tps[numa_id]->write_weights_to_buffer(gpu_tp_count, this->tp_count, gpu_experts_num, this->config,
+                                                  w13_weight_ptrs, w13_scale_ptrs,  // gate + up use w13
+                                                  w2_weight_ptrs, w2_scale_ptrs);   // down uses w2
     });
   }
 
