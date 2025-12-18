@@ -19,3 +19,6 @@ sparse_logs/
 build-cm/
 *.so
 sparse_logs/
+# Test executables
+operators/amx/test/*-test
+!operators/amx/test/*-test.cpp

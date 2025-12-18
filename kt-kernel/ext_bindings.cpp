@@ -37,7 +37,9 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
 #include "operators/amx/k2-moe.hpp"
+#include "operators/amx/nvfp4-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
+#include "operators/amx/la/nvfp4_kernel.hpp"
 #include "operators/amx/moe.hpp"
 #endif
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
@@ -565,6 +567,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
+  bind_moe_module<NVFP4_MOE_TP<nvfp4::GemmKernelNVFP4>>(moe_module, "NVFP4_MOE");
 #endif
 #if defined(USE_MOE_KERNEL)
   bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt8, _is_plain_>>(moe_module, "Int8_KERNEL_MOE");

@@ -29,8 +29,8 @@ void test_fp4_quantization() {
 
     std::cout << "Testing float <-> E2M1 conversion:" << std::endl;
     for (float val : test_values) {
-        uint8_t e2m1 = amx::float_to_e2m1(val);
-        float recovered = amx::e2m1_to_float(e2m1);
+        uint8_t e2m1 = nvfp4::float_to_e2m1(val);
+        float recovered = nvfp4::e2m1_to_float(e2m1);
         float error = std::abs(val - recovered);
 
         printf("  %.2f -> E2M1(%02x) -> %.2f, error: %.4f\n",
@@ -61,7 +61,7 @@ void test_block_quantization() {
 
     // Quantize using NVFP4Block
     const int num_blocks = k / 16;
-    std::vector<amx::NVFP4Block> blocks(num_blocks);
+    std::vector<nvfp4::NVFP4Block> blocks(num_blocks);
     for (int blk = 0; blk < num_blocks; blk++) {
         blocks[blk].quantize(test_data.data() + blk * 16);
     }
@@ -100,10 +100,10 @@ void test_buffer_b_loading() {
     const int n = 128;
     const int k = 256;
 
-    size_t buffer_size = amx::BufferBNVFP4Impl<amx::GemmKernelNVFP4>::required_size(n, k);
+    size_t buffer_size = nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(n, k);
     void* buffer = std::aligned_alloc(64, buffer_size);
 
-    auto buf = std::make_shared<amx::BufferBNVFP4Impl<amx::GemmKernelNVFP4>>(n, k, buffer);
+    auto buf = std::make_shared<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>(n, k, buffer);
 
     printf("BufferB created: n=%d, k=%d, buffer_size=%zu bytes\n",
            n, k, buffer_size);
@@ -135,10 +135,10 @@ void test_buffer_a_quantization() {
     const int max_m = 32;
     const int k = 256;
 
-    size_t buffer_size = amx::BufferANVFP4Impl<amx::GemmKernelNVFP4>::required_size(max_m, k);
+    size_t buffer_size = nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, k);
     void* buffer = std::aligned_alloc(64, buffer_size);
 
-    auto buf = std::make_shared<amx::BufferANVFP4Impl<amx::GemmKernelNVFP4>>(max_m, k, buffer);
+    auto buf = std::make_shared<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>(max_m, k, buffer);
 
     printf("BufferA created: max_m=%d, k=%d, buffer_size=%zu bytes\n",
            max_m, k, buffer_size);
@@ -162,7 +162,7 @@ void test_buffer_a_quantization() {
     std::cout << "Sample block scale values (FP8 E4M3):" << std::endl;
     for (int i = 0; i < std::min(4, max_m * k / 16); i++) {
         uint8_t scale_fp8 = buf->block_scales[i];
-        float scale_f32 = amx::fp8_e4m3_to_float(scale_fp8);
+        float scale_f32 = nvfp4::fp8_e4m3_to_float(scale_fp8);
         printf("  block[%d]: fp8=%02x, f32=%.6f\n", i, scale_fp8, scale_f32);
     }
 
@@ -179,17 +179,17 @@ void test_matrix_multiplication() {
     const int k = 256;
 
     // Allocate buffers
-    size_t ba_size = amx::BufferANVFP4Impl<amx::GemmKernelNVFP4>::required_size(m, k);
-    size_t bb_size = amx::BufferBNVFP4Impl<amx::GemmKernelNVFP4>::required_size(n, k);
-    size_t bc_size = amx::BufferCNVFP4Impl<amx::GemmKernelNVFP4>::required_size(m, n);
+    size_t ba_size = nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(m, k);
+    size_t bb_size = nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(n, k);
+    size_t bc_size = nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(m, n);
 
     void* ba_buffer = std::aligned_alloc(64, ba_size);
     void* bb_buffer = std::aligned_alloc(64, bb_size);
     void* bc_buffer = std::aligned_alloc(64, bc_size);
 
-    auto ba = std::make_shared<amx::BufferANVFP4Impl<amx::GemmKernelNVFP4>>(m, k, ba_buffer);
-    auto bb = std::make_shared<amx::BufferBNVFP4Impl<amx::GemmKernelNVFP4>>(n, k, bb_buffer);
-    auto bc = std::make_shared<amx::BufferCNVFP4Impl<amx::GemmKernelNVFP4>>(m, n, bc_buffer);
+    auto ba = std::make_shared<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>(m, k, ba_buffer);
+    auto bb = std::make_shared<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>(n, k, bb_buffer);
+    auto bc = std::make_shared<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>(m, n, bc_buffer);
 
     printf("Matrix sizes: M=%d, N=%d, K=%d\n", m, n, k);
 
@@ -228,15 +228,15 @@ void test_matrix_multiplication() {
             }
 
             float scale = max_val / 6.0f;  // Map to max E2M1 value
-            b_scales_fp8[n_i * k_group_count + kg] = amx::float_to_fp8_e4m3(scale);
+            b_scales_fp8[n_i * k_group_count + kg] = nvfp4::float_to_fp8_e4m3(scale);
 
             // Quantize group
             for (int k_i = 0; k_i < k_group_size; k_i += 2) {
                 float val0 = b_f32[n_i * k + k_start + k_i] / (scale + 1e-8f);
                 float val1 = b_f32[n_i * k + k_start + k_i + 1] / (scale + 1e-8f);
 
-                uint8_t q0 = amx::float_to_e2m1(val0);
-                uint8_t q1 = amx::float_to_e2m1(val1);
+                uint8_t q0 = nvfp4::float_to_e2m1(val0);
+                uint8_t q1 = nvfp4::float_to_e2m1(val1);
 
                 b_fp4[n_i * k / 2 + (k_start + k_i) / 2] = q0 | (q1 << 4);
             }
@@ -252,7 +252,7 @@ void test_matrix_multiplication() {
 
     // Perform multiplication
     std::cout << "Performing matrix multiplication..." << std::endl;
-    amx::nvfp4_matmul(m, n, k, ba, bb, bc, 0, 1);
+    nvfp4::nvfp4_matmul(m, n, k, ba, bb, bc, 0, 1);
 
     // Compute reference result
     std::cout << "Computing reference result..." << std::endl;

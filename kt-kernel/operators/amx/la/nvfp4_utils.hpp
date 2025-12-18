@@ -11,7 +11,7 @@
 #include "llama.cpp/ggml-impl.h"
 #include "utils.hpp"
 
-namespace amx {
+namespace nvfp4 {
 
 // Inline BF16 conversion helper (to avoid linking issues)
 static inline float bf16_to_f32_inline(ggml_bf16_t x) {
@@ -330,6 +330,6 @@ inline float compute_global_max_abs_bf16(int size, const ggml_bf16_t* data) {
     return max_val;
 }
 
-}  // namespace amx
+}  // namespace nvfp4
 
 #endif  // NVFP4_UTILS_HPP

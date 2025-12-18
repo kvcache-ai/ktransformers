@@ -30,13 +30,17 @@
 #include "llama.cpp/ggml.h"
 
 template <class T>
-class AMX_NVFP4_MOE_TP {
+class NVFP4_MOE_TP {
  private:
   int tp_part_idx = 0;
 
   void* gate_proj_ = nullptr;   // [expert_num * intermediate_size * hidden_size / 2] (packed FP4)
   void* up_proj_ = nullptr;     // [expert_num * intermediate_size * hidden_size / 2] (packed FP4)
   void* down_proj_ = nullptr;   // [expert_num * hidden_size * intermediate_size / 2] (packed FP4)
+
+  void* gate_scale_ = nullptr;  // FP8 E4M3 block scales for gate
+  void* up_scale_ = nullptr;    // FP8 E4M3 block scales for up
+  void* down_scale_ = nullptr;  // FP8 E4M3 block scales for down
 
   ggml_bf16_t* m_local_input_ = nullptr;        // [num_experts_per_tok * max_len * hidden_size]
   ggml_bf16_t* m_local_gate_output_ = nullptr;  // [num_experts_per_tok * max_len * intermediate_size]
@@ -51,14 +55,14 @@ class AMX_NVFP4_MOE_TP {
   std::vector<ggml_bf16_t*> m_local_up_output_ptr_;    // [expert_num]
   std::vector<ggml_bf16_t*> m_local_down_output_ptr_;  // [expert_num]
 
-  std::vector<std::shared_ptr<typename T::BufferA<T>>> gate_up_ba_;
-  std::vector<std::shared_ptr<typename T::BufferB<T>>> gate_bb_;
-  std::vector<std::shared_ptr<typename T::BufferC<T>>> gate_bc_;
-  std::vector<std::shared_ptr<typename T::BufferB<T>>> up_bb_;
-  std::vector<std::shared_ptr<typename T::BufferC<T>>> up_bc_;
-  std::vector<std::shared_ptr<typename T::BufferA<T>>> down_ba_;
-  std::vector<std::shared_ptr<typename T::BufferB<T>>> down_bb_;
-  std::vector<std::shared_ptr<typename T::BufferC<T>>> down_bc_;
+  std::vector<std::shared_ptr<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>> gate_up_ba_;
+  std::vector<std::shared_ptr<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>> gate_bb_;
+  std::vector<std::shared_ptr<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>> gate_bc_;
+  std::vector<std::shared_ptr<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>> up_bb_;
+  std::vector<std::shared_ptr<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>> up_bc_;
+  std::vector<std::shared_ptr<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>> down_ba_;
+  std::vector<std::shared_ptr<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>> down_bb_;
+  std::vector<std::shared_ptr<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>> down_bc_;
 
   size_t pool_count_ = 0;  // rows reserved in each scratch pool
   size_t gate_up_ba_pool_bytes_ = 0;
@@ -77,16 +81,21 @@ class AMX_NVFP4_MOE_TP {
   using output_t = float;
   GeneralMOEConfig config_;
   static constexpr double ELEMENT_SIZE = 0.5625;  // FP4: 4 bits + scale overhead
+  static constexpr int BLOCK_SIZE = 16;  // NVFP4 fixed block size
 
-  AMX_NVFP4_MOE_TP(GeneralMOEConfig config, int tp_part_idx_) {
+  NVFP4_MOE_TP(GeneralMOEConfig config, int tp_part_idx_) {
     auto& quant_config = config.quant_config;
-    int& group_size = quant_config.group_size;
 
-    if (quant_config.group_size == 0 || quant_config.zero_point) {
-      throw std::runtime_error("NVFP4 MoE requires KGroup quantization without zero-point");
+    if (quant_config.group_size != BLOCK_SIZE) {
+      printf("Warning: NVFP4 requires group_size=16, but got %d. Forcing to 16.\n", quant_config.group_size);
+      quant_config.group_size = BLOCK_SIZE;
     }
 
-    printf("Creating AMX_NVFP4_MOE_TP %d at numa %d\\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
+    if (quant_config.zero_point) {
+      throw std::runtime_error("NVFP4 MoE does not support zero-point quantization");
+    }
+
+    printf("Creating NVFP4_MOE_TP %d at numa %d\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
 
     this->tp_part_idx = tp_part_idx_;
     config_ = config;
@@ -118,37 +127,37 @@ class AMX_NVFP4_MOE_TP {
     // Initialize buffers for each expert
     for (size_t i = 0; i < config_.expert_num; i++) {
       gate_up_ba_.push_back(
-          std::make_shared<typename T::BufferA<T>>(config_.max_len, config_.hidden_size, group_size, nullptr));
-      gate_bc_.push_back(std::make_shared<typename T::BufferC<T>>(config_.max_len, config_.intermediate_size, nullptr));
-      up_bc_.push_back(std::make_shared<typename T::BufferC<T>>(config_.max_len, config_.intermediate_size, nullptr));
+          std::make_shared<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.max_len, config_.hidden_size, nullptr));
+      gate_bc_.push_back(std::make_shared<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.max_len, config_.intermediate_size, nullptr));
+      up_bc_.push_back(std::make_shared<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.max_len, config_.intermediate_size, nullptr));
       down_ba_.push_back(
-          std::make_shared<typename T::BufferA<T>>(config_.max_len, config_.intermediate_size, group_size, nullptr));
-      down_bc_.push_back(std::make_shared<typename T::BufferC<T>>(config_.max_len, config_.hidden_size, nullptr));
+          std::make_shared<nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.max_len, config_.intermediate_size, nullptr));
+      down_bc_.push_back(std::make_shared<nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.max_len, config_.hidden_size, nullptr));
 
       void* gate_bb_ptr = std::aligned_alloc(
-          64, T::BufferB<T>::required_size(config_.intermediate_size, config_.hidden_size, group_size));
-      gate_bb_.push_back(std::make_shared<typename T::BufferB<T>>(
-          config_.intermediate_size, config_.hidden_size, group_size, gate_bb_ptr));
+          64, nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(config_.intermediate_size, config_.hidden_size));
+      gate_bb_.push_back(std::make_shared<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>(
+          config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
       void* up_bb_ptr = std::aligned_alloc(
-          64, T::BufferB<T>::required_size(config_.intermediate_size, config_.hidden_size, group_size));
+          64, nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(config_.intermediate_size, config_.hidden_size));
       up_bb_.push_back(
-          std::make_shared<typename T::BufferB<T>>(config_.intermediate_size, config_.hidden_size, group_size, up_bb_ptr));
+          std::make_shared<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
       void* down_bb_ptr = std::aligned_alloc(
-          64, T::BufferB<T>::required_size(config_.hidden_size, config_.intermediate_size, group_size));
-      down_bb_.push_back(std::make_shared<typename T::BufferB<T>>(
-          config_.hidden_size, config_.intermediate_size, group_size, down_bb_ptr));
+          64, nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(config_.hidden_size, config_.intermediate_size));
+      down_bb_.push_back(std::make_shared<nvfp4::BufferBNVFP4Impl<nvfp4::GemmKernelNVFP4>>(
+          config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
 
-    assert(T::M_STEP == 32);  // Ensure M_STEP matches our kernel design
-    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::M_STEP;
+    assert(nvfp4::GemmKernelNVFP4::M_STEP == 32);  // Ensure M_STEP matches our kernel design
+    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * nvfp4::GemmKernelNVFP4::M_STEP;
 
-    gate_up_ba_pool_bytes_ = (T::BufferA<T>::required_size(pool_count_, config_.hidden_size, group_size)) + pool_count_ * 64;
-    gate_bc_pool_bytes_ = (T::BufferC<T>::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
-    up_bc_pool_bytes_ = (T::BufferC<T>::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
-    down_ba_pool_bytes_ = (T::BufferA<T>::required_size(pool_count_, config_.intermediate_size, group_size)) + pool_count_ * 64;
-    down_bc_pool_bytes_ = (T::BufferC<T>::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
+    gate_up_ba_pool_bytes_ = (nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
+    gate_bc_pool_bytes_ = (nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
+    up_bc_pool_bytes_ = (nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
+    down_ba_pool_bytes_ = (nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(pool_count_, config_.intermediate_size)) + pool_count_ * 64;
+    down_bc_pool_bytes_ = (nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(pool_count_, config_.hidden_size)) + pool_count_ * 64;
 
     mem_requests.append_pointer(&gate_up_ba_pool_, gate_up_ba_pool_bytes_);
     mem_requests.append_pointer(&gate_bc_pool_, gate_bc_pool_bytes_);
@@ -159,20 +168,23 @@ class AMX_NVFP4_MOE_TP {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AMX_NVFP4_MOE_TP() = default;
+  ~NVFP4_MOE_TP() = default;
 
   void load_weights() {
     auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
     if (config_.gate_scale == nullptr) {
-      throw std::runtime_error("NVFP4 MoE requires scale tensors");
+      throw std::runtime_error("NVFP4 MoE requires FP8 E4M3 scale tensors");
     }
 
-    // Load weights - simply copy packed FP4 data
-    int nth = T::recommended_nth(config_.intermediate_size);
+    gate_scale_ = config_.gate_scale;
+    up_scale_ = config_.up_scale;
+    down_scale_ = config_.down_scale;
+
+    // Load weights - copy packed FP4 data and FP8 scales
+    int nth = nvfp4::GemmKernelNVFP4::recommended_nth(config_.intermediate_size);
 
     pool->do_work_stealing_job(
         nth * config_.expert_num, nullptr,
@@ -181,21 +193,27 @@ class AMX_NVFP4_MOE_TP {
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
 
-          // Load gate weights
-          gate_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config_.gate_proj +
-                  ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
+          // Calculate sizes
+          size_t weight_elements = config_.intermediate_size * config_.hidden_size;
+          size_t scale_elements = weight_elements / BLOCK_SIZE;
+
+          // Load gate weights and scales
+          gate_bb_[expert_idx]->from_raw_nvfp4(
+              (uint8_t*)config_.gate_proj + ((logical_expert_id * weight_elements) >> 1),
+              (uint8_t*)gate_scale_ + (logical_expert_id * scale_elements),
+              1.0f,  // Tensor scale (should be extracted from config if available)
               ith, nth);
 
-          // Load up weights
-          up_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config_.up_proj +
-                  ((logical_expert_id * config_.intermediate_size * config_.hidden_size) >> 1),
+          // Load up weights and scales
+          up_bb_[expert_idx]->from_raw_nvfp4(
+              (uint8_t*)config_.up_proj + ((logical_expert_id * weight_elements) >> 1),
+              (uint8_t*)up_scale_ + (logical_expert_id * scale_elements),
+              1.0f,
               ith, nth);
         },
         nullptr);
 
-    nth = T::recommended_nth(config_.hidden_size);
+    nth = nvfp4::GemmKernelNVFP4::recommended_nth(config_.hidden_size);
     pool->do_work_stealing_job(
         nth * config_.expert_num, nullptr,
         [this, nth, physical_to_logical_map](int task_id) {
@@ -203,33 +221,15 @@ class AMX_NVFP4_MOE_TP {
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
 
-          // Load down weights
-          down_bb_[expert_idx]->from_raw_mat(
-              (uint8_t*)config_.down_proj +
-                  ((logical_expert_id * config_.hidden_size * config_.intermediate_size) >> 1),
+          size_t weight_elements = config_.hidden_size * config_.intermediate_size;
+          size_t scale_elements = weight_elements / BLOCK_SIZE;
+
+          // Load down weights and scales
+          down_bb_[expert_idx]->from_raw_nvfp4(
+              (uint8_t*)config_.down_proj + ((logical_expert_id * weight_elements) >> 1),
+              (uint8_t*)down_scale_ + (logical_expert_id * scale_elements),
+              1.0f,
               ith, nth);
-        },
-        nullptr);
-
-    // Load scales
-    pool->do_work_stealing_job(
-        config_.expert_num, nullptr,
-        [this, physical_to_logical_map](int task_id) {
-          uint64_t expert_idx = task_id;
-          uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-          size_t scale_elem_count =
-              (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
-
-          // Convert scales from BF16 to FP32
-          convert_or_copy(gate_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.gate_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
-          convert_or_copy(up_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.up_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
-          convert_or_copy(down_bb_[expert_idx]->d,
-                          (ggml_bf16_t*)config_.down_scale + (logical_expert_id * scale_elem_count),
-                          scale_elem_count);
         },
         nullptr);
   }
@@ -274,7 +274,6 @@ class AMX_NVFP4_MOE_TP {
                        void* output) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
 
     // Count tokens per expert
     int activated_expert = 0;
@@ -304,7 +303,7 @@ class AMX_NVFP4_MOE_TP {
     void* up_bc_pool_ptr = up_bc_pool_;
     void* down_ba_pool_ptr = down_ba_pool_;
     void* down_bc_pool_ptr = down_bc_pool_;
-    constexpr size_t M_STEP = T::M_STEP;
+    constexpr size_t M_STEP = nvfp4::GemmKernelNVFP4::M_STEP;
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
 
     for (int i = 0; i < config_.expert_num; i++) {
@@ -319,27 +318,27 @@ class AMX_NVFP4_MOE_TP {
       size_t max_m = (m_local_num_[i] + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[i]->max_m = max_m;
       gate_up_ba_[i]->set_data(gate_up_ba_pool_ptr);
-      size_t ba_size = align64(T::BufferA<T>::required_size(max_m, config_.hidden_size, group_size));
+      size_t ba_size = align64(nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, config_.hidden_size));
       gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
 
       gate_bc_[i]->max_m = max_m;
       gate_bc_[i]->set_data(gate_bc_pool_ptr);
-      size_t bc_gate_size = align64(T::BufferC<T>::required_size(max_m, config_.intermediate_size));
+      size_t bc_gate_size = align64(nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, config_.intermediate_size));
       gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
 
       up_bc_[i]->max_m = max_m;
       up_bc_[i]->set_data(up_bc_pool_ptr);
-      size_t bc_up_size = align64(T::BufferC<T>::required_size(max_m, config_.intermediate_size));
+      size_t bc_up_size = align64(nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, config_.intermediate_size));
       up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
 
       down_ba_[i]->max_m = max_m;
       down_ba_[i]->set_data(down_ba_pool_ptr);
-      size_t ba_down_size = align64(T::BufferA<T>::required_size(max_m, config_.intermediate_size, group_size));
+      size_t ba_down_size = align64(nvfp4::BufferANVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, config_.intermediate_size));
       down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
 
       down_bc_[i]->max_m = max_m;
       down_bc_[i]->set_data(down_bc_pool_ptr);
-      size_t bc_down_size = align64(T::BufferC<T>::required_size(max_m, config_.hidden_size));
+      size_t bc_down_size = align64(nvfp4::BufferCNVFP4Impl<nvfp4::GemmKernelNVFP4>::required_size(max_m, config_.hidden_size));
       down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
     }
 
@@ -354,31 +353,31 @@ class AMX_NVFP4_MOE_TP {
       }
     });
 
-    // Quantize input for each expert
-    DIRECT_OR_POOL_BY_QLEN(activated_expert, [this, group_size](int task_id) {
+    // Quantize input for each expert (using BF16 → NVFP4)
+    DIRECT_OR_POOL_BY_QLEN(activated_expert, [this](int task_id) {
       int expert_idx = m_expert_id_map_[task_id];
-      gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
+      gate_up_ba_[expert_idx]->from_bf16(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
     });
 
     // Compute gate and up projections
-    int nth = T::recommended_nth(config_.intermediate_size);
+    int nth = nvfp4::GemmKernelNVFP4::recommended_nth(config_.intermediate_size);
     pool->do_work_stealing_job(
-        nth * activated_expert * 2, [](int _) { T::config(); },
-        [this, nth, qlen, group_size](int task_id2) {
+        nth * activated_expert * 2, [](int _) { nvfp4::GemmKernelNVFP4::config(); },
+        [this, nth, qlen](int task_id2) {
           int task_id = task_id2 / 2;
           bool do_up = task_id2 % 2;
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
 
           if (do_up) {
-            amx::mat_mul_nvfp4_kgroup(m_local_num_[expert_idx], config_.intermediate_size, config_.hidden_size,
-                                      group_size, gate_up_ba_[expert_idx], up_bb_[expert_idx], up_bc_[expert_idx],
-                                      ith, nth);
+            nvfp4::nvfp4_matmul(m_local_num_[expert_idx], config_.intermediate_size, config_.hidden_size,
+                                gate_up_ba_[expert_idx], up_bb_[expert_idx], up_bc_[expert_idx],
+                                ith, nth);
             up_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_up_output_ptr_[expert_idx], ith, nth);
           } else {
-            amx::mat_mul_nvfp4_kgroup(m_local_num_[expert_idx], config_.intermediate_size, config_.hidden_size,
-                                      group_size, gate_up_ba_[expert_idx], gate_bb_[expert_idx], gate_bc_[expert_idx],
-                                      ith, nth);
+            nvfp4::nvfp4_matmul(m_local_num_[expert_idx], config_.intermediate_size, config_.hidden_size,
+                                gate_up_ba_[expert_idx], gate_bb_[expert_idx], gate_bc_[expert_idx],
+                                ith, nth);
             gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
           }
         },
@@ -388,7 +387,7 @@ class AMX_NVFP4_MOE_TP {
     auto act_fn = [this, nth](int task_id) {
       int expert_idx = m_expert_id_map_[task_id / nth];
       int ith = task_id % nth;
-      auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
+      auto [n_start, n_end] = nvfp4::GemmKernelNVFP4::split_range_n(config_.intermediate_size, ith, nth);
 
       for (int i = 0; i < m_local_num_[expert_idx]; i++) {
         ggml_bf16_t* gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
@@ -412,26 +411,26 @@ class AMX_NVFP4_MOE_TP {
     };
     DIRECT_OR_POOL_BY_QLEN(nth * activated_expert, act_fn);
 
-    // Quantize intermediate results for down projection
+    // Quantize intermediate results for down projection (BF16 → NVFP4)
     pool->do_work_stealing_job(
         activated_expert, nullptr,
-        [this, group_size](int task_id) {
+        [this](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
+          down_ba_[expert_idx]->from_bf16(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
         },
         nullptr);
 
     // Compute down projection
-    nth = T::recommended_nth(config_.hidden_size);
+    nth = nvfp4::GemmKernelNVFP4::recommended_nth(config_.hidden_size);
     pool->do_work_stealing_job(
-        nth * activated_expert, [](int _) { T::config(); },
-        [this, nth, qlen, group_size](int task_id) {
+        nth * activated_expert, [](int _) { nvfp4::GemmKernelNVFP4::config(); },
+        [this, nth, qlen](int task_id) {
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
 
-          amx::mat_mul_nvfp4_kgroup(m_local_num_[expert_idx], config_.hidden_size, config_.intermediate_size,
-                                    group_size, down_ba_[expert_idx], down_bb_[expert_idx], down_bc_[expert_idx],
-                                    ith, nth);
+          nvfp4::nvfp4_matmul(m_local_num_[expert_idx], config_.hidden_size, config_.intermediate_size,
+                              down_ba_[expert_idx], down_bb_[expert_idx], down_bc_[expert_idx],
+                              ith, nth);
           down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
@@ -471,7 +470,6 @@ class AMX_NVFP4_MOE_TP {
     int qlen = 1;
     auto pool = config_.pool->get_subpool(tp_part_idx);
     auto& quant_config = config_.quant_config;
-    int& group_size = quant_config.group_size;
 
     // Count activated experts
     int activated_expert = 0;
@@ -490,9 +488,9 @@ class AMX_NVFP4_MOE_TP {
 
 // Template specialization for TP_MOE
 template <typename K>
-class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
+class TP_MOE<NVFP4_MOE_TP<K>> : public TP_MOE_Common<NVFP4_MOE_TP<K>> {
  public:
-  using TP_MOE_Common<AMX_NVFP4_MOE_TP<K>>::TP_MOE_Common;
+  using TP_MOE_Common<NVFP4_MOE_TP<K>>::TP_MOE_Common;
 
   void load_weights() {
     auto& config = this->config;
@@ -505,10 +503,10 @@ class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
     bool use_per_expert_ptrs = !config.gate_projs.empty();
 
     if (!use_per_expert_ptrs && config.gate_scale == nullptr) {
-      throw std::runtime_error("NVFP4 MoE requires packed FP4 with KGroup scales");
+      throw std::runtime_error("NVFP4 MoE requires packed FP4 with FP8 E4M3 scales");
     }
 
-    int& group_size = config.quant_config.group_size;
+    constexpr int BLOCK_SIZE = 16;  // NVFP4 fixed block size
 
     // Load weights using TP slicing (similar to k2-moe.hpp)
     for (auto i = 0; i < tp_count; i++) {
@@ -519,11 +517,11 @@ class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
       tpc.up_proj = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
       tpc.down_proj = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
 
-      size_t scales_elem_count = (tpc.hidden_size / group_size) * tpc.intermediate_size;
+      size_t scales_elem_count = weight_elem_count / BLOCK_SIZE;
 
-      tpc.gate_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
-      tpc.up_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
-      tpc.down_scale = new ggml_bf16_t[(tpc.expert_num * scales_elem_count)];
+      tpc.gate_scale = new uint8_t[(tpc.expert_num * scales_elem_count)];  // FP8 scales
+      tpc.up_scale = new uint8_t[(tpc.expert_num * scales_elem_count)];
+      tpc.down_scale = new uint8_t[(tpc.expert_num * scales_elem_count)];
 
       // Copy weights and scales
       pool->get_subpool(i)->do_work_stealing_job(
@@ -542,17 +540,17 @@ class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
                        ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
                    ((sizeof(uint8_t) * weight_elem_count) >> 1));
 
-            memcpy((ggml_bf16_t*)tpc.gate_scale + (expert_id * scales_elem_count),
-                   (ggml_bf16_t*)config.gate_scale +
-                       (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+            memcpy((uint8_t*)tpc.gate_scale + (expert_id * scales_elem_count),
+                   (uint8_t*)config.gate_scale +
+                       (expert_id * (config.hidden_size * config.intermediate_size / BLOCK_SIZE) +
                         i * scales_elem_count),
-                   sizeof(ggml_bf16_t) * scales_elem_count);
+                   sizeof(uint8_t) * scales_elem_count);
 
-            memcpy((ggml_bf16_t*)tpc.up_scale + (expert_id * scales_elem_count),
-                   (ggml_bf16_t*)config.up_scale +
-                       (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+            memcpy((uint8_t*)tpc.up_scale + (expert_id * scales_elem_count),
+                   (uint8_t*)config.up_scale +
+                       (expert_id * (config.hidden_size * config.intermediate_size / BLOCK_SIZE) +
                         i * scales_elem_count),
-                   sizeof(ggml_bf16_t) * scales_elem_count);
+                   sizeof(uint8_t) * scales_elem_count);
 
             // TP-slicing for down (by column)
             for (size_t col = 0; col < config.hidden_size; col++) {
@@ -563,12 +561,12 @@ class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
                           1),
                      (sizeof(uint8_t) * tpc.intermediate_size) >> 1);
 
-              memcpy((ggml_bf16_t*)tpc.down_scale +
-                         (expert_id * scales_elem_count + col * (tpc.intermediate_size / group_size)),
-                     (ggml_bf16_t*)config.down_scale +
-                         ((expert_id * (config.intermediate_size / group_size) * config.hidden_size) +
-                          col * (config.intermediate_size / group_size) + i * (tpc.intermediate_size / group_size)),
-                     sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
+              size_t col_scales = tpc.intermediate_size / BLOCK_SIZE;
+              memcpy((uint8_t*)tpc.down_scale + (expert_id * scales_elem_count + col * col_scales),
+                     (uint8_t*)config.down_scale +
+                         ((expert_id * (config.intermediate_size * config.hidden_size / BLOCK_SIZE)) +
+                          col * (config.intermediate_size / BLOCK_SIZE) + i * col_scales),
+                     sizeof(uint8_t) * col_scales);
             }
           },
           nullptr);
@@ -582,9 +580,9 @@ class TP_MOE<AMX_NVFP4_MOE_TP<K>> : public TP_MOE_Common<AMX_NVFP4_MOE_TP<K>> {
       delete[] (uint8_t*)(tpc.gate_proj);
       delete[] (uint8_t*)(tpc.up_proj);
       delete[] (uint8_t*)(tpc.down_proj);
-      delete[] (ggml_bf16_t*)(tpc.gate_scale);
-      delete[] (ggml_bf16_t*)(tpc.up_scale);
-      delete[] (ggml_bf16_t*)(tpc.down_scale);
+      delete[] (uint8_t*)(tpc.gate_scale);
+      delete[] (uint8_t*)(tpc.up_scale);
+      delete[] (uint8_t*)(tpc.down_scale);
     }
 
     this->weights_loaded = true;

@@ -2,6 +2,8 @@
 
 这是基于 AVX512 查表法的 NVFP4 量化格式 MoE 算子实现，参考了 `nvfp4.md` 中的设计方案。
 
+**注意**: NVFP4 实现使用 `nvfp4` namespace（而不是 `amx`），因为该实现基于 AVX512 查表，与 AMX 指令无关。
+
 ## 文件结构
 
 ```
@@ -158,9 +160,9 @@ config.max_len = 2048;
 config.quant_config.group_size = 16;  // FP4 group size
 config.quant_config.zero_point = false;
 
-// 创建 operator
-using KernelType = amx::GemmKernelNVFP4KGroup;
-auto moe = std::make_shared<AMX_NVFP4_MOE_TP<KernelType>>(config, 0);
+// 创建 operator (注意使用 nvfp4 namespace)
+using KernelType = nvfp4::GemmKernelNVFP4;
+auto moe = std::make_shared<NVFP4_MOE_TP<KernelType>>(config, 0);
 
 // 加载权重
 moe->load_weights();

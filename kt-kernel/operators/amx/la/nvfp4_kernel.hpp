@@ -12,7 +12,7 @@
 #include "nvfp4_utils.hpp"
 #include "utils.hpp"
 
-namespace amx {
+namespace nvfp4 {
 
 /**
  * NVFP4 × NVFP4 Matrix Multiplication Kernel
@@ -511,6 +511,6 @@ void nvfp4_matmul(
     }
 }
 
-} // namespace amx
+} // namespace nvfp4
 
 #endif  // NVFP4_KERNEL_HPP
