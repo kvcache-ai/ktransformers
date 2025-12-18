@@ -239,6 +239,151 @@ class CMakeBuild(build_ext):
         return info
 
     def build_extension(self, ext: CMakeExtension):
+        """
+        Main entry point for building the extension.
+
+        Checks if multi-variant build is requested (CPUINFER_BUILD_ALL_VARIANTS=1)
+        and routes to the appropriate build method.
+        """
+        if _env_get_bool("CPUINFER_BUILD_ALL_VARIANTS", False):
+            # Build all 3 variants (AMX, AVX512, AVX2)
+            self.build_multi_variants(ext)
+        else:
+            # Build single variant (original behavior)
+            self._build_single_variant(ext)
+
+    def build_multi_variants(self, ext: CMakeExtension):
+        """
+        Build all 3 CPU variants (AMX, AVX512, AVX2) in a single wheel.
+
+        This creates 3 separate .so files:
+        - _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+        - _kt_kernel_ext_avx512.cpython-311-x86_64-linux-gnu.so
+        - _kt_kernel_ext_avx2.cpython-311-x86_64-linux-gnu.so
+
+        Runtime CPU detection (in _cpu_detect.py) will automatically load the best one.
+        """
+        print("=" * 70)
+        print("Building kt-kernel with ALL CPU variants (AMX, AVX512, AVX2)")
+        print("=" * 70)
+        print()
+        print("This will build three variants in a single wheel:")
+        print("  - AMX variant    (Intel Sapphire Rapids+)")
+        print("  - AVX512 variant (Intel Skylake-X/Ice Lake+, AMD Zen 4+)")
+        print("  - AVX2 variant   (maximum compatibility, 2013+)")
+        print()
+        print("Runtime CPU detection will automatically select the best variant.")
+        print()
+
+        extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
+        cfg = default_build_type()
+
+        # Save original env vars
+        orig_cpu_instruct = os.environ.get("CPUINFER_CPU_INSTRUCT")
+        orig_enable_amx = os.environ.get("CPUINFER_ENABLE_AMX")
+        orig_enable_avx512 = os.environ.get("CPUINFER_ENABLE_AVX512")
+
+        # Variant configurations: (name, CPUINFER_CPU_INSTRUCT, CPUINFER_ENABLE_AMX)
+        variants = [
+            ("amx", "AVX512", "ON"),      # AVX512 + AMX
+            ("avx512", "AVX512", "OFF"),  # AVX512 only
+            ("avx2", "AVX2", "OFF"),      # AVX2 only
+        ]
+
+        for variant_name, cpu_instruct, enable_amx in variants:
+            print("=" * 70)
+            print(f"Building {variant_name.upper()} variant...")
+            print("=" * 70)
+            print()
+
+            # Set environment variables for this variant
+            os.environ["CPUINFER_CPU_INSTRUCT"] = cpu_instruct
+            os.environ["CPUINFER_ENABLE_AMX"] = enable_amx
+            if variant_name == "avx2":
+                # For AVX2 variant, disable AVX512 umbrella to prevent AVX512 code
+                os.environ["CPUINFER_ENABLE_AVX512"] = "OFF"
+            else:
+                # For AMX and AVX512 variants, enable AVX512 umbrella
+                os.environ["CPUINFER_ENABLE_AVX512"] = "ON"
+
+            # Use separate build directory for each variant
+            build_temp = Path(self.build_temp) / f"{ext.name}_{cfg}_{variant_name}"
+            build_temp.mkdir(parents=True, exist_ok=True)
+
+            # Build this variant
+            self._build_single_variant_impl(ext, extdir, build_temp, cfg)
+
+            # Rename the built .so file to include variant suffix
+            # Original name: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
+            # New name: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+            built_so_files = list(extdir.glob(f"{ext.name.split('.')[-1]}.*.so"))
+            if built_so_files:
+                original_so = built_so_files[0]
+                # Extract the suffix after the module name
+                # e.g., "kt_kernel_ext.cpython-311-x86_64-linux-gnu.so" -> ".cpython-311-x86_64-linux-gnu.so"
+                suffix = original_so.name.replace(ext.name.split(".")[-1], "")
+                new_name = f"_kt_kernel_ext_{variant_name}{suffix}"
+                new_path = extdir / new_name
+
+                # Remove existing file if present
+                if new_path.exists():
+                    new_path.unlink()
+
+                # Rename
+                original_so.rename(new_path)
+                print(f"✓ Built and renamed to: {new_name}")
+                print()
+            else:
+                print(f"⚠ Warning: Could not find built .so file for {variant_name} variant")
+                print()
+
+        # Restore original env vars
+        if orig_cpu_instruct is not None:
+            os.environ["CPUINFER_CPU_INSTRUCT"] = orig_cpu_instruct
+        elif "CPUINFER_CPU_INSTRUCT" in os.environ:
+            del os.environ["CPUINFER_CPU_INSTRUCT"]
+
+        if orig_enable_amx is not None:
+            os.environ["CPUINFER_ENABLE_AMX"] = orig_enable_amx
+        elif "CPUINFER_ENABLE_AMX" in os.environ:
+            del os.environ["CPUINFER_ENABLE_AMX"]
+
+        if orig_enable_avx512 is not None:
+            os.environ["CPUINFER_ENABLE_AVX512"] = orig_enable_avx512
+        elif "CPUINFER_ENABLE_AVX512" in os.environ:
+            del os.environ["CPUINFER_ENABLE_AVX512"]
+
+        print("=" * 70)
+        print("✓ All variants built successfully!")
+        print("=" * 70)
+        print()
+        print("The wheel now contains 3 CPU variants:")
+        for so_file in sorted(extdir.glob("_kt_kernel_ext_*.so")):
+            print(f"  - {so_file.name}")
+        print()
+
+    def _build_single_variant(self, ext: CMakeExtension):
+        """Original single-variant build logic - wrapper for backward compatibility."""
+        extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
+        cfg = default_build_type()
+        build_temp = Path(self.build_temp) / f"{ext.name}_{cfg}"
+        build_temp.mkdir(parents=True, exist_ok=True)
+
+        self._build_single_variant_impl(ext, extdir, build_temp, cfg)
+
+    def _build_single_variant_impl(self, ext: CMakeExtension, extdir: Path, build_temp: Path, cfg: str):
+        """
+        Core build logic for a single variant.
+
+        This method contains the actual CMake configuration and build steps.
+        It's called by both _build_single_variant() and build_multi_variants().
+
+        Args:
+            ext: The CMakeExtension to build
+            extdir: Directory where the .so file should be placed
+            build_temp: Temporary build directory for CMake
+            cfg: Build type (Release/Debug/etc.)
+        """
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
@@ -286,11 +431,6 @@ class CMakeBuild(build_ext):
             auto_cuda = detect_cuda_toolkit()
             os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
             print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
-
-        extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
-        cfg = default_build_type()
-        build_temp = Path(self.build_temp) / f"{ext.name}_{cfg}"
-        build_temp.mkdir(parents=True, exist_ok=True)
 
         # Base CMake args
         cmake_args = [

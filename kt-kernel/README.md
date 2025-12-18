@@ -50,59 +50,67 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ### Option 1: Install from PyPI (Recommended for Most Users)
 
-Coming soon...
-
-Choose the version matching your CUDA installation:
+Install the latest stable version:
 
 ```bash
-# For CUDA 11.8
-pip install kt-kernel==0.4.2.cu118
-
-# For CUDA 12.1
-pip install kt-kernel==0.4.2.cu121
-
-# For CUDA 12.4
-pip install kt-kernel==0.4.2.cu124
-
-# For CUDA 12.6
-pip install kt-kernel==0.4.2.cu126
+pip install kt-kernel
 ```
 
-> **Note**: Replace `0.4.2` with the [latest version](https://pypi.org/project/kt-kernel/#history) if available.
+Or install a specific version:
+
+```bash
+pip install kt-kernel==0.4.3
+```
+
+> **Note**: Check the [latest version on PyPI](https://pypi.org/project/kt-kernel/#history)
 
 **Features:**
 - ✅ **Automatic CPU detection**: Detects your CPU and loads the optimal kernel variant
 - ✅ **Multi-variant wheel**: Includes AMX, AVX512, and AVX2 variants in a single package
 - ✅ **No compilation needed**: Pre-built wheels for Python 3.10, 3.11, 3.12
-- ✅ **Multiple CUDA versions**: Choose the version matching your environment
+- ✅ **Universal compatibility**: Works on any x86-64 Linux system (2013+)
 
 **Requirements:**
-- CUDA 11.8+ or 12.x runtime (must match the package version you install)
-- PyTorch 2.0+ (install separately, must match CUDA version)
-- Linux x86-64
+- Python 3.10, 3.11, or 3.12
+- Linux x86-64 (manylinux_2_17 compatible)
+- CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)
 
 **CPU Variants Included:**
-| Variant | CPU Support | Use Case |
-|---------|-------------|----------|
-| **AMX** | Intel Sapphire Rapids+ | Best performance on latest Intel CPUs |
-| **AVX512** | Intel Skylake-X/Ice Lake/Cascade Lake | AVX512-capable CPUs without AMX |
-| **AVX2** | Intel Haswell+, AMD Zen+ | Maximum compatibility |
 
-**Check which variant is loaded:**
+The wheel includes 3 optimized variants that are **automatically selected at runtime** based on your CPU:
+
+| Variant | CPU Support | Performance | Auto-Selected When |
+|---------|-------------|-------------|-------------------|
+| **AMX** | Intel Sapphire Rapids+ (2023+) | ⚡⚡⚡ Best | AMX instructions detected |
+| **AVX512** | Intel Skylake-X/Ice Lake/Cascade Lake (2017+) | ⚡⚡ Great | AVX512 instructions detected |
+| **AVX2** | Intel Haswell+ (2013+), AMD Zen+ | ⚡ Good | Fallback for maximum compatibility |
+
+**Verify installation:**
 ```python
 import kt_kernel
+
+# Check which CPU variant was loaded
 print(f"CPU variant: {kt_kernel.__cpu_variant__}")  # 'amx', 'avx512', or 'avx2'
 print(f"Version: {kt_kernel.__version__}")
+
+# Test import
+from kt_kernel import KTMoEWrapper
+print("✓ kt-kernel installed successfully!")
 ```
 
 **Environment Variables:**
 ```bash
-# Override automatic CPU detection
-export KT_KERNEL_CPU_VARIANT=avx2  # or 'avx512', 'amx'
+# Override automatic CPU detection (for testing or debugging)
+export KT_KERNEL_CPU_VARIANT=avx2  # Force AVX2 variant (options: 'avx2', 'avx512', 'amx')
 
-# Enable debug output
+# Enable debug output to see detection process
 export KT_KERNEL_DEBUG=1
 python -c "import kt_kernel"
+# Output:
+# [kt-kernel] Detected AMX support via /proc/cpuinfo
+# [kt-kernel] Selected CPU variant: amx
+# [kt-kernel] Loading amx from: /path/to/_kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+# [kt-kernel] Successfully loaded AMX variant
 ```
 
 ---
