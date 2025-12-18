@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b538aa0e.js";
+            window.path_to_searchindex_js = "searchindex-45f843c2.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-78fe5878.js"></script>
@@ -394,61 +394,65 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <h3 id="option-1-install-from-pypi-recommended-for-most-users"><a class="header" href="#option-1-install-from-pypi-recommended-for-most-users">Option 1: Install from PyPI (Recommended for Most Users)</a></h3>
-<p>Coming soon…</p>
-<p>Choose the version matching your CUDA installation:</p>
-<pre><code class="language-bash"># For CUDA 11.8
-pip install kt-kernel==0.4.2.cu118
-
-# For CUDA 12.1
-pip install kt-kernel==0.4.2.cu121
-
-# For CUDA 12.4
-pip install kt-kernel==0.4.2.cu124
-
-# For CUDA 12.6
-pip install kt-kernel==0.4.2.cu126
+<p>Install the latest stable version:</p>
+<pre><code class="language-bash">pip install kt-kernel
+</code></pre>
+<p>Or install a specific version:</p>
+<pre><code class="language-bash">pip install kt-kernel==0.4.3
 </code></pre>
 <blockquote>
-<p><strong>Note</strong>: Replace <code>0.4.2</code> with the <a href="https://pypi.org/project/kt-kernel/#history">latest version</a> if available.</p>
+<p><strong>Note</strong>: Check the <a href="https://pypi.org/project/kt-kernel/#history">latest version on PyPI</a></p>
 </blockquote>
 <p><strong>Features:</strong></p>
 <ul>
 <li>✅ <strong>Automatic CPU detection</strong>: Detects your CPU and loads the optimal kernel variant</li>
 <li>✅ <strong>Multi-variant wheel</strong>: Includes AMX, AVX512, and AVX2 variants in a single package</li>
 <li>✅ <strong>No compilation needed</strong>: Pre-built wheels for Python 3.10, 3.11, 3.12</li>
-<li>✅ <strong>Multiple CUDA versions</strong>: Choose the version matching your environment</li>
+<li>✅ <strong>Universal compatibility</strong>: Works on any x86-64 Linux system (2013+)</li>
 </ul>
 <p><strong>Requirements:</strong></p>
 <ul>
-<li>CUDA 11.8+ or 12.x runtime (must match the package version you install)</li>
-<li>PyTorch 2.0+ (install separately, must match CUDA version)</li>
-<li>Linux x86-64</li>
+<li>Python 3.10, 3.11, or 3.12</li>
+<li>Linux x86-64 (manylinux_2_17 compatible)</li>
+<li>CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)</li>
 </ul>
 <p><strong>CPU Variants Included:</strong></p>
+<p>The wheel includes 3 optimized variants that are <strong>automatically selected at runtime</strong> based on your CPU:</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Variant</th><th>CPU Support</th><th>Use Case</th></tr>
+<tr><th>Variant</th><th>CPU Support</th><th>Performance</th><th>Auto-Selected When</th></tr>
 </thead>
 <tbody>
-<tr><td><strong>AMX</strong></td><td>Intel Sapphire Rapids+</td><td>Best performance on latest Intel CPUs</td></tr>
-<tr><td><strong>AVX512</strong></td><td>Intel Skylake-X/Ice Lake/Cascade Lake</td><td>AVX512-capable CPUs without AMX</td></tr>
-<tr><td><strong>AVX2</strong></td><td>Intel Haswell+, AMD Zen+</td><td>Maximum compatibility</td></tr>
+<tr><td><strong>AMX</strong></td><td>Intel Sapphire Rapids+ (2023+)</td><td>⚡⚡⚡ Best</td><td>AMX instructions detected</td></tr>
+<tr><td><strong>AVX512</strong></td><td>Intel Skylake-X/Ice Lake/Cascade Lake (2017+)</td><td>⚡⚡ Great</td><td>AVX512 instructions detected</td></tr>
+<tr><td><strong>AVX2</strong></td><td>Intel Haswell+ (2013+), AMD Zen+</td><td>⚡ Good</td><td>Fallback for maximum compatibility</td></tr>
 </tbody>
 </table>
 </div>
-<p><strong>Check which variant is loaded:</strong></p>
+<p><strong>Verify installation:</strong></p>
 <pre><code class="language-python">import kt_kernel
+
+# Check which CPU variant was loaded
 print(f"CPU variant: {kt_kernel.__cpu_variant__}")  # 'amx', 'avx512', or 'avx2'
 print(f"Version: {kt_kernel.__version__}")
+
+# Test import
+from kt_kernel import KTMoEWrapper
+print("✓ kt-kernel installed successfully!")
 </code></pre>
 <p><strong>Environment Variables:</strong></p>
-<pre><code class="language-bash"># Override automatic CPU detection
-export KT_KERNEL_CPU_VARIANT=avx2  # or 'avx512', 'amx'
+<pre><code class="language-bash"># Override automatic CPU detection (for testing or debugging)
+export KT_KERNEL_CPU_VARIANT=avx2  # Force AVX2 variant (options: 'avx2', 'avx512', 'amx')
 
-# Enable debug output
+# Enable debug output to see detection process
 export KT_KERNEL_DEBUG=1
 python -c "import kt_kernel"
+# Output:
+# [kt-kernel] Detected AMX support via /proc/cpuinfo
+# [kt-kernel] Selected CPU variant: amx
+# [kt-kernel] Loading amx from: /path/to/_kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+# [kt-kernel] Successfully loaded AMX variant
 </code></pre>
 <hr>
 <h3 id="option-2-install-from-source-for-local-use-or-custom-builds"><a class="header" href="#option-2-install-from-source-for-local-use-or-custom-builds">Option 2: Install from Source (For Local Use or Custom Builds)</a></h3>
