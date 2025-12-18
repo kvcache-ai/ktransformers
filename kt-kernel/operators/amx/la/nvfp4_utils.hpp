@@ -13,78 +13,68 @@
 
 namespace amx {
 
+// Inline BF16 conversion helper (to avoid linking issues)
+static inline float bf16_to_f32_inline(ggml_bf16_t x) {
+    union { uint32_t i; float f; } u;
+    u.i = ((uint32_t)x.bits) << 16;
+    return u.f;
+}
+
 /**
- * NVFP4 (NVIDIA FP4) format
+ * NVFP4 (NVIDIA FP4) Format Implementation
  *
- * FP4 has 8 positive values: 0, 0.5, 1, 1.5, 2, 3, 4, 6
- * With sign bit, we have 16 values total (including negative)
+ * Format: E2M1 (1 sign bit, 2 exponent bits, 1 mantissa bit)
+ * Values: 0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6
  *
- * Storage format:
- * - Packed 4-bit values (2 FP4 values per byte)
- * - Group-based scales (one scale per group of 16 FP4 values)
+ * Dual-Level Scaling:
+ * - Block Scale: FP8 E4M3 (1 per 16 FP4 values)
+ * - Tensor Scale: FP32 (1 per tensor)
  *
- * Multiplication approach:
- * - Use lookup table for FP4 x FP4 multiplication
- * - Results stored as INT16 (scaled by 4 to preserve 0.25 precision)
- * - Use _mm512_permutexvar_epi8 for table lookup
+ * References:
+ * - https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/
+ * - https://arxiv.org/html/2509.23202v1
  */
 
-// FP4 value encoding (4 bits: 1 sign + 3 mantissa/exponent)
-// Positive values: 0=0.0, 1=0.5, 2=1.0, 3=1.5, 4=2.0, 5=3.0, 6=4.0, 7=6.0
-// Negative values: 8=-0.0, 9=-0.5, 10=-1.0, 11=-1.5, 12=-2.0, 13=-3.0, 14=-4.0, 15=-6.0
-constexpr float FP4_LUT[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+// ============================================================================
+// E2M1 FP4 Format Utilities
+// ============================================================================
+
+// E2M1 encodable values (positive only, sign bit handled separately)
+constexpr float E2M1_VALUES[8] = {
+    0.0f,   // 000: 0
+    0.5f,   // 001: 2^-1
+    1.0f,   // 010: 2^0
+    1.5f,   // 011: 2^0 * 1.5
+    2.0f,   // 100: 2^1
+    3.0f,   // 101: 2^1 * 1.5
+    4.0f,   // 110: 2^2
+    6.0f    // 111: 2^2 * 1.5
 };
 
-// Multiplication result lookup table (scaled by 4)
-// Results are unique values from FP4 x FP4 multiplication
-// 0, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.25, 3, 4, 4.5, 6, 8, 9, 12, 16, 18, 24, 36
-// Scaled by 4: 0, 1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 144
-constexpr int16_t FP4_MUL_RESULTS_SCALED[19] = {
-    0, 1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 144
-};
+// Decode E2M1 4-bit value to float
+inline float e2m1_to_float(uint8_t e2m1) {
+    uint8_t sign = (e2m1 >> 3) & 0x1;
+    uint8_t value_idx = e2m1 & 0x7;
+    float val = E2M1_VALUES[value_idx];
+    return sign ? -val : val;
+}
 
-// Mapping from (fp4_a, fp4_b) to result index (0-36, includes sign bit)
-// This is a 8x8 table for positive values, sign is handled separately
-// Result index 0-18: positive results
-// Result index 19-36: negative results (19 = -results[0], 20 = -results[1], etc.)
-constexpr uint8_t FP4_MUL_INDEX[8][8] = {
-    // Row: fp4_a (0, 0.5, 1, 1.5, 2, 3, 4, 6)
-    // Col: fp4_b (0, 0.5, 1, 1.5, 2, 3, 4, 6)
-    {0, 0, 0, 0, 0, 0, 0, 0},      // 0 * x = 0
-    {0, 1, 2, 3, 4, 5, 6, 7},      // 0.5 * x
-    {0, 2, 4, 5, 6, 7, 8, 9},      // 1 * x
-    {0, 3, 5, 10, 7, 11, 9, 12},   // 1.5 * x
-    {0, 4, 6, 7, 8, 9, 10, 11},    // 2 * x
-    {0, 5, 7, 11, 9, 12, 13, 14},  // 3 * x
-    {0, 6, 8, 9, 10, 13, 15, 16},  // 4 * x
-    {0, 7, 9, 12, 11, 14, 16, 17}  // 6 * x
-};
+// Encode float to E2M1 4-bit value (round to nearest)
+inline uint8_t float_to_e2m1(float x) {
+    if (x == 0.0f) return 0;
 
-// Actual multiplication result values (unscaled, for reference)
-const float FP4_MUL_TABLE[8][8] = {
-    {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
-    {0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f},
-    {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f},
-    {0.0f, 0.75f, 1.5f, 2.25f, 3.0f, 4.5f, 6.0f, 9.0f},
-    {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f},
-    {0.0f, 1.5f, 3.0f, 4.5f, 6.0f, 9.0f, 12.0f, 18.0f},
-    {0.0f, 2.0f, 4.0f, 6.0f, 8.0f, 12.0f, 16.0f, 24.0f},
-    {0.0f, 3.0f, 6.0f, 9.0f, 12.0f, 18.0f, 24.0f, 36.0f}
-};
-
-// Convert float to FP4 (4-bit encoding)
-inline uint8_t float_to_fp4(float x) {
-    const float abs_x = fabsf(x);
     uint8_t sign = (x < 0.0f) ? 0x8 : 0x0;
+    float abs_x = std::abs(x);
 
-    // Find the closest FP4 value
-    uint8_t best_idx = 0;
-    float best_diff = abs_x;
+    // Clamp to representable range
+    abs_x = std::min(abs_x, 6.0f);
 
-    for (int i = 0; i < 8; i++) {
-        float diff = fabsf(abs_x - FP4_LUT[i]);
+    // Find nearest E2M1 value using round-to-nearest
+    int best_idx = 0;
+    float best_diff = std::abs(abs_x - E2M1_VALUES[0]);
+
+    for (int i = 1; i < 8; i++) {
+        float diff = std::abs(abs_x - E2M1_VALUES[i]);
         if (diff < best_diff) {
             best_diff = diff;
             best_idx = i;
@@ -94,232 +84,251 @@ inline uint8_t float_to_fp4(float x) {
     return sign | best_idx;
 }
 
-// Convert FP4 to float
-inline float fp4_to_float(uint8_t fp4) {
-    return FP4_LUT[fp4 & 0x0F];
+// ============================================================================
+// FP8 E4M3 Format Utilities
+// ============================================================================
+
+// FP8 E4M3: 1 sign, 4 exponent (bias=7), 3 mantissa
+// Range: [-448, 448], more uniform than E8M0
+
+inline float fp8_e4m3_to_float(uint8_t fp8) {
+    if (fp8 == 0) return 0.0f;
+
+    uint8_t sign = (fp8 >> 7) & 0x1;
+    uint8_t exp = (fp8 >> 3) & 0x0F;
+    uint8_t mantissa = fp8 & 0x07;
+
+    // Special cases
+    if (exp == 0) {
+        // Subnormal: (-1)^sign * 2^-6 * (mantissa / 8)
+        float val = std::ldexp((float)mantissa / 8.0f, -6);
+        return sign ? -val : val;
+    } else if (exp == 0x0F) {
+        // NaN or Inf - clamp to max
+        return sign ? -448.0f : 448.0f;
+    } else {
+        // Normal: (-1)^sign * 2^(exp-7) * (1 + mantissa/8)
+        float val = std::ldexp(1.0f + (float)mantissa / 8.0f, (int)exp - 7);
+        return sign ? -val : val;
+    }
 }
 
-/**
- * AVX512 implementation of FP4 multiplication using lookup table
- *
- * Input: 64 pairs of FP4 values (packed in __m512i registers)
- * Output: 64 INT16 results (in two __m512i registers)
- *
- * Process:
- * 1. Extract sign bits and compute result sign
- * 2. Combine mantissa/exponent bits (6 bits total)
- * 3. Use _mm512_permutexvar_epi8 to lookup result index
- * 4. Lookup scaled INT16 result values
- * 5. Apply sign to results
- */
+inline uint8_t float_to_fp8_e4m3(float x) {
+    if (x == 0.0f) return 0;
 
-// Lookup table for result indices (6-bit input: 3-bit a + 3-bit b)
-// Returns index into FP4_MUL_RESULTS_SCALED array
-alignas(64) static const uint8_t FP4_MUL_INDEX_FLAT[64] = {
-    // Flattened version of FP4_MUL_INDEX
-    // Index = (fp4_a & 0x7) * 8 + (fp4_b & 0x7)
-    0, 0, 0, 0, 0, 0, 0, 0,      // 0 * x
-    0, 1, 2, 3, 4, 5, 6, 7,      // 0.5 * x
-    0, 2, 4, 5, 6, 7, 8, 9,      // 1 * x
-    0, 3, 5, 10, 7, 11, 9, 12,   // 1.5 * x
-    0, 4, 6, 7, 8, 9, 10, 11,    // 2 * x
-    0, 5, 7, 11, 9, 12, 13, 14,  // 3 * x
-    0, 6, 8, 9, 10, 13, 15, 16,  // 4 * x
-    0, 7, 9, 12, 11, 14, 16, 17  // 6 * x
-};
+    // Clamp to E4M3 range
+    x = std::max(-448.0f, std::min(448.0f, x));
 
-// Lookup table for scaled INT16 results (extended to 64 bytes for alignment)
-// First 19 entries are positive results, next 19 are negative (actually stored as negative values)
-alignas(64) static const int16_t FP4_MUL_RESULTS_LUT[64] = {
-    // Positive results (indices 0-18)
-    0, 1, 2, 3, 4, 6, 8, 9, 12, 16, 18, 24, 32, 36, 48, 64, 72, 96, 144,
-    // Padding
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-};
+    uint8_t sign = (x < 0.0f) ? 0x1 : 0x0;
+    float abs_x = std::abs(x);
 
-/**
- * Multiply 64 pairs of FP4 values using AVX512
- *
- * @param a_lo Low 4 bits of 64 FP4 values (32 bytes, each byte contains 2 FP4 values)
- * @param a_hi High 4 bits if needed (for sign extension, usually same as a_lo for packed)
- * @param b_lo Low 4 bits of 64 FP4 values
- * @param b_hi High 4 bits of 64 FP4 values
- * @return Two __m512i registers containing 64 INT16 results (scaled by 4)
- *
- * Note: This is a simplified implementation. For actual use, you may need to
- * handle the packed format differently based on your data layout.
- */
-inline void fp4_mul_64pairs_avx512(
-    __m512i fp4_a,  // 64 FP4 values from activation (packed)
-    __m512i fp4_b,  // 64 FP4 values from weight (packed)
-    __m512i& result_lo,  // Output: low 32 INT16 results
-    __m512i& result_hi   // Output: high 32 INT16 results
-) {
-    // Masks
-    const __m512i mask_0x07 = _mm512_set1_epi8(0x07);  // Mask for 3-bit value (mantissa/exponent)
-    const __m512i mask_0x08 = _mm512_set1_epi8(0x08);  // Mask for sign bit
+    // Get exponent and mantissa using frexp
+    int exp;
+    float mantissa_f = std::frexp(abs_x, &exp);  // abs_x = mantissa_f * 2^exp, mantissa_f in [0.5, 1)
 
-    // Extract sign bits
-    __m512i sign_a = _mm512_and_si512(fp4_a, mask_0x08);
-    __m512i sign_b = _mm512_and_si512(fp4_b, mask_0x08);
+    // Convert to E4M3 representation
+    // E4M3 stores: 2^(exp_stored - 7) * (1 + m/8)
+    // We have: 2^exp * mantissa_f = 2^exp * mantissa_f
 
-    // XOR signs to get result sign (0 = positive, 0x08 = negative)
-    __m512i sign_result = _mm512_xor_si512(sign_a, sign_b);
+    // Adjust: mantissa_f in [0.5, 1) → [1, 2) by exp -= 1
+    exp -= 1;
+    mantissa_f *= 2.0f;  // Now mantissa_f in [1, 2)
 
-    // Extract magnitude (3-bit value)
-    __m512i mag_a = _mm512_and_si512(fp4_a, mask_0x07);
-    __m512i mag_b = _mm512_and_si512(fp4_b, mask_0x07);
+    // Bias exponent (E4M3 bias = 7)
+    int exp_biased = exp + 7;
 
-    // Combine magnitudes into 6-bit index: (mag_a << 3) | mag_b
-    __m512i mag_a_shifted = _mm512_slli_epi16(mag_a, 3);
-    __m512i index_6bit = _mm512_or_si512(mag_a_shifted, mag_b);
+    // Clamp exponent to valid range [0, 14] (15 is reserved for NaN/Inf)
+    if (exp_biased < 0) {
+        // Subnormal
+        exp_biased = 0;
+        // Adjust mantissa for subnormal
+        mantissa_f = abs_x * std::ldexp(1.0f, 6);  // Scale to subnormal range
+    } else if (exp_biased > 14) {
+        // Overflow - clamp to max
+        exp_biased = 14;
+        mantissa_f = 1.875f;  // 1 + 7/8
+    }
 
-    // Mask to 6 bits
-    __m512i mask_0x3F = _mm512_set1_epi8(0x3F);
-    index_6bit = _mm512_and_si512(index_6bit, mask_0x3F);
+    // Extract 3-bit mantissa (fractional part)
+    uint8_t mantissa_bits = (uint8_t)((mantissa_f - 1.0f) * 8.0f + 0.5f);  // Round to nearest
+    mantissa_bits = std::min((uint8_t)7, mantissa_bits);
 
-    // Load lookup table
-    __m512i lut_indices = _mm512_load_si512((const __m512i*)FP4_MUL_INDEX_FLAT);
-
-    // Lookup result indices (this gives us indices 0-18 for magnitude results)
-    __m512i result_indices = _mm512_permutexvar_epi8(index_6bit, lut_indices);
-
-    // Adjust indices based on sign: if negative, add 19 to get negative results
-    // But since we store only positive values, we'll handle sign separately
-
-    // Now we need to convert byte indices to INT16 values
-    // This requires a second lookup into FP4_MUL_RESULTS_LUT
-
-    // For simplicity, we'll use a gather operation or multiple lookups
-    // This is a placeholder - actual implementation may need optimization
-
-    // For now, let's create the result by loading from the lookup table
-    // We need to expand result_indices from bytes to 16-bit indices
-
-    // Split into low and high 32 bytes
-    __m256i indices_lo = _mm512_extracti64x4_epi64(result_indices, 0);
-    __m256i indices_hi = _mm512_extracti64x4_epi64(result_indices, 1);
-
-    // Convert to 16-bit indices (zero-extend)
-    __m512i indices_16_lo = _mm512_cvtepu8_epi16(indices_lo);
-    __m512i indices_16_hi = _mm512_cvtepu8_epi16(indices_hi);
-
-    // Load result values using gather (scale by sizeof(int16_t) = 2)
-    result_lo = _mm512_i32gather_epi32(indices_16_lo, FP4_MUL_RESULTS_LUT, 2);
-    result_hi = _mm512_i32gather_epi32(indices_16_hi, FP4_MUL_RESULTS_LUT, 2);
-
-    // Apply sign: if sign_result has bit 0x08 set, negate the result
-    // Convert sign to mask
-    __m256i sign_lo = _mm512_extracti64x4_epi64(sign_result, 0);
-    __m256i sign_hi = _mm512_extracti64x4_epi64(sign_result, 1);
-
-    __m512i sign_16_lo = _mm512_cvtepi8_epi16(sign_lo);
-    __m512i sign_16_hi = _mm512_cvtepi8_epi16(sign_hi);
-
-    // Create mask: 0xFFFF if negative, 0x0000 if positive
-    __m512i neg_mask_lo = _mm512_slli_epi16(sign_16_lo, 12);  // Move bit 3 to bit 15
-    __m512i neg_mask_hi = _mm512_slli_epi16(sign_16_hi, 12);
-    neg_mask_lo = _mm512_srai_epi16(neg_mask_lo, 15);  // Arithmetic shift to fill with sign
-    neg_mask_hi = _mm512_srai_epi16(neg_mask_hi, 15);
-
-    // Apply negation: result = (result ^ mask) - mask
-    result_lo = _mm512_sub_epi16(_mm512_xor_si512(result_lo, neg_mask_lo), neg_mask_lo);
-    result_hi = _mm512_sub_epi16(_mm512_xor_si512(result_hi, neg_mask_hi), neg_mask_hi);
+    return (sign << 7) | ((exp_biased & 0x0F) << 3) | (mantissa_bits & 0x07);
 }
 
-/**
- * Quantization structure for NVFP4 format
- *
- * Group size: 16 FP4 values = 8 bytes (packed)
- * Each group has one scale factor
- */
-struct blocks_aligned_nvfp4_ref {
-    static constexpr int block_size = 16;  // 16 FP4 values per block
-    static constexpr double bytes_per_element = double(sizeof(ggml_half) + double(block_size) / 2) / block_size;
+// ============================================================================
+// NVFP4 Quantization Block Format
+// ============================================================================
 
-    ggml_half* d;   // Scale factors
-    uint8_t* qs;    // Quantized FP4 values (packed, 2 per byte)
+struct NVFP4Block {
+    static constexpr int SIZE = 16;  // 16 FP4 values per block
 
-    blocks_aligned_nvfp4_ref offset(size_t blck_cnt) const {
-        blocks_aligned_nvfp4_ref re;
-        re.d = &d[blck_cnt];
-        re.qs = &qs[blck_cnt * block_size / 2];
-        return re;
-    }
+    uint8_t fp4_data[SIZE / 2];  // Packed: 2 FP4 per byte
+    uint8_t scale_fp8;           // FP8 E4M3 block scale
 
-    static size_t expected_data_size(int64_t k) {
-        assert(k % block_size == 0);
-        return (sizeof(ggml_half) + block_size / 2) * (k / block_size);
-    }
-
-    uint8_t* get_qs(int block_idx) {
-        return offset_pointer(qs, block_idx * (block_size / 2));
-    }
-
-    // Quantize float array to NVFP4 format
-    static blocks_aligned_nvfp4_ref quantize(const float* RESTRICT x, void* RESTRICT data, int64_t k) {
-        assert(reinterpret_cast<intptr_t>(data) % 64 == 0);
-
-        blocks_aligned_nvfp4_ref re;
-        re.qs = reinterpret_cast<uint8_t*>(data);
-        re.d = reinterpret_cast<ggml_half*>(offset_pointer(re.qs, k / 2));
-
-        static const int qk = block_size;
-        assert(k % qk == 0);
-
-        const int nb = k / qk;
-
-        for (int i = 0; i < nb; i++) {
-            // Find max abs value in block
-            float amax = 0.0f;
-            for (int j = 0; j < qk; j++) {
-                amax = MAX(amax, fabsf(x[i * qk + j]));
-            }
-
-            // Scale: map max value to largest FP4 value (6.0)
-            const float d = amax / 6.0f;
-            const float id = d ? 1.0f / d : 0.0f;
-
-            re.d[i] = GGML_FP32_TO_FP16(d);
-
-            // Quantize each value
-            for (int j = 0; j < qk / 2; j++) {
-                const float x0 = x[i * qk + j * 2 + 0] * id;
-                const float x1 = x[i * qk + j * 2 + 1] * id;
-
-                const uint8_t q0 = float_to_fp4(x0);
-                const uint8_t q1 = float_to_fp4(x1);
-
-                // Pack two FP4 values into one byte
-                re.get_qs(i)[j] = q0 | (q1 << 4);
-            }
+    // Quantize 16 float values to NVFP4 block
+    void quantize(const float* values) {
+        // Find max absolute value in block
+        float max_abs = 0.0f;
+        for (int i = 0; i < SIZE; i++) {
+            max_abs = std::max(max_abs, std::abs(values[i]));
         }
 
-        return re;
+        // Compute block scale: map max to E2M1 max (6.0)
+        float block_scale = max_abs / 6.0f;
+        scale_fp8 = float_to_fp8_e4m3(block_scale);
+
+        // Quantize each value
+        float scale_inv = (block_scale > 1e-10f) ? (1.0f / block_scale) : 0.0f;
+
+        for (int i = 0; i < SIZE; i += 2) {
+            float normalized0 = values[i] * scale_inv;
+            float normalized1 = values[i + 1] * scale_inv;
+
+            uint8_t q0 = float_to_e2m1(normalized0);
+            uint8_t q1 = float_to_e2m1(normalized1);
+
+            fp4_data[i / 2] = (q0 & 0x0F) | ((q1 & 0x0F) << 4);
+        }
     }
 
-    // Dequantize NVFP4 to float array
-    void dequantize(float* y, int64_t k) {
-        static const int qk = block_size;
-        assert(k % qk == 0);
+    // Dequantize NVFP4 block to float values
+    void dequantize(float* values, float tensor_scale = 1.0f) const {
+        float block_scale = fp8_e4m3_to_float(scale_fp8);
+        float combined_scale = block_scale * tensor_scale;
 
-        const int nb = k / qk;
+        for (int i = 0; i < SIZE; i += 2) {
+            uint8_t packed = fp4_data[i / 2];
+            uint8_t q0 = packed & 0x0F;
+            uint8_t q1 = (packed >> 4) & 0x0F;
 
-        for (int i = 0; i < nb; i++) {
-            const float d = GGML_FP16_TO_FP32(this->d[i]);
-
-            for (int j = 0; j < qk / 2; j++) {
-                const uint8_t packed = get_qs(i)[j];
-                const uint8_t q0 = packed & 0x0F;
-                const uint8_t q1 = packed >> 4;
-
-                y[i * qk + j * 2 + 0] = fp4_to_float(q0) * d;
-                y[i * qk + j * 2 + 1] = fp4_to_float(q1) * d;
-            }
+            values[i] = e2m1_to_float(q0) * combined_scale;
+            values[i + 1] = e2m1_to_float(q1) * combined_scale;
         }
     }
 };
+
+// ============================================================================
+// NVFP4 Tensor Quantization
+// ============================================================================
+
+struct NVFP4Tensor {
+    uint8_t* fp4_data;       // Packed FP4 values
+    uint8_t* block_scales;   // FP8 E4M3 block scales
+    float tensor_scale;      // FP32 tensor scale
+
+    int rows, cols;
+    int block_count;
+
+    static constexpr int BLOCK_SIZE = 16;
+
+    NVFP4Tensor(int rows, int cols, void* buffer)
+        : rows(rows), cols(cols) {
+        int total_elems = rows * cols;
+        assert(total_elems % BLOCK_SIZE == 0);
+
+        block_count = total_elems / BLOCK_SIZE;
+
+        fp4_data = (uint8_t*)buffer;
+        block_scales = fp4_data + total_elems / 2;
+    }
+
+    static size_t required_size(int rows, int cols) {
+        int total_elems = rows * cols;
+        return total_elems / 2              // FP4 packed data
+             + total_elems / BLOCK_SIZE     // FP8 block scales
+             + sizeof(float);               // FP32 tensor scale (stored separately)
+    }
+
+    // Quantize from float array
+    void quantize_from_float(const float* src) {
+        // Step 1: Find global max for tensor scale
+        float global_max = 0.0f;
+        int total_elems = rows * cols;
+        for (int i = 0; i < total_elems; i++) {
+            global_max = std::max(global_max, std::abs(src[i]));
+        }
+
+        // Tensor scale: map global max to E4M3 range (448)
+        tensor_scale = global_max / 448.0f;
+
+        // Step 2: Quantize each block
+        for (int block_idx = 0; block_idx < block_count; block_idx++) {
+            const float* block_src = src + block_idx * BLOCK_SIZE;
+
+            NVFP4Block block;
+            block.quantize(block_src);
+
+            // Copy to tensor storage
+            memcpy(fp4_data + block_idx * BLOCK_SIZE / 2, block.fp4_data, BLOCK_SIZE / 2);
+            block_scales[block_idx] = block.scale_fp8;
+        }
+    }
+
+    // Dequantize to float array
+    void dequantize_to_float(float* dst) const {
+        for (int block_idx = 0; block_idx < block_count; block_idx++) {
+            NVFP4Block block;
+            memcpy(block.fp4_data, fp4_data + block_idx * BLOCK_SIZE / 2, BLOCK_SIZE / 2);
+            block.scale_fp8 = block_scales[block_idx];
+
+            float* block_dst = dst + block_idx * BLOCK_SIZE;
+            block.dequantize(block_dst, tensor_scale);
+        }
+    }
+};
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// Compute global max absolute value
+inline float compute_global_max_abs(int size, const float* data) {
+    float max_val = 0.0f;
+
+    // Use AVX512 for acceleration
+    for (int i = 0; i < size; i += 16) {
+        int remaining = std::min(16, size - i);
+        if (remaining == 16) {
+            __m512 vals = _mm512_loadu_ps(data + i);
+            __m512 abs_vals = _mm512_abs_ps(vals);
+            float local_max = _mm512_reduce_max_ps(abs_vals);
+            max_val = std::max(max_val, local_max);
+        } else {
+            for (int j = 0; j < remaining; j++) {
+                max_val = std::max(max_val, std::abs(data[i + j]));
+            }
+        }
+    }
+
+    return max_val;
+}
+
+// Compute global max absolute value from BF16
+inline float compute_global_max_abs_bf16(int size, const ggml_bf16_t* data) {
+    float max_val = 0.0f;
+
+    for (int i = 0; i < size; i += 32) {
+        int remaining = std::min(32, size - i);
+        if (remaining >= 32) {
+            __m512 f0, f1;
+            avx512_32xbf16_to_32xfp32((__m512i*)(data + i), &f0, &f1);
+
+            __m512 abs_f0 = _mm512_abs_ps(f0);
+            __m512 abs_f1 = _mm512_abs_ps(f1);
+
+            max_val = std::max(max_val, _mm512_reduce_max_ps(abs_f0));
+            max_val = std::max(max_val, _mm512_reduce_max_ps(abs_f1));
+        } else {
+            for (int j = 0; j < remaining; j++) {
+                float val = bf16_to_f32_inline(data[i + j]);
+                max_val = std::max(max_val, std::abs(val));
+            }
+        }
+    }
+
+    return max_val;
+}
 
 }  // namespace amx
 
