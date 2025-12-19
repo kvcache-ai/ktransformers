@@ -6,7 +6,7 @@ from typing import Dict, Literal
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 
 torch.manual_seed(42)
 
@@ -131,6 +131,7 @@ def pack_to_int32(value: torch.Tensor, num_bits: int, packed_dim: Literal[0, 1] 
         packed = packed.transpose(0, 1)
 
     return packed
+
 
 def pack_tensor_per_row(q: torch.Tensor, num_bits: int) -> torch.Tensor:
     e, rows, cols = q.shape
@@ -283,9 +284,9 @@ def run_case(pattern: str) -> Dict[str, float]:
             CPUInfer.sync()
 
             input_tensor_fp16 = input_tensor.to(torch.float16)
-            t_output = moe_torch(
-                input_tensor_fp16, expert_ids, weights, gate_fp16, up_fp16, down_fp16
-            ).to(torch.bfloat16)
+            t_output = moe_torch(input_tensor_fp16, expert_ids, weights, gate_fp16, up_fp16, down_fp16).to(
+                torch.bfloat16
+            )
 
             t_output = t_output.flatten()
             output = output.flatten()

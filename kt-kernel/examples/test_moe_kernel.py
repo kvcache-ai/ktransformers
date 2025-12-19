@@ -15,7 +15,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 os.environ["BLAS_NUM_THREADS"] = "1"
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 
 
 expert_num = 16

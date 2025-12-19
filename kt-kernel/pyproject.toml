@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kt-kernel"
-version = "0.1.0"
+# Version is dynamically read from ../version.py via setup.py
+dynamic = ["version"]
 description = "KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)"
 readme = "README.md"
 authors = [{ name = "kvcache-ai" }]

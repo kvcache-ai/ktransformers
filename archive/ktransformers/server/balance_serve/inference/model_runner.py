@@ -44,7 +44,8 @@ try:
     import torch_npu
     use_torch_npu = torch_npu.npu.is_available()
     from ktransformers.models.ascend.custom_ascend_modeling_deepseek_v3 import KNPUDeepseekV3ForCausalLM
-    from ktransformers.models.custom_cache import KVC2StaticCache
+    from ktransformers.models.ascend.custom_ascend_modeling_qwen3 import KNPUQwen3MoeForCausalLM
+    from ktransformers.models.custom_cache import KVC2StaticCache, KVC2Qwen3Cache
 except:
     use_torch_npu = False
 
@@ -70,8 +71,8 @@ class ModelRunner:
     if not use_torch_npu:
         model: KDeepseekV3ForCausalLM  | KQwen2MoeForCausalLM | KQwen3MoeForCausalLM | KSmallThinkerForCausalLM | KGlm4MoeForCausalLM | KQwen3NextForCausalLM
     else:
-        model: KNPUDeepseekV3ForCausalLM
-        cache: KVC2StaticCache #TODO 只有npu适配的代码里用到，规避
+        model: KNPUDeepseekV3ForCausalLM | KNPUQwen3MoeForCausalLM
+        cache: KVC2StaticCache | KVC2Qwen3Cache
     input: ForwardBatchInput | list[ForwardBatchInput]
     output: ForwardBatchOutput
     
@@ -210,7 +211,17 @@ class ModelRunner:
             utils._USE_NPU_GRAPH = True
             print("self.features_buf[npu_graph_idx] is ", self.features_buf[npu_graph_idx])
             with torch.npu.graph(self.graphs[npu_graph_idx], pool=self.graph_memory_pool, stream=self.stream, auto_dispatch_capture=True):
-                self.outputs_buf[npu_graph_idx] = self.model(self.input_decode[npu_graph_idx], self.features_buf[npu_graph_idx], self.cache, None, None, self.page_idx_buf[npu_graph_idx], self.page_offset_buf[npu_graph_idx], self.position_ids_buf[npu_graph_idx], self.block_tables_buf[npu_graph_idx], cuda_graph_idx=npu_graph_idx, is_prefill=False)
+                self.outputs_buf[npu_graph_idx] = self.model(
+                    self.input_decode[npu_graph_idx], 
+                    self.features_buf[npu_graph_idx], 
+                    self.cache, None, None, 
+                    self.page_idx_buf[npu_graph_idx], 
+                    self.page_offset_buf[npu_graph_idx], 
+                    self.position_ids_buf[npu_graph_idx], 
+                    self.block_tables_buf[npu_graph_idx], 
+                    cuda_graph_idx=npu_graph_idx, 
+                    is_prefill=False
+                    )
             self.graph_memory_pool = self.graphs[npu_graph_idx].pool()
             utils._USE_NPU_GRAPH = False
 
@@ -340,7 +351,6 @@ class ModelRunner:
         def _run_infer_stage(is_prefill=True):
             if "npu" in self.device:
                 cuda_graph_idx = batch_size_decode
-                # print("batch_size is ", batch_size)
             if is_prefill == False:
                 if cuda_graph_idx != -1 and self.use_cuda_graph:
                     self.features = self.model.batch_embeddings(self.input_decode[cuda_graph_idx], device=self.device, is_prefill=is_prefill)
@@ -370,7 +380,6 @@ class ModelRunner:
 
                 self.replay(cuda_graph_idx)
                 new_output = ForwardBatchOutput()
-                # bsz = self.outputs_buf[cuda_graph_idx].logits[0][self.input_decode[cuda_graph_idx].minibatch.d_logits_start].size(0)
                 for i in range(num_tokens):
                     new_output.top_ps.append(self.input_decode[cuda_graph_idx].minibatch.d_top_ps[i])
                     new_output.temperatures.append(self.input_decode[cuda_graph_idx].minibatch.d_temperatures[i])
@@ -389,13 +398,11 @@ class ModelRunner:
                 bsz = len(new_output.logits)
                 if is_prefill:
                     for i in range(bsz):
-                        # new_output.logits[i] = new_output.logits[i][self.input.minibatch.p_logits_start[i]:, :]  # slice prefill seq[-1]
                         new_output.logits[i] = new_output.logits[i][-1:, :]  # batched tensor do not need location
                         new_output.top_ps.append(self.input.minibatch.p_top_ps[i])
                         new_output.temperatures.append(self.input.minibatch.p_temperatures[i])
                 else:
                     for i in range(bsz):
-                        # new_output.logits[i] = new_output.logits[i][self.input.minibatch.d_logits_start[i]:, :]
                         new_output.top_ps.append(self.input.minibatch.d_top_ps[i])
                         new_output.temperatures.append(self.input.minibatch.d_temperatures[i])
 

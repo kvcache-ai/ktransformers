@@ -19,41 +19,65 @@ BUILD_OPTIONS (for "build" or "all"):
   --no-clean      Do not delete local build/ before building (default cleans)
 
 AUTO-DETECTION (Default):
-  The script will automatically detect your CPU capabilities and configure:
-  - If AMX instructions detected → NATIVE + AMX=ON
-  - Otherwise                    → NATIVE + AMX=OFF
+  The script will automatically detect your CPU and use ALL available features:
+  - CPUINFER_CPU_INSTRUCT = NATIVE (uses -march=native)
+  - CPUINFER_ENABLE_AMX   = ON/OFF (based on detection)
+  - CPUINFER_ENABLE_AVX512_VNNI = ON/OFF (with fallback if OFF)
+  - CPUINFER_ENABLE_AVX512_BF16 = ON/OFF (with fallback if OFF)
+
+  ✓ Best performance on YOUR machine
+  ✗ Binary may NOT work on different/older CPUs
+
+  Use this when: Installing for local use only
 
 MANUAL CONFIGURATION:
-  Use --manual flag and set these environment variables before running:
+  Use --manual flag when building for DISTRIBUTION or different machines.
+  Set these environment variables before running:
 
-  CPUINFER_CPU_INSTRUCT   - CPU instruction set
-                            Options: NATIVE, AVX512, AVX2, FANCY
+  CPUINFER_CPU_INSTRUCT   - Target CPU instruction set
+                            Options: AVX512, AVX2, FANCY, NATIVE
   CPUINFER_ENABLE_AMX     - Enable Intel AMX support
                             Options: ON, OFF
 
-Manual configuration examples:
+Distribution examples (portable binaries):
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│ Configuration                    │ Use Case                             │
-├──────────────────────────────────┼──────────────────────────────────────┤
-│ NATIVE + AMX=ON                  │ Best performance on AMX CPUs         │
-│ AVX512 + AMX=OFF                 │ AVX512 CPUs without AMX              │
-│ AVX2 + AMX=OFF                   │ Older CPUs or maximum compatibility  │
-└──────────────────────────────────┴──────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Configuration          │ Target CPUs              │ Use Case             │
+├────────────────────────┼──────────────────────────┼──────────────────────┤
+│ AVX512 + AMX=OFF       │ Skylake-X, Ice Lake,     │ General distribution │
+│                        │ Cascade Lake, Zen 4      │ (recommended)        │
+├────────────────────────┼──────────────────────────┼──────────────────────┤
+│ AVX2 + AMX=OFF         │ Haswell (2013) and newer │ Maximum compatibility│
+├────────────────────────┼──────────────────────────┼──────────────────────┤
+│ FANCY + AMX=OFF        │ Ice Lake+, Zen 4+        │ Modern CPUs only     │
+│                        │ (with full AVX512 ext)   │                      │
+└────────────────────────┴──────────────────────────┴──────────────────────┘
 
-  Example manual build:
+  Use this when: Building Docker images, PyPI packages, or deploying to clusters
+
+  Example: Build for general distribution
     export CPUINFER_CPU_INSTRUCT=AVX512
     export CPUINFER_ENABLE_AMX=OFF
     $0 build --manual
+    # Result: Works on any CPU with AVX512 (2017+)
 
-Advanced option (for binary distribution):
-  FANCY - AVX512 with full extensions for Ice Lake+/Zen 4+
-          Use this when building pre-compiled binaries to distribute.
+  Example: Build for maximum compatibility
+    export CPUINFER_CPU_INSTRUCT=AVX2
+    export CPUINFER_ENABLE_AMX=OFF
+    $0 build --manual
+    # Result: Works on any CPU with AVX2 (2013+)
 
 Optional variables (with defaults):
-  CPUINFER_BUILD_TYPE=Release      Build type (Debug/RelWithDebInfo/Release)
-  CPUINFER_PARALLEL=8              Number of parallel build jobs
-  CPUINFER_VERBOSE=1               Verbose build output (0/1)
+  CPUINFER_BUILD_TYPE=Release           Build type (Debug/RelWithDebInfo/Release)
+  CPUINFER_PARALLEL=8                   Number of parallel build jobs
+  CPUINFER_VERBOSE=1                    Verbose build output (0/1)
+  CPUINFER_ENABLE_AVX512_VNNI=ON/OFF    Override VNNI detection (auto if unset)
+  CPUINFER_ENABLE_AVX512_BF16=ON/OFF    Override BF16 detection (auto if unset)
+
+Software Fallback Support:
+  ✓ If VNNI not available: Uses AVX512BW fallback (2-3x slower but works)
+  ✓ If BF16 not available: Uses AVX512F fallback (5-10x slower but works)
+  → Old CPUs with only AVX512F+BW can run all code (slower but functional)
 
 EOF
   exit 1
@@ -120,20 +144,38 @@ install_dependencies() {
 }
 
 # Function to detect CPU features
+# Returns: "has_amx has_avx512_vnni has_avx512_bf16" (space-separated 0/1 values)
 detect_cpu_features() {
   local has_amx=0
+  local has_avx512_vnni=0
+  local has_avx512_bf16=0
 
   if [ -f /proc/cpuinfo ]; then
+    local cpu_flags
+    cpu_flags=$(grep -m1 "^flags" /proc/cpuinfo | tr ' ' '\n')
+
     # Check for AMX support on Linux
-    if grep -q "amx_tile\|amx_int8\|amx_bf16" /proc/cpuinfo; then
+    if echo "$cpu_flags" | grep -qE "amx_tile|amx_int8|amx_bf16"; then
       has_amx=1
+    fi
+
+    # Check for AVX512_VNNI support
+    if echo "$cpu_flags" | grep -qE "avx512_vnni|avx512vnni"; then
+      has_avx512_vnni=1
+    fi
+
+    # Check for AVX512_BF16 support
+    if echo "$cpu_flags" | grep -qE "avx512_bf16|avx512bf16"; then
+      has_avx512_bf16=1
     fi
   elif [ "$(uname)" = "Darwin" ]; then
     # macOS doesn't have AMX (ARM or Intel without AMX)
     has_amx=0
+    has_avx512_vnni=0
+    has_avx512_bf16=0
   fi
 
-  echo "$has_amx"
+  echo "$has_amx $has_avx512_vnni $has_avx512_bf16"
 }
 
 build_step() {
@@ -168,24 +210,69 @@ build_step() {
   echo "=========================================="
   echo ""
 
-  HAS_AMX=$(detect_cpu_features)
+  # detect_cpu_features returns "has_amx has_avx512_vnni has_avx512_bf16"
+  CPU_FEATURES=$(detect_cpu_features)
+  HAS_AMX=$(echo "$CPU_FEATURES" | cut -d' ' -f1)
+  HAS_AVX512_VNNI=$(echo "$CPU_FEATURES" | cut -d' ' -f2)
+  HAS_AVX512_BF16=$(echo "$CPU_FEATURES" | cut -d' ' -f3)
+
+  export CPUINFER_CPU_INSTRUCT=NATIVE
 
   if [ "$HAS_AMX" = "1" ]; then
     echo "✓ AMX instructions detected"
-    export CPUINFER_CPU_INSTRUCT=NATIVE
     export CPUINFER_ENABLE_AMX=ON
-    echo "  Configuration: NATIVE + AMX=ON (best performance)"
     echo ""
-    echo "  ⚠️  Note: If you plan to use LLAMAFILE backend, use manual mode:"
-    echo "     export CPUINFER_CPU_INSTRUCT=AVX512  # or AVX2/FANCY"
-    echo "     export CPUINFER_ENABLE_AMX=OFF"
-    echo "     ./install.sh build --manual"
+    echo "Configuration: NATIVE + AMX=ON"
+    echo "  ✓ Best performance on this machine"
+    echo "  ✗ Binary requires Sapphire Rapids or newer CPU"
   else
     echo "ℹ AMX instructions not detected"
-    export CPUINFER_CPU_INSTRUCT=NATIVE
     export CPUINFER_ENABLE_AMX=OFF
-    echo "  Configuration: NATIVE + AMX=OFF"
+    echo ""
+    echo "Configuration: NATIVE + AMX=OFF"
+    echo "  ✓ Using AVX512/AVX2 instructions"
   fi
+
+  echo ""
+  echo "  ⚠️  IMPORTANT: This binary is optimized for THIS CPU only"
+  echo "     To build portable binaries for distribution, use:"
+  echo "       export CPUINFER_CPU_INSTRUCT=AVX512  # or AVX2"
+  echo "       export CPUINFER_ENABLE_AMX=OFF"
+  echo "       ./install.sh build --manual"
+
+  # Fine-grained AVX512 subset detection (with fallback support)
+  echo ""
+  echo "AVX512 Feature Detection:"
+
+  # VNNI: Check if user manually set it, otherwise auto-detect
+  if [ -n "${CPUINFER_ENABLE_AVX512_VNNI:-}" ]; then
+    echo "  VNNI: User override = $CPUINFER_ENABLE_AVX512_VNNI"
+  else
+    if [ "$HAS_AVX512_VNNI" = "1" ]; then
+      echo "  VNNI: ✓ Detected (hardware acceleration enabled)"
+      export CPUINFER_ENABLE_AVX512_VNNI=ON
+    else
+      echo "  VNNI: ✗ Not detected (will use software fallback, 2-3x slower)"
+      export CPUINFER_ENABLE_AVX512_VNNI=OFF
+    fi
+  fi
+
+  # BF16: Check if user manually set it, otherwise auto-detect
+  if [ -n "${CPUINFER_ENABLE_AVX512_BF16:-}" ]; then
+    echo "  BF16: User override = $CPUINFER_ENABLE_AVX512_BF16"
+  else
+    if [ "$HAS_AVX512_BF16" = "1" ]; then
+      echo "  BF16: ✓ Detected (hardware acceleration enabled)"
+      export CPUINFER_ENABLE_AVX512_BF16=ON
+    else
+      echo "  BF16: ✗ Not detected (will use software fallback, 5-10x slower)"
+      export CPUINFER_ENABLE_AVX512_BF16=OFF
+    fi
+  fi
+
+  echo ""
+  echo "  Note: Software fallbacks ensure all code works on older CPUs"
+  echo "  Tip: Override with CPUINFER_ENABLE_AVX512_VNNI/BF16=ON/OFF"
 
   echo ""
   echo "To use manual configuration instead, run: $0 build --manual"
@@ -222,12 +309,32 @@ build_step() {
 
   # Warn about problematic configuration
   if [ "$CPUINFER_CPU_INSTRUCT" = "NATIVE" ] && [ "$CPUINFER_ENABLE_AMX" = "OFF" ]; then
-    HAS_AMX=$(detect_cpu_features)
+    CPU_FEATURES=$(detect_cpu_features)
+    HAS_AMX=$(echo "$CPU_FEATURES" | cut -d' ' -f1)
     if [ "$HAS_AMX" = "1" ]; then
-      echo "⚠️  WARNING: NATIVE + AMX=OFF on AMX-capable CPU may cause compilation issues!"
-      echo "   Recommended: Use AVX512 or AVX2 instead of NATIVE when AMX=OFF"
+      echo "=========================================="
+      echo "⚠️  WARNING: Risky Configuration"
+      echo "=========================================="
       echo ""
-      read -p "Continue anyway? (y/N) " -n 1 -r
+      echo "Your configuration:"
+      echo "  CPUINFER_CPU_INSTRUCT = NATIVE"
+      echo "  CPUINFER_ENABLE_AMX   = OFF"
+      echo ""
+      echo "Your CPU HAS AMX support!"
+      echo ""
+      echo "Problem:"
+      echo "  • NATIVE uses -march=native which auto-enables ALL CPU features"
+      echo "  • This may IGNORE your AMX=OFF setting"
+      echo "  • The binary may still contain AMX instructions"
+      echo ""
+      echo "Recommended fixes:"
+      echo "  1) For portable build (recommended for distribution):"
+      echo "       export CPUINFER_CPU_INSTRUCT=AVX512"
+      echo ""
+      echo "  2) If you want best performance on this CPU:"
+      echo "       export CPUINFER_ENABLE_AMX=ON"
+      echo ""
+      read -p "Continue with risky configuration? (y/N) " -n 1 -r
       echo
       if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         exit 1
@@ -243,12 +350,15 @@ export CPUINFER_BUILD_TYPE=${CPUINFER_BUILD_TYPE:-Release}
 export CPUINFER_PARALLEL=${CPUINFER_PARALLEL:-8}
 export CPUINFER_VERBOSE=${CPUINFER_VERBOSE:-1}
 
+echo "=========================================="
 echo "Building kt-kernel with configuration:"
-echo "  CPUINFER_CPU_INSTRUCT=$CPUINFER_CPU_INSTRUCT"
-echo "  CPUINFER_ENABLE_AMX=$CPUINFER_ENABLE_AMX"
-echo "  CPUINFER_BUILD_TYPE=$CPUINFER_BUILD_TYPE"
-echo "  CPUINFER_PARALLEL=$CPUINFER_PARALLEL"
-echo "  CPUINFER_VERBOSE=$CPUINFER_VERBOSE"
+echo "=========================================="
+echo "  CPUINFER_CPU_INSTRUCT        = $CPUINFER_CPU_INSTRUCT"
+echo "  CPUINFER_ENABLE_AMX          = $CPUINFER_ENABLE_AMX"
+echo "  CPUINFER_ENABLE_AVX512_VNNI  = ${CPUINFER_ENABLE_AVX512_VNNI:-AUTO}"
+echo "  CPUINFER_ENABLE_AVX512_BF16  = ${CPUINFER_ENABLE_AVX512_BF16:-AUTO}"
+echo "  CPUINFER_BUILD_TYPE          = $CPUINFER_BUILD_TYPE"
+echo "  CPUINFER_PARALLEL            = $CPUINFER_PARALLEL"
 echo ""
 
 pip install . -v

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 import torch
 
 # Benchmark parameters (single MoE, no layer loop)
@@ -29,9 +29,7 @@ warm_up_iter = 1000
 test_iter = 5000
 k_group_size = 32
 
-physical_to_logical_map = (
-    torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
-)
+physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
 worker_config = kt_kernel_ext.WorkerPoolConfig()
 worker_config.subpool_count = 2
@@ -43,24 +41,12 @@ CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 def get_git_commit():
     result = {}
     try:
-        commit = (
-            subprocess.check_output(["git", "rev-parse", "HEAD"])
-            .decode("utf-8")
-            .strip()
-        )
-        commit_msg = (
-            subprocess.check_output(["git", "log", "-1", "--pretty=%B"])
-            .decode("utf-8")
-            .strip()
-        )
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("utf-8").strip()
+        commit_msg = subprocess.check_output(["git", "log", "-1", "--pretty=%B"]).decode("utf-8").strip()
         result["commit"] = commit
         result["commit_message"] = commit_msg
 
-        dirty_output = (
-            subprocess.check_output(["git", "status", "--porcelain"])
-            .decode("utf-8")
-            .strip()
-        )
+        dirty_output = subprocess.check_output(["git", "status", "--porcelain"]).decode("utf-8").strip()
         if dirty_output:
             result["dirty"] = True
             result["dirty_files"] = dirty_output.splitlines()
@@ -132,9 +118,7 @@ def record_results(result, filename=json_path):
         f.write(json.dumps(result) + "\n")
 
 
-def pack_to_int32(
-    value: torch.Tensor, num_bits: int, packed_dim: int = 1
-) -> torch.Tensor:
+def pack_to_int32(value: torch.Tensor, num_bits: int, packed_dim: int = 1) -> torch.Tensor:
     if value.dtype is not torch.int8:
         raise ValueError("Tensor must be torch.int8 before packing")
     if not (1 <= num_bits <= 8):
@@ -181,9 +165,7 @@ def quantize_k2_tensor(weights: torch.Tensor, group_size: int):
     weights_f32 = weights.to(torch.float32)
     e, rows, cols = weights_f32.shape
     if cols % group_size != 0 or cols % 2 != 0:
-        raise ValueError(
-            f"cols ({cols}) must be divisible by group_size ({group_size}) and 2"
-        )
+        raise ValueError(f"cols ({cols}) must be divisible by group_size ({group_size}) and 2")
 
     reshaped = weights_f32.view(e, rows, cols // group_size, group_size)
     max_abs = reshaped.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -191,9 +173,7 @@ def quantize_k2_tensor(weights: torch.Tensor, group_size: int):
     q = torch.round(reshaped / scales.unsqueeze(-1)).clamp(-8, 7).to(torch.int8)
     q = q.view(e, rows, cols)
     packed = pack_tensor_per_row(q, num_bits=4).view(e, rows, cols // 8).contiguous()
-    scales = scales.to(torch.bfloat16).contiguous().view(
-        e, rows, cols // group_size
-    ).contiguous()
+    scales = scales.to(torch.bfloat16).contiguous().view(e, rows, cols // group_size).contiguous()
     return packed, scales
 
 
@@ -233,9 +213,7 @@ def bench_k2_moe():
         bytes_per_elem = 0.5 + 2.0 / k_group_size
 
         quant_data = build_quantized_layer_weights()
-        config = kt_kernel_ext.moe.MOEConfig(
-            expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0
-        )
+        config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
         config.max_len = max_len
         config.quant_config.bits = 4
         config.quant_config.group_size = k_group_size
@@ -261,12 +239,8 @@ def bench_k2_moe():
             .reshape(gen_iter, qlen * num_experts_per_tok)
             .contiguous()
         )
-        weights = torch.rand(
-            (gen_iter, qlen, num_experts_per_tok), dtype=torch.float32, device="cpu"
-        ).contiguous()
-        input_tensor = torch.randn(
-            (qlen, hidden_size), dtype=torch.bfloat16, device="cpu"
-        ).contiguous()
+        weights = torch.rand((gen_iter, qlen, num_experts_per_tok), dtype=torch.float32, device="cpu").contiguous()
+        input_tensor = torch.randn((qlen, hidden_size), dtype=torch.bfloat16, device="cpu").contiguous()
         output_tensor = torch.empty_like(input_tensor)
         bsz_tensor = torch.tensor([qlen], device="cpu")
 
@@ -313,17 +287,7 @@ def bench_k2_moe():
             / total_time
             / 1e9
         )
-        flops = (
-            hidden_size
-            * intermediate_size
-            * qlen
-            * 3
-            * num_experts_per_tok
-            * 2
-            * test_iter
-            / total_time
-            / 1e12
-        )
+        flops = hidden_size * intermediate_size * qlen * 3 * num_experts_per_tok * 2 * test_iter / total_time / 1e12
 
         print("Quant mode: int4_k2")
         print("Time(s): ", total_time)

@@ -3,9 +3,10 @@ import time
 import subprocess
 import platform
 import json
+
 os.environ["BLAS_NUM_THREADS"] = "1"
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build'))
-import kt_kernel_ext
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
+from kt_kernel import kt_kernel_ext
 from kt_kernel_ext.kvcache import ggml_type
 import torch
 from torch import inf, nn
@@ -31,9 +32,9 @@ layer_num = 10
 
 
 rope_theta = 10000
-max_qlen = qlen+kvlen
+max_qlen = qlen + kvlen
 max_kvlen = 4096
-max_position_embeddings =  163840
+max_position_embeddings = 163840
 
 rope_scaling = {
     "beta_fast": 32,
@@ -42,7 +43,7 @@ rope_scaling = {
     "mscale": 1.0,
     "mscale_all_dim": 1.0,
     "original_max_position_embeddings": 4096,
-    "type": "yarn"
+    "type": "yarn",
 }
 
 CPUINFER_PARAM = 304
@@ -54,13 +55,12 @@ warm_up_iter = 20
 test_iter = 100
 
 
-
-
 # 获取脚本相关信息，用于生成结果保存文件名
 script_path = os.path.abspath(__file__)
 script_dir = os.path.dirname(script_path)
 script_name = os.path.splitext(os.path.basename(script_path))[0]
-json_path = os.path.join(script_dir, "bench_results "+ ".jsonl")
+json_path = os.path.join(script_dir, "bench_results " + ".jsonl")
+
 
 def get_git_commit():
     """
@@ -100,9 +100,9 @@ def get_system_info():
 
     # 获取 CPU 型号（仅 Linux 支持）
     cpu_model = None
-    if os.path.exists('/proc/cpuinfo'):
+    if os.path.exists("/proc/cpuinfo"):
         try:
-            with open('/proc/cpuinfo', 'r') as f:
+            with open("/proc/cpuinfo", "r") as f:
                 for line in f:
                     if "model name" in line:
                         cpu_model = line.split(":", 1)[1].strip()
@@ -113,9 +113,9 @@ def get_system_info():
 
     # 获取内存大小（单位：GB），仅 Linux 支持
     mem_total_gb = None
-    if os.path.exists('/proc/meminfo'):
+    if os.path.exists("/proc/meminfo"):
         try:
-            with open('/proc/meminfo', 'r') as f:
+            with open("/proc/meminfo", "r") as f:
                 for line in f:
                     if "MemTotal" in line:
                         mem_kb = float(line.split(":", 1)[1].split()[0])
@@ -149,6 +149,7 @@ def record_results(result, filename=json_path):
     with open(filename, "a") as f:
         f.write(json.dumps(result) + "\n")
 
+
 def bench_mla(quant_mode: str):
     """
     测试 MLA 模型的性能
@@ -171,22 +172,22 @@ def bench_mla(quant_mode: str):
             w_o_type = 1
             bytes_per_elem = 2.000000
         elif quant_mode == "q4_k_m":
-            q_a_proj_type = 12   # ggml_type::GGML_TYPE_Q4_K
+            q_a_proj_type = 12  # ggml_type::GGML_TYPE_Q4_K
             q_b_proj_type = 12
-            kv_a_proj_with_mqa_type = 12   # ggml_type::GGML_TYPE_Q6_K
+            kv_a_proj_with_mqa_type = 12  # ggml_type::GGML_TYPE_Q6_K
             kv_b_proj_type = 12
             w_o_type = 12
             bytes_per_elem = 0.5625
         else:
             raise ValueError("不支持的量化模式")
-    
-    # 构建各层 MLA 模型的输入数据
+
+        # 构建各层 MLA 模型的输入数据
         mlas = []
         for i in tqdm(range(layer_num)):
             q_a_proj = nn.Linear(hidden_size, q_lora_rank, bias=False, dtype=torch.float16)
-            q_b_proj = nn.Linear(q_lora_rank, num_heads * (nope_size+rope_size) , bias=False, dtype=torch.float16)
+            q_b_proj = nn.Linear(q_lora_rank, num_heads * (nope_size + rope_size), bias=False, dtype=torch.float16)
             kv_a_proj_with_mqa = nn.Linear(hidden_size, kv_lora_rank + rope_size, bias=False, dtype=torch.float16)
-            kv_b_proj = nn.Linear( num_heads * (nope_size + nope_size),kv_lora_rank, bias=False, dtype=torch.float16)
+            kv_b_proj = nn.Linear(num_heads * (nope_size + nope_size), kv_lora_rank, bias=False, dtype=torch.float16)
             o_proj = nn.Linear(num_heads * nope_size, hidden_size, bias=False, dtype=torch.float16)
 
             init.normal_(q_a_proj.weight, mean=0.0, std=0.02)
@@ -194,11 +195,11 @@ def bench_mla(quant_mode: str):
             init.normal_(kv_a_proj_with_mqa.weight, mean=0.0, std=0.02)
             init.normal_(kv_b_proj.weight, mean=0.0, std=0.02)
             init.normal_(o_proj.weight, mean=0.0, std=0.02)
-            q_a_proj_weight = q_a_proj.weight.to(torch.float16).to('cpu').contiguous()
-            q_b_proj_weight = q_b_proj.weight.to(torch.float16).to('cpu').contiguous()
-            kv_a_proj_with_mqa_weight = kv_a_proj_with_mqa.weight.to('cpu').to(torch.float16).contiguous()
-            kv_b_proj_weight = kv_b_proj.weight.to(torch.float16).to('cpu').contiguous()
-            o_proj_weight = o_proj.weight.to(torch.float16).to('cpu').contiguous()
+            q_a_proj_weight = q_a_proj.weight.to(torch.float16).to("cpu").contiguous()
+            q_b_proj_weight = q_b_proj.weight.to(torch.float16).to("cpu").contiguous()
+            kv_a_proj_with_mqa_weight = kv_a_proj_with_mqa.weight.to("cpu").to(torch.float16).contiguous()
+            kv_b_proj_weight = kv_b_proj.weight.to(torch.float16).to("cpu").contiguous()
+            o_proj_weight = o_proj.weight.to(torch.float16).to("cpu").contiguous()
 
             config = kt_kernel_ext.mla.MLAConfig(
                 hidden_size,
@@ -210,7 +211,7 @@ def bench_mla(quant_mode: str):
             )
             config.max_qlen = max_qlen
             config.max_kvlen = max_kvlen
-            config.max_position_embeddings = max_position_embeddings 
+            config.max_position_embeddings = max_position_embeddings
             config.rope_scaling_factor = rope_scaling["factor"]
             config.rope_theta = rope_theta
             config.rope_scaling_beta_fast = rope_scaling["beta_fast"]
@@ -231,64 +232,85 @@ def bench_mla(quant_mode: str):
             config.kv_b_proj_type = ggml_type.FP16
             config.w_o_type = ggml_type.FP16
 
-
             config.pool = CPUInfer.backend_
-
-
 
             mla = kt_kernel_ext.mla.MLA(config)
             mla.load_weights()
             mla.set_local_pages(pages_count)
             mlas.append(mla)
 
-        print('Generating data...')
-        input_tensor = torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").to("cpu").contiguous()
-        output_tensor = torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").to("cpu").contiguous()
-        
-        print('Warming up...')
+        print("Generating data...")
+        input_tensor = (
+            torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").to("cpu").contiguous()
+        )
+        output_tensor = (
+            torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").to("cpu").contiguous()
+        )
+
+        print("Warming up...")
 
         for i in tqdm(range(warm_up_iter)):
-            mlas[i%layer_num].forward([qlen],[page_table],[kvlen],
-                        input_tensor[i%layer_num].data_ptr(),output_tensor[i%layer_num].data_ptr())
+            mlas[i % layer_num].forward(
+                [qlen],
+                [page_table],
+                [kvlen],
+                input_tensor[i % layer_num].data_ptr(),
+                output_tensor[i % layer_num].data_ptr(),
+            )
 
-
-        print('Start testing...')
+        print("Start testing...")
 
         start = time.perf_counter()
         for i in tqdm(range(test_iter)):
-            mlas[i%layer_num].forward([qlen],[page_table],[kvlen],
-                        input_tensor[i%layer_num].data_ptr(),output_tensor[i%layer_num].data_ptr())
+            mlas[i % layer_num].forward(
+                [qlen],
+                [page_table],
+                [kvlen],
+                input_tensor[i % layer_num].data_ptr(),
+                output_tensor[i % layer_num].data_ptr(),
+            )
 
         end = time.perf_counter()
         total_time = end - start
 
         time_per_iter_us = (total_time * 1e6) / test_iter
-        bandwidth = bytes_per_elem * (q_lora_rank * hidden_size 
-                     + (kv_lora_rank+rope_size) * hidden_size 
-                     + (nope_size+rope_size) * q_lora_rank * num_heads
-                     + (nope_size+nope_size)*kv_lora_rank * num_heads
-                     + hidden_size * nope_size * num_heads
-                     + hidden_size * qlen) * test_iter / (total_time * 1e9)
-        flops =  2*(
-                    q_lora_rank*hidden_size*qlen 
-                    + kv_lora_rank * hidden_size * qlen
-                    +num_heads* (nope_size+rope_size)*q_lora_rank*qlen 
-                    + num_heads * qlen * nope_size * kv_lora_rank
-                    + num_heads * (kvlen+qlen) * kv_lora_rank * qlen
-                    + num_heads * rope_size * qlen * (qlen+kvlen)
-                    + num_heads * kv_lora_rank * (qlen + kvlen) * qlen
-                    + num_heads * nope_size * kv_lora_rank * qlen
-                    + hidden_size * num_heads* nope_size * qlen
-                    ) * test_iter / (total_time * 1e12)
+        bandwidth = (
+            bytes_per_elem
+            * (
+                q_lora_rank * hidden_size
+                + (kv_lora_rank + rope_size) * hidden_size
+                + (nope_size + rope_size) * q_lora_rank * num_heads
+                + (nope_size + nope_size) * kv_lora_rank * num_heads
+                + hidden_size * nope_size * num_heads
+                + hidden_size * qlen
+            )
+            * test_iter
+            / (total_time * 1e9)
+        )
+        flops = (
+            2
+            * (
+                q_lora_rank * hidden_size * qlen
+                + kv_lora_rank * hidden_size * qlen
+                + num_heads * (nope_size + rope_size) * q_lora_rank * qlen
+                + num_heads * qlen * nope_size * kv_lora_rank
+                + num_heads * (kvlen + qlen) * kv_lora_rank * qlen
+                + num_heads * rope_size * qlen * (qlen + kvlen)
+                + num_heads * kv_lora_rank * (qlen + kvlen) * qlen
+                + num_heads * nope_size * kv_lora_rank * qlen
+                + hidden_size * num_heads * nope_size * qlen
+            )
+            * test_iter
+            / (total_time * 1e12)
+        )
 
-
-        print('Quant mode:', quant_mode)
-        print('Time(s):', total_time)
-        print('Iteration:', test_iter)
-        print('Time(us) per iteration:', time_per_iter_us)
-        print('Bandwidth:', bandwidth, 'GB/s')
-        print('TFLOPS:', flops)
-        print('')        
+        print("Quant mode:", quant_mode)
+        print("Time(s):", total_time)
+        print("Iteration:", test_iter)
+        print("Time(us) per iteration:", time_per_iter_us)
+        print("Bandwidth:", bandwidth, "GB/s")
+        print("TFLOPS:", flops)
+        print("")
 
         # 整理测试结果
         result = {
@@ -301,7 +323,7 @@ def bench_mla(quant_mode: str):
             "flops_TFLOPS": flops,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "test_parameters": {
-                 "qlen": qlen,
+                "qlen": qlen,
                 "kvlen": kvlen,
                 "page_table": page_table,
                 "page_size": page_size,
@@ -312,21 +334,16 @@ def bench_mla(quant_mode: str):
                 "q_lora_rank": q_lora_rank,
                 "nope_size": nope_size,
                 "rope_size": rope_size,
-
-
                 "layer_num": layer_num,
-               
                 "rope_theta": rope_theta,
                 "max_qlen": max_qlen,
                 "max_kvlen": max_kvlen,
                 "max_position_embeddings": max_position_embeddings,
-
                 "rope_scaling": rope_scaling,
-
                 "warm_up_iter": warm_up_iter,
                 "test_iter": test_iter,
-                "CPUInfer_parameter": CPUINFER_PARAM 
-            }
+                "CPUInfer_parameter": CPUINFER_PARAM,
+            },
         }
         # 添加 git 与系统信息
         result.update(get_git_commit())
@@ -334,6 +351,6 @@ def bench_mla(quant_mode: str):
         # 将结果记录到 JSON 文件中
         print(result)
         record_results(result)
-        
+
 
 bench_mla("fp16")

@@ -1,18 +1,19 @@
 #!/usr/bin/env python
 # coding=utf-8
-'''
-Description  :  
+"""
+Description  :
 Author       : chenht2022
 Date         : 2024-07-25 10:32:05
 Version      : 1.0.0
-LastEditors  : SkqLiao 
+LastEditors  : SkqLiao
 LastEditTime : 2025-03-13 11:38:05
-Copyright (c) 2024 by KVCache.AI, All Rights Reserved. 
-'''
+Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
+"""
 import os, sys
 import time
-sys.path.insert(0, os.path.dirname(__file__) + '/../build')
-import kt_kernel_ext
+
+sys.path.insert(0, os.path.dirname(__file__) + "/../build")
+from kt_kernel import kt_kernel_ext
 import torch
 from tqdm import tqdm
 from kt_kernel_ext.kvcache import ggml_type
@@ -20,7 +21,7 @@ from kt_kernel_ext.kvcache import ggml_type
 torch.manual_seed(0)
 
 expert_num = 8
-hidden_size = 2048 #7168
+hidden_size = 2048  # 7168
 intermediate_size = 2048
 stride = 32
 group_min_len = 10
@@ -39,8 +40,10 @@ layer_num = 1
 CPUInfer = kt_kernel_ext.CPUInfer(64)
 validation_iter = 10
 
+
 def act_fn(x):
     return x / (1.0 + torch.exp(-x))
+
 
 def mlp_torch(input, gate_proj, up_proj, down_proj):
     gate_buf = torch.mm(input, gate_proj.t())
@@ -48,6 +51,7 @@ def mlp_torch(input, gate_proj, up_proj, down_proj):
     intermediate = act_fn(gate_buf) * up_buf
     ret = torch.mm(intermediate, down_proj.t())
     return ret
+
 
 def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
     cnts = expert_ids.new_zeros((expert_ids.shape[0], expert_num))
@@ -85,10 +89,12 @@ def to_cpuinfer_tensor(tensor, type):
     size = torch.prod(torch.tensor(tensor.shape, dtype=torch.int32)).item()
     return kt_kernel_ext.utils.from_float(tensor.data_ptr(), size, type)
 
+
 def from_cpuinfer_tensor(tensor, size, type):
     return kt_kernel_ext.utils.to_float(tensor.data_ptr(), size, type)
 
-qlens = [1,64] #[64, 512, 2048, 8192, 16384]
+
+qlens = [1, 64]  # [64, 512, 2048, 8192, 16384]
 # gate_types = [ggml_type.FP32, ggml_type.FP16, ggml_type.Q8_0, ggml_type.Q6_K, ggml_type.Q5_K, ggml_type.Q4_K, ggml_type.Q3_K]
 # up_types = [ggml_type.FP32, ggml_type.FP16, ggml_type.Q8_0, ggml_type.Q6_K, ggml_type.Q5_K, ggml_type.Q4_K, ggml_type.Q3_K]
 # down_types = [ggml_type.FP32, ggml_type.FP16, ggml_type.Q8_0, ggml_type.Q6_K, ggml_type.Q6_K, ggml_type.Q6_K, ggml_type.Q5_K]
@@ -96,8 +102,8 @@ gate_types = [ggml_type.Q4_K]
 up_types = [ggml_type.Q4_K]
 down_types = [ggml_type.Q6_K]
 hidden_type = ggml_type.BF16
-print(f'Parameters: expert_num: {expert_num} hidden_size: {hidden_size} intermediate_size: {intermediate_size}')
-print(f'group_max_len: ', group_max_len)
+print(f"Parameters: expert_num: {expert_num} hidden_size: {hidden_size} intermediate_size: {intermediate_size}")
+print(f"group_max_len: ", group_max_len)
 
 for qlen in qlens:
     for gate_type, up_type, down_type in zip(gate_types, up_types, down_types):
@@ -106,18 +112,30 @@ for qlen in qlens:
             gate_projs = []
             up_projs = []
             down_projs = []
-            print('Preparing data...')
+            print("Preparing data...")
             converted_tensors = []
             for _ in range(layer_num):
                 size = expert_num * intermediate_size * hidden_size
-                gate_proj = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-                up_proj = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-                down_proj = torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32, device = "cuda").to("cpu").contiguous()
-                
+                gate_proj = (
+                    torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
+                    .to("cpu")
+                    .contiguous()
+                )
+                up_proj = (
+                    torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
+                    .to("cpu")
+                    .contiguous()
+                )
+                down_proj = (
+                    torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cuda")
+                    .to("cpu")
+                    .contiguous()
+                )
+
                 gate_tensor = to_cpuinfer_tensor(gate_proj, gate_type)
                 up_tensor = to_cpuinfer_tensor(up_proj, up_type)
                 down_tensor = to_cpuinfer_tensor(down_proj, down_type)
-                
+
                 config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
                 config.pool = CPUInfer.backend_
                 config.stride = stride
@@ -131,59 +149,62 @@ for qlen in qlens:
                 config.down_type = down_type
                 config.hidden_type = hidden_type
 
-
                 moe = kt_kernel_ext.moe.MOE(config)
                 gate_projs.append(gate_proj)
                 up_projs.append(up_proj)
-                down_projs.append(down_proj)    
+                down_projs.append(down_proj)
                 CPUInfer.submit(moe.load_weights_task())
                 CPUInfer.sync()
                 moes.append(moe)
                 converted_tensors.append((gate_tensor, up_tensor, down_tensor))
-            print('Finished initialization!')
+            print("Finished initialization!")
 
             CPUInfer.submit(moes[0].warm_up_task())
             CPUInfer.sync()
-            print('Warm up finished!')
+            print("Warm up finished!")
 
             # validation
             progress_bar = tqdm(range(validation_iter), desc="Starting")
             total_diff = 0
-            
+
             for i in tqdm(progress_bar):
-                progress_bar.set_description('Round: {}/{}'.format(i + 1, validation_iter))
-                expert_ids = torch.stack([torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]).contiguous()
+                progress_bar.set_description("Round: {}/{}".format(i + 1, validation_iter))
+                expert_ids = torch.stack(
+                    [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
+                ).contiguous()
                 weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
                 input_proj = torch.randn((qlen, hidden_size), dtype=torch.float32).contiguous() / 100
                 output_proj = torch.empty((qlen, hidden_size), dtype=torch.float32).contiguous()
-                
+
                 input_tensor = to_cpuinfer_tensor(input_proj, hidden_type)
                 output_tensor = to_cpuinfer_tensor(output_proj, hidden_type)
-                
+
                 qlen_tensor = torch.tensor([qlen], dtype=torch.int32)
                 moe = moes[i % layer_num]
                 CPUInfer.submit(
-                    moe.forward_task( 
+                    moe.forward_task(
                         qlen_tensor.data_ptr(),
-                        num_experts_per_tok, 
-                        expert_ids.data_ptr(), 
-                        weights.data_ptr(), 
-                        input_tensor.data_ptr(), 
+                        num_experts_per_tok,
+                        expert_ids.data_ptr(),
+                        weights.data_ptr(),
+                        input_tensor.data_ptr(),
                         output_tensor.data_ptr(),
                     )
                 )
                 CPUInfer.sync()
                 cpu_output = from_cpuinfer_tensor(output_tensor, qlen * hidden_size, hidden_type)
 
-                gate_proj = gate_projs[i%layer_num]
-                up_proj = up_projs[i%layer_num]
-                down_proj = down_projs[i%layer_num]
+                gate_proj = gate_projs[i % layer_num]
+                up_proj = up_projs[i % layer_num]
+                down_proj = down_projs[i % layer_num]
                 t_output = moe_torch(input_proj, expert_ids, weights, gate_proj, up_proj, down_proj)
-                print('cpuinfer output', cpu_output)
-                print('torch output', t_output)
-                diff = torch.mean(torch.abs(cpu_output.flatten() - t_output.flatten())) / torch.mean(torch.abs(t_output.flatten()))
+                print("cpuinfer output", cpu_output)
+                print("torch output", t_output)
+                diff = torch.mean(torch.abs(cpu_output.flatten() - t_output.flatten())) / torch.mean(
+                    torch.abs(t_output.flatten())
+                )
                 assert diff < 0.5
                 total_diff += diff
-                
-            print(f'gate_type: {gate_type}, up_type: {up_type}, down_type: {down_type}')
-            print(f'Average diff: {total_diff / validation_iter:.4f}')
+
+            print(f"gate_type: {gate_type}, up_type: {up_type}, down_type: {down_type}")
+            print(f"Average diff: {total_diff / validation_iter:.4f}")

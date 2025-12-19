@@ -2,7 +2,7 @@ import os, sys
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 import torch
 
 # Set fixed seed for reproducible results

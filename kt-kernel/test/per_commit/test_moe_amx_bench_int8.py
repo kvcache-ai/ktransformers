@@ -23,8 +23,11 @@ register_cpu_ci(est_time=300, suite="default")
 # Check if dependencies are available
 try:
     import torch
-    import kt_kernel_ext
+    import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+
+    kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     from tqdm import tqdm
+
     HAS_DEPS = True
 except ImportError as e:
     HAS_DEPS = False
@@ -48,7 +51,6 @@ worker_config_dict = {
     "subpool_thread_count": [30, 30],
 }
 CPUINFER_PARAM = 60
-
 
 
 def get_git_commit():
@@ -306,6 +308,7 @@ def run_all_tests():
     except Exception as e:
         print(f"\n✗ Test failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

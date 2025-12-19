@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 import numpy as np
 
 # 测试参数设置

@@ -38,6 +38,7 @@
 - ✅ **带 AMX 的 Intel CPU**：已支持（基于转换为 INT4/INT8 格式的权重）
 - ✅ **通用 CPU（llamafile 后端）**：已支持（基于 GGUF 格式的权重）
 - ✅ **带 BLIS 的 AMD CPU**：已支持（int8 的 prefill 和 decode）
+- ✅ **Kimi-K2 原生 INT4（RAWINT4）**：支持 AVX512 CPU（CPU-GPU 共享 INT4 权重）- [使用指南](../doc/en/Kimi-K2-Thinking-Native.md)
 
 ## 特性
 
@@ -49,69 +50,55 @@
 
 ## 安装
 
-### 先决条件
+### 从源码安装（本机使用或自定义构建）
 
-首先初始化子模块：
+适用于本地安装，或需要 AMD (BLIS)、ARM (KML) 或自定义 CUDA 版本的场景。
+
+#### 先决条件
+
+首先初始化子模块并创建 conda 环境：
 ```bash
 git submodule update --init --recursive
-```
-
-### 快速安装（推荐）
-
-第 0 步：创建并激活一个 conda 环境（推荐）：
-
-```bash
 conda create -n kt-kernel python=3.11 -y
 conda activate kt-kernel
 ```
 
-随后可以用同一个脚本分两步或一步安装。
+#### 快速安装（推荐）
 
-方案 A：两步（可以指定依赖安装与编译构建）
-
-```bash
-# 1）安装系统依赖（cmake, hwloc, pkg-config）
-./install.sh deps
-
-# 2）构建并安装 kt-kernel（自动检测 CPU 指令集）
-#    默认会在编译前清理本地 ./build 目录
-./install.sh build
-```
-
-方案 B：一步
+只需运行安装脚本，它会自动检测 CPU 并优化性能：
 
 ```bash
 ./install.sh
 ```
 
-安装脚本会：
-- 自动检测 CPU 能力（是否支持 AMX）
-- 尝试通过 conda 安装 `cmake`（若可用）
-- 根据你的操作系统安装系统依赖（`libhwloc-dev`、`pkg-config`）
+**自动完成的操作：**
+- 自动检测 CPU 能力（AMX、AVX512_VNNI、AVX512_BF16）
+- 安装系统依赖（`cmake`、`libhwloc-dev`、`pkg-config`）
+- 为**你的 CPU** 构建优化二进制（使用 `-march=native`）
+- **软件回退机制**：为不支持 VNNI/BF16 的 CPU 自动启用
 
-**自动配置内容：**
-- 检测到 AMX CPU → 使用 `NATIVE + AMX=ON`
-- 未检测到 AMX → 使用 `NATIVE + AMX=OFF`
-
-⚠️ **LLAMAFILE 后端用户特别说明：**  
-如果你有带 AMX 的 CPU，但是计划使用 LLAMAFILE 后端，请不要使用默认的自动检测构建方式。  
-请使用“手动模式”，并将 `CPUINFER_CPU_INSTRUCT` 设为 `AVX512` 或 `AVX2` 而非 `NATIVE`，以避免编译期异常（见下文）。
-
-### 手动配置（进阶）
-
-如果你需要更精细的构建选项（例如为 LLAMAFILE 后端、兼容性或二进制分发配置）：
-
+**可选：分步安装**
 ```bash
-# 在带 AMX 的 CPU 上构建 LLAMAFILE 后端的示例（使用 AVX512）
-export CPUINFER_CPU_INSTRUCT=AVX512  # 选项: NATIVE, AVX512, AVX2, FANCY
-export CPUINFER_ENABLE_AMX=OFF       # 选项: ON, OFF
-
-# 仅构建（不进行指令集的自动检测）
-./install.sh build --manual
+./install.sh deps   # 仅安装依赖
+./install.sh build  # 构建并安装 kt-kernel
 ```
 
-更多构建选项和二进制分发配置，请参见 [构建配置](#构建配置) 一节。  
-如果遇到问题，可参考 [错误排查](#错误排查)。
+**不同后端的 CPU 要求：**
+
+| 后端 | 最低 CPU 要求 | 示例 CPU | 说明 |
+|------|---------------|----------|------|
+| **LLAMAFILE** | AVX2 | Intel Haswell (2013+)、AMD Zen+ | 通用兼容性 |
+| **RAWINT4** | AVX512F + AVX512BW | Intel Skylake-X (2017+)、Ice Lake、Cascade Lake | 支持 VNNI/BF16 软件回退 |
+| **AMXINT4/INT8** | AMX | Intel Sapphire Rapids (2023+) | 最佳性能，需要 AMX 硬件 |
+
+**软件回退支持（AVX512 后端）：**
+- ✅ VNNI 回退：使用 AVX512BW 指令
+- ✅ BF16 回退：使用 AVX512F 指令
+- ✅ 老的 AVX512 CPU（Skylake-X、Cascade Lake）可以运行 RAWINT4（使用回退）
+
+⚠️ **可移植性说明：** 默认构建针对你的特定 CPU 优化，可能无法在不同/更老的 CPU 上运行。如需打包分发或跨机器部署，请参见下方的 [手动配置](#手动配置进阶)。
+
+⚠️ **AMD BLIS 后端用户：** 请参见 [安装指南](https://github.com/kvcache-ai/ktransformers/issues/1601) 了解 AMD 专用配置。
 
 ## 验证安装
 
@@ -421,11 +408,44 @@ batch_sizes = KTMoEWrapper.get_capture_batch_sizes()
 KTMoEWrapper.clear_buffer_cache()
 ```
 
+### 手动配置（进阶）
+
+如需打包分发、跨机器部署或构建可移植二进制，需要手动指定目标指令集：
+
+```bash
+# 通用分发版（适用于 2017+ 的任何 AVX512 CPU）
+export CPUINFER_CPU_INSTRUCT=AVX512
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+
+# 最大兼容性（适用于 2013+ 的任何 CPU）
+export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+
+# 仅限现代 CPU（Ice Lake+、Zen 4+）
+export CPUINFER_CPU_INSTRUCT=FANCY
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh build --manual
+```
+
+**可选：覆盖 VNNI/BF16 检测**
+```bash
+# 强制启用/禁用 VNNI 和 BF16（用于测试回退）
+export CPUINFER_ENABLE_AVX512_VNNI=OFF
+export CPUINFER_ENABLE_AVX512_BF16=OFF
+./install.sh
+```
+
+运行 `./install.sh --help` 查看所有可用选项。
+
+---
+
 ## 构建配置
 
-### 手动安装
+### 手动安装（不使用 install.sh）
 
-如果你不想使用 `install.sh`，可以按以下步骤手动构建：
+如果你不想使用 `install.sh` 脚本：
 
 #### 1. 安装系统依赖
 
@@ -447,24 +467,25 @@ KTMoEWrapper.clear_buffer_cache()
 
 **指令集说明：**
 
-- **`NATIVE`**：自动检测并启用所有可用 CPU 指令（`-march=native`）——**本机运行时首选**
-- **`AVX512`**：为 Skylake-SP / Cascade Lake 显式开启 AVX512
-- **`AVX2`**：开启 AVX2，兼容性较好
-- **`FANCY`**：开启完整 AVX512 扩展（AVX512F/BW/DQ/VL/VNNI），适用于 Ice Lake+ 和 Zen 4+ 等较新平台。  
-  用于向用户分发预编译二进制时推荐；本地构建推荐使用 `NATIVE` 以获得更优性能。
+| 选项 | 目标 CPU | 使用场景 |
+|------|----------|----------|
+| **`NATIVE`** | 仅限你的特定 CPU | 本地构建（最佳性能，**默认**） |
+| **`AVX512`** | Skylake-X、Ice Lake、Cascade Lake、Zen 4+ | 通用分发 |
+| **`AVX2`** | Haswell (2013) 及更新 | 最大兼容性 |
+| **`FANCY`** | Ice Lake+、Zen 4+ | 具有完整 AVX512 扩展的现代 CPU |
 
 **配置示例：**
 
 ```bash
-# 在 AMX CPU 上获得最高性能
+# 本地使用 - 最高性能（默认行为）
 export CPUINFER_CPU_INSTRUCT=NATIVE
-export CPUINFER_ENABLE_AMX=ON
+export CPUINFER_ENABLE_AMX=ON  # 或 OFF
 
-# 仅 AVX512，无 AMX
+# 分发构建 - 适用于任何 AVX512 CPU
 export CPUINFER_CPU_INSTRUCT=AVX512
 export CPUINFER_ENABLE_AMX=OFF
 
-# 兼容性优先构建
+# 最大兼容性 - 适用于 2013 年以来的 CPU
 export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 

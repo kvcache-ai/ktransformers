@@ -19,7 +19,9 @@ register_cpu_ci(est_time=120, suite="default")
 # Check if dependencies are available
 try:
     import torch
-    import kt_kernel_ext
+    import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+
+    kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     HAS_DEPS = True
 except ImportError as e:
     HAS_DEPS = False
@@ -67,9 +69,7 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
         if num_tokens == 0:
             continue
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-        expert_out = mlp_torch(
-            tokens_for_this_expert, gate_proj[i], up_proj[i], down_proj[i]
-        )
+        expert_out = mlp_torch(tokens_for_this_expert, gate_proj[i], up_proj[i], down_proj[i])
         outputs.append(expert_out)
         start_idx = end_idx
 
@@ -95,9 +95,7 @@ def test_moe_amx_int4_accuracy():
         pytest.skip(f"Dependencies not available: {import_error}")
 
     global physical_to_logical_map
-    physical_to_logical_map = torch.tensor(
-        data=range(expert_num), device="cpu", dtype=torch.int64
-    ).contiguous()
+    physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
     CPUInfer = kt_kernel_ext.CPUInfer(60)
 
@@ -132,9 +130,7 @@ def test_moe_amx_int4_accuracy():
         )
 
         # Create MOE config
-        config = kt_kernel_ext.moe.MOEConfig(
-            expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0
-        )
+        config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
         config.max_len = max_len
         config.gate_proj = gate_proj.data_ptr()
         config.up_proj = up_proj.data_ptr()
@@ -175,14 +171,10 @@ def test_moe_amx_int4_accuracy():
             CPUInfer.sync()
 
             # Run torch reference
-            t_output = moe_torch(
-                input_data, expert_ids, weights, gate_proj, up_proj, down_proj
-            )
+            t_output = moe_torch(input_data, expert_ids, weights, gate_proj, up_proj, down_proj)
 
             # Calculate relative difference
-            diff = torch.mean(torch.abs(output - t_output)) / torch.mean(
-                torch.abs(t_output)
-            )
+            diff = torch.mean(torch.abs(output - t_output)) / torch.mean(torch.abs(t_output))
             print(f"Iteration {i}, diff = {diff:.6f}")
 
             # INT4 should have diff < 0.35
@@ -204,6 +196,7 @@ def run_all_tests():
     except Exception as e:
         print(f"\n✗ Test failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

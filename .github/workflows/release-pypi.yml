@@ -1,0 +1,196 @@
+name: Release to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "version.py"
+  workflow_dispatch:
+    inputs:
+      test_pypi:
+        description: 'Publish to TestPyPI instead of PyPI (for testing)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  build-kt-kernel:
+    name: Build kt-kernel CPU-only (Python ${{ matrix.python-version }})
+    runs-on: [self-hosted, linux, x64]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
+
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools
+
+      - name: Build kt-kernel wheel (CPU-only, multi-variant)
+        working-directory: kt-kernel
+        env:
+          CPUINFER_BUILD_ALL_VARIANTS: '1'
+          CPUINFER_USE_CUDA: '0'
+          CPUINFER_BUILD_TYPE: 'Release'
+          CPUINFER_PARALLEL: '4'
+          CPUINFER_FORCE_REBUILD: '1'
+        run: |
+          echo "Building kt-kernel CPU-only with all CPU variants (AMX, AVX512, AVX2)"
+          python -m build --wheel -v
+
+      - name: List generated wheels
+        working-directory: kt-kernel
+        run: |
+          echo "Generated wheels:"
+          ls -lh dist/
+
+      - name: Test wheel import
+        working-directory: kt-kernel
+        run: |
+          pip install dist/*.whl
+          python -c "import kt_kernel; print('✓ Import successful'); print(f'CPU variant detected: {kt_kernel.__cpu_variant__}'); print(f'Version: {kt_kernel.__version__}')"
+
+      - name: Verify wheel contains all variants
+        working-directory: kt-kernel
+        run: |
+          echo "Checking wheel contents for CPU variants..."
+          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_" || echo "ERROR: No variant .so files found!"
+          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_amx.cpython" && echo "✓ AMX variant found" || echo "✗ AMX variant missing"
+          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx512.cpython" && echo "✓ AVX512 variant found" || echo "✗ AVX512 variant missing"
+          python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "✗ AVX2 variant missing"
+
+      - name: Repair wheel for manylinux compatibility
+        working-directory: kt-kernel
+        run: |
+          pip install auditwheel patchelf
+          echo "Repairing wheels for manylinux compatibility..."
+          mkdir -p wheelhouse
+          for wheel in dist/*.whl; do
+            echo "Processing $wheel..."
+            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 -w wheelhouse/ || {
+              echo "Warning: auditwheel repair failed, trying to rename platform tag..."
+              # Fallback: rename the wheel file with manylinux tag
+              wheel_name=$(basename "$wheel")
+              new_name=$(echo "$wheel_name" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+              cp "$wheel" "wheelhouse/$new_name"
+            }
+          done
+          echo "Repaired wheels:"
+          ls -lh wheelhouse/
+          # Replace original wheels with repaired ones
+          rm -f dist/*.whl
+          cp wheelhouse/*.whl dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kt-kernel-wheels-py${{ matrix.python-version }}
+          path: kt-kernel/dist/*.whl
+          retention-days: 7
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-kt-kernel
+    runs-on: [self-hosted, linux, x64]
+    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
+    environment: prod
+    permissions:
+      id-token: write  # For trusted publishing (OIDC)
+      contents: read
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Organize wheels into dist/
+        run: |
+          mkdir -p dist/
+          find artifacts/ -name "*.whl" -exec cp {} dist/ \;
+          echo "Wheels to publish:"
+          ls -lh dist/
+
+      - name: Get version from wheel
+        id: get_version
+        run: |
+          # Extract version from first wheel filename
+          wheel_name=$(ls dist/*.whl | head -1 | xargs basename)
+          # Extract version (format: kt_kernel-X.Y.Z-...)
+          version=$(echo "$wheel_name" | sed 's/kt_kernel-\([0-9.]*\)-.*/\1/')
+          echo "VERSION=$version" >> $GITHUB_OUTPUT
+          echo "Publishing version: $version"
+
+      - name: Install twine
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+
+      - name: Publish to TestPyPI (if requested)
+        if: github.event.inputs.test_pypi == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --repository testpypi \
+            --skip-existing \
+            --verbose \
+            dist/*.whl
+
+      - name: Publish to PyPI
+        if: github.event.inputs.test_pypi != 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --skip-existing \
+            --verbose \
+            dist/*.whl
+
+      - name: Create release summary
+        run: |
+          echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY
+          echo "Total: $(ls -1 dist/*.whl | wc -l) wheels (3 Python versions: 3.10, 3.11, 3.12)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Features" >> $GITHUB_STEP_SUMMARY
+          echo "**CPU-only build with multi-variant support:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AMX (Intel Sapphire Rapids+)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AVX512 (Intel Skylake-X/Ice Lake/Cascade Lake)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ AVX2 (Maximum compatibility)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Runtime CPU detection:** Automatically selects the best variant for your CPU" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "PyPI link: https://pypi.org/project/kt-kernel/#history" >> $GITHUB_STEP_SUMMARY
