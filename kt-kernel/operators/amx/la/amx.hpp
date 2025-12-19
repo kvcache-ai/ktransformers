@@ -46,6 +46,9 @@ static inline __m512 exp_avx512(__m512 x) {
 
 static inline __m512 act_fn(__m512 gate_val, __m512 up_val) {
   __m512 neg_gate_val = _mm512_sub_ps(_mm512_setzero_ps(), gate_val);
+  // Clamp neg_gate_val to avoid exp overflow (exp(88) overflows for float32)
+  const __m512 max_exp_input = _mm512_set1_ps(88.0f);
+  neg_gate_val = _mm512_min_ps(neg_gate_val, max_exp_input);
   __m512 exp_neg_gate = exp_avx512(neg_gate_val);
   __m512 denom = _mm512_add_ps(_mm512_set1_ps(1.0f), exp_neg_gate);
   __m512 act_val = _mm512_div_ps(gate_val, denom);
