@@ -67,6 +67,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_dep_ok": "OK",
         "install_dep_outdated": "Needs update",
         "install_dep_missing": "Missing",
+        "install_installing_pytorch": "Installing PyTorch...",
+        "install_installing_from_requirements": "Installing from requirements file...",
         "install_deps_outdated": "Found {count} package(s) that need updating. Continue?",
         "install_updating": "Updating packages...",
         "install_complete": "Installation complete!",
@@ -202,6 +204,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "setup_model_info": "{name} ({size}, {type})",
         "setup_no_models_found": "No existing models found in this location.",
         "setup_location_has_models": "{count} model(s) found",
+        "setup_installing_completion": "Installing shell completion for {shell}...",
+        "setup_completion_installed": "Shell completion installed! Restart terminal to enable.",
+        "setup_completion_failed": "Failed to install shell completion. Run 'kt --install-completion' manually.",
     },
     "zh": {
         # General
@@ -260,6 +265,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_dep_ok": "正常",
         "install_dep_outdated": "需更新",
         "install_dep_missing": "缺失",
+        "install_installing_pytorch": "正在安装 PyTorch...",
+        "install_installing_from_requirements": "从依赖文件安装...",
         "install_deps_outdated": "发现 {count} 个包需要更新，是否继续？",
         "install_updating": "正在更新包...",
         "install_complete": "安装完成！",
@@ -395,6 +402,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "setup_model_info": "{name} ({size}, {type})",
         "setup_no_models_found": "该位置未发现已有模型。",
         "setup_location_has_models": "发现 {count} 个模型",
+        "setup_installing_completion": "正在为 {shell} 安装命令补全...",
+        "setup_completion_installed": "命令补全已安装！重启终端后生效。",
+        "setup_completion_failed": "命令补全安装失败。请手动运行 'kt --install-completion'。",
     },
 }
 

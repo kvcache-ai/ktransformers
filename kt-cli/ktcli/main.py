@@ -206,6 +206,18 @@ def _show_first_run_setup(settings) -> None:
 
     console.print()
     console.print(f"[green]✓[/green] {t('setup_model_path_set', path=selected_path)}")
+
+    # Install shell completion automatically
+    console.print()
+    console.print(f"[dim]{t('setup_installing_completion', shell='...')}[/dim]", end="")
+    success, shell_name = _install_shell_completion()
+    # Clear the line and print result
+    console.print("\r" + " " * 50 + "\r", end="")
+    if success:
+        console.print(f"[green]✓[/green] {t('setup_completion_installed')}")
+    else:
+        console.print(f"[yellow]![/yellow] {t('setup_completion_failed')}")
+
     console.print()
 
     # Tips
@@ -250,6 +262,41 @@ def _prompt_custom_path(console, settings) -> str:
                 return custom_path
             else:
                 console.print(f"[red]{t('setup_path_no_write')}[/red]")
+
+
+def _install_shell_completion() -> tuple[bool, str]:
+    """Automatically install shell completion for the current shell.
+
+    Returns:
+        Tuple of (success, shell_name)
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    # Detect current shell
+    shell = os.environ.get("SHELL", "")
+    if "zsh" in shell:
+        shell_name = "zsh"
+    elif "fish" in shell:
+        shell_name = "fish"
+    elif "bash" in shell:
+        shell_name = "bash"
+    else:
+        # Default to bash
+        shell_name = "bash"
+
+    try:
+        # Use typer's built-in completion installation
+        result = subprocess.run(
+            ["kt", "--install-completion", shell_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0, shell_name
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False, shell_name
 
 
 def _apply_saved_language() -> None:
