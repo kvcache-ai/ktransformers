@@ -12,21 +12,20 @@
 
 // #define FORWARD_TIME_PROFILE
 
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-
 #include <immintrin.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
-#include <vector>
 #include <utility>
+#include <vector>
 
 #include "../../cpu_backend/shared_mem_buffer.h"
 #include "../../cpu_backend/worker_pool.h"
@@ -79,9 +78,7 @@ class AMX_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
-  AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
-    init();
-  }
+  AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) { init(); }
 
   void init() {
     if (config_.load && config_.path == "") {
@@ -116,13 +113,15 @@ class AMX_MOE_BASE {
       down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
-      void* gate_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* gate_bb_ptr =
+          std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
       void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
-      void* down_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      void* down_bb_ptr =
+          std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
     // TODO: need update to all *.hpp
@@ -609,9 +608,9 @@ class AMX_MOE_BASE {
         }
         __m512 weight = _mm512_set1_ps(weights[j]);
         __m512 down_output0, down_output1;
-        avx512_32xbf16_to_32xfp32((__m512i*)(m_local_down_output_ptr_[expert_ids[j]] +
-                                              m_local_pos_[0][j] * config_.hidden_size + e),
-                                  &down_output0, &down_output1);
+        avx512_32xbf16_to_32xfp32(
+            (__m512i*)(m_local_down_output_ptr_[expert_ids[j]] + m_local_pos_[0][j] * config_.hidden_size + e),
+            &down_output0, &down_output1);
         x0 = _mm512_fmadd_ps(down_output0, weight, x0);
         x1 = _mm512_fmadd_ps(down_output1, weight, x1);
       }
@@ -646,15 +645,9 @@ class AMX_MOE_BASE {
   // Derived classes (like moe.hpp) can override to not use group_size
   // ============================================================================
 
-  size_t buffer_a_required_size(size_t m, size_t k) const {
-    return derived_const()->buffer_a_required_size_impl(m, k);
-  }
-  size_t buffer_b_required_size(size_t n, size_t k) const {
-    return derived_const()->buffer_b_required_size_impl(n, k);
-  }
-  size_t buffer_c_required_size(size_t m, size_t n) const {
-    return derived_const()->buffer_c_required_size_impl(m, n);
-  }
+  size_t buffer_a_required_size(size_t m, size_t k) const { return derived_const()->buffer_a_required_size_impl(m, k); }
+  size_t buffer_b_required_size(size_t n, size_t k) const { return derived_const()->buffer_b_required_size_impl(n, k); }
+  size_t buffer_c_required_size(size_t m, size_t n) const { return derived_const()->buffer_c_required_size_impl(m, n); }
 
   std::shared_ptr<typename T::BufferA> make_buffer_a(size_t m, size_t k, void* data) const {
     return derived_const()->make_buffer_a_impl(m, k, data);
@@ -710,9 +703,7 @@ class TP_MOE<AMX_MOE_BASE<T, Derived>> : public TP_MOE_Common<AMX_MOE_BASE<T, De
   using TP_MOE_Common<AMX_MOE_BASE<T, Derived>>::TP_MOE_Common;
 
   // Default load_weights implementation - can be overridden by derived TP_MOE classes
-  void load_weights() override {
-    throw std::runtime_error("Not Implemented");
-  }
+  void load_weights() override { throw std::runtime_error("Not Implemented"); }
 
   void write_weight_scale_to_buffer(int gpu_tp_count, int gpu_experts_num,
                                     const std::vector<uintptr_t>& w13_weight_ptrs,
@@ -750,14 +741,23 @@ class TP_MOE<AMX_MOE_BASE<T, Derived>> : public TP_MOE_Common<AMX_MOE_BASE<T, De
         avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
       }
     };
-    for (int i = 0; i < qlen; i++) {
-      merge_fn(i);
-    }
+
+    auto pool = config.pool;
+
+    auto direct_or_pool = [&](int count, auto&& fn) {
+      if (qlen < 10) {
+        for (int i = 0; i < count; i++) {
+          fn(i);
+        }
+      } else {
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
+      }
+    };
+
+    direct_or_pool(qlen, merge_fn);
   }
 
-  void merge_results(int qlen, void* output) override {
-    merge_results(qlen, output, false);
-  }
+  void merge_results(int qlen, void* output) override { merge_results(qlen, output, false); }
 };
 
 #endif  // CPUINFER_OPERATOR_AMX_MOE_BASE_H

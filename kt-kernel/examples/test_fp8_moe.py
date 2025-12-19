@@ -9,7 +9,7 @@ This script:
 
 FP8 format notes:
 - Weight: FP8 (E4M3) stored as uint8, shape [expert_num, n, k]
-- Scale: BF16, shape [expert_num, n // group_size, k // group_size], group_size=128
+- Scale: FP32, shape [expert_num, n // group_size, k // group_size], group_size=128
 """
 
 import os
@@ -23,14 +23,14 @@ import kt_kernel_ext
 torch.manual_seed(42)
 
 # Model config
-hidden_size = 7168
-intermediate_size = 2048
+hidden_size = 3072
+intermediate_size = 1536
 max_len = 25600
 
 expert_num = 16
 num_experts_per_tok = 8
 
-qlen = 1
+qlen = 100
 layer_num = 1
 CPUInfer = kt_kernel_ext.CPUInfer(40)
 validation_iter = 1
@@ -106,10 +106,10 @@ def fp8_e4m3_to_float(fp8_val: int) -> float:
         if mant == 0:
             return -0.0 if sign else 0.0
         # Subnormal: value = (-1)^sign * 2^(-6) * (0.mant)
-        return ((-1) ** sign) * (2 ** -6) * (mant / 8.0)
+        return ((-1) ** sign) * (2**-6) * (mant / 8.0)
     elif exp == 15:
         # NaN (FP8 E4M3 doesn't have Inf, all exp=15 are NaN)
-        return float('nan')
+        return float("nan")
     else:
         # Normal: value = (-1)^sign * 2^(exp-7) * (1.mant)
         return ((-1) ** sign) * (2 ** (exp - 7)) * (1.0 + mant / 8.0)
@@ -133,6 +133,7 @@ def float_to_fp8_e4m3(val: float) -> int:
 
     # Find exponent
     import math
+
     if val < 2**-9:  # Subnormal threshold
         # Subnormal
         mant = int(round(val / (2**-9)))
@@ -225,9 +226,9 @@ def quantize_to_fp8_blockwise(weights: torch.Tensor, group_size: int = 128):
     fp8_q = fp8_q.permute(0, 1, 3, 2, 4).reshape(e, n, k)
 
     # Scales shape: [e, n_blocks, k_blocks] -> store as [e, n_blocks, k_blocks]
-    scales_bf16 = scales.to(torch.bfloat16).contiguous()
+    scales_fp32 = scales.to(torch.float32).contiguous()
 
-    return fp8_q.contiguous(), scales_bf16
+    return fp8_q.contiguous(), scales_fp32
 
 
 def dequantize_fp8_blockwise(fp8_weights: torch.Tensor, scales: torch.Tensor, group_size: int = 128):
@@ -277,9 +278,15 @@ def build_random_fp8_weights():
     torch.manual_seed(42)
 
     # Generate random BF16 weights with small values
-    gate_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16)
-    up_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16)
-    down_proj = (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 100.0).to(torch.bfloat16)
+    gate_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 100.0).to(
+        torch.bfloat16
+    )
+    up_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 100.0).to(
+        torch.bfloat16
+    )
+    down_proj = (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 100.0).to(
+        torch.bfloat16
+    )
 
     # Quantize to FP8
     gate_fp8, gate_scales = quantize_to_fp8_blockwise(gate_proj, fp8_group_size)
@@ -390,8 +397,8 @@ def run_fp8_moe_test():
             expert_ids = torch.stack(
                 [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
             ).contiguous()
-            weights = torch.ones((qlen, num_experts_per_tok), dtype=torch.float32).contiguous() / 100
-            input_tensor = torch.full((qlen, hidden_size), 0.01, dtype=torch.bfloat16).contiguous()
+            weights = torch.randn((qlen, num_experts_per_tok), dtype=torch.float32).contiguous() / 100
+            input_tensor = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() * 1.5
             output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
 
             moe = moes[i % layer_num]
@@ -408,10 +415,11 @@ def run_fp8_moe_test():
             )
             CPUInfer.sync()
 
+            assert not torch.isnan(output).any(), "NaN values detected in CPU expert output."
+            assert not torch.isinf(output).any(), "Inf values detected in CPU expert output."
+
             # Reference computation using dequantized weights
-            t_output = moe_torch(
-                input_tensor, expert_ids, weights, gate_deq, up_deq, down_deq
-            )
+            t_output = moe_torch(input_tensor, expert_ids, weights, gate_deq, up_deq, down_deq)
 
             t_output_flat = t_output.flatten()
             output_flat = output.flatten()

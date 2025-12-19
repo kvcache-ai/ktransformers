@@ -46,7 +46,7 @@ namespace amx {
  *   k_blocks = ceil(k / K_BLOCK)，m_blocks = max_m / M_STEP，
  *   k_steps = K_BLOCK / K_STEP（最后一个 k_block 可能更小）。
  * get_submat(m_begin, k_begin) 返回连续的 (M_STEP×K_STEP) tile。
-*/
+ */
 template <typename K>
 struct BufferABF16Impl {
   ggml_bf16_t* a;
@@ -177,9 +177,9 @@ struct BufferBBF16Impl {
  */
 template <typename K>
 struct BufferBFP8Impl {
-  uint8_t* b;     // FP8 weight
-  ggml_bf16_t* d; // scale_inv [n / k_group_size, k / k_group_size]
-  int n, k, k_group_size; // k_group_size = 128 in DeepSeek
+  uint8_t* b;              // FP8 weight
+  float* d;                // scale_inv [n / k_group_size, k / k_group_size]
+  int n, k, k_group_size;  // k_group_size = 128 in DeepSeek
 
   static constexpr int N_STEP = K::N_STEP;
   static constexpr int K_STEP = K::K_STEP;
@@ -188,38 +188,35 @@ struct BufferBFP8Impl {
   static constexpr bool SCALE = true;
 
   /**
-    * @brief 计算所需内存大小
-    */
+   * @brief 计算所需内存大小
+   */
   static size_t required_size(int n, int k, int k_group_size) {
     int n_blocks_n = (n + k_group_size - 1) / k_group_size;
     int n_blocks_k = (k + k_group_size - 1) / k_group_size;
-    return sizeof(uint8_t) * n * k +
-          sizeof(ggml_bf16_t) * n_blocks_n * n_blocks_k;
+    return sizeof(uint8_t) * n * k + sizeof(float) * n_blocks_n * n_blocks_k;
   }
 
   /**
-    * @brief 构造函数
-    */
-  BufferBFP8Impl(int n, int k, int k_group_size, void* ptr) : n(n), k(k), k_group_size(k_group_size) {
-    set_data(ptr);
-  }
+   * @brief 构造函数
+   */
+  BufferBFP8Impl(int n, int k, int k_group_size, void* ptr) : n(n), k(k), k_group_size(k_group_size) { set_data(ptr); }
 
   void set_data(void* ptr) {
     assert(reinterpret_cast<intptr_t>(ptr) % 64 == 0);
     b = reinterpret_cast<uint8_t*>(ptr);
-    d = reinterpret_cast<ggml_bf16_t*>(b + (size_t)n * k);
+    d = reinterpret_cast<float*>(b + (size_t)n * k);
   }
 
-  static constexpr int mat_offset[8] = {0, 2, 4, 6, 1, 3, 5, 7}; // fp8 matrix offset for reordering
+  static constexpr int mat_offset[8] = {0, 2, 4, 6, 1, 3, 5, 7};  // fp8 matrix offset for reordering
   /**
-    * @brief 从原始 FP8 权重加载（已经是量化格式）
-    *
-    * @param b_src FP8 权重源数据 (n-major, n×k)
-    * @param d_src BF16 scale_inv 源数据 (n-major, ceil(n/128)×ceil(k/128))
-    */
-  void from_mat(const uint8_t* b_src, const ggml_bf16_t* d_src, int ith, int nth) {
+   * @brief 从原始 FP8 权重加载（已经是量化格式）
+   *
+   * @param b_src FP8 权重源数据 (n-major, n×k)
+   * @param d_src FP32 scale_inv 源数据 (n-major, ceil(n/128)×ceil(k/128))
+   */
+  void from_mat(const uint8_t* b_src, const float* d_src, int ith, int nth) {
     assert(b != nullptr && d != nullptr);
-    assert(N_STEP == 32 && K_STEP == 32); // from mat block copy assumes this
+    assert(N_STEP == 32 && K_STEP == 32);  // from mat block copy assumes this
 
     // Copy scales (per 128x128 block). Each thread copies its own n-block range.
     const int n_blocks_k = (k + k_group_size - 1) / k_group_size;
@@ -227,9 +224,8 @@ struct BufferBFP8Impl {
       auto [n_start, n_end] = K::split_range_n(n, ith, nth);
       int bn_start = n_start / k_group_size;
       int bn_end = (n_end + k_group_size - 1) / k_group_size;
-      memcpy(d + bn_start * n_blocks_k,
-             d_src + bn_start * n_blocks_k,
-             sizeof(ggml_bf16_t) * (bn_end - bn_start) * n_blocks_k);
+      memcpy(d + bn_start * n_blocks_k, d_src + bn_start * n_blocks_k,
+             sizeof(float) * (bn_end - bn_start) * n_blocks_k);
     }
 
     // Reorder FP8 weights into KT block-major layout (same panel->tile order as BF16 BufferB).
@@ -244,18 +240,14 @@ struct BufferBFP8Impl {
           int k_step_size = std::min(K_STEP, k_block_size - k_begin);
           // [k_step_size, n_step_size] block copy
           const uint8_t* block_b_src = b_src + (size_t)(n_block_begin + n_begin) * k + k_block_begin + k_begin;
-          uint64_t* block_b_dst = reinterpret_cast<uint64_t*>(
-              b + (size_t)n_block_begin * k +
-              (size_t)k_block_begin * n_block_size +
-              (size_t)n_begin * k_block_size +
-              (size_t)k_begin * N_STEP);
+          uint64_t* block_b_dst =
+              reinterpret_cast<uint64_t*>(b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size +
+                                          (size_t)n_begin * k_block_size + (size_t)k_begin * N_STEP);
           for (int i = 0; i < 8; i++) {
             const uint16_t* s = reinterpret_cast<const uint16_t*>(block_b_src + (size_t)i * k * 4);
-            for (int j = 0; j < 16; j ++) {
-              uint64_t val = (((uint64_t)s[j])) | 
-                             (((uint64_t)s[j + (k / 2) * 1]) << 16) |
-                             (((uint64_t)s[j + (k / 2) * 2]) << 32) |
-                             (((uint64_t)s[j + (k / 2) * 3]) << 48);
+            for (int j = 0; j < 16; j++) {
+              uint64_t val = (((uint64_t)s[j])) | (((uint64_t)s[j + (k / 2) * 1]) << 16) |
+                             (((uint64_t)s[j + (k / 2) * 2]) << 32) | (((uint64_t)s[j + (k / 2) * 3]) << 48);
               block_b_dst[8 * j + mat_offset[i]] = val;
             }
           }
@@ -265,9 +257,9 @@ struct BufferBFP8Impl {
   }
 
   /**
-    * @brief get scale_inv
-    */
-  ggml_bf16_t* get_scale(int n, int n_begin, int k, int k_begin) {
+   * @brief get scale_inv
+   */
+  float* get_scale(int n, int n_begin, int k, int k_begin) {
     int n_blocks_k = (k + k_group_size - 1) / k_group_size;
     int bn = n_begin / k_group_size;
     int bk = k_begin / k_group_size;
@@ -275,8 +267,8 @@ struct BufferBFP8Impl {
   }
 
   /**
-    * @brief 获取子矩阵指针
-    */
+   * @brief 获取子矩阵指针
+   */
   uint8_t* get_submat(int n, int k, int n_begin, int k_begin) {
     int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
     n_begin -= n_block_begin;
@@ -284,22 +276,83 @@ struct BufferBFP8Impl {
     int k_block_begin = k_begin / K_BLOCK * K_BLOCK;
     k_begin -= k_block_begin;
     int k_block_size = std::min(K_BLOCK, k - k_block_begin);
-    return b + (size_t)n_block_begin * k +
-           (size_t)k_block_begin * n_block_size +
-           (size_t)n_begin * k_block_size +
+    return b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size + (size_t)n_begin * k_block_size +
            (size_t)k_begin * N_STEP;
   }
 
-    /**
-     * @brief write_buffer
-     *
-     * @param dst BF16 输出缓冲区
-     * @param n_begin N 起始索引
-     * @param k_begin K 起始索引
-     */
-    void to_mat(uint8_t* b_dst, ggml_bf16_t* d_dst, int ith, int nth) const {
-      //TODO: not implemented now, the inverse of from_mat
+  /**
+   * @brief Inverse mapping for mat_offset used in to_mat
+   * mat_offset = {0, 2, 4, 6, 1, 3, 5, 7}
+   * inv_mat_offset[mat_offset[i]] = i
+   */
+  static constexpr int inv_mat_offset[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+
+  /**
+   * @brief Unpack FP8 weights from KT block-major layout back to n-major layout
+   *
+   * This is the inverse operation of from_mat.
+   *
+   * @param b_dst FP8 输出缓冲区 (n-major, n×k)
+   * @param d_dst FP32 scale_inv 输出缓冲区 (n-major, ceil(n/128)×ceil(k/128))
+   * @param ith Thread index
+   * @param nth Total number of threads
+   */
+  void to_mat(uint8_t* b_dst, float* d_dst, int ith, int nth) const {
+    assert(b != nullptr && d != nullptr);
+    assert(N_STEP == 32 && K_STEP == 32);
+
+    // Calculate N_BLOCK range for this thread
+    // Unlike split_range_n which gives one N_BLOCK per thread, we need to handle
+    // the case where nth < n/N_BLOCK (fewer threads than blocks)
+    int total_n_blocks = (n + N_BLOCK - 1) / N_BLOCK;
+    int blocks_per_thread = (total_n_blocks + nth - 1) / nth;
+    int start_n_block_idx = ith * blocks_per_thread;
+    int end_n_block_idx = std::min((ith + 1) * blocks_per_thread, total_n_blocks);
+
+    // Copy scales (per 128x128 block). Each thread copies its own n-block range.
+    const int n_blocks_k = (k + k_group_size - 1) / k_group_size;
+    if (d_dst != nullptr) {
+      int bn_start = start_n_block_idx;
+      int bn_end = end_n_block_idx;
+      memcpy(d_dst + bn_start * n_blocks_k, d + bn_start * n_blocks_k,
+             sizeof(float) * (bn_end - bn_start) * n_blocks_k);
     }
+
+    // Reorder FP8 weights back to n-major layout (inverse of from_mat)
+    // Process each N_BLOCK assigned to this thread
+    for (int n_block_idx = start_n_block_idx; n_block_idx < end_n_block_idx; n_block_idx++) {
+      int n_block_begin = n_block_idx * N_BLOCK;
+      int n_block_size = std::min(N_BLOCK, n - n_block_begin);
+
+      for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+        for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+          int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+          for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+            // Source: packed layout (KT block-major)
+            const uint64_t* block_b_src =
+                reinterpret_cast<const uint64_t*>(b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size +
+                                                  (size_t)n_begin * k_block_size + (size_t)k_begin * N_STEP);
+
+            // Destination: n-major layout
+            uint8_t* block_b_dst = b_dst + (size_t)(n_block_begin + n_begin) * k + k_block_begin + k_begin;
+
+            // Inverse of from_mat transformation
+            for (int packed_i = 0; packed_i < 8; packed_i++) {
+              int i = inv_mat_offset[packed_i];
+              uint16_t* d_row = reinterpret_cast<uint16_t*>(block_b_dst + (size_t)i * k * 4);
+              for (int j = 0; j < 16; j++) {
+                uint64_t val = block_b_src[8 * j + packed_i];
+                d_row[j] = (uint16_t)(val & 0xFFFF);
+                d_row[j + (k / 2) * 1] = (uint16_t)((val >> 16) & 0xFFFF);
+                d_row[j + (k / 2) * 2] = (uint16_t)((val >> 32) & 0xFFFF);
+                d_row[j + (k / 2) * 3] = (uint16_t)((val >> 48) & 0xFFFF);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 };
 
 // ============================================================================
@@ -353,8 +406,8 @@ struct BufferCFP32Impl {
         for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
           __m512* x0 =
               (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP + i * N_STEP);
-          __m512* x1 = (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP +
-                                  i * N_STEP + 16);
+          __m512* x1 =
+              (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP + i * N_STEP + 16);
           avx512_32xfp32_to_32xbf16(x0, x1, (__m512i*)(dst + (m_begin + i) * n + n_block_begin + n_begin));
         }
       }
@@ -405,8 +458,8 @@ struct BufferCFP32ReduceImpl {
         for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
           __m512* x0 =
               (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP + i * N_STEP);
-          __m512* x1 = (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP +
-                                  i * N_STEP + 16);
+          __m512* x1 =
+              (__m512*)(c + m_block_size * n_block_begin + m_begin * n_block_size + n_begin * M_STEP + i * N_STEP + 16);
           avx512_32xfp32_to_32xbf16(x0, x1, (__m512i*)(dst + (m_begin + i) * n + n_block_begin + n_begin));
         }
       }
@@ -426,7 +479,8 @@ struct BufferCFP32ReduceImpl {
     int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
     int n_block_size = std::min(N_BLOCK, n - n_block_begin);
     n_begin -= n_block_begin;
-    return reduce_buf + (size_t)m_block_size * n_block_begin + (size_t)m_begin * n_block_size + (size_t)n_begin * M_STEP;
+    return reduce_buf + (size_t)m_block_size * n_block_begin + (size_t)m_begin * n_block_size +
+           (size_t)n_begin * M_STEP;
   }
 };
 

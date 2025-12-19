@@ -236,13 +236,61 @@ class SafeTensorLoader:
     def has_tensor(self, name: str):
         return name in self.tensor_file_map
 
-class RawFP8SafeTensorLoader(SafeTensorLoader):
-    """Loader for raw FP8 expert weights (DeepSeek V3.2 style).
 
-    Expected layout (per expert):
-    - {base_key}.mlp.experts.{expert_id}.{gate,up,down}_proj.weight
-    - {base_key}.mlp.experts.{expert_id}.{gate,up,down}_proj.weight_scale_inv
+class RawFP8SafeTensorLoader(SafeTensorLoader):
+    """Loader for raw FP8 expert weights with auto-detection of naming formats.
+
+    Supported formats:
+    - DeepSeek style: {base}.mlp.experts.{id}.{gate,up,down}_proj.weight
+    - Mixtral/MiniMax style: {base}.block_sparse_moe.experts.{id}.{w1,w3,w2}.weight
+
+    The format is auto-detected during initialization.
     """
+
+    # Known MoE naming formats: (experts_path_template, gate_name, up_name, down_name)
+    MOE_FORMATS = {
+        "deepseek": ("{base}.mlp.experts", "gate_proj", "up_proj", "down_proj"),
+        "mixtral": ("{base}.block_sparse_moe.experts", "w1", "w3", "w2"),
+    }
+
+    def __init__(self, file_path: str):
+        super().__init__(file_path)
+        self._detected_format = None
+        self._detect_format()
+
+    def _detect_format(self):
+        """Auto-detect the MoE naming format by checking tensor keys."""
+        # Sample some tensor names to detect format
+        sample_keys = list(self.tensor_file_map.keys())[:1000]
+
+        for fmt_name, (path_tpl, gate, up, down) in self.MOE_FORMATS.items():
+            # Check if any key matches this format pattern
+            # Look for pattern like: model.layers.0.{experts_path}.0.{gate_name}.weight
+            for key in sample_keys:
+                if ".experts." in key and f".{gate}.weight" in key:
+                    # Verify the path template matches
+                    if "block_sparse_moe.experts" in key and fmt_name == "mixtral":
+                        self._detected_format = fmt_name
+                        print(f"[RawFP8SafeTensorLoader] Detected format: {fmt_name}")
+                        return
+                    elif "mlp.experts" in key and "block_sparse_moe" not in key and fmt_name == "deepseek":
+                        self._detected_format = fmt_name
+                        print(f"[RawFP8SafeTensorLoader] Detected format: {fmt_name}")
+                        return
+
+        # Default to deepseek if no format detected
+        self._detected_format = "deepseek"
+        print(f"[RawFP8SafeTensorLoader] No MoE format detected, defaulting to: deepseek")
+
+    def _get_experts_prefix(self, base_key: str) -> str:
+        """Get the experts prefix based on detected format."""
+        path_tpl, _, _, _ = self.MOE_FORMATS[self._detected_format]
+        return path_tpl.format(base=base_key)
+
+    def _get_proj_names(self):
+        """Get projection names (gate, up, down) based on detected format."""
+        _, gate, up, down = self.MOE_FORMATS[self._detected_format]
+        return gate, up, down
 
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
@@ -258,10 +306,11 @@ class RawFP8SafeTensorLoader(SafeTensorLoader):
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load FP8 expert weights and their block-wise scale_inv tensors."""
-        experts_prefix = f"{base_key}.mlp.experts"
+        experts_prefix = self._get_experts_prefix(base_key)
+        gate_name, up_name, down_name = self._get_proj_names()
 
         expert_count = 0
-        while self.has_tensor(f"{experts_prefix}.{expert_count}.gate_proj.weight"):
+        while self.has_tensor(f"{experts_prefix}.{expert_count}.{gate_name}.weight"):
             expert_count += 1
 
         if expert_count == 0:
@@ -275,12 +324,12 @@ class RawFP8SafeTensorLoader(SafeTensorLoader):
         down_scales = [None] * expert_count
 
         for exp_id in range(expert_count):
-            gate_w_key = f"{experts_prefix}.{exp_id}.gate_proj.weight"
-            up_w_key = f"{experts_prefix}.{exp_id}.up_proj.weight"
-            down_w_key = f"{experts_prefix}.{exp_id}.down_proj.weight"
-            gate_s_key = f"{experts_prefix}.{exp_id}.gate_proj.weight_scale_inv"
-            up_s_key = f"{experts_prefix}.{exp_id}.up_proj.weight_scale_inv"
-            down_s_key = f"{experts_prefix}.{exp_id}.down_proj.weight_scale_inv"
+            gate_w_key = f"{experts_prefix}.{exp_id}.{gate_name}.weight"
+            up_w_key = f"{experts_prefix}.{exp_id}.{up_name}.weight"
+            down_w_key = f"{experts_prefix}.{exp_id}.{down_name}.weight"
+            gate_s_key = f"{experts_prefix}.{exp_id}.{gate_name}.weight_scale_inv"
+            up_s_key = f"{experts_prefix}.{exp_id}.{up_name}.weight_scale_inv"
+            down_s_key = f"{experts_prefix}.{exp_id}.{down_name}.weight_scale_inv"
 
             gate_weights[exp_id] = self.load_tensor(gate_w_key, device).contiguous()
             up_weights[exp_id] = self.load_tensor(up_w_key, device).contiguous()
@@ -297,6 +346,7 @@ class RawFP8SafeTensorLoader(SafeTensorLoader):
             "up_scale": up_scales,
             "down_scale": down_scales,
         }
+
 
 class CompressedSafeTensorLoader(SafeTensorLoader):
     """Loader for compressed SafeTensor layouts (RAWINT4 weights)."""

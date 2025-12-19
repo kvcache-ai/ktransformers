@@ -387,9 +387,16 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         self.down_weights = weights["down"]
 
         # Convert scales to bf16 individually
-        self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
-        self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
-        self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
+        # self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
+        # self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
+        # self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
+        self.gate_scales = weights["gate_scale"]
+        self.up_scales = weights["up_scale"]
+        self.down_scales = weights["down_scale"]
+        if self.method == "RAWINT4":
+            assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
+        elif self.method == "RAWFP8":
+            assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for RAWFP8"
 
         t2 = time.time()
 
@@ -425,7 +432,6 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size
         # So: group_size = hidden_size / scale.shape[1]
-
 
         if self.method == "RAWINT4":
             group_size = self.hidden_size // self.gate_scales[0].shape[1]
