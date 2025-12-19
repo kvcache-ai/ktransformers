@@ -941,3 +941,100 @@ def scan_models_in_location(location: StorageLocation, max_depth: int = 2) -> li
             search_paths.append(subpath)
 
     return scan_local_models(search_paths, max_depth=max_depth)
+
+
+@dataclass
+class CPUBuildFeatures:
+    """CPU features for build configuration."""
+
+    has_amx: bool
+    has_avx512: bool
+    has_avx512_vnni: bool
+    has_avx512_bf16: bool
+    has_avx2: bool
+    recommended_instruct: str  # NATIVE, AVX512, AVX2
+    recommended_amx: bool
+
+
+def detect_cpu_build_features() -> CPUBuildFeatures:
+    """
+    Detect CPU features for build configuration.
+
+    This is used to auto-configure kt-kernel source builds.
+    Reads /proc/cpuinfo on Linux to detect instruction set support.
+
+    Returns:
+        CPUBuildFeatures with detection results
+    """
+    has_amx = False
+    has_avx512 = False
+    has_avx512_vnni = False
+    has_avx512_bf16 = False
+    has_avx2 = False
+
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                content = f.read()
+
+            # Get flags from first processor
+            for line in content.split("\n"):
+                if line.startswith("flags"):
+                    flags = line.split(":")[1].strip().split()
+                    flags_lower = {f.lower() for f in flags}
+
+                    # Check for AMX support (requires all three)
+                    if {"amx_tile", "amx_int8", "amx_bf16"} <= flags_lower:
+                        has_amx = True
+
+                    # Check for AVX512 support
+                    if "avx512f" in flags_lower:
+                        has_avx512 = True
+
+                    # Check for AVX512 VNNI
+                    if "avx512_vnni" in flags_lower or "avx512vnni" in flags_lower:
+                        has_avx512_vnni = True
+
+                    # Check for AVX512 BF16
+                    if "avx512_bf16" in flags_lower or "avx512bf16" in flags_lower:
+                        has_avx512_bf16 = True
+
+                    # Check for AVX2
+                    if "avx2" in flags_lower:
+                        has_avx2 = True
+
+                    break
+        except (OSError, IOError):
+            pass
+
+    elif platform.system() == "Darwin":
+        # macOS - use sysctl
+        features_output = run_command(["sysctl", "-n", "machdep.cpu.features"])
+        if features_output:
+            flags_lower = {f.lower() for f in features_output.split()}
+            has_avx2 = "avx2" in flags_lower
+            # macOS doesn't have AMX or AVX512 typically
+
+    # Determine recommended configuration
+    if has_amx:
+        recommended_instruct = "NATIVE"
+        recommended_amx = True
+    elif has_avx512:
+        recommended_instruct = "NATIVE"
+        recommended_amx = False
+    elif has_avx2:
+        recommended_instruct = "NATIVE"
+        recommended_amx = False
+    else:
+        recommended_instruct = "AVX2"
+        recommended_amx = False
+
+    return CPUBuildFeatures(
+        has_amx=has_amx,
+        has_avx512=has_avx512,
+        has_avx512_vnni=has_avx512_vnni,
+        has_avx512_bf16=has_avx512_bf16,
+        has_avx2=has_avx2,
+        recommended_instruct=recommended_instruct,
+        recommended_amx=recommended_amx,
+    )

@@ -8,11 +8,13 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.table import Table
 
 from ktcli.i18n import t
 from ktcli.utils.console import (
@@ -26,6 +28,7 @@ from ktcli.utils.console import (
     print_warning,
 )
 from ktcli.utils.environment import (
+    detect_cpu_build_features,
     detect_cuda_version,
     detect_env_managers,
     get_current_env_name,
@@ -88,6 +91,221 @@ SOURCE_REPOS = {
 }
 
 
+# System dependencies for source builds
+@dataclass
+class SystemDep:
+    """System dependency information."""
+
+    name: str
+    display_name: str
+    check_command: list[str]
+    install_commands: dict[str, list[str]]  # os_type -> command
+    required: bool = True
+
+
+SYSTEM_DEPS = [
+    SystemDep(
+        name="cmake",
+        display_name="CMake",
+        check_command=["cmake", "--version"],
+        install_commands={
+            "conda": ["conda", "install", "-y", "cmake"],
+            "debian": ["sudo", "apt", "install", "-y", "cmake"],
+            "fedora": ["sudo", "dnf", "install", "-y", "cmake"],
+            "arch": ["sudo", "pacman", "-S", "--noconfirm", "cmake"],
+        },
+    ),
+    SystemDep(
+        name="hwloc",
+        display_name="libhwloc-dev",
+        check_command=["pkg-config", "--exists", "hwloc"],
+        install_commands={
+            "debian": ["sudo", "apt", "install", "-y", "libhwloc-dev"],
+            "fedora": ["sudo", "dnf", "install", "-y", "hwloc-devel"],
+            "arch": ["sudo", "pacman", "-S", "--noconfirm", "hwloc"],
+        },
+    ),
+    SystemDep(
+        name="pkg-config",
+        display_name="pkg-config",
+        check_command=["pkg-config", "--version"],
+        install_commands={
+            "debian": ["sudo", "apt", "install", "-y", "pkg-config"],
+            "fedora": ["sudo", "dnf", "install", "-y", "pkgconfig"],
+            "arch": ["sudo", "pacman", "-S", "--noconfirm", "pkgconf"],
+        },
+    ),
+]
+
+
+def _detect_os_type() -> str:
+    """Detect OS type for package management."""
+    if os.path.exists("/etc/os-release"):
+        try:
+            with open("/etc/os-release", "r") as f:
+                content = f.read()
+            for line in content.split("\n"):
+                if line.startswith("ID="):
+                    os_id = line.split("=")[1].strip().strip('"').lower()
+                    if os_id in ("debian", "ubuntu", "linuxmint", "pop"):
+                        return "debian"
+                    elif os_id in ("fedora", "rhel", "centos", "rocky", "almalinux"):
+                        return "fedora"
+                    elif os_id in ("arch", "manjaro"):
+                        return "arch"
+        except (OSError, IOError):
+            pass
+
+    # Check for Debian-based
+    if os.path.exists("/etc/debian_version"):
+        return "debian"
+    # Check for Red Hat-based
+    if os.path.exists("/etc/redhat-release"):
+        return "fedora"
+
+    return "unknown"
+
+
+def _check_system_dep(dep: SystemDep) -> bool:
+    """Check if a system dependency is installed."""
+    try:
+        result = subprocess.run(
+            dep.check_command,
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _check_all_system_deps() -> list[dict]:
+    """Check all system dependencies and return status list."""
+    results = []
+    for dep in SYSTEM_DEPS:
+        installed = _check_system_dep(dep)
+        results.append({
+            "name": dep.name,
+            "display_name": dep.display_name,
+            "installed": installed,
+            "required": dep.required,
+        })
+    return results
+
+
+def _display_deps_table(deps_status: list[dict]) -> None:
+    """Display system dependencies status table."""
+    table = Table(show_header=True, header_style="bold")
+    table.add_column(t("install_dep_name"))
+    table.add_column(t("install_dep_status"))
+
+    for dep in deps_status:
+        if dep["installed"]:
+            status = f"[green]{t('install_dep_ok')}[/green]"
+        else:
+            status = f"[red]{t('install_dep_missing')}[/red]"
+        table.add_row(dep["display_name"], status)
+
+    console.print(table)
+
+
+def _install_system_deps(yes: bool = False) -> bool:
+    """Install missing system dependencies."""
+    os_type = _detect_os_type()
+
+    # Check if conda is available (preferred for cmake)
+    has_conda = shutil.which("conda") is not None
+
+    missing_deps = [
+        dep for dep in SYSTEM_DEPS
+        if not _check_system_dep(dep)
+    ]
+
+    if not missing_deps:
+        print_success(t("install_deps_all_installed"))
+        return True
+
+    console.print()
+    print_step(t("install_installing_system_deps"))
+
+    for dep in missing_deps:
+        # Choose install command
+        if dep.name == "cmake" and has_conda and "conda" in dep.install_commands:
+            cmd = dep.install_commands["conda"]
+        elif os_type in dep.install_commands:
+            cmd = dep.install_commands[os_type]
+        else:
+            print_warning(t("install_dep_no_install_cmd", name=dep.display_name, os=os_type))
+            continue
+
+        console.print(f"  {t('install_installing_dep', name=dep.display_name)}...")
+        try:
+            subprocess.run(cmd, check=True)
+            print_success(f"  {dep.display_name} {t('install_dep_ok')}")
+        except subprocess.CalledProcessError as e:
+            print_error(f"  {t('install_dep_install_failed', name=dep.display_name)}: {e}")
+            return False
+
+    return True
+
+
+def _verify_kt_kernel_installation() -> dict:
+    """
+    Verify kt-kernel installation.
+
+    Returns dict with success, version, cpu_variant, error.
+    """
+    try:
+        # Need to reimport to get fresh module
+        import importlib
+        import kt_kernel
+        importlib.reload(kt_kernel)
+
+        return {
+            "success": True,
+            "version": getattr(kt_kernel, "__version__", "unknown"),
+            "cpu_variant": getattr(kt_kernel, "__cpu_variant__", "unknown"),
+            "error": None,
+        }
+    except ImportError as e:
+        return {
+            "success": False,
+            "version": None,
+            "cpu_variant": None,
+            "error": str(e),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "version": None,
+            "cpu_variant": None,
+            "error": str(e),
+        }
+
+
+def _display_verification_result(result: dict) -> None:
+    """Display kt-kernel verification result."""
+    if result["success"]:
+        print_success(
+            t("install_verify_success",
+              version=result["version"],
+              variant=result["cpu_variant"])
+        )
+    else:
+        print_error(t("install_verify_failed", error=result["error"]))
+
+
+def _show_docker_guide() -> None:
+    """Show Docker installation guide."""
+    console.print()
+    print_info(t("install_docker_guide_title"))
+    console.print()
+    console.print(t("install_docker_guide_desc"))
+    console.print()
+    console.print("  [cyan]https://github.com/kvcache-ai/ktransformers/tree/main/docker[/cyan]")
+    console.print()
+
+
 def install(
     mode: InstallMode = typer.Argument(
         InstallMode.INFERENCE,
@@ -128,23 +346,91 @@ def install(
         "-e",
         help="Install in editable/development mode (requires --source)",
     ),
+    # New options for source builds
+    from_source: bool = typer.Option(
+        False,
+        "--from-source",
+        help="Build from source (PyPI sdist) instead of using pre-built wheel",
+    ),
+    cpu_instruct: Optional[str] = typer.Option(
+        None,
+        "--cpu-instruct",
+        help="CPU instruction set: NATIVE, AVX512, AVX2, FANCY (--from-source only)",
+    ),
+    enable_amx: Optional[bool] = typer.Option(
+        None,
+        "--enable-amx/--disable-amx",
+        help="Enable/disable Intel AMX support (--from-source only)",
+    ),
+    build_type: str = typer.Option(
+        "Release",
+        "--build-type",
+        help="Build type: Release, Debug, RelWithDebInfo (--from-source only)",
+    ),
+    deps_only: bool = typer.Option(
+        False,
+        "--deps-only",
+        help="Install system dependencies only (for source builds)",
+    ),
+    docker: bool = typer.Option(
+        False,
+        "--docker",
+        help="Show Docker installation guide",
+    ),
+    verify: bool = typer.Option(
+        True,
+        "--verify/--no-verify",
+        help="Verify installation after completion",
+    ),
 ) -> None:
     """Install KTransformers and dependencies.
 
-    By default, installs from PyPI. Use --source to install from source code.
+    By default, installs from PyPI (pre-built wheel). Use --from-source to build
+    from source code for optimized performance on your CPU.
 
     Examples:
-        kt install                          # Install from PyPI
-        kt install --source /path/to/repo   # Install from local source
-        kt install --source .               # Install from current directory
-        kt install -s /path/to/repo -e      # Editable install from source
+        kt install                          # Install from PyPI (wheel)
+        kt install --from-source            # Build from source (NATIVE optimization)
+        kt install --from-source --cpu-instruct AVX512  # Build for AVX512
+        kt install --from-source --disable-amx  # Build without AMX
+        kt install --deps-only              # Install system dependencies only
+        kt install --docker                 # Show Docker installation guide
+        kt install --source /path/to/repo   # Install from local source directory
     """
     console.print()
+
+    # Handle --docker option first
+    if docker:
+        _show_docker_guide()
+        return
+
+    # Handle --deps-only option
+    if deps_only:
+        print_step(t("install_checking_system_deps"))
+        deps_status = _check_all_system_deps()
+        _display_deps_table(deps_status)
+
+        missing = [d for d in deps_status if not d["installed"]]
+        if missing:
+            if not yes:
+                console.print()
+                if not confirm(t("install_deps_install_prompt")):
+                    raise typer.Abort()
+            _install_system_deps(yes=True)
+        else:
+            print_success(t("install_deps_all_installed"))
+        return
 
     # Validate options
     if editable and not source:
         print_error("--editable requires --source to be specified")
         raise typer.Exit(1)
+
+    if cpu_instruct and not from_source and not source:
+        print_warning("--cpu-instruct is only effective with --from-source or --source")
+
+    if enable_amx is not None and not from_source and not source:
+        print_warning("--enable-amx/--disable-amx is only effective with --from-source or --source")
 
     # Step 1: Check if in virtual environment
     if not is_in_virtual_env():
@@ -160,15 +446,31 @@ def install(
 
     # Step 2: Determine installation method
     if source:
+        # Local source installation
         console.print()
-        print_info(f"Installation method: [bold]Source[/bold] ({source})")
+        print_info(f"Installation method: [bold]Local Source[/bold] ({source})")
         _install_from_source(mode, source, branch, editable, skip_torch, yes)
-    else:
+    elif from_source:
+        # PyPI source (sdist) installation
         console.print()
-        print_info("Installation method: [bold]PyPI[/bold]")
+        print_info("Installation method: [bold]PyPI Source (sdist)[/bold]")
+        _install_from_source_pypi(
+            mode, cpu_instruct, enable_amx, build_type, skip_torch, yes, verify
+        )
+    else:
+        # PyPI wheel installation (default)
+        console.print()
+        print_info("Installation method: [bold]PyPI (wheel)[/bold]")
         _install_from_pypi(mode, skip_torch, force, yes)
 
-    # Step 3: Show completion message
+    # Step 3: Verify installation if requested
+    if verify and not source:  # source has its own verification
+        console.print()
+        print_step(t("install_verifying"))
+        result = _verify_kt_kernel_installation()
+        _display_verification_result(result)
+
+    # Step 4: Show completion message
     console.print()
     print_success(t("install_complete"))
     console.print()
@@ -262,6 +564,157 @@ def _install_from_pypi(mode: InstallMode, skip_torch: bool, force: bool, yes: bo
     print_step(t("install_installing_deps"))
 
     _install_packages_pip(mode, skip_torch)
+
+
+def _install_from_source_pypi(
+    mode: InstallMode,
+    cpu_instruct: Optional[str],
+    enable_amx: Optional[bool],
+    build_type: str,
+    skip_torch: bool,
+    yes: bool,
+    verify: bool,
+) -> None:
+    """Install kt-kernel from PyPI source (sdist) with custom build configuration."""
+    # Step 1: Check and install system dependencies
+    console.print()
+    print_step(t("install_checking_system_deps"))
+    deps_status = _check_all_system_deps()
+    _display_deps_table(deps_status)
+
+    missing = [d for d in deps_status if not d["installed"]]
+    if missing:
+        if not yes:
+            console.print()
+            if not confirm(t("install_deps_install_prompt")):
+                print_warning(t("install_deps_skipped"))
+            else:
+                if not _install_system_deps(yes=True):
+                    print_error(t("install_deps_failed"))
+                    raise typer.Exit(1)
+        else:
+            if not _install_system_deps(yes=True):
+                print_error(t("install_deps_failed"))
+                raise typer.Exit(1)
+
+    # Step 2: Detect CPU and configure environment variables
+    console.print()
+    print_step(t("install_auto_detect_cpu"))
+    cpu_features = detect_cpu_build_features()
+
+    # Display detected features
+    features_list = []
+    if cpu_features.has_amx:
+        features_list.append("AMX")
+    if cpu_features.has_avx512:
+        features_list.append("AVX512")
+    if cpu_features.has_avx512_vnni:
+        features_list.append("AVX512_VNNI")
+    if cpu_features.has_avx512_bf16:
+        features_list.append("AVX512_BF16")
+    if cpu_features.has_avx2:
+        features_list.append("AVX2")
+
+    if features_list:
+        print_info(t("install_cpu_features", features=", ".join(features_list)))
+    else:
+        print_warning(t("install_cpu_no_features"))
+
+    # Configure environment variables
+    env = os.environ.copy()
+
+    # CPU instruction set
+    if cpu_instruct:
+        env["CPUINFER_CPU_INSTRUCT"] = cpu_instruct.upper()
+    else:
+        env["CPUINFER_CPU_INSTRUCT"] = cpu_features.recommended_instruct
+
+    # AMX support
+    if enable_amx is not None:
+        env["CPUINFER_ENABLE_AMX"] = "ON" if enable_amx else "OFF"
+    elif cpu_features.has_amx:
+        env["CPUINFER_ENABLE_AMX"] = "ON"
+    else:
+        env["CPUINFER_ENABLE_AMX"] = "OFF"
+
+    # Build type
+    env["CPUINFER_BUILD_TYPE"] = build_type
+
+    # Step 3: Display build configuration
+    console.print()
+    print_step(t("install_build_config"))
+    console.print(f"  CPUINFER_CPU_INSTRUCT = {env['CPUINFER_CPU_INSTRUCT']}")
+    console.print(f"  CPUINFER_ENABLE_AMX   = {env['CPUINFER_ENABLE_AMX']}")
+    console.print(f"  CPUINFER_BUILD_TYPE   = {env['CPUINFER_BUILD_TYPE']}")
+
+    if env["CPUINFER_CPU_INSTRUCT"] == "NATIVE":
+        console.print()
+        print_warning(t("install_native_warning"))
+
+    # Step 4: Install PyTorch if needed
+    if not skip_torch:
+        console.print()
+        print_step(t("install_installing_pytorch"))
+        _install_torch()
+
+    # Step 5: Install kt-kernel from source
+    console.print()
+    print_step(t("install_building_from_source"))
+    console.print()
+
+    pip_cmd = [
+        sys.executable, "-m", "pip", "install",
+        "kt-kernel", "--no-binary", "kt-kernel", "-v"
+    ]
+
+    try:
+        # Run pip install with custom environment
+        process = subprocess.Popen(
+            pip_cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        # Show real-time output (simplified)
+        for line in iter(process.stdout.readline, ''):
+            line = line.strip()
+            if line:
+                # Filter to show only important lines
+                if any(keyword in line.lower() for keyword in [
+                    "building", "compiling", "cmake", "installing", "error", "warning"
+                ]):
+                    console.print(f"  [dim]{line[:80]}{'...' if len(line) > 80 else ''}[/dim]")
+
+        process.wait()
+
+        if process.returncode != 0:
+            print_error(t("install_build_failed"))
+            raise typer.Exit(1)
+
+        print_success(t("install_build_success"))
+
+    except subprocess.CalledProcessError as e:
+        print_error(f"{t('install_build_failed')}: {e}")
+        raise typer.Exit(1)
+    except FileNotFoundError:
+        print_error("pip not found")
+        raise typer.Exit(1)
+
+    # Step 6: Install other dependencies based on mode
+    if mode != InstallMode.INFERENCE or mode == InstallMode.FULL:
+        console.print()
+        print_step(t("install_installing_deps"))
+        _install_other_deps(mode)
+
+    # Step 7: Verify installation
+    if verify:
+        console.print()
+        print_step(t("install_verifying"))
+        result = _verify_kt_kernel_installation()
+        _display_verification_result(result)
 
 
 def _install_from_source(

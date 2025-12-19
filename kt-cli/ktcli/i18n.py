@@ -82,6 +82,40 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_already_installed": "All dependencies are already installed!",
         "install_confirm": "Install {count} package(s)?",
 
+        # Install - System dependencies
+        "install_checking_system_deps": "Checking system dependencies...",
+        "install_dep_name": "Dependency",
+        "install_dep_status": "Status",
+        "install_deps_all_installed": "All system dependencies are installed",
+        "install_deps_install_prompt": "Install missing dependencies?",
+        "install_installing_system_deps": "Installing system dependencies...",
+        "install_installing_dep": "Installing {name}",
+        "install_dep_no_install_cmd": "No install command available for {name} on {os}",
+        "install_dep_install_failed": "Failed to install {name}",
+        "install_deps_skipped": "Skipping dependency installation",
+        "install_deps_failed": "Failed to install system dependencies",
+
+        # Install - CPU detection
+        "install_auto_detect_cpu": "Auto-detecting CPU capabilities...",
+        "install_cpu_features": "Detected CPU features: {features}",
+        "install_cpu_no_features": "No advanced CPU features detected",
+
+        # Install - Build configuration
+        "install_build_config": "Build Configuration:",
+        "install_native_warning": "Note: Binary optimized for THIS CPU only (not portable)",
+        "install_building_from_source": "Building kt-kernel from source...",
+        "install_build_failed": "Build failed",
+        "install_build_success": "Build completed successfully",
+
+        # Install - Verification
+        "install_verifying": "Verifying installation...",
+        "install_verify_success": "kt-kernel {version} ({variant} variant) installed successfully",
+        "install_verify_failed": "Verification failed: {error}",
+
+        # Install - Docker
+        "install_docker_guide_title": "Docker Installation",
+        "install_docker_guide_desc": "For Docker installation, please refer to the official guide:",
+
         # Config command
         "config_show_title": "Current Configuration",
         "config_set_success": "Configuration updated: {key} = {value}",
@@ -279,6 +313,40 @@ MESSAGES: dict[str, dict[str, str]] = {
         "install_continue_without_venv": "继续安装到系统 Python？",
         "install_already_installed": "所有依赖已安装！",
         "install_confirm": "安装 {count} 个包？",
+
+        # Install - System dependencies
+        "install_checking_system_deps": "检查系统依赖...",
+        "install_dep_name": "依赖项",
+        "install_dep_status": "状态",
+        "install_deps_all_installed": "所有系统依赖已安装",
+        "install_deps_install_prompt": "是否安装缺失的依赖？",
+        "install_installing_system_deps": "正在安装系统依赖...",
+        "install_installing_dep": "正在安装 {name}",
+        "install_dep_no_install_cmd": "{os} 系统上没有 {name} 的安装命令",
+        "install_dep_install_failed": "安装 {name} 失败",
+        "install_deps_skipped": "跳过依赖安装",
+        "install_deps_failed": "系统依赖安装失败",
+
+        # Install - CPU detection
+        "install_auto_detect_cpu": "正在自动检测 CPU 能力...",
+        "install_cpu_features": "检测到的 CPU 特性: {features}",
+        "install_cpu_no_features": "未检测到高级 CPU 特性",
+
+        # Install - Build configuration
+        "install_build_config": "构建配置:",
+        "install_native_warning": "注意: 二进制文件仅针对当前 CPU 优化（不可移植）",
+        "install_building_from_source": "正在从源码构建 kt-kernel...",
+        "install_build_failed": "构建失败",
+        "install_build_success": "构建成功",
+
+        # Install - Verification
+        "install_verifying": "正在验证安装...",
+        "install_verify_success": "kt-kernel {version} ({variant} 变体) 安装成功",
+        "install_verify_failed": "验证失败: {error}",
+
+        # Install - Docker
+        "install_docker_guide_title": "Docker 安装",
+        "install_docker_guide_desc": "有关 Docker 安装，请参阅官方指南:",
 
         # Config command
         "config_show_title": "当前配置",
