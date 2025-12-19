@@ -170,16 +170,15 @@ def build_moe():
     CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     CPUInfer.sync()
 
-    # Buffer sizing per TP
+    # Buffer sizing per TP (single expert)
     weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
     scale_elems_per_expert_per_tp = per_mat_scale_elems // gpu_tp_count
-    total_weight_bytes_per_tp = gpu_experts_num * weight_bytes_per_expert_per_tp
-    total_scale_elems_per_tp = gpu_experts_num * scale_elems_per_expert_per_tp
 
-    w13_weight_bufs = [torch.empty(2 * total_weight_bytes_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w13_scale_bufs = [torch.empty(2 * total_scale_elems_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
-    w2_weight_bufs = [torch.empty(total_weight_bytes_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w2_scale_bufs = [torch.empty(total_scale_elems_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+    # Each buffer stores data for a single expert
+    w13_weight_bufs = [torch.empty(2 * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w13_scale_bufs = [torch.empty(2 * scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+    w2_weight_bufs = [torch.empty(weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w2_scale_bufs = [torch.empty(scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
 
     buffer_ptrs = {
         "w13_weight_ptrs": [buf.data_ptr() for buf in w13_weight_bufs],
@@ -193,8 +192,6 @@ def build_moe():
         "per_mat_scale_elems": per_mat_scale_elems,
         "weight_bytes_per_expert_per_tp": weight_bytes_per_expert_per_tp,
         "scale_elems_per_expert_per_tp": scale_elems_per_expert_per_tp,
-        "total_weight_bytes_per_tp": total_weight_bytes_per_tp,
-        "total_scale_elems_per_tp": total_scale_elems_per_tp,
     }
 
     keep_tensors = {
@@ -222,63 +219,57 @@ def bench_write_buffer():
 
     # Warm-up
     for _ in tqdm(range(warm_up_iter), desc="Warm-up"):
-        CPUInfer.submit(
-            moe.write_weight_scale_to_buffer_task(
-                gpu_tp_count=gpu_tp_count,
-                gpu_experts_num=gpu_experts_num,
-                **buffer_ptrs,
+        for expert_idx in range(gpu_experts_num):
+            CPUInfer.submit(
+                moe.write_weight_scale_to_buffer_task(
+                    gpu_tp_count=gpu_tp_count,
+                    expert_id=expert_idx,
+                    **buffer_ptrs,
+                )
             )
-        )
-        CPUInfer.sync()
+            CPUInfer.sync()
 
     total_time = 0
-    for _ in tqdm(range(test_iter), desc="Testing"):
+    for iter_idx in tqdm(range(test_iter), desc="Testing"):
         start = time.perf_counter()
-        CPUInfer.submit(
-            moe.write_weight_scale_to_buffer_task(
-                gpu_tp_count=gpu_tp_count,
-                gpu_experts_num=gpu_experts_num,
-                **buffer_ptrs,
+        for expert_idx in range(gpu_experts_num):
+            CPUInfer.submit(
+                moe.write_weight_scale_to_buffer_task(
+                    gpu_tp_count=gpu_tp_count,
+                    expert_id=expert_idx,
+                    **buffer_ptrs,
+                )
             )
-        )
-        CPUInfer.sync()
+            CPUInfer.sync()
         end = time.perf_counter()
-        total_time += end - start
-        time.sleep(0.6)
-        print(end - start)
+        iter_time = end - start
+        total_time += iter_time
+        print(f"Iter {iter_idx}: {iter_time*1000:.2f} ms")
+        time.sleep(0.3)
 
-    time_per_iter_us = total_time / test_iter * 1e6
+    time_per_iter_ms = total_time / test_iter * 1000
     bandwidth_gbs = bytes_per_call * test_iter / total_time / 1e9
 
-    print("write_weight_scale_to_buffer benchmark")
-    print("Time(s): ", total_time)
-    print("Iteration: ", test_iter)
-    print("Time(us) per iteration: ", time_per_iter_us)
-    print("Bandwidth: ", bandwidth_gbs, "GB/s")
-    print("")
+    print(f"\n{'='*60}")
+    print("K2 write_weight_scale_to_buffer benchmark")
+    print(f"{'='*60}")
+    print(f"Time per iteration: {time_per_iter_ms:.2f} ms")
+    print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
+    print(f"Experts: {gpu_experts_num}, Time per expert: {time_per_iter_ms/gpu_experts_num*1000:.2f} us")
 
     result = {
-        "op": "write_weight_scale_to_buffer",
-        "total_time_seconds": total_time,
-        "iterations": test_iter,
-        "time_per_iteration_us": time_per_iter_us,
+        "op": "write_weight_scale_to_buffer_k2",
+        "time_per_iteration_ms": time_per_iter_ms,
         "bandwidth_GBs": bandwidth_gbs,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "test_parameters": {
             "expert_num": expert_num,
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "group_size": group_size,
-            "max_len": max_len,
-            "num_experts_per_tok": num_experts_per_tok,
             "gpu_tp_count": gpu_tp_count,
-            "gpu_experts_num": gpu_experts_num,
-            "warm_up_iter": warm_up_iter,
-            "test_iter": test_iter,
             "bytes_per_call": bytes_per_call,
         },
-        "buffer_shapes": buffer_shapes,
-        "keep_tensors_alive": list(keep_tensors.keys()),
     }
     result.update(get_git_commit())
     result.update(get_system_info())

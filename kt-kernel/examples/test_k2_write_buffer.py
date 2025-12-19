@@ -107,17 +107,18 @@ def main():
     total_scale_elems_per_tp = gpu_experts * scale_elems_per_expert_per_tp
 
     # Create buffer lists for w13 (gate+up) and w2 (down)
+    # Each buffer stores data for a single expert
     w13_weight_bufs = []
     w13_scale_bufs = []
     w2_weight_bufs = []
     w2_scale_bufs = []
 
     for tp_idx in range(gpu_tp_count):
-        # w13 combines gate and up, so needs 2x the size
-        w13_weight_bufs.append(torch.empty(2 * total_weight_bytes_per_tp, dtype=torch.uint8))
-        w13_scale_bufs.append(torch.empty(2 * total_scale_elems_per_tp, dtype=torch.bfloat16))
-        w2_weight_bufs.append(torch.empty(total_weight_bytes_per_tp, dtype=torch.uint8))
-        w2_scale_bufs.append(torch.empty(total_scale_elems_per_tp, dtype=torch.bfloat16))
+        # w13 combines gate and up, so needs 2x the size per expert
+        w13_weight_bufs.append(torch.empty(2 * weight_bytes_per_expert_per_tp, dtype=torch.uint8))
+        w13_scale_bufs.append(torch.empty(2 * scale_elems_per_expert_per_tp, dtype=torch.bfloat16))
+        w2_weight_bufs.append(torch.empty(weight_bytes_per_expert_per_tp, dtype=torch.uint8))
+        w2_scale_bufs.append(torch.empty(scale_elems_per_expert_per_tp, dtype=torch.bfloat16))
 
     # Get data pointers for all buffers
     w13_weight_ptrs = [buf.data_ptr() for buf in w13_weight_bufs]
@@ -131,16 +132,31 @@ def main():
     print(f"Original per matrix scale elements: {per_mat_scale_elems}")
     print(f"Weight bytes per expert per TP: {weight_bytes_per_expert_per_tp}")
     print(f"Scale elements per expert per TP: {scale_elems_per_expert_per_tp}")
-    print(f"Total weight bytes per TP (w13): {2 * total_weight_bytes_per_tp}")
-    print(f"Total weight bytes per TP (w2): {total_weight_bytes_per_tp}")
-    print(f"Total scale elements per TP (w13): {2 * total_scale_elems_per_tp}")
-    print(f"Total scale elements per TP (w2): {total_scale_elems_per_tp}")
+    print(f"Weight bytes per TP (w13, per expert): {2 * weight_bytes_per_expert_per_tp}")
+    print(f"Weight bytes per TP (w2, per expert): {weight_bytes_per_expert_per_tp}")
 
+    # Warm up
     for i in range(5):
+        for expert_idx in range(gpu_experts):
+            cpuinfer.submit(
+                moe.write_weight_scale_to_buffer_task(
+                    gpu_tp_count=gpu_tp_count,
+                    expert_idx=expert_idx,
+                    w13_weight_ptrs=w13_weight_ptrs,
+                    w13_scale_ptrs=w13_scale_ptrs,
+                    w2_weight_ptrs=w2_weight_ptrs,
+                    w2_scale_ptrs=w2_scale_ptrs,
+                )
+            )
+            cpuinfer.sync()
+
+    # Timing
+    begin_time = time.perf_counter_ns()
+    for expert_idx in range(gpu_experts):
         cpuinfer.submit(
             moe.write_weight_scale_to_buffer_task(
                 gpu_tp_count=gpu_tp_count,
-                gpu_experts_num=gpu_experts,
+                expert_idx=expert_idx,
                 w13_weight_ptrs=w13_weight_ptrs,
                 w13_scale_ptrs=w13_scale_ptrs,
                 w2_weight_ptrs=w2_weight_ptrs,
@@ -148,19 +164,6 @@ def main():
             )
         )
         cpuinfer.sync()
-
-    begin_time = time.perf_counter_ns()
-    cpuinfer.submit(
-        moe.write_weight_scale_to_buffer_task(
-            gpu_tp_count=gpu_tp_count,
-            gpu_experts_num=gpu_experts,
-            w13_weight_ptrs=w13_weight_ptrs,
-            w13_scale_ptrs=w13_scale_ptrs,
-            w2_weight_ptrs=w2_weight_ptrs,
-            w2_scale_ptrs=w2_scale_ptrs,
-        )
-    )
-    cpuinfer.sync()
     end_time = time.perf_counter_ns()
     elapsed_ms = (end_time - begin_time) / 1000000
     total_weights = hidden_size * intermediate_size * expert_num * 3
@@ -181,87 +184,102 @@ def main():
     up_scale_experts = split_expert_tensor(up_scale, per_mat_scale_elems)
     down_scale_experts = split_expert_tensor(down_scale, per_mat_scale_elems)
 
-    # CPU TP count is always 2 in this test setup (one TP per NUMA node)
-    cpu_tp_count = 2
-
     # Verify buffers for each TP part
-    for tp_idx in range(gpu_tp_count):
-        expected_w13_weights = []
-        expected_w13_scales = []
-        expected_w2_weights = []
-        expected_w2_scales = []
+    # Since we process one expert at a time, buffer contains only the last expert's data
+    last_expert_idx = gpu_experts - 1
 
+    for tp_idx in range(gpu_tp_count):
         weight13_per_tp = per_mat_weight_bytes // gpu_tp_count
         scale13_per_tp = per_mat_scale_elems // gpu_tp_count
-        # Process each GPU expert
-        for expert_idx in range(gpu_experts):
-            # For w13 (gate and up), the slicing is straightforward
 
-            start_weight = tp_idx * weight13_per_tp
-            end_weight = (tp_idx + 1) * weight13_per_tp
-            start_scale = tp_idx * scale13_per_tp
-            end_scale = (tp_idx + 1) * scale13_per_tp
+        # For w13 (gate and up), the slicing is straightforward
+        start_weight = tp_idx * weight13_per_tp
+        end_weight = (tp_idx + 1) * weight13_per_tp
+        start_scale = tp_idx * scale13_per_tp
+        end_scale = (tp_idx + 1) * scale13_per_tp
 
-            # Gate
-            gate_weight_tp = gate_q_experts[expert_idx][start_weight:end_weight]
-            gate_scale_tp = gate_scale_experts[expert_idx][start_scale:end_scale]
+        # Gate
+        gate_weight_tp = gate_q_experts[last_expert_idx][start_weight:end_weight]
+        gate_scale_tp = gate_scale_experts[last_expert_idx][start_scale:end_scale]
 
-            # Up
-            up_weight_tp = up_q_experts[expert_idx][start_weight:end_weight]
-            up_scale_tp = up_scale_experts[expert_idx][start_scale:end_scale]
+        # Up
+        up_weight_tp = up_q_experts[last_expert_idx][start_weight:end_weight]
+        up_scale_tp = up_scale_experts[last_expert_idx][start_scale:end_scale]
 
-            # Down matrix needs special handling because it's sliced column-wise
-            # We need to reconstruct it from column slices
-            down_weight_tp_parts = []
-            down_scale_tp_parts = []
+        # Down matrix needs special handling because it's sliced column-wise
+        # We need to reconstruct it from column slices
+        down_weight_tp_parts = []
+        down_scale_tp_parts = []
 
-            # Iterate through each column to extract the corresponding parts
-            for col_idx in range(hidden_size):
-                col_weight_start = col_idx * (intermediate_size // 2)
-                col_scale_start = col_idx * (intermediate_size // group_size)
+        # Iterate through each column to extract the corresponding parts
+        for col_idx in range(hidden_size):
+            col_weight_start = col_idx * (intermediate_size // 2)
+            col_scale_start = col_idx * (intermediate_size // group_size)
 
-                # Direct mapping: each CPU TP corresponds to a GPU TP
-                tp_slice_weight_size = (intermediate_size // gpu_tp_count) // 2
-                tp_slice_scale_size = (intermediate_size // gpu_tp_count) // group_size
+            # Direct mapping: each CPU TP corresponds to a GPU TP
+            tp_slice_weight_size = (intermediate_size // gpu_tp_count) // 2
+            tp_slice_scale_size = (intermediate_size // gpu_tp_count) // group_size
 
-                tp_weight_offset = col_weight_start + tp_idx * tp_slice_weight_size
-                tp_scale_offset = col_scale_start + tp_idx * tp_slice_scale_size
+            tp_weight_offset = col_weight_start + tp_idx * tp_slice_weight_size
+            tp_scale_offset = col_scale_start + tp_idx * tp_slice_scale_size
 
-                down_weight_tp_parts.append(
-                    down_q_experts[expert_idx][tp_weight_offset : tp_weight_offset + tp_slice_weight_size]
-                )
-                down_scale_tp_parts.append(
-                    down_scale_experts[expert_idx][tp_scale_offset : tp_scale_offset + tp_slice_scale_size]
-                )
+            down_weight_tp_parts.append(
+                down_q_experts[last_expert_idx][tp_weight_offset : tp_weight_offset + tp_slice_weight_size]
+            )
+            down_scale_tp_parts.append(
+                down_scale_experts[last_expert_idx][tp_scale_offset : tp_scale_offset + tp_slice_scale_size]
+            )
 
-            # Concatenate all column slices for this TP
-            down_weight_tp = torch.cat(down_weight_tp_parts)
-            down_scale_tp = torch.cat(down_scale_tp_parts)
+        # Concatenate all column slices for this TP
+        down_weight_tp = torch.cat(down_weight_tp_parts)
+        down_scale_tp = torch.cat(down_scale_tp_parts)
 
-            expected_w13_weights.append(gate_weight_tp)
-            expected_w13_weights.append(up_weight_tp)
-            expected_w13_scales.append(gate_scale_tp)
-            expected_w13_scales.append(up_scale_tp)
-            expected_w2_weights.append(down_weight_tp)
-            expected_w2_scales.append(down_scale_tp)
+        # Expected buffer contains: gate_weight, up_weight for w13
+        expected_w13_weight = torch.cat([gate_weight_tp, up_weight_tp])
+        expected_w13_scale = torch.cat([gate_scale_tp, up_scale_tp])
+        expected_w2_weight = down_weight_tp
+        expected_w2_scale = down_scale_tp
 
-        # Concatenate all experts for this TP part
-        expected_w13_weight = torch.cat(expected_w13_weights)
-        expected_w13_scale = torch.cat(expected_w13_scales)
-        expected_w2_weight = torch.cat(expected_w2_weights)
-        expected_w2_scale = torch.cat(expected_w2_scales)
-
-        print(f"=== Checking TP part {tp_idx} ===")
+        print(f"=== Checking TP part {tp_idx} (expert {last_expert_idx}) ===")
+        print(f"  w13 weight shape: actual={w13_weight_bufs[tp_idx].shape}, expected={expected_w13_weight.shape}")
+        print(f"  w13 scale shape: actual={w13_scale_bufs[tp_idx].shape}, expected={expected_w13_scale.shape}")
+        print(f"  w2 weight shape: actual={w2_weight_bufs[tp_idx].shape}, expected={expected_w2_weight.shape}")
+        print(f"  w2 scale shape: actual={w2_scale_bufs[tp_idx].shape}, expected={expected_w2_scale.shape}")
 
         # Assert all checks pass
-        assert torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight), f"w13 weight bytes mismatch for TP {tp_idx}"
-        assert torch.allclose(w13_scale_bufs[tp_idx], expected_w13_scale), f"w13 scale values mismatch for TP {tp_idx}"
-        assert torch.equal(w2_weight_bufs[tp_idx], expected_w2_weight), f"w2 weight bytes mismatch for TP {tp_idx}"
-        assert torch.allclose(w2_scale_bufs[tp_idx], expected_w2_scale), f"w2 scale values mismatch for TP {tp_idx}"
+        if not torch.equal(w13_weight_bufs[tp_idx], expected_w13_weight):
+            diff_mask = w13_weight_bufs[tp_idx] != expected_w13_weight
+            first_diff_idx = diff_mask.nonzero()[0].item() if diff_mask.any() else -1
+            print(f"  w13 weight mismatch at index {first_diff_idx}")
+            print(f"    actual: {w13_weight_bufs[tp_idx][first_diff_idx:first_diff_idx+10]}")
+            print(f"    expected: {expected_w13_weight[first_diff_idx:first_diff_idx+10]}")
+            raise AssertionError(f"w13 weight bytes mismatch for TP {tp_idx}")
 
-    print(
-        f"\n✓ write_weight_scale_to_buffer passed: extracted {gpu_experts} GPU experts across {gpu_tp_count} TP parts from total {expert_num} experts"
-    )
+        if not torch.allclose(w13_scale_bufs[tp_idx], expected_w13_scale):
+            diff = torch.abs(w13_scale_bufs[tp_idx].float() - expected_w13_scale.float())
+            max_diff_idx = diff.argmax().item()
+            print(f"  w13 scale mismatch, max diff at index {max_diff_idx}")
+            print(f"    actual: {w13_scale_bufs[tp_idx][max_diff_idx]}")
+            print(f"    expected: {expected_w13_scale[max_diff_idx]}")
+            raise AssertionError(f"w13 scale values mismatch for TP {tp_idx}")
+
+        if not torch.equal(w2_weight_bufs[tp_idx], expected_w2_weight):
+            diff_mask = w2_weight_bufs[tp_idx] != expected_w2_weight
+            first_diff_idx = diff_mask.nonzero()[0].item() if diff_mask.any() else -1
+            print(f"  w2 weight mismatch at index {first_diff_idx}")
+            print(f"    actual: {w2_weight_bufs[tp_idx][first_diff_idx:first_diff_idx+10]}")
+            print(f"    expected: {expected_w2_weight[first_diff_idx:first_diff_idx+10]}")
+            raise AssertionError(f"w2 weight bytes mismatch for TP {tp_idx}")
+
+        if not torch.allclose(w2_scale_bufs[tp_idx], expected_w2_scale):
+            diff = torch.abs(w2_scale_bufs[tp_idx].float() - expected_w2_scale.float())
+            max_diff_idx = diff.argmax().item()
+            print(f"  w2 scale mismatch, max diff at index {max_diff_idx}")
+            print(f"    actual: {w2_scale_bufs[tp_idx][max_diff_idx]}")
+            print(f"    expected: {expected_w2_scale[max_diff_idx]}")
+            raise AssertionError(f"w2 scale values mismatch for TP {tp_idx}")
+
+    print(f"\n✓ write_weight_scale_to_buffer passed: verified expert {last_expert_idx} across {gpu_tp_count} TP parts")
 
 
 if __name__ == "__main__":

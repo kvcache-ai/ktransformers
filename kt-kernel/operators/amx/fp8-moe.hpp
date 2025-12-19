@@ -233,17 +233,54 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
   }
 
   /**
-   * @brief Reconstruct weights for a single expert to the output buffers
+   * @brief Unpack a single N_STEP x K_STEP block from packed BufferB format to n-major format
    *
-   * This function handles the TP-specific portion of the reconstruction for one expert.
-   * Used for GPU offloading scenarios. Unlike K2 MoE which processes all experts,
-   * FP8 MoE processes one expert at a time.
+   * This is the inverse of the packing done in BufferBFP8Impl::from_mat.
+   * Optimized: process by row groups to keep writes more localized.
    *
-   * Optimized version using work_stealing_job for parallelism:
-   * - Gate/Up: Direct write to destination (no temp buffer) since each N_BLOCK maps to one GPU TP
-   * - Down: Use work_stealing for both unpack and copy phases
+   * @param src Pointer to packed data (N_STEP * K_STEP bytes in packed layout)
+   * @param dst Pointer to destination in n-major layout
+   * @param dst_row_stride Row stride in destination buffer (number of columns in full matrix)
+   */
+  static inline void unpack_nk_block(const uint16_t* src16, uint8_t* dst, int dst_row_stride) {
+    // inv_mat_offset: packed position -> original row group index
+    // mat_offset = {0, 2, 4, 6, 1, 3, 5, 7}, inv = {0, 4, 1, 5, 2, 6, 3, 7}
+    // So row_map[packed_i] = inv_mat_offset[packed_i] * 4
+    static constexpr int row_map[8] = {0, 16, 4, 20, 8, 24, 12, 28};
+    const uint64_t* src = reinterpret_cast<const uint64_t*>(src16);
+
+    // Packed format: 128 uint64_t values arranged as src[8*j + packed_i]
+    // Each uint64_t contains 4 uint16 values for 4 consecutive rows
+    for (int packed_i = 0; packed_i < 8; packed_i++) {
+      const int base_row = row_map[packed_i];
+      uint16_t* row0 = reinterpret_cast<uint16_t*>(dst + (size_t)base_row * dst_row_stride);
+      uint16_t* row1 = reinterpret_cast<uint16_t*>(dst + (size_t)(base_row + 1) * dst_row_stride);
+      uint16_t* row2 = reinterpret_cast<uint16_t*>(dst + (size_t)(base_row + 2) * dst_row_stride);
+      uint16_t* row3 = reinterpret_cast<uint16_t*>(dst + (size_t)(base_row + 3) * dst_row_stride);
+
+      for (int j = 0; j < 16; j++) {
+        uint64_t val = src[8 * j + packed_i];
+        row0[j] = static_cast<uint16_t>(val);
+        row1[j] = static_cast<uint16_t>(val >> 16);
+        row2[j] = static_cast<uint16_t>(val >> 32);
+        row3[j] = static_cast<uint16_t>(val >> 48);
+      }
+    }
+  }
+
+  /**
+   * @brief Reconstruct weights for a single expert to the output buffers (no temp buffer version)
    *
-   * @param gpu_tp_count Number of GPU TP parts
+   * Directly unpacks from packed BufferB format to n-major GPU buffers without intermediate storage.
+   * Optimized version: merged w13/w2 jobs, coarse-grained splitting, uint16 unpack.
+   *
+   * Key insight:
+   * - w13 (gate+up): Shape [intermediate, hidden], split by N (intermediate) only
+   *   K dimension is not split across GPU TPs, so process full K per job.
+   * - w2 (down): Shape [hidden, intermediate], split by K (intermediate)
+   *   Use gpu_k_w2 as K_SLICE so each slice maps to exactly one GPU TP.
+   *
+   * @param gpu_tp_count Number of GPU TP parts (1, 2, 4, or 8)
    * @param cpu_tp_count Number of CPU TP parts
    * @param expert_idx Expert index to process
    * @param full_config Full configuration (before CPU TP split)
@@ -252,8 +289,8 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
    * @param w2_weight_ptrs Pointers to down weight buffers (one per GPU TP)
    * @param w2_scale_ptrs Pointers to down scale buffers (one per GPU TP)
    */
-  void write_weights_to_buffer(int gpu_tp_count, int cpu_tp_count, int expert_idx, const GeneralMOEConfig& full_config,
-                               const std::vector<uintptr_t>& w13_weight_ptrs,
+  void write_weights_to_buffer(int gpu_tp_count, [[maybe_unused]] int cpu_tp_count, int expert_idx,
+                               const GeneralMOEConfig& full_config, const std::vector<uintptr_t>& w13_weight_ptrs,
                                const std::vector<uintptr_t>& w13_scale_ptrs,
                                const std::vector<uintptr_t>& w2_weight_ptrs,
                                const std::vector<uintptr_t>& w2_scale_ptrs) const {
@@ -261,233 +298,186 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
     const int group_size = config.quant_config.group_size;
     auto pool = config.pool->get_subpool(tp_part_idx);
 
-    // Calculate sizes for CPU TP part (this instance)
-    size_t cpu_tp_weight_elem_count = (size_t)config.intermediate_size * config.hidden_size;
-    size_t cpu_tp_n_blocks_gate_up = div_up(config.intermediate_size, group_size);
-    size_t cpu_tp_k_blocks = div_up(config.hidden_size, group_size);
-    size_t cpu_tp_scale_elem_count_gate_up = cpu_tp_n_blocks_gate_up * cpu_tp_k_blocks;
+    constexpr int N_STEP = T::N_STEP;
+    constexpr int K_STEP = T::K_STEP;
+    constexpr int N_BLOCK = T::N_BLOCK;
+    constexpr int K_BLOCK = T::K_BLOCK;
 
-    // For down: n=hidden_size, k=intermediate_size
-    size_t cpu_tp_n_blocks_down = cpu_tp_k_blocks;
-    size_t cpu_tp_k_blocks_down = cpu_tp_n_blocks_gate_up;
-    size_t cpu_tp_scale_elem_count_down = cpu_tp_n_blocks_down * cpu_tp_k_blocks_down;
+    // ========= W13 (gate+up): Shape [intermediate, hidden], split by N only =========
+    const int cpu_n_w13 = config.intermediate_size;
+    const int cpu_k_w13 = config.hidden_size;
+    const int gpu_n_w13 = full_config.intermediate_size / gpu_tp_count;
+    const int gpu_k_w13 = full_config.hidden_size;
+    const int global_n_offset_w13 = tp_part_idx * cpu_n_w13;
 
-    // Calculate sizes for GPU TP part
-    size_t gpu_tp_weight_elem_count = (size_t)full_config.intermediate_size * full_config.hidden_size / gpu_tp_count;
-    size_t gpu_tp_n_blocks_gate_up = div_up(full_config.intermediate_size / gpu_tp_count, group_size);
-    size_t gpu_tp_k_blocks = div_up(full_config.hidden_size, group_size);
-    size_t gpu_tp_scale_elem_count_gate_up = gpu_tp_n_blocks_gate_up * gpu_tp_k_blocks;
+    const size_t gpu_w13_weight_per_mat = (size_t)gpu_n_w13 * gpu_k_w13;
+    const size_t gpu_w13_scale_per_mat = (size_t)div_up(gpu_n_w13, group_size) * div_up(gpu_k_w13, group_size);
+    const int cpu_scale_k_blocks_w13 = div_up(cpu_k_w13, group_size);
+    const int gpu_scale_k_blocks_w13 = div_up(gpu_k_w13, group_size);
 
-    size_t gpu_tp_n_blocks_down = gpu_tp_k_blocks;
-    size_t gpu_tp_k_blocks_down = gpu_tp_n_blocks_gate_up;
-    size_t gpu_tp_scale_elem_count_down = gpu_tp_n_blocks_down * gpu_tp_k_blocks_down;
+    // ========= W2 (down): Shape [hidden, intermediate], split by K =========
+    const int cpu_n_w2 = config.hidden_size;
+    const int cpu_k_w2 = config.intermediate_size;
+    const int gpu_n_w2 = full_config.hidden_size;
+    const int gpu_k_w2 = full_config.intermediate_size / gpu_tp_count;
+    const int global_k_offset_w2 = tp_part_idx * cpu_k_w2;
 
-    if (cpu_tp_count >= gpu_tp_count) {
-      // Multiple CPU TPs map to one GPU TP
-      int cpu_tps_per_gpu_tp = cpu_tp_count / gpu_tp_count;
-      int target_gpu_tp = tp_part_idx / cpu_tps_per_gpu_tp;
-      int local_idx = tp_part_idx % cpu_tps_per_gpu_tp;
+    const size_t gpu_w2_weight_per_mat = (size_t)gpu_n_w2 * gpu_k_w2;
+    const size_t gpu_w2_scale_per_mat = (size_t)div_up(gpu_n_w2, group_size) * div_up(gpu_k_w2, group_size);
+    const int cpu_scale_k_blocks_w2 = div_up(cpu_k_w2, group_size);
+    const int gpu_scale_k_blocks_w2 = div_up(gpu_k_w2, group_size);
 
-      // Get pointers for this GPU TP part
-      uint8_t* w13_weight_dst = (uint8_t*)w13_weight_ptrs[target_gpu_tp];
-      float* w13_scale_dst = (float*)w13_scale_ptrs[target_gpu_tp];
-      uint8_t* w2_weight_dst = (uint8_t*)w2_weight_ptrs[target_gpu_tp];
-      float* w2_scale_dst = (float*)w2_scale_ptrs[target_gpu_tp];
+    // ========= Scale dimensions =========
+    const int cpu_scale_n_blocks_w13 = div_up(cpu_n_w13, group_size);
+    const int gpu_scale_n_blocks_w13 = div_up(gpu_n_w13, group_size);
+    const int cpu_scale_n_blocks_w2 = div_up(cpu_n_w2, group_size);
 
-      // Calculate offset within the GPU TP buffer for gate/up
-      size_t offset_in_gpu_weight = local_idx * cpu_tp_weight_elem_count;
-      size_t offset_in_gpu_scale = local_idx * cpu_tp_scale_elem_count_gate_up;
+    // ========= Job counts =========
+    // W13: split by N_STEP (each job processes N_STEP rows x full K, contiguous src and dst)
+    // W2: split by (N_STEP, gpu_k_w2) for balanced workload
+    const int n_steps_w13 = div_up(cpu_n_w13, N_STEP);
+    const int n_steps_w2 = div_up(cpu_n_w2, N_STEP);
+    const int k_slices_w2 = div_up(cpu_k_w2, gpu_k_w2);
 
-      // Expert base offsets in destination buffers
-      size_t w13_expert_base_weight = expert_idx * 2 * gpu_tp_weight_elem_count;
-      size_t w13_expert_base_scale = expert_idx * 2 * gpu_tp_scale_elem_count_gate_up;
-      size_t w2_expert_base_weight = expert_idx * gpu_tp_weight_elem_count;
-      size_t w2_expert_base_scale = expert_idx * gpu_tp_scale_elem_count_down;
+    const int w13_weight_jobs = n_steps_w13 * 2;  // x2 for gate and up
+    const int w2_weight_jobs = n_steps_w2 * k_slices_w2;
 
-      // Gate and Up destinations - direct write without temp buffer
-      uint8_t* gate_weight_dst = w13_weight_dst + w13_expert_base_weight + offset_in_gpu_weight;
-      float* gate_scale_dst = w13_scale_dst + w13_expert_base_scale + offset_in_gpu_scale;
-      uint8_t* up_weight_dst =
-          w13_weight_dst + w13_expert_base_weight + gpu_tp_weight_elem_count + offset_in_gpu_weight;
-      float* up_scale_dst =
-          w13_scale_dst + w13_expert_base_scale + gpu_tp_scale_elem_count_gate_up + offset_in_gpu_scale;
+    // Scale jobs: 3 simple copy tasks (gate_scale, up_scale, down_scale)
+    const int scale_jobs = 3;
 
-      // Gate and Up: write directly using work_stealing
-      // With nth = recommended_nth(intermediate_size), each thread handles one N_BLOCK (128 rows)
-      int nth_gate_up = T::recommended_nth(config.intermediate_size);
-      pool->do_work_stealing_job(
-          nth_gate_up * 2, nullptr,
-          [this, expert_idx, gate_weight_dst, gate_scale_dst, up_weight_dst, up_scale_dst, nth_gate_up](int task_id) {
-            bool is_up = task_id >= nth_gate_up;
-            int ith = task_id % nth_gate_up;
-            if (is_up) {
-              up_bb_[expert_idx]->to_mat(up_weight_dst, up_scale_dst, ith, nth_gate_up);
-            } else {
-              gate_bb_[expert_idx]->to_mat(gate_weight_dst, gate_scale_dst, ith, nth_gate_up);
-            }
-          },
-          nullptr);
+    const int total_jobs = w13_weight_jobs + w2_weight_jobs + scale_jobs;
 
-      // Down matrix handling
-      size_t gpu_intermediate_per_tp = full_config.intermediate_size / gpu_tp_count;
-      size_t cpu_intermediate = config.intermediate_size;
+    pool->do_work_stealing_job(
+        total_jobs, nullptr,
+        [=, &w13_weight_ptrs, &w13_scale_ptrs, &w2_weight_ptrs, &w2_scale_ptrs, this](int task_id) {
+          if (task_id < w13_weight_jobs) {
+            // ========= W13 weight task: process N_STEP rows x full K (contiguous memory) =========
+            const bool is_up = task_id >= n_steps_w13;
+            const int n_step_idx = task_id % n_steps_w13;
 
-      if (cpu_tps_per_gpu_tp == 1) {
-        // Direct write: cpu_tp_count == gpu_tp_count, no column interleaving needed
-        uint8_t* down_weight_dst = w2_weight_dst + w2_expert_base_weight;
-        float* down_scale_dst = w2_scale_dst + w2_expert_base_scale;
+            const auto& bb = is_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
 
-        int nth_down = T::recommended_nth(config.hidden_size);
-        pool->do_work_stealing_job(
-            nth_down, nullptr,
-            [this, expert_idx, down_weight_dst, down_scale_dst, nth_down](int ith) {
-              down_bb_[expert_idx]->to_mat(down_weight_dst, down_scale_dst, ith, nth_down);
-            },
-            nullptr);
-      } else {
-        // Need column interleaving: unpack to temp buffer, then copy with slicing
-        std::vector<uint8_t> down_tmp(cpu_tp_weight_elem_count);
-        std::vector<float> down_scale_tmp(cpu_tp_scale_elem_count_down);
+            const int local_n_start = n_step_idx * N_STEP;
+            if (local_n_start >= cpu_n_w13) return;  // Out of bounds
 
-        int nth_down = T::recommended_nth(config.hidden_size);
-        pool->do_work_stealing_job(
-            nth_down, nullptr,
-            [this, expert_idx, &down_tmp, &down_scale_tmp, nth_down](int ith) {
-              down_bb_[expert_idx]->to_mat(down_tmp.data(), down_scale_tmp.data(), ith, nth_down);
-            },
-            nullptr);
+            const int global_n = global_n_offset_w13 + local_n_start;
+            const int target_gpu = global_n / gpu_n_w13;
+            const int n_in_gpu = global_n % gpu_n_w13;
 
-        // Copy with column interleaving - parallelize by row chunks (N_BLOCK = 128 rows)
-        size_t slice_offset_weight = local_idx * cpu_intermediate;
-        size_t slice_offset_scale = local_idx * cpu_tp_k_blocks_down;
-        int n_row_chunks = div_up(config.hidden_size, T::N_BLOCK);
+            uint8_t* weight_base = (uint8_t*)w13_weight_ptrs[target_gpu];
+            const size_t expert_weight_off =
+                expert_idx * 2 * gpu_w13_weight_per_mat + (is_up ? gpu_w13_weight_per_mat : 0);
 
-        pool->do_work_stealing_job(
-            n_row_chunks, nullptr,
-            [&config, &down_tmp, &down_scale_tmp, w2_weight_dst, w2_scale_dst, w2_expert_base_weight,
-             w2_expert_base_scale, gpu_intermediate_per_tp, cpu_intermediate, slice_offset_weight, slice_offset_scale,
-             cpu_tp_k_blocks_down, gpu_tp_k_blocks_down, group_size](int chunk_id) {
-              int row_start = chunk_id * T::N_BLOCK;
-              int row_end = std::min(row_start + T::N_BLOCK, config.hidden_size);
+            // Which N_BLOCK does this N_STEP belong to?
+            const int n_block_idx = local_n_start / N_BLOCK;
+            const int n_block_begin = n_block_idx * N_BLOCK;
+            const int n_block_size = std::min(N_BLOCK, cpu_n_w13 - n_block_begin);
+            const int n_in_block = local_n_start - n_block_begin;
 
-              for (int row = row_start; row < row_end; row++) {
-                size_t gpu_row_offset = row * gpu_intermediate_per_tp;
-                size_t cpu_row_offset = row * cpu_intermediate;
+            // Process all K_BLOCKs for this N_STEP (contiguous in src)
+            for (int k_block_begin = 0; k_block_begin < cpu_k_w13; k_block_begin += K_BLOCK) {
+              const int k_block_size = std::min(K_BLOCK, cpu_k_w13 - k_block_begin);
 
-                std::memcpy(w2_weight_dst + w2_expert_base_weight + gpu_row_offset + slice_offset_weight,
-                            down_tmp.data() + cpu_row_offset, cpu_intermediate);
+              for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+                const uint16_t* src = reinterpret_cast<const uint16_t*>(
+                    bb->b + (size_t)n_block_begin * cpu_k_w13 + (size_t)k_block_begin * n_block_size +
+                    (size_t)n_in_block * k_block_size + (size_t)k_begin * N_STEP);
+                uint8_t* dst = weight_base + expert_weight_off + (size_t)n_in_gpu * gpu_k_w13 + k_block_begin + k_begin;
+                unpack_nk_block(src, dst, gpu_k_w13);
               }
+            }
+          } else if (task_id < w13_weight_jobs + w2_weight_jobs) {
+            // ========= W2 weight task: process N_STEP rows x gpu_k_w2 slice =========
+            const int w2_task_id = task_id - w13_weight_jobs;
+            const int n_step_idx = w2_task_id / k_slices_w2;
+            const int k_slice_idx = w2_task_id % k_slices_w2;
+            const auto& bb = down_bb_[expert_idx];
 
-              // Scale: copy once per scale block row
-              int scale_row = row_start / group_size;
-              if (row_start % group_size == 0 && scale_row * (int)group_size < config.hidden_size) {
-                std::memcpy(w2_scale_dst + w2_expert_base_scale + scale_row * gpu_tp_k_blocks_down + slice_offset_scale,
-                            down_scale_tmp.data() + scale_row * cpu_tp_k_blocks_down,
-                            sizeof(float) * cpu_tp_k_blocks_down);
+            const int local_n_start = n_step_idx * N_STEP;
+            if (local_n_start >= cpu_n_w2) return;  // Out of bounds
+
+            const int k_slice_start = k_slice_idx * gpu_k_w2;
+            const int k_slice_end = std::min(k_slice_start + gpu_k_w2, cpu_k_w2);
+
+            const int global_k_start = global_k_offset_w2 + k_slice_start;
+            const int target_gpu = global_k_start / gpu_k_w2;
+            const int k_in_gpu_base = global_k_start % gpu_k_w2;
+
+            uint8_t* weight_base = (uint8_t*)w2_weight_ptrs[target_gpu];
+            const size_t expert_weight_off = expert_idx * gpu_w2_weight_per_mat;
+
+            // Which N_BLOCK does this N_STEP belong to?
+            const int n_block_idx = local_n_start / N_BLOCK;
+            const int n_block_begin = n_block_idx * N_BLOCK;
+            const int n_block_size = std::min(N_BLOCK, cpu_n_w2 - n_block_begin);
+            const int n_in_block = local_n_start - n_block_begin;
+
+            const int k_block_begin = (k_slice_start / K_BLOCK) * K_BLOCK;
+            const int k_block_size = std::min(K_BLOCK, cpu_k_w2 - k_block_begin);
+
+            for (int k_abs = k_slice_start; k_abs < k_slice_end; k_abs += K_STEP) {
+              const int k_in_block = k_abs - k_block_begin;
+              const int k_in_gpu = k_in_gpu_base + (k_abs - k_slice_start);
+
+              const uint16_t* src = reinterpret_cast<const uint16_t*>(
+                  bb->b + (size_t)n_block_begin * cpu_k_w2 + (size_t)k_block_begin * n_block_size +
+                  (size_t)n_in_block * k_block_size + (size_t)k_in_block * N_STEP);
+              uint8_t* dst = weight_base + expert_weight_off + (size_t)local_n_start * gpu_k_w2 + k_in_gpu;
+              unpack_nk_block(src, dst, gpu_k_w2);
+            }
+          } else {
+            // ========= Scale copy task: simple linear copy =========
+            const int scale_task_id = task_id - w13_weight_jobs - w2_weight_jobs;
+
+            if (scale_task_id < 2) {
+              // Gate (0) or Up (1) scale copy
+              const bool is_up = scale_task_id == 1;
+              const auto& bb = is_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+
+              // W13 scales: copy N blocks corresponding to this CPU TP
+              const int bn_start = global_n_offset_w13 / group_size;
+              const int bn_end = div_up(global_n_offset_w13 + cpu_n_w13, group_size);
+              const int target_gpu = bn_start / gpu_scale_n_blocks_w13;
+              const int gpu_bn_start = bn_start % gpu_scale_n_blocks_w13;
+
+              float* scale_dst = (float*)w13_scale_ptrs[target_gpu];
+              const size_t expert_scale_off =
+                  expert_idx * 2 * gpu_w13_scale_per_mat + (is_up ? gpu_w13_scale_per_mat : 0);
+
+              for (int bn = 0; bn < cpu_scale_n_blocks_w13; bn++) {
+                const int gpu_bn = gpu_bn_start + bn;
+                memcpy(scale_dst + expert_scale_off + (size_t)gpu_bn * gpu_scale_k_blocks_w13,
+                       bb->d + (size_t)bn * cpu_scale_k_blocks_w13, cpu_scale_k_blocks_w13 * sizeof(float));
               }
-            },
-            nullptr);
-      }
-    } else {
-      // cpu_tp_count < gpu_tp_count: one CPU TP writes to multiple GPU TPs
-      int gpu_tps_per_cpu_tp = gpu_tp_count / cpu_tp_count;
-      int start_gpu_tp = tp_part_idx * gpu_tps_per_cpu_tp;
-
-      size_t data_per_gpu_tp_weight = cpu_tp_weight_elem_count / gpu_tps_per_cpu_tp;
-      size_t data_per_gpu_tp_scale_gate_up = cpu_tp_scale_elem_count_gate_up / gpu_tps_per_cpu_tp;
-
-      // Gate and Up: write directly using work_stealing
-      // Each thread handles one N_BLOCK, which maps to exactly one GPU TP
-      int nth_gate_up = T::recommended_nth(config.intermediate_size);
-      int n_blocks_per_gpu_tp = nth_gate_up / gpu_tps_per_cpu_tp;
-
-      pool->do_work_stealing_job(
-          nth_gate_up * 2, nullptr,
-          [this, expert_idx, &w13_weight_ptrs, &w13_scale_ptrs, start_gpu_tp, n_blocks_per_gpu_tp,
-           gpu_tp_weight_elem_count, gpu_tp_scale_elem_count_gate_up, nth_gate_up](int task_id) {
-            bool is_up = task_id >= nth_gate_up;
-            int ith = task_id % nth_gate_up;
-
-            // Which GPU TP does this N_BLOCK belong to?
-            int local_gpu_idx = ith / n_blocks_per_gpu_tp;
-            int gpu_tp_idx = start_gpu_tp + local_gpu_idx;
-            int ith_within_gpu = ith % n_blocks_per_gpu_tp;
-
-            uint8_t* w13_weight_dst = (uint8_t*)w13_weight_ptrs[gpu_tp_idx];
-            float* w13_scale_dst = (float*)w13_scale_ptrs[gpu_tp_idx];
-
-            size_t w13_gpu_expert_offset_weight = expert_idx * 2 * gpu_tp_weight_elem_count;
-            size_t w13_gpu_expert_offset_scale = expert_idx * 2 * gpu_tp_scale_elem_count_gate_up;
-
-            if (is_up) {
-              uint8_t* up_dst = w13_weight_dst + w13_gpu_expert_offset_weight + gpu_tp_weight_elem_count;
-              float* up_scale_dst = w13_scale_dst + w13_gpu_expert_offset_scale + gpu_tp_scale_elem_count_gate_up;
-              up_bb_[expert_idx]->to_mat(up_dst, up_scale_dst, ith_within_gpu, n_blocks_per_gpu_tp);
             } else {
-              uint8_t* gate_dst = w13_weight_dst + w13_gpu_expert_offset_weight;
-              float* gate_scale_dst = w13_scale_dst + w13_gpu_expert_offset_scale;
-              gate_bb_[expert_idx]->to_mat(gate_dst, gate_scale_dst, ith_within_gpu, n_blocks_per_gpu_tp);
+              // Down scale copy (scale_task_id == 2)
+              const auto& bb = down_bb_[expert_idx];
+
+              // W2 scales: K dimension is split, copy to each GPU TP
+              for (int k_slice_idx = 0; k_slice_idx < div_up(cpu_k_w2, gpu_k_w2); k_slice_idx++) {
+                const int k_slice_start = k_slice_idx * gpu_k_w2;
+                const int k_slice_end = std::min(k_slice_start + gpu_k_w2, cpu_k_w2);
+
+                const int global_k_start = global_k_offset_w2 + k_slice_start;
+                const int target_gpu = global_k_start / gpu_k_w2;
+                const int bk_gpu_base = (global_k_start % gpu_k_w2) / group_size;
+
+                float* scale_dst = (float*)w2_scale_ptrs[target_gpu];
+                const size_t expert_scale_off = expert_idx * gpu_w2_scale_per_mat;
+
+                const int bk_start = k_slice_start / group_size;
+                const int bk_end = div_up(k_slice_end, group_size);
+                const int bk_count = bk_end - bk_start;
+
+                for (int bn = 0; bn < cpu_scale_n_blocks_w2; bn++) {
+                  memcpy(scale_dst + expert_scale_off + (size_t)bn * gpu_scale_k_blocks_w2 + bk_gpu_base,
+                         bb->d + (size_t)bn * cpu_scale_k_blocks_w2 + bk_start, bk_count * sizeof(float));
+                }
+              }
             }
-          },
-          nullptr);
-
-      // Down: need temp buffer for column slicing
-      std::vector<uint8_t> down_tmp(cpu_tp_weight_elem_count);
-      std::vector<float> down_scale_tmp(cpu_tp_scale_elem_count_down);
-
-      int nth_down = T::recommended_nth(config.hidden_size);
-      pool->do_work_stealing_job(
-          nth_down, nullptr,
-          [this, expert_idx, &down_tmp, &down_scale_tmp, nth_down](int ith) {
-            down_bb_[expert_idx]->to_mat(down_tmp.data(), down_scale_tmp.data(), ith, nth_down);
-          },
-          nullptr);
-
-      // Copy down with column slicing for each GPU TP - parallelize by (gpu_tp, row_chunk)
-      size_t gpu_intermediate_per_tp = full_config.intermediate_size / gpu_tp_count;
-      size_t cpu_intermediate_per_gpu_tp = config.intermediate_size / gpu_tps_per_cpu_tp;
-      int n_row_chunks = div_up(config.hidden_size, T::N_BLOCK);
-
-      pool->do_work_stealing_job(
-          gpu_tps_per_cpu_tp * n_row_chunks, nullptr,
-          [&config, &down_tmp, &down_scale_tmp, &w2_weight_ptrs, &w2_scale_ptrs, start_gpu_tp, gpu_tps_per_cpu_tp,
-           n_row_chunks, expert_idx, gpu_tp_weight_elem_count, gpu_tp_scale_elem_count_down, gpu_intermediate_per_tp,
-           cpu_intermediate_per_gpu_tp, cpu_tp_k_blocks_down, gpu_tp_k_blocks_down, group_size](int task_id) {
-            int local_gpu_idx = task_id / n_row_chunks;
-            int chunk_id = task_id % n_row_chunks;
-            int gpu_tp_idx = start_gpu_tp + local_gpu_idx;
-
-            uint8_t* w2_weight_dst = (uint8_t*)w2_weight_ptrs[gpu_tp_idx];
-            float* w2_scale_dst = (float*)w2_scale_ptrs[gpu_tp_idx];
-
-            size_t w2_gpu_expert_offset_weight = expert_idx * gpu_tp_weight_elem_count;
-            size_t w2_gpu_expert_offset_scale = expert_idx * gpu_tp_scale_elem_count_down;
-
-            int row_start = chunk_id * T::N_BLOCK;
-            int row_end = std::min(row_start + T::N_BLOCK, config.hidden_size);
-
-            for (int row = row_start; row < row_end; row++) {
-              size_t col_offset_weight = row * config.intermediate_size + local_gpu_idx * cpu_intermediate_per_gpu_tp;
-              size_t gpu_row_offset = row * gpu_intermediate_per_tp;
-
-              std::memcpy(w2_weight_dst + w2_gpu_expert_offset_weight + gpu_row_offset,
-                          down_tmp.data() + col_offset_weight, cpu_intermediate_per_gpu_tp);
-            }
-
-            // Scale: copy once per scale block row
-            int scale_row = row_start / group_size;
-            if (row_start % (int)group_size == 0 && scale_row * (int)group_size < config.hidden_size) {
-              size_t col_offset_scale =
-                  scale_row * cpu_tp_k_blocks_down + local_gpu_idx * (cpu_tp_k_blocks_down / gpu_tps_per_cpu_tp);
-              size_t gpu_scale_row_offset = scale_row * gpu_tp_k_blocks_down;
-
-              std::memcpy(w2_scale_dst + w2_gpu_expert_offset_scale + gpu_scale_row_offset,
-                          down_scale_tmp.data() + col_offset_scale,
-                          sizeof(float) * (cpu_tp_k_blocks_down / gpu_tps_per_cpu_tp));
-            }
-          },
-          nullptr);
-    }
+          }
+        },
+        nullptr);
   }
 };
 

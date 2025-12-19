@@ -94,12 +94,30 @@ def allocate_weights():
     per_mat_scale_elems_gate_up = n_blocks_n_gate_up * n_blocks_k
     per_mat_scale_elems_down = n_blocks_k * n_blocks_n_gate_up
 
-    gate_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-    up_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-    down_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-    gate_scale = torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32)
-    up_scale = torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32)
-    down_scale = torch.randn(expert_num * per_mat_scale_elems_down, dtype=torch.float32)
+    gate_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    up_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    down_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    gate_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    up_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    down_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_down, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
 
     return (
         gate_q,
@@ -151,12 +169,26 @@ def build_moe():
     total_scale_elems_per_tp_gate_up = gpu_experts_num * scale_elems_per_expert_per_tp_gate_up
     total_scale_elems_per_tp_down = gpu_experts_num * scale_elems_per_expert_per_tp_down
 
-    w13_weight_bufs = [torch.empty(2 * total_weight_bytes_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w13_scale_bufs = [
-        torch.empty(2 * total_scale_elems_per_tp_gate_up, dtype=torch.float32) for _ in range(gpu_tp_count)
-    ]
-    w2_weight_bufs = [torch.empty(total_weight_bytes_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w2_scale_bufs = [torch.empty(total_scale_elems_per_tp_down, dtype=torch.float32) for _ in range(gpu_tp_count)]
+    # Allocate with 64-byte alignment using torch.empty with pin_memory for alignment
+    # PyTorch CUDA tensors are 256-byte aligned, CPU tensors may not be
+    # Use a simple approach: allocate slightly larger and return a view
+    class AlignedBuffer:
+        def __init__(self, size, dtype, alignment=64):
+            elem_size = torch.tensor([], dtype=dtype).element_size()
+            extra_elems = (alignment + elem_size - 1) // elem_size
+            self._storage = torch.empty(size + extra_elems, dtype=dtype)
+            ptr = self._storage.data_ptr()
+            offset_bytes = (alignment - (ptr % alignment)) % alignment
+            offset_elems = offset_bytes // elem_size
+            self.data = self._storage[offset_elems : offset_elems + size]
+
+        def data_ptr(self):
+            return self.data.data_ptr()
+
+    w13_weight_bufs = [AlignedBuffer(2 * total_weight_bytes_per_tp, torch.uint8) for _ in range(gpu_tp_count)]
+    w13_scale_bufs = [AlignedBuffer(2 * total_scale_elems_per_tp_gate_up, torch.float32) for _ in range(gpu_tp_count)]
+    w2_weight_bufs = [AlignedBuffer(total_weight_bytes_per_tp, torch.uint8) for _ in range(gpu_tp_count)]
+    w2_scale_bufs = [AlignedBuffer(total_scale_elems_per_tp_down, torch.float32) for _ in range(gpu_tp_count)]
 
     buffer_ptrs = {
         "w13_weight_ptrs": [buf.data_ptr() for buf in w13_weight_bufs],

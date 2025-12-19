@@ -66,7 +66,7 @@ def main():
 
     expert_num = 256  # Total experts
     gpu_experts = expert_num  # Number of experts on GPU
-    gpu_tp_count = 2  # Number of GPU TP parts
+    gpu_tp_count = 1  # Number of GPU TP parts
 
     num_experts_per_tok = 8
     hidden_size = 7168
