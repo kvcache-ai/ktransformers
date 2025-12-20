@@ -628,7 +628,7 @@ class LLAMA_MOE_TP {
                           config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_proj_ptr,
                           config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_input_ptr,
                           config_.hidden_size / ggml_blck_size((ggml_type)config_.gate_type), gate_output_ptr,
-                          config_.intermediate_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.gate_type,
+                          m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.gate_type,
                           ggml_internal_get_type_traits((ggml_type)config_.gate_type).vec_dot_type, GGML_TYPE_F32,
                           GGML_PREC_DEFAULT);
           void* up_input_ptr = m_local_up_input_ptr_[expert_idx];
@@ -643,7 +643,7 @@ class LLAMA_MOE_TP {
               m_block, m_local_num_[expert_idx], config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type),
               up_proj_ptr, config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_input_ptr,
               config_.hidden_size / ggml_blck_size((ggml_type)config_.up_type), up_output_ptr,
-              config_.intermediate_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.up_type,
+              m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.up_type,
               ggml_internal_get_type_traits((ggml_type)config_.up_type).vec_dot_type, GGML_TYPE_F32, GGML_PREC_DEFAULT);
           for (int i = 0; i < m_local_num_[expert_idx]; i++) {
             for (int j = ith * m_block; j < (ith + 1) * m_block; j++) {
@@ -696,7 +696,7 @@ class LLAMA_MOE_TP {
                           config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_proj_ptr,
                           config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_input_ptr,
                           config_.intermediate_size / ggml_blck_size((ggml_type)config_.down_type), down_output_ptr,
-                          config_.hidden_size, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.down_type,
+                          m_block, 0, 1, GGML_TASK_TYPE_COMPUTE, (ggml_type)config_.down_type,
                           ggml_internal_get_type_traits((ggml_type)config_.down_type).vec_dot_type, GGML_TYPE_F32,
                           GGML_PREC_DEFAULT);
         },
