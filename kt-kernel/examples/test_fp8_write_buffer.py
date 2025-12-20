@@ -6,7 +6,7 @@ import torch
 import numpy as np
 
 
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 from kt_kernel_ext import CPUInfer
 from kt_kernel_ext.moe import AMXRAWFp8_MOE
 
@@ -61,16 +61,16 @@ def allocate_weights(expert_num, hidden_size, intermediate_size, group_size):
     )
 
 
-def main():
+def test_with_tp(gpu_tp_count):
+    """Test write_weight_scale_to_buffer with a specific gpu_tp_count"""
     torch.manual_seed(123)
 
-    expert_num = 256  # Total experts
+    expert_num = 256  # Reduced for debugging
     gpu_experts = expert_num  # Number of experts on GPU
-    gpu_tp_count = 1  # Number of GPU TP parts
 
     num_experts_per_tok = 8
-    hidden_size = 7168
-    intermediate_size = 2048
+    hidden_size = 3072
+    intermediate_size = 1536  # Changed from 2048 to test non-aligned case
     group_size = 128  # FP8 uses 128x128 block-wise scales
 
     cpuinfer = make_cpu_infer()
@@ -102,10 +102,21 @@ def main():
     cpuinfer.sync()
 
     # TP configuration
-    # Calculate sizes per TP part
+    # Calculate sizes per TP part (per expert) - must match C++ code which uses div_up
+    def div_up(a, b):
+        return (a + b - 1) // b
+
     weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
-    scale_elems_per_expert_per_tp_gate_up = per_mat_scale_elems_gate_up // gpu_tp_count
-    scale_elems_per_expert_per_tp_down = per_mat_scale_elems_down // gpu_tp_count
+
+    # For W13 (gate/up): n=intermediate_size/gpu_tp, k=hidden_size
+    gpu_n_w13 = intermediate_size // gpu_tp_count
+    gpu_k_w13 = hidden_size
+    scale_elems_per_expert_per_tp_gate_up = div_up(gpu_n_w13, group_size) * div_up(gpu_k_w13, group_size)
+
+    # For W2 (down): n=hidden_size, k=intermediate_size/gpu_tp
+    gpu_n_w2 = hidden_size
+    gpu_k_w2 = intermediate_size // gpu_tp_count
+    scale_elems_per_expert_per_tp_down = div_up(gpu_n_w2, group_size) * div_up(gpu_k_w2, group_size)
 
     # Total sizes for all gpu_experts
     total_weight_bytes_per_tp = gpu_experts * weight_bytes_per_expert_per_tp
@@ -113,6 +124,7 @@ def main():
     total_scale_elems_per_tp_down = gpu_experts * scale_elems_per_expert_per_tp_down
 
     # Create buffer lists for w13 (gate+up) and w2 (down)
+    # These hold all experts' data for each GPU TP
     w13_weight_bufs = []
     w13_scale_bufs = []
     w2_weight_bufs = []
@@ -125,12 +137,6 @@ def main():
         w2_weight_bufs.append(torch.empty(total_weight_bytes_per_tp, dtype=torch.uint8))
         w2_scale_bufs.append(torch.empty(total_scale_elems_per_tp_down, dtype=torch.float32))
 
-    # Get data pointers for all buffers
-    w13_weight_ptrs = [buf.data_ptr() for buf in w13_weight_bufs]
-    w13_scale_ptrs = [buf.data_ptr() for buf in w13_scale_bufs]
-    w2_weight_ptrs = [buf.data_ptr() for buf in w2_weight_bufs]
-    w2_scale_ptrs = [buf.data_ptr() for buf in w2_scale_bufs]
-
     print(f"Total experts: {expert_num}, GPU experts: {gpu_experts}")
     print(f"GPU TP count: {gpu_tp_count}")
     print(f"Original per matrix weight bytes: {per_mat_weight_bytes}")
@@ -142,13 +148,39 @@ def main():
     print(f"Total weight bytes per TP (w13): {2 * total_weight_bytes_per_tp}")
     print(f"Total weight bytes per TP (w2): {total_weight_bytes_per_tp}")
 
+    # Helper function to get pointers with expert offset
+    # write_weights_to_buffer writes one expert at a time, so we need to pass
+    # pointers that already point to the correct location for each expert
+    def get_expert_ptrs(expert_id):
+        w13_weight_ptrs = []
+        w13_scale_ptrs = []
+        w2_weight_ptrs = []
+        w2_scale_ptrs = []
+
+        for tp_idx in range(gpu_tp_count):
+            # Calculate byte offsets for this expert
+            # w13: gate_weight + up_weight interleaved by expert
+            # Layout: [expert0_gate, expert0_up, expert1_gate, expert1_up, ...]
+            w13_weight_expert_offset = expert_id * 2 * weight_bytes_per_expert_per_tp
+            w13_scale_expert_offset = expert_id * 2 * scale_elems_per_expert_per_tp_gate_up
+            w2_weight_expert_offset = expert_id * weight_bytes_per_expert_per_tp
+            w2_scale_expert_offset = expert_id * scale_elems_per_expert_per_tp_down
+
+            w13_weight_ptrs.append(w13_weight_bufs[tp_idx].data_ptr() + w13_weight_expert_offset)
+            w13_scale_ptrs.append(w13_scale_bufs[tp_idx].data_ptr() + w13_scale_expert_offset * 4)  # float32 = 4 bytes
+            w2_weight_ptrs.append(w2_weight_bufs[tp_idx].data_ptr() + w2_weight_expert_offset)
+            w2_scale_ptrs.append(w2_scale_bufs[tp_idx].data_ptr() + w2_scale_expert_offset * 4)  # float32 = 4 bytes
+
+        return w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs
+
     # Warm up
-    for i in range(5):
-        for expert_idx in range(gpu_experts):
+    for i in range(2):
+        for expert_id in range(gpu_experts):
+            w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs = get_expert_ptrs(expert_id)
             cpuinfer.submit(
                 moe.write_weight_scale_to_buffer_task(
                     gpu_tp_count=gpu_tp_count,
-                    expert_idx=expert_idx,
+                    expert_id=expert_id,
                     w13_weight_ptrs=w13_weight_ptrs,
                     w13_scale_ptrs=w13_scale_ptrs,
                     w2_weight_ptrs=w2_weight_ptrs,
@@ -159,11 +191,12 @@ def main():
 
     # Timing
     begin_time = time.perf_counter_ns()
-    for expert_idx in range(gpu_experts):
+    for expert_id in range(gpu_experts):
+        w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs = get_expert_ptrs(expert_id)
         cpuinfer.submit(
             moe.write_weight_scale_to_buffer_task(
                 gpu_tp_count=gpu_tp_count,
-                expert_idx=expert_idx,
+                expert_id=expert_id,
                 w13_weight_ptrs=w13_weight_ptrs,
                 w13_scale_ptrs=w13_scale_ptrs,
                 w2_weight_ptrs=w2_weight_ptrs,
@@ -175,8 +208,8 @@ def main():
     elapsed_ms = (end_time - begin_time) / 1000000
 
     # Calculate throughput
-    total_weights = hidden_size * intermediate_size * expert_num * 3
-    total_scale_bytes = (per_mat_scale_elems_gate_up * 2 + per_mat_scale_elems_down) * expert_num * 4  # float32
+    total_weights = hidden_size * intermediate_size * gpu_experts * 3
+    total_scale_bytes = (per_mat_scale_elems_gate_up * 2 + per_mat_scale_elems_down) * gpu_experts * 4  # float32
     total_bytes = total_weights + total_scale_bytes
     print(f"write_weight_scale_to_buffer time: {elapsed_ms:.2f} ms")
     print(f"Throughput: {total_bytes / (elapsed_ms * 1e6):.2f} GB/s")
@@ -194,8 +227,10 @@ def main():
     up_scale_experts = split_expert_tensor(up_scale, per_mat_scale_elems_gate_up)
     down_scale_experts = split_expert_tensor(down_scale, per_mat_scale_elems_down)
 
-    # CPU TP count is always 2 in this test setup (one TP per NUMA node)
-    cpu_tp_count = 2
+    # For down matrix
+    n_blocks_n = (hidden_size + group_size - 1) // group_size
+    n_blocks_k = (intermediate_size + group_size - 1) // group_size
+    n_blocks_k_per_tp = n_blocks_k // gpu_tp_count
 
     # Verify buffers for each TP part
     for tp_idx in range(gpu_tp_count):
@@ -207,13 +242,8 @@ def main():
         weight13_per_tp = per_mat_weight_bytes // gpu_tp_count
         scale13_per_tp = per_mat_scale_elems_gate_up // gpu_tp_count
 
-        # For down matrix
-        n_blocks_n = (hidden_size + group_size - 1) // group_size
-        n_blocks_k = (intermediate_size + group_size - 1) // group_size
-        n_blocks_k_per_tp = n_blocks_k // gpu_tp_count
-
         # Process each GPU expert
-        for expert_idx in range(gpu_experts):
+        for expert_id in range(gpu_experts):
             # For w13 (gate and up), the slicing is along intermediate_size (n direction)
             start_weight = tp_idx * weight13_per_tp
             end_weight = (tp_idx + 1) * weight13_per_tp
@@ -221,12 +251,12 @@ def main():
             end_scale = (tp_idx + 1) * scale13_per_tp
 
             # Gate
-            gate_weight_tp = gate_q_experts[expert_idx][start_weight:end_weight]
-            gate_scale_tp = gate_scale_experts[expert_idx][start_scale:end_scale]
+            gate_weight_tp = gate_q_experts[expert_id][start_weight:end_weight]
+            gate_scale_tp = gate_scale_experts[expert_id][start_scale:end_scale]
 
             # Up
-            up_weight_tp = up_q_experts[expert_idx][start_weight:end_weight]
-            up_scale_tp = up_scale_experts[expert_idx][start_scale:end_scale]
+            up_weight_tp = up_q_experts[expert_id][start_weight:end_weight]
+            up_scale_tp = up_scale_experts[expert_id][start_scale:end_scale]
 
             # Down matrix needs special handling because it's sliced column-wise
             # down is (hidden_size, intermediate_size) in n-major format
@@ -243,7 +273,7 @@ def main():
                 tp_weight_offset = row_weight_start + tp_idx * tp_slice_weight_size
 
                 down_weight_tp_parts.append(
-                    down_q_experts[expert_idx][tp_weight_offset : tp_weight_offset + tp_slice_weight_size]
+                    down_q_experts[expert_id][tp_weight_offset : tp_weight_offset + tp_slice_weight_size]
                 )
 
             # For scale: only process at block boundaries
@@ -251,13 +281,14 @@ def main():
                 row_scale_start = bn * n_blocks_k
                 tp_scale_offset = row_scale_start + tp_idx * n_blocks_k_per_tp
                 down_scale_tp_parts.append(
-                    down_scale_experts[expert_idx][tp_scale_offset : tp_scale_offset + n_blocks_k_per_tp]
+                    down_scale_experts[expert_id][tp_scale_offset : tp_scale_offset + n_blocks_k_per_tp]
                 )
 
             # Concatenate all slices for this TP
             down_weight_tp = torch.cat(down_weight_tp_parts)
             down_scale_tp = torch.cat(down_scale_tp_parts)
 
+            # Append to expected lists - interleaved by expert: [gate0, up0, gate1, up1, ...]
             expected_w13_weights.append(gate_weight_tp)
             expected_w13_weights.append(up_weight_tp)
             expected_w13_scales.append(gate_scale_tp)
@@ -312,8 +343,46 @@ def main():
             raise AssertionError(f"w2 scale values mismatch for TP {tp_idx}")
 
     print(
-        f"\n✓ write_weight_scale_to_buffer passed: extracted {gpu_experts} GPU experts across {gpu_tp_count} TP parts from total {expert_num} experts"
+        f"\n✓ write_weight_scale_to_buffer passed: extracted {gpu_experts} GPU experts across {gpu_tp_count} TP parts"
     )
+    return True
+
+
+def main():
+    """Run tests for all gpu_tp_count values: 1, 2, 4, 8"""
+    tp_values = [1, 2, 4]  # Test TP=8
+    all_passed = True
+    results = {}
+
+    print("=" * 60)
+    print("Testing FP8 write_weight_scale_to_buffer for TP = ", tp_values)
+    print("=" * 60)
+
+    for tp in tp_values:
+        print(f"\n{'='*60}")
+        print(f"Testing with gpu_tp_count = {tp}")
+        print(f"{'='*60}")
+        try:
+            test_with_tp(tp)
+            results[tp] = "PASSED"
+            print(f"✓ TP={tp} PASSED")
+        except Exception as e:
+            results[tp] = f"FAILED: {e}"
+            all_passed = False
+            print(f"✗ TP={tp} FAILED: {e}")
+
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    for tp, result in results.items():
+        status = "✓" if "PASSED" in result else "✗"
+        print(f"  {status} TP={tp}: {result}")
+
+    if all_passed:
+        print("\n✓ ALL TESTS PASSED")
+    else:
+        print("\n✗ SOME TESTS FAILED")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

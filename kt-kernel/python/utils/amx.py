@@ -472,7 +472,7 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
     def submit_write_weight_scale_to_buffer(
         self,
         gpu_tp_count: int,
-        gpu_experts_num: int,
+        expert_id: int,
         w13_weight_ptrs,
         w13_scale_ptrs,
         w2_weight_ptrs,
@@ -496,7 +496,7 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         self.cpu_infer.submit(
             self.moe.write_weight_scale_to_buffer_task(
                 gpu_tp_count,
-                gpu_experts_num,
+                expert_id,
                 w13_weight_ptrs,
                 w13_scale_ptrs,
                 w2_weight_ptrs,

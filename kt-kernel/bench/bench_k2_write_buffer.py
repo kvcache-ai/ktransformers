@@ -2,6 +2,8 @@
 # coding=utf-8
 """
 Benchmark write_weight_scale_to_buffer for AMX_K2_MOE_TP (int4 packed weights + bf16 scales).
+
+Uses two MOE instances that alternate writing to simulate realistic multi-layer scenarios.
 """
 import json
 import os
@@ -17,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 from kt_kernel import kt_kernel_ext
 import torch
 
-# Benchmark parameters (single MoE, mirror examples/test_k2_write_buffer.py)
+# Benchmark parameters
 expert_num = 384
 num_experts_per_tok = expert_num
 gpu_tp_count = 4
@@ -33,7 +35,7 @@ group_size = 32
 max_len = 1
 
 physical_to_logical_map = torch.arange(expert_num, dtype=torch.int64, device="cpu").contiguous()
-CPUInfer = kt_kernel_ext.CPUInfer(96)
+CPUInfer = kt_kernel_ext.CPUInfer(80)
 
 
 def get_git_commit():
@@ -140,7 +142,8 @@ def allocate_weights():
     )
 
 
-def build_moe():
+def build_moe(layer_idx=0):
+    """Build a single MOE instance with the given layer_idx."""
     (
         gate_q,
         up_q,
@@ -154,6 +157,7 @@ def build_moe():
 
     config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
     config.max_len = max_len
+    config.layer_idx = layer_idx
     config.quant_config.bits = 4
     config.quant_config.group_size = group_size
     config.quant_config.zero_point = False
@@ -170,7 +174,28 @@ def build_moe():
     CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     CPUInfer.sync()
 
-    # Buffer sizing per TP (single expert)
+    keep_tensors = {
+        "gate_q": gate_q,
+        "up_q": up_q,
+        "down_q": down_q,
+        "gate_scale": gate_scale,
+        "up_scale": up_scale,
+        "down_scale": down_scale,
+    }
+
+    buffer_shapes = {
+        "per_mat_weight_bytes": per_mat_weight_bytes,
+        "per_mat_scale_elems": per_mat_scale_elems,
+    }
+
+    return moe, buffer_shapes, keep_tensors
+
+
+def allocate_buffers(buffer_shapes):
+    """Allocate shared output buffers for single expert."""
+    per_mat_weight_bytes = buffer_shapes["per_mat_weight_bytes"]
+    per_mat_scale_elems = buffer_shapes["per_mat_scale_elems"]
+
     weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
     scale_elems_per_expert_per_tp = per_mat_scale_elems // gpu_tp_count
 
@@ -187,75 +212,74 @@ def build_moe():
         "w2_scale_ptrs": [buf.data_ptr() for buf in w2_scale_bufs],
     }
 
-    buffer_shapes = {
-        "per_mat_weight_bytes": per_mat_weight_bytes,
-        "per_mat_scale_elems": per_mat_scale_elems,
-        "weight_bytes_per_expert_per_tp": weight_bytes_per_expert_per_tp,
-        "scale_elems_per_expert_per_tp": scale_elems_per_expert_per_tp,
-    }
-
     keep_tensors = {
-        "gate_q": gate_q,
-        "up_q": up_q,
-        "down_q": down_q,
-        "gate_scale": gate_scale,
-        "up_scale": up_scale,
-        "down_scale": down_scale,
         "w13_weight_bufs": w13_weight_bufs,
         "w13_scale_bufs": w13_scale_bufs,
         "w2_weight_bufs": w2_weight_bufs,
         "w2_scale_bufs": w2_scale_bufs,
     }
 
-    return moe, buffer_ptrs, buffer_shapes, keep_tensors
+    return buffer_ptrs, keep_tensors
 
 
 def bench_write_buffer():
-    moe, buffer_ptrs, buffer_shapes, keep_tensors = build_moe()
+    # Build two MOE instances with different layer_idx
+    moe_0, buffer_shapes, keep_tensors_0 = build_moe(layer_idx=0)
+    moe_1, _, keep_tensors_1 = build_moe(layer_idx=1)
+    moes = [moe_0, moe_1]
+
+    # Allocate shared buffers
+    buffer_ptrs, buffer_keep_tensors = allocate_buffers(buffer_shapes)
 
     total_weights = hidden_size * intermediate_size * expert_num * 3
-    # Throughput accounting consistent with examples/test_k2_write_buffer.py
-    bytes_per_call = total_weights // group_size + total_weights // 2
+    # Throughput accounting: scale bytes (bf16) + weight bytes (int4 packed)
+    bytes_per_call = total_weights // group_size * 2 + total_weights // 2
 
-    # Warm-up
+    # Warm-up: alternate between two MOEs
     for _ in tqdm(range(warm_up_iter), desc="Warm-up"):
-        for expert_idx in range(gpu_experts_num):
-            CPUInfer.submit(
-                moe.write_weight_scale_to_buffer_task(
-                    gpu_tp_count=gpu_tp_count,
-                    expert_id=expert_idx,
-                    **buffer_ptrs,
+        for moe_idx, moe in enumerate(moes):
+            for expert_id in range(gpu_experts_num):
+                CPUInfer.submit(
+                    moe.write_weight_scale_to_buffer_task(
+                        gpu_tp_count=gpu_tp_count,
+                        expert_id=expert_id,
+                        **buffer_ptrs,
+                    )
                 )
-            )
-            CPUInfer.sync()
+                CPUInfer.sync()
 
     total_time = 0
     for iter_idx in tqdm(range(test_iter), desc="Testing"):
         start = time.perf_counter()
-        for expert_idx in range(gpu_experts_num):
-            CPUInfer.submit(
-                moe.write_weight_scale_to_buffer_task(
-                    gpu_tp_count=gpu_tp_count,
-                    expert_id=expert_idx,
-                    **buffer_ptrs,
+        # Alternate between two MOEs
+        for moe_idx, moe in enumerate(moes):
+            for expert_id in range(gpu_experts_num):
+                CPUInfer.submit(
+                    moe.write_weight_scale_to_buffer_task(
+                        gpu_tp_count=gpu_tp_count,
+                        expert_id=expert_id,
+                        **buffer_ptrs,
+                    )
                 )
-            )
-            CPUInfer.sync()
+                CPUInfer.sync()
         end = time.perf_counter()
         iter_time = end - start
         total_time += iter_time
         print(f"Iter {iter_idx}: {iter_time*1000:.2f} ms")
         time.sleep(0.3)
 
+    # bytes_per_call is for one MOE, we have 2 MOEs
+    bytes_per_iter = bytes_per_call * 2
     time_per_iter_ms = total_time / test_iter * 1000
-    bandwidth_gbs = bytes_per_call * test_iter / total_time / 1e9
+    bandwidth_gbs = bytes_per_iter * test_iter / total_time / 1e9
 
     print(f"\n{'='*60}")
-    print("K2 write_weight_scale_to_buffer benchmark")
+    print("K2 write_weight_scale_to_buffer benchmark (2 MOEs alternating)")
     print(f"{'='*60}")
     print(f"Time per iteration: {time_per_iter_ms:.2f} ms")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
-    print(f"Experts: {gpu_experts_num}, Time per expert: {time_per_iter_ms/gpu_experts_num*1000:.2f} us")
+    print(f"Experts per MOE: {gpu_experts_num}, MOEs: 2")
+    print(f"Time per expert: {time_per_iter_ms/(gpu_experts_num*2)*1000:.2f} us")
 
     result = {
         "op": "write_weight_scale_to_buffer_k2",
@@ -268,7 +292,8 @@ def bench_write_buffer():
             "intermediate_size": intermediate_size,
             "group_size": group_size,
             "gpu_tp_count": gpu_tp_count,
-            "bytes_per_call": bytes_per_call,
+            "bytes_per_iter": bytes_per_iter,
+            "num_moes": 2,
         },
     }
     result.update(get_git_commit())

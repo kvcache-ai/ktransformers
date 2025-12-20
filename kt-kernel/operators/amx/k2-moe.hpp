@@ -220,8 +220,11 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
       // Pack 32-bit values to 16-bit
       __m512i packed = _mm512_packus_epi32(i0, i1);
 
-      // Reorder due to packus lane behavior: [0,1,4,5,2,3,6,7] -> [0,1,2,3,4,5,6,7]
-      __m512i permuted = _mm512_permutexvar_epi64(_mm512_set_epi64(7, 6, 3, 2, 5, 4, 1, 0), packed);
+      // Reorder due to packus lane behavior:
+      // packus outputs interleaved: [i0[0-3], i1[0-3], i0[4-7], i1[4-7], i0[8-11], i1[8-11], i0[12-15], i1[12-15]]
+      // We need sequential: [i0[0-15], i1[0-15]] = [i0[0-3], i0[4-7], i0[8-11], i0[12-15], i1[0-3], i1[4-7], i1[8-11],
+      // i1[12-15]] Permutation: [0, 2, 4, 6, 1, 3, 5, 7] (qword indices)
+      __m512i permuted = _mm512_permutexvar_epi64(_mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0), packed);
 
       _mm512_storeu_si512((__m512i*)(dst + i), permuted);
     }
