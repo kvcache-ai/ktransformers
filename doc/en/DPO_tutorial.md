@@ -7,7 +7,7 @@ This tutorial demonstrates how to use Direct Preference Optimization (DPO) to fi
 ### Step 1: Create a conda environment and suit it for KTransformers
 
 ```Bash
-conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda create -n Kllama python=3.12 # choose from : [3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-12.8.0 cuda-runtime
 ```
