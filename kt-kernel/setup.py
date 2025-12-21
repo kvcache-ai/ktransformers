@@ -482,8 +482,8 @@ class CMakeBuild(build_ext):
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512", "KTRANSFORMERS_CPU_USE_AMX_AVX512"):
             if cpu_mode in ("NATIVE", "FANCY", "AVX512") and ("AMX" in d["features"] or "AVX512" in d["features"]):
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON")
-                cmake_args.append("-DLLAMA_AVX512_FANCY_SIMD=ON")
-                cmake_args.append("-DLLAMA_AVX512_BF16=ON")
+                # Removed: cmake_args.append("-DLLAMA_AVX512_FANCY_SIMD=ON")
+                # Removed: cmake_args.append("-DLLAMA_AVX512_BF16=ON")
                 print("-- Enabling AMX/AVX512 umbrella (-DKTRANSFORMERS_CPU_USE_AMX_AVX512=ON)")
             elif cpu_mode == "AVX512VNNI" or "AVX512VNNI" in d["features"]:
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AVX512VNNI=ON")
