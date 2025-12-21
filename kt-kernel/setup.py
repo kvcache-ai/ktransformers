@@ -370,7 +370,9 @@ class CMakeBuild(build_ext):
         os.environ.update(original_env)
 
         print(f"\n{'=' * 80}")
-        print("✓ Successfully built all 3 CPU variants")
+        print(f"\n{'=' * 80}")
+        print("✓ Successfully built all 5 CPU variants")
+        print(f"{'=' * 80}\n")
         print(f"{'=' * 80}\n")
 
     def _build_single_variant(self, ext: CMakeExtension):
