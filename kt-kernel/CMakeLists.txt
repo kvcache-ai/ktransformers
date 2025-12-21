@@ -19,6 +19,9 @@ option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
 option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
 option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
 option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
+option(KTRANSFORMERS_CPU_USE_AVX512F "ktransformers: CPU use AVX512F")
+option(KTRANSFORMERS_CPU_USE_AVX512VNNI "ktransformers: CPU use AVX512VNNI")
+option(KTRANSFORMERS_CPU_USE_AVX512 "ktransformers: CPU use AVX512")
 option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX "ktransformers: CPU use AMX" OFF)
 option(KTRANSFORMERS_CPU_DEBUG "ktransformers: DEBUG CPU use AMX" OFF)
@@ -28,7 +31,7 @@ option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.4.4)
+project(kt_kernel_ext VERSION 0.4.2)
 # Choose compilers BEFORE project() so CMake honors them
 if(USE_CONDA_TOOLCHAIN)
     if(NOT DEFINED ENV{CONDA_PREFIX} OR NOT EXISTS "$ENV{CONDA_PREFIX}")
@@ -360,6 +363,15 @@ endif()
 
 
 if(HOST_IS_X86)
+    if(KTRANSFORMERS_CPU_USE_AVX512F)
+        list(APPEND ARCH_FLAGS -mfma -mf16c)
+    endif()
+    if (KTRANSFORMERS_CPU_USE_AVX512VNNI)
+        list(APPEND ARCH_FLAGS  -mfma -mf16c -mavx512vnni)
+    endif()
+    if (KTRANSFORMERS_CPU_USE_AVX512)
+        list(APPEND ARCH_FLAGS   -mfma -mf16c -mavx512vnni -mavx512bf16)
+    endif()
     if(KTRANSFORMERS_CPU_USE_AMX_AVX512)
         add_compile_definitions(USE_AMX_AVX_KERNEL=1)
         if(KTRANSFORMERS_CPU_USE_AMX)
@@ -377,20 +389,6 @@ if(HOST_IS_X86)
                 add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
                 target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
             endforeach()
-        endif()
-        # Note: AVX512 subset flags (-mavx512vnni, -mavx512bf16) are already added
-        # in the generic x86 detection block above (lines 276-289) when corresponding
-        # LLAMA_AVX512_* options are enabled. No need to add them again here.
-        # -mfma is already added by LLAMA_NATIVE (line 254), LLAMA_AVX*, or LLAMA_FMA blocks.
-        # Only add -mf16c if LLAMA_F16C is not already enabled.
-        if(NOT LLAMA_F16C)
-            list(APPEND ARCH_FLAGS -mf16c)
-        endif()
-        if(LLAMA_AVX512_VNNI)
-            message(STATUS "AVX512_VNNI enabled")
-        endif()
-        if(LLAMA_AVX512_BF16)
-            message(STATUS "AVX512_BF16 enabled")
         endif()
     endif()
 endif()
