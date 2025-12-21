@@ -310,7 +310,7 @@ class CMakeBuild(build_ext):
         for i, variant in enumerate(variants, 1):
             print(f"\n{'=' * 80}")
             print(f"Building variant {i}/3: {variant['description']}")
-            print(f"{'=' * 80}\n")
+            print(f"Building variant {i}/5: {variant['description']}")
 
             # Set variant-specific environment variables
             os.environ.update(variant["env"])
