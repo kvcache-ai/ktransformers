@@ -491,7 +491,7 @@ class CMakeBuild(build_ext):
             elif cpu_mode == "AVX512F" or "AVX512F" in d["features"]:
                 cmake_args.append("-DKTRANSFORMERS_CPU_USE_AVX512F=ON")
                 cmake_args.append("-DLLAMA_AVX512=ON")
-                cmake_args.append("-DLLAMA_AVX512_VMBI=ON")
+                cmake_args.append("-DLLAMA_AVX512_VBMI=ON")
             else:
                 print(f"-- CPUINFER_CPU_INSTRUCT={cpu_mode}; not auto-enabling AMX/AVX512 umbrella")
 
