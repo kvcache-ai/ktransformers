@@ -237,8 +237,8 @@ class SafeTensorLoader:
         return name in self.tensor_file_map
 
 
-class RawFP8SafeTensorLoader(SafeTensorLoader):
-    """Loader for raw FP8 expert weights with auto-detection of naming formats.
+class FP8SafeTensorLoader(SafeTensorLoader):
+    """Loader for FP8 expert weights with auto-detection of naming formats.
 
     Supported formats:
     - DeepSeek style: {base}.mlp.experts.{id}.{gate,up,down}_proj.weight
@@ -271,16 +271,16 @@ class RawFP8SafeTensorLoader(SafeTensorLoader):
                     # Verify the path template matches
                     if "block_sparse_moe.experts" in key and fmt_name == "mixtral":
                         self._detected_format = fmt_name
-                        print(f"[RawFP8SafeTensorLoader] Detected format: {fmt_name}")
+                        print(f"[FP8SafeTensorLoader] Detected format: {fmt_name}")
                         return
                     elif "mlp.experts" in key and "block_sparse_moe" not in key and fmt_name == "deepseek":
                         self._detected_format = fmt_name
-                        print(f"[RawFP8SafeTensorLoader] Detected format: {fmt_name}")
+                        print(f"[FP8SafeTensorLoader] Detected format: {fmt_name}")
                         return
 
         # Default to deepseek if no format detected
         self._detected_format = "deepseek"
-        print(f"[RawFP8SafeTensorLoader] No MoE format detected, defaulting to: deepseek")
+        print("[FP8SafeTensorLoader] No MoE format detected, defaulting to: deepseek")
 
     def _get_experts_prefix(self, base_key: str) -> str:
         """Get the experts prefix based on detected format."""

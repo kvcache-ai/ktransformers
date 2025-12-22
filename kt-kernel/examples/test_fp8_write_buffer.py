@@ -8,7 +8,7 @@ import numpy as np
 
 from kt_kernel import kt_kernel_ext
 from kt_kernel_ext import CPUInfer
-from kt_kernel_ext.moe import AMXRAWFp8_MOE
+from kt_kernel_ext.moe import AMXFP8_MOE
 
 
 def make_cpu_infer(thread_num=80):
@@ -95,7 +95,7 @@ def test_with_tp(gpu_tp_count):
     cfg.up_scale = up_scale.data_ptr()
     cfg.down_scale = down_scale.data_ptr()
 
-    moe = AMXRAWFp8_MOE(cfg)
+    moe = AMXFP8_MOE(cfg)
 
     physical_to_logical_map = torch.arange(expert_num, dtype=torch.int64, device="cpu").contiguous()
     cpuinfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))

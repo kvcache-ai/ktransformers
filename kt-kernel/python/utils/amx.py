@@ -4,16 +4,16 @@ import ctypes
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader, RawFP8SafeTensorLoader
+from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
 
 try:
-    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXRAWFp8_MOE
+    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE
 
     _HAS_AMX_SUPPORT = True
 except (ImportError, AttributeError):
     _HAS_AMX_SUPPORT = False
-    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXRAWFp8_MOE = None, None, None, None
+    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE = None, None, None, None
 
 from typing import Optional
 
@@ -303,10 +303,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
             del self.down_scales
 
 
-class RAWAMXMoEWrapper(BaseMoEWrapper):
-    """Wrapper for RAWINT4 experts stored in compressed SafeTensor format."""
+class NativeMoEWrapper(BaseMoEWrapper):
+    """Wrapper for RAWINT4/FP8 experts stored in compressed SafeTensor format."""
 
-    _raw_loader_instance = None
+    _native_loader_instance = None
 
     def __init__(
         self,
@@ -328,8 +328,8 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
             raise RuntimeError("AMX backend is not available.")
         if method == "RAWINT4" and AMXInt4_KGroup_MOE is None:
             raise RuntimeError("AMX backend with RAWINT4 support is not available.")
-        if method == "RAWFP8" and AMXRAWFp8_MOE is None:
-            raise RuntimeError("AMX backend with RAWFP8 support is not available.")
+        if method == "FP8" and AMXFP8_MOE is None:
+            raise RuntimeError("AMX backend with FP8 support is not available.")
 
         super().__init__(
             layer_idx=layer_idx,
@@ -347,14 +347,14 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
             method=method,
         )
 
-        if RAWAMXMoEWrapper._raw_loader_instance is None:
+        if NativeMoEWrapper._native_loader_instance is None:
             if method == "RAWINT4":
-                RAWAMXMoEWrapper._raw_loader_instance = CompressedSafeTensorLoader(weight_path)
-            elif method == "RAWFP8":
-                RAWAMXMoEWrapper._raw_loader_instance = RawFP8SafeTensorLoader(weight_path)
+                NativeMoEWrapper._native_loader_instance = CompressedSafeTensorLoader(weight_path)
+            elif method == "FP8":
+                NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path)
             else:
-                raise NotImplementedError(f"Unsupported method for RAWAMXMoEWrapper: {method}")
-        self.loader = RAWAMXMoEWrapper._raw_loader_instance
+                raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
+        self.loader = NativeMoEWrapper._native_loader_instance
 
         self.gate_weights = None
         self.up_weights = None
@@ -395,8 +395,8 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         self.down_scales = weights["down_scale"]
         if self.method == "RAWINT4":
             assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
-        elif self.method == "RAWFP8":
-            assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for RAWFP8"
+        elif self.method == "FP8":
+            assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
 
         t2 = time.time()
 
@@ -439,11 +439,11 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.group_size = group_size
             moe_config.quant_config.zero_point = False
             self.moe = AMXInt4_KGroup_MOE(moe_config)
-        elif self.method == "RAWFP8":
+        elif self.method == "FP8":
             moe_config.quant_config.bits = 8
             moe_config.quant_config.group_size = 128
             moe_config.quant_config.zero_point = False
-            self.moe = AMXRAWFp8_MOE(moe_config)
+            self.moe = AMXFP8_MOE(moe_config)
         t4 = time.time()
 
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
@@ -459,7 +459,7 @@ class RAWAMXMoEWrapper(BaseMoEWrapper):
         t6 = time.time()
 
         print(
-            f"[RAWAMXMoEWrapper Layer {self.layer_idx}] "
+            f"[NativeMoEWrapper Layer {self.layer_idx}] "
             f"load_experts: {(t1-t0)*1000:.1f}ms, "
             f"prepare_tensors: {(t2-t1)*1000:.1f}ms, "
             f"build_ptrs: {(t3-t2)*1000:.1f}ms, "

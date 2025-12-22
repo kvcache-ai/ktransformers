@@ -26,7 +26,6 @@
 #include <vector>
 
 #include "amx_config.hpp"
-#include "amx_raw_utils.hpp"
 #include "amx_utils.hpp"
 #include "llama.cpp/ggml-impl.h"
 #include "pack.hpp"

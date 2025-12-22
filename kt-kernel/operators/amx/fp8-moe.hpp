@@ -25,7 +25,6 @@
 
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
-#include "la/amx_raw_utils.hpp"
 #include "moe_base.hpp"
 
 /**

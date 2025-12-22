@@ -17,7 +17,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
 from kt_kernel import kt_kernel_ext
-from kt_kernel_ext.moe import AMXRAWFp8_MOE
+from kt_kernel_ext.moe import AMXFP8_MOE
 import torch
 
 # Benchmark parameters
@@ -160,7 +160,7 @@ def build_moe(layer_idx=0):
     config.up_scale = up_scale.data_ptr()
     config.down_scale = down_scale.data_ptr()
 
-    moe = AMXRAWFp8_MOE(config)
+    moe = AMXFP8_MOE(config)
     CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     CPUInfer.sync()
 

@@ -361,7 +361,7 @@ def build_moes_from_fp8_data(fp8_data: dict):
             config.down_scale = fp8_data["down_scales"].data_ptr()
             config.pool = CPUInfer.backend_
 
-            moe = kt_kernel_ext.moe.AMXRAWFp8_MOE(config)
+            moe = kt_kernel_ext.moe.AMXFP8_MOE(config)
             CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
             CPUInfer.sync()
             moes.append(moe)

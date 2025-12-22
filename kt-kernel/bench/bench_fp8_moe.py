@@ -156,7 +156,7 @@ def bench_fp8_moe():
             config.down_scale = down_scales.data_ptr()
             config.pool = CPUInfer.backend_
 
-            moe = kt_kernel_ext.moe.AMXRAWFp8_MOE(config)
+            moe = kt_kernel_ext.moe.AMXFP8_MOE(config)
             CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
             CPUInfer.sync()
             moes.append(moe)
