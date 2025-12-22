@@ -614,10 +614,26 @@ setup(
     author="kvcache-ai",
     license="Apache-2.0",
     python_requires=">=3.8",
-    packages=["kt_kernel", "kt_kernel.utils"],
+    packages=[
+        "kt_kernel",
+        "kt_kernel.utils",
+        "kt_kernel.cli",
+        "kt_kernel.cli.commands",
+        "kt_kernel.cli.config",
+        "kt_kernel.cli.utils",
+    ],
     package_dir={
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
+        "kt_kernel.cli": "python/cli",
+        "kt_kernel.cli.commands": "python/cli/commands",
+        "kt_kernel.cli.config": "python/cli/config",
+        "kt_kernel.cli.utils": "python/cli/utils",
+    },
+    entry_points={
+        "console_scripts": [
+            "kt=kt_kernel.cli.main:main",
+        ],
     },
     ext_modules=[CMakeExtension("kt_kernel.kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},

@@ -27,6 +27,12 @@ dependencies = [
   "numpy>=1.24.0",
   "triton>=2.0.0",
   "gguf>=0.17.0",
+  # CLI dependencies
+  "typer[all]>=0.9.0",
+  "rich>=13.0.0",
+  "pyyaml>=6.0",
+  "httpx>=0.25.0",
+  "packaging>=23.0",
   # Development dependencies
   "black>=25.9.0",
 ]
@@ -37,16 +43,30 @@ test = [
   "psutil>=5.9.0",
 ]
 
+[project.scripts]
+kt = "kt_kernel.cli.main:main"
+
 [project.urls]
 Homepage = "https://github.com/kvcache-ai"
 
 [tool.setuptools]
-packages = ["kt_kernel", "kt_kernel.utils"]
+packages = [
+  "kt_kernel",
+  "kt_kernel.utils",
+  "kt_kernel.cli",
+  "kt_kernel.cli.commands",
+  "kt_kernel.cli.config",
+  "kt_kernel.cli.utils",
+]
 include-package-data = true
 
 [tool.setuptools.package-dir]
 kt_kernel = "python"
 "kt_kernel.utils" = "python/utils"
+"kt_kernel.cli" = "python/cli"
+"kt_kernel.cli.commands" = "python/cli/commands"
+"kt_kernel.cli.config" = "python/cli/config"
+"kt_kernel.cli.utils" = "python/cli/utils"
 
 [tool.setuptools.package-data]
 # (empty) placeholder if you later add resources
