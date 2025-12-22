@@ -61,7 +61,7 @@ pip install custom_flashinfer/
 
 ## Prepare Models
 
-We uses `DeepSeek-V2-Lite-Chat` as an example here. You can replace it with other models such as Kimi K2.
+We uses `deepseek-ai/DeepSeek-V2-Lite` as an example here. You can replace it with other models such as Kimi K2.
 
 ## How to start
 
@@ -80,7 +80,7 @@ For example, we provide the YAML file as follows:
 
 ```YAML
 ### model
-model_name_or_path: DeepSeek-V2-Lite-Chat
+model_name_or_path: deepseek-ai/DeepSeek-V2-Lite
 trust_remote_code: true
 
 ### method
@@ -114,7 +114,7 @@ report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 learning_rate: 5.0e-6
-num_train_epochs: 0.1
+num_train_epochs: 3
 lr_scheduler_type: cosine
 warmup_ratio: 0.1
 bf16: true
@@ -130,7 +130,7 @@ chunk_size: 8192
 
 For more details about --kt_optimize_rule, please refer to https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/KTransformers-Fine-Tuning_User-Guide.md 
 
-（2）examples/inference/deepseek2_lora_dpo_kt.yaml
+Then, you can use the lora adapter saved in `saves/Kllama_deepseekV2_DPO` for inference the same as the sft training. For example,
 
 ```YAML
 model_name_or_path: DeepSeek-V2-Lite-Chat 
