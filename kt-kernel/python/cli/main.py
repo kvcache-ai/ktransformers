@@ -206,18 +206,6 @@ def _show_first_run_setup(settings) -> None:
 
     console.print()
     console.print(f"[green]✓[/green] {t('setup_model_path_set', path=selected_path)}")
-
-    # Install shell completion automatically
-    console.print()
-    console.print(f"[dim]{t('setup_installing_completion', shell='...')}[/dim]", end="")
-    success, shell_name = _install_shell_completion()
-    # Clear the line and print result
-    console.print("\r" + " " * 50 + "\r", end="")
-    if success:
-        console.print(f"[green]✓[/green] {t('setup_completion_installed')}")
-    else:
-        console.print(f"[yellow]![/yellow] {t('setup_completion_failed')}")
-
     console.print()
 
     # Tips
@@ -264,15 +252,14 @@ def _prompt_custom_path(console, settings) -> str:
                 console.print(f"[red]{t('setup_path_no_write')}[/red]")
 
 
-def _install_shell_completion() -> tuple[bool, str]:
-    """Automatically install shell completion for the current shell.
+def _install_shell_completion_silent() -> tuple[bool, str]:
+    """Silently install shell completion for the current shell.
 
     Returns:
         Tuple of (success, shell_name)
     """
     import os
     import subprocess
-    from pathlib import Path
 
     # Detect current shell
     shell = os.environ.get("SHELL", "")
@@ -299,6 +286,23 @@ def _install_shell_completion() -> tuple[bool, str]:
         return False, shell_name
 
 
+def _auto_install_completion() -> None:
+    """Automatically install shell completion on first run."""
+    from kt_kernel.cli.config.settings import get_settings
+
+    settings = get_settings()
+
+    # Check if already installed
+    if settings.get("general._completion_installed", False):
+        return
+
+    # Try to install silently
+    success, shell_name = _install_shell_completion_silent()
+
+    # Mark as installed regardless of success (to avoid repeated attempts)
+    settings.set("general._completion_installed", True)
+
+
 def _apply_saved_language() -> None:
     """Apply the saved language setting."""
     from kt_kernel.cli.config.settings import get_settings
@@ -315,13 +319,17 @@ def main():
     # Check for first run (but not for certain commands)
     # Skip first-run check for: --help, config commands, version
     args = sys.argv[1:] if len(sys.argv) > 1 else []
-    skip_commands = ["--help", "-h", "config", "version", "--version"]
+    skip_commands = ["--help", "-h", "config", "version", "--version", "--install-completion", "--show-completion"]
 
     should_check_first_run = True
     for arg in args:
         if arg in skip_commands:
             should_check_first_run = False
             break
+
+    # Auto-install shell completion (silent, on first run only)
+    if should_check_first_run:
+        _auto_install_completion()
 
     # Check first run before applying saved language (to avoid creating config)
     if should_check_first_run and args:
