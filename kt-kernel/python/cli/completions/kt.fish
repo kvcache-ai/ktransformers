@@ -18,8 +18,6 @@ complete -c kt -f -n "__fish_use_subcommand" -a "sft" -d "Fine-tuning with Llama
 # Global options
 complete -c kt -l help -d "Show help message"
 complete -c kt -l version -d "Show version"
-complete -c kt -l install-completion -d "Install shell completion"
-complete -c kt -l show-completion -d "Show completion script"
 
 # Install command options
 complete -c kt -f -n "__fish_seen_subcommand_from install" -l source -d "Install from source directory"

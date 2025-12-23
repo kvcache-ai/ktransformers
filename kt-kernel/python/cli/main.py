@@ -17,7 +17,7 @@ app = typer.Typer(
     name="kt",
     help="KTransformers CLI - A unified command-line interface for KTransformers.",
     no_args_is_help=True,
-    add_completion=True,
+    add_completion=False,  # Use static completion scripts instead of dynamic completion
     rich_markup_mode="rich",
 )
 
@@ -395,7 +395,7 @@ def main():
     # Check for first run (but not for certain commands)
     # Skip first-run check for: --help, config commands, version
     args = sys.argv[1:] if len(sys.argv) > 1 else []
-    skip_commands = ["--help", "-h", "config", "version", "--version", "--install-completion", "--show-completion"]
+    skip_commands = ["--help", "-h", "config", "version", "--version"]
 
     should_check_first_run = True
     for arg in args:

@@ -94,9 +94,7 @@ _kt() {
             _describe 'kt commands' commands
             _arguments \
                 '--help[Show help message]' \
-                '--version[Show version]' \
-                '--install-completion[Install shell completion]:shell:(bash zsh fish)' \
-                '--show-completion[Show completion script]:shell:(bash zsh fish)'
+                '--version[Show version]'
             ;;
         args)
             case $words[1] in

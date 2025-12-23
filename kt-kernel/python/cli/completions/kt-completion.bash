@@ -12,7 +12,7 @@ _kt_completion() {
     local commands="version install update run download quant bench microbench doctor model config sft"
 
     # Global options
-    local global_opts="--help --version --install-completion --show-completion"
+    local global_opts="--help --version"
 
     # Handle subcommands
     case "${COMP_CWORD}" in
