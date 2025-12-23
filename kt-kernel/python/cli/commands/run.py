@@ -56,7 +56,7 @@ def run(
     cpu_threads: Optional[int] = typer.Option(
         None,
         "--cpu-threads",
-        help="Number of CPU inference threads",
+        help="Number of CPU inference threads (kt-cpuinfer, defaults to 80% of CPU cores)",
     ),
     numa_nodes: Optional[int] = typer.Option(
         None,
@@ -292,11 +292,22 @@ def run(
     )
 
     # CPU/GPU configuration with smart defaults
-    # kt-cpuinfer: default to 80% of CPU cores
-    final_cpu_threads = cpu_threads or model_defaults.get("kt-cpuinfer") or settings.get("inference.cpu_threads") or int(cpu.cores * 0.8)
+    # kt-cpuinfer: default to 80% of total CPU threads (cores * NUMA nodes)
+    total_threads = cpu.cores * cpu.numa_nodes
+    final_cpu_threads = (
+        cpu_threads
+        or model_defaults.get("kt-cpuinfer")
+        or settings.get("inference.cpu_threads")
+        or int(total_threads * 0.8)
+    )
 
     # kt-threadpool-count: default to NUMA node count
-    final_numa_nodes = numa_nodes or model_defaults.get("kt-threadpool-count") or settings.get("inference.numa_nodes") or cpu.numa_nodes
+    final_numa_nodes = (
+        numa_nodes
+        or model_defaults.get("kt-threadpool-count")
+        or settings.get("inference.numa_nodes")
+        or cpu.numa_nodes
+    )
 
     # kt-num-gpu-experts: use model-specific computation if available and not explicitly set
     if gpu_experts is not None:
@@ -411,8 +422,8 @@ def run(
     # Key parameters
     console.print()
     console.print(f"  GPU Experts: [cyan]{final_gpu_experts}[/cyan] per layer")
-    console.print(f"  CPU Threads: [cyan]{final_cpu_threads}[/cyan]")
-    console.print(f"  NUMA Nodes: [cyan]{final_numa_nodes}[/cyan]")
+    console.print(f"  CPU Threads (kt-cpuinfer): [cyan]{final_cpu_threads}[/cyan]")
+    console.print(f"  NUMA Nodes (kt-threadpool-count): [cyan]{final_numa_nodes}[/cyan]")
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
