@@ -456,12 +456,14 @@ def install(
     elif from_source:
         # PyPI source (sdist) installation
         console.print()
-        print_info("Installation method: [bold]PyPI Source (sdist)[/bold]")
+        print_info("KT-Kernel installation: [bold]PyPI Source (sdist)[/bold]")
         _install_from_source_pypi(mode, cpu_instruct, enable_amx, build_type, skip_torch, yes, verify)
     else:
         # PyPI wheel installation (default)
         console.print()
-        print_info("Installation method: [bold]PyPI (wheel)[/bold]")
+        print_info("KT-Kernel installation: [bold]PyPI (wheel)[/bold]")
+        if mode in (InstallMode.INFERENCE, InstallMode.FULL):
+            console.print("  [dim]Note: SGLang will be installed from GitHub source[/dim]")
         _install_from_pypi(mode, skip_torch, force, yes)
 
     # Step 3: Verify installation if requested
@@ -1183,37 +1185,38 @@ def _install_sglang(force: bool = False) -> None:
             # Clone or update the repository
             if clone_path.exists():
                 console.print(f"  [dim]Updating existing repository at {clone_path}...[/dim]")
-                # Pull latest changes
+                console.print()
+                # Pull latest changes (show output)
                 subprocess.run(
                     ["git", "fetch", "origin", branch],
                     cwd=clone_path,
                     check=True,
-                    capture_output=True,
                 )
                 subprocess.run(
                     ["git", "checkout", branch],
                     cwd=clone_path,
                     check=True,
-                    capture_output=True,
                 )
                 subprocess.run(
                     ["git", "pull"],
                     cwd=clone_path,
                     check=True,
-                    capture_output=True,
                 )
             else:
                 console.print(f"  [dim]Cloning {repo_url} to {clone_path}...[/dim]")
+                console.print()
+                # Clone with progress (show output)
                 subprocess.run(
-                    ["git", "clone", "--branch", branch, repo_url, str(clone_path)],
+                    ["git", "clone", "--progress", "--branch", branch, repo_url, str(clone_path)],
                     check=True,
-                    capture_output=True,
                 )
 
             # Install in editable mode to preserve git info
+            console.print()
             console.print(f"  [dim]Installing in editable mode...[/dim]")
+            console.print()
             subprocess.run(
-                pip_cmd + ["-e", str(clone_path)],
+                pip_cmd + ["-e", str(clone_path), "-v"],
                 check=True,
                 cwd=clone_path,
             )
@@ -1224,9 +1227,10 @@ def _install_sglang(force: bool = False) -> None:
         except subprocess.CalledProcessError as e:
             print_error(f"Failed to install sglang from GitHub: {e}")
             print_warning("Falling back to PyPI installation...")
+            console.print()
             # Fallback to PyPI
             try:
-                subprocess.run(pip_cmd + ["sglang"], check=True)
+                subprocess.run(pip_cmd + ["sglang", "-v"], check=True)
                 print_success("SGLang installed from PyPI")
                 print_warning("⚠ PyPI version may not be compatible with kt-kernel. Source installation recommended.")
             except subprocess.CalledProcessError as e2:
@@ -1238,8 +1242,9 @@ def _install_sglang(force: bool = False) -> None:
         # Install from PyPI
         print_warning("Installing sglang from PyPI (may not be compatible with kt-kernel)")
         console.print(f"  [dim]Recommend using GitHub source: kt config set dependencies.sglang.source github[/dim]")
+        console.print()
         try:
-            subprocess.run(pip_cmd + ["sglang"], check=True)
+            subprocess.run(pip_cmd + ["sglang", "-v"], check=True)
             print_success("SGLang installed from PyPI")
             print_warning("⚠ PyPI version may not be compatible with kt-kernel")
         except subprocess.CalledProcessError as e:
@@ -1277,7 +1282,7 @@ def _install_other_deps(mode: InstallMode) -> None:
     # Install sglang separately based on configuration
     if mode in (InstallMode.INFERENCE, InstallMode.FULL):
         console.print()
-        print_step("Installing SGLang...")
+        print_step("Installing SGLang from source...")
         _install_sglang()
 
 
@@ -1319,12 +1324,6 @@ def _install_packages_pip(mode: InstallMode, skip_torch: bool) -> None:
 
         # Use pip install -r with real-time output
         _run_pip_realtime(pip_cmd + ["-r", str(req_file)], "dependencies")
-
-        # Install sglang separately if in inference or full mode
-        if mode in (InstallMode.INFERENCE, InstallMode.FULL):
-            console.print()
-            print_step("Installing SGLang...")
-            _install_sglang()
     else:
         # Fallback to individual package installation
         console.print()
@@ -1341,11 +1340,11 @@ def _install_packages_pip(mode: InstallMode, skip_torch: bool) -> None:
             pkg_name = pkg.split(">=")[0].split("==")[0]
             _run_pip_realtime(pip_cmd + [pkg], pkg_name)
 
-        # Install sglang separately if in inference or full mode
-        if mode in (InstallMode.INFERENCE, InstallMode.FULL):
-            console.print()
-            print_step("Installing SGLang...")
-            _install_sglang()
+    # Install sglang separately if in inference or full mode (for both branches)
+    if mode in (InstallMode.INFERENCE, InstallMode.FULL):
+        console.print()
+        print_step("Installing SGLang from source...")
+        _install_sglang()
 
 
 def _run_pip_realtime(cmd: list[str], name: str) -> bool:

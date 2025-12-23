@@ -1,0 +1,6 @@
+# Inference dependencies for KTransformers
+# NOTE: sglang is installed separately from source (see install.py)
+
+transformers>=4.45.0
+safetensors>=0.4.0
+huggingface-hub>=0.20.0
