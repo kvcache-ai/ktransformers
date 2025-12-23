@@ -244,6 +244,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat_proxy_detected": "Proxy detected in environment",
         "chat_proxy_confirm": "Use proxy for connection?",
         "chat_proxy_disabled": "Proxy disabled for this session",
+        # Coming soon
+        "feature_coming_soon": "This feature is coming soon...",
     },
     "zh": {
         # General
@@ -479,6 +481,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat_proxy_detected": "检测到环境中存在代理设置",
         "chat_proxy_confirm": "是否使用代理连接？",
         "chat_proxy_disabled": "已在本次会话中禁用代理",
+        # Coming soon
+        "feature_coming_soon": "此功能即将推出...",
     },
 }
 

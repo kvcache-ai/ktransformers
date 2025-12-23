@@ -255,6 +255,85 @@ def _prompt_custom_path(console, settings) -> str:
                 console.print(f"[red]{t('setup_path_no_write')}[/red]")
 
 
+def _install_shell_completion() -> None:
+    """Install shell completion scripts to user directories.
+
+    Uses standard locations that are auto-loaded by shell completion systems:
+    - Bash: ~/.local/share/bash-completion/completions/kt (auto-loaded by bash-completion 2.0+)
+    - Zsh: ~/.zfunc/_kt (requires fpath setup, but commonly used)
+    - Fish: ~/.config/fish/completions/kt.fish (auto-loaded)
+    """
+    import os
+    import shutil
+    from pathlib import Path
+
+    from kt_kernel.cli.config.settings import get_settings
+
+    settings = get_settings()
+
+    # Check if already installed
+    if settings.get("general._completion_installed", False):
+        return
+
+    # Detect current shell
+    shell = os.environ.get("SHELL", "")
+    if "zsh" in shell:
+        shell_name = "zsh"
+    elif "fish" in shell:
+        shell_name = "fish"
+    else:
+        shell_name = "bash"
+
+    try:
+        cli_dir = Path(__file__).parent
+        completions_dir = cli_dir / "completions"
+        home = Path.home()
+
+        installed = False
+
+        if shell_name == "bash":
+            # Use XDG standard location for bash-completion (auto-loaded)
+            src_file = completions_dir / "kt-completion.bash"
+            dest_dir = home / ".local" / "share" / "bash-completion" / "completions"
+            dest_file = dest_dir / "kt"
+
+            if src_file.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest_file)
+                installed = True
+
+        elif shell_name == "zsh":
+            src_file = completions_dir / "_kt"
+            dest_dir = home / ".zfunc"
+            dest_file = dest_dir / "_kt"
+
+            if src_file.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest_file)
+                installed = True
+
+        elif shell_name == "fish":
+            # Fish auto-loads from this directory
+            src_file = completions_dir / "kt.fish"
+            dest_dir = home / ".config" / "fish" / "completions"
+            dest_file = dest_dir / "kt.fish"
+
+            if src_file.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest_file)
+                installed = True
+
+        # Mark as installed
+        settings.set("general._completion_installed", True)
+
+        # For bash/zsh, completion will work in new terminals automatically
+        # (bash-completion 2.0+ auto-loads from ~/.local/share/bash-completion/completions/)
+
+    except (OSError, IOError):
+        # Silently ignore errors - completion is not critical
+        pass
+
+
 def _apply_saved_language() -> None:
     """Apply the saved language setting."""
     from kt_kernel.cli.config.settings import get_settings
@@ -278,6 +357,10 @@ def main():
         if arg in skip_commands:
             should_check_first_run = False
             break
+
+    # Auto-install shell completion on first run
+    if should_check_first_run:
+        _install_shell_completion()
 
     # Check first run before applying saved language (to avoid creating config)
     if should_check_first_run and args:

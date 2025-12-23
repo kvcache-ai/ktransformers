@@ -123,11 +123,9 @@ def microbench(
 ) -> None:
     """Run micro-benchmark for specific components."""
     console.print()
-    print_step(t("bench_starting"))
-    print_info(f"Component: {component}")
-    print_info(f"Batch size: {batch_size}, Seq len: {seq_len}")
-    print_info(f"Iterations: {iterations} (warmup: {warmup})")
+    console.print(f"[yellow]{t('feature_coming_soon')}[/yellow]")
     console.print()
+    raise typer.Exit(0)
 
     # Try to find the benchmark script
     kt_kernel_path = _find_kt_kernel_path()
@@ -160,11 +158,16 @@ def microbench(
 
     # Run benchmark
     cmd = [
-        sys.executable, str(script_path),
-        "--batch-size", str(batch_size),
-        "--seq-len", str(seq_len),
-        "--iterations", str(iterations),
-        "--warmup", str(warmup),
+        sys.executable,
+        str(script_path),
+        "--batch-size",
+        str(batch_size),
+        "--seq-len",
+        str(seq_len),
+        "--iterations",
+        str(iterations),
+        "--warmup",
+        str(warmup),
     ]
 
     if output:
@@ -194,6 +197,7 @@ def _find_kt_kernel_path() -> Optional[Path]:
     """Find the kt-kernel installation path."""
     try:
         import kt_kernel
+
         return Path(kt_kernel.__file__).parent.parent
     except ImportError:
         pass
@@ -221,9 +225,7 @@ def _run_all_benchmarks(model: Optional[str], output: Optional[Path], iterations
         _run_component_benchmark(component, None, iterations)
 
 
-def _run_inference_benchmark(
-    model: Optional[str], output: Optional[Path], iterations: int
-) -> None:
+def _run_inference_benchmark(model: Optional[str], output: Optional[Path], iterations: int) -> None:
     """Run inference benchmark."""
     if model is None:
         print_error("Model required for inference benchmark. Use --model flag.")
@@ -238,9 +240,7 @@ def _run_inference_benchmark(
     print_error("Inference benchmarking not yet implemented.")
 
 
-def _run_component_benchmark(
-    component: str, output: Optional[Path], iterations: int
-) -> None:
+def _run_component_benchmark(component: str, output: Optional[Path], iterations: int) -> None:
     """Run a component benchmark."""
     kt_kernel_path = _find_kt_kernel_path()
 
