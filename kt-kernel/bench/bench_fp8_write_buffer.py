@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Benchmark write_weight_scale_to_buffer for AMX_K2_MOE_TP (int4 packed weights + bf16 scales).
+Benchmark write_weight_scale_to_buffer for AMX_FP8_MOE_TP (FP8 weights + float32 scales).
 
 Uses two MOE instances that alternate writing to simulate realistic multi-layer scenarios.
 """
@@ -17,12 +17,13 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
 from kt_kernel import kt_kernel_ext
+from kt_kernel_ext.moe import AMXFP8_MOE
 import torch
 
 # Benchmark parameters
-expert_num = 384
-num_experts_per_tok = expert_num
-gpu_tp_count = 4
+expert_num = 256
+num_experts_per_tok = 8
+gpu_tp_count = 2
 
 warm_up_iter = 3
 test_iter = 7
@@ -31,7 +32,7 @@ gpu_experts_num = expert_num
 
 hidden_size = 7168
 intermediate_size = 2048
-group_size = 32
+group_size = 128  # FP8 uses 128x128 block-wise scales
 max_len = 1
 
 physical_to_logical_map = torch.arange(expert_num, dtype=torch.int64, device="cpu").contiguous()
@@ -45,65 +46,33 @@ def get_git_commit():
         commit_msg = subprocess.check_output(["git", "log", "-1", "--pretty=%B"]).decode("utf-8").strip()
         result["commit"] = commit
         result["commit_message"] = commit_msg
-
         dirty_output = subprocess.check_output(["git", "status", "--porcelain"]).decode("utf-8").strip()
+        result["dirty"] = bool(dirty_output)
         if dirty_output:
-            result["dirty"] = True
             result["dirty_files"] = dirty_output.splitlines()
-        else:
-            result["dirty"] = False
     except Exception as e:
-        result["commit"] = None
-        result["commit_message"] = None
-        result["dirty"] = None
         result["error"] = str(e)
     return result
 
 
 def get_system_info():
     info = {}
-    uname = platform.uname()
-    info["system_name"] = uname.system
-    info["node_name"] = uname.node
-
-    cpu_model = None
-    if os.path.exists("/proc/cpuinfo"):
-        try:
-            with open("/proc/cpuinfo", "r") as f:
-                for line in f:
-                    if "model name" in line:
-                        cpu_model = line.split(":", 1)[1].strip()
-                        break
-        except Exception as e:
-            cpu_model = f"Error: {e}"
-    info["cpu_model"] = cpu_model
-
-    mem_total_gb = None
-    if os.path.exists("/proc/meminfo"):
-        try:
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if "MemTotal" in line:
-                        mem_kb = float(line.split(":", 1)[1].split()[0])
-                        mem_total_gb = round(mem_kb / (1024 * 1024), 2)
-                        break
-        except Exception as e:
-            mem_total_gb = f"Error: {e}"
-    info["memory_size_GB"] = mem_total_gb
-
+    info["system_name"] = platform.uname().system
+    info["node_name"] = platform.uname().node
     info["cpu_core_count"] = os.cpu_count()
-
-    sockets = set()
     if os.path.exists("/proc/cpuinfo"):
-        try:
-            with open("/proc/cpuinfo", "r") as f:
-                for line in f:
-                    if "physical id" in line:
-                        sockets.add(line.split(":", 1)[1].strip())
-        except Exception:
-            sockets = set()
-    info["cpu_socket_count"] = len(sockets) if len(sockets) > 0 else 1
-
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if "model name" in line:
+                    info["cpu_model"] = line.split(":", 1)[1].strip()
+                    break
+    if os.path.exists("/proc/meminfo"):
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if "MemTotal" in line:
+                    mem_kb = float(line.split(":", 1)[1].split()[0])
+                    info["memory_size_GB"] = round(mem_kb / (1024 * 1024), 2)
+                    break
     return info
 
 
@@ -119,26 +88,47 @@ def record_results(result, filename=json_path):
 
 
 def allocate_weights():
-    per_mat_weight_bytes = (hidden_size * intermediate_size) // 2
-    per_mat_scale_elems = (hidden_size * intermediate_size) // group_size
+    per_mat_weight_bytes = hidden_size * intermediate_size
+    n_blocks_n_gate_up = (intermediate_size + group_size - 1) // group_size
+    n_blocks_k = (hidden_size + group_size - 1) // group_size
+    per_mat_scale_elems_gate_up = n_blocks_n_gate_up * n_blocks_k
+    per_mat_scale_elems_down = n_blocks_k * n_blocks_n_gate_up
 
-    gate_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-    up_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-    down_q = torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8)
-
-    gate_scale = torch.randn(expert_num * per_mat_scale_elems, dtype=torch.bfloat16)
-    up_scale = torch.randn(expert_num * per_mat_scale_elems, dtype=torch.bfloat16)
-    down_scale = torch.randn(expert_num * per_mat_scale_elems, dtype=torch.bfloat16)
+    gate_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    up_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    down_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    gate_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    up_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    down_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_down, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
 
     return (
-        gate_q.contiguous(),
-        up_q.contiguous(),
-        down_q.contiguous(),
-        gate_scale.contiguous(),
-        up_scale.contiguous(),
-        down_scale.contiguous(),
+        gate_q,
+        up_q,
+        down_q,
+        gate_scale,
+        up_scale,
+        down_scale,
         per_mat_weight_bytes,
-        per_mat_scale_elems,
+        per_mat_scale_elems_gate_up,
+        per_mat_scale_elems_down,
     )
 
 
@@ -152,17 +142,17 @@ def build_moe(layer_idx=0):
         up_scale,
         down_scale,
         per_mat_weight_bytes,
-        per_mat_scale_elems,
+        per_mat_scale_elems_gate_up,
+        per_mat_scale_elems_down,
     ) = allocate_weights()
 
     config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
     config.max_len = max_len
     config.layer_idx = layer_idx
-    config.quant_config.bits = 4
+    config.quant_config.bits = 8
     config.quant_config.group_size = group_size
     config.quant_config.zero_point = False
     config.pool = CPUInfer.backend_
-
     config.gate_proj = gate_q.data_ptr()
     config.up_proj = up_q.data_ptr()
     config.down_proj = down_q.data_ptr()
@@ -170,7 +160,7 @@ def build_moe(layer_idx=0):
     config.up_scale = up_scale.data_ptr()
     config.down_scale = down_scale.data_ptr()
 
-    moe = kt_kernel_ext.moe.AMXInt4_KGroup_MOE(config)
+    moe = AMXFP8_MOE(config)
     CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
     CPUInfer.sync()
 
@@ -185,7 +175,8 @@ def build_moe(layer_idx=0):
 
     buffer_shapes = {
         "per_mat_weight_bytes": per_mat_weight_bytes,
-        "per_mat_scale_elems": per_mat_scale_elems,
+        "per_mat_scale_elems_gate_up": per_mat_scale_elems_gate_up,
+        "per_mat_scale_elems_down": per_mat_scale_elems_down,
     }
 
     return moe, buffer_shapes, keep_tensors
@@ -194,16 +185,20 @@ def build_moe(layer_idx=0):
 def allocate_buffers(buffer_shapes):
     """Allocate shared output buffers for single expert."""
     per_mat_weight_bytes = buffer_shapes["per_mat_weight_bytes"]
-    per_mat_scale_elems = buffer_shapes["per_mat_scale_elems"]
+    per_mat_scale_elems_gate_up = buffer_shapes["per_mat_scale_elems_gate_up"]
+    per_mat_scale_elems_down = buffer_shapes["per_mat_scale_elems_down"]
 
     weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
-    scale_elems_per_expert_per_tp = per_mat_scale_elems // gpu_tp_count
+    scale_elems_per_expert_per_tp_gate_up = per_mat_scale_elems_gate_up // gpu_tp_count
+    scale_elems_per_expert_per_tp_down = per_mat_scale_elems_down // gpu_tp_count
 
     # Each buffer stores data for a single expert
     w13_weight_bufs = [torch.empty(2 * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w13_scale_bufs = [torch.empty(2 * scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+    w13_scale_bufs = [
+        torch.empty(2 * scale_elems_per_expert_per_tp_gate_up, dtype=torch.float32) for _ in range(gpu_tp_count)
+    ]
     w2_weight_bufs = [torch.empty(weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
-    w2_scale_bufs = [torch.empty(scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+    w2_scale_bufs = [torch.empty(scale_elems_per_expert_per_tp_down, dtype=torch.float32) for _ in range(gpu_tp_count)]
 
     buffer_ptrs = {
         "w13_weight_ptrs": [buf.data_ptr() for buf in w13_weight_bufs],
@@ -232,19 +227,17 @@ def bench_write_buffer():
     buffer_ptrs, buffer_keep_tensors = allocate_buffers(buffer_shapes)
 
     total_weights = hidden_size * intermediate_size * expert_num * 3
-    # Throughput accounting: scale bytes (bf16) + weight bytes (int4 packed)
-    bytes_per_call = total_weights // group_size * 2 + total_weights // 2
+    total_scale_bytes = (
+        (buffer_shapes["per_mat_scale_elems_gate_up"] * 2 + buffer_shapes["per_mat_scale_elems_down"]) * expert_num * 4
+    )
+    bytes_per_call = total_weights + total_scale_bytes
 
     # Warm-up: alternate between two MOEs
     for _ in tqdm(range(warm_up_iter), desc="Warm-up"):
         for moe_idx, moe in enumerate(moes):
             for expert_id in range(gpu_experts_num):
                 CPUInfer.submit(
-                    moe.write_weight_scale_to_buffer_task(
-                        gpu_tp_count=gpu_tp_count,
-                        expert_id=expert_id,
-                        **buffer_ptrs,
-                    )
+                    moe.write_weight_scale_to_buffer_task(gpu_tp_count=gpu_tp_count, expert_id=expert_id, **buffer_ptrs)
                 )
                 CPUInfer.sync()
 
@@ -255,11 +248,7 @@ def bench_write_buffer():
         for moe_idx, moe in enumerate(moes):
             for expert_id in range(gpu_experts_num):
                 CPUInfer.submit(
-                    moe.write_weight_scale_to_buffer_task(
-                        gpu_tp_count=gpu_tp_count,
-                        expert_id=expert_id,
-                        **buffer_ptrs,
-                    )
+                    moe.write_weight_scale_to_buffer_task(gpu_tp_count=gpu_tp_count, expert_id=expert_id, **buffer_ptrs)
                 )
                 CPUInfer.sync()
         end = time.perf_counter()
@@ -274,7 +263,7 @@ def bench_write_buffer():
     bandwidth_gbs = bytes_per_iter * test_iter / total_time / 1e9
 
     print(f"\n{'='*60}")
-    print("K2 write_weight_scale_to_buffer benchmark (2 MOEs alternating)")
+    print("FP8 write_weight_scale_to_buffer benchmark (2 MOEs alternating)")
     print(f"{'='*60}")
     print(f"Time per iteration: {time_per_iter_ms:.2f} ms")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
@@ -282,7 +271,7 @@ def bench_write_buffer():
     print(f"Time per expert: {time_per_iter_ms/(gpu_experts_num*2)*1000:.2f} us")
 
     result = {
-        "op": "write_weight_scale_to_buffer_k2",
+        "op": "write_weight_scale_to_buffer_fp8",
         "time_per_iteration_ms": time_per_iter_ms,
         "bandwidth_GBs": bandwidth_gbs,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

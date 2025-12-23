@@ -762,6 +762,16 @@ struct GemmKernel224BF {
   struct BufferC {
     float* c;
     int max_m, n;
+    // 物理布局(按 float 元素数)：
+    // 逻辑矩阵 C 为 (max_m, n) 行主序，max_m 为 M_STEP 的倍数，
+    // n 按 N_BLOCK 分块。
+    // 存储顺序：
+    //   n_block(N_BLOCK 列) → m_block(M_STEP 行) → n_step(N_STEP 列) → (M_STEP×N_STEP) 行主序 tile。
+    // 因此可视为 5D：
+    //   c[n_blocks][m_blocks][n_steps][M_STEP][N_STEP]，
+    //   n_blocks = ceil(n / N_BLOCK)，m_blocks = max_m / M_STEP，
+    //   n_steps = N_BLOCK / N_STEP（尾块可能更小）。
+    // get_submat(m_begin, n_begin) 返回连续的 (M_STEP×N_STEP) tile 起始地址。
 
     static size_t required_size(int max_m, int n) { return sizeof(float) * max_m * n; }
 

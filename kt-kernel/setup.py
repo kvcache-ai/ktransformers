@@ -285,9 +285,9 @@ class CMakeBuild(build_ext):
 
         # Variant configurations: (name, CPUINFER_CPU_INSTRUCT, CPUINFER_ENABLE_AMX)
         variants = [
-            ("amx", "AVX512", "ON"),      # AVX512 + AMX
+            ("amx", "AVX512", "ON"),  # AVX512 + AMX
             ("avx512", "AVX512", "OFF"),  # AVX512 only
-            ("avx2", "AVX2", "OFF"),      # AVX2 only
+            ("avx2", "AVX2", "OFF"),  # AVX2 only
         ]
 
         for variant_name, cpu_instruct, enable_amx in variants:
@@ -384,6 +384,7 @@ class CMakeBuild(build_ext):
             build_temp: Temporary build directory for CMake
             cfg: Build type (Release/Debug/etc.)
         """
+
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
