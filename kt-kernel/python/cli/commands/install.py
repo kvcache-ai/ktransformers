@@ -959,30 +959,70 @@ def _check_sglang_installation() -> dict:
         - location: str or None (installation path)
         - editable: bool (whether installed in editable mode)
         - git_info: dict or None (git remote and branch if available)
+        - from_source: bool (whether installed from source repository, not PyPI)
     """
     try:
         import sglang
 
         version = getattr(sglang, "__version__", None)
 
-        # Try to get package location
+        # Use pip show to get detailed package information
         location = None
         editable = False
         git_info = None
+        from_source = False
 
-        if hasattr(sglang, "__file__") and sglang.__file__:
-            location = str(Path(sglang.__file__).parent.parent)
+        try:
+            # Get pip show output
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "show", "sglang"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
 
-            # Check if it's an editable install (has .git directory)
-            git_dir = Path(location) / ".git"
-            if git_dir.exists():
-                editable = True
+            if result.returncode == 0:
+                pip_info = {}
+                for line in result.stdout.split("\n"):
+                    if ":" in line:
+                        key, value = line.split(":", 1)
+                        pip_info[key.strip()] = value.strip()
+
+                location = pip_info.get("Location")
+                editable_location = pip_info.get("Editable project location")
+
+                if editable_location:
+                    editable = True
+                    location = editable_location
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            # Fallback to module location
+            if hasattr(sglang, "__file__") and sglang.__file__:
+                location = str(Path(sglang.__file__).parent.parent)
+
+        # Check if it's installed from source (has .git directory)
+        # Search in location and parent directories (for packages in subdirectories)
+        if location:
+            git_root = None
+            check_path = Path(location)
+
+            # Check current directory and up to 2 parent directories
+            for _ in range(3):
+                git_dir = check_path / ".git"
+                if git_dir.exists():
+                    git_root = check_path
+                    from_source = True
+                    break
+                if check_path.parent == check_path:  # Reached root
+                    break
+                check_path = check_path.parent
+
+            if from_source and git_root:
                 # Try to get git remote and branch info
                 try:
                     # Get remote URL
                     result = subprocess.run(
                         ["git", "remote", "get-url", "origin"],
-                        cwd=location,
+                        cwd=git_root,
                         capture_output=True,
                         text=True,
                         timeout=5,
@@ -992,7 +1032,7 @@ def _check_sglang_installation() -> dict:
                     # Get current branch
                     result = subprocess.run(
                         ["git", "branch", "--show-current"],
-                        cwd=location,
+                        cwd=git_root,
                         capture_output=True,
                         text=True,
                         timeout=5,
@@ -1013,6 +1053,7 @@ def _check_sglang_installation() -> dict:
             "location": location,
             "editable": editable,
             "git_info": git_info,
+            "from_source": from_source,
         }
     except ImportError:
         return {
@@ -1021,6 +1062,7 @@ def _check_sglang_installation() -> dict:
             "location": None,
             "editable": False,
             "git_info": None,
+            "from_source": False,
         }
 
 
@@ -1041,9 +1083,13 @@ def _sglang_needs_reinstall(sglang_info: dict, source: str, repo_url: str, branc
 
     # If we want GitHub source
     if source == "github":
-        # If current installation is not from git, reinstall
-        if not sglang_info["editable"] or not sglang_info["git_info"]:
-            return True, "installed from PyPI but GitHub source required"
+        # If current installation is not from source (from PyPI), reinstall
+        if not sglang_info["from_source"]:
+            return True, "installed from PyPI but source installation required"
+
+        # If no git info available, reinstall for safety
+        if not sglang_info["git_info"]:
+            return True, "source installation found but git info unavailable"
 
         git_info = sglang_info["git_info"]
 
@@ -1061,10 +1107,10 @@ def _sglang_needs_reinstall(sglang_info: dict, source: str, repo_url: str, branc
 
     # If we want PyPI source but currently installed from git
     elif source == "pypi":
-        if sglang_info["editable"] and sglang_info["git_info"]:
-            return True, "installed from GitHub but PyPI source required"
+        if sglang_info["from_source"]:
+            return True, "installed from source but PyPI installation required"
 
-    return False, "already installed with correct version"
+    return False, "already installed with correct source"
 
 
 def _install_sglang(force: bool = False) -> None:
@@ -1079,7 +1125,6 @@ def _install_sglang(force: bool = False) -> None:
     - branch: Git branch to use (if source is "github")
     """
     from kt_kernel.cli.config.settings import get_settings
-    import tempfile
 
     settings = get_settings()
 
@@ -1105,12 +1150,14 @@ def _install_sglang(force: bool = False) -> None:
                 git_info = sglang_info["git_info"]
                 console.print(f"  [dim]Source: GitHub ({git_info.get('remote', 'unknown')})[/dim]")
                 console.print(f"  [dim]Branch: {git_info.get('branch', 'unknown')}[/dim]")
+            elif sglang_info["from_source"]:
+                console.print(f"  [dim]Source: GitHub (editable)[/dim]")
             else:
                 console.print(f"  [dim]Source: PyPI[/dim]")
 
             return
         else:
-            print_info(f"SGLang needs reinstall: {reason}")
+            print_warning(f"SGLang needs reinstall: {reason}")
             # Uninstall current version first
             console.print(f"  [dim]Uninstalling current version...[/dim]")
             try:
@@ -1127,48 +1174,74 @@ def _install_sglang(force: bool = False) -> None:
     if source == "github":
         print_info(f"Installing sglang from GitHub: {repo_url} (branch: {branch})")
 
-        # Create temporary directory for cloning
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = Path(temp_dir)
-            clone_path = temp_path / "sglang"
+        # Use persistent directory for editable installation
+        deps_dir = Path.home() / ".ktransformers" / "deps"
+        deps_dir.mkdir(parents=True, exist_ok=True)
+        clone_path = deps_dir / "sglang"
 
-            try:
-                # Clone the repository
-                console.print(f"  [dim]Cloning {repo_url}...[/dim]")
+        try:
+            # Clone or update the repository
+            if clone_path.exists():
+                console.print(f"  [dim]Updating existing repository at {clone_path}...[/dim]")
+                # Pull latest changes
                 subprocess.run(
-                    ["git", "clone", "--depth", "1", "--branch", branch, repo_url, str(clone_path)],
+                    ["git", "fetch", "origin", branch],
+                    cwd=clone_path,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "checkout", branch],
+                    cwd=clone_path,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "pull"],
+                    cwd=clone_path,
+                    check=True,
+                    capture_output=True,
+                )
+            else:
+                console.print(f"  [dim]Cloning {repo_url} to {clone_path}...[/dim]")
+                subprocess.run(
+                    ["git", "clone", "--branch", branch, repo_url, str(clone_path)],
                     check=True,
                     capture_output=True,
                 )
 
-                # Install from the cloned directory
-                console.print(f"  [dim]Installing from source...[/dim]")
-                subprocess.run(
-                    pip_cmd + [str(clone_path)],
-                    check=True,
-                    cwd=clone_path,
-                )
+            # Install in editable mode to preserve git info
+            console.print(f"  [dim]Installing in editable mode...[/dim]")
+            subprocess.run(
+                pip_cmd + ["-e", str(clone_path)],
+                check=True,
+                cwd=clone_path,
+            )
 
-                print_success("SGLang installed from GitHub")
+            print_success("SGLang installed from GitHub (editable)")
+            console.print(f"  [dim]Location: {clone_path}[/dim]")
 
-            except subprocess.CalledProcessError as e:
-                print_error(f"Failed to install sglang from GitHub: {e}")
-                print_warning("Falling back to PyPI installation...")
-                # Fallback to PyPI
-                try:
-                    subprocess.run(pip_cmd + ["sglang"], check=True)
-                    print_success("SGLang installed from PyPI")
-                except subprocess.CalledProcessError as e2:
-                    print_error(f"Failed to install sglang from PyPI: {e2}")
-            except FileNotFoundError:
-                print_error("Git not found. Please install git or use PyPI source in config.")
-                raise typer.Exit(1)
+        except subprocess.CalledProcessError as e:
+            print_error(f"Failed to install sglang from GitHub: {e}")
+            print_warning("Falling back to PyPI installation...")
+            # Fallback to PyPI
+            try:
+                subprocess.run(pip_cmd + ["sglang"], check=True)
+                print_success("SGLang installed from PyPI")
+                print_warning("⚠ PyPI version may not be compatible with kt-kernel. Source installation recommended.")
+            except subprocess.CalledProcessError as e2:
+                print_error(f"Failed to install sglang from PyPI: {e2}")
+        except FileNotFoundError:
+            print_error("Git not found. Please install git or use PyPI source in config.")
+            raise typer.Exit(1)
     else:
         # Install from PyPI
-        print_info("Installing sglang from PyPI")
+        print_warning("Installing sglang from PyPI (may not be compatible with kt-kernel)")
+        console.print(f"  [dim]Recommend using GitHub source: kt config set dependencies.sglang.source github[/dim]")
         try:
             subprocess.run(pip_cmd + ["sglang"], check=True)
             print_success("SGLang installed from PyPI")
+            print_warning("⚠ PyPI version may not be compatible with kt-kernel")
         except subprocess.CalledProcessError as e:
             print_error(f"Failed to install sglang from PyPI: {e}")
 

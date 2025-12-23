@@ -5,7 +5,6 @@ Starts the model inference server using SGLang + kt-kernel.
 """
 
 import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -187,6 +186,36 @@ def run(
     if Path(model).exists():
         resolved_model_path = Path(model)
         print_info(t("run_model_path", path=str(resolved_model_path)))
+
+        # Try to infer model type from path to use default configurations
+        # Check directory name against known models
+        dir_name = resolved_model_path.name.lower()
+        for registered_model in registry.list_all():
+            # Check if directory name matches model name or aliases
+            if dir_name == registered_model.name.lower():
+                model_info = registered_model
+                print_info(f"Detected model type: {registered_model.name}")
+                break
+            for alias in registered_model.aliases:
+                if dir_name == alias.lower() or alias.lower() in dir_name:
+                    model_info = registered_model
+                    print_info(f"Detected model type: {registered_model.name}")
+                    break
+            if model_info:
+                break
+
+        # Also check HuggingFace repo format (org--model)
+        if not model_info:
+            for registered_model in registry.list_all():
+                repo_slug = registered_model.hf_repo.replace("/", "--").lower()
+                if repo_slug in dir_name or dir_name in repo_slug:
+                    model_info = registered_model
+                    print_info(f"Detected model type: {registered_model.name}")
+                    break
+
+        if not model_info:
+            print_warning("Could not detect model type from path. Using default parameters.")
+            console.print("  [dim]Tip: Use model name (e.g., 'kt run m2') to apply optimized configurations[/dim]")
     else:
         # Search in registry
         matches = registry.search(model)
@@ -223,28 +252,29 @@ def run(
 
         print_info(t("run_model_path", path=str(resolved_model_path)))
 
-    # Step 3: Check quantized weights
-    resolved_weights_path = weights_path
-    if resolved_weights_path is None and model_info:
-        resolved_weights_path = _find_weights_path(model_info, settings)
+    # Step 3: Check quantized weights (only if explicitly requested)
+    resolved_weights_path = None
 
-    if resolved_weights_path is None or not resolved_weights_path.exists():
-        print_warning(t("run_weights_not_found"))
-
-        if quantize:
-            console.print()
-            print_step(t("run_quantizing"))
-            # TODO: Implement quantization
-            print_warning("Quantization not yet implemented. Please run 'kt quant' manually.")
+    # Only use quantized weights if explicitly specified by user
+    if weights_path is not None:
+        # User explicitly specified weights path
+        resolved_weights_path = weights_path
+        if not resolved_weights_path.exists():
+            print_error(t("run_weights_not_found"))
+            console.print(f"  Path: {resolved_weights_path}")
             raise typer.Exit(1)
-        else:
-            console.print()
-            if confirm(t("run_quant_prompt")):
-                print_warning("Quantization not yet implemented. Please run 'kt quant' manually.")
-                raise typer.Exit(1)
-            else:
-                # Try to continue without quantized weights
-                resolved_weights_path = None
+        print_info(f"Using quantized weights: {resolved_weights_path}")
+    elif quantize:
+        # User requested quantization
+        console.print()
+        print_step(t("run_quantizing"))
+        # TODO: Implement quantization
+        print_warning("Quantization not yet implemented. Please run 'kt quant' manually.")
+        raise typer.Exit(1)
+    else:
+        # Default: use original precision model without quantization
+        console.print()
+        print_info("Using original precision model (no quantization)")
 
     # Step 4: Build command
     # Resolve all parameters (CLI > model defaults > config > auto-detect)
@@ -342,29 +372,49 @@ def run(
         settings=settings,
     )
 
-    # Step 5: Show or execute
-    if dry_run:
+    # Step 5: Show configuration summary
+    console.print()
+    print_step("Configuration")
+
+    # Model info
+    if model_info:
+        console.print(f"  Model: [bold]{model_info.name}[/bold]")
+    else:
+        console.print(f"  Model: [bold]{resolved_model_path.name}[/bold]")
+
+    console.print(f"  Path: [dim]{resolved_model_path}[/dim]")
+
+    # Key parameters
+    console.print()
+    console.print(f"  GPU Experts: [cyan]{final_gpu_experts}[/cyan] per layer")
+    console.print(f"  CPU Threads: [cyan]{final_cpu_threads}[/cyan]")
+    console.print(f"  NUMA Nodes: [cyan]{final_numa_nodes}[/cyan]")
+    console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
+    console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
+    console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
+
+    # Weights info
+    if resolved_weights_path:
         console.print()
-        console.print("[bold]Command:[/bold]")
-        console.print()
-        console.print(f"  [dim]{' '.join(cmd)}[/dim]")
-        console.print()
-        return
+        console.print(f"  Quantized weights: [yellow]{resolved_weights_path}[/yellow]")
 
     console.print()
-    print_step(t("run_starting_server"))
-    print_server_info(
-        mode="SGLang + kt-kernel",
-        host=final_host,
-        port=final_port,
-        gpu_experts=final_gpu_experts,
-        cpu_threads=final_cpu_threads,
-    )
+    console.print(f"  Server: [green]http://{final_host}:{final_port}[/green]")
+    console.print()
 
-    print_api_info(final_host, final_port)
-
-    # Execute
+    # Prepare environment variables (for both dry-run and actual execution)
     env = os.environ.copy()
+
+    # Set default environment variables for better performance
+    default_env = {
+        "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+        "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
+    }
+    # Apply defaults only if not already set
+    for key, value in default_env.items():
+        if key not in env:
+            env[key] = value
+
     # Add environment variables from advanced.env
     env.update(settings.get_env_vars())
     # Add environment variables from inference.env
@@ -372,21 +422,36 @@ def run(
     if isinstance(inference_env, dict):
         env.update({k: str(v) for k, v in inference_env.items()})
 
+    # Add model-specific environment variables if available
+    if model_info and hasattr(model_info, 'default_params') and 'env' in model_info.default_params:
+        model_env = model_info.default_params['env']
+        if isinstance(model_env, dict):
+            env.update({k: str(v) for k, v in model_env.items()})
+
+    # Step 6: Show or execute
+    if dry_run:
+        console.print()
+        console.print("[bold]Environment Variables:[/bold]")
+        console.print()
+        # Show kt/sglang-specific environment variables
+        for key in sorted(env.keys()):
+            if any(prefix in key.upper() for prefix in ['KT_', 'SGLANG_', 'PYTORCH_ALLOC']):
+                console.print(f"  [dim]{key}={env[key]}[/dim]")
+        console.print()
+        console.print("[bold]Command:[/bold]")
+        console.print()
+        console.print(f"  [dim]{' '.join(cmd)}[/dim]")
+        console.print()
+        return
+
+    # Execute with prepared environment variables
+    # Don't print "Server started" or API info here - let sglang's logs speak for themselves
+    # The actual startup takes time and these messages are misleading
     try:
-        process = subprocess.Popen(cmd, env=env)
-
-        # Handle Ctrl+C gracefully
-        def signal_handler(signum, frame):
-            process.terminate()
-            process.wait()
-            console.print()
-            print_info("Server stopped.")
-            sys.exit(0)
-
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-
-        process.wait()
+        # Execute directly without intercepting output or signals
+        # This allows direct output to terminal and Ctrl+C to work naturally
+        process = subprocess.run(cmd, env=env)
+        sys.exit(process.returncode)
 
     except FileNotFoundError:
         print_error("SGLang not found. Please install with 'kt install inference'.")
@@ -487,12 +552,32 @@ def _build_sglang_command(
         str(model_path),
     ]
 
-    # Add kt-kernel options if weights are available
+    # Add kt-kernel options
+    # kt-kernel is needed for:
+    # 1. Quantized models (when weights_path is provided)
+    # 2. MoE models with CPU offloading (when kt-cpuinfer > 0 or kt-num-gpu-experts is configured)
+    use_kt_kernel = False
+
+    # Check if we should use kt-kernel
     if weights_path:
+        # Quantized model - always use kt-kernel
+        use_kt_kernel = True
+    elif cpu_threads > 0 or gpu_experts > 1:
+        # CPU offloading configured - use kt-kernel
+        use_kt_kernel = True
+    elif model_info and model_info.type == "moe":
+        # MoE model - likely needs kt-kernel for expert offloading
+        use_kt_kernel = True
+
+    if use_kt_kernel:
+        # Add kt-weight-path: use quantized weights if available, otherwise use model path
+        weight_path_to_use = weights_path if weights_path else model_path
+
+        # Add kt-kernel configuration
         cmd.extend(
             [
                 "--kt-weight-path",
-                str(weights_path),
+                str(weight_path_to_use),
                 "--kt-cpuinfer",
                 str(cpu_threads),
                 "--kt-threadpool-count",

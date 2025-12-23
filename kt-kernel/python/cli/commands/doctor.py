@@ -211,7 +211,39 @@ def doctor(
             "packages": package_issues,
         })
 
-    # 7. Environment managers
+    # 7. SGLang installation source check
+    from kt_kernel.cli.commands.install import _check_sglang_installation
+    sglang_info = _check_sglang_installation()
+
+    if sglang_info["installed"]:
+        if sglang_info["from_source"]:
+            if sglang_info["git_info"]:
+                git_remote = sglang_info["git_info"].get("remote", "unknown")
+                git_branch = sglang_info["git_info"].get("branch", "unknown")
+                sglang_source_value = f"Source (GitHub: {git_remote}, branch: {git_branch})"
+                sglang_source_status = "ok"
+                sglang_source_hint = None
+            else:
+                sglang_source_value = "Source (editable)"
+                sglang_source_status = "ok"
+                sglang_source_hint = None
+        else:
+            sglang_source_value = "PyPI (not recommended)"
+            sglang_source_status = "warning"
+            sglang_source_hint = "SGLang from PyPI may not be compatible. Reinstall with: kt install"
+    else:
+        sglang_source_value = "Not installed"
+        sglang_source_status = "warning"
+        sglang_source_hint = "Install with: kt install"
+
+    checks.append({
+        "name": "SGLang Source",
+        "status": sglang_source_status,
+        "value": sglang_source_value,
+        "hint": sglang_source_hint,
+    })
+
+    # 8. Environment managers
     env_managers = detect_env_managers()
     docker = check_docker()
     env_list = [f"{m.name} {m.version}" for m in env_managers]
