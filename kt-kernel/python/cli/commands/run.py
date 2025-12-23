@@ -349,6 +349,9 @@ def run(
     if final_numa_nodes == 0:
         final_numa_nodes = cpu.numa_nodes
 
+    # Pass all model default params to handle any extra parameters
+    extra_params = model_defaults if model_info else {}
+
     cmd = _build_sglang_command(
         model_path=resolved_model_path,
         weights_path=resolved_weights_path,
@@ -370,7 +373,17 @@ def run(
         served_model_name=final_served_model_name,
         disable_shared_experts_fusion=final_disable_shared_experts_fusion,
         settings=settings,
+        extra_model_params=extra_params,
     )
+
+    # Prepare environment variables
+    env = os.environ.copy()
+    # Add environment variables from advanced.env
+    env.update(settings.get_env_vars())
+    # Add environment variables from inference.env
+    inference_env = settings.get("inference.env", {})
+    if isinstance(inference_env, dict):
+        env.update({k: str(v) for k, v in inference_env.items()})
 
     # Step 5: Show configuration summary
     console.print()
@@ -402,41 +415,8 @@ def run(
     console.print(f"  Server: [green]http://{final_host}:{final_port}[/green]")
     console.print()
 
-    # Prepare environment variables (for both dry-run and actual execution)
-    env = os.environ.copy()
-
-    # Set default environment variables for better performance
-    default_env = {
-        "PYTORCH_ALLOC_CONF": "expandable_segments:True",
-        "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
-    }
-    # Apply defaults only if not already set
-    for key, value in default_env.items():
-        if key not in env:
-            env[key] = value
-
-    # Add environment variables from advanced.env
-    env.update(settings.get_env_vars())
-    # Add environment variables from inference.env
-    inference_env = settings.get("inference.env", {})
-    if isinstance(inference_env, dict):
-        env.update({k: str(v) for k, v in inference_env.items()})
-
-    # Add model-specific environment variables if available
-    if model_info and hasattr(model_info, 'default_params') and 'env' in model_info.default_params:
-        model_env = model_info.default_params['env']
-        if isinstance(model_env, dict):
-            env.update({k: str(v) for k, v in model_env.items()})
-
     # Step 6: Show or execute
     if dry_run:
-        console.print()
-        console.print("[bold]Environment Variables:[/bold]")
-        console.print()
-        # Show kt/sglang-specific environment variables
-        for key in sorted(env.keys()):
-            if any(prefix in key.upper() for prefix in ['KT_', 'SGLANG_', 'PYTORCH_ALLOC']):
-                console.print(f"  [dim]{key}={env[key]}[/dim]")
         console.print()
         console.print("[bold]Command:[/bold]")
         console.print()
@@ -538,6 +518,7 @@ def _build_sglang_command(
     served_model_name: str,
     disable_shared_experts_fusion: bool,
     settings,
+    extra_model_params: Optional[dict] = None,  # New parameter for additional params
 ) -> list[str]:
     """Build the SGLang launch command."""
     cmd = [
@@ -621,6 +602,29 @@ def _build_sglang_command(
     # Add performance flags
     if disable_shared_experts_fusion:
         cmd.append("--disable-shared-experts-fusion")
+
+    # Add any extra parameters from model defaults that weren't explicitly handled
+    if extra_model_params:
+        # List of parameters already handled above
+        handled_params = {
+            "kt-num-gpu-experts", "kt-cpuinfer", "kt-threadpool-count", "kt-method",
+            "kt-gpu-prefill-token-threshold", "attention-backend", "tensor-parallel-size",
+            "max-total-tokens", "max-running-requests", "chunked-prefill-size",
+            "mem-fraction-static", "watchdog-timeout", "served-model-name",
+            "disable-shared-experts-fusion"
+        }
+
+        for key, value in extra_model_params.items():
+            if key not in handled_params:
+                # Add unhandled parameters dynamically
+                cmd.append(f"--{key}")
+                if isinstance(value, bool):
+                    # Boolean flags don't need a value
+                    if not value:
+                        # For False boolean, skip the flag entirely
+                        cmd.pop()  # Remove the flag we just added
+                else:
+                    cmd.append(str(value))
 
     # Add extra args from settings
     extra_args = settings.get("advanced.sglang_args", [])

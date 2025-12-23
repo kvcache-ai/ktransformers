@@ -175,6 +175,7 @@ BUILTIN_MODELS: list[ModelInfo] = [
             "kt-method": "FP8",
             "kt-gpu-prefill-token-threshold": 4096,
             "attention-backend": "flashinfer",
+            "fp8-gemm-backend": "triton",
             "tensor-parallel-size": 4,
             "max-total-tokens": 100000,
             "max-running-requests": 16,
