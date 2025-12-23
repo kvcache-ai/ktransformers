@@ -397,33 +397,35 @@ def run(
 
 
 def _find_model_path(model_info: ModelInfo, settings) -> Optional[Path]:
-    """Find the model path on disk."""
-    models_dir = settings.models_dir
+    """Find the model path on disk by searching all configured model paths."""
+    model_paths = settings.get_model_paths()
 
-    # Check common path patterns
-    possible_paths = [
-        models_dir / model_info.name,
-        models_dir / model_info.name.lower(),
-        models_dir / model_info.name.replace(" ", "-"),
-        models_dir / model_info.hf_repo.split("/")[-1],
-        models_dir / model_info.hf_repo.replace("/", "--"),
-    ]
+    # Search in all configured model directories
+    for models_dir in model_paths:
+        # Check common path patterns
+        possible_paths = [
+            models_dir / model_info.name,
+            models_dir / model_info.name.lower(),
+            models_dir / model_info.name.replace(" ", "-"),
+            models_dir / model_info.hf_repo.split("/")[-1],
+            models_dir / model_info.hf_repo.replace("/", "--"),
+        ]
 
-    # Add alias-based paths
-    for alias in model_info.aliases:
-        possible_paths.append(models_dir / alias)
-        possible_paths.append(models_dir / alias.lower())
+        # Add alias-based paths
+        for alias in model_info.aliases:
+            possible_paths.append(models_dir / alias)
+            possible_paths.append(models_dir / alias.lower())
 
-    for path in possible_paths:
-        if path.exists() and (path / "config.json").exists():
-            return path
+        for path in possible_paths:
+            if path.exists() and (path / "config.json").exists():
+                return path
 
     return None
 
 
 def _find_weights_path(model_info: ModelInfo, settings) -> Optional[Path]:
-    """Find the quantized weights path on disk."""
-    models_dir = settings.models_dir
+    """Find the quantized weights path on disk by searching all configured paths."""
+    model_paths = settings.get_model_paths()
     weights_dir = settings.weights_dir
 
     # Check common patterns
@@ -435,9 +437,13 @@ def _find_weights_path(model_info: ModelInfo, settings) -> Optional[Path]:
 
     suffixes = ["-INT4", "-int4", "_INT4", "_int4", "-quant", "-quantized"]
 
+    # Prepare search directories
+    search_dirs = [weights_dir] if weights_dir else []
+    search_dirs.extend(model_paths)
+
     for base in base_names:
         for suffix in suffixes:
-            for dir_path in [weights_dir, models_dir] if weights_dir else [models_dir]:
+            for dir_path in search_dirs:
                 if dir_path:
                     path = dir_path / f"{base}{suffix}"
                     if path.exists():

@@ -11,6 +11,7 @@ complete -c kt -f -n "__fish_use_subcommand" -a "quant" -d "Quantize model weigh
 complete -c kt -f -n "__fish_use_subcommand" -a "bench" -d "Run full benchmark"
 complete -c kt -f -n "__fish_use_subcommand" -a "microbench" -d "Run micro-benchmark"
 complete -c kt -f -n "__fish_use_subcommand" -a "doctor" -d "Diagnose environment issues"
+complete -c kt -f -n "__fish_use_subcommand" -a "model" -d "Manage models and storage paths"
 complete -c kt -f -n "__fish_use_subcommand" -a "config" -d "Manage configuration"
 complete -c kt -f -n "__fish_use_subcommand" -a "sft" -d "Fine-tuning with LlamaFactory"
 
@@ -67,11 +68,21 @@ complete -c kt -f -n "__fish_seen_subcommand_from bench microbench" -l config -d
 # Doctor command options
 complete -c kt -f -n "__fish_seen_subcommand_from doctor" -l verbose -d "Verbose output"
 
+# Model subcommands
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "download" -d "Download a model from HuggingFace"
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "list" -d "List available models"
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "path-list" -d "List all model storage paths"
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "path-add" -d "Add a new model storage path"
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "path-remove" -d "Remove a model storage path"
+complete -c kt -f -n "__fish_seen_subcommand_from model; and not __fish_seen_subcommand_from download list path-list path-add path-remove search" -a "search" -d "Search for models in the registry"
+
 # Config subcommands
-complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset" -a "show" -d "Show all configuration"
-complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset" -a "get" -d "Get configuration value"
-complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset" -a "set" -d "Set configuration value"
-complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset" -a "reset" -d "Reset to defaults"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "show" -d "Show all configuration"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "get" -d "Get configuration value"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "set" -d "Set configuration value"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "reset" -d "Reset to defaults"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "path" -d "Show configuration file path"
+complete -c kt -f -n "__fish_seen_subcommand_from config; and not __fish_seen_subcommand_from show get set reset path init" -a "init" -d "Re-run first-time setup wizard"
 
 # SFT subcommands
 complete -c kt -f -n "__fish_seen_subcommand_from sft; and not __fish_seen_subcommand_from train chat export" -a "train" -d "Train model"

@@ -200,17 +200,19 @@ def _resolve_input_path(model: str, settings) -> Optional[Path]:
 
     if matches:
         model_info = matches[0]
-        # Try to find in models directory
-        models_dir = settings.models_dir
-        possible_paths = [
-            models_dir / model_info.name,
-            models_dir / model_info.name.lower(),
-            models_dir / model_info.hf_repo.split("/")[-1],
-        ]
+        # Try to find in all configured model directories
+        model_paths = settings.get_model_paths()
 
-        for p in possible_paths:
-            if p.exists() and (p / "config.json").exists():
-                return p
+        for models_dir in model_paths:
+            possible_paths = [
+                models_dir / model_info.name,
+                models_dir / model_info.name.lower(),
+                models_dir / model_info.hf_repo.split("/")[-1],
+            ]
+
+            for p in possible_paths:
+                if p.exists() and (p / "config.json").exists():
+                    return p
 
     return None
 

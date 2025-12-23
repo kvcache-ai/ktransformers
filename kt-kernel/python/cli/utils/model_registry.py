@@ -316,30 +316,37 @@ class ModelRegistry:
         return list(self._models.values())
 
     def find_local_models(self) -> list[tuple[ModelInfo, Path]]:
-        """Find models that are downloaded locally.
+        """Find models that are downloaded locally in any configured model path.
 
         Returns:
             List of (ModelInfo, path) tuples for local models
         """
         settings = get_settings()
-        models_dir = settings.models_dir
+        model_paths = settings.get_model_paths()
         results = []
 
-        if not models_dir.exists():
-            return results
-
         for model in self._models.values():
-            # Check common path patterns
-            possible_paths = [
-                models_dir / model.name,
-                models_dir / model.name.lower(),
-                models_dir / model.hf_repo.split("/")[-1],
-                models_dir / model.hf_repo.replace("/", "--"),
-            ]
+            found = False
+            # Search in all configured model directories
+            for models_dir in model_paths:
+                if not models_dir.exists():
+                    continue
 
-            for path in possible_paths:
-                if path.exists() and (path / "config.json").exists():
-                    results.append((model, path))
+                # Check common path patterns
+                possible_paths = [
+                    models_dir / model.name,
+                    models_dir / model.name.lower(),
+                    models_dir / model.hf_repo.split("/")[-1],
+                    models_dir / model.hf_repo.replace("/", "--"),
+                ]
+
+                for path in possible_paths:
+                    if path.exists() and (path / "config.json").exists():
+                        results.append((model, path))
+                        found = True
+                        break
+
+                if found:
                     break
 
         return results

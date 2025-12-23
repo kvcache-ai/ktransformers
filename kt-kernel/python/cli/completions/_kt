@@ -14,6 +14,7 @@ _kt() {
         'bench:Run full benchmark'
         'microbench:Run micro-benchmark'
         'doctor:Diagnose environment issues'
+        'model:Manage models and storage paths'
         'config:Manage configuration'
         'sft:Fine-tuning with LlamaFactory'
     )
@@ -57,12 +58,24 @@ _kt() {
         '--help[Show help message]'
     )
 
+    local -a model_cmds
+    model_cmds=(
+        'download:Download a model from HuggingFace'
+        'list:List available models'
+        'path-list:List all model storage paths'
+        'path-add:Add a new model storage path'
+        'path-remove:Remove a model storage path'
+        'search:Search for models in the registry'
+    )
+
     local -a config_cmds
     config_cmds=(
         'show:Show all configuration'
         'get:Get configuration value'
         'set:Set configuration value'
         'reset:Reset to defaults'
+        'path:Show configuration file path'
+        'init:Re-run first-time setup wizard'
     )
 
     local -a sft_cmds
@@ -122,6 +135,17 @@ _kt() {
                     _arguments \
                         '--verbose[Verbose output]' \
                         '--help[Show help message]'
+                    ;;
+                model)
+                    _arguments \
+                        '1: :->model_cmd' \
+                        '*::arg:->model_args'
+
+                    case $state in
+                        model_cmd)
+                            _describe 'model commands' model_cmds
+                            ;;
+                    esac
                     ;;
                 config)
                     _arguments \

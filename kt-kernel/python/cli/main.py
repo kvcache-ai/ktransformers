@@ -9,7 +9,7 @@ import sys
 import typer
 
 from kt_kernel.cli import __version__
-from kt_kernel.cli.commands import bench, config, doctor, download, install, quant, run, sft, version
+from kt_kernel.cli.commands import bench, config, doctor, download, install, model, quant, run, sft, version
 from kt_kernel.cli.i18n import t, set_lang
 
 # Create main app
@@ -26,13 +26,14 @@ app.command(name="version", help="Show version information")(version.version)
 app.command(name="install", help="Install KTransformers and dependencies")(install.install)
 app.command(name="update", help="Update KTransformers to the latest version")(install.update)
 app.command(name="run", help="Start model inference server")(run.run)
-app.command(name="download", help="Download model weights")(download.download)
+app.command(name="download", help="Download model weights (alias for 'model download')")(download.download)
 app.command(name="quant", help="Quantize model weights")(quant.quant)
 app.command(name="bench", help="Run full benchmark")(bench.bench)
 app.command(name="microbench", help="Run micro-benchmark")(bench.microbench)
 app.command(name="doctor", help="Diagnose environment issues")(doctor.doctor)
 
 # Register sub-apps
+app.add_typer(model.app, name="model", help="Manage models and storage paths")
 app.add_typer(config.app, name="config", help="Manage configuration")
 app.add_typer(sft.app, name="sft", help="Fine-tuning with LlamaFactory")
 

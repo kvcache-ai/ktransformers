@@ -107,6 +107,34 @@ def path() -> None:
     console.print(str(settings.config_path))
 
 
+@app.command(name="model-path-list", deprecated=True, hidden=True)
+def model_path_list() -> None:
+    """[Deprecated] Use 'kt model path-list' instead."""
+    console.print("[yellow]⚠ This command is deprecated. Use 'kt model path-list' instead.[/yellow]\n")
+    import subprocess
+    subprocess.run(["kt", "model", "path-list"])
+
+
+@app.command(name="model-path-add", deprecated=True, hidden=True)
+def model_path_add(
+    path: str = typer.Argument(..., help="Path to add"),
+) -> None:
+    """[Deprecated] Use 'kt model path-add' instead."""
+    console.print("[yellow]⚠ This command is deprecated. Use 'kt model path-add' instead.[/yellow]\n")
+    import subprocess
+    subprocess.run(["kt", "model", "path-add", path])
+
+
+@app.command(name="model-path-remove", deprecated=True, hidden=True)
+def model_path_remove(
+    path: str = typer.Argument(..., help="Path to remove"),
+) -> None:
+    """[Deprecated] Use 'kt model path-remove' instead."""
+    console.print("[yellow]⚠ This command is deprecated. Use 'kt model path-remove' instead.[/yellow]\n")
+    import subprocess
+    subprocess.run(["kt", "model", "path-remove", path])
+
+
 def _parse_value(value: str):
     """Parse a string value into appropriate Python type."""
     # Try boolean

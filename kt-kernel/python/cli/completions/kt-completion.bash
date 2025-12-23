@@ -9,7 +9,7 @@ _kt_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Main commands
-    local commands="version install update run download quant bench microbench doctor config sft"
+    local commands="version install update run download quant bench microbench doctor model config sft"
 
     # Global options
     local global_opts="--help --version --install-completion --show-completion"
@@ -52,8 +52,13 @@ _kt_completion() {
                     local doctor_opts="--verbose --help"
                     COMPREPLY=( $(compgen -W "${doctor_opts}" -- ${cur}) )
                     ;;
+                model)
+                    local model_cmds="download list path-list path-add path-remove search"
+                    local model_opts="--help"
+                    COMPREPLY=( $(compgen -W "${model_cmds} ${model_opts}" -- ${cur}) )
+                    ;;
                 config)
-                    local config_cmds="show get set reset"
+                    local config_cmds="show get set reset path init model-path-list model-path-add model-path-remove"
                     local config_opts="--help"
                     COMPREPLY=( $(compgen -W "${config_cmds} ${config_opts}" -- ${cur}) )
                     ;;

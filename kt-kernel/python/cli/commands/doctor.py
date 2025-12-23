@@ -164,17 +164,24 @@ def doctor(
         "hint": "32GB+ RAM recommended for large models" if not ram_ok else None,
     })
 
-    # 8. Disk space
+    # 8. Disk space - check all model paths
     settings = get_settings()
-    disk_path = str(settings.models_dir)
-    available_disk, total_disk = detect_disk_space_gb(disk_path)
-    disk_ok = available_disk >= 100
-    checks.append({
-        "name": t("doctor_check_disk"),
-        "status": "ok" if disk_ok else "warning",
-        "value": t("doctor_disk_info", available=f"{available_disk}GB", path=disk_path),
-        "hint": "100GB+ free space recommended for model storage" if not disk_ok else None,
-    })
+    model_paths = settings.get_model_paths()
+
+    # Check all configured model paths
+    for i, disk_path in enumerate(model_paths):
+        available_disk, total_disk = detect_disk_space_gb(str(disk_path))
+        disk_ok = available_disk >= 100
+
+        # For multiple paths, add index to name
+        path_label = f"Model Path {i+1}" if len(model_paths) > 1 else t("doctor_check_disk")
+
+        checks.append({
+            "name": path_label,
+            "status": "ok" if disk_ok else "warning",
+            "value": t("doctor_disk_info", available=f"{available_disk}GB", path=str(disk_path)),
+            "hint": "100GB+ free space recommended for model storage" if not disk_ok else None,
+        })
 
     # 6. Required packages
     packages = [

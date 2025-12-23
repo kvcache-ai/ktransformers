@@ -15,6 +15,55 @@ from kt_kernel.cli.utils.console import console, print_version_table
 from kt_kernel.cli.utils.environment import detect_cuda_version, get_installed_package_version
 
 
+def _get_sglang_info() -> str:
+    """Get sglang version and installation source information."""
+    try:
+        import sglang
+        version = getattr(sglang, "__version__", None)
+
+        if not version:
+            version = get_installed_package_version("sglang")
+
+        if not version:
+            return t("version_not_installed")
+
+        # Try to detect installation source
+        from pathlib import Path
+        import subprocess
+
+        if hasattr(sglang, "__file__") and sglang.__file__:
+            location = Path(sglang.__file__).parent.parent
+            git_dir = location / ".git"
+
+            if git_dir.exists():
+                # Installed from git (editable install)
+                try:
+                    # Get remote URL
+                    result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"],
+                        cwd=location,
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                    if result.returncode == 0:
+                        remote_url = result.stdout.strip()
+                        # Simplify GitHub URLs
+                        if "github.com" in remote_url:
+                            repo_name = remote_url.split("/")[-1].replace(".git", "")
+                            owner = remote_url.split("/")[-2]
+                            return f"{version} [dim](GitHub: {owner}/{repo_name})[/dim]"
+                        return f"{version} [dim](Git: {remote_url})[/dim]"
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    pass
+
+        # Default: installed from PyPI
+        return f"{version} [dim](PyPI)[/dim]"
+
+    except ImportError:
+        return t("version_not_installed")
+
+
 def version(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed version info"),
 ) -> None:
@@ -33,18 +82,26 @@ def version(
 
     print_version_table(versions)
 
+    # Always show key packages with installation source
+    console.print("\n[bold]Packages:[/bold]\n")
+
+    key_packages = {
+        t("version_kt_kernel"): get_installed_package_version("kt-kernel") or t("version_not_installed"),
+        t("version_sglang"): _get_sglang_info(),
+    }
+
+    print_version_table(key_packages)
+
     if verbose:
-        console.print("\n[bold]Packages:[/bold]\n")
+        console.print("\n[bold]Additional Packages:[/bold]\n")
 
         package_versions = {
-            t("version_kt_kernel"): get_installed_package_version("kt-kernel"),
-            t("version_ktransformers"): get_installed_package_version("ktransformers"),
-            t("version_sglang"): get_installed_package_version("sglang"),
-            t("version_llamafactory"): get_installed_package_version("llamafactory"),
-            "typer": get_installed_package_version("typer"),
-            "rich": get_installed_package_version("rich"),
-            "torch": get_installed_package_version("torch"),
-            "transformers": get_installed_package_version("transformers"),
+            t("version_ktransformers"): get_installed_package_version("ktransformers") or t("version_not_installed"),
+            t("version_llamafactory"): get_installed_package_version("llamafactory") or t("version_not_installed"),
+            "typer": get_installed_package_version("typer") or t("version_not_installed"),
+            "rich": get_installed_package_version("rich") or t("version_not_installed"),
+            "torch": get_installed_package_version("torch") or t("version_not_installed"),
+            "transformers": get_installed_package_version("transformers") or t("version_not_installed"),
         }
 
         print_version_table(package_versions)

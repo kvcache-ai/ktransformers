@@ -100,7 +100,12 @@ class Settings:
     def _ensure_dirs(self) -> None:
         """Ensure configuration directories exist."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        Path(self.get("paths.models", DEFAULT_MODELS_DIR)).mkdir(parents=True, exist_ok=True)
+
+        # Ensure all model paths exist
+        model_paths = self.get_model_paths()
+        for path in model_paths:
+            path.mkdir(parents=True, exist_ok=True)
+
         Path(self.get("paths.cache", DEFAULT_CACHE_DIR)).mkdir(parents=True, exist_ok=True)
 
     def _load(self) -> None:
@@ -231,8 +236,68 @@ class Settings:
 
     @property
     def models_dir(self) -> Path:
-        """Get the models directory path."""
-        return Path(self.get("paths.models", DEFAULT_MODELS_DIR))
+        """Get the primary models directory path (for backward compatibility)."""
+        paths = self.get_model_paths()
+        return paths[0] if paths else Path(DEFAULT_MODELS_DIR)
+
+    def get_model_paths(self) -> list[Path]:
+        """Get all model directory paths.
+
+        Returns a list of Path objects. Supports both:
+        - Single path: paths.models = "/path/to/models"
+        - Multiple paths: paths.models = ["/path/1", "/path/2"]
+        """
+        models_config = self.get("paths.models", DEFAULT_MODELS_DIR)
+
+        # Handle both string and list
+        if isinstance(models_config, str):
+            return [Path(models_config)]
+        elif isinstance(models_config, list):
+            return [Path(p) for p in models_config]
+        else:
+            return [Path(DEFAULT_MODELS_DIR)]
+
+    def add_model_path(self, path: str) -> None:
+        """Add a new model path to the configuration."""
+        models_config = self.get("paths.models", DEFAULT_MODELS_DIR)
+
+        # Convert to list if it's a string
+        if isinstance(models_config, str):
+            paths = [models_config]
+        elif isinstance(models_config, list):
+            paths = list(models_config)
+        else:
+            paths = []
+
+        # Add new path if not already present
+        if path not in paths:
+            paths.append(path)
+            self.set("paths.models", paths)
+
+    def remove_model_path(self, path: str) -> bool:
+        """Remove a model path from the configuration.
+
+        Returns True if path was removed, False if not found.
+        """
+        models_config = self.get("paths.models", DEFAULT_MODELS_DIR)
+
+        if isinstance(models_config, str):
+            # Can't remove if it's a single string
+            if models_config == path:
+                # Don't remove the last path
+                return False
+            return False
+        elif isinstance(models_config, list):
+            if path in models_config:
+                paths = list(models_config)
+                paths.remove(path)
+                # Don't allow removing all paths
+                if not paths:
+                    return False
+                self.set("paths.models", paths if len(paths) > 1 else paths[0])
+                return True
+
+        return False
 
     @property
     def cache_dir(self) -> Path:
