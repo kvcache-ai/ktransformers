@@ -184,6 +184,8 @@ BUILTIN_MODELS: list[ModelInfo] = [
             "watchdog-timeout": 3000,
             "served-model-name": "MiniMax-M2",
             "disable-shared-experts-fusion": True,
+            "tool-call-parser": "minimax-m2",
+            "reasoning-parser":"minimax-append-think"
         },
         description="MiniMax M2 MoE model (example configuration)",
         description_zh="MiniMax M2 MoE 模型（示例配置）",
