@@ -59,20 +59,16 @@ def show_model_list() -> None:
     # Create table
     table = Table(show_header=True, header_style="bold")
     table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("HuggingFace Repo", style="dim")
     table.add_column("Status", justify="center")
-    table.add_column("Local Path", style="yellow")
 
     all_models = registry.list_all()
     for model in all_models:
         if model.name in local_models:
-            status = "[green]✓[/green]"
-            local_path = str(local_models[model.name])
+            status = "[green]✓ Local[/green]"
         else:
             status = "[dim]-[/dim]"
-            local_path = "[dim]Not downloaded[/dim]"
 
-        table.add_row(model.name, model.hf_repo, status, local_path)
+        table.add_row(model.name, status)
 
     console.print(table)
     console.print()
@@ -259,6 +255,7 @@ def download(
 @app.command(name="list")
 def list_models(
     local_only: bool = typer.Option(False, "--local", help="Show only locally downloaded models"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed info including paths"),
 ) -> None:
     """List available models."""
     from rich.table import Table
@@ -280,12 +277,14 @@ def list_models(
 
         table = Table(title="Locally Downloaded Models", show_header=True, header_style="bold")
         table.add_column("Model", style="cyan", no_wrap=True)
-        table.add_column("HuggingFace Repo", style="dim")
-        table.add_column("Status", justify="center")
-        table.add_column("Local Path", style="yellow")
+        if verbose:
+            table.add_column("Local Path", style="dim")
 
         for model_info, model_path in local_models:
-            table.add_row(model_info.name, model_info.hf_repo, "[green]✓[/green]", str(model_path))
+            if verbose:
+                table.add_row(model_info.name, str(model_path))
+            else:
+                table.add_row(model_info.name)
 
         console.print(table)
     else:
@@ -295,19 +294,22 @@ def list_models(
 
         table = Table(title="Available Models", show_header=True, header_style="bold")
         table.add_column("Model", style="cyan", no_wrap=True)
-        table.add_column("HuggingFace Repo", style="dim")
         table.add_column("Status", justify="center")
-        table.add_column("Local Path", style="yellow")
+        if verbose:
+            table.add_column("Local Path", style="dim")
 
         for model in all_models:
             if model.name in local_models_dict:
-                status = "[green]✓[/green]"
+                status = "[green]✓ Local[/green]"
                 local_path = str(local_models_dict[model.name])
             else:
                 status = "[dim]-[/dim]"
                 local_path = "[dim]Not downloaded[/dim]"
 
-            table.add_row(model.name, model.hf_repo, status, local_path)
+            if verbose:
+                table.add_row(model.name, status, local_path)
+            else:
+                table.add_row(model.name, status)
 
         console.print(table)
 
