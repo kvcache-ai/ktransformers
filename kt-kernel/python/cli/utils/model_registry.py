@@ -161,6 +161,30 @@ BUILTIN_MODELS: list[ModelInfo] = [
         description="Mistral Mixtral 8x22B MoE model",
         description_zh="Mistral Mixtral 8x22B MoE 模型",
     ),
+    ModelInfo(
+        name="MiniMax-M2",
+        hf_repo="MiniMaxAI/MiniMax-M2",
+        aliases=["minimax-m2", "minimax", "m2"],
+        type="moe",
+        gpu_vram_gb=80,  # Example: 4 GPUs with 20GB each
+        cpu_ram_gb=400,
+        default_params={
+            "kt-num-gpu-experts": 60,
+            "kt-method": "RAWFP8",
+            "kt-gpu-prefill-token-threshold": 4096,
+            "attention-backend": "flashinfer",
+            "tensor-parallel-size": 4,
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "DeepSeek",
+            "disable-shared-experts-fusion": True,
+        },
+        description="MiniMax M2 MoE model (example configuration)",
+        description_zh="MiniMax M2 MoE 模型（示例配置）",
+    ),
 ]
 
 

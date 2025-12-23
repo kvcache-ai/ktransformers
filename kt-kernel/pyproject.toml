@@ -57,6 +57,7 @@ packages = [
   "kt_kernel.cli.commands",
   "kt_kernel.cli.config",
   "kt_kernel.cli.utils",
+  "kt_kernel.cli.completions",
 ]
 include-package-data = true
 
@@ -67,9 +68,10 @@ kt_kernel = "python"
 "kt_kernel.cli.commands" = "python/cli/commands"
 "kt_kernel.cli.config" = "python/cli/config"
 "kt_kernel.cli.utils" = "python/cli/utils"
+"kt_kernel.cli.completions" = "python/cli/completions"
 
 [tool.setuptools.package-data]
-# (empty) placeholder if you later add resources
+"kt_kernel.cli.completions" = ["*.bash", "*.fish", "_kt"]
 
 [tool.setuptools.exclude-package-data]
 # (empty)

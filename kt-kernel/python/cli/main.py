@@ -51,11 +51,13 @@ def check_first_run() -> None:
     if not DEFAULT_CONFIG_FILE.exists():
         # First run - show welcome and language selection
         from kt_kernel.cli.config.settings import get_settings
+
         settings = get_settings()
         _show_first_run_setup(settings)
     else:
         # Config exists - check if initialized
         from kt_kernel.cli.config.settings import get_settings
+
         settings = get_settings()
         if not settings.get("general._initialized"):
             _show_first_run_setup(settings)
@@ -75,13 +77,15 @@ def _show_first_run_setup(settings) -> None:
 
     # Welcome message
     console.print()
-    console.print(Panel.fit(
-        "[bold cyan]Welcome to KTransformers CLI! / 欢迎使用 KTransformers CLI![/bold cyan]\n\n"
-        "Let's set up your preferences.\n"
-        "让我们设置您的偏好。",
-        title="kt-cli",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            "[bold cyan]Welcome to KTransformers CLI! / 欢迎使用 KTransformers CLI![/bold cyan]\n\n"
+            "Let's set up your preferences.\n"
+            "让我们设置您的偏好。",
+            title="kt-cli",
+            border_style="cyan",
+        )
+    )
     console.print()
 
     # Language selection
@@ -141,9 +145,9 @@ def _show_first_run_setup(settings) -> None:
 
             # Build the option string
             if i == 1:
-                option_str = t('setup_disk_option_recommended', path=loc.path, available=available, total=total)
+                option_str = t("setup_disk_option_recommended", path=loc.path, available=available, total=total)
             else:
-                option_str = t('setup_disk_option', path=loc.path, available=available, total=total)
+                option_str = t("setup_disk_option", path=loc.path, available=available, total=total)
 
             # Add model count if any
             if loc.path in location_models:
@@ -196,7 +200,10 @@ def _show_first_run_setup(settings) -> None:
 
     # Check available space and warn if low
     from kt_kernel.cli.utils.environment import detect_disk_space_gb
-    available_gb, _ = detect_disk_space_gb(selected_path if os.path.exists(selected_path) else str(Path(selected_path).parent))
+
+    available_gb, _ = detect_disk_space_gb(
+        selected_path if os.path.exists(selected_path) else str(Path(selected_path).parent)
+    )
     if available_gb < 100:
         console.print(f"[yellow]{t('setup_path_low_space')}[/yellow]")
 
@@ -226,10 +233,7 @@ def _prompt_custom_path(console, settings) -> str:
     default_path = str(Path.home() / ".ktransformers" / "models")
 
     while True:
-        custom_path = Prompt.ask(
-            t("setup_enter_custom_path"),
-            default=default_path
-        )
+        custom_path = Prompt.ask(t("setup_enter_custom_path"), default=default_path)
 
         # Expand user home
         custom_path = os.path.expanduser(custom_path)
@@ -259,7 +263,8 @@ def _install_shell_completion_silent() -> tuple[bool, str]:
         Tuple of (success, shell_name)
     """
     import os
-    import subprocess
+    import shutil
+    from pathlib import Path
 
     # Detect current shell
     shell = os.environ.get("SHELL", "")
@@ -274,21 +279,48 @@ def _install_shell_completion_silent() -> tuple[bool, str]:
         shell_name = "bash"
 
     try:
-        # Use typer's built-in completion installation
-        result = subprocess.run(
-            ["kt", "--install-completion", shell_name],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0, shell_name
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        # Get the static completion script path
+        cli_dir = Path(__file__).parent
+        completions_dir = cli_dir / "completions"
+
+        home = Path.home()
+
+        if shell_name == "bash":
+            src_file = completions_dir / "kt-completion.bash"
+            dest_dir = home / ".bash_completions"
+            dest_file = dest_dir / "kt.sh"
+        elif shell_name == "zsh":
+            src_file = completions_dir / "_kt"
+            dest_dir = home / ".zsh_completions"
+            dest_file = dest_dir / "_kt"
+        elif shell_name == "fish":
+            src_file = completions_dir / "kt.fish"
+            dest_dir = home / ".config" / "fish" / "completions"
+            dest_file = dest_dir / "kt.fish"
+        else:
+            return False, shell_name
+
+        # Create destination directory if it doesn't exist
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy the static completion script
+        if src_file.exists():
+            shutil.copy2(src_file, dest_file)
+            return True, shell_name
+        else:
+            return False, shell_name
+
+    except (OSError, IOError):
         return False, shell_name
 
 
 def _auto_install_completion() -> None:
     """Automatically install shell completion on first run."""
     from kt_kernel.cli.config.settings import get_settings
+    from kt_kernel.cli.i18n import t
+    from rich.console import Console
+    from rich.panel import Panel
+    import os
 
     settings = get_settings()
 
@@ -301,6 +333,49 @@ def _auto_install_completion() -> None:
 
     # Mark as installed regardless of success (to avoid repeated attempts)
     settings.set("general._completion_installed", True)
+
+    # Show activation message if successful and in interactive terminal
+    if success and sys.stdin.isatty():
+        console = Console(stderr=True)
+
+        # Determine the activation command based on shell
+        home = os.path.expanduser("~")
+        if shell_name == "bash":
+            completion_file = f"{home}/.bash_completions/kt.sh"
+            activate_cmd = f"source {completion_file}"
+        elif shell_name == "zsh":
+            # Try to find the actual completion file location
+            possible_paths = [
+                f"{home}/.zsh_completions/_kt",
+                f"{home}/.zfunc/_kt",
+            ]
+            completion_file = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    completion_file = path
+                    break
+            if completion_file:
+                activate_cmd = f"source {completion_file}"
+            else:
+                activate_cmd = "exec $SHELL"  # Fallback: restart shell
+        elif shell_name == "fish":
+            completion_file = f"{home}/.config/fish/completions/kt.fish"
+            activate_cmd = f"source {completion_file}"
+        else:
+            activate_cmd = "exec $SHELL"
+
+        console.print()
+        console.print(
+            Panel.fit(
+                f"[green]✓[/green] {t('completion_installed_for', shell=shell_name)}\n\n"
+                f"{t('completion_activate_now')}\n"
+                f"[yellow]{activate_cmd}[/yellow]\n\n"
+                f"[dim]{t('completion_next_session')}[/dim]",
+                title=f"[bold cyan]{t('completion_installed_title')}[/bold cyan]",
+                border_style="cyan",
+            )
+        )
+        console.print()
 
 
 def _apply_saved_language() -> None:
@@ -335,8 +410,9 @@ def main():
     if should_check_first_run and args:
         check_first_run()
 
-    # Apply saved language setting
-    _apply_saved_language()
+    # Apply saved language setting (skip for completion commands to avoid I/O overhead)
+    if should_check_first_run:
+        _apply_saved_language()
 
     app()
 

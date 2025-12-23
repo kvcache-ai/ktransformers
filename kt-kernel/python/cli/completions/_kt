@@ -1,0 +1,153 @@
+#compdef kt
+# Zsh completion for kt command
+# This is a static completion script that doesn't require Python startup
+
+_kt() {
+    local -a commands
+    commands=(
+        'version:Show version information'
+        'install:Install KTransformers and dependencies'
+        'update:Update KTransformers to the latest version'
+        'run:Start model inference server'
+        'download:Download model weights'
+        'quant:Quantize model weights'
+        'bench:Run full benchmark'
+        'microbench:Run micro-benchmark'
+        'doctor:Diagnose environment issues'
+        'config:Manage configuration'
+        'sft:Fine-tuning with LlamaFactory'
+    )
+
+    local -a install_opts
+    install_opts=(
+        '--source[Install from source directory]:path:_files -/'
+        '--branch[Git branch to use]:branch:'
+        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]'
+        '(-f --force)'{-f,--force}'[Force reinstall]'
+        '--skip-torch[Skip PyTorch installation]'
+        '(-e --editable)'{-e,--editable}'[Install in editable mode]'
+        '--from-source[Build from source]'
+        '--cpu-instruct[CPU instruction set]:instruct:(NATIVE AVX512 AVX2 FANCY)'
+        '--enable-amx[Enable Intel AMX]'
+        '--disable-amx[Disable Intel AMX]'
+        '--build-type[Build type]:type:(Release Debug RelWithDebInfo)'
+        '--deps-only[Install system dependencies only]'
+        '--docker[Show Docker installation guide]'
+        '--verify[Verify installation]'
+        '--no-verify[Skip verification]'
+        '--help[Show help message]'
+    )
+
+    local -a update_opts
+    update_opts=(
+        '--source[Update from source directory]:path:_files -/'
+        '--pypi[Update from PyPI]'
+        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]'
+        '--help[Show help message]'
+    )
+
+    local -a run_opts
+    run_opts=(
+        '--model[Model name or path]:model:'
+        '--config[Config file path]:path:_files'
+        '--host[Server host]:host:'
+        '--port[Server port]:port:'
+        '--gpu-experts[Number of GPU experts]:count:'
+        '--cpu-threads[Number of CPU threads]:count:'
+        '--help[Show help message]'
+    )
+
+    local -a config_cmds
+    config_cmds=(
+        'show:Show all configuration'
+        'get:Get configuration value'
+        'set:Set configuration value'
+        'reset:Reset to defaults'
+    )
+
+    local -a sft_cmds
+    sft_cmds=(
+        'train:Train model'
+        'chat:Chat with model'
+        'export:Export model'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe 'kt commands' commands
+            _arguments \
+                '--help[Show help message]' \
+                '--version[Show version]' \
+                '--install-completion[Install shell completion]:shell:(bash zsh fish)' \
+                '--show-completion[Show completion script]:shell:(bash zsh fish)'
+            ;;
+        args)
+            case $words[1] in
+                install)
+                    _arguments $install_opts \
+                        '2:mode:(inference sft full)'
+                    ;;
+                update)
+                    _arguments $update_opts
+                    ;;
+                run)
+                    _arguments $run_opts
+                    ;;
+                download)
+                    _arguments \
+                        '--output[Output directory]:path:_files -/' \
+                        '--resume[Resume download]' \
+                        '--mirror[HuggingFace mirror]:url:' \
+                        '--help[Show help message]' \
+                        '1:model:'
+                    ;;
+                quant)
+                    _arguments \
+                        '--method[Quantization method]:method:' \
+                        '--output[Output directory]:path:_files -/' \
+                        '--help[Show help message]' \
+                        '1:model:_files -/'
+                    ;;
+                bench|microbench)
+                    _arguments \
+                        '--model[Model name or path]:model:' \
+                        '--config[Config file path]:path:_files' \
+                        '--help[Show help message]'
+                    ;;
+                doctor)
+                    _arguments \
+                        '--verbose[Verbose output]' \
+                        '--help[Show help message]'
+                    ;;
+                config)
+                    _arguments \
+                        '1: :->config_cmd' \
+                        '*::arg:->config_args'
+
+                    case $state in
+                        config_cmd)
+                            _describe 'config commands' config_cmds
+                            ;;
+                    esac
+                    ;;
+                sft)
+                    _arguments \
+                        '1: :->sft_cmd' \
+                        '*::arg:->sft_args'
+
+                    case $state in
+                        sft_cmd)
+                            _describe 'sft commands' sft_cmds
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_kt "$@"

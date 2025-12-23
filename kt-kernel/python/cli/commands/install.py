@@ -69,12 +69,14 @@ REQUIREMENTS = {
     ],
 }
 
+
 def get_requirements_file(mode: str) -> Optional[Path]:
     """Get the requirements file path for a given mode."""
     req_file = REQUIREMENTS_DIR / f"{mode}.txt"
     if req_file.exists():
         return req_file
     return None
+
 
 # Source repositories
 SOURCE_REPOS = {
@@ -86,6 +88,11 @@ SOURCE_REPOS = {
     "ktransformers": {
         "repo": "https://github.com/kvcache-ai/ktransformers.git",
         "subdir": "kt-sft",
+        "branch": "main",
+    },
+    "sglang": {
+        "repo": "https://github.com/kvcache-ai/sglang",
+        "subdir": None,  # No subdirectory, install from root
         "branch": "main",
     },
 }
@@ -184,12 +191,14 @@ def _check_all_system_deps() -> list[dict]:
     results = []
     for dep in SYSTEM_DEPS:
         installed = _check_system_dep(dep)
-        results.append({
-            "name": dep.name,
-            "display_name": dep.display_name,
-            "installed": installed,
-            "required": dep.required,
-        })
+        results.append(
+            {
+                "name": dep.name,
+                "display_name": dep.display_name,
+                "installed": installed,
+                "required": dep.required,
+            }
+        )
     return results
 
 
@@ -216,10 +225,7 @@ def _install_system_deps(yes: bool = False) -> bool:
     # Check if conda is available (preferred for cmake)
     has_conda = shutil.which("conda") is not None
 
-    missing_deps = [
-        dep for dep in SYSTEM_DEPS
-        if not _check_system_dep(dep)
-    ]
+    missing_deps = [dep for dep in SYSTEM_DEPS if not _check_system_dep(dep)]
 
     if not missing_deps:
         print_success(t("install_deps_all_installed"))
@@ -259,6 +265,7 @@ def _verify_kt_kernel_installation() -> dict:
         # Need to reimport to get fresh module
         import importlib
         import kt_kernel
+
         importlib.reload(kt_kernel)
 
         return {
@@ -286,11 +293,7 @@ def _verify_kt_kernel_installation() -> dict:
 def _display_verification_result(result: dict) -> None:
     """Display kt-kernel verification result."""
     if result["success"]:
-        print_success(
-            t("install_verify_success",
-              version=result["version"],
-              variant=result["cpu_variant"])
-        )
+        print_success(t("install_verify_success", version=result["version"], variant=result["cpu_variant"]))
     else:
         print_error(t("install_verify_failed", error=result["error"]))
 
@@ -454,9 +457,7 @@ def install(
         # PyPI source (sdist) installation
         console.print()
         print_info("Installation method: [bold]PyPI Source (sdist)[/bold]")
-        _install_from_source_pypi(
-            mode, cpu_instruct, enable_amx, build_type, skip_torch, yes, verify
-        )
+        _install_from_source_pypi(mode, cpu_instruct, enable_amx, build_type, skip_torch, yes, verify)
     else:
         # PyPI wheel installation (default)
         console.print()
@@ -662,10 +663,7 @@ def _install_from_source_pypi(
     print_step(t("install_building_from_source"))
     console.print()
 
-    pip_cmd = [
-        sys.executable, "-m", "pip", "install",
-        "kt-kernel", "--no-binary", "kt-kernel", "-v"
-    ]
+    pip_cmd = [sys.executable, "-m", "pip", "install", "kt-kernel", "--no-binary", "kt-kernel", "-v"]
 
     try:
         # Run pip install with custom environment
@@ -679,13 +677,14 @@ def _install_from_source_pypi(
         )
 
         # Show real-time output (simplified)
-        for line in iter(process.stdout.readline, ''):
+        for line in iter(process.stdout.readline, ""):
             line = line.strip()
             if line:
                 # Filter to show only important lines
-                if any(keyword in line.lower() for keyword in [
-                    "building", "compiling", "cmake", "installing", "error", "warning"
-                ]):
+                if any(
+                    keyword in line.lower()
+                    for keyword in ["building", "compiling", "cmake", "installing", "error", "warning"]
+                ):
                     console.print(f"  [dim]{line[:80]}{'...' if len(line) > 80 else ''}[/dim]")
 
         process.wait()
@@ -950,18 +949,244 @@ def _install_torch() -> None:
         print_warning(f"Failed to install PyTorch: {e}")
 
 
+def _check_sglang_installation() -> dict:
+    """Check if sglang is installed and get its metadata.
+
+    Returns:
+        dict with keys:
+        - installed: bool
+        - version: str or None
+        - location: str or None (installation path)
+        - editable: bool (whether installed in editable mode)
+        - git_info: dict or None (git remote and branch if available)
+    """
+    try:
+        import sglang
+
+        version = getattr(sglang, "__version__", None)
+
+        # Try to get package location
+        location = None
+        editable = False
+        git_info = None
+
+        if hasattr(sglang, "__file__") and sglang.__file__:
+            location = str(Path(sglang.__file__).parent.parent)
+
+            # Check if it's an editable install (has .git directory)
+            git_dir = Path(location) / ".git"
+            if git_dir.exists():
+                editable = True
+                # Try to get git remote and branch info
+                try:
+                    # Get remote URL
+                    result = subprocess.run(
+                        ["git", "remote", "get-url", "origin"],
+                        cwd=location,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    remote_url = result.stdout.strip() if result.returncode == 0 else None
+
+                    # Get current branch
+                    result = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        cwd=location,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    branch = result.stdout.strip() if result.returncode == 0 else None
+
+                    if remote_url or branch:
+                        git_info = {
+                            "remote": remote_url,
+                            "branch": branch,
+                        }
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    pass
+
+        return {
+            "installed": True,
+            "version": version,
+            "location": location,
+            "editable": editable,
+            "git_info": git_info,
+        }
+    except ImportError:
+        return {
+            "installed": False,
+            "version": None,
+            "location": None,
+            "editable": False,
+            "git_info": None,
+        }
+
+
+def _sglang_needs_reinstall(sglang_info: dict, source: str, repo_url: str, branch: str) -> tuple[bool, str]:
+    """Check if sglang needs to be reinstalled.
+
+    Args:
+        sglang_info: Result from _check_sglang_installation()
+        source: Desired source ("github" or "pypi")
+        repo_url: Desired GitHub repo URL
+        branch: Desired branch name
+
+    Returns:
+        Tuple of (needs_reinstall: bool, reason: str)
+    """
+    if not sglang_info["installed"]:
+        return True, "not installed"
+
+    # If we want GitHub source
+    if source == "github":
+        # If current installation is not from git, reinstall
+        if not sglang_info["editable"] or not sglang_info["git_info"]:
+            return True, "installed from PyPI but GitHub source required"
+
+        git_info = sglang_info["git_info"]
+
+        # Check if repo URL matches (normalize URLs for comparison)
+        current_remote = git_info.get("remote", "").rstrip("/").replace(".git", "")
+        desired_remote = repo_url.rstrip("/").replace(".git", "")
+
+        if current_remote and desired_remote and current_remote != desired_remote:
+            return True, f"different repository (current: {current_remote}, desired: {desired_remote})"
+
+        # Check if branch matches
+        current_branch = git_info.get("branch", "")
+        if current_branch and branch and current_branch != branch:
+            return True, f"different branch (current: {current_branch}, desired: {branch})"
+
+    # If we want PyPI source but currently installed from git
+    elif source == "pypi":
+        if sglang_info["editable"] and sglang_info["git_info"]:
+            return True, "installed from GitHub but PyPI source required"
+
+    return False, "already installed with correct version"
+
+
+def _install_sglang(force: bool = False) -> None:
+    """Install SGLang based on configuration settings.
+
+    Args:
+        force: If True, reinstall even if already installed
+
+    Reads from config dependencies.sglang to determine:
+    - source: "github" or "pypi"
+    - repo: GitHub repository URL (if source is "github")
+    - branch: Git branch to use (if source is "github")
+    """
+    from kt_kernel.cli.config.settings import get_settings
+    import tempfile
+
+    settings = get_settings()
+
+    # Get sglang configuration
+    source = settings.get("dependencies.sglang.source", "github")
+    repo_url = settings.get("dependencies.sglang.repo", "https://github.com/kvcache-ai/sglang")
+    branch = settings.get("dependencies.sglang.branch", "main")
+
+    # Check current installation
+    sglang_info = _check_sglang_installation()
+
+    if not force:
+        needs_reinstall, reason = _sglang_needs_reinstall(sglang_info, source, repo_url, branch)
+
+        if not needs_reinstall:
+            if sglang_info["version"]:
+                print_success(f"SGLang {sglang_info['version']} already installed")
+            else:
+                print_success("SGLang already installed")
+
+            # Show current installation info
+            if sglang_info["git_info"]:
+                git_info = sglang_info["git_info"]
+                console.print(f"  [dim]Source: GitHub ({git_info.get('remote', 'unknown')})[/dim]")
+                console.print(f"  [dim]Branch: {git_info.get('branch', 'unknown')}[/dim]")
+            else:
+                console.print(f"  [dim]Source: PyPI[/dim]")
+
+            return
+        else:
+            print_info(f"SGLang needs reinstall: {reason}")
+            # Uninstall current version first
+            console.print(f"  [dim]Uninstalling current version...[/dim]")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "uninstall", "-y", "sglang"],
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError:
+                pass  # Ignore uninstall errors
+
+    pip_cmd = [sys.executable, "-m", "pip", "install"]
+
+    if source == "github":
+        print_info(f"Installing sglang from GitHub: {repo_url} (branch: {branch})")
+
+        # Create temporary directory for cloning
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            clone_path = temp_path / "sglang"
+
+            try:
+                # Clone the repository
+                console.print(f"  [dim]Cloning {repo_url}...[/dim]")
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--branch", branch, repo_url, str(clone_path)],
+                    check=True,
+                    capture_output=True,
+                )
+
+                # Install from the cloned directory
+                console.print(f"  [dim]Installing from source...[/dim]")
+                subprocess.run(
+                    pip_cmd + [str(clone_path)],
+                    check=True,
+                    cwd=clone_path,
+                )
+
+                print_success("SGLang installed from GitHub")
+
+            except subprocess.CalledProcessError as e:
+                print_error(f"Failed to install sglang from GitHub: {e}")
+                print_warning("Falling back to PyPI installation...")
+                # Fallback to PyPI
+                try:
+                    subprocess.run(pip_cmd + ["sglang"], check=True)
+                    print_success("SGLang installed from PyPI")
+                except subprocess.CalledProcessError as e2:
+                    print_error(f"Failed to install sglang from PyPI: {e2}")
+            except FileNotFoundError:
+                print_error("Git not found. Please install git or use PyPI source in config.")
+                raise typer.Exit(1)
+    else:
+        # Install from PyPI
+        print_info("Installing sglang from PyPI")
+        try:
+            subprocess.run(pip_cmd + ["sglang"], check=True)
+            print_success("SGLang installed from PyPI")
+        except subprocess.CalledProcessError as e:
+            print_error(f"Failed to install sglang from PyPI: {e}")
+
+
 def _install_other_deps(mode: InstallMode) -> None:
     """Install other dependencies based on mode."""
     packages = REQUIREMENTS.get(mode.value, [])
     if mode == InstallMode.FULL:
         packages = list(set(REQUIREMENTS["inference"] + REQUIREMENTS["sft"]))
 
-    # Filter out torch and kt-kernel/ktransformers (already installed)
+    # Filter out torch, kt-kernel/ktransformers (already installed), and sglang (handled separately)
     other_packages = [
-        p for p in packages
-        if not p.startswith("torch") and
-        not p.startswith("kt-kernel") and
-        not p.startswith("ktransformers")
+        p
+        for p in packages
+        if not p.startswith("torch")
+        and not p.startswith("kt-kernel")
+        and not p.startswith("ktransformers")
+        and not p.startswith("sglang")
     ]
 
     pip_cmd = [sys.executable, "-m", "pip", "install"]
@@ -975,6 +1200,12 @@ def _install_other_deps(mode: InstallMode) -> None:
             )
         except subprocess.CalledProcessError:
             print_warning(f"Failed to install {pkg}")
+
+    # Install sglang separately based on configuration
+    if mode in (InstallMode.INFERENCE, InstallMode.FULL):
+        console.print()
+        print_step("Installing SGLang...")
+        _install_sglang()
 
 
 def _install_packages_pip(mode: InstallMode, skip_torch: bool) -> None:
@@ -1015,6 +1246,12 @@ def _install_packages_pip(mode: InstallMode, skip_torch: bool) -> None:
 
         # Use pip install -r with real-time output
         _run_pip_realtime(pip_cmd + ["-r", str(req_file)], "dependencies")
+
+        # Install sglang separately if in inference or full mode
+        if mode in (InstallMode.INFERENCE, InstallMode.FULL):
+            console.print()
+            print_step("Installing SGLang...")
+            _install_sglang()
     else:
         # Fallback to individual package installation
         console.print()
@@ -1024,12 +1261,18 @@ def _install_packages_pip(mode: InstallMode, skip_torch: bool) -> None:
         if mode == InstallMode.FULL:
             packages = list(set(REQUIREMENTS["inference"] + REQUIREMENTS["sft"]))
 
-        # Filter out torch packages (already installed)
-        other_packages = [p for p in packages if not p.startswith("torch")]
+        # Filter out torch and sglang packages (already installed or handled separately)
+        other_packages = [p for p in packages if not p.startswith("torch") and not p.startswith("sglang")]
 
         for pkg in other_packages:
             pkg_name = pkg.split(">=")[0].split("==")[0]
             _run_pip_realtime(pip_cmd + [pkg], pkg_name)
+
+        # Install sglang separately if in inference or full mode
+        if mode in (InstallMode.INFERENCE, InstallMode.FULL):
+            console.print()
+            print_step("Installing SGLang...")
+            _install_sglang()
 
 
 def _run_pip_realtime(cmd: list[str], name: str) -> bool:
@@ -1052,7 +1295,7 @@ def _run_pip_realtime(cmd: list[str], name: str) -> bool:
         )
 
         with Live(status_text, refresh_per_second=10, console=console, transient=True) as live:
-            for line in iter(process.stdout.readline, ''):
+            for line in iter(process.stdout.readline, ""):
                 line = line.strip()
                 if not line:
                     continue
@@ -1063,14 +1306,14 @@ def _run_pip_realtime(cmd: list[str], name: str) -> bool:
 
                 if "Downloading" in line:
                     # Extract size if present
-                    size_match = re.search(r'(\d+\.?\d*)\s*(kB|MB|GB)', line)
+                    size_match = re.search(r"(\d+\.?\d*)\s*(kB|MB|GB)", line)
                     if size_match:
                         status_text.append(f"Downloading ({size_match.group()})", style="yellow")
                     else:
                         # Extract filename
-                        file_match = re.search(r'Downloading\s+(\S+)', line)
+                        file_match = re.search(r"Downloading\s+(\S+)", line)
                         if file_match:
-                            filename = file_match.group(1).split('/')[-1]
+                            filename = file_match.group(1).split("/")[-1]
                             if len(filename) > 40:
                                 filename = filename[:37] + "..."
                             status_text.append(f"Downloading {filename}", style="yellow")
@@ -1078,7 +1321,7 @@ def _run_pip_realtime(cmd: list[str], name: str) -> bool:
                             status_text.append("Downloading...", style="yellow")
 
                 elif "Collecting" in line:
-                    pkg_match = re.search(r'Collecting\s+(\S+)', line)
+                    pkg_match = re.search(r"Collecting\s+(\S+)", line)
                     if pkg_match:
                         status_text.append(f"Collecting {pkg_match.group(1)}", style="yellow")
                     else:
@@ -1176,12 +1419,14 @@ def _check_dependencies(mode: InstallMode) -> list[dict]:
         else:
             status = "ok" if _compare_versions(installed, required) else "outdated"
 
-        deps.append({
-            "name": name,
-            "installed": installed or "-",
-            "required": f">={required}",
-            "status": status,
-        })
+        deps.append(
+            {
+                "name": name,
+                "installed": installed or "-",
+                "required": f">={required}",
+                "status": status,
+            }
+        )
 
     return deps
 
@@ -1190,6 +1435,7 @@ def _compare_versions(installed: str, required: str) -> bool:
     """Compare version strings. Returns True if installed >= required."""
     try:
         from packaging import version
+
         return version.parse(installed) >= version.parse(required)
     except Exception:
         return installed >= required

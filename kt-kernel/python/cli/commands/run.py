@@ -48,6 +48,7 @@ def run(
         "-p",
         help="Server port",
     ),
+    # CPU/GPU configuration
     gpu_experts: Optional[int] = typer.Option(
         None,
         "--gpu-experts",
@@ -63,6 +64,13 @@ def run(
         "--numa-nodes",
         help="Number of NUMA nodes",
     ),
+    tensor_parallel_size: Optional[int] = typer.Option(
+        None,
+        "--tensor-parallel-size",
+        "--tp",
+        help="Tensor parallel size (number of GPUs)",
+    ),
+    # Model paths
     model_path: Optional[Path] = typer.Option(
         None,
         "--model-path",
@@ -73,6 +81,60 @@ def run(
         "--weights-path",
         help="Custom quantized weights path",
     ),
+    # KT-kernel options
+    kt_method: Optional[str] = typer.Option(
+        None,
+        "--kt-method",
+        help="KT quantization method (AMXINT4, RAWFP8, etc.)",
+    ),
+    kt_gpu_prefill_token_threshold: Optional[int] = typer.Option(
+        None,
+        "--kt-gpu-prefill-threshold",
+        help="GPU prefill token threshold for kt-kernel",
+    ),
+    # SGLang options
+    attention_backend: Optional[str] = typer.Option(
+        None,
+        "--attention-backend",
+        help="Attention backend (triton, flashinfer)",
+    ),
+    max_total_tokens: Optional[int] = typer.Option(
+        None,
+        "--max-total-tokens",
+        help="Maximum total tokens",
+    ),
+    max_running_requests: Optional[int] = typer.Option(
+        None,
+        "--max-running-requests",
+        help="Maximum running requests",
+    ),
+    chunked_prefill_size: Optional[int] = typer.Option(
+        None,
+        "--chunked-prefill-size",
+        help="Chunked prefill size",
+    ),
+    mem_fraction_static: Optional[float] = typer.Option(
+        None,
+        "--mem-fraction-static",
+        help="Memory fraction for static allocation",
+    ),
+    watchdog_timeout: Optional[int] = typer.Option(
+        None,
+        "--watchdog-timeout",
+        help="Watchdog timeout in seconds",
+    ),
+    served_model_name: Optional[str] = typer.Option(
+        None,
+        "--served-model-name",
+        help="Custom model name for API responses",
+    ),
+    # Performance flags
+    disable_shared_experts_fusion: Optional[bool] = typer.Option(
+        None,
+        "--disable-shared-experts-fusion/--enable-shared-experts-fusion",
+        help="Disable/enable shared experts fusion",
+    ),
+    # Other options
     quantize: bool = typer.Option(
         False,
         "--quantize",
@@ -154,7 +216,9 @@ def run(
             if resolved_model_path is None:
                 print_error(t("run_model_not_found", name=model_info.name))
                 console.print()
-                console.print(f"  Download with: kt download {model_info.aliases[0] if model_info.aliases else model_info.name}")
+                console.print(
+                    f"  Download with: kt download {model_info.aliases[0] if model_info.aliases else model_info.name}"
+                )
                 raise typer.Exit(1)
 
         print_info(t("run_model_path", path=str(resolved_model_path)))
@@ -183,11 +247,71 @@ def run(
                 resolved_weights_path = None
 
     # Step 4: Build command
+    # Resolve all parameters (CLI > model defaults > config > auto-detect)
     final_host = host or settings.get("server.host", "0.0.0.0")
     final_port = port or settings.get("server.port", 30000)
-    final_gpu_experts = gpu_experts or settings.get("inference.gpu_experts", 1)
+
+    # Get defaults from model info if available
+    model_defaults = model_info.default_params if model_info else {}
+
+    # CPU/GPU configuration
+    final_gpu_experts = (
+        gpu_experts or model_defaults.get("kt-num-gpu-experts") or settings.get("inference.gpu_experts", 1)
+    )
     final_cpu_threads = cpu_threads or settings.get("inference.cpu_threads", 0)
     final_numa_nodes = numa_nodes or settings.get("inference.numa_nodes", 0)
+    final_tensor_parallel_size = (
+        tensor_parallel_size
+        or model_defaults.get("tensor-parallel-size")
+        or settings.get("inference.tensor_parallel_size", 1)
+    )
+
+    # KT-kernel options
+    final_kt_method = kt_method or model_defaults.get("kt-method") or settings.get("inference.kt_method", "AMXINT4")
+    final_kt_gpu_prefill_threshold = (
+        kt_gpu_prefill_token_threshold
+        or model_defaults.get("kt-gpu-prefill-token-threshold")
+        or settings.get("inference.kt_gpu_prefill_token_threshold", 4096)
+    )
+
+    # SGLang options
+    final_attention_backend = (
+        attention_backend
+        or model_defaults.get("attention-backend")
+        or settings.get("inference.attention_backend", "triton")
+    )
+    final_max_total_tokens = (
+        max_total_tokens or model_defaults.get("max-total-tokens") or settings.get("inference.max_total_tokens", 40000)
+    )
+    final_max_running_requests = (
+        max_running_requests
+        or model_defaults.get("max-running-requests")
+        or settings.get("inference.max_running_requests", 32)
+    )
+    final_chunked_prefill_size = (
+        chunked_prefill_size
+        or model_defaults.get("chunked-prefill-size")
+        or settings.get("inference.chunked_prefill_size", 4096)
+    )
+    final_mem_fraction_static = (
+        mem_fraction_static
+        or model_defaults.get("mem-fraction-static")
+        or settings.get("inference.mem_fraction_static", 0.98)
+    )
+    final_watchdog_timeout = (
+        watchdog_timeout or model_defaults.get("watchdog-timeout") or settings.get("inference.watchdog_timeout", 3000)
+    )
+    final_served_model_name = (
+        served_model_name or model_defaults.get("served-model-name") or settings.get("inference.served_model_name", "")
+    )
+
+    # Performance flags
+    if disable_shared_experts_fusion is not None:
+        final_disable_shared_experts_fusion = disable_shared_experts_fusion
+    elif "disable-shared-experts-fusion" in model_defaults:
+        final_disable_shared_experts_fusion = model_defaults["disable-shared-experts-fusion"]
+    else:
+        final_disable_shared_experts_fusion = settings.get("inference.disable_shared_experts_fusion", False)
 
     # Auto-detect if not specified
     if final_cpu_threads == 0:
@@ -204,6 +328,17 @@ def run(
         gpu_experts=final_gpu_experts,
         cpu_threads=final_cpu_threads,
         numa_nodes=final_numa_nodes,
+        tensor_parallel_size=final_tensor_parallel_size,
+        kt_method=final_kt_method,
+        kt_gpu_prefill_threshold=final_kt_gpu_prefill_threshold,
+        attention_backend=final_attention_backend,
+        max_total_tokens=final_max_total_tokens,
+        max_running_requests=final_max_running_requests,
+        chunked_prefill_size=final_chunked_prefill_size,
+        mem_fraction_static=final_mem_fraction_static,
+        watchdog_timeout=final_watchdog_timeout,
+        served_model_name=final_served_model_name,
+        disable_shared_experts_fusion=final_disable_shared_experts_fusion,
         settings=settings,
     )
 
@@ -230,7 +365,12 @@ def run(
 
     # Execute
     env = os.environ.copy()
+    # Add environment variables from advanced.env
     env.update(settings.get_env_vars())
+    # Add environment variables from inference.env
+    inference_env = settings.get("inference.env", {})
+    if isinstance(inference_env, dict):
+        env.update({k: str(v) for k, v in inference_env.items()})
 
     try:
         process = subprocess.Popen(cmd, env=env)
@@ -315,46 +455,81 @@ def _build_sglang_command(
     gpu_experts: int,
     cpu_threads: int,
     numa_nodes: int,
+    tensor_parallel_size: int,
+    kt_method: str,
+    kt_gpu_prefill_threshold: int,
+    attention_backend: str,
+    max_total_tokens: int,
+    max_running_requests: int,
+    chunked_prefill_size: int,
+    mem_fraction_static: float,
+    watchdog_timeout: int,
+    served_model_name: str,
+    disable_shared_experts_fusion: bool,
     settings,
 ) -> list[str]:
     """Build the SGLang launch command."""
     cmd = [
-        sys.executable, "-m", "sglang.launch_server",
-        "--host", host,
-        "--port", str(port),
-        "--model", str(model_path),
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--model",
+        str(model_path),
     ]
 
     # Add kt-kernel options if weights are available
     if weights_path:
-        cmd.extend([
-            "--kt-weight-path", str(weights_path),
-            "--kt-cpuinfer", str(cpu_threads),
-            "--kt-threadpool-count", str(numa_nodes),
-            "--kt-num-gpu-experts", str(gpu_experts),
-        ])
+        cmd.extend(
+            [
+                "--kt-weight-path",
+                str(weights_path),
+                "--kt-cpuinfer",
+                str(cpu_threads),
+                "--kt-threadpool-count",
+                str(numa_nodes),
+                "--kt-num-gpu-experts",
+                str(gpu_experts),
+                "--kt-method",
+                kt_method,
+                "--kt-gpu-prefill-token-threshold",
+                str(kt_gpu_prefill_threshold),
+            ]
+        )
 
-    # Add model-specific defaults
-    if model_info and model_info.default_params:
-        for key, value in model_info.default_params.items():
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(f"--{key}")
-            else:
-                cmd.extend([f"--{key}", str(value)])
+    # Add SGLang options
+    cmd.extend(
+        [
+            "--attention-backend",
+            attention_backend,
+            "--trust-remote-code",
+            "--mem-fraction-static",
+            str(mem_fraction_static),
+            "--chunked-prefill-size",
+            str(chunked_prefill_size),
+            "--max-running-requests",
+            str(max_running_requests),
+            "--max-total-tokens",
+            str(max_total_tokens),
+            "--watchdog-timeout",
+            str(watchdog_timeout),
+            "--enable-mixed-chunk",
+            "--tensor-parallel-size",
+            str(tensor_parallel_size),
+            "--enable-p2p-check",
+        ]
+    )
 
-    # Add common options
-    cmd.extend([
-        "--attention-backend", settings.get("inference.attention_backend", "triton"),
-        "--trust-remote-code",
-        "--mem-fraction-static", str(settings.get("inference.mem_fraction_static", 0.98)),
-        "--chunked-prefill-size", str(settings.get("inference.chunked_prefill_size", 4096)),
-        "--max-running-requests", str(settings.get("inference.max_running_requests", 32)),
-        "--max-total-tokens", str(settings.get("inference.max_total_tokens", 40000)),
-        "--enable-mixed-chunk",
-        "--tensor-parallel-size", "1",
-        "--enable-p2p-check",
-    ])
+    # Add served model name if specified
+    if served_model_name:
+        cmd.extend(["--served-model-name", served_model_name])
+
+    # Add performance flags
+    if disable_shared_experts_fusion:
+        cmd.append("--disable-shared-experts-fusion")
 
     # Add extra args from settings
     extra_args = settings.get("advanced.sglang_args", [])
