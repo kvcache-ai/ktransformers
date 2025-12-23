@@ -285,15 +285,28 @@ def run(
     model_defaults = model_info.default_params if model_info else {}
 
     # Determine tensor parallel size first (needed for GPU expert calculation)
-    # Priority: CLI > model defaults > config > auto-detect from GPUs
-    requested_tensor_parallel_size = (
-        tensor_parallel_size
-        or model_defaults.get("tensor-parallel-size")
-        or settings.get("inference.tensor_parallel_size")
-        or (len(gpus) if gpus else 1)
+    # Priority: CLI > model defaults > config > auto-detect (with model constraints)
+
+    # Check if explicitly specified by user or configuration
+    explicitly_specified = (
+        tensor_parallel_size  # CLI argument (highest priority)
+        or model_defaults.get("tensor-parallel-size")  # Model defaults
+        or settings.get("inference.tensor_parallel_size")  # Config file
     )
 
-    # Apply model's max_tensor_parallel_size constraint if it exists
+    if explicitly_specified:
+        # Use explicitly specified value
+        requested_tensor_parallel_size = explicitly_specified
+    else:
+        # Auto-detect from GPUs, considering model's max constraint
+        detected_gpu_count = len(gpus) if gpus else 1
+        if model_info and model_info.max_tensor_parallel_size is not None:
+            # Automatically limit to model's maximum to use as many GPUs as possible
+            requested_tensor_parallel_size = min(detected_gpu_count, model_info.max_tensor_parallel_size)
+        else:
+            requested_tensor_parallel_size = detected_gpu_count
+
+    # Apply model's max_tensor_parallel_size constraint if explicitly specified value exceeds it
     final_tensor_parallel_size = requested_tensor_parallel_size
     if model_info and model_info.max_tensor_parallel_size is not None:
         if requested_tensor_parallel_size > model_info.max_tensor_parallel_size:
@@ -333,7 +346,9 @@ def run(
         compute_func = MODEL_COMPUTE_FUNCTIONS[model_info.name]
         final_gpu_experts = compute_func(final_tensor_parallel_size, vram_per_gpu)
         console.print()
-        print_info(f"Auto-computed kt-num-gpu-experts: {final_gpu_experts} (TP={final_tensor_parallel_size}, VRAM={vram_per_gpu}GB per GPU)")
+        print_info(
+            f"Auto-computed kt-num-gpu-experts: {final_gpu_experts} (TP={final_tensor_parallel_size}, VRAM={vram_per_gpu}GB per GPU)"
+        )
     else:
         # Fall back to defaults
         final_gpu_experts = model_defaults.get("kt-num-gpu-experts") or settings.get("inference.gpu_experts", 1)

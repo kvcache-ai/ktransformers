@@ -52,10 +52,17 @@ BUILTIN_MODELS: list[ModelInfo] = [
         aliases=["deepseek-v3.2", "dsv3.2", "deepseek3.2", "v3.2"],
         type="moe",
         default_params={
-            "kt-num-gpu-experts": 1,
-            "attention-backend": "triton",
+            "kt-method": "FP8",
+            "kt-gpu-prefill-token-threshold": 4096,
+            "attention-backend": "flashinfer",
+            "fp8-gemm-backend": "triton",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "DeepSeek-V3.2",
             "disable-shared-experts-fusion": True,
-            "kt-method": "AMXINT4",
         },
         description="DeepSeek V3.2 671B MoE model (latest)",
         description_zh="DeepSeek V3.2 671B MoE 模型（最新）",
@@ -80,8 +87,16 @@ BUILTIN_MODELS: list[ModelInfo] = [
         aliases=["kimi-k2-thinking", "kimi-thinking", "k2-thinking", "kimi", "k2"],
         type="moe",
         default_params={
-            "kt-num-gpu-experts": 1,
-            "attention-backend": "triton",
+            "kt-method": "RAWINT4",
+            "kt-gpu-prefill-token-threshold": 400,
+            "attention-backend": "flashinfer",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "Kimi-K2-Thinking",
+            "disable-shared-experts-fusion": True,
         },
         description="Moonshot Kimi K2 Thinking MoE model",
         description_zh="月之暗面 Kimi K2 Thinking MoE 模型",
@@ -104,7 +119,7 @@ BUILTIN_MODELS: list[ModelInfo] = [
             "served-model-name": "MiniMax-M2",
             "disable-shared-experts-fusion": True,
             "tool-call-parser": "minimax-m2",
-            "reasoning-parser": "minimax-append-think"
+            "reasoning-parser": "minimax-append-think",
         },
         description="MiniMax M2 MoE model",
         description_zh="MiniMax M2 MoE 模型",
@@ -128,7 +143,7 @@ BUILTIN_MODELS: list[ModelInfo] = [
             "served-model-name": "MiniMax-M2.1",
             "disable-shared-experts-fusion": True,
             "tool-call-parser": "minimax-m2",
-            "reasoning-parser": "minimax-append-think"
+            "reasoning-parser": "minimax-append-think",
         },
         description="MiniMax M2.1 MoE model (enhanced multi-language programming)",
         description_zh="MiniMax M2.1 MoE 模型（增强多语言编程能力）",
@@ -323,9 +338,9 @@ def compute_deepseek_v3_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: 
     per_gpu_gb = 16
     if vram_per_gpu_gb < per_gpu_gb:
         return int(0)
-    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
+    total_vram = int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
 
-    return total_vram // 1
+    return total_vram // 3
 
 
 def compute_kimi_k2_thinking_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
@@ -333,9 +348,9 @@ def compute_kimi_k2_thinking_gpu_experts(tensor_parallel_size: int, vram_per_gpu
     per_gpu_gb = 16
     if vram_per_gpu_gb < per_gpu_gb:
         return int(0)
-    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
+    total_vram = int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
 
-    return total_vram * 2
+    return total_vram * 2 // 3
 
 
 def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
@@ -343,7 +358,7 @@ def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: f
     per_gpu_gb = 16
     if vram_per_gpu_gb < per_gpu_gb:
         return int(0)
-    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
+    total_vram = int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
 
     return total_vram // 1
 

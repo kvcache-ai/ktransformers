@@ -33,27 +33,9 @@ DEFAULT_CONFIG = {
         "port": 30000,
     },
     "inference": {
-        # CPU/GPU configuration
-        "cpu_threads": 0,  # 0 = auto-detect
-        "numa_nodes": 0,  # 0 = auto-detect
-        "gpu_experts": 1,
-        "tensor_parallel_size": 1,
-        # KT-kernel specific
-        "kt_method": "AMXINT4",  # AMXINT4, RAWFP8, etc.
-        "kt_gpu_prefill_token_threshold": 4096,
-        # SGLang configuration
-        "attention_backend": "triton",  # triton, flashinfer
-        "max_total_tokens": 40000,
-        "max_running_requests": 32,
-        "chunked_prefill_size": 4096,
-        "mem_fraction_static": 0.98,
-        "watchdog_timeout": 3000,  # seconds
-        "served_model_name": "",  # Custom model name for API (empty = use actual model name)
-        # Performance options
-        "enable_mixed_chunk": True,
-        "enable_p2p_check": True,
-        "disable_shared_experts_fusion": False,
-        # Environment variables
+        # Inference parameters are model-specific and should not have defaults
+        # They will be auto-detected or use model-specific optimizations
+        # Environment variables (general optimizations)
         "env": {
             "PYTORCH_ALLOC_CONF": "expandable_segments:True",
             "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
