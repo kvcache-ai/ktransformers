@@ -75,9 +75,7 @@ class SystemInfo:
 def run_command(cmd: list[str], timeout: int = 10) -> Optional[str]:
     """Run a command and return its output, or None if it fails."""
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         if result.returncode == 0:
             return result.stdout.strip()
         return None
@@ -120,9 +118,7 @@ def detect_env_managers() -> list[EnvManager]:
     try:
         import venv  # noqa: F401
 
-        managers.append(
-            EnvManager(name="venv", version="builtin", path="python -m venv")
-        )
+        managers.append(EnvManager(name="venv", version="builtin", path="python -m venv"))
     except ImportError:
         pass
 
@@ -224,14 +220,10 @@ def detect_cuda_version() -> Optional[str]:
 
 
 def detect_gpus() -> list[GPUInfo]:
-    """Detect available NVIDIA GPUs."""
+    """Detect available NVIDIA GPUs, respecting CUDA_VISIBLE_DEVICES."""
     gpus = []
 
-    nvidia_smi = run_command([
-        "nvidia-smi",
-        "--query-gpu=index,name,memory.total",
-        "--format=csv,noheader,nounits"
-    ])
+    nvidia_smi = run_command(["nvidia-smi", "--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"])
 
     if nvidia_smi:
         for line in nvidia_smi.strip().split("\n"):
@@ -246,7 +238,52 @@ def detect_gpus() -> list[GPUInfo]:
                 except (ValueError, IndexError):
                     continue
 
+    # Filter by CUDA_VISIBLE_DEVICES if set
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible is not None:
+        if cuda_visible == "":
+            # Empty string means no GPUs visible
+            return []
+
+        try:
+            # Parse CUDA_VISIBLE_DEVICES (can be "0,1,2" or "0-3" etc.)
+            visible_indices = _parse_cuda_visible_devices(cuda_visible)
+            # Filter GPUs to only those in CUDA_VISIBLE_DEVICES
+            filtered_gpus = [gpu for gpu in gpus if gpu.index in visible_indices]
+            # Re-index GPUs to match CUDA's logical indexing (0, 1, 2, ...)
+            for i, gpu in enumerate(filtered_gpus):
+                # Keep original index in a comment, but CUDA sees them as 0,1,2...
+                gpu.index = i
+            return filtered_gpus
+        except ValueError:
+            # If parsing fails, return all GPUs as fallback
+            pass
+
     return gpus
+
+
+def _parse_cuda_visible_devices(cuda_visible: str) -> list[int]:
+    """Parse CUDA_VISIBLE_DEVICES string into list of GPU indices.
+
+    Supports formats like:
+    - "0,1,2,3" -> [0, 1, 2, 3]
+    - "0-3" -> [0, 1, 2, 3]
+    - "0,2-4,7" -> [0, 2, 3, 4, 7]
+    """
+    indices = []
+    parts = cuda_visible.split(",")
+
+    for part in parts:
+        part = part.strip()
+        if "-" in part:
+            # Range like "0-3"
+            start, end = part.split("-")
+            indices.extend(range(int(start), int(end) + 1))
+        else:
+            # Single index
+            indices.append(int(part))
+
+    return sorted(set(indices))  # Remove duplicates and sort
 
 
 def detect_cpu_info() -> CPUInfo:
@@ -381,9 +418,21 @@ def _parse_cpu_flags(flags: list[str]) -> list[str]:
             found.append(display_name)
 
     # Sort by importance for display
-    priority = ["AMX-INT8", "AMX-BF16", "AMX-FP16", "AMX-TILE",
-                "AVX512BF16", "AVX512VNNI", "AVX512F", "AVX512BW", "AVX512VL",
-                "AVX2", "AVX", "FMA", "SSE4.2"]
+    priority = [
+        "AMX-INT8",
+        "AMX-BF16",
+        "AMX-FP16",
+        "AMX-TILE",
+        "AVX512BF16",
+        "AVX512VNNI",
+        "AVX512F",
+        "AVX512BW",
+        "AVX512VL",
+        "AVX2",
+        "AVX",
+        "FMA",
+        "SSE4.2",
+    ]
     result = []
     for p in priority:
         if p in found:
@@ -525,6 +574,7 @@ def detect_ram_gb() -> float:
     # Fallback
     try:
         import psutil
+
         return round(psutil.virtual_memory().total / 1024 / 1024 / 1024, 1)
     except ImportError:
         return 0.0
@@ -545,6 +595,7 @@ def detect_available_ram_gb() -> float:
     # Fallback
     try:
         import psutil
+
         return round(psutil.virtual_memory().available / 1024 / 1024 / 1024, 1)
     except ImportError:
         return 0.0
@@ -554,6 +605,7 @@ def detect_disk_space_gb(path: str = "/") -> tuple[float, float]:
     """Detect disk space (available, total) in GB for the given path."""
     try:
         import shutil
+
         total, used, free = shutil.disk_usage(path)
         return round(free / 1024 / 1024 / 1024, 1), round(total / 1024 / 1024 / 1024, 1)
     except (OSError, IOError):
@@ -564,6 +616,7 @@ def get_installed_package_version(package_name: str) -> Optional[str]:
     """Get the version of an installed Python package."""
     try:
         from importlib.metadata import version
+
         return version(package_name)
     except Exception:
         return None
@@ -703,10 +756,7 @@ def scan_storage_locations(min_size_gb: float = 50.0) -> list[StorageLocation]:
             continue
 
     # Sort by available space descending, then by path
-    sorted_locations = sorted(
-        locations.values(),
-        key=lambda x: (-x.available_gb, x.path)
-    )
+    sorted_locations = sorted(locations.values(), key=lambda x: (-x.available_gb, x.path))
 
     # Filter to only writable locations
     return [loc for loc in sorted_locations if loc.is_writable]
@@ -726,11 +776,28 @@ def _get_mount_points() -> list[str]:
                         fs_type = parts[2] if len(parts) > 2 else ""
 
                         # Skip pseudo filesystems
-                        skip_fs = {"proc", "sysfs", "devpts", "tmpfs", "cgroup",
-                                   "cgroup2", "pstore", "securityfs", "debugfs",
-                                   "hugetlbfs", "mqueue", "fusectl", "configfs",
-                                   "devtmpfs", "efivarfs", "autofs", "binfmt_misc",
-                                   "overlay", "nsfs", "tracefs"}
+                        skip_fs = {
+                            "proc",
+                            "sysfs",
+                            "devpts",
+                            "tmpfs",
+                            "cgroup",
+                            "cgroup2",
+                            "pstore",
+                            "securityfs",
+                            "debugfs",
+                            "hugetlbfs",
+                            "mqueue",
+                            "fusectl",
+                            "configfs",
+                            "devtmpfs",
+                            "efivarfs",
+                            "autofs",
+                            "binfmt_misc",
+                            "overlay",
+                            "nsfs",
+                            "tracefs",
+                        }
                         if fs_type in skip_fs:
                             continue
 
@@ -833,10 +900,7 @@ def scan_local_models(search_paths: list[str], max_depth: int = 3) -> list[Local
 
 
 def _scan_directory_for_models(
-    directory: str,
-    models: dict[str, LocalModel],
-    current_depth: int,
-    max_depth: int
+    directory: str, models: dict[str, LocalModel], current_depth: int, max_depth: int
 ) -> None:
     """Recursively scan a directory for models."""
     if current_depth > max_depth:
@@ -878,8 +942,12 @@ def _detect_model_in_directory(directory: str, entries: list) -> Optional[LocalM
     elif has_config:
         # Config but no weights - might be incomplete
         # Check for other model-related files
-        model_files = {"model.safetensors.index.json", "pytorch_model.bin.index.json",
-                       "model.safetensors", "pytorch_model.bin"}
+        model_files = {
+            "model.safetensors.index.json",
+            "pytorch_model.bin.index.json",
+            "model.safetensors",
+            "pytorch_model.bin",
+        }
         if entry_names & model_files:
             model_type = "huggingface"
 
@@ -888,7 +956,7 @@ def _detect_model_in_directory(directory: str, entries: list) -> Optional[LocalM
 
     # Calculate directory size
     size_bytes = _get_directory_size(directory)
-    size_gb = size_bytes / (1024 ** 3)
+    size_gb = size_bytes / (1024**3)
 
     # Skip very small directories (likely incomplete or config-only)
     if size_gb < 0.1:

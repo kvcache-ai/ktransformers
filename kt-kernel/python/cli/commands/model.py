@@ -144,13 +144,15 @@ def download(
         for m in models:
             lang = get_lang()
             desc = m.description_zh if lang == "zh" and m.description_zh else m.description
-            model_dicts.append({
-                "name": m.name,
-                "hf_repo": m.hf_repo,
-                "type": m.type,
-                "gpu_vram_gb": m.gpu_vram_gb,
-                "cpu_ram_gb": m.cpu_ram_gb,
-            })
+            model_dicts.append(
+                {
+                    "name": m.name,
+                    "hf_repo": m.hf_repo,
+                    "type": m.type,
+                    "gpu_vram_gb": m.gpu_vram_gb,
+                    "cpu_ram_gb": m.cpu_ram_gb,
+                }
+            )
 
         print_model_table(model_dicts)
         console.print()
@@ -220,9 +222,11 @@ def download(
     print_step(t("download_starting"))
 
     cmd = [
-        "huggingface-cli", "download",
+        "huggingface-cli",
+        "download",
         hf_repo,
-        "--local-dir", str(download_path),
+        "--local-dir",
+        str(download_path),
     ]
 
     if resume:
@@ -274,28 +278,36 @@ def list_models(
             console.print()
             return
 
-        table = Table(title="Locally Downloaded Models", show_header=True)
-        table.add_column("Model", style="cyan")
-        table.add_column("Path", style="dim")
+        table = Table(title="Locally Downloaded Models", show_header=True, header_style="bold")
+        table.add_column("Model", style="cyan", no_wrap=True)
+        table.add_column("HuggingFace Repo", style="dim")
+        table.add_column("Status", justify="center")
+        table.add_column("Local Path", style="yellow")
 
         for model_info, model_path in local_models:
-            table.add_row(model_info.name, str(model_path))
+            table.add_row(model_info.name, model_info.hf_repo, "[green]✓[/green]", str(model_path))
 
         console.print(table)
     else:
         # Show all registered models
         all_models = registry.list_all()
+        local_models_dict = {m.name: p for m, p in registry.find_local_models()}
 
-        table = Table(title="Available Models", show_header=True)
-        table.add_column("Name", style="cyan")
+        table = Table(title="Available Models", show_header=True, header_style="bold")
+        table.add_column("Model", style="cyan", no_wrap=True)
         table.add_column("HuggingFace Repo", style="dim")
-        table.add_column("Status", style="green")
-
-        local_models = {m.name: p for m, p in registry.find_local_models()}
+        table.add_column("Status", justify="center")
+        table.add_column("Local Path", style="yellow")
 
         for model in all_models:
-            status = "✓ Local" if model.name in local_models else "Cloud"
-            table.add_row(model.name, model.hf_repo, status)
+            if model.name in local_models_dict:
+                status = "[green]✓[/green]"
+                local_path = str(local_models_dict[model.name])
+            else:
+                status = "[dim]-[/dim]"
+                local_path = "[dim]Not downloaded[/dim]"
+
+            table.add_row(model.name, model.hf_repo, status, local_path)
 
         console.print(table)
 
