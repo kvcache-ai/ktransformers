@@ -9,7 +9,7 @@ _kt_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Main commands
-    local commands="version install update run download quant bench microbench doctor model config sft"
+    local commands="version run chat quant bench microbench doctor model config sft"
 
     # Global options
     local global_opts="--help --version"
@@ -24,21 +24,13 @@ _kt_completion() {
         *)
             # Handle specific command options
             case "${COMP_WORDS[1]}" in
-                install)
-                    local install_opts="--source --branch --yes --force --skip-torch --editable --from-source --cpu-instruct --enable-amx --disable-amx --build-type --deps-only --docker --verify --no-verify --help"
-                    COMPREPLY=( $(compgen -W "${install_opts} inference sft full" -- ${cur}) )
-                    ;;
-                update)
-                    local update_opts="--source --pypi --yes --help"
-                    COMPREPLY=( $(compgen -W "${update_opts}" -- ${cur}) )
-                    ;;
                 run)
-                    local run_opts="--model --config --host --port --gpu-experts --cpu-threads --help"
+                    local run_opts="--host --port --gpu-experts --cpu-threads --tensor-parallel-size --kt-method --attention-backend --max-total-tokens --dry-run --help"
                     COMPREPLY=( $(compgen -W "${run_opts}" -- ${cur}) )
                     ;;
-                download)
-                    local download_opts="--output --resume --mirror --help"
-                    COMPREPLY=( $(compgen -W "${download_opts}" -- ${cur}) )
+                chat)
+                    local chat_opts="--host --port --model --temperature --max-tokens --system --save-history --no-save-history --history-file --stream --no-stream --help"
+                    COMPREPLY=( $(compgen -W "${chat_opts}" -- ${cur}) )
                     ;;
                 quant)
                     local quant_opts="--method --output --help"

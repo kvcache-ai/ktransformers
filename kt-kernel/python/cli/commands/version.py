@@ -19,6 +19,7 @@ def _get_sglang_info() -> str:
     """Get sglang version and installation source information."""
     try:
         import sglang
+
         version = getattr(sglang, "__version__", None)
 
         if not version:
@@ -85,12 +86,20 @@ def version(
     # Always show key packages with installation source
     console.print("\n[bold]Packages:[/bold]\n")
 
+    sglang_info = _get_sglang_info()
     key_packages = {
         t("version_kt_kernel"): get_installed_package_version("kt-kernel") or t("version_not_installed"),
-        t("version_sglang"): _get_sglang_info(),
+        t("version_sglang"): sglang_info,
     }
 
     print_version_table(key_packages)
+
+    # Show SGLang installation hint if not installed
+    if sglang_info == t("version_not_installed"):
+        from kt_kernel.cli.utils.sglang_checker import print_sglang_install_instructions
+
+        console.print()
+        print_sglang_install_instructions()
 
     if verbose:
         console.print("\n[bold]Additional Packages:[/bold]\n")

@@ -31,9 +31,9 @@ from kt_kernel.cli.utils.model_registry import MODEL_COMPUTE_FUNCTIONS, ModelInf
 
 
 def run(
-    model: str = typer.Argument(
-        ...,
-        help="Model name or path (e.g., deepseek-v3, qwen3-30b)",
+    model: Optional[str] = typer.Argument(
+        None,
+        help="Model name or path (e.g., deepseek-v3, qwen3-30b). If not specified, shows interactive selection.",
     ),
     host: str = typer.Option(
         None,
@@ -152,10 +152,27 @@ def run(
     ),
 ) -> None:
     """Start model inference server."""
+    # Check if SGLang is installed before proceeding
+    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation, print_sglang_install_instructions
+
+    sglang_info = check_sglang_installation()
+    if not sglang_info["installed"]:
+        console.print()
+        print_error(t("sglang_not_found"))
+        console.print()
+        print_sglang_install_instructions()
+        raise typer.Exit(1)
+
     settings = get_settings()
     registry = get_registry()
 
     console.print()
+
+    # If no model specified, show interactive selection
+    if model is None:
+        model = _interactive_model_selection(registry, settings)
+        if model is None:
+            raise typer.Exit(0)
 
     # Step 1: Detect hardware
     print_step(t("run_detecting_hardware"))
@@ -493,7 +510,11 @@ def run(
         sys.exit(process.returncode)
 
     except FileNotFoundError:
-        print_error("SGLang not found. Please install with 'kt install inference'.")
+        from kt_kernel.cli.utils.sglang_checker import print_sglang_install_instructions
+
+        print_error(t("sglang_not_found"))
+        console.print()
+        print_sglang_install_instructions()
         raise typer.Exit(1)
     except Exception as e:
         print_error(f"Failed to start server: {e}")
@@ -700,3 +721,97 @@ def _build_sglang_command(
         cmd.extend(extra_args)
 
     return cmd
+
+
+def _interactive_model_selection(registry, settings) -> Optional[str]:
+    """Show interactive model selection interface.
+
+    Returns:
+        Selected model name or None if cancelled.
+    """
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.prompt import Prompt
+
+    from kt_kernel.cli.i18n import get_lang
+
+    lang = get_lang()
+
+    # Find local models first
+    local_models = registry.find_local_models()
+
+    # Get all registered models
+    all_models = registry.list_all()
+
+    console.print()
+    console.print(
+        Panel.fit(
+            t("run_select_model_title"),
+            border_style="cyan",
+        )
+    )
+    console.print()
+
+    # Build choices list
+    choices = []
+    choice_map = {}  # index -> model name
+
+    # Section 1: Local models (downloaded)
+    if local_models:
+        console.print(f"[bold green]{t('run_local_models')}[/bold green]")
+        console.print()
+
+        for i, (model_info, path) in enumerate(local_models, 1):
+            desc = model_info.description_zh if lang == "zh" else model_info.description
+            short_desc = desc[:50] + "..." if len(desc) > 50 else desc
+            console.print(f"  [cyan][{i}][/cyan] [bold]{model_info.name}[/bold]")
+            console.print(f"      [dim]{short_desc}[/dim]")
+            console.print(f"      [dim]{path}[/dim]")
+            choices.append(str(i))
+            choice_map[str(i)] = model_info.name
+
+        console.print()
+
+    # Section 2: All registered models (for reference)
+    start_idx = len(local_models) + 1
+    console.print(f"[bold yellow]{t('run_registered_models')}[/bold yellow]")
+    console.print()
+
+    # Filter out already shown local models
+    local_model_names = {m.name for m, _ in local_models}
+
+    for i, model_info in enumerate(all_models, start_idx):
+        if model_info.name in local_model_names:
+            continue
+
+        desc = model_info.description_zh if lang == "zh" else model_info.description
+        short_desc = desc[:50] + "..." if len(desc) > 50 else desc
+        console.print(f"  [cyan][{i}][/cyan] [bold]{model_info.name}[/bold]")
+        console.print(f"      [dim]{short_desc}[/dim]")
+        console.print(f"      [dim]{model_info.hf_repo}[/dim]")
+        choices.append(str(i))
+        choice_map[str(i)] = model_info.name
+
+    console.print()
+
+    # Add cancel option
+    cancel_idx = str(len(choices) + 1)
+    console.print(f"  [cyan][{cancel_idx}][/cyan] [dim]{t('cancel')}[/dim]")
+    choices.append(cancel_idx)
+    console.print()
+
+    # Prompt for selection
+    try:
+        selection = Prompt.ask(
+            t("run_select_model_prompt"),
+            choices=choices,
+            default="1" if choices else cancel_idx,
+        )
+    except KeyboardInterrupt:
+        console.print()
+        return None
+
+    if selection == cancel_idx:
+        return None
+
+    return choice_map.get(selection)

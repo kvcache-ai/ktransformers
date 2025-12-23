@@ -464,8 +464,8 @@ def detect_memory_info() -> MemoryInfo:
     mem_type: Optional[str] = None
 
     if platform.system() == "Linux":
-        # Try dmidecode first (requires root, but may have cached data)
-        dmidecode_output = run_command(["sudo", "dmidecode", "-t", "memory"])
+        # Try dmidecode without sudo first (may work if user has permissions)
+        dmidecode_output = run_command(["dmidecode", "-t", "memory"])
         if dmidecode_output:
             frequency_mhz, mem_type, channels = _parse_dmidecode_memory(dmidecode_output)
 

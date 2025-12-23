@@ -3,10 +3,8 @@
 
 # Main commands
 complete -c kt -f -n "__fish_use_subcommand" -a "version" -d "Show version information"
-complete -c kt -f -n "__fish_use_subcommand" -a "install" -d "Install KTransformers and dependencies"
-complete -c kt -f -n "__fish_use_subcommand" -a "update" -d "Update KTransformers to the latest version"
 complete -c kt -f -n "__fish_use_subcommand" -a "run" -d "Start model inference server"
-complete -c kt -f -n "__fish_use_subcommand" -a "download" -d "Download model weights"
+complete -c kt -f -n "__fish_use_subcommand" -a "chat" -d "Interactive chat with running model"
 complete -c kt -f -n "__fish_use_subcommand" -a "quant" -d "Quantize model weights"
 complete -c kt -f -n "__fish_use_subcommand" -a "bench" -d "Run full benchmark"
 complete -c kt -f -n "__fish_use_subcommand" -a "microbench" -d "Run micro-benchmark"
@@ -19,41 +17,29 @@ complete -c kt -f -n "__fish_use_subcommand" -a "sft" -d "Fine-tuning with Llama
 complete -c kt -l help -d "Show help message"
 complete -c kt -l version -d "Show version"
 
-# Install command options
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l source -d "Install from source directory"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l branch -d "Git branch to use"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -s y -l yes -d "Skip confirmation prompts"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -s f -l force -d "Force reinstall"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l skip-torch -d "Skip PyTorch installation"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -s e -l editable -d "Install in editable mode"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l from-source -d "Build from source"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l cpu-instruct -d "CPU instruction set"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l enable-amx -d "Enable Intel AMX"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l disable-amx -d "Disable Intel AMX"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l build-type -d "Build type"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l deps-only -d "Install system dependencies only"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l docker -d "Show Docker installation guide"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l verify -d "Verify installation"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -l no-verify -d "Skip verification"
-complete -c kt -f -n "__fish_seen_subcommand_from install" -a "inference sft full"
-
-# Update command options
-complete -c kt -f -n "__fish_seen_subcommand_from update" -l source -d "Update from source directory"
-complete -c kt -f -n "__fish_seen_subcommand_from update" -l pypi -d "Update from PyPI"
-complete -c kt -f -n "__fish_seen_subcommand_from update" -s y -l yes -d "Skip confirmation prompts"
-
 # Run command options
-complete -c kt -f -n "__fish_seen_subcommand_from run" -l model -d "Model name or path"
-complete -c kt -f -n "__fish_seen_subcommand_from run" -l config -d "Config file path"
 complete -c kt -f -n "__fish_seen_subcommand_from run" -l host -d "Server host"
 complete -c kt -f -n "__fish_seen_subcommand_from run" -l port -d "Server port"
 complete -c kt -f -n "__fish_seen_subcommand_from run" -l gpu-experts -d "Number of GPU experts"
 complete -c kt -f -n "__fish_seen_subcommand_from run" -l cpu-threads -d "Number of CPU threads"
+complete -c kt -f -n "__fish_seen_subcommand_from run" -l tensor-parallel-size -d "Tensor parallel size"
+complete -c kt -f -n "__fish_seen_subcommand_from run" -l kt-method -d "KT method"
+complete -c kt -f -n "__fish_seen_subcommand_from run" -l attention-backend -d "Attention backend"
+complete -c kt -f -n "__fish_seen_subcommand_from run" -l max-total-tokens -d "Maximum total tokens"
+complete -c kt -f -n "__fish_seen_subcommand_from run" -l dry-run -d "Show command without executing"
 
-# Download command options
-complete -c kt -f -n "__fish_seen_subcommand_from download" -l output -d "Output directory"
-complete -c kt -f -n "__fish_seen_subcommand_from download" -l resume -d "Resume download"
-complete -c kt -f -n "__fish_seen_subcommand_from download" -l mirror -d "HuggingFace mirror"
+# Chat command options
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l host -d "Server host"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l port -d "Server port"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l model -d "Model name"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l temperature -d "Sampling temperature"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l max-tokens -d "Maximum tokens"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l system -d "System prompt"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l save-history -d "Save conversation history"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l no-save-history -d "Do not save history"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l history-file -d "History file path"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l stream -d "Enable streaming output"
+complete -c kt -f -n "__fish_seen_subcommand_from chat" -l no-stream -d "Disable streaming output"
 
 # Quant command options
 complete -c kt -f -n "__fish_seen_subcommand_from quant" -l method -d "Quantization method"

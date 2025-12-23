@@ -9,7 +9,7 @@ import sys
 import typer
 
 from kt_kernel.cli import __version__
-from kt_kernel.cli.commands import bench, chat, config, doctor, install, model, quant, run, sft, version
+from kt_kernel.cli.commands import bench, chat, config, doctor, model, quant, run, sft, version
 from kt_kernel.cli.i18n import t, set_lang
 
 # Create main app
@@ -23,8 +23,6 @@ app = typer.Typer(
 
 # Register commands
 app.command(name="version", help="Show version information")(version.version)
-app.command(name="install", help="Install KTransformers and dependencies")(install.install)
-app.command(name="update", help="Update KTransformers to the latest version")(install.update)
 app.command(name="run", help="Start model inference server")(run.run)
 app.command(name="chat", help="Interactive chat with running model")(chat.chat)
 app.command(name="quant", help="Quantize model weights")(quant.quant)
@@ -257,128 +255,6 @@ def _prompt_custom_path(console, settings) -> str:
                 console.print(f"[red]{t('setup_path_no_write')}[/red]")
 
 
-def _install_shell_completion_silent() -> tuple[bool, str]:
-    """Silently install shell completion for the current shell.
-
-    Returns:
-        Tuple of (success, shell_name)
-    """
-    import os
-    import shutil
-    from pathlib import Path
-
-    # Detect current shell
-    shell = os.environ.get("SHELL", "")
-    if "zsh" in shell:
-        shell_name = "zsh"
-    elif "fish" in shell:
-        shell_name = "fish"
-    elif "bash" in shell:
-        shell_name = "bash"
-    else:
-        # Default to bash
-        shell_name = "bash"
-
-    try:
-        # Get the static completion script path
-        cli_dir = Path(__file__).parent
-        completions_dir = cli_dir / "completions"
-
-        home = Path.home()
-
-        if shell_name == "bash":
-            src_file = completions_dir / "kt-completion.bash"
-            dest_dir = home / ".bash_completions"
-            dest_file = dest_dir / "kt.sh"
-        elif shell_name == "zsh":
-            src_file = completions_dir / "_kt"
-            dest_dir = home / ".zsh_completions"
-            dest_file = dest_dir / "_kt"
-        elif shell_name == "fish":
-            src_file = completions_dir / "kt.fish"
-            dest_dir = home / ".config" / "fish" / "completions"
-            dest_file = dest_dir / "kt.fish"
-        else:
-            return False, shell_name
-
-        # Create destination directory if it doesn't exist
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        # Copy the static completion script
-        if src_file.exists():
-            shutil.copy2(src_file, dest_file)
-            return True, shell_name
-        else:
-            return False, shell_name
-
-    except (OSError, IOError):
-        return False, shell_name
-
-
-def _auto_install_completion() -> None:
-    """Automatically install shell completion on first run."""
-    from kt_kernel.cli.config.settings import get_settings
-    from kt_kernel.cli.i18n import t
-    from rich.console import Console
-    from rich.panel import Panel
-    import os
-
-    settings = get_settings()
-
-    # Check if already installed
-    if settings.get("general._completion_installed", False):
-        return
-
-    # Try to install silently
-    success, shell_name = _install_shell_completion_silent()
-
-    # Mark as installed regardless of success (to avoid repeated attempts)
-    settings.set("general._completion_installed", True)
-
-    # Show activation message if successful and in interactive terminal
-    if success and sys.stdin.isatty():
-        console = Console(stderr=True)
-
-        # Determine the activation command based on shell
-        home = os.path.expanduser("~")
-        if shell_name == "bash":
-            completion_file = f"{home}/.bash_completions/kt.sh"
-            activate_cmd = f"source {completion_file}"
-        elif shell_name == "zsh":
-            # Try to find the actual completion file location
-            possible_paths = [
-                f"{home}/.zsh_completions/_kt",
-                f"{home}/.zfunc/_kt",
-            ]
-            completion_file = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    completion_file = path
-                    break
-            if completion_file:
-                activate_cmd = f"source {completion_file}"
-            else:
-                activate_cmd = "exec $SHELL"  # Fallback: restart shell
-        elif shell_name == "fish":
-            completion_file = f"{home}/.config/fish/completions/kt.fish"
-            activate_cmd = f"source {completion_file}"
-        else:
-            activate_cmd = "exec $SHELL"
-
-        console.print()
-        console.print(
-            Panel.fit(
-                f"[green]✓[/green] {t('completion_installed_for', shell=shell_name)}\n\n"
-                f"{t('completion_activate_now')}\n"
-                f"[yellow]{activate_cmd}[/yellow]\n\n"
-                f"[dim]{t('completion_next_session')}[/dim]",
-                title=f"[bold cyan]{t('completion_installed_title')}[/bold cyan]",
-                border_style="cyan",
-            )
-        )
-        console.print()
-
-
 def _apply_saved_language() -> None:
     """Apply the saved language setting."""
     from kt_kernel.cli.config.settings import get_settings
@@ -402,10 +278,6 @@ def main():
         if arg in skip_commands:
             should_check_first_run = False
             break
-
-    # Auto-install shell completion (silent, on first run only)
-    if should_check_first_run:
-        _auto_install_completion()
 
     # Check first run before applying saved language (to avoid creating config)
     if should_check_first_run and args:

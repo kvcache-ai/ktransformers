@@ -166,6 +166,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "run_model_not_found": "Model '{name}' not found. Run 'kt download' first.",
         "run_multiple_matches": "Multiple models found. Please select:",
         "run_select_model": "Select model",
+        "run_select_model_title": "Select a model to run",
+        "run_select_model_prompt": "Enter number",
+        "run_local_models": "Local Models (Downloaded)",
+        "run_registered_models": "Registered Models",
         # Download command
         "download_list_title": "Available Models",
         "download_searching": "Searching for model '{name}'...",
@@ -230,6 +234,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "completion_installed_for": "Shell completion installed for {shell}",
         "completion_activate_now": "To enable completion in this terminal session, run:",
         "completion_next_session": "Completion will be automatically enabled in new terminal sessions.",
+        # SGLang
+        "sglang_not_found": "SGLang not found",
+        "sglang_pypi_warning": "SGLang from PyPI may not be compatible with kt-kernel",
+        "sglang_pypi_hint": 'SGLang from PyPI may not be compatible. Install from source: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        "sglang_install_hint": 'Install SGLang: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        "sglang_recommend_source": 'Recommend reinstalling from source: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        # Chat
+        "chat_proxy_detected": "Proxy detected in environment",
+        "chat_proxy_confirm": "Use proxy for connection?",
+        "chat_proxy_disabled": "Proxy disabled for this session",
     },
     "zh": {
         # General
@@ -387,6 +401,10 @@ MESSAGES: dict[str, dict[str, str]] = {
         "run_model_not_found": "未找到模型 '{name}'。请先运行 'kt download'。",
         "run_multiple_matches": "找到多个匹配的模型，请选择:",
         "run_select_model": "选择模型",
+        "run_select_model_title": "选择要运行的模型",
+        "run_select_model_prompt": "输入编号",
+        "run_local_models": "本地模型 (已下载)",
+        "run_registered_models": "注册模型",
         # Download command
         "download_list_title": "可用模型",
         "download_searching": "正在搜索模型 '{name}'...",
@@ -451,6 +469,16 @@ MESSAGES: dict[str, dict[str, str]] = {
         "completion_installed_for": "已为 {shell} 安装命令补全",
         "completion_activate_now": "在当前终端会话中启用补全，请运行：",
         "completion_next_session": "新的终端会话将自动启用补全。",
+        # SGLang
+        "sglang_not_found": "未找到 SGLang",
+        "sglang_pypi_warning": "PyPI 版本的 SGLang 可能与 kt-kernel 不兼容",
+        "sglang_pypi_hint": 'PyPI 版本可能不兼容。从源码安装: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        "sglang_install_hint": '安装 SGLang: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        "sglang_recommend_source": '建议从源码重新安装: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"',
+        # Chat
+        "chat_proxy_detected": "检测到环境中存在代理设置",
+        "chat_proxy_confirm": "是否使用代理连接？",
+        "chat_proxy_disabled": "已在本次会话中禁用代理",
     },
 }
 

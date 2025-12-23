@@ -6,10 +6,8 @@ _kt() {
     local -a commands
     commands=(
         'version:Show version information'
-        'install:Install KTransformers and dependencies'
-        'update:Update KTransformers to the latest version'
         'run:Start model inference server'
-        'download:Download model weights'
+        'chat:Interactive chat with running model'
         'quant:Quantize model weights'
         'bench:Run full benchmark'
         'microbench:Run micro-benchmark'
@@ -19,42 +17,33 @@ _kt() {
         'sft:Fine-tuning with LlamaFactory'
     )
 
-    local -a install_opts
-    install_opts=(
-        '--source[Install from source directory]:path:_files -/'
-        '--branch[Git branch to use]:branch:'
-        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]'
-        '(-f --force)'{-f,--force}'[Force reinstall]'
-        '--skip-torch[Skip PyTorch installation]'
-        '(-e --editable)'{-e,--editable}'[Install in editable mode]'
-        '--from-source[Build from source]'
-        '--cpu-instruct[CPU instruction set]:instruct:(NATIVE AVX512 AVX2 FANCY)'
-        '--enable-amx[Enable Intel AMX]'
-        '--disable-amx[Disable Intel AMX]'
-        '--build-type[Build type]:type:(Release Debug RelWithDebInfo)'
-        '--deps-only[Install system dependencies only]'
-        '--docker[Show Docker installation guide]'
-        '--verify[Verify installation]'
-        '--no-verify[Skip verification]'
-        '--help[Show help message]'
-    )
-
-    local -a update_opts
-    update_opts=(
-        '--source[Update from source directory]:path:_files -/'
-        '--pypi[Update from PyPI]'
-        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]'
-        '--help[Show help message]'
-    )
-
     local -a run_opts
     run_opts=(
-        '--model[Model name or path]:model:'
-        '--config[Config file path]:path:_files'
         '--host[Server host]:host:'
         '--port[Server port]:port:'
         '--gpu-experts[Number of GPU experts]:count:'
         '--cpu-threads[Number of CPU threads]:count:'
+        '--tensor-parallel-size[Tensor parallel size]:size:'
+        '--kt-method[KT method]:method:(AMXINT4 FP8 RAWINT4)'
+        '--attention-backend[Attention backend]:backend:(triton flashinfer)'
+        '--max-total-tokens[Maximum total tokens]:tokens:'
+        '--dry-run[Show command without executing]'
+        '--help[Show help message]'
+    )
+
+    local -a chat_opts
+    chat_opts=(
+        '--host[Server host]:host:'
+        '--port[Server port]:port:'
+        '--model[Model name]:model:'
+        '--temperature[Sampling temperature]:temp:'
+        '--max-tokens[Maximum tokens]:tokens:'
+        '--system[System prompt]:prompt:'
+        '--save-history[Save conversation history]'
+        '--no-save-history[Do not save history]'
+        '--history-file[History file path]:path:_files'
+        '--stream[Enable streaming output]'
+        '--no-stream[Disable streaming output]'
         '--help[Show help message]'
     )
 
@@ -98,23 +87,12 @@ _kt() {
             ;;
         args)
             case $words[1] in
-                install)
-                    _arguments $install_opts \
-                        '2:mode:(inference sft full)'
-                    ;;
-                update)
-                    _arguments $update_opts
-                    ;;
                 run)
-                    _arguments $run_opts
-                    ;;
-                download)
-                    _arguments \
-                        '--output[Output directory]:path:_files -/' \
-                        '--resume[Resume download]' \
-                        '--mirror[HuggingFace mirror]:url:' \
-                        '--help[Show help message]' \
+                    _arguments $run_opts \
                         '1:model:'
+                    ;;
+                chat)
+                    _arguments $chat_opts
                     ;;
                 quant)
                     _arguments \

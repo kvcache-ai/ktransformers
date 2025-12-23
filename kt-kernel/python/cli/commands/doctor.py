@@ -41,51 +41,61 @@ def doctor(
     # 1. Python version
     python_version = platform.python_version()
     python_ok = _check_python_version(python_version)
-    checks.append({
-        "name": t("doctor_check_python"),
-        "status": "ok" if python_ok else "error",
-        "value": python_version,
-        "hint": "Python 3.10+ required" if not python_ok else None,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_python"),
+            "status": "ok" if python_ok else "error",
+            "value": python_version,
+            "hint": "Python 3.10+ required" if not python_ok else None,
+        }
+    )
     if not python_ok:
         issues_found = True
 
     # 2. CUDA availability
     cuda_version = detect_cuda_version()
-    checks.append({
-        "name": t("doctor_check_cuda"),
-        "status": "ok" if cuda_version else "warning",
-        "value": cuda_version or t("version_cuda_not_found"),
-        "hint": "CUDA is optional but recommended for GPU acceleration" if not cuda_version else None,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_cuda"),
+            "status": "ok" if cuda_version else "warning",
+            "value": cuda_version or t("version_cuda_not_found"),
+            "hint": "CUDA is optional but recommended for GPU acceleration" if not cuda_version else None,
+        }
+    )
 
     # 3. GPU detection
     gpus = detect_gpus()
     if gpus:
         gpu_names = ", ".join(g.name for g in gpus)
         total_vram = sum(g.vram_gb for g in gpus)
-        checks.append({
-            "name": t("doctor_check_gpu"),
-            "status": "ok",
-            "value": t("doctor_gpu_found", count=len(gpus), names=gpu_names),
-            "hint": f"Total VRAM: {total_vram}GB",
-        })
+        checks.append(
+            {
+                "name": t("doctor_check_gpu"),
+                "status": "ok",
+                "value": t("doctor_gpu_found", count=len(gpus), names=gpu_names),
+                "hint": f"Total VRAM: {total_vram}GB",
+            }
+        )
     else:
-        checks.append({
-            "name": t("doctor_check_gpu"),
-            "status": "warning",
-            "value": t("doctor_gpu_not_found"),
-            "hint": "GPU recommended for best performance",
-        })
+        checks.append(
+            {
+                "name": t("doctor_check_gpu"),
+                "status": "warning",
+                "value": t("doctor_gpu_not_found"),
+                "hint": "GPU recommended for best performance",
+            }
+        )
 
     # 4. CPU information
     cpu_info = detect_cpu_info()
-    checks.append({
-        "name": t("doctor_check_cpu"),
-        "status": "ok",
-        "value": t("doctor_cpu_info", name=cpu_info.name, cores=cpu_info.cores, threads=cpu_info.threads),
-        "hint": None,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_cpu"),
+            "status": "ok",
+            "value": t("doctor_cpu_info", name=cpu_info.name, cores=cpu_info.cores, threads=cpu_info.threads),
+            "hint": None,
+        }
+    )
 
     # 5. CPU instruction sets (critical for kt-kernel)
     isa_list = cpu_info.instruction_sets
@@ -116,12 +126,14 @@ def doctor(
     if len(isa_list) > 8:
         isa_display += f" (+{len(isa_list) - 8} more)"
 
-    checks.append({
-        "name": t("doctor_check_cpu_isa"),
-        "status": isa_status,
-        "value": isa_display if isa_display else "None detected",
-        "hint": isa_hint,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_cpu_isa"),
+            "status": isa_status,
+            "value": isa_display if isa_display else "None detected",
+            "hint": isa_hint,
+        }
+    )
 
     # 6. NUMA topology
     numa_detail = []
@@ -136,33 +148,37 @@ def doctor(
     if verbose and numa_detail:
         numa_value += " (" + "; ".join(numa_detail) + ")"
 
-    checks.append({
-        "name": t("doctor_check_numa"),
-        "status": "ok",
-        "value": numa_value,
-        "hint": f"{cpu_info.threads // cpu_info.numa_nodes} threads per node" if cpu_info.numa_nodes > 1 else None,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_numa"),
+            "status": "ok",
+            "value": numa_value,
+            "hint": f"{cpu_info.threads // cpu_info.numa_nodes} threads per node" if cpu_info.numa_nodes > 1 else None,
+        }
+    )
 
     # 7. System memory (with frequency if available)
     mem_info = detect_memory_info()
     if mem_info.frequency_mhz and mem_info.type:
-        mem_value = t("doctor_memory_freq",
-                      available=f"{mem_info.available_gb}GB",
-                      total=f"{mem_info.total_gb}GB",
-                      freq=mem_info.frequency_mhz,
-                      type=mem_info.type)
+        mem_value = t(
+            "doctor_memory_freq",
+            available=f"{mem_info.available_gb}GB",
+            total=f"{mem_info.total_gb}GB",
+            freq=mem_info.frequency_mhz,
+            type=mem_info.type,
+        )
     else:
-        mem_value = t("doctor_memory_info",
-                      available=f"{mem_info.available_gb}GB",
-                      total=f"{mem_info.total_gb}GB")
+        mem_value = t("doctor_memory_info", available=f"{mem_info.available_gb}GB", total=f"{mem_info.total_gb}GB")
 
     ram_ok = mem_info.total_gb >= 32
-    checks.append({
-        "name": t("doctor_check_memory"),
-        "status": "ok" if ram_ok else "warning",
-        "value": mem_value,
-        "hint": "32GB+ RAM recommended for large models" if not ram_ok else None,
-    })
+    checks.append(
+        {
+            "name": t("doctor_check_memory"),
+            "status": "ok" if ram_ok else "warning",
+            "value": mem_value,
+            "hint": "32GB+ RAM recommended for large models" if not ram_ok else None,
+        }
+    )
 
     # 8. Disk space - check all model paths
     settings = get_settings()
@@ -176,12 +192,14 @@ def doctor(
         # For multiple paths, add index to name
         path_label = f"Model Path {i+1}" if len(model_paths) > 1 else t("doctor_check_disk")
 
-        checks.append({
-            "name": path_label,
-            "status": "ok" if disk_ok else "warning",
-            "value": t("doctor_disk_info", available=f"{available_disk}GB", path=str(disk_path)),
-            "hint": "100GB+ free space recommended for model storage" if not disk_ok else None,
-        })
+        checks.append(
+            {
+                "name": path_label,
+                "status": "ok" if disk_ok else "warning",
+                "value": t("doctor_disk_info", available=f"{available_disk}GB", path=str(disk_path)),
+                "hint": "100GB+ free space recommended for model storage" if not disk_ok else None,
+            }
+        )
 
     # 6. Required packages
     packages = [
@@ -204,16 +222,19 @@ def doctor(
             package_issues.append((pkg_name, t("version_not_installed"), "warning"))
 
     if verbose:
-        checks.append({
-            "name": t("doctor_check_packages"),
-            "status": "ok" if not any(p[2] == "error" for p in package_issues) else "error",
-            "value": f"{sum(1 for p in package_issues if p[2] == 'ok')}/{len(package_issues)} installed",
-            "packages": package_issues,
-        })
+        checks.append(
+            {
+                "name": t("doctor_check_packages"),
+                "status": "ok" if not any(p[2] == "error" for p in package_issues) else "error",
+                "value": f"{sum(1 for p in package_issues if p[2] == 'ok')}/{len(package_issues)} installed",
+                "packages": package_issues,
+            }
+        )
 
     # 7. SGLang installation source check
-    from kt_kernel.cli.commands.install import _check_sglang_installation
-    sglang_info = _check_sglang_installation()
+    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation
+
+    sglang_info = check_sglang_installation()
 
     if sglang_info["installed"]:
         if sglang_info["from_source"]:
@@ -230,18 +251,20 @@ def doctor(
         else:
             sglang_source_value = "PyPI (not recommended)"
             sglang_source_status = "warning"
-            sglang_source_hint = "SGLang from PyPI may not be compatible. Reinstall with: kt install"
+            sglang_source_hint = t("sglang_pypi_hint")
     else:
         sglang_source_value = "Not installed"
         sglang_source_status = "warning"
-        sglang_source_hint = "Install with: kt install"
+        sglang_source_hint = t("sglang_install_hint")
 
-    checks.append({
-        "name": "SGLang Source",
-        "status": sglang_source_status,
-        "value": sglang_source_value,
-        "hint": sglang_source_hint,
-    })
+    checks.append(
+        {
+            "name": "SGLang Source",
+            "status": sglang_source_status,
+            "value": sglang_source_value,
+            "hint": sglang_source_hint,
+        }
+    )
 
     # 8. Environment managers
     env_managers = detect_env_managers()
@@ -250,15 +273,24 @@ def doctor(
     if docker:
         env_list.append(f"docker {docker.version}")
 
-    checks.append({
-        "name": "Environment Managers",
-        "status": "ok" if env_list else "warning",
-        "value": ", ".join(env_list) if env_list else "None found",
-        "hint": "conda or docker recommended for installation" if not env_list else None,
-    })
+    checks.append(
+        {
+            "name": "Environment Managers",
+            "status": "ok" if env_list else "warning",
+            "value": ", ".join(env_list) if env_list else "None found",
+            "hint": "conda or docker recommended for installation" if not env_list else None,
+        }
+    )
 
     # Display results
     _display_results(checks, verbose)
+
+    # Show SGLang installation instructions if not installed
+    if not sglang_info["installed"]:
+        from kt_kernel.cli.utils.sglang_checker import print_sglang_install_instructions
+
+        console.print()
+        print_sglang_install_instructions()
 
     # Summary
     console.print()
