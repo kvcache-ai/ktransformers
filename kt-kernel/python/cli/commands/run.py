@@ -27,7 +27,7 @@ from kt_kernel.cli.utils.console import (
     prompt_choice,
 )
 from kt_kernel.cli.utils.environment import detect_cpu_info, detect_gpus, detect_ram_gb
-from kt_kernel.cli.utils.model_registry import ModelInfo, get_registry
+from kt_kernel.cli.utils.model_registry import MODEL_COMPUTE_FUNCTIONS, ModelInfo, get_registry
 
 
 def run(
@@ -284,17 +284,34 @@ def run(
     # Get defaults from model info if available
     model_defaults = model_info.default_params if model_info else {}
 
-    # CPU/GPU configuration
-    final_gpu_experts = (
-        gpu_experts or model_defaults.get("kt-num-gpu-experts") or settings.get("inference.gpu_experts", 1)
-    )
-    final_cpu_threads = cpu_threads or settings.get("inference.cpu_threads", 0)
-    final_numa_nodes = numa_nodes or settings.get("inference.numa_nodes", 0)
+    # Determine tensor parallel size first (needed for GPU expert calculation)
     final_tensor_parallel_size = (
         tensor_parallel_size
         or model_defaults.get("tensor-parallel-size")
         or settings.get("inference.tensor_parallel_size", 1)
     )
+
+    # CPU/GPU configuration with smart defaults
+    # kt-cpuinfer: default to 80% of CPU cores
+    final_cpu_threads = cpu_threads or model_defaults.get("kt-cpuinfer") or settings.get("inference.cpu_threads") or int(cpu.cores * 0.8)
+
+    # kt-threadpool-count: default to NUMA node count
+    final_numa_nodes = numa_nodes or model_defaults.get("kt-threadpool-count") or settings.get("inference.numa_nodes") or cpu.numa_nodes
+
+    # kt-num-gpu-experts: use model-specific computation if available and not explicitly set
+    if gpu_experts is not None:
+        # User explicitly set it
+        final_gpu_experts = gpu_experts
+    elif model_info and model_info.name in MODEL_COMPUTE_FUNCTIONS and gpus:
+        # Use model-specific computation function (only if GPUs detected)
+        vram_per_gpu = gpus[0].vram_gb
+        compute_func = MODEL_COMPUTE_FUNCTIONS[model_info.name]
+        final_gpu_experts = compute_func(final_tensor_parallel_size, vram_per_gpu)
+        console.print()
+        print_info(f"Auto-computed kt-num-gpu-experts: {final_gpu_experts} (TP={final_tensor_parallel_size}, VRAM={vram_per_gpu}GB per GPU)")
+    else:
+        # Fall back to defaults
+        final_gpu_experts = model_defaults.get("kt-num-gpu-experts") or settings.get("inference.gpu_experts", 1)
 
     # KT-kernel options
     final_kt_method = kt_method or model_defaults.get("kt-method") or settings.get("inference.kt_method", "AMXINT4")
@@ -342,12 +359,6 @@ def run(
         final_disable_shared_experts_fusion = model_defaults["disable-shared-experts-fusion"]
     else:
         final_disable_shared_experts_fusion = settings.get("inference.disable_shared_experts_fusion", False)
-
-    # Auto-detect if not specified
-    if final_cpu_threads == 0:
-        final_cpu_threads = cpu.cores
-    if final_numa_nodes == 0:
-        final_numa_nodes = cpu.numa_nodes
 
     # Pass all model default params to handle any extra parameters
     extra_params = model_defaults if model_info else {}

@@ -7,7 +7,7 @@ Provides a registry of supported models with fuzzy matching capabilities.
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -169,9 +169,6 @@ BUILTIN_MODELS: list[ModelInfo] = [
         gpu_vram_gb=80,  # Example: 4 GPUs with 20GB each
         cpu_ram_gb=400,
         default_params={
-            "kt-num-gpu-experts": 60,
-            "kt-cpuinfer" : 110,
-            "kt-threadpool-count": 2,
             "kt-method": "FP8",
             "kt-gpu-prefill-token-threshold": 4096,
             "attention-backend": "flashinfer",
@@ -367,3 +364,127 @@ def get_registry() -> ModelRegistry:
     if _registry is None:
         _registry = ModelRegistry()
     return _registry
+
+
+# ============================================================================
+# Model-specific parameter computation functions
+# ============================================================================
+
+
+def compute_deepseek_v3_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """
+    Compute kt-num-gpu-experts for DeepSeek V3 based on available GPU memory.
+
+    Args:
+        tensor_parallel_size: Number of GPUs (tensor parallel size)
+        vram_per_gpu_gb: VRAM per GPU in GB
+
+    Returns:
+        Number of GPU experts per layer
+    """
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    # More VRAM = more experts can fit on GPU
+    if total_vram >= 160:  # 4x 40GB or 2x 80GB
+        return 2
+    elif total_vram >= 80:  # 1x 80GB or 4x 20GB
+        return 1
+    else:  # Limited VRAM
+        return 1
+
+
+def compute_deepseek_v2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for DeepSeek V2."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 80:
+        return 4
+    elif total_vram >= 48:
+        return 2
+    else:
+        return 2
+
+
+def compute_qwen3_30b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Qwen3-30B."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 48:
+        return 4
+    elif total_vram >= 24:
+        return 2
+    else:
+        return 2
+
+
+def compute_qwen25_57b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Qwen2.5-57B."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 80:
+        return 4
+    elif total_vram >= 48:
+        return 2
+    else:
+        return 2
+
+
+def compute_kimi_k2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Kimi K2."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 160:
+        return 2
+    elif total_vram >= 80:
+        return 1
+    else:
+        return 1
+
+
+def compute_mixtral_8x7b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Mixtral 8x7B."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 48:
+        return 4
+    elif total_vram >= 24:
+        return 2
+    else:
+        return 2
+
+
+def compute_mixtral_8x22b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Mixtral 8x22B."""
+    total_vram = tensor_parallel_size * vram_per_gpu_gb
+
+    if total_vram >= 160:
+        return 2
+    elif total_vram >= 80:
+        return 1
+    else:
+        return 1
+
+
+def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for MiniMax M2."""
+    per_gpu_gb = 16
+    if vram_per_gpu_gb < per_gpu_gb:
+        return int(0)
+    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
+
+    return total_vram // 1
+
+
+# Model name to computation function mapping
+MODEL_COMPUTE_FUNCTIONS: dict[str, Callable[[int, float], int]] = {
+    "DeepSeek-V3": compute_deepseek_v3_gpu_experts,
+    "DeepSeek-V3.2": compute_deepseek_v3_gpu_experts,  # Same as V3
+    "DeepSeek-V2": compute_deepseek_v2_gpu_experts,
+    "DeepSeek-V2.5": compute_deepseek_v2_gpu_experts,  # Same as V2
+    "Qwen3-30B-A3B": compute_qwen3_30b_gpu_experts,
+    "Qwen2.5-57B-A14B": compute_qwen25_57b_gpu_experts,
+    "Kimi-K2": compute_kimi_k2_gpu_experts,
+    "Mixtral-8x7B": compute_mixtral_8x7b_gpu_experts,
+    "Mixtral-8x22B": compute_mixtral_8x22b_gpu_experts,
+    "MiniMax-M2": compute_minimax_m2_gpu_experts,
+}
