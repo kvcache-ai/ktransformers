@@ -427,6 +427,14 @@ def run(
     # Execute with prepared environment variables
     # Don't print "Server started" or API info here - let sglang's logs speak for themselves
     # The actual startup takes time and these messages are misleading
+
+    # Print the command being executed
+    console.print()
+    console.print("[bold]Launching server with command:[/bold]")
+    console.print()
+    console.print(f"  [dim]{' '.join(cmd)}[/dim]")
+    console.print()
+
     try:
         # Execute directly without intercepting output or signals
         # This allows direct output to terminal and Ctrl+C to work naturally
@@ -607,11 +615,20 @@ def _build_sglang_command(
     if extra_model_params:
         # List of parameters already handled above
         handled_params = {
-            "kt-num-gpu-experts", "kt-cpuinfer", "kt-threadpool-count", "kt-method",
-            "kt-gpu-prefill-token-threshold", "attention-backend", "tensor-parallel-size",
-            "max-total-tokens", "max-running-requests", "chunked-prefill-size",
-            "mem-fraction-static", "watchdog-timeout", "served-model-name",
-            "disable-shared-experts-fusion"
+            "kt-num-gpu-experts",
+            "kt-cpuinfer",
+            "kt-threadpool-count",
+            "kt-method",
+            "kt-gpu-prefill-token-threshold",
+            "attention-backend",
+            "tensor-parallel-size",
+            "max-total-tokens",
+            "max-running-requests",
+            "chunked-prefill-size",
+            "mem-fraction-static",
+            "watchdog-timeout",
+            "served-model-name",
+            "disable-shared-experts-fusion",
         }
 
         for key, value in extra_model_params.items():
