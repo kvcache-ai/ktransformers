@@ -27,33 +27,30 @@ class ModelInfo:
     default_params: dict = field(default_factory=dict)
     description: str = ""
     description_zh: str = ""
+    max_tensor_parallel_size: Optional[int] = None  # Maximum tensor parallel size for this model
 
 
 # Built-in model registry
 BUILTIN_MODELS: list[ModelInfo] = [
     ModelInfo(
-        name="DeepSeek-V3",
-        hf_repo="deepseek-ai/DeepSeek-V3",
-        aliases=["deepseek-v3", "dsv3", "deepseek3"],
+        name="DeepSeek-V3-0324",
+        hf_repo="deepseek-ai/DeepSeek-V3-0324",
+        aliases=["deepseek-v3-0324", "deepseek-v3", "dsv3", "deepseek3", "v3-0324"],
         type="moe",
-        gpu_vram_gb=27,
-        cpu_ram_gb=350,
         default_params={
             "kt-num-gpu-experts": 1,
             "attention-backend": "triton",
             "disable-shared-experts-fusion": True,
             "kt-method": "AMXINT4",
         },
-        description="DeepSeek V3 671B MoE model",
-        description_zh="DeepSeek V3 671B MoE 模型",
+        description="DeepSeek V3-0324 685B MoE model (March 2025, improved benchmarks)",
+        description_zh="DeepSeek V3-0324 685B MoE 模型（2025年3月，改进的基准测试）",
     ),
     ModelInfo(
         name="DeepSeek-V3.2",
         hf_repo="deepseek-ai/DeepSeek-V3.2",
         aliases=["deepseek-v3.2", "dsv3.2", "deepseek3.2", "v3.2"],
         type="moe",
-        gpu_vram_gb=27,
-        cpu_ram_gb=350,
         default_params={
             "kt-num-gpu-experts": 1,
             "attention-backend": "triton",
@@ -64,116 +61,41 @@ BUILTIN_MODELS: list[ModelInfo] = [
         description_zh="DeepSeek V3.2 671B MoE 模型（最新）",
     ),
     ModelInfo(
-        name="DeepSeek-V2",
-        hf_repo="deepseek-ai/DeepSeek-V2",
-        aliases=["deepseek-v2", "dsv2", "deepseek2"],
+        name="DeepSeek-R1-0528",
+        hf_repo="deepseek-ai/DeepSeek-R1-0528",
+        aliases=["deepseek-r1-0528", "deepseek-r1", "dsr1", "r1", "r1-0528"],
         type="moe",
-        gpu_vram_gb=16,
-        cpu_ram_gb=128,
         default_params={
-            "kt-num-gpu-experts": 2,
+            "kt-num-gpu-experts": 1,
             "attention-backend": "triton",
+            "disable-shared-experts-fusion": True,
+            "kt-method": "AMXINT4",
         },
-        description="DeepSeek V2 236B MoE model",
-        description_zh="DeepSeek V2 236B MoE 模型",
+        description="DeepSeek R1-0528 reasoning model (May 2025, improved reasoning depth)",
+        description_zh="DeepSeek R1-0528 推理模型（2025年5月，改进的推理深度）",
     ),
     ModelInfo(
-        name="DeepSeek-V2.5",
-        hf_repo="deepseek-ai/DeepSeek-V2.5",
-        aliases=["deepseek-v2.5", "dsv2.5", "deepseek2.5"],
+        name="Kimi-K2-Thinking",
+        hf_repo="moonshotai/Kimi-K2-Thinking",
+        aliases=["kimi-k2-thinking", "kimi-thinking", "k2-thinking", "kimi", "k2"],
         type="moe",
-        gpu_vram_gb=16,
-        cpu_ram_gb=128,
-        default_params={
-            "kt-num-gpu-experts": 2,
-            "attention-backend": "triton",
-        },
-        description="DeepSeek V2.5 236B MoE model",
-        description_zh="DeepSeek V2.5 236B MoE 模型",
-    ),
-    ModelInfo(
-        name="Qwen3-30B-A3B",
-        hf_repo="Qwen/Qwen3-30B-A3B",
-        aliases=["qwen3-30b-a3b", "qwen3-30b", "qwen3-moe", "qwen3"],
-        type="moe",
-        gpu_vram_gb=12,
-        cpu_ram_gb=64,
-        default_params={
-            "kt-num-gpu-experts": 2,
-            "attention-backend": "triton",
-        },
-        description="Qwen3 30B MoE model with 3B active parameters",
-        description_zh="Qwen3 30B MoE 模型，3B 活跃参数",
-    ),
-    ModelInfo(
-        name="Qwen2.5-57B-A14B",
-        hf_repo="Qwen/Qwen2.5-57B-A14B",
-        aliases=["qwen2.5-57b-a14b", "qwen2.5-57b", "qwen2.5-moe"],
-        type="moe",
-        gpu_vram_gb=16,
-        cpu_ram_gb=128,
-        default_params={
-            "kt-num-gpu-experts": 2,
-            "attention-backend": "triton",
-        },
-        description="Qwen2.5 57B MoE model with 14B active parameters",
-        description_zh="Qwen2.5 57B MoE 模型，14B 活跃参数",
-    ),
-    ModelInfo(
-        name="Kimi-K2",
-        hf_repo="moonshotai/Kimi-K2",
-        aliases=["kimi-k2", "kimi", "k2"],
-        type="moe",
-        gpu_vram_gb=24,
-        cpu_ram_gb=256,
         default_params={
             "kt-num-gpu-experts": 1,
             "attention-backend": "triton",
         },
-        description="Moonshot Kimi K2 MoE model",
-        description_zh="月之暗面 Kimi K2 MoE 模型",
-    ),
-    ModelInfo(
-        name="Mixtral-8x7B",
-        hf_repo="mistralai/Mixtral-8x7B-v0.1",
-        aliases=["mixtral-8x7b", "mixtral", "mixtral-moe"],
-        type="moe",
-        gpu_vram_gb=12,
-        cpu_ram_gb=48,
-        default_params={
-            "kt-num-gpu-experts": 2,
-            "attention-backend": "triton",
-        },
-        description="Mistral Mixtral 8x7B MoE model",
-        description_zh="Mistral Mixtral 8x7B MoE 模型",
-    ),
-    ModelInfo(
-        name="Mixtral-8x22B",
-        hf_repo="mistralai/Mixtral-8x22B-v0.1",
-        aliases=["mixtral-8x22b", "mixtral-22b"],
-        type="moe",
-        gpu_vram_gb=24,
-        cpu_ram_gb=176,
-        default_params={
-            "kt-num-gpu-experts": 1,
-            "attention-backend": "triton",
-        },
-        description="Mistral Mixtral 8x22B MoE model",
-        description_zh="Mistral Mixtral 8x22B MoE 模型",
+        description="Moonshot Kimi K2 Thinking MoE model",
+        description_zh="月之暗面 Kimi K2 Thinking MoE 模型",
     ),
     ModelInfo(
         name="MiniMax-M2",
         hf_repo="MiniMaxAI/MiniMax-M2",
-        aliases=["minimax-m2", "minimax", "m2"],
+        aliases=["minimax-m2", "m2"],
         type="moe",
-        gpu_vram_gb=80,  # Example: 4 GPUs with 20GB each
-        cpu_ram_gb=400,
         default_params={
             "kt-method": "FP8",
             "kt-gpu-prefill-token-threshold": 4096,
             "attention-backend": "flashinfer",
             "fp8-gemm-backend": "triton",
-            "tensor-parallel-size": 4,
             "max-total-tokens": 100000,
             "max-running-requests": 16,
             "chunked-prefill-size": 32768,
@@ -182,10 +104,35 @@ BUILTIN_MODELS: list[ModelInfo] = [
             "served-model-name": "MiniMax-M2",
             "disable-shared-experts-fusion": True,
             "tool-call-parser": "minimax-m2",
-            "reasoning-parser":"minimax-append-think"
+            "reasoning-parser": "minimax-append-think"
         },
-        description="MiniMax M2 MoE model (example configuration)",
-        description_zh="MiniMax M2 MoE 模型（示例配置）",
+        description="MiniMax M2 MoE model",
+        description_zh="MiniMax M2 MoE 模型",
+        max_tensor_parallel_size=4,  # M2 only supports up to 4-way tensor parallelism
+    ),
+    ModelInfo(
+        name="MiniMax-M2.1",
+        hf_repo="MiniMaxAI/MiniMax-M2.1",
+        aliases=["minimax-m2.1", "m2.1"],
+        type="moe",
+        default_params={
+            "kt-method": "FP8",
+            "kt-gpu-prefill-token-threshold": 4096,
+            "attention-backend": "flashinfer",
+            "fp8-gemm-backend": "triton",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "MiniMax-M2.1",
+            "disable-shared-experts-fusion": True,
+            "tool-call-parser": "minimax-m2",
+            "reasoning-parser": "minimax-append-think"
+        },
+        description="MiniMax M2.1 MoE model (enhanced multi-language programming)",
+        description_zh="MiniMax M2.1 MoE 模型（增强多语言编程能力）",
+        max_tensor_parallel_size=4,  # M2.1 only supports up to 4-way tensor parallelism
     ),
 ]
 
@@ -226,6 +173,7 @@ class ModelRegistry:
                         default_params=info.get("default_params", {}),
                         description=info.get("description", ""),
                         description_zh=info.get("description_zh", ""),
+                        max_tensor_parallel_size=info.get("max_tensor_parallel_size"),
                     )
                     self._register(model)
             except (yaml.YAMLError, OSError):
@@ -372,101 +320,26 @@ def get_registry() -> ModelRegistry:
 
 
 def compute_deepseek_v3_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """
-    Compute kt-num-gpu-experts for DeepSeek V3 based on available GPU memory.
+    per_gpu_gb = 16
+    if vram_per_gpu_gb < per_gpu_gb:
+        return int(0)
+    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
 
-    Args:
-        tensor_parallel_size: Number of GPUs (tensor parallel size)
-        vram_per_gpu_gb: VRAM per GPU in GB
-
-    Returns:
-        Number of GPU experts per layer
-    """
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    # More VRAM = more experts can fit on GPU
-    if total_vram >= 160:  # 4x 40GB or 2x 80GB
-        return 2
-    elif total_vram >= 80:  # 1x 80GB or 4x 20GB
-        return 1
-    else:  # Limited VRAM
-        return 1
+    return total_vram // 1
 
 
-def compute_deepseek_v2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for DeepSeek V2."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
+def compute_kimi_k2_thinking_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for Kimi K2 Thinking."""
+    per_gpu_gb = 16
+    if vram_per_gpu_gb < per_gpu_gb:
+        return int(0)
+    total_vram =  int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
 
-    if total_vram >= 80:
-        return 4
-    elif total_vram >= 48:
-        return 2
-    else:
-        return 2
-
-
-def compute_qwen3_30b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for Qwen3-30B."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    if total_vram >= 48:
-        return 4
-    elif total_vram >= 24:
-        return 2
-    else:
-        return 2
-
-
-def compute_qwen25_57b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for Qwen2.5-57B."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    if total_vram >= 80:
-        return 4
-    elif total_vram >= 48:
-        return 2
-    else:
-        return 2
-
-
-def compute_kimi_k2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for Kimi K2."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    if total_vram >= 160:
-        return 2
-    elif total_vram >= 80:
-        return 1
-    else:
-        return 1
-
-
-def compute_mixtral_8x7b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for Mixtral 8x7B."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    if total_vram >= 48:
-        return 4
-    elif total_vram >= 24:
-        return 2
-    else:
-        return 2
-
-
-def compute_mixtral_8x22b_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for Mixtral 8x22B."""
-    total_vram = tensor_parallel_size * vram_per_gpu_gb
-
-    if total_vram >= 160:
-        return 2
-    elif total_vram >= 80:
-        return 1
-    else:
-        return 1
+    return total_vram * 2
 
 
 def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for MiniMax M2."""
+    """Compute kt-num-gpu-experts for MiniMax M2/M2.1."""
     per_gpu_gb = 16
     if vram_per_gpu_gb < per_gpu_gb:
         return int(0)
@@ -477,14 +350,10 @@ def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: f
 
 # Model name to computation function mapping
 MODEL_COMPUTE_FUNCTIONS: dict[str, Callable[[int, float], int]] = {
-    "DeepSeek-V3": compute_deepseek_v3_gpu_experts,
-    "DeepSeek-V3.2": compute_deepseek_v3_gpu_experts,  # Same as V3
-    "DeepSeek-V2": compute_deepseek_v2_gpu_experts,
-    "DeepSeek-V2.5": compute_deepseek_v2_gpu_experts,  # Same as V2
-    "Qwen3-30B-A3B": compute_qwen3_30b_gpu_experts,
-    "Qwen2.5-57B-A14B": compute_qwen25_57b_gpu_experts,
-    "Kimi-K2": compute_kimi_k2_gpu_experts,
-    "Mixtral-8x7B": compute_mixtral_8x7b_gpu_experts,
-    "Mixtral-8x22B": compute_mixtral_8x22b_gpu_experts,
+    "DeepSeek-V3-0324": compute_deepseek_v3_gpu_experts,
+    "DeepSeek-V3.2": compute_deepseek_v3_gpu_experts,  # Same as V3-0324
+    "DeepSeek-R1-0528": compute_deepseek_v3_gpu_experts,  # Same as V3-0324
+    "Kimi-K2-Thinking": compute_kimi_k2_thinking_gpu_experts,
     "MiniMax-M2": compute_minimax_m2_gpu_experts,
+    "MiniMax-M2.1": compute_minimax_m2_gpu_experts,  # Same as M2
 }

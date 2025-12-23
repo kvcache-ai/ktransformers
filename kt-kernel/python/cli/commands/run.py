@@ -285,11 +285,25 @@ def run(
     model_defaults = model_info.default_params if model_info else {}
 
     # Determine tensor parallel size first (needed for GPU expert calculation)
-    final_tensor_parallel_size = (
+    # Priority: CLI > model defaults > config > auto-detect from GPUs
+    requested_tensor_parallel_size = (
         tensor_parallel_size
         or model_defaults.get("tensor-parallel-size")
-        or settings.get("inference.tensor_parallel_size", 1)
+        or settings.get("inference.tensor_parallel_size")
+        or (len(gpus) if gpus else 1)
     )
+
+    # Apply model's max_tensor_parallel_size constraint if it exists
+    final_tensor_parallel_size = requested_tensor_parallel_size
+    if model_info and model_info.max_tensor_parallel_size is not None:
+        if requested_tensor_parallel_size > model_info.max_tensor_parallel_size:
+            console.print()
+            print_warning(
+                f"Model {model_info.name} only supports up to {model_info.max_tensor_parallel_size}-way "
+                f"tensor parallelism, but {requested_tensor_parallel_size} was requested. "
+                f"Reducing to {model_info.max_tensor_parallel_size}."
+            )
+            final_tensor_parallel_size = model_info.max_tensor_parallel_size
 
     # CPU/GPU configuration with smart defaults
     # kt-cpuinfer: default to 80% of total CPU threads (cores * NUMA nodes)

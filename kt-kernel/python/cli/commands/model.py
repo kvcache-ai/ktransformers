@@ -22,7 +22,75 @@ from kt_kernel.cli.utils.console import (
     prompt_choice,
 )
 
-app = typer.Typer(help="Manage models and storage paths")
+app = typer.Typer(
+    help="Manage models and storage paths",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+
+
+@app.callback()
+def callback(ctx: typer.Context) -> None:
+    """
+    Model management commands.
+
+    Run without arguments to see available models.
+    """
+    # If no subcommand is provided, show the model list
+    if ctx.invoked_subcommand is None:
+        show_model_list()
+
+
+def show_model_list() -> None:
+    """Display available models with their status and paths."""
+    from rich.table import Table
+    from kt_kernel.cli.utils.model_registry import get_registry
+    from kt_kernel.cli.i18n import get_lang
+
+    registry = get_registry()
+    settings = get_settings()
+
+    console.print()
+    console.print("[bold cyan]KTransformers Supported Models[/bold cyan]\n")
+
+    # Get local models mapping
+    local_models = {m.name: p for m, p in registry.find_local_models()}
+
+    # Create table
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Model", style="cyan", no_wrap=True)
+    table.add_column("HuggingFace Repo", style="dim")
+    table.add_column("Status", justify="center")
+    table.add_column("Local Path", style="yellow")
+
+    all_models = registry.list_all()
+    for model in all_models:
+        if model.name in local_models:
+            status = "[green]✓[/green]"
+            local_path = str(local_models[model.name])
+        else:
+            status = "[dim]-[/dim]"
+            local_path = "[dim]Not downloaded[/dim]"
+
+        table.add_row(model.name, model.hf_repo, status, local_path)
+
+    console.print(table)
+    console.print()
+
+    # Usage instructions
+    console.print("[bold]Usage:[/bold]")
+    console.print("  • Download a model:  [cyan]kt model download <model-name>[/cyan]")
+    console.print("  • List local models: [cyan]kt model list --local[/cyan]")
+    console.print("  • Search models:     [cyan]kt model search <query>[/cyan]")
+    console.print()
+
+    # Show model storage paths
+    model_paths = settings.get_model_paths()
+    console.print("[bold]Model Storage Paths:[/bold]")
+    for path in model_paths:
+        marker = "[green]✓[/green]" if path.exists() else "[dim]✗[/dim]"
+        console.print(f"  {marker} {path}")
+    console.print()
 
 
 @app.command(name="download")
