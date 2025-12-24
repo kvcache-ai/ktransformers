@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-a795a334.js";
+            window.path_to_searchindex_js = "searchindex-fad84553.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-51c9f918.js"></script>
@@ -322,50 +322,32 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <h1 id="kt-kernel"><a class="header" href="#kt-kernel">KT-Kernel</a></h1>
 <p>High-performance kernel operations for KTransformers, featuring CPU-optimized MoE inference with AMX, AVX, KML and blis (amd library) support.</p>
 <ul>
-<li><a href="#kt-kernel">KT-Kernel</a>
-<ul>
 <li><a href="#note">Note</a></li>
 <li><a href="#features">Features</a></li>
 <li><a href="#installation">Installation</a>
 <ul>
-<li><a href="#prerequisites">Prerequisites</a></li>
-<li><a href="#quick-installation-recommended">Quick Installation (Recommended)</a></li>
-<li><a href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></li>
+<li><a href="#option-1-install-from-pypi-recommended-for-most-users">Option 1: Install from PyPI (Recommended for Most Users)</a></li>
+<li><a href="#option-2-install-from-source-for-local-use-or-custom-builds">Option 2: Install from Source (For Local Use or Custom Builds)</a></li>
 </ul>
 </li>
 <li><a href="#verification">Verification</a></li>
+<li><a href="#kt-cli-overview">KT CLI Overview</a></li>
 <li><a href="#integration-with-sglang">Integration with SGLang</a>
 <ul>
-<li><a href="#installation-steps">Installation Steps</a>
-<ul>
-<li><a href="#1-install-sglang">1. Install SGLang</a></li>
-<li><a href="#2-prepare-weights">2. Prepare Weights</a></li>
-<li><a href="#3-launch-sglang-server">3. Launch SGLang Server</a></li>
-</ul>
-</li>
-<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a>
-<ul>
-<li><a href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></li>
-<li><a href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></li>
-</ul>
-</li>
+<li><a href="#installation-steps">Installation Steps</a></li>
+<li><a href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></li>
 <li><a href="#kt-kernel-parameters">KT-Kernel Parameters</a></li>
 </ul>
 </li>
 <li><a href="#direct-python-api-usage">Direct Python API Usage</a>
 <ul>
 <li><a href="#advanced-options">Advanced Options</a></li>
+<li><a href="#manual-configuration-advanced">Manual Configuration (Advanced)</a></li>
 </ul>
 </li>
 <li><a href="#build-configuration">Build Configuration</a>
 <ul>
-<li><a href="#manual-installation">Manual Installation</a>
-<ul>
-<li><a href="#1-install-system-dependencies">1. Install System Dependencies</a></li>
-<li><a href="#2-set-build-configuration">2. Set Build Configuration</a></li>
-<li><a href="#3-build-and-install">3. Build and Install</a></li>
-</ul>
-</li>
+<li><a href="#manual-installation-without-installsh">Manual Installation (Without install.sh)</a></li>
 </ul>
 </li>
 <li><a href="#error-troubleshooting">Error Troubleshooting</a>
@@ -377,16 +359,14 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li><a href="#weight-quantization">Weight Quantization</a></li>
 <li><a href="#before-commit">Before Commit!</a></li>
 </ul>
-</li>
-</ul>
 <h2 id="note"><a class="header" href="#note">Note</a></h2>
 <p><strong>Current Support Status:</strong></p>
 <ul>
 <li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
-<li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode)</li>
-<li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="en/doc/en/Kimi-K2-Thinking-Native.html">Guide</a></li>
-<li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="en/doc/en/MiniMax-M2.1-Tutorial.html">Guide</a></li>
+<li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis">Guide</a></li>
+<li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md">Guide</a></li>
+<li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md">Guide</a></li>
 </ul>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
