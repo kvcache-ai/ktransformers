@@ -38,6 +38,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - ✅ **Universal CPU (llamafile backend)**: Supported (using GGUF-format weights)
 - ✅ **AMD CPUs with BLIS**: Supported (for int8 prefill & decode)
 - ✅ **Kimi-K2 Native INT4 (RAWINT4)**: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - [Guide](../doc/en/Kimi-K2-Thinking-Native.md)
+- ✅ **FP8 weights (e.g., MiniMax-M2.1)**: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - [Guide](../doc/en/MiniMax-M2.1-Tutorial.md)
 
 ## Features
 
@@ -361,13 +362,13 @@ python -m sglang.launch_server \
 
 | Parameter | Description | Example Value |
 |-----------|-------------|---------------|
-| `--kt-method` | CPU inference backend method | `AMXINT4`, `AMXINT8`, `RAWINT4`, or `LLAMAFILE` |
+| `--kt-method` | CPU inference backend method | `AMXINT4`, `AMXINT8`, `RAWINT4`, `FP8` or `LLAMAFILE` |
 | `--kt-weight-path` | Path to quantized CPU weights | `/path/to/cpu-weights` |
 | `--kt-cpuinfer` | Number of CPU inference threads | `64` (adjust based on CPU cores) |
 | `--kt-threadpool-count` | Number of thread pools for parallel execution | `2` (typically 1-4) |
 | `--kt-num-gpu-experts` | Number of experts to keep on GPU | `32` (remaining experts go to CPU) |
 | `--kt-max-deferred-experts-per-token` | Number of experts per token to defer for pipelined execution | `2` (0 to disable, 1-4 recommended) |
-| `--kt-gpu-prefill-token-threshold` | Token count threshold for prefill strategy (RAWINT4 only) | ~`400` |
+| `--kt-gpu-prefill-token-threshold` | Token count threshold for prefill strategy (FP8 and RAWINT4 only) | ~`1024` |
 
 **Parameter Guidelines:**
 
@@ -375,6 +376,7 @@ python -m sglang.launch_server \
   - `AMXINT4`: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)
   - `AMXINT8`: Higher accuracy with INT8 quantized weights on AMX CPUs
   - `RAWINT4`: Native INT4 weights shared by CPU and GPU (AMX backend only, currently supports Kimi-K2-Thinking model). See [Kimi-K2-Thinking Native Tutorial](../doc/en/Kimi-K2-Thinking-Native.md) for details.
+  - `FP8`: FP8 weights shared by CPU and GPU
   - `LLAMAFILE`: GGUF-based backend
 
 - **`kt-cpuinfer`**: Set to the number of **physical CPU cores** (not hyperthreads).
@@ -400,10 +402,10 @@ python -m sglang.launch_server \
   - `1-4`: Deferred execution (recommended range; good latency/quality balance, requires tuning)
   - `5-7`: Highest latency reduction but may introduce noticeable accuracy loss; use with care
 
-- **`kt-gpu-prefill-token-threshold`** (RAWINT4 only): Controls prefill strategy for native INT4 inference:
+- **`kt-gpu-prefill-token-threshold`** (FP8 and RAWINT4 only): Controls prefill strategy for native FP8 and INT4 inference:
   - **≤ threshold**: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.
-  - **> threshold**: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires ~9GB+ extra VRAM.
-  - Only applicable when `--kt-method RAWINT4` is used. Currently supports Kimi-K2-Thinking model only.
+  - **> threshold**: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires one MoE layer extra VRAM (e.g., ~9GB+ for Kimi-K2-Thinking and ~3.6GB for MiniMax-M2.1).
+  - Only applicable when `--kt-method RAWINT4` or `--kt-method FP8` is used.
 
 ## Direct Python API Usage
 
