@@ -36,7 +36,9 @@ static const bool _is_plain_ = false;
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
-#include "operators/amx/fp8-moe.hpp"
+#if defined(__AVX512BF16__)
+#include "operators/amx/fp8-moe.hpp"  // FP8 MoE requires AVX512 BF16 support
+#endif
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
@@ -293,7 +295,9 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
 
+#if defined(__AVX512BF16__)
   // FP8 MoE: processes one expert at a time (expert_id instead of gpu_experts_num)
+  // Only available on CPUs with AVX512 BF16 support
   if constexpr (std::is_same_v<MoeTP, AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>) {
     struct WriteWeightScaleToBufferBindings {
       struct Args {
@@ -336,6 +340,7 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
+#endif  // __AVX512BF16__
 #endif
 }
 
@@ -607,7 +612,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
+#if defined(__AVX512BF16__)
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
+#endif
 #endif
 #if defined(USE_MOE_KERNEL)
   bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt8, _is_plain_>>(moe_module, "Int8_KERNEL_MOE");
