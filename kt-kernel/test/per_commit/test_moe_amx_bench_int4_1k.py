@@ -25,8 +25,10 @@ register_cpu_ci(est_time=300, suite="default")
 try:
     import torch
     import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+
     kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     from tqdm import tqdm
+
     HAS_DEPS = True
 except ImportError as e:
     HAS_DEPS = False
@@ -156,11 +158,7 @@ def test_moe_amx_int4_1k_benchmark():
         CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 
         # Physical to logical map for weight loading
-        physical_to_logical_map = torch.tensor(
-            data=range(expert_num),
-            device="cpu",
-            dtype=torch.int64
-        ).contiguous()
+        physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
         # Initialize MOE layers
         moes = []
@@ -322,6 +320,7 @@ def run_all_tests():
     except Exception as e:
         print(f"\nTest failed: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

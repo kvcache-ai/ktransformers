@@ -4,13 +4,13 @@
 Utilities for kt_kernel package.
 """
 
-from .amx import AMXMoEWrapper, RAWAMXMoEWrapper
+from .amx import AMXMoEWrapper, NativeMoEWrapper
 from .llamafile import LlamafileMoEWrapper
 from .loader import SafeTensorLoader, GGUFLoader, CompressedSafeTensorLoader
 
 __all__ = [
     "AMXMoEWrapper",
-    "RAWAMXMoEWrapper",
+    "NativeMoEWrapper",
     "LlamafileMoEWrapper",
     "SafeTensorLoader",
     "CompressedSafeTensorLoader",

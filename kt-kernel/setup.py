@@ -285,9 +285,9 @@ class CMakeBuild(build_ext):
 
         # Variant configurations: (name, CPUINFER_CPU_INSTRUCT, CPUINFER_ENABLE_AMX)
         variants = [
-            ("amx", "AVX512", "ON"),      # AVX512 + AMX
+            ("amx", "AVX512", "ON"),  # AVX512 + AMX
             ("avx512", "AVX512", "OFF"),  # AVX512 only
-            ("avx2", "AVX2", "OFF"),      # AVX2 only
+            ("avx2", "AVX2", "OFF"),  # AVX2 only
         ]
 
         for variant_name, cpu_instruct, enable_amx in variants:
@@ -384,6 +384,7 @@ class CMakeBuild(build_ext):
             build_temp: Temporary build directory for CMake
             cfg: Build type (Release/Debug/etc.)
         """
+
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
             # Respect CUDA_HOME
@@ -614,10 +615,26 @@ setup(
     author="kvcache-ai",
     license="Apache-2.0",
     python_requires=">=3.8",
-    packages=["kt_kernel", "kt_kernel.utils"],
+    packages=[
+        "kt_kernel",
+        "kt_kernel.utils",
+        "kt_kernel.cli",
+        "kt_kernel.cli.commands",
+        "kt_kernel.cli.config",
+        "kt_kernel.cli.utils",
+    ],
     package_dir={
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
+        "kt_kernel.cli": "python/cli",
+        "kt_kernel.cli.commands": "python/cli/commands",
+        "kt_kernel.cli.config": "python/cli/config",
+        "kt_kernel.cli.utils": "python/cli/utils",
+    },
+    entry_points={
+        "console_scripts": [
+            "kt=kt_kernel.cli.main:main",
+        ],
     },
     ext_modules=[CMakeExtension("kt_kernel.kt_kernel_ext", str(REPO_ROOT))],
     cmdclass={"build_ext": CMakeBuild},

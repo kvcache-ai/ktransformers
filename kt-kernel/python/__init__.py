@@ -37,11 +37,13 @@ from __future__ import annotations
 
 # Detect CPU and load optimal extension variant
 from ._cpu_detect import initialize as _initialize_cpu
+
 _kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
 
 # Make the extension module available to other modules in this package
 import sys
-sys.modules['kt_kernel_ext'] = _kt_kernel_ext
+
+sys.modules["kt_kernel_ext"] = _kt_kernel_ext
 
 # Also expose kt_kernel_ext as an attribute for backward compatibility
 kt_kernel_ext = _kt_kernel_ext
@@ -53,25 +55,28 @@ from .experts import KTMoEWrapper
 try:
     # Try to get version from installed package metadata (works in installed environment)
     from importlib.metadata import version, PackageNotFoundError
+
     try:
-        __version__ = version('kt-kernel')
+        __version__ = version("kt-kernel")
     except PackageNotFoundError:
         # Package not installed, try to read from source tree version.py
         import os
-        _root_version_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'version.py')
+
+        _root_version_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "version.py")
         if os.path.exists(_root_version_file):
             _version_ns = {}
-            with open(_root_version_file, 'r', encoding='utf-8') as f:
+            with open(_root_version_file, "r", encoding="utf-8") as f:
                 exec(f.read(), _version_ns)
-            __version__ = _version_ns.get('__version__', '0.4.3')
+            __version__ = _version_ns.get("__version__", "0.4.3")
         else:
             __version__ = "0.4.3"
 except ImportError:
     # Python < 3.8, fallback to pkg_resources or hardcoded version
     try:
         from pkg_resources import get_distribution, DistributionNotFound
+
         try:
-            __version__ = get_distribution('kt-kernel').version
+            __version__ = get_distribution("kt-kernel").version
         except DistributionNotFound:
             __version__ = "0.4.3"
     except ImportError:

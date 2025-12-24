@@ -1,0 +1,153 @@
+#compdef kt
+# Zsh completion for kt command
+# This is a static completion script that doesn't require Python startup
+
+_kt() {
+    local -a commands
+    commands=(
+        'version:Show version information'
+        'run:Start model inference server'
+        'chat:Interactive chat with running model'
+        'quant:Quantize model weights'
+        'bench:Run full benchmark'
+        'microbench:Run micro-benchmark'
+        'doctor:Diagnose environment issues'
+        'model:Manage models and storage paths'
+        'config:Manage configuration'
+        'sft:Fine-tuning with LlamaFactory'
+    )
+
+    local -a run_opts
+    run_opts=(
+        '--host[Server host]:host:'
+        '--port[Server port]:port:'
+        '--gpu-experts[Number of GPU experts]:count:'
+        '--cpu-threads[Number of CPU threads]:count:'
+        '--tensor-parallel-size[Tensor parallel size]:size:'
+        '--kt-method[KT method]:method:(AMXINT4 FP8 RAWINT4)'
+        '--attention-backend[Attention backend]:backend:(triton flashinfer)'
+        '--max-total-tokens[Maximum total tokens]:tokens:'
+        '--dry-run[Show command without executing]'
+        '--help[Show help message]'
+    )
+
+    local -a chat_opts
+    chat_opts=(
+        '--host[Server host]:host:'
+        '--port[Server port]:port:'
+        '--model[Model name]:model:'
+        '--temperature[Sampling temperature]:temp:'
+        '--max-tokens[Maximum tokens]:tokens:'
+        '--system[System prompt]:prompt:'
+        '--save-history[Save conversation history]'
+        '--no-save-history[Do not save history]'
+        '--history-file[History file path]:path:_files'
+        '--stream[Enable streaming output]'
+        '--no-stream[Disable streaming output]'
+        '--help[Show help message]'
+    )
+
+    local -a model_cmds
+    model_cmds=(
+        'download:Download a model from HuggingFace'
+        'list:List available models'
+        'path-list:List all model storage paths'
+        'path-add:Add a new model storage path'
+        'path-remove:Remove a model storage path'
+        'search:Search for models in the registry'
+    )
+
+    local -a config_cmds
+    config_cmds=(
+        'show:Show all configuration'
+        'get:Get configuration value'
+        'set:Set configuration value'
+        'reset:Reset to defaults'
+        'path:Show configuration file path'
+        'init:Re-run first-time setup wizard'
+    )
+
+    local -a sft_cmds
+    sft_cmds=(
+        'train:Train model'
+        'chat:Chat with model'
+        'export:Export model'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            _describe 'kt commands' commands
+            _arguments \
+                '--help[Show help message]' \
+                '--version[Show version]'
+            ;;
+        args)
+            case $words[1] in
+                run)
+                    _arguments $run_opts \
+                        '1:model:'
+                    ;;
+                chat)
+                    _arguments $chat_opts
+                    ;;
+                quant)
+                    _arguments \
+                        '--method[Quantization method]:method:' \
+                        '--output[Output directory]:path:_files -/' \
+                        '--help[Show help message]' \
+                        '1:model:_files -/'
+                    ;;
+                bench|microbench)
+                    _arguments \
+                        '--model[Model name or path]:model:' \
+                        '--config[Config file path]:path:_files' \
+                        '--help[Show help message]'
+                    ;;
+                doctor)
+                    _arguments \
+                        '--verbose[Verbose output]' \
+                        '--help[Show help message]'
+                    ;;
+                model)
+                    _arguments \
+                        '1: :->model_cmd' \
+                        '*::arg:->model_args'
+
+                    case $state in
+                        model_cmd)
+                            _describe 'model commands' model_cmds
+                            ;;
+                    esac
+                    ;;
+                config)
+                    _arguments \
+                        '1: :->config_cmd' \
+                        '*::arg:->config_args'
+
+                    case $state in
+                        config_cmd)
+                            _describe 'config commands' config_cmds
+                            ;;
+                    esac
+                    ;;
+                sft)
+                    _arguments \
+                        '1: :->sft_cmd' \
+                        '*::arg:->sft_args'
+
+                    case $state in
+                        sft_cmd)
+                            _describe 'sft commands' sft_cmds
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_kt "$@"
