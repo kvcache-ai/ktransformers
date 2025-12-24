@@ -4,13 +4,24 @@ This tutorial demonstrates how to run MiniMax-M2.1 model inference using SGLang 
 
 ## Table of Contents
 
+- [Table of Contents](#table-of-contents)
 - [Hardware Requirements](#hardware-requirements)
 - [Prerequisites](#prerequisites)
 - [Step 1: Download Model Weights](#step-1-download-model-weights)
 - [Step 2: Launch Server with KT CLI](#step-2-launch-server-with-kt-cli)
+  - [Advanced Options](#advanced-options)
+  - [Dry Run](#dry-run)
+  - [Key Parameters](#key-parameters)
 - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
+  - [Option A: Interactive Chat with KT CLI](#option-a-interactive-chat-with-kt-cli)
+  - [Option B: OpenAI-Compatible API](#option-b-openai-compatible-api)
 - [Performance](#performance)
+  - [Throughput (tokens/s)](#throughput-tokenss)
+  - [Comparison with llama.cpp](#comparison-with-llamacpp)
 - [Troubleshooting](#troubleshooting)
+  - [OOM (Out of Memory) Issues](#oom-out-of-memory-issues)
+- [Advanced Use Case: Running Claude Code with MiniMax-M2.1 Local Backend](#advanced-use-case-running-claude-code-with-minimax-m21-local-backend)
+- [Additional Resources](#additional-resources)
 
 ## Hardware Requirements
 
@@ -165,7 +176,7 @@ We benchmarked KT-Kernel + Sglang against llama.cpp to demonstrate the performan
 
 - **Test environment**: 2 x RTX 5090 (32 GB) with AMD EPYC 9355 CPUs, input tokens=32768, output tokens=512. We made our best effort to optimize llama.cpp performance, but we could not achieve optimal prefill and decode with a single command, so we used separate configurations for prefill and decode measurements.
 
-![Performance Comparison with llama.cpp](../assets/MiniMax-M2_comparison.png)
+![Performance Comparison with llama.cpp](../../assets/MiniMax-M2_comparison.png)
 
 As shown in the chart, KT-Kernel achieves up to **>4.5x prefill** and **30% faster decode** compared to llama.cpp on the same hardware.
 
@@ -193,6 +204,6 @@ With the above command, you can use [claude-code-router](https://github.com/musi
 
 ## Additional Resources
 
-- [KT-Kernel Documentation](../../kt-kernel/README.md)
+- [KT-Kernel Documentation](../../../kt-kernel/README.md)
 - [SGLang GitHub](https://github.com/sgl-project/sglang)
-- [KT-Kernel Parameters Reference](../../kt-kernel/README.md#kt-kernel-parameters)
+- [KT-Kernel Parameters Reference](../../../kt-kernel/README.md#kt-kernel-parameters)
