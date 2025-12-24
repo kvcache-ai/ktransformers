@@ -7,8 +7,9 @@
 
 # Tutorial 
 - [kt-sft part](en/SFT/README.md)
-  - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
+  - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
+  - [DPO tutorial](en/SFT/DPO_tutorial.md)
   <!-- - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md) -->
   <!-- - [Use FP8 GPU Kernel](en/fp8_kernel.md) -->
   <!-- - [Use AMD GPU](en/ROCm.md) -->

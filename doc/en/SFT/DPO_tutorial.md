@@ -61,7 +61,7 @@ pip install custom_flashinfer/
 
 ## Prepare Models
 
-We uses `deepseek-ai/DeepSeek-V2-Lite` as an example here. You can replace it with other models such as Kimi K2.
+We use `deepseek-ai/DeepSeek-V2-Lite` as an example here. You can replace it with other models such as Kimi K2.
 
 ## How to start
 
