@@ -191,7 +191,7 @@ cpu_infer: 32
 chunk_size: 8192
 ```
 
-We also support RL DPO training using the KTransformers backend now. See [DPO Tutorial](../doc/en/DPO_tutorial.md) for details.  
+We also support RL DPO training using the KTransformers backend now. See [DPO Tutorial](../doc/en/SFT/DPO_tutorial.md) for details.  
 
 `kt_optimize_rule` controls **placement strategy**. See also [ktransformers/optimize_rules](https://github.com/kvcache-ai/ktransformers/tree/main/ktransformers/optimize/optimize_rules). Naming hints (`*` = wildcard):
 
