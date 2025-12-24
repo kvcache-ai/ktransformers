@@ -25,10 +25,10 @@ MiniMax-M2.1 is a large MoE (Mixture of Experts) model that provides native FP8 
 ## Hardware Requirements
 
 **Minimum Configuration:**
-- **GPU**: NVIDIA RTX 4090 24 GB (or equivalent with at least 24GB VRAM available)
+- **GPU**: NVIDIA RTX 5090 32 GB (or equivalent with at least 32GB VRAM available)
 - **CPU**: x86 CPU with AVX512 support (e.g., Intel Sapphire Rapids, AMD EPYC)
-- **RAM**: At least <!-- TODO: RAM requirement -->GB system memory
-- **Storage**: 220 GB for model weights (same weight dir for GPU and CPU)
+- **RAM**: At least 256GB system memory
+- **Storage**: >220 GB for model weights (same weight dir for GPU and CPU)
 
 **Tested Configuration:**
 
@@ -74,7 +74,7 @@ Before starting, ensure you have:
 Download the official MiniMax-M2.1 weights.
 
 * huggingface: https://huggingface.co/MiniMaxAI/MiniMax-M2.1
-M
+
     ```bash
     hf download MiniMaxAI/MiniMax-M2.1 --local-dir /path/to/minimax-m2.1
     ```
@@ -180,38 +180,38 @@ The following benchmarks were measured with single concurrency (Prefill tps / De
 | 1 x RTX 4090 (48 GB) | 2 x Intel Xeon Platinum 8488C| PCIe 4.0 | 129 / 21.8 | 669 / 20.9 | 1385 / 18.5 |
 | 2 x RTX 4090 (48 GB) | 2 x Intel Xeon Platinum 8488C| PCIe 4.0 | 139 / 23.6 | 1013 / 23.3 | 2269 / 21.6 |
 | 1 x RTX 5090 (32 GB) | 2 x AMD EPYC 9355 | PCIe 5.0 | 408 / 32.1 | 1196 / 31.4 | 2540 / 27.6 |
-| 2 x RTX 5090 (32 GB) | 2 x AMD EPYC 9355 | PCIe 5.0 | 414 / 34.3 | 1847 / 33.1 | 4007 / 31.8 |
+| 2 x RTX 5090 (32 GB) | 2 x AMD EPYC 9355 | PCIe 5.0 | 414 / 35.9 | 1847 / 35.5 | 4007 / 33.1 |
 
 ### Comparison with llama.cpp
 
-We benchmarked KT-Kernel + SGLang against llama.cpp to demonstrate the performance advantages of our CPU-GPU heterogeneous inference approach.
+We benchmarked KT-Kernel + Sglang against llama.cpp to demonstrate the performance advantages of our CPU-GPU heterogeneous inference approach.
 
+- **Weight formats**: KT-Kernel uses native unquantized FP8 weights from MiniMax-M2, while llama.cpp only supports quantized weights, so we used Q8_0 quantization for the llama.cpp benchmarks.
 
-<!-- TODO: Add prefill performance comparison chart -->
-<!-- ![Prefill Performance Comparison](./images/minimax-m2.1-prefill-comparison.png) -->
+- **Test environment**: 2 x RTX 5090 (32 GB) with AMD EPYC 9355 CPUs, input tokens=32768, output tokens=512. We made our best effort to optimize llama.cpp performance, but we could not achieve optimal prefill and decode with a single command, so we used separate configurations for prefill and decode measurements.
 
-| Input Length | llama.cpp (tokens/s) | KT-Kernel (tokens/s) | Speedup |
-|--------------|----------------------|----------------------|---------|
-| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
-| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
-| <!-- TODO --> | <!-- TODO --> | <!-- TODO --> | <!-- TODO --> |
+![Performance Comparison with llama.cpp](../assets/MiniMax-M2_comparison.png)
 
-### Key Observations
-
-<!-- TODO: Add key observations and analysis, e.g.:
-- KT-Kernel achieves Xx speedup in prefill compared to llama.cpp
-- Decode performance shows Xx improvement due to GPU expert caching
-- Memory efficiency comparison
-- Scalability with different batch sizes
--->
+As shown in the chart, KT-Kernel achieves up to **>4.5x prefill** and **30% faster decode** compared to llama.cpp on the same hardware.
 
 ## Troubleshooting
-<!-- TODO: -->
 
-## Advance Use Case: Running Claude Code with MiniMax-M2.1 Local Backend
+### OOM (Out of Memory) Issues
+
+Layerwise prefill requires extra VRAM (~3.6GB + incremental cost with prefill length). If you encounter OOM, adjust these parameters when launching the server:
+
+| Parameter | VRAM Impact |
+|-----------|-------------|
+| `--kt-num-gpu-experts` | Reduces expert weight VRAM usage |
+| `--chunked-prefill-size` | Reduces prefill extra VRAM allocation |
+| `--max-total-tokens` | Reduces KV cache VRAM usage |
+
+**Tip:** Test with an input of length `chunked-prefill-size` to verify your configuration won't OOM during prefill.
+
+## Advanced Use Case: Running Claude Code with MiniMax-M2.1 Local Backend
 
 ```bash
-kt run M2.1 --tool-call-parser minimax-m2 --reasoning-parser minimax-append-think
+kt run m2.1 --tool-call-parser minimax-m2 --reasoning-parser minimax-append-think
 ```
 
 With the above command, you can use [claude-code-router](https://github.com/musistudio/claude-code-router) to connect MiniMax-M2.1 as a local backend for [Claude Code](https://github.com/anthropics/claude-code).
