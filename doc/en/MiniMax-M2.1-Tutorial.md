@@ -153,21 +153,6 @@ curl http://localhost:30000/v1/chat/completions \
   }'
 ```
 
-**Python example (streaming):**
-
-```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:30000/v1", api_key="not-needed")
-
-for chunk in client.chat.completions.create(
-    model="MiniMax-M2.1",
-    messages=[{"role": "user", "content": "Hello!"}],
-    stream=True
-):
-    print(chunk.choices[0].delta.content or "", end="", flush=True)
-```
-
 
 ## Performance
 
