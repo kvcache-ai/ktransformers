@@ -194,7 +194,7 @@
 </div>
 
 <h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
-<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="kt-kernel">kt-kernel</a> and <a href="kt-sft">kt-sft</a>.</p>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/">kt-kernel</a> and <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft">kt-sft</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
 <li><strong>Dec 24, 2025</strong>: Support Native MiniMax-M2.1 inference. (<a href="doc/en/MiniMax-M2.1-Tutorial.html">Tutorial</a>)</li>
@@ -364,7 +364,7 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <ul>
 <li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
-<li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis">Guide</a></li>
+<li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis.md">Guide</a></li>
 <li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md">Guide</a></li>
 <li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md">Guide</a></li>
 </ul>
