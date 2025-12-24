@@ -232,7 +232,7 @@ def doctor(
         )
 
     # 7. SGLang installation source check
-    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation
+    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation, check_sglang_kt_kernel_support
 
     sglang_info = check_sglang_installation()
 
@@ -266,6 +266,31 @@ def doctor(
         }
     )
 
+    # 7b. SGLang kt-kernel support check (only if SGLang is installed)
+    kt_kernel_support = {"supported": True}  # Default to True if not checked
+    if sglang_info["installed"]:
+        # Use cache=False to force re-check in doctor, but silent=True since we show in table
+        kt_kernel_support = check_sglang_kt_kernel_support(use_cache=False, silent=True)
+
+        if kt_kernel_support["supported"]:
+            kt_kernel_value = t("sglang_kt_kernel_supported")
+            kt_kernel_status = "ok"
+            kt_kernel_hint = None
+        else:
+            kt_kernel_value = t("sglang_kt_kernel_not_supported")
+            kt_kernel_status = "error"
+            kt_kernel_hint = 'Reinstall SGLang from: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"'
+            issues_found = True
+
+        checks.append(
+            {
+                "name": "SGLang kt-kernel",
+                "status": kt_kernel_status,
+                "value": kt_kernel_value,
+                "hint": kt_kernel_hint,
+            }
+        )
+
     # 8. Environment managers
     env_managers = detect_env_managers()
     docker = check_docker()
@@ -291,6 +316,12 @@ def doctor(
 
         console.print()
         print_sglang_install_instructions()
+    # Show kt-kernel installation instructions if SGLang is installed but doesn't support kt-kernel
+    elif sglang_info["installed"] and not kt_kernel_support.get("supported", True):
+        from kt_kernel.cli.utils.sglang_checker import print_sglang_kt_kernel_instructions
+
+        console.print()
+        print_sglang_kt_kernel_instructions()
 
     # Summary
     console.print()

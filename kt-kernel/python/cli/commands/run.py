@@ -153,7 +153,12 @@ def run(
 ) -> None:
     """Start model inference server."""
     # Check if SGLang is installed before proceeding
-    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation, print_sglang_install_instructions
+    from kt_kernel.cli.utils.sglang_checker import (
+        check_sglang_installation,
+        check_sglang_kt_kernel_support,
+        print_sglang_install_instructions,
+        print_sglang_kt_kernel_instructions,
+    )
 
     sglang_info = check_sglang_installation()
     if not sglang_info["installed"]:
@@ -161,6 +166,15 @@ def run(
         print_error(t("sglang_not_found"))
         console.print()
         print_sglang_install_instructions()
+        raise typer.Exit(1)
+
+    # Check if SGLang supports kt-kernel (has --kt-gpu-prefill-token-threshold parameter)
+    kt_kernel_support = check_sglang_kt_kernel_support()
+    if not kt_kernel_support["supported"]:
+        console.print()
+        print_error(t("sglang_kt_kernel_not_supported"))
+        console.print()
+        print_sglang_kt_kernel_instructions()
         raise typer.Exit(1)
 
     settings = get_settings()

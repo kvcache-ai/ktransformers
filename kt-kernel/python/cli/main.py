@@ -10,9 +10,36 @@ import typer
 
 from kt_kernel.cli import __version__
 from kt_kernel.cli.commands import bench, chat, config, doctor, model, quant, run, sft, version
-from kt_kernel.cli.i18n import t, set_lang
+from kt_kernel.cli.i18n import t, set_lang, get_lang
 
-# Create main app
+
+def _get_app_help() -> str:
+    """Get app help text based on current language."""
+    lang = get_lang()
+    if lang == "zh":
+        return "KTransformers CLI - KTransformers 统一命令行界面"
+    return "KTransformers CLI - A unified command-line interface for KTransformers."
+
+
+def _get_help(key: str) -> str:
+    """Get help text based on current language."""
+    help_texts = {
+        "version": {"en": "Show version information", "zh": "显示版本信息"},
+        "run": {"en": "Start model inference server", "zh": "启动模型推理服务器"},
+        "chat": {"en": "Interactive chat with running model", "zh": "与运行中的模型进行交互式聊天"},
+        "quant": {"en": "Quantize model weights", "zh": "量化模型权重"},
+        "bench": {"en": "Run full benchmark", "zh": "运行完整基准测试"},
+        "microbench": {"en": "Run micro-benchmark", "zh": "运行微基准测试"},
+        "doctor": {"en": "Diagnose environment issues", "zh": "诊断环境问题"},
+        "model": {"en": "Manage models and storage paths", "zh": "管理模型和存储路径"},
+        "config": {"en": "Manage configuration", "zh": "管理配置"},
+        "sft": {"en": "Fine-tuning with LlamaFactory", "zh": "使用 LlamaFactory 进行微调"},
+    }
+    lang = get_lang()
+    return help_texts.get(key, {}).get(lang, help_texts.get(key, {}).get("en", key))
+
+
+# Create main app with dynamic help
 app = typer.Typer(
     name="kt",
     help="KTransformers CLI - A unified command-line interface for KTransformers.",
@@ -20,6 +47,24 @@ app = typer.Typer(
     add_completion=False,  # Use static completion scripts instead of dynamic completion
     rich_markup_mode="rich",
 )
+
+
+def _update_help_texts() -> None:
+    """Update all help texts based on current language setting."""
+    # Update main app help
+    app.info.help = _get_app_help()
+
+    # Update command help texts
+    for cmd_info in app.registered_commands:
+        # cmd_info is a CommandInfo object
+        if hasattr(cmd_info, "name") and cmd_info.name:
+            cmd_info.help = _get_help(cmd_info.name)
+
+    # Update sub-app help texts
+    for group_info in app.registered_groups:
+        if hasattr(group_info, "name") and group_info.name:
+            group_info.help = _get_help(group_info.name)
+
 
 # Register commands
 app.command(name="version", help="Show version information")(version.version)
@@ -335,7 +380,19 @@ def _install_shell_completion() -> None:
 
 
 def _apply_saved_language() -> None:
-    """Apply the saved language setting."""
+    """Apply the saved language setting.
+
+    Priority:
+    1. KT_LANG environment variable (if already set, don't override)
+    2. Config file setting
+    3. System locale (auto)
+    """
+    import os
+
+    # Don't override if KT_LANG is already set by user
+    if os.environ.get("KT_LANG"):
+        return
+
     from kt_kernel.cli.config.settings import get_settings
 
     settings = get_settings()
@@ -347,6 +404,12 @@ def _apply_saved_language() -> None:
 
 def main():
     """Main entry point."""
+    # Apply saved language setting first (before anything else for correct help display)
+    _apply_saved_language()
+
+    # Update help texts based on language
+    _update_help_texts()
+
     # Check for first run (but not for certain commands)
     # Skip first-run check for: --help, config commands, version
     args = sys.argv[1:] if len(sys.argv) > 1 else []
@@ -362,13 +425,9 @@ def main():
     if should_check_first_run:
         _install_shell_completion()
 
-    # Check first run before applying saved language (to avoid creating config)
+    # Check first run before running commands
     if should_check_first_run and args:
         check_first_run()
-
-    # Apply saved language setting (skip for completion commands to avoid I/O overhead)
-    if should_check_first_run:
-        _apply_saved_language()
 
     app()
 
