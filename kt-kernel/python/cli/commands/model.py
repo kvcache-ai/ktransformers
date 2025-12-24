@@ -51,20 +51,20 @@ def show_model_list() -> None:
     settings = get_settings()
 
     console.print()
-    console.print("[bold cyan]KTransformers Supported Models[/bold cyan]\n")
+    console.print(f"[bold cyan]{t('model_supported_title')}[/bold cyan]\n")
 
     # Get local models mapping
     local_models = {m.name: p for m, p in registry.find_local_models()}
 
     # Create table
     table = Table(show_header=True, header_style="bold")
-    table.add_column("Model", style="cyan", no_wrap=True)
-    table.add_column("Status", justify="center")
+    table.add_column(t("model_column_model"), style="cyan", no_wrap=True)
+    table.add_column(t("model_column_status"), justify="center")
 
     all_models = registry.list_all()
     for model in all_models:
         if model.name in local_models:
-            status = "[green]✓ Local[/green]"
+            status = f"[green]✓ {t('model_status_local')}[/green]"
         else:
             status = "[dim]-[/dim]"
 
@@ -74,15 +74,15 @@ def show_model_list() -> None:
     console.print()
 
     # Usage instructions
-    console.print("[bold]Usage:[/bold]")
-    console.print("  • Download a model:  [cyan]kt model download <model-name>[/cyan]")
-    console.print("  • List local models: [cyan]kt model list --local[/cyan]")
-    console.print("  • Search models:     [cyan]kt model search <query>[/cyan]")
+    console.print(f"[bold]{t('model_usage_title')}:[/bold]")
+    console.print(f"  • {t('model_usage_download')}  [cyan]kt model download <model-name>[/cyan]")
+    console.print(f"  • {t('model_usage_list_local')} [cyan]kt model list --local[/cyan]")
+    console.print(f"  • {t('model_usage_search')}     [cyan]kt model search <query>[/cyan]")
     console.print()
 
     # Show model storage paths
     model_paths = settings.get_model_paths()
-    console.print("[bold]Model Storage Paths:[/bold]")
+    console.print(f"[bold]{t('model_storage_paths_title')}:[/bold]")
     for path in model_paths:
         marker = "[green]✓[/green]" if path.exists() else "[dim]✗[/dim]"
         console.print(f"  {marker} {path}")
@@ -154,7 +154,7 @@ def download(
         console.print()
 
         if model is None:
-            console.print("[dim]Usage: kt model download <model-name>[/dim]")
+            console.print(f"[dim]{t('model_download_usage_hint')}[/dim]")
             console.print()
             return
 
@@ -172,8 +172,8 @@ def download(
         if not matches:
             print_error(t("run_model_not_found", name=model))
             console.print()
-            console.print("Use 'kt model download --list' to see available models.")
-            console.print("Or specify a HuggingFace repo directly: kt model download org/model-name")
+            console.print(t("model_download_list_hint"))
+            console.print(t("model_download_hf_hint"))
             raise typer.Exit(1)
 
         if len(matches) == 1:
@@ -239,16 +239,16 @@ def download(
         console.print()
         print_success(t("download_complete"))
         console.print()
-        console.print(f"  Model saved to: {download_path}")
+        console.print(f"  {t('model_saved_to', path=download_path)}")
         console.print()
-        console.print(f"  Start with: kt run {model_name}")
+        console.print(f"  {t('model_start_with', name=model_name)}")
         console.print()
 
     except subprocess.CalledProcessError as e:
-        print_error(f"Download failed: {e}")
+        print_error(t("model_download_failed", error=str(e)))
         raise typer.Exit(1)
     except FileNotFoundError:
-        print_error("huggingface-cli not found. Install with: pip install huggingface-hub")
+        print_error(t("model_hf_cli_not_found"))
         raise typer.Exit(1)
 
 
@@ -269,16 +269,16 @@ def list_models(
         local_models = registry.find_local_models()
 
         if not local_models:
-            print_warning("No locally downloaded models found")
+            print_warning(t("model_no_local_models"))
             console.print()
-            console.print("  Download a model with: [cyan]kt model download <model-name>[/cyan]")
+            console.print(f"  {t('model_download_hint')} [cyan]kt model download <model-name>[/cyan]")
             console.print()
             return
 
-        table = Table(title="Locally Downloaded Models", show_header=True, header_style="bold")
-        table.add_column("Model", style="cyan", no_wrap=True)
+        table = Table(title=t("model_local_models_title"), show_header=True, header_style="bold")
+        table.add_column(t("model_column_model"), style="cyan", no_wrap=True)
         if verbose:
-            table.add_column("Local Path", style="dim")
+            table.add_column(t("model_column_local_path"), style="dim")
 
         for model_info, model_path in local_models:
             if verbose:
@@ -292,19 +292,19 @@ def list_models(
         all_models = registry.list_all()
         local_models_dict = {m.name: p for m, p in registry.find_local_models()}
 
-        table = Table(title="Available Models", show_header=True, header_style="bold")
-        table.add_column("Model", style="cyan", no_wrap=True)
-        table.add_column("Status", justify="center")
+        table = Table(title=t("model_available_models_title"), show_header=True, header_style="bold")
+        table.add_column(t("model_column_model"), style="cyan", no_wrap=True)
+        table.add_column(t("model_column_status"), justify="center")
         if verbose:
-            table.add_column("Local Path", style="dim")
+            table.add_column(t("model_column_local_path"), style="dim")
 
         for model in all_models:
             if model.name in local_models_dict:
-                status = "[green]✓ Local[/green]"
+                status = f"[green]✓ {t('model_status_local')}[/green]"
                 local_path = str(local_models_dict[model.name])
             else:
                 status = "[dim]-[/dim]"
-                local_path = "[dim]Not downloaded[/dim]"
+                local_path = f"[dim]{t('model_status_not_downloaded')}[/dim]"
 
             if verbose:
                 table.add_row(model.name, status, local_path)
@@ -323,7 +323,7 @@ def path_list() -> None:
     model_paths = settings.get_model_paths()
 
     console.print()
-    console.print("[bold]Model Storage Paths:[/bold]\n")
+    console.print(f"[bold]{t('model_storage_paths_title')}:[/bold]\n")
 
     for i, path in enumerate(model_paths, 1):
         marker = "[green]✓[/green]" if path.exists() else "[red]✗[/red]"
@@ -343,13 +343,13 @@ def path_add(
     # Check if path exists or can be created
     path_obj = Path(path)
     if not path_obj.exists():
-        console.print(f"[yellow]Path does not exist: {path}[/yellow]")
-        if confirm(f"Create directory {path}?", default=True):
+        console.print(f"[yellow]{t('model_path_not_exist', path=path)}[/yellow]")
+        if confirm(t("model_create_directory", path=path), default=True):
             try:
                 path_obj.mkdir(parents=True, exist_ok=True)
-                console.print(f"[green]✓[/green] Created directory: {path}")
+                console.print(f"[green]✓[/green] {t('model_created_directory', path=path)}")
             except (OSError, PermissionError) as e:
-                print_error(f"Failed to create directory: {e}")
+                print_error(t("model_create_dir_failed", error=str(e)))
                 raise typer.Exit(1)
         else:
             raise typer.Abort()
@@ -357,7 +357,7 @@ def path_add(
     # Add to configuration
     settings = get_settings()
     settings.add_model_path(path)
-    print_success(f"Added model path: {path}")
+    print_success(t("model_path_added", path=path))
 
 
 @app.command(name="path-remove")
@@ -370,9 +370,9 @@ def path_remove(
 
     settings = get_settings()
     if settings.remove_model_path(path):
-        print_success(f"Removed model path: {path}")
+        print_success(t("model_path_removed", path=path))
     else:
-        print_error(f"Path not found in configuration or cannot remove last path: {path}")
+        print_error(t("model_path_not_found", path=path))
         raise typer.Exit(1)
 
 
@@ -390,14 +390,14 @@ def search(
     console.print()
 
     if not matches:
-        print_warning(f"No models found matching '{query}'")
+        print_warning(t("model_search_no_results", query=query))
         console.print()
         return
 
-    table = Table(title=f"Search Results for '{query}'", show_header=True)
-    table.add_column("Name", style="cyan")
-    table.add_column("HuggingFace Repo", style="dim")
-    table.add_column("Aliases", style="yellow")
+    table = Table(title=t("model_search_results_title", query=query), show_header=True)
+    table.add_column(t("model_column_name"), style="cyan")
+    table.add_column(t("model_column_hf_repo"), style="dim")
+    table.add_column(t("model_column_aliases"), style="yellow")
 
     for model in matches:
         aliases = ", ".join(model.aliases[:3])
