@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-fa70e972.js";
+            window.path_to_searchindex_js = "../../searchindex-a795a334.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-51c9f918.js"></script>
@@ -247,6 +247,7 @@
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
 <li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode)</li>
 <li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="../doc/en/Kimi-K2-Thinking-Native.html">Guide</a></li>
+<li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="../doc/en/MiniMax-M2.1-Tutorial.html">Guide</a></li>
 </ul>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
@@ -363,8 +364,49 @@ conda activate kt-kernel
 <p>⚠️ <strong>Portability Note:</strong> The default build is optimized for your specific CPU and may not work on different/older CPUs. For portable builds or binary distribution, see <a href="#manual-configuration-advanced">Manual Configuration</a> below.</p>
 <p>⚠️ <strong>AMD BLIS backend users:</strong> See <a href="https://github.com/kvcache-ai/ktransformers/issues/1601">installation guide</a> for AMD-specific setup.</p>
 <h2 id="verification"><a class="header" href="#verification">Verification</a></h2>
+<p>After installation, verify that the CLI is working:</p>
+<pre><code class="language-bash">kt version
+</code></pre>
+<p>Expected output:</p>
+<pre><code>KTransformers CLI v0.x.x
+
+  Python:        3.11.x
+  Platform:      Linux 5.15.0-xxx-generic
+  CUDA:          12.x
+  kt-kernel:     0.x.x (amx)
+  sglang:        0.x.x
+</code></pre>
+<p>You can also verify the Python module directly:</p>
 <pre><code class="language-bash">python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 </code></pre>
+<h2 id="kt-cli-overview"><a class="header" href="#kt-cli-overview">KT CLI Overview</a></h2>
+<p>The <code>kt</code> command-line tool provides a unified interface for running and managing KTransformers models:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Command</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>kt run &lt;model&gt;</code></td><td>Start model inference server with auto-optimized parameters</td></tr>
+<tr><td><code>kt chat</code></td><td>Interactive chat with a running model server</td></tr>
+<tr><td><code>kt model</code></td><td>Manage models and storage paths</td></tr>
+<tr><td><code>kt doctor</code></td><td>Diagnose environment issues and check system compatibility</td></tr>
+<tr><td><code>kt config</code></td><td>Manage CLI configuration</td></tr>
+<tr><td><code>kt version</code></td><td>Show version information</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>Quick Start Example:</strong></p>
+<pre><code class="language-bash"># Start a model server (auto-detects hardware and applies optimal settings)
+kt run m2
+
+# In another terminal, chat with the model
+kt chat
+
+# Check system compatibility
+kt doctor
+</code></pre>
+<p>Run <code>kt --help</code> for more options, or <code>kt &lt;command&gt; --help</code> for command-specific help.</p>
 <h2 id="integration-with-sglang"><a class="header" href="#integration-with-sglang">Integration with SGLang</a></h2>
 <p>KT-Kernel can be used standalone via <a href="#direct-python-api-usage">Direct Python API</a> or integrated with SGLang for production deployment. This section describes SGLang integration to enable CPU-GPU heterogeneous inference, where “hot” experts run on GPU and “cold” experts run on CPU for optimal resource utilization.</p>
 <h3 id="installation-steps"><a class="header" href="#installation-steps">Installation Steps</a></h3>
@@ -514,13 +556,13 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr>
 </thead>
 <tbody>
-<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, <code>RAWINT4</code>, or <code>LLAMAFILE</code></td></tr>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, <code>RAWINT4</code>, <code>FP8</code> or <code>LLAMAFILE</code></td></tr>
 <tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
 <tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
 <tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
 <tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
 <tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-4 recommended)</td></tr>
-<tr><td><code>--kt-gpu-prefill-token-threshold</code></td><td>Token count threshold for prefill strategy (RAWINT4 only)</td><td>~<code>400</code></td></tr>
+<tr><td><code>--kt-gpu-prefill-token-threshold</code></td><td>Token count threshold for prefill strategy (FP8 and RAWINT4 only)</td><td>~<code>1024</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -532,6 +574,7 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
 <li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
 <li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (AMX backend only, currently supports Kimi-K2-Thinking model). See <a href="../doc/en/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
+<li><code>FP8</code>: FP8 weights shared by CPU and GPU</li>
 <li><code>LLAMAFILE</code>: GGUF-based backend</li>
 </ul>
 </li>
@@ -574,11 +617,11 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 </ul>
 </li>
 <li>
-<p><strong><code>kt-gpu-prefill-token-threshold</code></strong> (RAWINT4 only): Controls prefill strategy for native INT4 inference:</p>
+<p><strong><code>kt-gpu-prefill-token-threshold</code></strong> (FP8 and RAWINT4 only): Controls prefill strategy for native FP8 and INT4 inference:</p>
 <ul>
 <li><strong>≤ threshold</strong>: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.</li>
-<li><strong>&gt; threshold</strong>: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires ~9GB+ extra VRAM.</li>
-<li>Only applicable when <code>--kt-method RAWINT4</code> is used. Currently supports Kimi-K2-Thinking model only.</li>
+<li><strong>&gt; threshold</strong>: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires one MoE layer extra VRAM (e.g., ~9GB+ for Kimi-K2-Thinking and ~3.6GB for MiniMax-M2.1).</li>
+<li>Only applicable when <code>--kt-method RAWINT4</code> or <code>--kt-method FP8</code> is used.</li>
 </ul>
 </li>
 </ul>
