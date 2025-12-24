@@ -28,7 +28,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 **Current Support Status:**
 - ✅ **Intel CPUs with AMX**: Fully supported (using weights converted to INT4/INT8 format)
 - ✅ **Universal CPU (llamafile backend)**: Supported (using GGUF-format weights)
-- ✅ **AMD CPUs with BLIS**: Supported (for int8 prefill & decode) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis)
+- ✅ **AMD CPUs with BLIS**: Supported (for int8 prefill & decode) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis.md)
 - ✅ **Kimi-K2 Native INT4 (RAWINT4)**: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)
 - ✅ **FP8 weights (e.g., MiniMax-M2.1)**: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md)
 
