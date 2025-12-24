@@ -41,16 +41,17 @@ MiniMax-M2.1 is a large MoE (Mixture of Experts) model that provides native FP8 
 
 Before starting, ensure you have:
 
-1. **SGLang installed** - Follow [SGLang integration steps](./kt-kernel_intro.md#integration-with-sglang)
-2. **KT-Kernel installed** - Follow the [installation guide](./kt-kernel_intro.md#installation)
+1. **SGLang installed** - Follow [SGLang integration steps](https://docs.sglang.io/get_started/install.html)
 
-Note: Currently, please clone our custom SGLang repository:
+    Note: Currently, please clone our custom SGLang repository:
 
-```bash
-git clone https://github.com/kvcache-ai/sglang.git
-cd sglang
-pip install -e "python[all]"
-```
+    ```bash
+    git clone https://github.com/kvcache-ai/sglang.git
+    cd sglang
+    pip install -e "python[all]"
+    ```
+
+2. **KT-Kernel installed**
 
 3. **CUDA toolkit** - CUDA 12.0+ recommended for FP8 support
 4. **Hugging Face CLI** - For downloading models:
@@ -60,7 +61,14 @@ pip install -e "python[all]"
 
 ## Step 1: Download Model Weights
 
-<!-- TODO: using kt-cli -->
+Download the official MiniMax-M2.1 weights.
+
+* huggingface: https://huggingface.co/MiniMaxAI/MiniMax-M2.1
+
+    ```bash
+    hf download MiniMaxAI/MiniMax-M2.1 --local-dir /path/to/minimax-m2.1
+    ```
+
 ## Step 2: Launch SGLang Server
 
 
@@ -122,8 +130,13 @@ We benchmarked KT-Kernel + SGLang against llama.cpp to demonstrate the performan
 ## Troubleshooting
 <!-- TODO: -->
 
-## Advance Use Casee: Running Claude Code with MiniMax-M2.1 Local Backend
-<!-- TODO: -->
+## Advance Use Case: Running Claude Code with MiniMax-M2.1 Local Backend
+
+```bash
+kt run M2.1 --tool-call-parser minimax-m2 --reasoning-parser minimax-append-think
+```
+
+With the above command, you can use [claude-code-router](https://github.com/musistudio/claude-code-router) to connect MiniMax-M2.1 as a local backend for [Claude Code](https://github.com/anthropics/claude-code).
 
 ## Additional Resources
 
