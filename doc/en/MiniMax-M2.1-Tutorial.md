@@ -4,7 +4,6 @@ This tutorial demonstrates how to run MiniMax-M2.1 model inference using SGLang 
 
 ## Table of Contents
 
-- [Overview](#overview)
 - [Hardware Requirements](#hardware-requirements)
 - [Prerequisites](#prerequisites)
 - [Step 1: Download Model Weights](#step-1-download-model-weights)
@@ -12,15 +11,6 @@ This tutorial demonstrates how to run MiniMax-M2.1 model inference using SGLang 
 - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
 - [Performance](#performance)
 - [Troubleshooting](#troubleshooting)
-
-## Overview
-
-MiniMax-M2.1 is a large MoE (Mixture of Experts) model that provides native FP8 weights. This tutorial uses KT-Kernel's FP8 support to enable CPU-GPU heterogeneous inference:
-
-- **FP8 GPU Inference**: Native FP8 precision for GPU-side computation, providing both memory efficiency and computational accuracy
-- **CPU-GPU Heterogeneous Architecture**:
-  - Hot experts and attention modules run on GPU with FP8 precision
-  - Cold experts offloaded to CPU for memory efficiency
 
 ## Hardware Requirements
 
