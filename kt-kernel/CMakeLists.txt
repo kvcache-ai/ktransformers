@@ -26,7 +26,7 @@ option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.4.4)
+project(kt_kernel_ext VERSION 0.5.0)
 
 # Auto-detect CPU features early (unless building with LLAMA_NATIVE)
 if(NOT LLAMA_NATIVE AND NOT MSVC)
