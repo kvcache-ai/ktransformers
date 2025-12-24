@@ -24,6 +24,7 @@ AUTO-DETECTION (Default):
   - CPUINFER_ENABLE_AMX   = ON/OFF (based on detection)
   - CPUINFER_ENABLE_AVX512_VNNI = ON/OFF (with fallback if OFF)
   - CPUINFER_ENABLE_AVX512_BF16 = ON/OFF (with fallback if OFF)
+  - CPUINFER_ENABLE_AVX512_VBMI = ON/OFF (required for FP8 MoE)
 
   ✓ Best performance on YOUR machine
   ✗ Binary may NOT work on different/older CPUs
@@ -73,6 +74,7 @@ Optional variables (with defaults):
   CPUINFER_VERBOSE=1                    Verbose build output (0/1)
   CPUINFER_ENABLE_AVX512_VNNI=ON/OFF    Override VNNI detection (auto if unset)
   CPUINFER_ENABLE_AVX512_BF16=ON/OFF    Override BF16 detection (auto if unset)
+  CPUINFER_ENABLE_AVX512_VBMI=ON/OFF    Override VBMI detection (auto if unset)
 
 Software Fallback Support:
   ✓ If VNNI not available: Uses AVX512BW fallback (2-3x slower but works)
@@ -144,11 +146,13 @@ install_dependencies() {
 }
 
 # Function to detect CPU features
-# Returns: "has_amx has_avx512_vnni has_avx512_bf16" (space-separated 0/1 values)
+# Returns: "has_amx has_avx512f has_avx512_vnni has_avx512_bf16 has_avx512_vbmi" (space-separated 0/1 values)
 detect_cpu_features() {
   local has_amx=0
+  local has_avx512f=0
   local has_avx512_vnni=0
   local has_avx512_bf16=0
+  local has_avx512_vbmi=0
 
   if [ -f /proc/cpuinfo ]; then
     local cpu_flags
@@ -157,6 +161,11 @@ detect_cpu_features() {
     # Check for AMX support on Linux
     if echo "$cpu_flags" | grep -qE "amx_tile|amx_int8|amx_bf16"; then
       has_amx=1
+    fi
+
+    # Check for AVX512F (foundation)
+    if echo "$cpu_flags" | grep -qE "avx512f"; then
+      has_avx512f=1
     fi
 
     # Check for AVX512_VNNI support
@@ -168,14 +177,21 @@ detect_cpu_features() {
     if echo "$cpu_flags" | grep -qE "avx512_bf16|avx512bf16"; then
       has_avx512_bf16=1
     fi
+
+    # Check for AVX512_VBMI support
+    if echo "$cpu_flags" | grep -qE "avx512_vbmi|avx512vbmi"; then
+      has_avx512_vbmi=1
+    fi
   elif [ "$(uname)" = "Darwin" ]; then
     # macOS doesn't have AMX (ARM or Intel without AMX)
     has_amx=0
+    has_avx512f=0
     has_avx512_vnni=0
     has_avx512_bf16=0
+    has_avx512_vbmi=0
   fi
 
-  echo "$has_amx $has_avx512_vnni $has_avx512_bf16"
+  echo "$has_amx $has_avx512f $has_avx512_vnni $has_avx512_bf16 $has_avx512_vbmi"
 }
 
 build_step() {
@@ -210,11 +226,13 @@ build_step() {
   echo "=========================================="
   echo ""
 
-  # detect_cpu_features returns "has_amx has_avx512_vnni has_avx512_bf16"
+  # detect_cpu_features returns "has_amx has_avx512f has_avx512_vnni has_avx512_bf16 has_avx512_vbmi"
   CPU_FEATURES=$(detect_cpu_features)
   HAS_AMX=$(echo "$CPU_FEATURES" | cut -d' ' -f1)
-  HAS_AVX512_VNNI=$(echo "$CPU_FEATURES" | cut -d' ' -f2)
-  HAS_AVX512_BF16=$(echo "$CPU_FEATURES" | cut -d' ' -f3)
+  HAS_AVX512F=$(echo "$CPU_FEATURES" | cut -d' ' -f2)
+  HAS_AVX512_VNNI=$(echo "$CPU_FEATURES" | cut -d' ' -f3)
+  HAS_AVX512_BF16=$(echo "$CPU_FEATURES" | cut -d' ' -f4)
+  HAS_AVX512_VBMI=$(echo "$CPU_FEATURES" | cut -d' ' -f5)
 
   export CPUINFER_CPU_INSTRUCT=NATIVE
 
@@ -244,6 +262,13 @@ build_step() {
   echo ""
   echo "AVX512 Feature Detection:"
 
+  # AVX512F: Foundation (required for all AVX512 variants)
+  if [ "$HAS_AVX512F" = "1" ]; then
+    echo "  AVX512F: ✓ Detected (foundation)"
+  else
+    echo "  AVX512F: ✗ Not detected (AVX512 not available)"
+  fi
+
   # VNNI: Check if user manually set it, otherwise auto-detect
   if [ -n "${CPUINFER_ENABLE_AVX512_VNNI:-}" ]; then
     echo "  VNNI: User override = $CPUINFER_ENABLE_AVX512_VNNI"
@@ -270,9 +295,23 @@ build_step() {
     fi
   fi
 
+  # VBMI: Check if user manually set it, otherwise auto-detect
+  if [ -n "${CPUINFER_ENABLE_AVX512_VBMI:-}" ]; then
+    echo "  VBMI: User override = $CPUINFER_ENABLE_AVX512_VBMI"
+  else
+    if [ "$HAS_AVX512_VBMI" = "1" ]; then
+      echo "  VBMI: ✓ Detected (byte permutation enabled)"
+      export CPUINFER_ENABLE_AVX512_VBMI=ON
+    else
+      echo "  VBMI: ✗ Not detected (FP8 MoE may not work)"
+      export CPUINFER_ENABLE_AVX512_VBMI=OFF
+    fi
+  fi
+
   echo ""
   echo "  Note: Software fallbacks ensure all code works on older CPUs"
-  echo "  Tip: Override with CPUINFER_ENABLE_AVX512_VNNI/BF16=ON/OFF"
+  echo "  Note: FP8 MoE requires AVX512F + BF16 + VNNI + VBMI"
+  echo "  Tip: Override with CPUINFER_ENABLE_AVX512_[VNNI|BF16|VBMI]=ON/OFF"
 
   echo ""
   echo "To use manual configuration instead, run: $0 build --manual"
@@ -357,6 +396,7 @@ echo "  CPUINFER_CPU_INSTRUCT        = $CPUINFER_CPU_INSTRUCT"
 echo "  CPUINFER_ENABLE_AMX          = $CPUINFER_ENABLE_AMX"
 echo "  CPUINFER_ENABLE_AVX512_VNNI  = ${CPUINFER_ENABLE_AVX512_VNNI:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_BF16  = ${CPUINFER_ENABLE_AVX512_BF16:-AUTO}"
+echo "  CPUINFER_ENABLE_AVX512_VBMI  = ${CPUINFER_ENABLE_AVX512_VBMI:-AUTO}"
 echo "  CPUINFER_BUILD_TYPE          = $CPUINFER_BUILD_TYPE"
 echo "  CPUINFER_PARALLEL            = $CPUINFER_PARALLEL"
 echo ""

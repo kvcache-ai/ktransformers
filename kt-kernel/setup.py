@@ -21,6 +21,9 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_BLIS=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_MOE_AMD
   CPUINFER_ENABLE_KML=OFF         ON/OFF -> -DKTRANSFORMERS_CPU_USE_KML
   CPUINFER_ENABLE_AVX512=OFF      ON/OFF -> -DKTRANSFORMERS_CPU_USE_AMX_AVX512
+  CPUINFER_ENABLE_AVX512_VNNI=OFF ON/OFF -> -DLLAMA_AVX512_VNNI
+  CPUINFER_ENABLE_AVX512_BF16=OFF ON/OFF -> -DLLAMA_AVX512_BF16
+  CPUINFER_ENABLE_AVX512_VBMI=OFF ON/OFF -> -DLLAMA_AVX512_VBMI (required for FP8 MoE)
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
 
 
@@ -254,23 +257,29 @@ class CMakeBuild(build_ext):
 
     def build_multi_variants(self, ext: CMakeExtension):
         """
-        Build all 3 CPU variants (AMX, AVX512, AVX2) in a single wheel.
+        Build all 6 CPU variants with progressive AVX512 capabilities.
 
-        This creates 3 separate .so files:
-        - _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
-        - _kt_kernel_ext_avx512.cpython-311-x86_64-linux-gnu.so
-        - _kt_kernel_ext_avx2.cpython-311-x86_64-linux-gnu.so
+        This creates 6 separate .so files optimized for different CPU generations:
+        - _kt_kernel_ext_avx2.so         (Haswell+, 2013)
+        - _kt_kernel_ext_avx512_base.so  (Skylake-X+, 2017)
+        - _kt_kernel_ext_avx512_vnni.so  (Cascade Lake+, 2019)
+        - _kt_kernel_ext_avx512_vbmi.so  (Ice Lake client, 2019)
+        - _kt_kernel_ext_avx512_bf16.so  (Ice Lake server/Zen 4+, 2021)
+        - _kt_kernel_ext_amx.so          (Sapphire Rapids+, 2023)
 
-        Runtime CPU detection (in _cpu_detect.py) will automatically load the best one.
+        Runtime CPU detection (in _cpu_detect.py) will automatically select the best match.
         """
         print("=" * 70)
-        print("Building kt-kernel with ALL CPU variants (AMX, AVX512, AVX2)")
+        print("Building kt-kernel with ALL 6 CPU variants")
         print("=" * 70)
         print()
-        print("This will build three variants in a single wheel:")
-        print("  - AMX variant    (Intel Sapphire Rapids+)")
-        print("  - AVX512 variant (Intel Skylake-X/Ice Lake+, AMD Zen 4+)")
-        print("  - AVX2 variant   (maximum compatibility, 2013+)")
+        print("This will build six progressive variants in a single wheel:")
+        print("  1. AVX2          - Haswell+ (2013)")
+        print("  2. AVX512 Base   - Skylake-X+ (2017)")
+        print("  3. AVX512+VNNI   - Cascade Lake+ (2019)")
+        print("  4. AVX512+VBMI   - Ice Lake client (2019)")
+        print("  5. AVX512+BF16   - Ice Lake server, Zen 4+ (2021)")
+        print("  6. AMX           - Sapphire Rapids+ (2023)")
         print()
         print("Runtime CPU detection will automatically select the best variant.")
         print()
@@ -278,33 +287,100 @@ class CMakeBuild(build_ext):
         extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
         cfg = default_build_type()
 
-        # Save original env vars
-        orig_cpu_instruct = os.environ.get("CPUINFER_CPU_INSTRUCT")
-        orig_enable_amx = os.environ.get("CPUINFER_ENABLE_AMX")
-        orig_enable_avx512 = os.environ.get("CPUINFER_ENABLE_AVX512")
+        # Save original env vars to restore later
+        env_backup = {
+            "CPUINFER_CPU_INSTRUCT": os.environ.get("CPUINFER_CPU_INSTRUCT"),
+            "CPUINFER_ENABLE_AMX": os.environ.get("CPUINFER_ENABLE_AMX"),
+            "CPUINFER_ENABLE_AVX512": os.environ.get("CPUINFER_ENABLE_AVX512"),
+            "CPUINFER_ENABLE_AVX512_VNNI": os.environ.get("CPUINFER_ENABLE_AVX512_VNNI"),
+            "CPUINFER_ENABLE_AVX512_BF16": os.environ.get("CPUINFER_ENABLE_AVX512_BF16"),
+            "CPUINFER_ENABLE_AVX512_VBMI": os.environ.get("CPUINFER_ENABLE_AVX512_VBMI"),
+        }
 
-        # Variant configurations: (name, CPUINFER_CPU_INSTRUCT, CPUINFER_ENABLE_AMX)
+        # Variant configurations: (name, description, env_vars)
+        # Each variant specifies exactly which features to enable
         variants = [
-            ("amx", "AVX512", "ON"),  # AVX512 + AMX
-            ("avx512", "AVX512", "OFF"),  # AVX512 only
-            ("avx2", "AVX2", "OFF"),  # AVX2 only
+            (
+                "avx2",
+                "AVX2 baseline",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX2",
+                    "CPUINFER_ENABLE_AVX512": "OFF",
+                    "CPUINFER_ENABLE_AMX": "OFF",
+                },
+            ),
+            (
+                "avx512_base",
+                "AVX512F+BW",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX512",
+                    "CPUINFER_ENABLE_AVX512": "ON",
+                    "CPUINFER_ENABLE_AVX512_VNNI": "OFF",
+                    "CPUINFER_ENABLE_AVX512_BF16": "OFF",
+                    "CPUINFER_ENABLE_AVX512_VBMI": "OFF",
+                    "CPUINFER_ENABLE_AMX": "OFF",
+                },
+            ),
+            (
+                "avx512_vnni",
+                "AVX512F+VNNI",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX512",
+                    "CPUINFER_ENABLE_AVX512": "ON",
+                    "CPUINFER_ENABLE_AVX512_VNNI": "ON",
+                    "CPUINFER_ENABLE_AVX512_BF16": "OFF",
+                    "CPUINFER_ENABLE_AVX512_VBMI": "OFF",
+                    "CPUINFER_ENABLE_AMX": "OFF",
+                },
+            ),
+            (
+                "avx512_vbmi",
+                "AVX512F+VNNI+VBMI",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX512",
+                    "CPUINFER_ENABLE_AVX512": "ON",
+                    "CPUINFER_ENABLE_AVX512_VNNI": "ON",
+                    "CPUINFER_ENABLE_AVX512_BF16": "OFF",
+                    "CPUINFER_ENABLE_AVX512_VBMI": "ON",
+                    "CPUINFER_ENABLE_AMX": "OFF",
+                },
+            ),
+            (
+                "avx512_bf16",
+                "AVX512 Full (F+VNNI+VBMI+BF16)",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX512",
+                    "CPUINFER_ENABLE_AVX512": "ON",
+                    "CPUINFER_ENABLE_AVX512_VNNI": "ON",
+                    "CPUINFER_ENABLE_AVX512_BF16": "ON",
+                    "CPUINFER_ENABLE_AVX512_VBMI": "ON",
+                    "CPUINFER_ENABLE_AMX": "OFF",
+                },
+            ),
+            (
+                "amx",
+                "AMX + AVX512 Full",
+                {
+                    "CPUINFER_CPU_INSTRUCT": "AVX512",
+                    "CPUINFER_ENABLE_AVX512": "ON",
+                    "CPUINFER_ENABLE_AVX512_VNNI": "ON",
+                    "CPUINFER_ENABLE_AVX512_BF16": "ON",
+                    "CPUINFER_ENABLE_AVX512_VBMI": "ON",
+                    "CPUINFER_ENABLE_AMX": "ON",
+                },
+            ),
         ]
 
-        for variant_name, cpu_instruct, enable_amx in variants:
+        for variant_name, variant_desc, env_vars in variants:
             print("=" * 70)
-            print(f"Building {variant_name.upper()} variant...")
+            print(f"Building {variant_name.upper()} variant ({variant_desc})")
             print("=" * 70)
             print()
 
             # Set environment variables for this variant
-            os.environ["CPUINFER_CPU_INSTRUCT"] = cpu_instruct
-            os.environ["CPUINFER_ENABLE_AMX"] = enable_amx
-            if variant_name == "avx2":
-                # For AVX2 variant, disable AVX512 umbrella to prevent AVX512 code
-                os.environ["CPUINFER_ENABLE_AVX512"] = "OFF"
-            else:
-                # For AMX and AVX512 variants, enable AVX512 umbrella
-                os.environ["CPUINFER_ENABLE_AVX512"] = "ON"
+            for key, value in env_vars.items():
+                os.environ[key] = value
+                print(f"  {key} = {value}")
 
             # Use separate build directory for each variant
             build_temp = Path(self.build_temp) / f"{ext.name}_{cfg}_{variant_name}"
@@ -338,26 +414,17 @@ class CMakeBuild(build_ext):
                 print()
 
         # Restore original env vars
-        if orig_cpu_instruct is not None:
-            os.environ["CPUINFER_CPU_INSTRUCT"] = orig_cpu_instruct
-        elif "CPUINFER_CPU_INSTRUCT" in os.environ:
-            del os.environ["CPUINFER_CPU_INSTRUCT"]
-
-        if orig_enable_amx is not None:
-            os.environ["CPUINFER_ENABLE_AMX"] = orig_enable_amx
-        elif "CPUINFER_ENABLE_AMX" in os.environ:
-            del os.environ["CPUINFER_ENABLE_AMX"]
-
-        if orig_enable_avx512 is not None:
-            os.environ["CPUINFER_ENABLE_AVX512"] = orig_enable_avx512
-        elif "CPUINFER_ENABLE_AVX512" in os.environ:
-            del os.environ["CPUINFER_ENABLE_AVX512"]
+        for key, value in env_backup.items():
+            if value is not None:
+                os.environ[key] = value
+            elif key in os.environ:
+                del os.environ[key]
 
         print("=" * 70)
-        print("✓ All variants built successfully!")
+        print("✓ All 6 variants built successfully!")
         print("=" * 70)
         print()
-        print("The wheel now contains 3 CPU variants:")
+        print("The wheel now contains 6 CPU variants:")
         for so_file in sorted(extdir.glob("_kt_kernel_ext_*.so")):
             print(f"  - {so_file.name}")
         print()
@@ -483,14 +550,38 @@ class CMakeBuild(build_ext):
 
         # Fine-grained AVX512 subset flags: only enable if CPU actually supports them
         # These are passed to CMake to conditionally add compiler flags
+        # Track if any AVX512 extension is enabled
+        avx512_extension_enabled = False
+
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VNNI", "LLAMA_AVX512_VNNI"):
             if "AVX512_VNNI" in d["features"]:
                 cmake_args.append("-DLLAMA_AVX512_VNNI=ON")
                 print("-- AVX512_VNNI detected; enabling (-DLLAMA_AVX512_VNNI=ON)")
+                avx512_extension_enabled = True
+        else:
+            avx512_extension_enabled = True
+
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_BF16", "LLAMA_AVX512_BF16"):
             if "AVX512_BF16" in d["features"]:
                 cmake_args.append("-DLLAMA_AVX512_BF16=ON")
                 print("-- AVX512_BF16 detected; enabling (-DLLAMA_AVX512_BF16=ON)")
+                avx512_extension_enabled = True
+        else:
+            avx512_extension_enabled = True
+
+        if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VBMI", "LLAMA_AVX512_VBMI"):
+            if "AVX512_VBMI" in d["features"]:
+                cmake_args.append("-DLLAMA_AVX512_VBMI=ON")
+                print("-- AVX512_VBMI detected; enabling (-DLLAMA_AVX512_VBMI=ON)")
+                avx512_extension_enabled = True
+        else:
+            avx512_extension_enabled = True
+
+        # If any AVX512 extension is enabled, ensure base AVX512 is also enabled
+        if avx512_extension_enabled and cpu_mode == "NATIVE":
+            if not any("LLAMA_AVX512=ON" in a for a in cmake_args):
+                cmake_args.append("-DLLAMA_AVX512=ON")
+                print("-- AVX512 extensions enabled; also enabling base AVX512F (-DLLAMA_AVX512=ON)")
 
         # Auto-enable MOE kernel only when env explicitly turns on AMD or KML backend
         # (Do not enable purely on vendor auto-detection to avoid surprise behavior.)
