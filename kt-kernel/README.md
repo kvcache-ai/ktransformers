@@ -168,9 +168,56 @@ Simply run the install script - it will auto-detect your CPU and optimize for be
 
 ## Verification
 
+After installation, verify that the CLI is working:
+
+```bash
+kt version
+```
+
+Expected output:
+```
+KTransformers CLI v0.x.x
+
+  Python:        3.11.x
+  Platform:      Linux 5.15.0-xxx-generic
+  CUDA:          12.x
+  kt-kernel:     0.x.x (amx)
+  sglang:        0.x.x
+```
+
+You can also verify the Python module directly:
+
 ```bash
 python -c "from kt_kernel import KTMoEWrapper; print('✓ kt-kernel installed successfully')"
 ```
+
+## KT CLI Overview
+
+The `kt` command-line tool provides a unified interface for running and managing KTransformers models:
+
+| Command | Description |
+|---------|-------------|
+| `kt run <model>` | Start model inference server with auto-optimized parameters |
+| `kt chat` | Interactive chat with a running model server |
+| `kt model` | Manage models and storage paths |
+| `kt doctor` | Diagnose environment issues and check system compatibility |
+| `kt config` | Manage CLI configuration |
+| `kt version` | Show version information |
+
+**Quick Start Example:**
+
+```bash
+# Start a model server (auto-detects hardware and applies optimal settings)
+kt run m2
+
+# In another terminal, chat with the model
+kt chat
+
+# Check system compatibility
+kt doctor
+```
+
+Run `kt --help` for more options, or `kt <command> --help` for command-specific help.
 
 ## Integration with SGLang
 
