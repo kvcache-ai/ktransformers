@@ -101,9 +101,19 @@ def run(
     advanced: bool,
     dry_run: bool,
 ) -> None:
-    """Start model inference server."""
+    """Start model inference server.
+
+    \b
+    Examples: kt run deepseek-v3 | kt run m2 --tensor-parallel-size 2 | kt run /path/to/model --gpu-experts 4
+
+    \b
+    Custom Options: Pass any SGLang server option directly (e.g., kt run m2 --fp8-gemm-backend triton).
+    Common: --fp8-gemm-backend, --tool-call-parser, --reasoning-parser, --dp-size, --enable-ma
+    For full list: python -m sglang.launch_server --help
+    """
     # Handle --help manually since we disabled it
-    if "--help" in ctx.args or "-h" in ctx.args:
+    # Check sys.argv for --help or -h since ctx.args may not be set yet
+    if "--help" in sys.argv or "-h" in sys.argv:
         click.echo(ctx.get_help())
         return
 
@@ -562,29 +572,51 @@ def _run_impl(
         raise typer.Exit(1)
 
 
-def _find_model_path(model_info: ModelInfo, settings) -> Optional[Path]:
-    """Find the model path on disk by searching all configured model paths."""
+def _find_model_path(model_info: ModelInfo, settings, max_depth: int = 3) -> Optional[Path]:
+    """Find the model path on disk by searching all configured model paths.
+
+    Args:
+        model_info: Model information to search for
+        settings: Settings instance
+        max_depth: Maximum depth to search within each model path (default: 3)
+
+    Returns:
+        Path to the model directory, or None if not found
+    """
     model_paths = settings.get_model_paths()
+
+    # Generate possible names to search for
+    possible_names = [
+        model_info.name,
+        model_info.name.lower(),
+        model_info.name.replace(" ", "-"),
+        model_info.hf_repo.split("/")[-1],
+        model_info.hf_repo.replace("/", "--"),
+    ]
+
+    # Add alias-based names
+    for alias in model_info.aliases:
+        possible_names.append(alias)
+        possible_names.append(alias.lower())
 
     # Search in all configured model directories
     for models_dir in model_paths:
-        # Check common path patterns
-        possible_paths = [
-            models_dir / model_info.name,
-            models_dir / model_info.name.lower(),
-            models_dir / model_info.name.replace(" ", "-"),
-            models_dir / model_info.hf_repo.split("/")[-1],
-            models_dir / model_info.hf_repo.replace("/", "--"),
-        ]
+        if not models_dir.exists():
+            continue
 
-        # Add alias-based paths
-        for alias in model_info.aliases:
-            possible_paths.append(models_dir / alias)
-            possible_paths.append(models_dir / alias.lower())
+        # Search recursively up to max_depth
+        for depth in range(max_depth):
+            for name in possible_names:
+                if depth == 0:
+                    # Direct children: models_dir / name
+                    search_paths = [models_dir / name]
+                else:
+                    # Nested: use rglob to find directories matching the name
+                    search_paths = list(models_dir.rglob(name))
 
-        for path in possible_paths:
-            if path.exists() and (path / "config.json").exists():
-                return path
+                for path in search_paths:
+                    if path.exists() and (path / "config.json").exists():
+                        return path
 
     return None
 

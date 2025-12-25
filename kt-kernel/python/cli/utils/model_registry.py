@@ -280,8 +280,11 @@ class ModelRegistry:
         """List all registered models."""
         return list(self._models.values())
 
-    def find_local_models(self) -> list[tuple[ModelInfo, Path]]:
+    def find_local_models(self, max_depth: int = 3) -> list[tuple[ModelInfo, Path]]:
         """Find models that are downloaded locally in any configured model path.
+
+        Args:
+            max_depth: Maximum depth to search within each model path (default: 3)
 
         Returns:
             List of (ModelInfo, path) tuples for local models
@@ -297,18 +300,40 @@ class ModelRegistry:
                 if not models_dir.exists():
                     continue
 
-                # Check common path patterns
-                possible_paths = [
-                    models_dir / model.name,
-                    models_dir / model.name.lower(),
-                    models_dir / model.hf_repo.split("/")[-1],
-                    models_dir / model.hf_repo.replace("/", "--"),
+                # Generate possible names to search for
+                possible_names = [
+                    model.name,
+                    model.name.lower(),
+                    model.hf_repo.split("/")[-1],
+                    model.hf_repo.replace("/", "--"),
                 ]
 
-                for path in possible_paths:
-                    if path.exists() and (path / "config.json").exists():
-                        results.append((model, path))
-                        found = True
+                # Search recursively up to max_depth
+                for depth in range(max_depth):
+                    # Build glob pattern for current depth
+                    # depth=0: direct children, depth=1: grandchildren, etc.
+                    glob_pattern = "*" if depth > 0 else ""
+                    for _ in range(depth):
+                        glob_pattern = "*/" + glob_pattern if glob_pattern else "*"
+
+                    for name in possible_names:
+                        if depth == 0:
+                            # Direct children: models_dir / name
+                            search_paths = [models_dir / name]
+                        else:
+                            # Nested: use rglob to find directories matching the name
+                            search_paths = list(models_dir.rglob(name))
+
+                        for path in search_paths:
+                            if path.exists() and (path / "config.json").exists():
+                                results.append((model, path))
+                                found = True
+                                break
+
+                        if found:
+                            break
+
+                    if found:
                         break
 
                 if found:
