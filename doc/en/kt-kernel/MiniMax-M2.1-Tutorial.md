@@ -168,6 +168,8 @@ The following benchmarks were measured with single concurrency (Prefill tps / De
 | 1 x RTX 5090 (32 GB) | 2 x AMD EPYC 9355 | PCIe 5.0 | 408 / 32.1 | 1196 / 31.4 | 2540 / 27.6 |
 | 2 x RTX 5090 (32 GB) | 2 x AMD EPYC 9355 | PCIe 5.0 | 414 / 35.9 | 1847 / 35.5 | 4007 / 33.1 |
 
+![Throughput in 2 x RTX 5090](../../assets/MiniMax-M2_speed.png)
+
 ### Comparison with llama.cpp
 
 We benchmarked KT-Kernel + Sglang against llama.cpp to demonstrate the performance advantages of our CPU-GPU heterogeneous inference approach.
