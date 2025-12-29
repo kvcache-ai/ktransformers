@@ -48,13 +48,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 Install the latest CPU-only version:
 
 ```bash
-pip install "kt-kernel==0.5.0+cpu"
-```
-
-Or let pip auto-select the latest CPU version:
-
-```bash
-pip install kt-kernel  # Defaults to CPU version
+pip install kt-kernel
 ```
 
 > **Note**: Check the [latest version on PyPI](https://pypi.org/project/kt-kernel/#history)
@@ -75,7 +69,7 @@ pip install kt-kernel  # Defaults to CPU version
 For NVIDIA GPU-accelerated inference:
 
 ```bash
-pip install "kt-kernel==0.5.0+cuda118"
+pip install kt-kernel-cuda
 ```
 
 **Features:**
