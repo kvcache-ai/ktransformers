@@ -32,6 +32,10 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - ✅ **Kimi-K2 Native INT4 (RAWINT4)**: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)
 - ✅ **FP8 weights (e.g., MiniMax-M2.1)**: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md)
 
+**KT-CLI**
+
+We are developing a simpler way to use KTransformers. Check out the [KT-CLI Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md) for more details.
+
 ## Features
 
 - **CPU-Optimized MoE Kernels**: High-throughput MoE expert kernels optimized for instruction sets.
