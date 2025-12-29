@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-fad84553.js";
+            window.path_to_searchindex_js = "../../searchindex-d08bc8da.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-51c9f918.js"></script>
@@ -238,11 +238,12 @@
 </ul>
 <h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
 <h3 id="option-1-install-from-pypi-recommended-for-most-users"><a class="header" href="#option-1-install-from-pypi-recommended-for-most-users">Option 1: Install from PyPI (Recommended for Most Users)</a></h3>
-<p>Install the latest stable version:</p>
-<pre><code class="language-bash">pip install kt-kernel
+<h4 id="cpu-only-installation"><a class="header" href="#cpu-only-installation">CPU-Only Installation</a></h4>
+<p>Install the latest CPU-only version:</p>
+<pre><code class="language-bash">pip install "kt-kernel==0.5.0+cpu"
 </code></pre>
-<p>Or install a specific version:</p>
-<pre><code class="language-bash">pip install kt-kernel==0.4.3
+<p>Or let pip auto-select the latest CPU version:</p>
+<pre><code class="language-bash">pip install kt-kernel  # Defaults to CPU version
 </code></pre>
 <blockquote>
 <p><strong>Note</strong>: Check the <a href="https://pypi.org/project/kt-kernel/#history">latest version on PyPI</a></p>
@@ -259,6 +260,50 @@
 <li>Python 3.10, 3.11, or 3.12</li>
 <li>Linux x86-64 (manylinux_2_17 compatible)</li>
 <li>CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)</li>
+</ul>
+<h4 id="cuda-installation-gpu-acceleration"><a class="header" href="#cuda-installation-gpu-acceleration">CUDA Installation (GPU Acceleration)</a></h4>
+<p>For NVIDIA GPU-accelerated inference:</p>
+<pre><code class="language-bash">pip install "kt-kernel==0.5.0+cuda118"
+</code></pre>
+<p><strong>Features:</strong></p>
+<ul>
+<li>✅ <strong>Multi-architecture support</strong>: Single wheel supports SM 80/86/89/90 (Ampere, Ada, Hopper)</li>
+<li>✅ <strong>Static CUDA runtime</strong>: No CUDA toolkit installation required</li>
+<li>✅ <strong>Broad compatibility</strong>: Works with CUDA 11.8+ and 12.x drivers</li>
+<li>✅ <strong>PyTorch compatible</strong>: Works with any PyTorch CUDA variant (cu118, cu121, cu124)</li>
+</ul>
+<p><strong>Requirements:</strong></p>
+<ul>
+<li>Python 3.10, 3.11, or 3.12</li>
+<li>Linux x86-64 (manylinux_2_17 compatible)</li>
+<li>NVIDIA GPU with compute capability 8.0+ (Ampere or newer)
+<ul>
+<li>✅ Supported: A100, RTX 3000/4000 series, H100</li>
+<li>❌ Not supported: V100, P100, GTX 1000/2000 series (too old)</li>
+</ul>
+</li>
+<li>NVIDIA driver with CUDA 11.8+ or 12.x support (no CUDA toolkit needed)</li>
+</ul>
+<p><strong>GPU Compatibility Matrix:</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>GPU Architecture</th><th>Compute Capability</th><th>Supported</th><th>Example GPUs</th></tr>
+</thead>
+<tbody>
+<tr><td>Hopper</td><td>9.0</td><td>✅</td><td>H100, H200</td></tr>
+<tr><td>Ada Lovelace</td><td>8.9</td><td>✅</td><td>RTX 4090, 4080, 4070</td></tr>
+<tr><td>Ampere</td><td>8.6</td><td>✅</td><td>RTX 3090, 3080, 3070, 3060</td></tr>
+<tr><td>Ampere</td><td>8.0</td><td>✅</td><td>A100, A30</td></tr>
+<tr><td>Turing</td><td>7.5</td><td>❌</td><td>RTX 2080, T4</td></tr>
+<tr><td>Volta</td><td>7.0</td><td>❌</td><td>V100</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>CUDA Driver Compatibility:</strong></p>
+<ul>
+<li>CUDA 11.8, 11.9, 12.0-12.6+: Full support</li>
+<li>CUDA 11.0-11.7: Not supported (use CPU version or upgrade driver)</li>
 </ul>
 <p><strong>CPU Variants Included:</strong></p>
 <p>The wheel includes 3 optimized variants that are <strong>automatically selected at runtime</strong> based on your CPU:</p>
