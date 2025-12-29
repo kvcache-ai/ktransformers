@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-56206cb7.js";
+            window.path_to_searchindex_js = "searchindex-f95adfba.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-51c9f918.js"></script>
+        <script src="toc-a83fdfe0.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -368,6 +368,8 @@ USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
 <li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md">Guide</a></li>
 <li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md">Guide</a></li>
 </ul>
+<p><strong>KT-CLI</strong></p>
+<p>We are developing a simpler way to use KTransformers. Check out the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md">KT-CLI Guide</a> for more details.</p>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
 <li><strong>CPU-Optimized MoE Kernels</strong>: High-throughput MoE expert kernels optimized for instruction sets.</li>
@@ -1851,7 +1853,57 @@ chunk_size: 8192
 </code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="kt-kernel-docs"><a class="header" href="#kt-kernel-docs">kt-kernel Docs</a></h1>
-<p>To be written…</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="kt-cli"><a class="header" href="#kt-cli">KT-CLI</a></h1>
+<blockquote>
+<p>⚠️ <strong>Note:</strong> This feature is currently under active development. Many functionalities are not yet complete and are being improved. Please stay tuned for updates.</p>
+</blockquote>
+<h2 id="design-philosophy"><a class="header" href="#design-philosophy">Design Philosophy</a></h2>
+<p>KT-CLI is designed to <strong>minimize the burden of reading documentation</strong>. Instead of requiring users to read lengthy docs, the CLI provides:</p>
+<ul>
+<li><strong>Interactive Mode</strong>: Run commands without arguments to get step-by-step guided prompts</li>
+<li><strong>Direct Mode</strong>: Pass arguments directly for automation and scripting
+<blockquote>
+<p>💡 <strong>Tip:</strong> The arguments are fully compatible with the previous SGLang + KTransformers approach, so you can migrate seamlessly.</p>
+</blockquote>
+</li>
+</ul>
+<p>Simply run a command, and the CLI will interactively guide you through the process!</p>
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
+<p>You can check the usage by <code>kt --help</code></p>
+<pre><code>kt [OPTIONS] COMMAND [ARGS]...
+</code></pre>
+<p>KTransformers CLI - A unified command-line interface for KTransformers.</p>
+<h2 id="options"><a class="header" href="#options">Options</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Option</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--help</code></td><td>Show this message and exit.</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="commands"><a class="header" href="#commands">Commands</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Command</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>version</code></td><td>Show version information</td></tr>
+<tr><td><code>chat</code></td><td>Interactive chat with running model</td></tr>
+<tr><td><code>quant</code></td><td>Quantize model weights</td></tr>
+<tr><td><code>bench</code></td><td>Run full benchmark</td></tr>
+<tr><td><code>microbench</code></td><td>Run micro-benchmark</td></tr>
+<tr><td><code>doctor</code></td><td>Diagnose environment issues</td></tr>
+<tr><td><code>model</code></td><td>Manage models and storage paths</td></tr>
+<tr><td><code>config</code></td><td>Manage configuration</td></tr>
+<tr><td><code>sft</code></td><td>Fine-tuning with LlamaFactory</td></tr>
+</tbody>
+</table>
+</div>
 <div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
 <h1 id="see-the-issue-faq-page"><a class="header" href="#see-the-issue-faq-page">see the issue <a href="https://github.com/kvcache-ai/ktransformers/issues/1608">FAQ page</a></a></h1>
 
