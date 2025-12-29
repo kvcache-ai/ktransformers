@@ -350,10 +350,7 @@ struct BufferAKGroupImpl {
     return sizeof(int8_t) * max_m * k + sizeof(float) * max_m * (k / k_group_size);
   }
 
-  BufferAKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
-      : max_m(max_m),
-        k(k),
-        k_group_size(k_group_size) {
+  BufferAKGroupImpl(int max_m, int k, int k_group_size, void* ptr) : max_m(max_m), k(k), k_group_size(k_group_size) {
     ASSERT_RELEASE(k % k_group_size == 0, "k must be multiple of k_group_size");
     ASSERT_RELEASE(max_m % M_STEP == 0, "max_m must be multiple of M_STEP");
     ASSERT_RELEASE(k % K_STEP == 0, "k must be multiple of K_STEP");
@@ -459,8 +456,7 @@ struct BufferASmallKGroupImpl : public BufferAKGroupImpl<K> {
   static constexpr int K_STEP = K::K_STEP;
   static constexpr int K_BLOCK = K::K_BLOCK;
 
-  BufferASmallKGroupImpl(int max_m, int k, int k_group_size, void* ptr)
-      : Base(max_m, k, k_group_size, ptr) {}
+  BufferASmallKGroupImpl(int max_m, int k, int k_group_size, void* ptr) : Base(max_m, k, k_group_size, ptr) {}
 
   // Override from_mat to write only 32 bytes per K_STEP iteration
   void from_mat(int m, ggml_bf16_t* src, int ith, int nth) {
@@ -991,8 +987,8 @@ struct BufferBInt4WithZeroImpl {
 template <typename K>
 struct BufferBInt4KGroupImpl {
   using dt = typename K::dt;
-  dt* b;      // packed signed int4 weights, col majored
-  float* d;   // scales only (no mins/zero-points), row majored
+  dt* b;     // packed signed int4 weights, col majored
+  float* d;  // scales only (no mins/zero-points), row majored
   int n, k, k_group_size, k_group_count;
 
   static constexpr int N_STEP = K::N_STEP;
@@ -1009,8 +1005,8 @@ struct BufferBInt4KGroupImpl {
     assert(n % N_STEP == 0);
     assert(k % K_STEP == 0);
     if (n % N_STEP || k % K_STEP || k % k_group_size) {
-      printf("BufferBInt4KGroupImpl: n: %d, k: %d, N_STEP: %d, K_STEP: %d, k_group_size: %d\n", n, k, N_STEP,
-             K_STEP, k_group_size);
+      printf("BufferBInt4KGroupImpl: n: %d, k: %d, N_STEP: %d, K_STEP: %d, k_group_size: %d\n", n, k, N_STEP, K_STEP,
+             k_group_size);
       throw std::runtime_error("n or k is not aligned to N_STEP or K_STEP");
     }
     k_group_count = k / k_group_size;
@@ -1043,8 +1039,8 @@ struct BufferBInt4KGroupImpl {
 
   // Get scale pointer for a specific row and k_group
   float* get_scale(int n, int n_begin, int k, int k_begin) {
-      int k_group_idx = k_begin / k_group_size;
-      return d + n_begin * (k / k_group_size) +  k_group_idx;
+    int k_group_idx = k_begin / k_group_size;
+    return d + n_begin * (k / k_group_size) + k_group_idx;
   }
 
   // Split range for parallel processing

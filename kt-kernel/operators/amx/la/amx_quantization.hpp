@@ -211,26 +211,44 @@ inline __m256i merge_q8K_bsum(block_q8_K* b) {
   return _mm256_madd_epi16(_mm256_loadu_si256((__m256i*)b->bsums), _mm256_set1_epi16(1));
 }
 
+inline __m512i _mm512_dpbusd_epi32_compat(__m512i src, __m512i a, __m512i b) {
+#if defined(__AVX512VNNI__)
+  return _mm512_dpbusd_epi32(src, a, b);
+#else
+  const __m512i mask_lo = _mm512_set1_epi16(0x00FF);
+  const __m512i ones16 = _mm512_set1_epi16(1);
+
+  __m512i a_even = _mm512_and_si512(a, mask_lo);
+  __m512i b_even = _mm512_srai_epi16(_mm512_slli_epi16(b, 8), 8);
+
+  __m512i a_odd = _mm512_srli_epi16(a, 8);
+  __m512i b_odd = _mm512_srai_epi16(b, 8);
+
+  __m512i prod_even = _mm512_mullo_epi16(a_even, b_even);
+  __m512i prod_odd = _mm512_mullo_epi16(a_odd, b_odd);
+
+  __m512i sum_even = _mm512_madd_epi16(prod_even, ones16);
+  __m512i sum_odd = _mm512_madd_epi16(prod_odd, ones16);
+
+  return _mm512_add_epi32(src, _mm512_add_epi32(sum_even, sum_odd));
+#endif
+}
+
 inline __m512i _mm512_dpbssd_epi32(__m512i src, __m512i a, __m512i b) {
-  // 提取高低256-bit部分
   __m256i a_lo = _mm512_extracti64x4_epi64(a, 0);
   __m256i a_hi = _mm512_extracti64x4_epi64(a, 1);
   __m256i b_lo = _mm512_extracti64x4_epi64(b, 0);
   __m256i b_hi = _mm512_extracti64x4_epi64(b, 1);
 
-  // 根据a的符号调整b的符号
   b_lo = _mm256_sign_epi8(b_lo, a_lo);
   b_hi = _mm256_sign_epi8(b_hi, a_hi);
 
-  // 将修改后的b重新组合
   b = _mm512_inserti64x4(b, b_lo, 0);
   b = _mm512_inserti64x4(b, b_hi, 1);
 
-  // 取绝对值
   a = _mm512_abs_epi8(a);
 
-  // 进行dot-product计算
-  return _mm512_dpbusd_epi32(src, a, b);
+  return _mm512_dpbusd_epi32_compat(src, a, b);
 }
 
 }  // namespace amx

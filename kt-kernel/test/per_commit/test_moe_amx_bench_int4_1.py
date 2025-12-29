@@ -24,6 +24,7 @@ register_cpu_ci(est_time=300, suite="default")
 try:
     import torch
     import kt_kernel  # Import kt_kernel first to register kt_kernel_ext
+
     kt_kernel_ext = kt_kernel.kt_kernel_ext  # Access the extension module
     from tqdm import tqdm
 

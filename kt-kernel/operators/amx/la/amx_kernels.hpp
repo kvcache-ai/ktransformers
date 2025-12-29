@@ -762,6 +762,16 @@ struct GemmKernel224BF {
   struct BufferC {
     float* c;
     int max_m, n;
+    // 物理布局(按 float 元素数)：
+    // 逻辑矩阵 C 为 (max_m, n) 行主序，max_m 为 M_STEP 的倍数，
+    // n 按 N_BLOCK 分块。
+    // 存储顺序：
+    //   n_block(N_BLOCK 列) → m_block(M_STEP 行) → n_step(N_STEP 列) → (M_STEP×N_STEP) 行主序 tile。
+    // 因此可视为 5D：
+    //   c[n_blocks][m_blocks][n_steps][M_STEP][N_STEP]，
+    //   n_blocks = ceil(n / N_BLOCK)，m_blocks = max_m / M_STEP，
+    //   n_steps = N_BLOCK / N_STEP（尾块可能更小）。
+    // get_submat(m_begin, n_begin) 返回连续的 (M_STEP×N_STEP) tile 起始地址。
 
     static size_t required_size(int max_m, int n) { return sizeof(float) * max_m * n; }
 
@@ -1552,9 +1562,9 @@ struct GemmKernel224Int4_1 {
           __m512i ma_hi = _mm512_set1_epi32(a32_hi[m_i * 16 + k_i]);
           for (int n_i = 0; n_i < 2; n_i++) {
             __m512i b512_lo = _mm512_slli_epi32(_mm512_and_si512(K::lo_mask(), b512[n_i * 16 + k_i]), 4);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_lo, ma_lo);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_lo, ma_lo);
             __m512i b512_hi = _mm512_and_si512(K::hi_mask(), b512[n_i * 16 + k_i]);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_hi, ma_hi);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_hi, ma_hi);
           }
         }
       }
@@ -2491,7 +2501,7 @@ struct GemmKernel224Int4_1KGroup {
           __m512i ma_lo = _mm512_set1_epi32(a32_lo[m_i * 16 + k_i]);
           for (int n_i = 0; n_i < 2; n_i++) {
             __m512i b512_lo = _mm512_slli_epi32(_mm512_and_si512(K::lo_mask(), b512[n_i * 16 + k_i]), 4);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_lo, ma_lo);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_lo, ma_lo);
           }
         }
       }
@@ -2503,7 +2513,7 @@ struct GemmKernel224Int4_1KGroup {
           __m512i ma_hi = _mm512_set1_epi32(a32_hi[m_i * 16 + k_i]);
           for (int n_i = 0; n_i < 2; n_i++) {
             __m512i b512_hi = _mm512_and_si512(K::hi_mask(), b512[n_i * 16 + k_i]);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_hi, ma_hi);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_hi, ma_hi);
           }
         }
       }
@@ -2767,7 +2777,7 @@ struct GemmKernel224Int4_1_LowKGroup {
           __m512i ma_lo = _mm512_set1_epi32(a32_lo[m_i * 16 + k_i]);
           for (int n_i = 0; n_i < 2; n_i++) {
             __m512i b512_lo = _mm512_and_si512(K::lo_mask(), b512[n_i * 16 + k_i]);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_lo, ma_lo);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_lo, ma_lo);
           }
         }
       }
@@ -2779,7 +2789,7 @@ struct GemmKernel224Int4_1_LowKGroup {
           __m512i ma_hi = _mm512_set1_epi32(a32_hi[m_i * 16 + k_i]);
           for (int n_i = 0; n_i < 2; n_i++) {
             __m512i b512_hi = _mm512_srli_epi32(_mm512_and_si512(K::hi_mask(), b512[n_i * 16 + k_i]), 4);
-            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32(c512[m_i * 2 + n_i], b512_hi, ma_hi);
+            c512[m_i * 2 + n_i] = _mm512_dpbusd_epi32_compat(c512[m_i * 2 + n_i], b512_hi, ma_hi);
           }
         }
       }
@@ -2850,7 +2860,7 @@ struct GemmKernel224Int4SmallKGroup {
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
   static const int VNNI_BLK = 4;
-  
+
   static const int M_STEP = 1;
   static const int N_STEP = 32;
   static const int K_STEP = 32;
@@ -2870,18 +2880,15 @@ struct GemmKernel224Int4SmallKGroup {
 
   alignas(64) static constexpr uint8_t hi_mask_arr[32] = {
       0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0,
-      0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0
-    };
+      0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0};
 
   alignas(64) static constexpr uint8_t lo_mask_arr[32] = {
       0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F,
-      0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F
-    };
-  
+      0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F};
+
   alignas(64) static constexpr uint8_t sign_xor_arr[32] = {
       0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
-      0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88
-    };
+      0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88};
   static __m256i hi_mask() { return *((__m256i*)(&hi_mask_arr[0])); }
   static __m256i lo_mask() { return *((__m256i*)(&lo_mask_arr[0])); }
   static __m256i sign_xor_mask() { return *((__m256i*)(&sign_xor_arr[0])); }
@@ -2902,27 +2909,28 @@ struct GemmKernel224Int4SmallKGroup {
     const __m512i lane_shuffle = _mm512_set_epi64(7, 6, 3, 2, 5, 4, 1, 0);
     return _mm512_permutexvar_epi64(lane_shuffle, result);
   }
-  static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB *bb, BufferC* bc, int ith, int nth) {
+  static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
+                                            BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
-    for (int m_begin = 0; m_begin < m; m_begin ++) {
+    for (int m_begin = 0; m_begin < m; m_begin++) {
       float* c = bc->get_submat(m, n, m_begin, n_start);
       __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
-      
-      for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin ++) {
+
+      for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin++) {
         __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_block_begin, 0);
         float* as = (float*)ba->get_scale(m, m_begin, k, 0);
         float* bs = (float*)bb->get_scale(n, n_block_begin, k, 0);
-        
+
         __m512 sum = _mm512_setzero_ps();
-        #define WORK_K_BLOCK(k_block) \
-          { \
-            __m256 abscale0 = _mm256_set1_ps(as[(k_block)*2] * bs[(k_block)*2]); \
-            __m256 abscale1 = _mm256_set1_ps(as[(k_block)*2+1] * bs[(k_block)*2+1]); \
-            __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1); \
-            __m512i mul = _mm512_setzero_si512(); \
-            mul = _mm512_dpbssd_epi32(mul, a512[k_block], compressed_int4_to_int8_avx512(b256[k_block])); \
-            sum = _mm512_add_ps(sum, _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul))); \
-          }
+#define WORK_K_BLOCK(k_block)                                                                     \
+  {                                                                                               \
+    __m256 abscale0 = _mm256_set1_ps(as[(k_block) * 2] * bs[(k_block) * 2]);                      \
+    __m256 abscale1 = _mm256_set1_ps(as[(k_block) * 2 + 1] * bs[(k_block) * 2 + 1]);              \
+    __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);           \
+    __m512i mul = _mm512_setzero_si512();                                                         \
+    mul = _mm512_dpbssd_epi32(mul, a512[k_block], compressed_int4_to_int8_avx512(b256[k_block])); \
+    sum = _mm512_add_ps(sum, _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));                    \
+  }
 
         for (int k_block = 0; k_block < k / 64; k_block += 2) {
           WORK_K_BLOCK(k_block);
@@ -2935,13 +2943,15 @@ struct GemmKernel224Int4SmallKGroup {
   }
 };
 
-inline void vec_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
+inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferC> bc, int ith, int nth) {
   GemmKernel224Int4SmallKGroup::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
-inline void mat_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
+inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferC> bc, int ith, int nth) {
   GemmKernel224Int4SmallKGroup::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);

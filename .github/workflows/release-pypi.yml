@@ -89,18 +89,42 @@ jobs:
           pip install auditwheel patchelf
           echo "Repairing wheels for manylinux compatibility..."
           mkdir -p wheelhouse
+
           for wheel in dist/*.whl; do
             echo "Processing $wheel..."
-            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 -w wheelhouse/ || {
-              echo "Warning: auditwheel repair failed, trying to rename platform tag..."
-              # Fallback: rename the wheel file with manylinux tag
+            success=0
+
+            # Try different manylinux versions (newest to oldest)
+            for plat in manylinux_2_31_x86_64 manylinux_2_28_x86_64 manylinux_2_17_x86_64; do
+              echo "  Trying $plat..."
+              if auditwheel repair "$wheel" --plat "$plat" -w wheelhouse/ 2>&1; then
+                echo "  ✓ Successfully repaired with $plat"
+                success=1
+                break
+              fi
+            done
+
+            # If all auditwheel attempts failed, use rename fallback
+            if [ $success -eq 0 ]; then
+              echo "  Warning: auditwheel repair failed, using rename fallback..."
               wheel_name=$(basename "$wheel")
-              new_name=$(echo "$wheel_name" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+              # Use # as sed delimiter to avoid conflict with /
+              new_name=$(echo "$wheel_name" | sed 's#linux_x86_64#manylinux_2_17_x86_64#')
               cp "$wheel" "wheelhouse/$new_name"
-            }
+              echo "  ✓ Renamed to $new_name"
+            fi
           done
+
           echo "Repaired wheels:"
           ls -lh wheelhouse/
+
+          # Verify all wheels contain 3 CPU variants
+          echo "Verifying CPU variants in repaired wheels..."
+          for wheel in wheelhouse/*.whl; do
+            echo "Checking $(basename $wheel):"
+            python -m zipfile -l "$wheel" | grep "\.so" | grep -E "(amx|avx512|avx2)"
+          done
+
           # Replace original wheels with repaired ones
           rm -f dist/*.whl
           cp wheelhouse/*.whl dist/
@@ -112,9 +136,90 @@ jobs:
           path: kt-kernel/dist/*.whl
           retention-days: 7
 
+  build-kt-kernel-cuda:
+    name: Build kt-kernel CUDA (Python ${{ matrix.python-version }})
+    runs-on: [self-hosted, linux, x64, gpu]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Verify CUDA availability
+        run: |
+          nvidia-smi || (echo "ERROR: GPU not available" && exit 1)
+          nvcc --version || (echo "ERROR: CUDA toolkit not found" && exit 1)
+
+      - name: Install dependencies
+        run: |
+          apt-get update && apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
+          python -m pip install --upgrade pip
+          pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu118
+
+      - name: Build CUDA wheel
+        working-directory: kt-kernel
+        env:
+          CPUINFER_BUILD_ALL_VARIANTS: '1'
+          CPUINFER_USE_CUDA: '1'
+          CPUINFER_CUDA_ARCHS: '80;86;89;90'
+          CPUINFER_CUDA_STATIC_RUNTIME: '1'
+          CPUINFER_BUILD_TYPE: 'Release'
+          CPUINFER_PARALLEL: '4'
+          CPUINFER_FORCE_REBUILD: '1'
+          CUDA_HOME: '/usr/local/cuda-11.8'
+        run: |
+          echo "Building CUDA wheel with multi-CPU-variant support (AMX, AVX512, AVX2)"
+          echo "CUDA architectures for GPU sync: SM 80, 86, 89, 90"
+          python -m build --wheel -v
+
+      - name: Verify wheel
+        working-directory: kt-kernel
+        run: |
+          ls -lh dist/
+          # Check version suffix
+          [[ $(ls dist/*.whl) == *"+cuda118"* ]] || (echo "ERROR: Missing +cuda118 suffix" && exit 1)
+
+          # Install and test
+          pip install dist/*.whl
+          python -c "import kt_kernel; print(f'Version: {kt_kernel.__version__}')"
+
+          # Verify static linking (should NOT depend on libcudart.so)
+          rm -rf /tmp/check
+          unzip -q dist/*.whl -d /tmp/check
+          ! ldd /tmp/check/kt_kernel/*.so | grep -q "libcudart.so" || (echo "ERROR: Dynamic cudart found" && exit 1)
+          echo "✓ CUDA runtime statically linked"
+
+      - name: Repair wheel for manylinux
+        working-directory: kt-kernel
+        run: |
+          pip install auditwheel patchelf
+          mkdir -p wheelhouse
+          for wheel in dist/*.whl; do
+            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 --exclude libcuda.so.1 -w wheelhouse/ || \
+              cp "$wheel" wheelhouse/$(basename "$wheel" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+          done
+          rm -f dist/*.whl && cp wheelhouse/*.whl dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kt-kernel-cuda-wheels-py${{ matrix.python-version }}
+          path: kt-kernel/dist/*.whl
+          retention-days: 7
+
   publish-pypi:
     name: Publish to PyPI
-    needs: build-kt-kernel
+    needs: [build-kt-kernel, build-kt-kernel-cuda]
     runs-on: [self-hosted, linux, x64]
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     environment: prod
@@ -177,20 +282,37 @@ jobs:
         run: |
           echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
+          echo "- **kt-kernel** (CPU-only)" >> $GITHUB_STEP_SUMMARY
+          echo "- **kt-kernel-cuda** (CUDA support)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Total wheels: $(ls -1 dist/*.whl | wc -l) (3 Python versions: 3.10, 3.11, 3.12)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Installation" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# CPU version (AMX/AVX512/AVX2 multi-variant)" >> $GITHUB_STEP_SUMMARY
           echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# CUDA version (requires NVIDIA driver with CUDA 11.8+ or 12.x support)" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel-cuda==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY
-          echo "Total: $(ls -1 dist/*.whl | wc -l) wheels (3 Python versions: 3.10, 3.11, 3.12)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Features" >> $GITHUB_STEP_SUMMARY
-          echo "**CPU-only build with multi-variant support:**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**kt-kernel (CPU) - Multi-variant support:**" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AMX (Intel Sapphire Rapids+)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVX512 (Intel Skylake-X/Ice Lake/Cascade Lake)" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ AVX2 (Maximum compatibility)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔧 Runtime CPU detection: Automatically selects optimal variant" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Runtime CPU detection:** Automatically selects the best variant for your CPU" >> $GITHUB_STEP_SUMMARY
+          echo "**kt-kernel-cuda (CUDA) - Multi-architecture support:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SM 80 (Ampere: A100, RTX 3000 series)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SM 86 (Ampere: RTX 3060-3090)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SM 89 (Ada Lovelace: RTX 4000 series)" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SM 90 (Hopper: H100)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔧 Static CUDA runtime: Compatible with CUDA 11.8+ and 12.x drivers" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔧 Includes multi-variant CPU code (AMX/AVX512/AVX2)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "PyPI link: https://pypi.org/project/kt-kernel/#history" >> $GITHUB_STEP_SUMMARY
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
+          echo "- CPU package: https://pypi.org/project/kt-kernel/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
+          echo "- CUDA package: https://pypi.org/project/kt-kernel-cuda/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY

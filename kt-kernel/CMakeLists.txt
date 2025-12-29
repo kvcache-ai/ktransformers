@@ -5,10 +5,8 @@ option(USE_CONDA_TOOLCHAIN "Use C/C++ compilers and libraries from active conda 
 option(LLAMA_NATIVE "llama: enable -march=native flag" OFF)
 option(LLAMA_AVX "llama: enable AVX" OFF)
 option(LLAMA_AVX2 "llama: enable AVX2" OFF)
-option(LLAMA_AVX512 "llama: enable AVX512" OFF)
-option(LLAMA_AVX512_VBMI "llama: enable AVX512-VBMI" OFF)
-option(LLAMA_AVX512_VNNI "llama: enable AVX512-VNNI" OFF)
-option(LLAMA_AVX512_BF16 "llama: enable AVX512-BF16" OFF)
+# AVX512 options will be auto-detected by cmake/DetectCPU.cmake
+# Users can override with -DLLAMA_AVX512=OFF etc.
 option(LLAMA_FMA "llama: enable FMA" OFF)
 # in MSVC F16C is implied with AVX2/AVX512
 if(NOT MSVC)
@@ -18,6 +16,7 @@ option(LLAMA_AVX512_FANCY_SIMD "llama: enable AVX512-VL, AVX512-BW, AVX512-DQ, A
 option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
 option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
 option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
+option(KTRANSFORMERS_CUDA_STATIC_RUNTIME "ktransformers: statically link CUDA runtime" ON)
 option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX "ktransformers: CPU use AMX" OFF)
@@ -28,7 +27,13 @@ option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.4.2)
+project(kt_kernel_ext VERSION 0.5.0)
+
+# Auto-detect CPU features early (unless building with LLAMA_NATIVE)
+if(NOT LLAMA_NATIVE AND NOT MSVC)
+    include(cmake/DetectCPU.cmake)
+endif()
+
 # Choose compilers BEFORE project() so CMake honors them
 if(USE_CONDA_TOOLCHAIN)
     if(NOT DEFINED ENV{CONDA_PREFIX} OR NOT EXISTS "$ENV{CONDA_PREFIX}")
@@ -378,7 +383,14 @@ if(HOST_IS_X86)
                 target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
             endforeach()
         endif()
-        list(APPEND ARCH_FLAGS -mfma -mf16c -mavx512bf16 -mavx512vnni)
+
+        # AVX512 extensions are auto-detected by cmake/DetectCPU.cmake
+        # Users can override with -DLLAMA_AVX512_BF16=OFF etc.
+        # Only add -mf16c if LLAMA_F16C is not already enabled.
+        if(NOT LLAMA_F16C)
+            list(APPEND ARCH_FLAGS -mf16c)
+        endif()
+        message(STATUS "AVX512 extensions: F=${LLAMA_AVX512}, BF16=${LLAMA_AVX512_BF16}, VNNI=${LLAMA_AVX512_VNNI}, VBMI=${LLAMA_AVX512_VBMI}")
     endif()
 endif()
 
@@ -404,6 +416,25 @@ if(KTRANSFORMERS_USE_CUDA)
     message(STATUS "enabling CUDA")
     enable_language(CUDA)
     add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
+
+    # Set default CUDA architectures if not specified
+    # Target: SM 80/86 (Ampere), 89 (Ada), 90 (Hopper)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90" CACHE STRING "CUDA architectures" FORCE)
+        message(STATUS "CUDA architectures (default): ${CMAKE_CUDA_ARCHITECTURES}")
+    else()
+        message(STATUS "CUDA architectures (user): ${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+
+    # Optimization flags
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+    message(STATUS "CUDA toolkit: ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA flags: ${CMAKE_CUDA_FLAGS}")
 elseif(KTRANSFORMERS_USE_ROCM)
     find_package(HIP REQUIRED)
     if(HIP_FOUND)
@@ -618,7 +649,32 @@ endif()
 
 
 if(KTRANSFORMERS_USE_CUDA)
-    target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
+    # Link CUDA runtime (static or dynamic)
+    if(KTRANSFORMERS_CUDA_STATIC_RUNTIME)
+        # Platform-aware static library path
+        if(WIN32)
+            set(CUDART_STATIC_LIB "${CUDAToolkit_LIBRARY_DIR}/cudart_static.lib")
+        else()
+            set(CUDART_STATIC_LIB "${CUDAToolkit_LIBRARY_DIR}/libcudart_static.a")
+        endif()
+
+        if(EXISTS "${CUDART_STATIC_LIB}")
+            target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDART_STATIC_LIB}")
+            message(STATUS "CUDA runtime: static (${CUDART_STATIC_LIB})")
+
+            # Linux needs additional libs for static cudart
+            if(UNIX AND NOT APPLE)
+                target_link_libraries(${PROJECT_NAME} PRIVATE rt pthread dl)
+            endif()
+        else()
+            message(WARNING "Static CUDA runtime not found, using dynamic")
+            target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+        endif()
+    else()
+        # Dynamic linking
+        target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+        message(STATUS "CUDA runtime: dynamic")
+    endif()
 endif()
 if(KTRANSFORMERS_USE_ROCM)
     add_compile_definitions(USE_HIP=1)
