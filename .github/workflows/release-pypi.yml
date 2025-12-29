@@ -169,6 +169,7 @@ jobs:
       - name: Build CUDA wheel
         working-directory: kt-kernel
         env:
+          CPUINFER_BUILD_ALL_VARIANTS: '1'
           CPUINFER_USE_CUDA: '1'
           CPUINFER_CUDA_ARCHS: '80;86;89;90'
           CPUINFER_CUDA_STATIC_RUNTIME: '1'
@@ -177,7 +178,8 @@ jobs:
           CPUINFER_FORCE_REBUILD: '1'
           CUDA_HOME: '/usr/local/cuda-11.8'
         run: |
-          echo "Building CUDA wheel for SM 80, 86, 89, 90"
+          echo "Building CUDA wheel with multi-CPU-variant support (AMX, AVX512, AVX2)"
+          echo "CUDA architectures for GPU sync: SM 80, 86, 89, 90"
           python -m build --wheel -v
 
       - name: Verify wheel
@@ -192,6 +194,7 @@ jobs:
           python -c "import kt_kernel; print(f'Version: {kt_kernel.__version__}')"
 
           # Verify static linking (should NOT depend on libcudart.so)
+          rm -rf /tmp/check
           unzip -q dist/*.whl -d /tmp/check
           ! ldd /tmp/check/kt_kernel/*.so | grep -q "libcudart.so" || (echo "ERROR: Dynamic cudart found" && exit 1)
           echo "✓ CUDA runtime statically linked"
