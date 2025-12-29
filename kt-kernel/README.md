@@ -43,16 +43,18 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ### Option 1: Install from PyPI (Recommended for Most Users)
 
-Install the latest stable version:
+#### CPU-Only Installation
+
+Install the latest CPU-only version:
 
 ```bash
-pip install kt-kernel
+pip install "kt-kernel==0.5.0+cpu"
 ```
 
-Or install a specific version:
+Or let pip auto-select the latest CPU version:
 
 ```bash
-pip install kt-kernel==0.4.3
+pip install kt-kernel  # Defaults to CPU version
 ```
 
 > **Note**: Check the [latest version on PyPI](https://pypi.org/project/kt-kernel/#history)
@@ -67,6 +69,43 @@ pip install kt-kernel==0.4.3
 - Python 3.10, 3.11, or 3.12
 - Linux x86-64 (manylinux_2_17 compatible)
 - CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)
+
+#### CUDA Installation (GPU Acceleration)
+
+For NVIDIA GPU-accelerated inference:
+
+```bash
+pip install "kt-kernel==0.5.0+cuda118"
+```
+
+**Features:**
+- ✅ **Multi-architecture support**: Single wheel supports SM 80/86/89/90 (Ampere, Ada, Hopper)
+- ✅ **Static CUDA runtime**: No CUDA toolkit installation required
+- ✅ **Broad compatibility**: Works with CUDA 11.8+ and 12.x drivers
+- ✅ **PyTorch compatible**: Works with any PyTorch CUDA variant (cu118, cu121, cu124)
+
+**Requirements:**
+- Python 3.10, 3.11, or 3.12
+- Linux x86-64 (manylinux_2_17 compatible)
+- NVIDIA GPU with compute capability 8.0+ (Ampere or newer)
+  - ✅ Supported: A100, RTX 3000/4000 series, H100
+  - ❌ Not supported: V100, P100, GTX 1000/2000 series (too old)
+- NVIDIA driver with CUDA 11.8+ or 12.x support (no CUDA toolkit needed)
+
+**GPU Compatibility Matrix:**
+
+| GPU Architecture | Compute Capability | Supported | Example GPUs |
+|-----------------|-------------------|-----------|-------------|
+| Hopper | 9.0 | ✅ | H100, H200 |
+| Ada Lovelace | 8.9 | ✅ | RTX 4090, 4080, 4070 |
+| Ampere | 8.6 | ✅ | RTX 3090, 3080, 3070, 3060 |
+| Ampere | 8.0 | ✅ | A100, A30 |
+| Turing | 7.5 | ❌ | RTX 2080, T4 |
+| Volta | 7.0 | ❌ | V100 |
+
+**CUDA Driver Compatibility:**
+- CUDA 11.8, 11.9, 12.0-12.6+: Full support
+- CUDA 11.0-11.7: Not supported (use CPU version or upgrade driver)
 
 **CPU Variants Included:**
 
