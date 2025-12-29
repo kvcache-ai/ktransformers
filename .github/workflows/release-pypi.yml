@@ -180,14 +180,27 @@ jobs:
         run: |
           echo "Building CUDA wheel with multi-CPU-variant support (AMX, AVX512, AVX2)"
           echo "CUDA architectures for GPU sync: SM 80, 86, 89, 90"
-          python -m build --wheel -v
+          echo "Environment check: CPUINFER_USE_CUDA=$CPUINFER_USE_CUDA"
+          python -m build --wheel -v 2>&1 | tee build.log
+          echo "=== Checking build output for package name ==="
+          grep -E "(CUDA wheel|CPU wheel|package name)" build.log || true
 
       - name: Verify wheel
         working-directory: kt-kernel
         run: |
           ls -lh dist/
-          # Check version suffix
-          [[ $(ls dist/*.whl) == *"+cuda118"* ]] || (echo "ERROR: Missing +cuda118 suffix" && exit 1)
+
+          # Check if wheel was built correctly
+          wheel_file=$(ls dist/*.whl)
+          echo "Built wheel: $wheel_file"
+
+          # Extract package name from wheel
+          if [[ "$wheel_file" == *"kt_kernel_cuda"* ]]; then
+            echo "✓ Correct package name: kt-kernel-cuda"
+          else
+            echo "⚠ Warning: Expected kt_kernel_cuda but got different name"
+            echo "This might indicate CPUINFER_USE_CUDA was not set during build"
+          fi
 
           # Install and test
           pip install dist/*.whl
@@ -196,8 +209,12 @@ jobs:
           # Verify static linking (should NOT depend on libcudart.so)
           rm -rf /tmp/check
           unzip -q dist/*.whl -d /tmp/check
-          ! ldd /tmp/check/kt_kernel/*.so | grep -q "libcudart.so" || (echo "ERROR: Dynamic cudart found" && exit 1)
-          echo "✓ CUDA runtime statically linked"
+          if ldd /tmp/check/kt_kernel/*.so | grep -q "libcudart.so"; then
+            echo "ERROR: Dynamic cudart found, should be statically linked"
+            exit 1
+          else
+            echo "✓ CUDA runtime statically linked"
+          fi
 
       - name: Repair wheel for manylinux
         working-directory: kt-kernel

@@ -700,6 +700,10 @@ else:
 
 # Determine package name and version based on build type
 # PyPI doesn't allow local version identifiers (+suffix), so we use separate package names
+
+# Debug: Print environment variable
+print(f"-- Environment variable CPUINFER_USE_CUDA = {os.environ.get('CPUINFER_USE_CUDA', 'NOT SET')}")
+
 if "CPUINFER_VERSION" in os.environ:
     # User explicitly set version (e.g., for testing)
     VERSION = os.environ["CPUINFER_VERSION"]
@@ -709,6 +713,8 @@ else:
 
 # Determine package name based on CUDA usage
 cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
+print(f"-- CUDA enabled (from _env_get_bool): {cuda_enabled}")
+
 if cuda_enabled:
     # CUDA build: use kt-kernel-cuda package name
     # Compatible with CUDA 11.8+ and 12.x drivers
