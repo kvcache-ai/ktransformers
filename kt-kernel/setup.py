@@ -698,31 +698,33 @@ if _version_file.exists():
 else:
     _base_version = "0.5.0"
 
-# Auto-detect version suffix based on build type
+# Determine package name and version based on build type
+# PyPI doesn't allow local version identifiers (+suffix), so we use separate package names
 if "CPUINFER_VERSION" in os.environ:
     # User explicitly set version (e.g., for testing)
     VERSION = os.environ["CPUINFER_VERSION"]
     print(f"-- Explicit version: {VERSION}")
 else:
-    # Auto-detect suffix based on CUDA usage
-    cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
+    VERSION = _base_version
 
-    if cuda_enabled:
-        # CUDA build: add +cuda118 suffix
-        # (CUDA 11.8 is the build toolkit version for compatibility with 11.8+ and 12.x)
-        VERSION = f"{_base_version}+cuda118"
-        print(f"-- CUDA wheel version: {VERSION}")
-    else:
-        # CPU-only build: add +cpu suffix
-        VERSION = f"{_base_version}+cpu"
-        print(f"-- CPU wheel version: {VERSION}")
+# Determine package name based on CUDA usage
+cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
+if cuda_enabled:
+    # CUDA build: use kt-kernel-cuda package name
+    # Compatible with CUDA 11.8+ and 12.x drivers
+    PACKAGE_NAME = "kt-kernel-cuda"
+    print(f"-- CUDA wheel: {PACKAGE_NAME} version {VERSION}")
+else:
+    # CPU-only build: use kt-kernel package name
+    PACKAGE_NAME = "kt-kernel"
+    print(f"-- CPU wheel: {PACKAGE_NAME} version {VERSION}")
 
 ################################################################################
 # Setup
 ################################################################################
 
 setup(
-    name="kt-kernel",
+    name=PACKAGE_NAME,
     version=VERSION,
     description="KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)",
     author="kvcache-ai",
