@@ -189,9 +189,19 @@ jobs:
         run: |
           echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
+          echo "- **kt-kernel** (CPU-only)" >> $GITHUB_STEP_SUMMARY
+          echo "- **kt-kernel-cuda** (CUDA support)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Total wheels: $(ls -1 dist/*.whl | wc -l) (3 Python versions: 3.10, 3.11, 3.12)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Installation" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# CPU version (AMX/AVX512/AVX2 multi-variant)" >> $GITHUB_STEP_SUMMARY
           echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# CUDA version (requires NVIDIA driver with CUDA 11.8+ or 12.x support)" >> $GITHUB_STEP_SUMMARY
+          echo "pip install kt-kernel-cuda==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY

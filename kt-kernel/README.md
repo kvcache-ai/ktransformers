@@ -32,6 +32,10 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - ✅ **Kimi-K2 Native INT4 (RAWINT4)**: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)
 - ✅ **FP8 weights (e.g., MiniMax-M2.1)**: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md)
 
+**KT-CLI**
+
+We are developing a simpler way to use KTransformers. Check out the [KT-CLI Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md) for more details.
+
 ## Features
 
 - **CPU-Optimized MoE Kernels**: High-throughput MoE expert kernels optimized for instruction sets.
@@ -65,7 +69,33 @@ pip install kt-kernel
 - CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)
 - Optional: NVIDIA GPU with compute capability 8.0+ for CUDA features
 
+<<<<<<< HEAD
 **GPU Compatibility (Optional):**
+=======
+#### CUDA Installation (GPU Acceleration)
+
+For NVIDIA GPU-accelerated inference:
+
+```bash
+pip install kt-kernel-cuda
+```
+
+**Features:**
+- ✅ **Multi-architecture support**: Single wheel supports SM 80/86/89/90 (Ampere, Ada, Hopper)
+- ✅ **Static CUDA runtime**: No CUDA toolkit installation required
+- ✅ **Broad compatibility**: Works with CUDA 11.8+ and 12.x drivers
+- ✅ **PyTorch compatible**: Works with any PyTorch CUDA variant (cu118, cu121, cu124)
+
+**Requirements:**
+- Python 3.10, 3.11, or 3.12
+- Linux x86-64 (manylinux_2_17 compatible)
+- NVIDIA GPU with compute capability 8.0+ (Ampere or newer)
+  - ✅ Supported: A100, RTX 3000/4000 series, H100
+  - ❌ Not supported: V100, P100, GTX 1000/2000 series (too old)
+- NVIDIA driver with CUDA 11.8+ or 12.x support (no CUDA toolkit needed)
+
+**GPU Compatibility Matrix:**
+>>>>>>> main
 
 | GPU Architecture | Compute Capability | Supported | Example GPUs |
 |-----------------|-------------------|-----------|-------------|
