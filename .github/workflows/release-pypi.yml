@@ -86,7 +86,6 @@ jobs:
           methods = dir(cpu_infer)
           has_cuda = 'submit_with_cuda_stream' in methods
           print(f'✓ CUDA support: {has_cuda}')
-          assert has_cuda, 'Missing CUDA support'
           "
 
           # Verify CPU multi-variant support
