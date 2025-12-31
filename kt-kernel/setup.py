@@ -698,26 +698,23 @@ if _version_file.exists():
 else:
     _base_version = "0.5.0"
 
-# Determine package name and version based on build type
-# PyPI doesn't allow local version identifiers (+suffix), so we use separate package names
+# Determine version
 if "CPUINFER_VERSION" in os.environ:
     # User explicitly set version (e.g., for testing)
     VERSION = os.environ["CPUINFER_VERSION"]
     print(f"-- Explicit version: {VERSION}")
 else:
     VERSION = _base_version
+    print(f"-- Version: {VERSION}")
 
-# Determine package name based on CUDA usage
+# Package name is always kt-kernel
+# The CUDA-enabled wheel includes both CPU multi-variant support and CUDA capabilities
+PACKAGE_NAME = "kt-kernel"
 cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
 if cuda_enabled:
-    # CUDA build: use kt-kernel-cuda package name
-    # Compatible with CUDA 11.8+ and 12.x drivers
-    PACKAGE_NAME = "kt-kernel-cuda"
-    print(f"-- CUDA wheel: {PACKAGE_NAME} version {VERSION}")
+    print(f"-- Building kt-kernel with CUDA support (+ CPU multi-variant)")
 else:
-    # CPU-only build: use kt-kernel package name
-    PACKAGE_NAME = "kt-kernel"
-    print(f"-- CPU wheel: {PACKAGE_NAME} version {VERSION}")
+    print(f"-- Building kt-kernel (CPU-only multi-variant)")
 
 ################################################################################
 # Setup
