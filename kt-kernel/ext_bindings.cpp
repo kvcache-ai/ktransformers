@@ -42,6 +42,8 @@ static const bool _is_plain_ = false;
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
+#include "operators/amx/sft_moe.hpp"
+#include "operators/moe-sft-tp.hpp"
 #endif
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
 
@@ -224,6 +226,149 @@ class MOEBindings {
     }
   };
 };
+
+#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
+template <class T>
+class MOESFTBindings {
+ public:
+  class WarmUpBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE_SFT<T>* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::warm_up, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class LoadWeightsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE_SFT<T>* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::load_weights, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class ForwardSFTBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE_SFT<T>* moe;
+      intptr_t qlen;
+      int k;
+      intptr_t expert_ids;
+      intptr_t weights;
+      intptr_t input;
+      intptr_t output;
+      bool save_for_backward;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::forward_sft_binding, args_->moe, args_->qlen, args_->k,
+                               args_->expert_ids, args_->weights, args_->input, args_->output,
+                               args_->save_for_backward);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t qlen, int k,
+                                                            intptr_t expert_ids, intptr_t weights, intptr_t input,
+                                                            intptr_t output, bool save_for_backward) {
+      Args* args = new Args{nullptr, moe.get(), qlen, k, expert_ids, weights, input, output, save_for_backward};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class BackwardBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE_SFT<T>* moe;
+      intptr_t grad_output;
+      intptr_t grad_input;
+      intptr_t grad_gate_lora_a;
+      intptr_t grad_gate_lora_b;
+      intptr_t grad_up_lora_a;
+      intptr_t grad_up_lora_b;
+      intptr_t grad_down_lora_a;
+      intptr_t grad_down_lora_b;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::backward_binding, args_->moe, args_->grad_output, args_->grad_input,
+                               args_->grad_gate_lora_a, args_->grad_gate_lora_b, args_->grad_up_lora_a,
+                               args_->grad_up_lora_b, args_->grad_down_lora_a, args_->grad_down_lora_b);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t grad_output,
+                                                            intptr_t grad_input, intptr_t grad_gate_lora_a,
+                                                            intptr_t grad_gate_lora_b, intptr_t grad_up_lora_a,
+                                                            intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
+                                                            intptr_t grad_down_lora_b) {
+      Args* args = new Args{nullptr,          moe.get(),      grad_output,    grad_input,       grad_gate_lora_a,
+                            grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b, grad_down_lora_a, grad_down_lora_b};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class UpdateLoRAWeightsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE_SFT<T>* moe;
+      intptr_t gate_lora_a;
+      intptr_t gate_lora_b;
+      intptr_t up_lora_a;
+      intptr_t up_lora_b;
+      intptr_t down_lora_a;
+      intptr_t down_lora_b;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::update_lora_weights_binding, args_->moe, args_->gate_lora_a,
+                               args_->gate_lora_b, args_->up_lora_a, args_->up_lora_b, args_->down_lora_a,
+                               args_->down_lora_b);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t gate_lora_a,
+                                                            intptr_t gate_lora_b, intptr_t up_lora_a,
+                                                            intptr_t up_lora_b, intptr_t down_lora_a,
+                                                            intptr_t down_lora_b) {
+      Args* args =
+          new Args{nullptr, moe.get(), gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+};
+
+template <typename MoeSftTP>
+void bind_moe_sft_module(py::module_& moe_module, const char* name) {
+  using MoeClass = TP_MOE_SFT<MoeSftTP>;
+  using MoeBindings = MOESFTBindings<MoeSftTP>;
+
+  py::class_<MoeClass, MoE_Interface, std::shared_ptr<MoeClass>>(moe_module, name)
+      .def(py::init<MOESFTConfig>())
+      .def("warm_up_task", &MoeBindings::WarmUpBindings::cpuinfer_interface)
+      .def("load_weights_task", &MoeBindings::LoadWeightsBindings::cpuinfer_interface)
+      .def("forward_sft_task", &MoeBindings::ForwardSFTBindings::cpuinfer_interface)
+      .def("backward_task", &MoeBindings::BackwardBindings::cpuinfer_interface)
+      .def("update_lora_weights_task", &MoeBindings::UpdateLoRAWeightsBindings::cpuinfer_interface)
+      .def("warm_up", &MoeClass::warm_up)
+      .def("load_weights", &MoeClass::load_weights)
+      .def("forward_sft", &MoeClass::forward_sft_binding)
+      .def("backward", &MoeClass::backward_binding)
+      .def("update_lora_weights", &MoeClass::update_lora_weights_binding);
+}
+#endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 
 template <typename MoeTP>
 void bind_moe_module(py::module_& moe_module, const char* name) {
@@ -601,6 +746,22 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
       ;
 
+  // MOESFTConfig - extends GeneralMOEConfig with LoRA support
+  py::class_<MOESFTConfig, GeneralMOEConfig>(moe_module, "MOESFTConfig")
+      .def(py::init<>())
+      .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
+        return MOESFTConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
+      }))
+      .def_readwrite("lora_rank", &MOESFTConfig::lora_rank)
+      .def_readwrite("lora_alpha", &MOESFTConfig::lora_alpha)
+      .def_readwrite("max_cache_depth", &MOESFTConfig::max_cache_depth)
+      .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_a)
+      .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_b)
+      .DEF_PTR_PROPERTY(MOESFTConfig, up_lora_a)
+      .DEF_PTR_PROPERTY(MOESFTConfig, up_lora_b)
+      .DEF_PTR_PROPERTY(MOESFTConfig, down_lora_a)
+      .DEF_PTR_PROPERTY(MOESFTConfig, down_lora_b);
+
   py::class_<MoE_Interface, std::shared_ptr<MoE_Interface>>(moe_module, "MoE_Interface");
 
   bind_moe_module<LLAMA_MOE_TP>(moe_module, "MOE");
@@ -615,6 +776,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
 #endif
+  // SFT MoE with LoRA support (BF16 and INT8)
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF>>(moe_module, "AMXBF16_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_SFT_MOE");
 #endif
 #if defined(USE_MOE_KERNEL)
   bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt8, _is_plain_>>(moe_module, "Int8_KERNEL_MOE");

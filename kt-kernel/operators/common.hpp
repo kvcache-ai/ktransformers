@@ -290,6 +290,31 @@ struct GeneralMOEConfig {
   int max_possible_qlen() { return std::max(max_len, group_max_len); }
 };
 
+// SFT (Supervised Fine-Tuning) configuration for MoE with LoRA
+struct MOESFTConfig : public GeneralMOEConfig {
+  // LoRA configuration
+  int lora_rank = 16;
+  float lora_alpha = 32.0f;
+  float lora_scaling() const { return lora_alpha / lora_rank; }
+
+  // LoRA weight pointers (directly pointing to Python tensor memory, zero-copy)
+  // Layout: [expert_num, lora_rank, in_dim] for A, [expert_num, out_dim, lora_rank] for B
+  void* gate_lora_a = nullptr;  // [expert_num, lora_rank, hidden_size]
+  void* gate_lora_b = nullptr;  // [expert_num, intermediate_size, lora_rank]
+  void* up_lora_a = nullptr;    // [expert_num, lora_rank, hidden_size]
+  void* up_lora_b = nullptr;    // [expert_num, intermediate_size, lora_rank]
+  void* down_lora_a = nullptr;  // [expert_num, lora_rank, intermediate_size]
+  void* down_lora_b = nullptr;  // [expert_num, hidden_size, lora_rank]
+
+  // Gradient checkpointing configuration
+  int max_cache_depth = 1;  // Maximum cache depth (support N forwards before backward)
+
+  MOESFTConfig() : GeneralMOEConfig() {}
+
+  MOESFTConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
+      : GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size) {}
+};
+
 struct GeneralGateConfig {
   size_t hidden_size;
   size_t num_experts_per_tok;
