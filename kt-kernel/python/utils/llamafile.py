@@ -33,7 +33,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -51,7 +51,10 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             num_experts_per_tok: Number of experts per token (top-k)
             hidden_size: Hidden dimension size
             moe_intermediate_size: MoE intermediate size
-            num_gpu_experts: Number of experts to run on GPU
+            gpu_experts_mask: Boolean mask indicating which experts are on GPU.
+                              Shape: [num_experts], dtype: torch.bool.
+                              mask[i] = True means expert i is on GPU.
+                              If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools (TP count)
             weight_path: Path to GGUF weights
@@ -122,7 +125,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             num_experts_per_tok=num_experts_per_tok,
             hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
-            num_gpu_experts=num_gpu_experts,
+            gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
             weight_path=weight_path,
@@ -189,7 +192,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             self.num_experts_per_tok,
             self.hidden_size,
             self.moe_intermediate_size,
-            self.num_gpu_experts,
+            self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_

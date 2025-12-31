@@ -401,7 +401,7 @@ echo "  CPUINFER_BUILD_TYPE          = $CPUINFER_BUILD_TYPE"
 echo "  CPUINFER_PARALLEL            = $CPUINFER_PARALLEL"
 echo ""
 
-pip install . -v
+pip install -e . -v
 }
 
 # Subcommand dispatcher: default to "all"

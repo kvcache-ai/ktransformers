@@ -237,8 +237,25 @@ struct GeneralMOEConfig {
   WorkerPool* pool = nullptr;
 
   // SGLang offload
-  int num_gpu_experts = 0;
+  int num_gpu_experts = 0;  // Computed from gpu_experts_mask
+  uint8_t* gpu_experts_mask = nullptr;  // Bool mask: true = expert on GPU
   void* physical_to_logical_map = nullptr;
+
+  // Compute num_gpu_experts from gpu_experts_mask
+  void compute_num_gpu_experts() {
+    num_gpu_experts = 0;
+    if (gpu_experts_mask) {
+      for (int i = 0; i < expert_num; i++) {
+        if (gpu_experts_mask[i]) num_gpu_experts++;
+      }
+    }
+  }
+
+  // Check if expert should be skipped (invalid, out of range, or on GPU)
+  inline bool should_skip_expert(int64_t expert_id) const {
+    return expert_id < 0 || expert_id >= expert_num ||
+           (gpu_experts_mask && gpu_experts_mask[expert_id]);
+  }
 
   void* gate_proj;
   void* up_proj;

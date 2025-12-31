@@ -18,6 +18,60 @@ import ctypes
 from kt_kernel import kt_kernel_ext
 
 
+def generate_gpu_experts_masks(
+    activation_freq: torch.Tensor,
+    num_gpu_experts: int,
+) -> torch.Tensor:
+    """
+    Generate GPU experts masks based on activation frequency.
+
+    Selects the top `num_gpu_experts` experts with highest activation frequency
+    across all layers to be placed on GPU.
+
+    Args:
+        activation_freq: Activation frequency table of shape (num_layers, num_experts).
+                         Higher values indicate more frequently activated experts.
+        num_gpu_experts: Total number of experts to place on GPU across all layers.
+
+    Returns:
+        gpu_experts_masks: Boolean mask of shape (num_layers, num_experts) on CPU.
+                           True means the expert should be on GPU.
+
+    Example:
+        >>> activation_freq = torch.tensor([
+        ...     [0.1, 0.5, 0.3, 0.8],  # layer 0
+        ...     [0.2, 0.4, 0.9, 0.1],  # layer 1
+        ... ])
+        >>> masks = generate_gpu_experts_masks(activation_freq, num_gpu_experts=3)
+        >>> # Top 3: layer0-expert3 (0.8), layer1-expert2 (0.9), layer0-expert1 (0.5)
+        >>> masks
+        tensor([[False,  True, False,  True],
+                [False, False,  True, False]])
+    """
+    num_layers, num_experts_per_layer = activation_freq.shape
+    total_experts = num_layers * num_experts_per_layer
+
+    # Clamp num_gpu_experts to valid range
+    num_gpu_experts = min(num_gpu_experts, total_experts)
+    num_gpu_experts = max(num_gpu_experts, 0)
+
+    if num_gpu_experts == 0:
+        return torch.zeros(num_layers, num_experts_per_layer, dtype=torch.bool, device="cpu")
+
+    # Flatten and find top-k indices
+    flat_freq = activation_freq.view(-1).to(device="cpu")
+    _, top_indices = torch.topk(flat_freq, k=num_gpu_experts, largest=True, sorted=False)
+
+    # Create mask
+    gpu_experts_masks = torch.zeros(total_experts, dtype=torch.bool, device="cpu")
+    gpu_experts_masks[top_indices] = True
+
+    # Reshape to (num_layers, num_experts)
+    gpu_experts_masks = gpu_experts_masks.view(num_layers, num_experts_per_layer)
+
+    return gpu_experts_masks
+
+
 class KExpertsCPUBuffer:
     """
     CPU buffer management for expert computation.
@@ -102,7 +156,7 @@ class BaseMoEWrapper(ABC):
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -120,7 +174,10 @@ class BaseMoEWrapper(ABC):
             num_experts_per_tok: Number of experts per token (top-k)
             hidden_size: Hidden dimension size
             moe_intermediate_size: MoE intermediate size
-            num_gpu_experts: Number of experts to run on GPU
+            gpu_experts_mask: Boolean mask indicating which experts are on GPU.
+                              Shape: [num_experts], dtype: torch.bool.
+                              mask[i] = True means expert i is on GPU.
+                              If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
             weight_path: Path to weights
@@ -134,7 +191,22 @@ class BaseMoEWrapper(ABC):
         self.num_experts_per_tok = num_experts_per_tok
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
-        self.num_gpu_experts = num_gpu_experts
+
+        # Process gpu_experts_mask: convert to bool tensor on CPU, pinned memory for async copy
+        # This mask is shared between C and Python (C uses uint8_t*), both can read/write it
+        if gpu_experts_mask is None:
+            # No GPU experts - all experts on CPU
+            self.gpu_experts_mask = torch.zeros(num_experts, dtype=torch.bool, device="cpu", pin_memory=True)
+        else:
+            # Create a new pinned tensor and copy data into it
+            self.gpu_experts_mask = torch.empty(num_experts, dtype=torch.bool, device="cpu", pin_memory=True)
+            self.gpu_experts_mask.copy_(gpu_experts_mask)
+
+        self.num_gpu_experts = int(self.gpu_experts_mask.sum().item())
+
+        # GPU copy for mask operations in forward pass (e.g., mask_cpu_expert_ids)
+        # This will be lazily initialized when needed
+        self._gpu_experts_mask_gpu: Optional[torch.Tensor] = None
         self.weight_path = weight_path
         self.chunked_prefill_size = chunked_prefill_size
         self.cpu_save = cpu_save

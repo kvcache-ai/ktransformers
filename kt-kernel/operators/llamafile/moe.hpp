@@ -317,7 +317,7 @@ class LLAMA_MOE_TP {
 
     int activated_expert = 0;
     for (int i = 0; i < k; i++) {
-      if (expert_ids[i] < config_.num_gpu_experts || expert_ids[i] >= config_.expert_num) {
+      if (config_.should_skip_expert(expert_ids[i])) {
         continue;
       }
       m_expert_id_map_[activated_expert] = expert_ids[i];
@@ -474,10 +474,7 @@ class LLAMA_MOE_TP {
     }
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
-        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
-          continue;
-        }
-        if (expert_ids[i * k + j] == -1) {
+        if (config_.should_skip_expert(expert_ids[i * k + j])) {
           continue;
         }
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
@@ -567,10 +564,7 @@ class LLAMA_MOE_TP {
             }
           }
           for (int j = 0; j < k; j++) {
-            if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
-              continue;
-            }
-            if (expert_ids[i * k + j] == -1) {
+            if (config_.should_skip_expert(expert_ids[i * k + j])) {
               continue;
             }
             memcpy(m_local_gate_input_ptr_[expert_ids[i * k + j]] +
@@ -717,10 +711,7 @@ class LLAMA_MOE_TP {
             m_output_fp32_[i][e] = 0;
           }
           for (int j = 0; j < k; j++) {
-            if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
-              continue;
-            }
-            if (expert_ids[i * k + j] == -1) {
+            if (config_.should_skip_expert(expert_ids[i * k + j])) {
               continue;
             }
             for (int e = 0; e < config_.hidden_size; e++) {
