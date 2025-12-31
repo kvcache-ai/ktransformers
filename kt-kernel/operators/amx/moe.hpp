@@ -18,20 +18,21 @@
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
- private:
+ protected:
   using Base = AMX_MOE_BASE<T, AMX_MOE_TP<T>>;
   using Base::config_;
-  using Base::tp_part_idx;
-  using Base::gate_bb_;
-  using Base::up_bb_;
-  using Base::down_bb_;
-  using Base::gate_up_ba_;
-  using Base::gate_bc_;
-  using Base::up_bc_;
   using Base::down_ba_;
+  using Base::down_bb_;
   using Base::down_bc_;
+  using Base::gate_bb_;
+  using Base::gate_bc_;
+  using Base::gate_up_ba_;
   using Base::m_local_num_;
+  using Base::tp_part_idx;
+  using Base::up_bb_;
+  using Base::up_bc_;
 
+ private:
   std::filesystem::path prefix;
 
   void* gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if
@@ -169,15 +170,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   // CRTP buffer creation - no group_size
   // ============================================================================
 
-  size_t buffer_a_required_size_impl(size_t m, size_t k) const {
-    return T::BufferA::required_size(m, k);
-  }
-  size_t buffer_b_required_size_impl(size_t n, size_t k) const {
-    return T::BufferB::required_size(n, k);
-  }
-  size_t buffer_c_required_size_impl(size_t m, size_t n) const {
-    return T::BufferC::required_size(m, n);
-  }
+  size_t buffer_a_required_size_impl(size_t m, size_t k) const { return T::BufferA::required_size(m, k); }
+  size_t buffer_b_required_size_impl(size_t n, size_t k) const { return T::BufferB::required_size(n, k); }
+  size_t buffer_c_required_size_impl(size_t m, size_t n) const { return T::BufferC::required_size(m, n); }
 
   std::shared_ptr<typename T::BufferA> make_buffer_a_impl(size_t m, size_t k, void* data) const {
     return std::make_shared<typename T::BufferA>(m, k, data);

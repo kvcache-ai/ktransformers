@@ -8,6 +8,9 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
+#include <immintrin.h>
+
+#include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
 
 // Forward declaration
@@ -38,6 +41,56 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
   TP_MOE_SFT(MOESFTConfig config) : Base(static_cast<GeneralMOEConfig>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
+  }
+
+  /**
+   * @brief Load weights on all NUMA nodes.
+   */
+  void load_weights() override {
+    auto pool = config.pool;
+    pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+    weights_loaded = true;
+  }
+
+  /**
+   * @brief Merge results from all NUMA nodes.
+   */
+  void merge_results(int qlen, void* output) override { merge_results(qlen, output, false); }
+
+  void merge_results(int qlen, void* output, bool incremental) override {
+    auto& tp_count_ref = this->tp_count;
+    auto& local_output_numa_ref = this->local_output_numa;
+    auto& tp_configs_ref = this->tp_configs;
+
+    auto merge_fn = [this, output, incremental, &tp_count_ref, &local_output_numa_ref, &tp_configs_ref](int token_nth) {
+      float* merge_to = local_output_numa_ref[0] + token_nth * tp_configs_ref[0].hidden_size;
+      if (incremental) {
+        for (int e = 0; e < config.hidden_size; e += 32) {
+          __m512 x0, x1;
+          avx512_32xbf16_to_32xfp32((__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e), &x0, &x1);
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), x0);
+          *((__m512*)(merge_to + e + 16)) = _mm512_add_ps(*((__m512*)(merge_to + e + 16)), x1);
+        }
+      }
+      for (int i = 1; i < tp_count_ref; i++) {
+        float* merge_from = local_output_numa_ref[i] + token_nth * tp_configs_ref[i].hidden_size;
+        for (int e = 0; e < tp_configs_ref[i].hidden_size; e += 16) {
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), *((__m512*)(merge_from + e)));
+        }
+      }
+      for (int e = 0; e < config.hidden_size; e += 32) {
+        __m512 x0 = *(__m512*)(merge_to + e);
+        __m512 x1 = *(__m512*)(merge_to + e + 16);
+        avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
+      }
+    };
+
+    auto pool = config.pool;
+    if (qlen < 10) {
+      for (int i = 0; i < qlen; i++) merge_fn(i);
+    } else {
+      pool->do_work_stealing_job(qlen, nullptr, merge_fn, nullptr);
+    }
   }
 
   /**

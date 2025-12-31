@@ -52,7 +52,7 @@ struct ForwardCache {
  */
 template <class T>
 class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
- private:
+ protected:
   using Base = AMX_MOE_TP<T>;
   using Base::config_;
   using Base::down_ba_;
@@ -76,6 +76,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
   using Base::up_bb_;
   using Base::up_bc_;
 
+ private:
   // SFT configuration
   MOESFTConfig sft_config_;
 
@@ -141,6 +142,9 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
     init_cache_buffers();
     init_grad_buffers();
   }
+
+  // Constructor to satisfy MOE_TP_PART concept (takes GeneralMOEConfig)
+  AMX_SFT_MOE_TP(GeneralMOEConfig config, int tp_part_idx) : AMX_SFT_MOE_TP(MOESFTConfig(config), tp_part_idx) {}
 
   ~AMX_SFT_MOE_TP() = default;
 

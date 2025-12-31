@@ -313,6 +313,11 @@ struct MOESFTConfig : public GeneralMOEConfig {
 
   MOESFTConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
       : GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size) {}
+
+  // Conversion constructor from GeneralMOEConfig (for MOE_TP_PART concept satisfaction)
+  explicit MOESFTConfig(const GeneralMOEConfig& base) : GeneralMOEConfig(base) {
+    // LoRA fields use default values (already initialized in struct definition)
+  }
 };
 
 struct GeneralGateConfig {
