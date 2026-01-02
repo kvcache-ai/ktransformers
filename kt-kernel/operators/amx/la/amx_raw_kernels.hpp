@@ -18,14 +18,14 @@ struct GemmKernel224BF16 {
   using dt = ggml_bf16_t;
   using output_t = float;
   static constexpr double ELEMENT_SIZE = 2;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   static inline const int K_BLOCK = 1792;
@@ -129,14 +129,14 @@ struct GemmKernel224FP8 {
   using output_t = float;
 
   static constexpr double ELEMENT_SIZE = 1.0;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int BLOCK_SIZE = 128;  // 128 x 128 block quantization
   static inline const int N_BLOCK = 128;

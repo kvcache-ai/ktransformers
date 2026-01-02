@@ -86,14 +86,14 @@ inline void dpb133<uint8_t, uint8_t>::run() {
 
 template <int TILE_K = 32>
 struct GemmKernel133 {
-  static const int TILE_M = 16;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
-  static const int OUTPUT_T_SIZE = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
+  static constexpr int OUTPUT_T_SIZE = 4;
 
-  static const int M_STEP = TILE_M * 3;
-  static const int N_STEP = TILE_N;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 3;
+  static constexpr int N_STEP = TILE_N;
+  static constexpr int K_STEP = TILE_K;
 
   static int recommended_nth(int m) { return (m + M_STEP - 1) / M_STEP; }
 
@@ -429,14 +429,14 @@ struct GemmKernel133 {
 struct GemmKernel133BF {
   using dt = ggml_bf16_t;
   using output_t = float;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 3;
-  static const int N_STEP = TILE_N;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 3;
+  static constexpr int N_STEP = TILE_N;
+  static constexpr int K_STEP = TILE_K;
 
   static int recommended_nth(int m) { return (m + M_STEP - 1) / M_STEP; }
   static void config() {
@@ -565,14 +565,14 @@ struct GemmKernel224BF {
   using dt = ggml_bf16_t;
   using output_t = float;
   static constexpr double ELEMENT_SIZE = 2;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   static inline const int K_BLOCK = 1792;
@@ -817,14 +817,14 @@ struct GemmKernel224Int8 {
   using dt = int8_t;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 1;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   // static inline const int N_BLOCK = 256;
   static inline const int N_BLOCK = 64;
@@ -1074,14 +1074,14 @@ struct GemmKernel224Int4 {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   // static inline const int N_BLOCK = 256;
   static inline const int N_BLOCK = 128;
@@ -1365,14 +1365,14 @@ struct GemmKernel224Int4_1 {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2075,13 +2075,13 @@ struct GemmKernel224Int4KGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
   static inline const int N_BLOCK = 256;
   // K_BLOCK should match k_group_size for proper scaling
   static inline const int K_BLOCK = 7168;  // Will be overridden by k_group_size
@@ -2305,14 +2305,14 @@ struct GemmKernel224Int4_1KGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2581,14 +2581,14 @@ struct GemmKernel224Int4_1_LowKGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2859,11 +2859,11 @@ struct GemmKernel224Int4SmallKGroup {
   using dt = uint8_t;  // packed int4 type
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int VNNI_BLK = 4;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = 1;
-  static const int N_STEP = 32;
-  static const int K_STEP = 32;
+  static constexpr int M_STEP = 1;
+  static constexpr int N_STEP = 32;
+  static constexpr int K_STEP = 32;
 
   static inline const int N_BLOCK = 256;
   // K_BLOCK should match k_group_size for proper scaling
