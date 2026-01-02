@@ -4,6 +4,239 @@
 
 ---
 
+# 预备知识：Cache 机制与公式推导
+
+本板块介绍 SFT MoE 的 ForwardCache 机制及 backward pass 的数学推导，为理解后续 bug 提供理论基础。
+
+---
+
+## 1. MoE SFT Forward Cache 设计
+
+### 1.1 Cache 的目的
+
+在训练场景中，需要保存 forward pass 的中间结果用于 backward pass 计算梯度。由于 MoE 层的特殊性（routing、多专家并行），需要保存：
+
+1. **Routing 信息**：哪些 token 被路由到哪些 expert
+2. **中间激活值**：gate/up projection 的输出（activation 之前）
+3. **Expert 映射**：activated expert 的顺序
+
+### 1.2 ForwardCache 结构
+
+```cpp
+struct ForwardCache {
+  // 中间值指针 (指向预分配的 buffer pool)
+  ggml_bf16_t* input_cache;          // [qlen, hidden_size]
+  ggml_bf16_t* gate_output_cache;    // [tokens_total, intermediate_size]
+  ggml_bf16_t* up_output_cache;      // [tokens_total, intermediate_size]
+  ggml_bf16_t* intermediate_cache;   // [tokens_total, intermediate_size]
+
+  // Routing 信息
+  std::vector<int64_t> expert_ids_cache;        // [qlen * k] 每个 token 选择的专家
+  std::vector<float> weights_cache;             // [qlen * k] 路由权重
+  std::vector<int> m_local_num_cache;           // [expert_num] 每个专家处理的 token 数
+  std::vector<std::vector<int>> m_local_pos_cache; // [qlen][k] 每个 token 在专家内的位置
+  std::vector<int> m_expert_id_map_cache;       // [activated_expert] 激活专家的顺序
+
+  int qlen_cache, k_cache, activated_expert_cache;
+  bool valid = false;
+};
+```
+
+### 1.3 Cache Buffer 的内存布局
+
+**关键概念**：`gate_output_cache` 和 `up_output_cache` 存储数据的顺序由 `m_expert_id_map_` 决定！
+
+```
+假设 forward 时激活了 3 个专家，顺序为 [Expert 5, Expert 10, Expert 0]：
+- m_expert_id_map_[0] = 5   (2 tokens)
+- m_expert_id_map_[1] = 10  (1 token)
+- m_expert_id_map_[2] = 0   (1 token)
+
+gate_output_cache 内存布局：
++--------------------------------------------------+
+| Expert 5 的 2 个 token | Expert 10 的 1 个 token | Expert 0 的 1 个 token |
+| [2 * intermediate_size] | [1 * intermediate_size] | [1 * intermediate_size]|
++--------------------------------------------------+
+offset=0                   offset=2                  offset=3
+```
+
+### 1.4 save_to_cache 流程
+
+```cpp
+void save_to_cache(ForwardCache& cache, ...) {
+  // 1. 保存 routing 信息
+  cache.m_local_num_cache = m_local_num_;
+  cache.m_expert_id_map_cache = m_expert_id_map_;
+
+  // 2. 按 m_expert_id_map_ 的顺序复制 gate/up 输出
+  size_t offset = 0;
+  for (int i = 0; i < activated_expert; i++) {
+    int expert_idx = m_expert_id_map_[i];           // 第 i 个激活的专家 ID
+    int num_tokens = m_local_num_[expert_idx];      // 这个专家处理的 token 数
+
+    // 从 m_local_gate_output_ptr_[expert_idx] 复制到 cache
+    memcpy(cache.gate_output_cache + offset * intermediate_size,
+           m_local_gate_output_ptr_[expert_idx],
+           num_tokens * intermediate_size * sizeof(bf16));
+
+    offset += num_tokens;
+  }
+}
+```
+
+---
+
+## 2. Backward Pass 公式推导
+
+### 2.1 MoE FFN Forward 公式
+
+对于单个专家的 FFN：
+```
+y = down_proj(activation(gate_proj(x) * up_proj(x)))
+  = W_down @ (silu(W_gate @ x) * (W_up @ x))
+```
+
+其中 `silu(x) = x * sigmoid(x)`。
+
+设：
+- `g = W_gate @ x`（gate projection 输出）
+- `u = W_up @ x`（up projection 输出）
+- `intermediate = silu(g) * u = g * sigmoid(g) * u`
+- `y = W_down @ intermediate`
+
+### 2.2 Backward Pass 链式法则
+
+设 loss 为 L，反向传播需要计算：
+- `∂L/∂x` (grad_input) - 用于继续反向传播
+- `∂L/∂W_gate`, `∂L/∂W_up`, `∂L/∂W_down` (LoRA 梯度)
+
+#### Step 1: backward_down
+
+```
+给定：∂L/∂y (grad_output)
+计算：∂L/∂intermediate = ∂L/∂y @ W_down^T
+
+其中 intermediate = silu(gate_out) * up_out
+```
+
+#### Step 2: backward_activation (SiLU backward)
+
+```
+设 g = gate_out, u = up_out
+intermediate = silu(g) * u = g * sigmoid(g) * u
+
+∂L/∂g = ∂L/∂intermediate * u * sigmoid(g) * (1 + g * (1 - sigmoid(g)))
+∂L/∂u = ∂L/∂intermediate * silu(g) = ∂L/∂intermediate * g * sigmoid(g)
+```
+
+**关键观察**：如果 `g ≈ 0`，那么 `silu(g) = g * sigmoid(g) ≈ 0`，导致 `∂L/∂u ≈ 0`！
+
+这就是 Bug #15 中 `grad_up = 0` 的数学原因。
+
+#### Step 3: backward_gate_up
+
+```
+∂L/∂x = ∂L/∂g @ W_gate^T + ∂L/∂u @ W_up^T
+```
+
+### 2.3 完整的 LoRA 梯度公式
+
+对于 LoRA 层：`y = x @ W^T + (x @ A^T @ B^T) * scaling`
+
+Backward:
+```
+grad_x = grad_y @ W + (grad_y @ B @ A) * scaling
+grad_A = (x^T @ (grad_y @ B)) * scaling
+grad_B = (grad_y^T @ (x @ A^T)) * scaling
+```
+
+---
+
+## 3. Cache 在 Backward 中的使用
+
+### 3.1 正确的 backward 流程
+
+```cpp
+void backward(...) {
+  ForwardCache cache = pop_cache();  // 获取对应的 forward cache
+
+  // ★ 恢复 routing 信息 ★
+  m_local_num_ = cache.m_local_num_cache;
+  m_expert_id_map_ = cache.m_expert_id_map_cache;
+
+  // 调用各个 backward 函数
+  backward_down(cache, grad_output, ...);      // 计算 grad_intermediate
+  backward_activation(cache);                   // 计算 grad_gate, grad_up
+  backward_gate_up(cache, grad_input, ...);    // 计算 grad_input
+}
+```
+
+### 3.2 backward_activation 如何读取 cache
+
+```cpp
+void backward_activation(const ForwardCache& cache) {
+  for (int task_id = 0; task_id < activated_expert; task_id++) {
+    // 使用 ★当前★ m_expert_id_map_（已在 backward() 中恢复）
+    int expert_idx = m_expert_id_map_[task_id];
+    int num_tokens = m_local_num_[expert_idx];
+
+    // 计算在 cache 中的 offset（按 m_expert_id_map_ 顺序）
+    size_t offset = 0;
+    for (int i = 0; i < task_id; i++) {
+      offset += m_local_num_[m_expert_id_map_[i]];
+    }
+
+    // 读取 cache 数据
+    ggml_bf16_t* gate_output = cache.gate_output_cache + offset * intermediate_size;
+    ggml_bf16_t* up_output = cache.up_output_cache + offset * intermediate_size;
+
+    // 计算梯度（使用上面的 SiLU backward 公式）
+    for (int i = 0; i < num_tokens * intermediate_size; i++) {
+      float g = GGML_BF16_TO_FP32(gate_output[i]);
+      float u = GGML_BF16_TO_FP32(up_output[i]);
+      float sigmoid_g = 1.0f / (1.0f + expf(-g));
+      float silu_g = g * sigmoid_g;
+      float grad_i = GGML_BF16_TO_FP32(grad_intermediate_[offset + i]);
+
+      float grad_gate_val = grad_i * u * sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));
+      float grad_up_val = grad_i * silu_g;  // 如果 g ≈ 0，这里 ≈ 0！
+      // ...
+    }
+  }
+}
+```
+
+---
+
+## 4. 关键调试技巧
+
+### 4.1 使用 Norm 追踪数据流
+
+在 backward 各阶段打印 norm 值可以快速定位问题：
+
+```cpp
+printf("[DEBUG] grad_intermediate norm: %f\n", compute_bf16_norm(...));
+printf("[DEBUG] grad_gate norm: %f, grad_up norm: %f\n", ...);
+printf("[DEBUG] grad_input norm: %f\n", ...);
+```
+
+如果某个 norm 突然变成 0，说明该阶段出了问题。
+
+### 4.2 检查内存地址避免 Buffer 重叠
+
+当多个 buffer 分配时，需要检查它们的地址是否重叠：
+
+```cpp
+printf("[DEBUG ADDR] buffer1 = %p, buffer2 = %p\n", (void*)buf1, (void*)buf2);
+printf("[DEBUG BEFORE memset] buf2[0..3] = %.4f %.4f %.4f %.4f\n", ...);
+memset(buf1, 0, size);
+printf("[DEBUG AFTER memset] buf2[0..3] = %.4f %.4f %.4f %.4f\n", ...);
+```
+
+如果 BEFORE 有值而 AFTER 变成 0，说明 buf1 和 buf2 有内存重叠！
+
+---
+
 # 第一板块：语法 Bug
 
 本板块记录编译期和运行时的语法、类型、继承相关问题。
@@ -642,7 +875,7 @@ void load_weights() override {
 
 ---
 
-## Bug #9: Forward Cache Stack Overflow 【正在处理中】
+## Bug #9: Forward Cache Stack Overflow 【已修复】
 
 ### 问题现象
 
@@ -705,7 +938,7 @@ config.max_cache_depth = validation_iter  # 至少等于迭代次数
 
 ---
 
-## Bug #10: SFT Forward 数值差异分析（无 LoRA 相关）【正在处理中】
+## Bug #10: SFT Forward 数值差异分析（无 LoRA 相关）【已修复】
 
 ### 问题现象
 
@@ -804,7 +1037,7 @@ SFT： relative_diff = 1e-6 / 1e-5 = 0.1
 
 ---
 
-## Bug #11: PyTorch 参考实现中的 Dtype 不匹配（Backward 测试）
+## Bug #11: PyTorch 参考实现中的 Dtype 不匹配（Backward 测试）【已修复】
 
 ### 问题现象
 
@@ -905,17 +1138,558 @@ grad_output_expanded = grad_output_expanded.view(-1, grad_output.shape[-1]).to(g
      - 已添加 `lora_linear_backward()`, `mlp_lora_backward()`, `moe_sft_torch_backward()`
      - 已添加 `test_moe_sft_backward_no_tp()`, `test_moe_sft_lora_weight_sync_no_tp()`, `test_moe_sft_training_loop_no_tp()`
 
-4. **发现新问题**：Bug #11 - PyTorch 参考实现中 dtype 不匹配，需要修复后才能运行 backward 测试。
+4. **Bug #11 修复**：PyTorch 参考实现中 dtype 不匹配已修复（添加 `.to(grad_output.dtype)`）。
 
 ### 当前状态
 
 | 测试 | 状态 | 备注 |
 |------|------|------|
 | 非 TP forward | ✓ PASSED | 已修复 |
-| 非 TP backward | ✗ BLOCKED | Bug #11 待修复 |
-| 非 TP weight sync | ✗ BLOCKED | 依赖 backward |
-| 非 TP training loop | ✗ BLOCKED | 依赖 backward |
+| 非 TP backward | ? 待验证 | Bug #12, #13, #14 已修复 |
+| 非 TP weight sync | ? 待验证 | Bug #11 已修复 |
+| 非 TP training loop | ? 待验证 | Bug #11 已修复 |
 | TP forward | ? 待验证 | 已同步修改 |
-| TP backward | ? 待验证 | 可能有同样的 Bug #11 |
+| TP backward | ? 待验证 | Bug #11 已修复 |
+
+---
+
+## Bug #12: Backward pass 中 grad_intermediate 未被计算 【已修复】
+
+### 问题现象
+
+运行 `test_moe_sft_amx_no_tp.py` 的 backward 测试时：
+
+```
+[BACKWARD DEBUG] qlen=4, k=8, activated_expert=30, total_tokens=32
+[BACKWARD DEBUG] grad_output norm: 1.680211          ← 有值
+[BACKWARD DEBUG] After backward_down - grad_intermediate norm: 0.000000   ← 0！
+[BACKWARD DEBUG] After backward_activation - grad_gate norm: 0.000000, grad_up norm: 0.000000
+[BACKWARD DEBUG] After backward_gate_up - grad_input norm: 0.000000
+```
+
+`grad_input diff = 1.0`，backward 计算完全不正确。
+
+### 问题原因
+
+**文件**: `operators/amx/sft_moe.hpp`，`backward_down()` 函数
+
+`backward_down()` 只计算了 LoRA 权重梯度，但**没有计算 `grad_intermediate = grad_output @ down_proj^T`**。
+
+**正确的反向传播流程**:
+```
+grad_output [qlen, hidden_size]
+    ↓ backward_down: grad_intermediate = grad_output @ down_proj^T  ← 缺失！
+grad_intermediate [tokens, intermediate_size]
+    ↓ backward_activation: SiLU backward
+grad_gate, grad_up [tokens, intermediate_size]
+    ↓ backward_gate_up: grad_input = grad_gate @ gate_W^T + grad_up @ up_W^T  ← Bug #14
+grad_input [qlen, hidden_size]
+```
+
+原代码只有：
+```cpp
+// Line 713-714: 只是初始化为零，从未填充实际值！
+memset(grad_intermediate_, 0, ...);
+```
+
+### 解决方案
+
+在 `backward_down()` 中添加 `grad_intermediate = grad_output @ down_proj` 的计算：
+
+```cpp
+// Compute grad w.r.t. intermediate: grad_intermediate = grad_output @ down_proj
+// down_proj layout: [expert_num, hidden_size, intermediate_size]
+// grad_output: [num_tokens, hidden_size], grad_intermediate: [num_tokens, intermediate_size]
+// grad_intermediate[t, i] = sum_h grad_output[t, h] * down_proj[h, i]
+{
+  const ggml_bf16_t* down_proj = (const ggml_bf16_t*)config_.down_proj;
+  size_t expert_offset = (size_t)expert_idx * config_.hidden_size * config_.intermediate_size;
+
+  // Compute offset into grad_intermediate_ for this expert
+  size_t grad_inter_offset = 0;
+  for (int e = 0; e < task_id; e++) {
+    grad_inter_offset += m_local_num_[m_expert_id_map_[e]];
+  }
+  grad_inter_offset *= config_.intermediate_size;
+
+  for (int t = 0; t < num_tokens; t++) {
+    for (int i = 0; i < config_.intermediate_size; i++) {
+      float sum = 0.0f;
+      for (int h = 0; h < config_.hidden_size; h++) {
+        float grad_out_val = expert_grad_out[t * config_.hidden_size + h];
+        float down_val = GGML_BF16_TO_FP32(down_proj[expert_offset + h * config_.intermediate_size + i]);
+        sum += grad_out_val * down_val;
+      }
+      grad_intermediate_[grad_inter_offset + t * config_.intermediate_size + i] = GGML_FP32_TO_BF16(sum);
+    }
+  }
+}
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/amx/sft_moe.hpp` | 在 `backward_down()` 中添加 grad_intermediate 计算 |
+
+---
+
+## Bug #13: grad_input 数据类型错误导致内存损坏 【已修复】
+
+### 问题现象
+
+运行 backward 测试时程序崩溃：
+
+```
+*** Error in `python': double free or corruption (!prev): 0x00007f8d6c000010 ***
+Aborted (core dumped)
+```
+
+GDB backtrace 显示问题在 `backward_gate_up()` 函数。
+
+### 问题原因
+
+**文件**: `operators/amx/sft_moe.hpp`，`backward_gate_up()` 函数
+
+C++ 代码将 `grad_input` 当作 `float` (4 bytes) 处理：
+
+```cpp
+// 原代码 Line 855: 用 float (4 bytes) 初始化
+memset(grad_input, 0, qlen * config_.hidden_size * sizeof(float));
+
+// 原代码 Line 973: 当作 float* 写入
+((float*)grad_input)[i * config_.hidden_size + h] += sum * lora_scaling_;
+```
+
+但 Python 传入的是 `torch.bfloat16` (2 bytes)！
+
+**导致的问题：**
+1. `memset` 清零了两倍的内存（越界）
+2. 写入时错误地将 bf16 buffer 解释为 float，导致写入位置错误
+3. 最终导致内存损坏和 double free
+
+### 解决方案
+
+将 `grad_input` 处理改为 bf16：
+
+```cpp
+// 修改后：用 bf16 (2 bytes) 初始化
+memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+
+// 修改后：用 bf16 累加
+ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+// ...
+float current = GGML_BF16_TO_FP32(grad_input_bf16[i * config_.hidden_size + h]);
+grad_input_bf16[i * config_.hidden_size + h] = GGML_FP32_TO_BF16(current + sum * lora_scaling_);
+```
+
+同时修复 `backward_down()` 中 `grad_output` 的读取：
+
+```cpp
+// 修改后：从 bf16 读取
+const ggml_bf16_t* grad_out_bf16 = (const ggml_bf16_t*)grad_output;
+// ...
+expert_grad_out[pos * config_.hidden_size + h] +=
+    GGML_BF16_TO_FP32(grad_out_bf16[i * config_.hidden_size + h]) * w;
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/amx/sft_moe.hpp` | `backward_gate_up()` 和 `backward_down()` 中将 float 处理改为 bf16 |
+
+---
+
+## Bug #14: grad_input 缺少 base weight 贡献 【已修复】
+
+### 问题现象
+
+即使修复 Bug #12 和 #13 后，`grad_input` 计算仍然不完整。
+
+### 问题原因
+
+**文件**: `operators/amx/sft_moe.hpp`，`backward_gate_up()` 函数
+
+原代码只计算了 LoRA 的贡献：
+```cpp
+// grad_input += grad @ lora_B @ lora_A * scaling
+```
+
+但缺少 base weight 的贡献：
+```cpp
+// 缺失：grad_input += grad_gate @ gate_proj^T + grad_up @ up_proj^T
+```
+
+### 解决方案
+
+在 `backward_gate_up()` 中添加 base weight 贡献，并将其移到 LoRA 条件检查之前（确保即使没有 LoRA 也会计算）：
+
+```cpp
+// First, compute base weight contribution to grad_input (always, regardless of LoRA)
+// grad_input += grad @ W^T (for gate or up, depending on do_up)
+// W layout: [expert_num, intermediate_size, hidden_size]
+// grad: [num_tokens, intermediate_size]
+// grad_input[t, h] += sum_i grad[t, i] * W[i, h]
+{
+  ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+  const ggml_bf16_t* base_proj =
+      do_up ? (const ggml_bf16_t*)config_.up_proj : (const ggml_bf16_t*)config_.gate_proj;
+  size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
+
+  // Pre-compute grad_input contribution per token, then scatter
+  std::vector<float> token_grad_input(num_tokens * config_.hidden_size, 0.0f);
+  for (int t = 0; t < num_tokens; t++) {
+    for (int h = 0; h < config_.hidden_size; h++) {
+      float sum = 0.0f;
+      for (int i = 0; i < config_.intermediate_size; i++) {
+        float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
+        float w = GGML_BF16_TO_FP32(base_proj[expert_offset + i * config_.hidden_size + h]);
+        sum += g * w;
+      }
+      token_grad_input[t * config_.hidden_size + h] = sum;
+    }
+  }
+
+  // Scatter back to grad_input
+  for (int i = 0; i < qlen; i++) {
+    for (int j = 0; j < k; j++) {
+      if (cache.expert_ids_cache[i * k + j] == expert_idx) {
+        int pos = cache.m_local_pos_cache[i][j];
+        for (int h = 0; h < config_.hidden_size; h++) {
+          float current = GGML_BF16_TO_FP32(grad_input_bf16[i * config_.hidden_size + h]);
+          grad_input_bf16[i * config_.hidden_size + h] =
+              GGML_FP32_TO_BF16(current + token_grad_input[pos * config_.hidden_size + h]);
+        }
+      }
+    }
+  }
+}
+
+// LoRA gradients and contribution - only if LoRA is enabled
+if (lora_a == nullptr || lora_b == nullptr) return;
+// ... LoRA computation continues ...
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/amx/sft_moe.hpp` | `backward_gate_up()` 中添加 base weight grad_input 贡献 |
+
+### 关键知识点
+
+**完整的 MoE 层反向传播公式：**
+
+```
+Forward:  y = (silu(x @ gate_W^T) * (x @ up_W^T)) @ down_W^T
+        + LoRA 贡献（如果启用）
+
+Backward:
+  grad_intermediate = grad_output @ down_W
+  grad_gate, grad_up = silu_backward(grad_intermediate, gate_out, up_out)
+  grad_input = grad_gate @ gate_W + grad_up @ up_W
+             + LoRA 贡献（如果启用）
+```
+
+---
+
+## Bug #15: backward_activation 中 grad_up = 0 【已修复 - SharedMemBuffer 内存重叠】
+
+### 第一轮调试输出
+
+Bug #12, #13, #14 修复后，运行测试显示：
+
+```
+[BACKWARD DEBUG] qlen=4, k=8, activated_expert=30, total_tokens=32
+[BACKWARD DEBUG] grad_output norm: 1.680211          ✓ 有值
+[BACKWARD DEBUG] After backward_down - grad_intermediate norm: 32.011452   ✓ Bug #12 修复成功！
+[BACKWARD DEBUG] After backward_activation - grad_gate norm: 13.238412, grad_up norm: 0.000000  ← Bug #15！
+[BACKWARD DEBUG] After backward_gate_up - grad_input norm: 1116.860474
+grad_input diff: 0.804688
+```
+
+**关键问题**：`grad_gate` 有值（13.238412），但 `grad_up` 是 0！
+
+### 公式分析
+
+**SiLU backward 公式**（在 `backward_activation()` 中）：
+
+```cpp
+float g = GGML_BF16_TO_FP32(gate_output[i]);         // 从 cache 读取
+float u = GGML_BF16_TO_FP32(up_output[i]);           // 从 cache 读取
+float sigmoid_g = 1.0f / (1.0f + expf(-g));
+float silu_g = g * sigmoid_g;                         // silu(g) = g * sigmoid(g)
+
+float grad_i = GGML_BF16_TO_FP32(grad_inter[i]);     // 从 backward_down 计算得到
+
+// Compute gradients
+float grad_gate_val = grad_i * u * sigmoid_g * (1.0f + g * (1.0f - sigmoid_g));  // ≈ 13.24
+float grad_up_val = grad_i * silu_g;                                               // = 0 ！
+```
+
+**推论**：
+- 如果 `grad_gate_val ≠ 0`，说明 `grad_i`, `u`, `sigmoid_g` 都有值
+- 如果 `grad_up_val = 0`，那么 `silu_g = g * sigmoid_g ≈ 0`
+- 由于 `sigmoid_g ∈ (0, 1)` 且不可能为 0，所以必然是 **`g (gate_output) ≈ 0`**
+
+### 第二轮调试输出（关键发现）
+
+```
+[DEBUG save_to_cache] total_tokens=32, gate_output_cache[0..7] = 0.1689 -1.0078 0.0410 -0.2109 1.3203 -1.3203 0.0077 -0.1904
+
+[BACKWARD DEBUG] qlen=4, k=8, activated_expert=30, total_tokens=32
+[DEBUG backward_activation] task_id=0, expert_idx=0, num_tokens=1, offset=0
+[DEBUG] gate_output[0..7] = 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000 0.0000   ← 全零！
+[DEBUG] up_output[0..7] = -0.0244 1.0156 -0.1816 -0.0011 1.2500 0.0889 -0.5117 -0.0796  ← 有值！
+[DEBUG] grad_inter[0..7] = -0.2129 0.2871 -0.3789 -0.1934 0.3945 0.3203 -0.3008 0.1079
+```
+
+### 关键发现：内存覆盖问题！
+
+**奇怪现象**：
+1. `save_to_cache` 时 `gate_output_cache[0..7]` 有正常值（0.1689, -1.0078, ...）
+2. `backward_activation` 时读取同一个 offset=0，但 `gate_output` 全是 0
+3. **同一个 offset 的 `up_output` 却有值！**
+
+**这是不可能的**——两者使用相同的 offset 读取，但结果不同。唯一的解释是：
+
+**`cache.gate_output_cache` 指向的内存被覆盖了，而 `cache.up_output_cache` 没有。**
+
+### 可能的内存覆盖来源
+
+`gate_output_cache` 和 `up_output_cache` 使用**不同的内存池**：
+
+```cpp
+// init_cache_buffers() 中
+cache_stack_[i].gate_output_cache = (ggml_bf16_t*)cache_gate_output_pool_ + ...;
+cache_stack_[i].up_output_cache = (ggml_bf16_t*)cache_up_output_pool_ + ...;
+```
+
+**嫌疑最大**：`backward_down()` 中的 memset
+
+```cpp
+// backward_down() 第 720-721 行
+memset(grad_intermediate_, 0,
+       config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t));
+```
+
+如果 `shared_mem_buffer_numa.alloc()` 在多次调用时复用了相同的内存区域，那么 `grad_intermediate_` 可能与 `cache.gate_output_cache` 指向相同（或重叠）的内存！
+
+### 已添加的内存地址调试代码
+
+```cpp
+// save_to_cache 中添加
+printf("[DEBUG ADDR] cache.gate_output_cache = %p, cache.up_output_cache = %p\n", ...);
+
+// backward_down 中添加
+printf("[DEBUG ADDR backward_down] grad_intermediate_ = %p\n", ...);
+printf("[DEBUG ADDR backward_down] cache.gate_output_cache = %p\n", ...);
+printf("[DEBUG BEFORE memset] gate_cache[0..3] = ...\n");
+memset(grad_intermediate_, 0, ...);
+printf("[DEBUG AFTER memset] gate_cache[0..3] = ...\n");
+```
+
+### 预期调试结果
+
+运行后，如果看到：
+1. `grad_intermediate_` 和 `cache.gate_output_cache` 地址相同或接近
+2. `BEFORE memset` 有值，`AFTER memset` 变成 0
+
+→ 确认内存覆盖问题。
+
+### 修复方案
+
+**合并所有 buffer 分配到一个 `alloc()` 调用**：
+
+当前代码分三次调用 `alloc()`：
+1. `init_lora_buffers()` - 分配 LoRA 中间 buffer
+2. `init_cache_buffers()` - 分配 cache buffer
+3. `init_grad_buffers()` - 分配梯度 buffer
+
+**修复后**：合并到一个 `init_buffers()` 函数：
+
+```cpp
+void init_buffers() {
+  MemoryRequest mem_requests;
+
+  // LoRA buffers
+  mem_requests.append_pointer(&lora_intermediate_pool_, lora_intermediate_pool_bytes_);
+
+  // Cache buffers
+  mem_requests.append_pointer(&cache_input_pool_, cache_slot_bytes_input_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_gate_output_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_up_output_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_intermediate_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+
+  // Gradient buffers
+  mem_requests.append_pointer(&grad_intermediate_pool_, grad_buffer_bytes);
+  mem_requests.append_pointer(&grad_gate_output_pool_, grad_buffer_bytes);
+  mem_requests.append_pointer(&grad_up_output_pool_, grad_buffer_bytes);
+
+  // Single allocation for all buffers
+  shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
+
+  // Initialize pointers after allocation
+  // ...
+}
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/amx/sft_moe.hpp` | 合并 buffer 分配，修复内存重叠问题 |
+
+### 第三轮调试输出（确认根因）
+
+根据调试代码输出：
+
+```
+[DEBUG ADDR] cache.gate_output_cache = 0x7f0703aa7040
+[DEBUG ADDR] cache.up_output_cache   = 0x7f0735aa7040
+[DEBUG ADDR backward_down] grad_intermediate_ = 0x7f06edca7040
+[DEBUG BEFORE memset] gate_cache[0..3] = 0.1689 -1.0078 0.0410 -0.2109
+[DEBUG AFTER memset] gate_cache[0..3] = 0.0000 0.0000 0.0000 0.0000  ← 被清零！
+```
+
+**确认内存覆盖！** `grad_intermediate_` 的 memset（800 MB）覆盖了 `cache.gate_output_cache`。
+
+### SharedMemBuffer 工作原理（根因分析）
+
+查看 `/home/lpl/ktransformers/kt-kernel/cpu_backend/shared_mem_buffer.cpp:49-73`：
+
+```cpp
+void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
+  size_t total_size = requests.total_size();
+  object_requests.push_back(requests);
+
+  if (total_size > size) {
+    buffer = posix_memalign(..., total_size);
+    size = total_size;
+    // ★ 关键：所有请求都从同一个 base 开始！
+    for (auto& req : object_requests) {
+      req.update_base_ptr(buffer);
+    }
+  } else {
+    requests.update_base_ptr(buffer);
+  }
+}
+```
+
+**设计意图**：SharedMemBuffer 是一个**共享内存池**，让多个临时 buffer 可以复用同一块内存。
+
+**问题**：SFT 的 cache buffer 和 grad buffer **不是临时的**——它们需要**同时存在**！
+
+### 内存分配顺序（问题所在）
+
+原代码在构造函数中分三次调用 `alloc()`：
+
+```cpp
+init_lora_buffers();   // alloc #1: ~1 MB
+init_cache_buffers();  // alloc #2: ~800 MB
+init_grad_buffers();   // alloc #3: ~800 MB
+```
+
+由于 SharedMemBuffer 让所有请求从同一个 base 开始：
+
+```
+SharedMemBuffer (size = 800 MB):
++---------------------------------------------------------------------+
+| 0                                                        800 MB     |
++---------------------------------------------------------------------+
+                              ↑
+          cache_gate_output_pool_ 从某个 offset 开始
+          grad_intermediate_pool_ 从 0 开始 ← 覆盖 cache!
+```
+
+memset 大小 = 25600 × 8 × 2048 × 2 = 800 MB，覆盖了 `cache.gate_output_cache`。
+
+### 最终修复方案
+
+**合并所有 buffer 到单次 `alloc()` 调用**，确保所有 buffer 获得连续、不重叠的地址。
+
+**新函数 `init_all_buffers()`**：
+
+```cpp
+void init_all_buffers() {
+  // 计算所有 buffer 大小
+  lora_intermediate_pool_bytes_ = sizeof(ggml_bf16_t) * config_.max_len *
+                                  config_.num_experts_per_tok * lora_rank_;
+  cache_slot_bytes_input_ = config_.max_len * config_.hidden_size * sizeof(ggml_bf16_t);
+  cache_slot_bytes_intermediate_ =
+      config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t);
+  size_t grad_buffer_bytes =
+      config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t);
+
+  // ★ 单次 alloc() 调用，所有 buffer 获得连续地址 ★
+  MemoryRequest mem_requests;
+
+  // LoRA buffers
+  mem_requests.append_pointer(&lora_intermediate_pool_, lora_intermediate_pool_bytes_);
+
+  // Cache buffers (4 个 pool × max_cache_depth)
+  mem_requests.append_pointer(&cache_input_pool_, cache_slot_bytes_input_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_gate_output_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_up_output_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+  mem_requests.append_pointer(&cache_intermediate_pool_, cache_slot_bytes_intermediate_ * max_cache_depth_);
+
+  // Gradient buffers (3 个 pool)
+  mem_requests.append_pointer(&grad_intermediate_pool_, grad_buffer_bytes);
+  mem_requests.append_pointer(&grad_gate_output_pool_, grad_buffer_bytes);
+  mem_requests.append_pointer(&grad_up_output_pool_, grad_buffer_bytes);
+
+  // 单次分配
+  shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
+
+  // 初始化指针和 cache stack...
+}
+```
+
+**构造函数修改**：
+
+```cpp
+// 原代码（删除）
+init_lora_buffers();
+init_cache_buffers();
+init_grad_buffers();
+
+// 新代码
+init_all_buffers();
+```
+
+---
+
+## 2025-01-02: Backward Pass 完整修复
+
+### 进展摘要
+
+1. **调试验证**：添加了 `compute_bf16_norm()` 和 `compute_f32_norm()` 辅助函数，在 `backward()` 各阶段打印 norm 值，确认问题分析正确。
+
+2. **Bug #12 修复**：在 `backward_down()` 中添加了 `grad_intermediate = grad_output @ down_proj` 的计算。
+
+3. **Bug #13 修复**：将 `grad_input` 和 `grad_output` 的处理从 float 改为 bf16，修复内存损坏问题。
+
+4. **Bug #14 修复**：在 `backward_gate_up()` 中添加了 base weight 对 grad_input 的贡献，并将其移到 LoRA 条件检查之前。
+
+5. **Bug #15 修复**：发现 `grad_up = 0` 问题，根因是 SharedMemBuffer 多次 `alloc()` 调用导致内存重叠。修复方案：合并所有 buffer 分配到单个 `init_all_buffers()` 函数。
+
+### 当前状态
+
+| 测试 | 状态 | 备注 |
+|------|------|------|
+| 非 TP forward | ✓ PASSED | 已修复 |
+| 非 TP backward | ✓ 代码已修复 | Bug #12, #13, #14, #15 已修复，待验证 |
+| 非 TP weight sync | ? 待验证 | 依赖 backward |
+| 非 TP training loop | ? 待验证 | 依赖 backward |
+
+### Bug 修复总结
+
+| Bug | 问题 | 状态 |
+|-----|------|------|
+| Bug #12 | grad_intermediate 未计算 | ✓ 已修复 |
+| Bug #13 | grad_input/grad_output 数据类型错误 | ✓ 已修复 |
+| Bug #14 | grad_input 缺少 base weight 贡献 | ✓ 已修复 |
+| Bug #15 | SharedMemBuffer 内存重叠 | ✓ 已修复 |
 
 ---
