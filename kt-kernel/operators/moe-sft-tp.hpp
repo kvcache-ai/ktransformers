@@ -41,6 +41,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
   TP_MOE_SFT(MOESFTConfig config) : Base(static_cast<GeneralMOEConfig>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
+
+    // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
+    // LoRA pointers. We need to propagate LoRA pointers to all NUMA node instances.
+    if (config.gate_lora_a != nullptr) {
+      update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
+                          config.down_lora_a, config.down_lora_b);
+    }
   }
 
   /**

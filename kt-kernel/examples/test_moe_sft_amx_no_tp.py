@@ -862,6 +862,29 @@ def test_moe_sft_backward_no_tp():
         # LoRA gradients (check activated experts only)
         activated = [i for i, n in enumerate(moe_saved["tokens_per_expert"]) if n > 0]
 
+        # Debug: compare PyTorch and C++ gradient values for Bug #17
+        print(f"\n[DEBUG COMPARISON] Activated experts: {activated[:5]}...")  # Only print first 5
+        print(f"[DEBUG COMPARISON] First activated expert: {activated[0] if activated else 'None'}")
+
+        if activated:
+            first_exp = activated[0]
+            print(
+                f"\n[TORCH DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_gate_lora_a'][first_exp, 0, :8]}"
+            )
+            print(f"[AMX DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {grad_gate_lora_a[first_exp, 0, :8]}")
+            print(f"[TORCH DEBUG] mean abs = {torch.mean(torch.abs(torch_grads['grad_gate_lora_a'][first_exp])):.6e}")
+            print(f"[AMX DEBUG] mean abs = {torch.mean(torch.abs(grad_gate_lora_a[first_exp])):.6e}")
+
+            # Also check up_lora_a and down_lora_a
+            print(
+                f"\n[TORCH DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_up_lora_a'][first_exp, 0, :8]}"
+            )
+            print(f"[AMX DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {grad_up_lora_a[first_exp, 0, :8]}")
+            print(
+                f"[TORCH DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_down_lora_a'][first_exp, 0, :8]}"
+            )
+            print(f"[AMX DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {grad_down_lora_a[first_exp, 0, :8]}")
+
         for name, amx_grad, torch_grad in [
             ("gate_lora_a", grad_gate_lora_a, torch_grads["grad_gate_lora_a"]),
             ("gate_lora_b", grad_gate_lora_b, torch_grads["grad_gate_lora_b"]),

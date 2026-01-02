@@ -1660,6 +1660,120 @@ init_all_buffers();
 
 ---
 
+## Bug #16: LoRA 指针 Object Slicing 导致 LoRA 梯度全零 【已修复】
+
+### 问题现象
+
+Bug #15 修复后，运行测试显示：
+
+```
+[DEBUG BEFORE memset] gate_cache[0..3] = 0.1689 -1.0078 0.0410 -0.2109
+[DEBUG AFTER memset] gate_cache[0..3] = 0.1689 -1.0078 0.0410 -0.2109  ← Bug #15 已修复！
+grad_input diff: 0.006775     ← 正确！
+gate_lora_a diff: 1.000000    ← 完全错误！
+```
+
+`diff = 1.0` 意味着 C++ 输出全零，而 PyTorch 有非零值。LoRA 梯度没有被计算。
+
+### 问题原因
+
+**根因：C++ Object Slicing**
+
+**继承链：**
+```
+TP_MOE_SFT<T>
+  ↓ 继承
+TP_MOE<T>
+  ↓ 存储
+GeneralMOEConfig config;  // 不是 MOESFTConfig！
+```
+
+**关键代码 (moe-tp.hpp:115-123)：**
+
+```cpp
+for (auto i = 0; i < tp_count; i++) {
+  tps.push_back(nullptr);
+  GeneralMOEConfig tp_config = config;  // ★ Object Slicing！★
+  tp_config.intermediate_size /= tp_count;
+  tp_configs.push_back(tp_config);
+}
+
+config.pool->dispense_backend()->do_numa_job(
+    [this, config](int i) {
+      tps[i] = std::move(std::unique_ptr<T>(new T(tp_configs[i], i)));  // ★ LoRA 指针丢失！★
+    });
+```
+
+当 `config` 是 `MOESFTConfig` 时，`GeneralMOEConfig tp_config = config` 会切片掉所有 SFT 特有字段：
+- `gate_lora_a`, `gate_lora_b` → nullptr
+- `up_lora_a`, `up_lora_b` → nullptr
+- `down_lora_a`, `down_lora_b` → nullptr
+
+**AMX_SFT_MOE_TP 构造函数：**
+
+```cpp
+// sft_moe.hpp:142-162
+AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
+    : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
+  // ...
+  gate_lora_a_ = (ggml_bf16_t*)config.gate_lora_a;  // config.gate_lora_a = nullptr!
+  gate_lora_b_ = (ggml_bf16_t*)config.gate_lora_b;  // config.gate_lora_b = nullptr!
+  // ...
+}
+
+// 满足 concept 的构造函数 (被 TP_MOE 调用)
+AMX_SFT_MOE_TP(GeneralMOEConfig config, int tp_part_idx)
+    : AMX_SFT_MOE_TP(MOESFTConfig(config), tp_part_idx) {}  // ★ 使用默认 LoRA 值 (nullptr)！★
+```
+
+**结果：**
+
+1. `TP_MOE_SFT` 构造时，基类 `TP_MOE<T>` 创建 `tps[i]` 使用 `GeneralMOEConfig`
+2. `AMX_SFT_MOE_TP` 被调用 `GeneralMOEConfig` 构造函数，转换为 `MOESFTConfig` 时 LoRA 指针为 nullptr
+3. `backward_gate_up` 中检查 `if (lora_a == nullptr || lora_b == nullptr) return;` → 早期返回，不计算 LoRA 梯度
+4. LoRA 梯度 buffer 保持全零
+
+### 解决方案
+
+在 `TP_MOE_SFT` 构造函数中调用 `update_lora_weights()` 将 LoRA 指针传递给所有 NUMA 节点的实例。
+
+**文件**: `/home/lpl/ktransformers/kt-kernel/operators/moe-sft-tp.hpp`
+
+**修改后的构造函数：**
+
+```cpp
+TP_MOE_SFT(MOESFTConfig config) : Base(static_cast<GeneralMOEConfig>(config)), sft_config(config) {
+  printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
+
+  // ★ Bug #16 fix: 将 LoRA 指针传递给所有 NUMA 节点的实例 ★
+  if (config.gate_lora_a != nullptr) {
+    update_lora_weights(
+        config.gate_lora_a, config.gate_lora_b,
+        config.up_lora_a, config.up_lora_b,
+        config.down_lora_a, config.down_lora_b);
+  }
+}
+```
+
+这会调用 `AMX_SFT_MOE_TP::update_lora_weights()` 为每个实例设置正确的 LoRA 指针。
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/moe-sft-tp.hpp` | 在 `TP_MOE_SFT` 构造函数中调用 `update_lora_weights()` |
+
+### 关键知识点
+
+**C++ Object Slicing**：当派生类对象赋值给基类对象时，派生类特有的成员会被"切掉"。这在模板继承中尤其危险，因为基类可能存储的是基类类型而非派生类类型。
+
+**解决方案选择**：
+1. ✗ 修改 `TP_MOE` 基类存储 `MOESFTConfig` — 会破坏非 SFT 的 MoE 使用
+2. ✗ 为每个派生类创建模板特化 — 维护困难
+3. ✓ 在派生类构造函数中手动传递丢失的字段 — 简单有效
+
+---
+
 ## 2025-01-02: Backward Pass 完整修复
 
 ### 进展摘要
@@ -1674,12 +1788,14 @@ init_all_buffers();
 
 5. **Bug #15 修复**：发现 `grad_up = 0` 问题，根因是 SharedMemBuffer 多次 `alloc()` 调用导致内存重叠。修复方案：合并所有 buffer 分配到单个 `init_all_buffers()` 函数。
 
+6. **Bug #16 修复**：发现 `gate_lora_a diff = 1.0` 问题，根因是 C++ Object Slicing 导致 LoRA 指针丢失。修复方案：在 `TP_MOE_SFT` 构造函数中调用 `update_lora_weights()` 传递 LoRA 指针。
+
 ### 当前状态
 
 | 测试 | 状态 | 备注 |
 |------|------|------|
 | 非 TP forward | ✓ PASSED | 已修复 |
-| 非 TP backward | ✓ 代码已修复 | Bug #12, #13, #14, #15 已修复，待验证 |
+| 非 TP backward | ✓ 代码已修复 | Bug #12, #13, #14, #15, #16 已修复，待验证 |
 | 非 TP weight sync | ? 待验证 | 依赖 backward |
 | 非 TP training loop | ? 待验证 | 依赖 backward |
 
@@ -1691,5 +1807,127 @@ init_all_buffers();
 | Bug #13 | grad_input/grad_output 数据类型错误 | ✓ 已修复 |
 | Bug #14 | grad_input 缺少 base weight 贡献 | ✓ 已修复 |
 | Bug #15 | SharedMemBuffer 内存重叠 | ✓ 已修复 |
+| Bug #16 | LoRA 指针 Object Slicing | ✓ 已修复 |
+| Bug #17a | save_to_cache 存储 m_local_input_ (expert-sorted) | ✓ 已修复 |
+| Bug #17b | backward_gate_up 需要原始 token order 的 input | ✓ 已修复 |
+| Bug #17c | backward_down 使用 gate_output_cache (激活前) | ✓ 已修复 |
+
+---
+
+## 2026-01-02: Bug #17 系列修复
+
+### Bug #17a & #17b: input_cache 与原始输入不一致
+
+**现象**：
+```
+[TORCH DEBUG] x[0, 0:8] = [-1.7700e-03,  1.8921e-03, ...]
+[DEBUG] expert_input[0..7] = 0.0156 -0.0084 ...
+```
+值完全不同，甚至符号都不同。
+
+**根因分析**：
+- `save_to_cache` 之前将 `m_local_input_` 复制到 cache
+- `m_local_input_` 是 **expert-sorted layout**（按专家排序）
+- 但 `backward_gate_up` 从 cache 读取时假设是 **原始 token order**
+
+**修复方案**：
+1. 修改 `save_to_cache` 函数签名，添加 `const void* input` 参数
+2. 复制原始 `input` 而非 `m_local_input_`
+3. 修改 `forward_sft` 调用时传入 `input` 参数
+
+**代码修改** (sft_moe.hpp):
+```cpp
+// 修改前
+void save_to_cache(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids,
+                   const float* weights, int activated_expert) {
+  // ...
+  memcpy(cache.input_cache, m_local_input_, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+}
+
+// 修改后
+void save_to_cache(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids,
+                   const float* weights, int activated_expert, const void* input) {
+  // ...
+  // Bug #17b fix: 存储原始 input (token order)，而非 m_local_input_ (expert-sorted)
+  memcpy(cache.input_cache, input, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+}
+```
+
+### Bug #17c: backward_down 使用错误的 intermediate
+
+**现象**：
+```
+gate_lora_a diff: 0.005066  ✓ 正确
+up_lora_a diff: 0.004456   ✓ 正确
+down_lora_a diff: 3.031250  ✗ 失败
+```
+
+**根因分析**：
+
+Forward 流程：
+```cpp
+// Save gate/up outputs before activation
+if (save_for_backward) {
+  save_to_cache(cache, ...);  // ★ 保存激活前的 gate/up
+}
+// Step 6: Activation (silu(gate) * up)
+Base::apply_activation(activated_expert, nth, qlen);  // ★ m_local_gate_output_ 变为 intermediate
+```
+
+`cache.gate_output_cache` = gate 输出 (**激活前**)
+`cache.intermediate_cache` = **未保存！**
+
+Backward 代码：
+```cpp
+const ggml_bf16_t* cached_intermediate = cache.gate_output_cache + cache_offset * ...;
+// ★ 错误：使用激活前的 gate_output，而非激活后的 intermediate！
+```
+
+Down LoRA 梯度公式需要的是 `intermediate = silu(gate) * up`（激活后），不是 `gate`（激活前）！
+
+**修复方案**：
+
+1. 添加 `save_intermediate_to_cache` 函数：
+```cpp
+void save_intermediate_to_cache(ForwardCache& cache, int activated_expert) {
+  size_t offset = 0;
+  for (int i = 0; i < activated_expert; i++) {
+    int expert_idx = m_expert_id_map_[i];
+    int num_tokens = m_local_num_[expert_idx];
+    // m_local_gate_output_ptr_ 现在包含 intermediate (激活后: silu(gate) * up)
+    memcpy(cache.intermediate_cache + offset * config_.intermediate_size,
+           m_local_gate_output_ptr_[expert_idx],
+           num_tokens * config_.intermediate_size * sizeof(ggml_bf16_t));
+    offset += num_tokens;
+  }
+}
+```
+
+2. 在 `apply_activation` **之后**调用：
+```cpp
+// Step 6: Activation (silu(gate) * up)
+Base::apply_activation(activated_expert, nth, qlen);
+
+// Bug #17c fix: 保存激活后的 intermediate
+if (save_for_backward) {
+  ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];
+  save_intermediate_to_cache(cache, activated_expert);
+}
+```
+
+3. 修改 `backward_down` 使用 `cache.intermediate_cache`：
+```cpp
+// 修改前（错误）
+const ggml_bf16_t* cached_intermediate = cache.gate_output_cache + cache_offset * ...;
+
+// 修改后（正确）
+const ggml_bf16_t* cached_intermediate = cache.intermediate_cache + cache_offset * ...;
+```
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/amx/sft_moe.hpp` | Bug #17a/b/c: save_to_cache, save_intermediate_to_cache, backward_down |
 
 ---

@@ -14,25 +14,6 @@
 
 #include "moe.hpp"
 
-// Debug helper: compute L2 norm of bf16 buffer
-static float compute_bf16_norm(const ggml_bf16_t* data, size_t size) {
-  double sum = 0.0;
-  for (size_t i = 0; i < size; i++) {
-    float val = GGML_BF16_TO_FP32(data[i]);
-    sum += val * val;
-  }
-  return sqrtf((float)sum);
-}
-
-// Debug helper: compute L2 norm of float buffer
-static float compute_f32_norm(const float* data, size_t size) {
-  double sum = 0.0;
-  for (size_t i = 0; i < size; i++) {
-    sum += data[i] * data[i];
-  }
-  return sqrtf((float)sum);
-}
-
 /**
  * @brief Forward cache structure for gradient checkpointing.
  *
@@ -304,11 +285,17 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
     // Save gate/up outputs before activation (for backward)
     if (save_for_backward) {
       ForwardCache& cache = push_cache();
-      save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert);
+      save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
     }
 
     // Step 6: Activation (silu(gate) * up)
     Base::apply_activation(activated_expert, nth, qlen);
+
+    // Save intermediate AFTER activation for backward_down (Bug #17c fix)
+    if (save_for_backward) {
+      ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
+      save_intermediate_to_cache(cache, activated_expert);
+    }
 
     // Step 7: Quantize intermediate for down projection
     pool->do_work_stealing_job(
@@ -404,32 +391,32 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
       offset += m_local_num_[i];
     }
 
-    // Compute total tokens for debug
-    size_t total_tokens = 0;
-    for (int i = 0; i < activated_expert; i++) {
-      total_tokens += m_local_num_[m_expert_id_map_[i]];
-    }
+    // // Compute total tokens for debug
+    // size_t total_tokens = 0;
+    // for (int i = 0; i < activated_expert; i++) {
+    //   total_tokens += m_local_num_[m_expert_id_map_[i]];
+    // }
 
-    printf("[BACKWARD DEBUG] qlen=%d, k=%d, activated_expert=%d, total_tokens=%zu\n", qlen, k, activated_expert,
-           total_tokens);
-    printf("[BACKWARD DEBUG] grad_output norm: %f\n",
-           compute_bf16_norm((const ggml_bf16_t*)grad_output, qlen * config_.hidden_size));
+    // printf("[BACKWARD DEBUG] qlen=%d, k=%d, activated_expert=%d, total_tokens=%zu\n", qlen, k, activated_expert,
+    //        total_tokens);
+    // printf("[BACKWARD DEBUG] grad_output norm: %f\n",
+    //        compute_bf16_norm((const ggml_bf16_t*)grad_output, qlen * config_.hidden_size));
 
     // Step 1: Down projection backward
     backward_down(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
-    printf("[BACKWARD DEBUG] After backward_down - grad_intermediate norm: %f\n",
-           compute_bf16_norm(grad_intermediate_, total_tokens * config_.intermediate_size));
+    // printf("[BACKWARD DEBUG] After backward_down - grad_intermediate norm: %f\n",
+    //        compute_bf16_norm(grad_intermediate_, total_tokens * config_.intermediate_size));
 
     // Step 2: Activation backward
     backward_activation(cache);
-    printf("[BACKWARD DEBUG] After backward_activation - grad_gate norm: %f, grad_up norm: %f\n",
-           compute_bf16_norm(grad_gate_output_, total_tokens * config_.intermediate_size),
-           compute_bf16_norm(grad_up_output_, total_tokens * config_.intermediate_size));
+    // printf("[BACKWARD DEBUG] After backward_activation - grad_gate norm: %f, grad_up norm: %f\n",
+    //        compute_bf16_norm(grad_gate_output_, total_tokens * config_.intermediate_size),
+    //        compute_bf16_norm(grad_up_output_, total_tokens * config_.intermediate_size));
 
     // Step 3: Gate + Up projection backward
     backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
-    printf("[BACKWARD DEBUG] After backward_gate_up - grad_input norm: %f\n",
-           compute_bf16_norm((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size));
+    // printf("[BACKWARD DEBUG] After backward_gate_up - grad_input norm: %f\n",
+    //        compute_bf16_norm((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size));
 
     // Mark cache as invalid
     cache.valid = false;
@@ -663,7 +650,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
   }
 
   void save_to_cache(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
-                     int activated_expert) {
+                     int activated_expert, const void* input) {
     cache.qlen_cache = qlen;
     cache.k_cache = k;
     cache.activated_expert_cache = activated_expert;
@@ -691,8 +678,9 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
       total_tokens += m_local_num_[expert_idx];
     }
 
-    // Copy input (before any processing)
-    memcpy(cache.input_cache, m_local_input_, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+    // Copy input (original input, not m_local_input_ which is expert-sorted)
+    // Bug #17b fix: backward_gate_up expects original token order
+    memcpy(cache.input_cache, input, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
 
     // Copy gate and up outputs (before activation)
     size_t offset = 0;
@@ -706,17 +694,35 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
       offset += num_tokens;
     }
 
-    // Debug: Print gate_output_cache values and addresses at save time
-    printf("[DEBUG save_to_cache] total_tokens=%zu\n", offset);
-    printf("[DEBUG ADDR] cache.gate_output_cache = %p, cache.up_output_cache = %p\n", (void*)cache.gate_output_cache,
-           (void*)cache.up_output_cache);
-    printf("[DEBUG save_to_cache] gate_output_cache[0..7] = ");
-    for (int i = 0; i < 8 && i < (int)(offset * config_.intermediate_size); i++) {
-      printf("%.4f ", GGML_BF16_TO_FP32(cache.gate_output_cache[i]));
-    }
-    printf("\n");
+    // Debug code commented out - Bug #15 verified fixed
+    // printf("[DEBUG save_to_cache] total_tokens=%zu\n", offset);
+    // printf("[DEBUG ADDR] cache.gate_output_cache = %p, cache.up_output_cache = %p\n", (void*)cache.gate_output_cache,
+    //        (void*)cache.up_output_cache);
+    // printf("[DEBUG save_to_cache] gate_output_cache[0..7] = ");
+    // for (int i = 0; i < 8 && i < (int)(offset * config_.intermediate_size); i++) {
+    //   printf("%.4f ", GGML_BF16_TO_FP32(cache.gate_output_cache[i]));
+    // }
+    // printf("\n");
 
     cache.valid = true;
+  }
+
+  /**
+   * @brief Save intermediate values AFTER activation for backward_down.
+   *
+   * Must be called after apply_activation() since m_local_gate_output_ptr_
+   * now contains silu(gate) * up (the intermediate value).
+   */
+  void save_intermediate_to_cache(ForwardCache& cache, int activated_expert) {
+    size_t offset = 0;
+    for (int i = 0; i < activated_expert; i++) {
+      int expert_idx = m_expert_id_map_[i];
+      int num_tokens = m_local_num_[expert_idx];
+      // m_local_gate_output_ptr_ now contains intermediate (after activation: silu(gate) * up)
+      memcpy(cache.intermediate_cache + offset * config_.intermediate_size, m_local_gate_output_ptr_[expert_idx],
+             num_tokens * config_.intermediate_size * sizeof(ggml_bf16_t));
+      offset += num_tokens;
+    }
   }
 
   void backward_down(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
@@ -729,24 +735,21 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
     ggml_bf16_t* grad_down_a = (ggml_bf16_t*)grad_down_lora_a;
     ggml_bf16_t* grad_down_b = (ggml_bf16_t*)grad_down_lora_b;
 
-    // Debug: Print memory addresses to check for overlap
-    printf("[DEBUG ADDR backward_down] grad_intermediate_ = %p\n", (void*)grad_intermediate_);
-    printf("[DEBUG ADDR backward_down] cache.gate_output_cache = %p\n", (void*)cache.gate_output_cache);
-    printf("[DEBUG ADDR backward_down] cache.up_output_cache = %p\n", (void*)cache.up_output_cache);
-
-    // Debug: Check cache data BEFORE memset
-    printf("[DEBUG BEFORE memset] gate_cache[0..3] = %.4f %.4f %.4f %.4f\n",
-           GGML_BF16_TO_FP32(cache.gate_output_cache[0]), GGML_BF16_TO_FP32(cache.gate_output_cache[1]),
-           GGML_BF16_TO_FP32(cache.gate_output_cache[2]), GGML_BF16_TO_FP32(cache.gate_output_cache[3]));
+    // Debug code commented out - Bug #15 verified fixed
+    // printf("[DEBUG ADDR backward_down] grad_intermediate_ = %p\n", (void*)grad_intermediate_);
+    // printf("[DEBUG ADDR backward_down] cache.gate_output_cache = %p\n", (void*)cache.gate_output_cache);
+    // printf("[DEBUG ADDR backward_down] cache.up_output_cache = %p\n", (void*)cache.up_output_cache);
+    // printf("[DEBUG BEFORE memset] gate_cache[0..3] = %.4f %.4f %.4f %.4f\n",
+    //        GGML_BF16_TO_FP32(cache.gate_output_cache[0]), GGML_BF16_TO_FP32(cache.gate_output_cache[1]),
+    //        GGML_BF16_TO_FP32(cache.gate_output_cache[2]), GGML_BF16_TO_FP32(cache.gate_output_cache[3]));
 
     // Initialize gradient intermediate buffer
     memset(grad_intermediate_, 0,
            config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t));
 
-    // Debug: Check cache data AFTER memset - if this is different from before, memory overlap!
-    printf("[DEBUG AFTER memset] gate_cache[0..3] = %.4f %.4f %.4f %.4f\n",
-           GGML_BF16_TO_FP32(cache.gate_output_cache[0]), GGML_BF16_TO_FP32(cache.gate_output_cache[1]),
-           GGML_BF16_TO_FP32(cache.gate_output_cache[2]), GGML_BF16_TO_FP32(cache.gate_output_cache[3]));
+    // printf("[DEBUG AFTER memset] gate_cache[0..3] = %.4f %.4f %.4f %.4f\n",
+    //        GGML_BF16_TO_FP32(cache.gate_output_cache[0]), GGML_BF16_TO_FP32(cache.gate_output_cache[1]),
+    //        GGML_BF16_TO_FP32(cache.gate_output_cache[2]), GGML_BF16_TO_FP32(cache.gate_output_cache[3]));
 
     // Scatter grad_output to per-expert buffers and compute gradients
     pool->do_work_stealing_job(
@@ -813,6 +816,15 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
             ggml_bf16_t* expert_lora_a = down_lora_a_ + lora_a_offset;
             ggml_bf16_t* expert_lora_b = down_lora_b_ + lora_b_offset;
 
+            // Bug #17c fix: Use cached intermediate (after activation), not gate_output_cache (before activation)
+            // The cache is stored in task order (activated expert order), need to compute offset
+            size_t cache_offset = 0;
+            for (int e = 0; e < task_id; e++) {
+              cache_offset += m_local_num_[m_expert_id_map_[e]];
+            }
+            const ggml_bf16_t* cached_intermediate =
+                cache.intermediate_cache + cache_offset * config_.intermediate_size;
+
             // Gradient for LoRA B: grad_B = grad_output^T @ (intermediate @ lora_A^T) * scaling
             // = (grad_output^T @ intermediate @ lora_A^T) * scaling
             // Shape: [hidden_size, num_tokens] @ [num_tokens, lora_rank] → [hidden_size, lora_rank]
@@ -823,9 +835,8 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
               for (int r = 0; r < lora_rank_; r++) {
                 float sum = 0.0f;
                 for (int i = 0; i < config_.intermediate_size; i++) {
-                  // Use cached gate_output after activation as intermediate
-                  float inp =
-                      GGML_BF16_TO_FP32(m_local_gate_output_ptr_[expert_idx][t * config_.intermediate_size + i]);
+                  // Use cached intermediate (gate_output after activation)
+                  float inp = GGML_BF16_TO_FP32(cached_intermediate[t * config_.intermediate_size + i]);
                   float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.intermediate_size + i]);
                   sum += inp * w;
                 }
@@ -873,8 +884,8 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
               for (int i = 0; i < config_.intermediate_size; i++) {
                 float sum = 0.0f;
                 for (int t = 0; t < num_tokens; t++) {
-                  float inter =
-                      GGML_BF16_TO_FP32(m_local_gate_output_ptr_[expert_idx][t * config_.intermediate_size + i]);
+                  // Bug #17a fix: Use cached_intermediate instead of m_local_gate_output_ptr_
+                  float inter = GGML_BF16_TO_FP32(cached_intermediate[t * config_.intermediate_size + i]);
                   sum += inter * grad_times_b[t * lora_rank_ + r];
                 }
                 float current = GGML_BF16_TO_FP32(grad_down_a[lora_a_offset + r * config_.intermediate_size + i]);
@@ -918,26 +929,26 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
           ggml_bf16_t* grad_gate = grad_gate_output_ + offset * config_.intermediate_size;
           ggml_bf16_t* grad_up = grad_up_output_ + offset * config_.intermediate_size;
 
-          // Debug: Print values for first task only
-          if (task_id == 0) {
-            printf("[DEBUG backward_activation] task_id=0, expert_idx=%d, num_tokens=%d, offset=%zu\n", expert_idx,
-                   num_tokens, offset);
-            printf("[DEBUG] gate_output[0..7] = ");
-            for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
-              printf("%.4f ", GGML_BF16_TO_FP32(gate_output[dbg]));
-            }
-            printf("\n");
-            printf("[DEBUG] up_output[0..7] = ");
-            for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
-              printf("%.4f ", GGML_BF16_TO_FP32(up_output[dbg]));
-            }
-            printf("\n");
-            printf("[DEBUG] grad_inter[0..7] = ");
-            for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
-              printf("%.4f ", GGML_BF16_TO_FP32(grad_inter[dbg]));
-            }
-            printf("\n");
-          }
+          // Debug code commented out - Bug #15 verified fixed
+          // if (task_id == 0) {
+          //   printf("[DEBUG backward_activation] task_id=0, expert_idx=%d, num_tokens=%d, offset=%zu\n", expert_idx,
+          //          num_tokens, offset);
+          //   printf("[DEBUG] gate_output[0..7] = ");
+          //   for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
+          //     printf("%.4f ", GGML_BF16_TO_FP32(gate_output[dbg]));
+          //   }
+          //   printf("\n");
+          //   printf("[DEBUG] up_output[0..7] = ");
+          //   for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
+          //     printf("%.4f ", GGML_BF16_TO_FP32(up_output[dbg]));
+          //   }
+          //   printf("\n");
+          //   printf("[DEBUG] grad_inter[0..7] = ");
+          //   for (int dbg = 0; dbg < 8 && dbg < num_tokens * config_.intermediate_size; dbg++) {
+          //     printf("%.4f ", GGML_BF16_TO_FP32(grad_inter[dbg]));
+          //   }
+          //   printf("\n");
+          // }
 
           for (int i = 0; i < num_tokens * config_.intermediate_size; i++) {
             float g = GGML_BF16_TO_FP32(gate_output[i]);
