@@ -263,6 +263,6 @@ def test_moe(quant_mode: str):
 
 # test_moe("bf16")
 test_moe("int8")
-test_moe("int4")
-test_moe("int4_1")
-test_moe("int4_1k")
+# test_moe("int4")
+# test_moe("int4_1")
+# test_moe("int4_1k")

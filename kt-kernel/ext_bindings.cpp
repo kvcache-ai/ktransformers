@@ -698,6 +698,11 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
             cfg.num_gpu_experts = num_gpu_experts;
             return cfg;
           }))
+      // Core config fields (required for Python access after construction)
+      .def_readwrite("expert_num", &GeneralMOEConfig::expert_num)
+      .def_readwrite("num_experts_per_tok", &GeneralMOEConfig::num_experts_per_tok)
+      .def_readwrite("hidden_size", &GeneralMOEConfig::hidden_size)
+      .def_readwrite("intermediate_size", &GeneralMOEConfig::intermediate_size)
       .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)
       .def_readwrite("pool", &GeneralMOEConfig::pool)
 

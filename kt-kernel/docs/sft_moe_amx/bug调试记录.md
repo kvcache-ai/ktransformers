@@ -1,5 +1,15 @@
 # SFT MoE AMX Bug 调试记录
 
+本文档记录 SFT MoE AMX 实现过程中遇到的 bug 及其修复方案。
+
+---
+
+# 第一板块：语法 Bug
+
+本板块记录编译期和运行时的语法、类型、继承相关问题。
+
+---
+
 ## Bug #1: C++ 继承链中的私有成员访问问题
 
 ### 问题现象
@@ -331,3 +341,301 @@ moe-sft-tp.hpp:15:10: fatal error: amx/llama.cpp/ggml.h: No such file or directo
 在添加 include 时，应该：
 1. 检查头文件的实际路径是否正确
 2. 检查所需的类型/函数是否已经通过现有 include 链可用，避免重复 include
+
+---
+
+## Bug #6: Python 绑定缺失核心配置字段
+
+### 问题现象
+
+运行 `test_moe_sft_amx.py` 时出现 AttributeError：
+
+```
+test_moe_sft_amx.py:628: AttributeError: 'kt_kernel_ext.moe.MOESFTConfig' object has no attribute 'expert_num'
+```
+
+测试代码尝试设置配置字段：
+
+```python
+config = kt_kernel_ext.moe.MOESFTConfig()
+config.expert_num = expert_num  # <-- 报错
+config.num_experts_per_tok = num_experts_per_tok
+config.hidden_size = hidden_size
+config.intermediate_size = intermediate_size
+```
+
+### 问题原因
+
+`ext_bindings.cpp` 中的 pybind11 绑定没有暴露 `GeneralMOEConfig` 的核心字段。
+
+**问题代码 (ext_bindings.cpp:691-747)：**
+
+```cpp
+py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
+    .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
+      return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
+    }))
+    // 构造函数接受这些参数...
+    .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)  // 直接跳到其他字段
+    .def_readwrite("pool", &GeneralMOEConfig::pool)
+    // ... 没有 expert_num, num_experts_per_tok, hidden_size, intermediate_size 的 def_readwrite！
+```
+
+虽然构造函数可以接受这些参数进行初始化，但由于没有 `.def_readwrite()` 声明，Python 端无法在构造后读取或修改这些属性。
+
+`MOESFTConfig` 继承自 `GeneralMOEConfig`（通过 `py::class_<MOESFTConfig, GeneralMOEConfig>`），因此也缺失这些属性。
+
+### 解决方案
+
+在 `ext_bindings.cpp` 的 `GeneralMOEConfig` 绑定中添加缺失的字段声明：
+
+```cpp
+py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
+    .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
+      return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
+    }))
+    // ... 其他 init ...
+    // 新增：核心配置字段
+    .def_readwrite("expert_num", &GeneralMOEConfig::expert_num)
+    .def_readwrite("num_experts_per_tok", &GeneralMOEConfig::num_experts_per_tok)
+    .def_readwrite("hidden_size", &GeneralMOEConfig::hidden_size)
+    .def_readwrite("intermediate_size", &GeneralMOEConfig::intermediate_size)
+    .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)
+    // ... 其余绑定 ...
+```
+
+### 关键知识点
+
+**pybind11 继承与属性暴露**：
+1. 当派生类通过 `py::class_<Derived, Base>` 声明继承关系时，基类中通过 `.def_readwrite()` 暴露的属性会自动被派生类继承
+2. 但构造函数参数不会自动变成可访问的属性——必须显式声明 `.def_readwrite()`
+3. 如果基类没有暴露某个字段，所有派生类都无法访问该字段
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------||
+| `ext_bindings.cpp` | 在 `GeneralMOEConfig` 绑定中添加 `expert_num`, `num_experts_per_tok`, `hidden_size`, `intermediate_size` 的 `.def_readwrite()` 声明 |
+
+---
+
+# 第二板块：数值 Bug
+
+本板块记录计算结果不正确的数值问题。
+
+---
+
+## Bug #7: 测试文件输出 Buffer 数据类型错误
+
+### 问题现象
+
+运行 `test_moe_sft_amx.py` 时，forward 测试出现极大的相对误差：
+
+```
+Relative difference: 1.359375
+[FAILED] Test failed with error: Forward pass accuracy test failed: diff=1.359375 >= 0.05
+```
+
+相比之下，推理测试 `test_moe_amx.py` 的误差约为 0.046，在可接受范围内。
+
+### 问题原因
+
+C++ 实现中 `TP_MOE_SFT::merge_results()` 将最终输出转换为 **bf16** 格式：
+
+```cpp
+// moe-sft-tp.hpp:81-84
+for (int e = 0; e < config.hidden_size; e += 32) {
+  __m512 x0 = *(__m512*)(merge_to + e);
+  __m512 x1 = *(__m512*)(merge_to + e + 16);
+  avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
+}
+```
+
+但测试文件 `test_moe_sft_amx.py` 分配的输出 buffer 是 **float32**：
+
+```python
+# test_moe_sft_amx.py:698
+output = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()  # 错误！
+```
+
+**数据类型不匹配的后果：**
+- bf16 每个元素 2 字节，float32 每个元素 4 字节
+- C++ 向 float32 buffer 写入 bf16 数据，只填充了 buffer 的一半
+- Python 将这些 bf16 字节解释为 float32 → 得到完全错误的数值
+
+### 解决方案
+
+修改 `test_moe_sft_amx.py`，将所有 SFT forward 输出 buffer 的 dtype 从 `float32` 改为 `bfloat16`：
+
+**修改点：**
+
+| 函数 | 行号 | 修改内容 |
+|------|------|---------|
+| `test_moe_sft_forward()` | 698 | `dtype=torch.float32` → `dtype=torch.bfloat16` |
+| `test_moe_sft_forward()` | 712-716 | 删除 `.to(torch.bfloat16)` 转换 |
+| `test_moe_sft_backward()` | 854 | `dtype=torch.float32` → `dtype=torch.bfloat16` |
+| `test_moe_sft_lora_weight_sync()` | 998, 1026, 1068 | `dtype=torch.float32` → `dtype=torch.bfloat16` |
+| `test_moe_sft_training_loop()` | 1205 | `dtype=torch.float32` → `dtype=torch.bfloat16` |
+
+**修改示例：**
+
+```python
+# 修改前
+output = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+# ...
+output_bf16 = output.to(torch.bfloat16)
+diff = torch.mean(torch.abs(output_bf16 - torch_output)) / ...
+
+# 修改后
+output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+# ...
+diff = torch.mean(torch.abs(output - torch_output)) / ...
+```
+
+### 关键知识点
+
+1. **数据类型必须匹配**：C++ 和 Python 之间通过指针传递数据时，双方必须使用相同的数据类型解释内存
+2. **SFT forward 输出为 bf16**：与推理模式一致，SFT 的 forward 输出也是 bf16 格式
+
+---
+
+## Bug #8: TP 模式下基础权重未正确分区
+
+### 问题现象
+
+修复 Bug #7 后，输出不再是垃圾值，但仍有较大误差（约 1.71）：
+
+```
+[AMX SFT DEBUG] AMX output[:8] = tensor([ 4.2021e-06,  1.1086e-05, ...])
+[MOE SFT DEBUG] Final output[:8] = tensor([-1.2457e-05, -5.0366e-06, ...])
+Relative difference: 1.710938
+```
+
+AMX 输出和 PyTorch 参考输出数值范围相近（都是 1e-5 到 1e-6），但具体值明显不同。
+
+### 问题原因
+
+**TP（Tensor Parallel）模式的工作原理：**
+- intermediate_size 被分割到多个 NUMA 节点
+- 每个 NUMA 节点处理 intermediate_size / tp_count 的权重
+- 各 NUMA 节点的输出结果相加得到最终输出
+
+**推理模式 `TP_MOE<AMX_MOE_TP<K>>::load_weights()`** (moe.hpp:370-430) 正确处理了权重分区：
+
+```cpp
+for (auto i = 0; i < tp_count; i++) {
+  auto& tpc = tps[i]->config_;
+  size_t gate_up_elcount = tpc.intermediate_size * tpc.hidden_size;
+
+  // 分配临时分区 buffer
+  tpc.gate_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+
+  // 复制对应分区的权重（注意 i * gate_up_elcount 偏移）
+  memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
+         (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
+             i * gate_up_elcount,  // <-- 关键：按 NUMA 节点偏移
+         sizeof(ggml_bf16_t) * gate_up_elcount);
+}
+```
+
+**但 SFT 模式 `TP_MOE_SFT::load_weights()`** (moe-sft-tp.hpp:49-53) 没有做分区：
+
+```cpp
+void load_weights() override {
+  auto pool = config.pool;
+  // 直接调用各 NUMA 的 load_weights，没有先分区！
+  pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+  weights_loaded = true;
+}
+```
+
+**导致的问题：**
+1. 测试设置 `config.gate_proj` 指向完整权重张量
+2. TP_MOE_SFT 构造时，各 NUMA 的 `tp_configs[i].intermediate_size` 被除以 `tp_count`
+3. `load_weights()` 调用时，各 NUMA 的 `AMX_MOE_TP::load_weights()` 使用缩小后的 `intermediate_size` 计算偏移
+4. 但源指针仍指向完整权重，导致各 NUMA 读取了错误的权重分区
+5. NUMA 0 和 NUMA 1 读取相同或重叠的数据，而非正确的分区
+
+### 解决方案
+
+修改 `TP_MOE_SFT::load_weights()`，在加载前正确分区基础权重：
+
+```cpp
+void load_weights() override {
+  auto pool = config.pool;
+
+  // 如果 gate_proj 直接设置（非预量化），需要分区权重
+  if (config.gate_proj != nullptr) {
+    // 为每个 NUMA 节点分配临时分区 buffer
+    for (int i = 0; i < tp_count; i++) {
+      auto& tpc = tps[i]->config_;
+      size_t gate_up_elcount = tpc.intermediate_size * tpc.hidden_size;
+
+      tpc.gate_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      tpc.up_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      tpc.down_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+
+      // 复制分区后的权重
+      pool->get_subpool(i)->do_work_stealing_job(
+          tpc.expert_num, nullptr,
+          [&, i](int expert_id) {
+            // gate 和 up: [expert_num, intermediate_size, hidden_size]
+            // 每个 NUMA 获取 intermediate_size 的一个切片
+            memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
+                   (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
+                       i * gate_up_elcount,
+                   sizeof(ggml_bf16_t) * gate_up_elcount);
+
+            memcpy((ggml_bf16_t*)tpc.up_proj + expert_id * gate_up_elcount,
+                   (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
+                       i * gate_up_elcount,
+                   sizeof(ggml_bf16_t) * gate_up_elcount);
+
+            // down: [expert_num, hidden_size, intermediate_size]
+            // 每个 NUMA 获取 intermediate_size 的一个切片（列）
+            for (size_t row = 0; row < config.hidden_size; row++) {
+              memcpy((ggml_bf16_t*)tpc.down_proj + expert_id * tpc.hidden_size * tpc.intermediate_size +
+                         row * tpc.intermediate_size,
+                     (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
+                         row * config.intermediate_size + i * tpc.intermediate_size,
+                     sizeof(ggml_bf16_t) * tpc.intermediate_size);
+            }
+          },
+          nullptr);
+    }
+
+    // 在各 NUMA 节点加载权重
+    pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+
+    // 清理临时 buffer
+    for (int i = 0; i < tp_count; i++) {
+      auto& tpc = tps[i]->config_;
+      delete[] (ggml_bf16_t*)tpc.gate_proj;
+      delete[] (ggml_bf16_t*)tpc.up_proj;
+      delete[] (ggml_bf16_t*)tpc.down_proj;
+    }
+  } else {
+    // 无需分区（预量化或无权重）
+    pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+  }
+
+  weights_loaded = true;
+}
+```
+
+### 关键知识点
+
+1. **TP 模式权重分区**：当使用 Tensor Parallel 时，每个 NUMA 节点只处理 intermediate_size 的一部分。必须在加载前将完整权重按正确偏移分区到各节点。
+
+2. **gate/up vs down 的分区方式不同**：
+   - gate_proj, up_proj: 形状为 `[expert_num, intermediate_size, hidden_size]`，按 intermediate_size 维度切片（连续块）
+   - down_proj: 形状为 `[expert_num, hidden_size, intermediate_size]`，按 intermediate_size 维度切片（需逐行复制）
+
+3. **SFT 继承推理逻辑**：SFT 模式应尽量复用推理模式的基础设施，包括权重分区逻辑。
+
+### 修改文件清单
+
+| 文件 | 修改内容 |
+|------|---------|
+| `operators/moe-sft-tp.hpp` | 重写 `load_weights()` 方法，添加 TP 权重分区逻辑 |
+| `examples/test_moe_sft_amx.py` | 将输出 buffer dtype 从 `float32` 改为 `bfloat16` |

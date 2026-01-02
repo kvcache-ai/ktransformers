@@ -695,7 +695,7 @@ def test_moe_sft_forward(quant_mode: str):
 
         if HAS_KT_KERNEL:
             # AMX forward using forward_sft_task (no separate sync needed - uses config pointers)
-            output = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+            output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
             CPUInfer.submit(
                 moe.forward_sft_task(
                     bsz_tensor.data_ptr(),
@@ -709,11 +709,13 @@ def test_moe_sft_forward(quant_mode: str):
             )
             CPUInfer.sync()
 
-            # Convert output to bf16 for comparison
-            output_bf16 = output.to(torch.bfloat16)
+            # Debug: print AMX output
+            print(f"[AMX SFT DEBUG] AMX output[:8] = {output.flatten()[:8]}")
+            print(f"[AMX SFT DEBUG] AMX output mean abs = {torch.mean(torch.abs(output)):.6e}")
+            print(f"[AMX SFT DEBUG] Torch output mean abs = {torch.mean(torch.abs(torch_output)):.6e}")
 
-            # Compare results
-            diff = torch.mean(torch.abs(output_bf16 - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
+            # Compare results (output is already bf16)
+            diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
             print(f"Relative difference: {diff:.6f}")
 
             threshold = BF16_FORWARD_THRESHOLD if quant_mode == "bf16" else INT8_FORWARD_THRESHOLD
@@ -851,7 +853,7 @@ def test_moe_sft_backward(quant_mode: str):
         if HAS_KT_KERNEL:
             # AMX forward (with save_for_backward=True)
             # LoRA weights already set in config (zero-copy), no sync needed
-            output = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+            output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
             CPUInfer.submit(
                 moe.forward_sft_task(
                     bsz_tensor.data_ptr(),
@@ -995,7 +997,7 @@ def test_moe_sft_lora_weight_sync():
     input_data = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
     # First forward with initial LoRA weights (already set in config, zero-copy)
-    output1 = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+    output1 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
             bsz_tensor.data_ptr(),
@@ -1023,7 +1025,7 @@ def test_moe_sft_lora_weight_sync():
     # For in-place operations like add_(), no sync is needed due to zero-copy
 
     # Second forward with updated LoRA weights
-    output2 = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+    output2 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
             bsz_tensor.data_ptr(),
@@ -1065,7 +1067,7 @@ def test_moe_sft_lora_weight_sync():
     CPUInfer.sync()
 
     # Third forward with new tensor pointers
-    output3 = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+    output3 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
             bsz_tensor.data_ptr(),
@@ -1202,7 +1204,7 @@ def test_moe_sft_training_loop():
             bsz_tensor = torch.tensor([qlen], device="cpu")
 
             # Forward pass (with save_for_backward=True)
-            output = torch.zeros((qlen, hidden_size), dtype=torch.float32).contiguous()
+            output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
             CPUInfer.submit(
                 moe.forward_sft_task(
                     bsz_tensor.data_ptr(),
