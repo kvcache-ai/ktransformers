@@ -1314,13 +1314,31 @@ def test_moe_sft_training_loop_no_tp():
             down_lora_a_param.grad = grads["grad_down_lora_a"]
             down_lora_b_param.grad = grads["grad_down_lora_b"]
 
+        # Print gradient norms to verify gradients are computed
+        print(f"  gate_lora_a grad norm: {gate_lora_a_param.grad.norm().item():.6e}")
+        print(f"  gate_lora_b grad norm: {gate_lora_b_param.grad.norm().item():.6e}")
+
+        # Save weight snapshots before optimizer step
+        gate_lora_a_before = gate_lora_a_param.data.clone()
+        gate_lora_b_before = gate_lora_b_param.data.clone()
+
         # Optimizer step
         optimizer.step()
         optimizer.zero_grad()
 
-        # Print weight update magnitude
-        print(f"  gate_lora_a norm: {gate_lora_a_param.data.norm().item():.6f}")
-        print(f"  gate_lora_b norm: {gate_lora_b_param.data.norm().item():.6f}")
+        # Calculate weight changes
+        gate_a_diff = (gate_lora_a_param.data - gate_lora_a_before).abs().mean().item()
+        gate_b_diff = (gate_lora_b_param.data - gate_lora_b_before).abs().mean().item()
+
+        # Print weight norms with higher precision
+        print(f"  gate_lora_a norm: {gate_lora_a_param.data.norm().item():.10f}")
+        print(f"  gate_lora_b norm: {gate_lora_b_param.data.norm().item():.10f}")
+        print(f"  gate_lora_a weight change (mean abs): {gate_a_diff:.10e}")
+        print(f"  gate_lora_b weight change (mean abs): {gate_b_diff:.10e}")
+
+        # Verify weights are actually being updated
+        assert gate_a_diff > 0, "gate_lora_a weights should change after optimizer step"
+        assert gate_b_diff > 0, "gate_lora_b weights should change after optimizer step"
 
     print("\n[OK] Training Loop Test (NO TP) PASSED")
 
