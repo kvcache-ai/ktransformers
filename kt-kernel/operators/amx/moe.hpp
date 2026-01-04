@@ -21,18 +21,16 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
  private:
   using Base = AMX_MOE_BASE<T, AMX_MOE_TP<T>>;
   using Base::config_;
-  using Base::tp_part_idx;
-  using Base::gate_bb_;
-  using Base::up_bb_;
-  using Base::down_bb_;
-  using Base::gate_up_ba_;
-  using Base::gate_bc_;
-  using Base::up_bc_;
   using Base::down_ba_;
+  using Base::down_bb_;
   using Base::down_bc_;
+  using Base::gate_bb_;
+  using Base::gate_bc_;
+  using Base::gate_up_ba_;
   using Base::m_local_num_;
-
-  std::filesystem::path prefix;
+  using Base::tp_part_idx;
+  using Base::up_bb_;
+  using Base::up_bc_;
 
   void* gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if
                      // quantized)]
@@ -140,11 +138,15 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   AMX_MOE_TP() = default;
 
   AMX_MOE_TP(GeneralMOEConfig config, int tp_part_idx = 0) : Base(config, tp_part_idx) {
+    // Initialization now happens in derived_init() which is called by base constructor
+  }
+
+  void derived_init() {
     printf("Creating AMX_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
     auto& load = config_.load;
     auto& save = config_.save;
 
-    prefix = config_.path;
+    std::filesystem::path prefix = config_.path;
     prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
     if (save) {
       std::cout << "Creating " << prefix << std::endl;
@@ -169,15 +171,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   // CRTP buffer creation - no group_size
   // ============================================================================
 
-  size_t buffer_a_required_size_impl(size_t m, size_t k) const {
-    return T::BufferA::required_size(m, k);
-  }
-  size_t buffer_b_required_size_impl(size_t n, size_t k) const {
-    return T::BufferB::required_size(n, k);
-  }
-  size_t buffer_c_required_size_impl(size_t m, size_t n) const {
-    return T::BufferC::required_size(m, n);
-  }
+  size_t buffer_a_required_size_impl(size_t m, size_t k) const { return T::BufferA::required_size(m, k); }
+  size_t buffer_b_required_size_impl(size_t n, size_t k) const { return T::BufferB::required_size(n, k); }
+  size_t buffer_c_required_size_impl(size_t m, size_t n) const { return T::BufferC::required_size(m, n); }
 
   std::shared_ptr<typename T::BufferA> make_buffer_a_impl(size_t m, size_t k, void* data) const {
     return std::make_shared<typename T::BufferA>(m, k, data);
@@ -260,6 +256,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     } else {
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
+      std::filesystem::path prefix = config_.path;
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+
       if (config_.load) {
         std::cout << "Loading from " << prefix << std::endl;
         for (int task_id = 0; task_id < config_.expert_num * mat_type_all * mat_split; task_id++) {
@@ -335,7 +334,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (config_.save) {
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
-            [this, physical_to_logical_map](int task_id) {
+            [this, physical_to_logical_map, prefix](int task_id) {
               int64_t expert_idx = task_id / mat_type_all;
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
@@ -426,7 +425,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
 
       this->weights_loaded = true;
     } else if (config.path != "") {
-      printf("TP Load from file\n");
+      printf("TP Load from file %s\n", config.path.c_str());
       DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {

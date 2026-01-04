@@ -23,6 +23,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,7 +79,10 @@ class AMX_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
-  AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) { init(); }
+  AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
+    init();
+    derived()->derived_init();
+  }
 
   void init() {
     if (config_.load && config_.path == "") {
@@ -638,6 +642,15 @@ class AMX_MOE_BASE {
  protected:
   Derived* derived() { return static_cast<Derived*>(this); }
   const Derived* derived_const() const { return static_cast<const Derived*>(this); }
+
+  // ============================================================================
+  // Derived class initialization hook
+  // Called after base class init() completes, allows derived classes to perform
+  // their own initialization that depends on base class being fully initialized
+  // ============================================================================
+  void derived_init() {
+    // Default implementation does nothing - derived classes can override
+  }
 
   // ============================================================================
   // Virtual points for buffer creation and size calculation
