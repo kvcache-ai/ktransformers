@@ -31,16 +31,16 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
  private:
   using Base = AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>>;
   using Base::config_;
-  using Base::tp_part_idx;
-  using Base::gate_bb_;
-  using Base::up_bb_;
-  using Base::down_bb_;
-  using Base::gate_up_ba_;
-  using Base::gate_bc_;
-  using Base::up_bc_;
   using Base::down_ba_;
+  using Base::down_bb_;
   using Base::down_bc_;
+  using Base::gate_bb_;
+  using Base::gate_bc_;
+  using Base::gate_up_ba_;
   using Base::m_local_num_;
+  using Base::tp_part_idx;
+  using Base::up_bb_;
+  using Base::up_bc_;
 
   std::filesystem::path prefix;
 
@@ -265,7 +265,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
                                          config_.quant_config.group_size)) != 0) {
       printf("verify error\n");
       for (size_t i = 0; i < T::BufferB::required_size(config_.hidden_size, config_.intermediate_size,
-                                                        config_.quant_config.group_size);
+                                                       config_.quant_config.group_size);
            ++i) {
         if (verify_bb[i] != check_bb[i]) {
           printf("Difference at byte %zu: verify_bb_%d[%zu] = %02x, check_bb[%zu] = %02x\n", i, compare_expers, i,
@@ -393,19 +393,21 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
 
   AMX_AWQ_MOE_TP() = default;
 
-  AMX_AWQ_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
+  AMX_AWQ_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
+
+  void derived_init() {
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size == 0 || !quant_config.zero_point) {
       throw std::runtime_error("AWQ-Quantization AMX MoE only support KGroup Int4_1");
     }
 
-    printf("Creating AMX_AWQ_MOE_TP %d at numa %d\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
+    printf("Creating AMX_AWQ_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
 
     auto& load = config_.load;
     auto& save = config_.save;
 
     prefix = config_.path;
-    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx_));
+    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
     if (save) {
       std::cout << "Creating " << prefix << std::endl;
       std::filesystem::create_directories(prefix);
@@ -431,9 +433,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
     return T::BufferB::required_size(n, k, config_.quant_config.group_size);
   }
-  size_t buffer_c_required_size_impl(size_t m, size_t n) const {
-    return T::BufferC::required_size(m, n);
-  }
+  size_t buffer_c_required_size_impl(size_t m, size_t n) const { return T::BufferC::required_size(m, n); }
 
   std::shared_ptr<typename T::BufferA> make_buffer_a_impl(size_t m, size_t k, void* data) const {
     return std::make_shared<typename T::BufferA>(m, k, config_.quant_config.group_size, data);
