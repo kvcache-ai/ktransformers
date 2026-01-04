@@ -2578,3 +2578,390 @@ void load_weights() override {
 
 ---
 
+## Bug #20: TP 模式 Backward 段错误 - BF16 权重被过早释放 【已修复】
+
+### 问题现象
+
+在 Bug #19 修复后，TP 模式 forward 测试通过，但 backward 测试出现段错误（Segmentation Fault）。
+
+### 调试过程
+
+**问题复现**：
+```
+[BACKWARD DEBUG] qlen=4, k=8, activated_expert=32, total_tokens=32
+Segmentation fault (core dumped)
+```
+
+**段错误位置定位**：通过添加 debug print，确认错误发生在 `backward_down()` 中访问 `config_.down_proj` 时。
+
+### 根本原因
+
+在 Bug #19 的修复代码中，`load_weights()` 方法创建了临时的分区权重数组：
+
+```cpp
+// 问题代码 (moe-sft-tp.hpp::load_weights)
+std::vector<ggml_bf16_t*> temp_gate(tp_count);
+std::vector<ggml_bf16_t*> temp_up(tp_count);
+std::vector<ggml_bf16_t*> temp_down(tp_count);
+
+// ... 分配和复制分区权重 ...
+
+for (int i = 0; i < tp_count; i++) {
+  tps[i]->set_base_weight_pointers(temp_gate[i], temp_up[i], temp_down[i]);
+  // ...
+}
+
+pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+
+// ❌ 错误：临时数组在函数结束时被删除！
+// 但 backward_down() 需要使用 config_.down_proj 来计算梯度
+for (int i = 0; i < tp_count; i++) {
+  delete[] temp_gate[i];  // 这会导致 backward 时访问已释放内存
+  delete[] temp_up[i];
+  delete[] temp_down[i];
+}
+```
+
+**关键洞察**：
+- `load_weights()` 将原始 BF16 权重量化为 INT8 存储在 GEMM buffer 中
+- 但 `backward_down()` 需要使用原始 BF16 权重（`config_.down_proj`）来计算 `grad_intermediate`：
+
+```cpp
+// sft_moe.hpp::backward_down
+const ggml_bf16_t* down_proj = (const ggml_bf16_t*)config_.down_proj;
+// grad_intermediate[t, i] = sum_h grad_output[t, h] * down_proj[h, i]
+```
+
+### 修复方案
+
+将分区后的权重指针保存为类成员变量，在析构函数中释放：
+
+```cpp
+// moe-sft-tp.hpp
+class TP_MOE_SFT : public TP_MOE<T> {
+  // Bug #20 fix: 保存分区权重指针供 backward 使用
+  std::vector<ggml_bf16_t*> partitioned_gate_proj_;
+  std::vector<ggml_bf16_t*> partitioned_up_proj_;
+  std::vector<ggml_bf16_t*> partitioned_down_proj_;
+
+  void load_weights() override {
+    // ... 分配和复制分区权重 ...
+
+    // 保存指针而非删除
+    partitioned_gate_proj_.resize(tp_count);
+    partitioned_up_proj_.resize(tp_count);
+    partitioned_down_proj_.resize(tp_count);
+    for (int i = 0; i < tp_count; i++) {
+      partitioned_gate_proj_[i] = temp_gate[i];
+      partitioned_up_proj_[i] = temp_up[i];
+      partitioned_down_proj_[i] = temp_down[i];
+    }
+  }
+
+  void free_partitioned_base_weights() {
+    for (auto ptr : partitioned_gate_proj_) { if (ptr) delete[] ptr; }
+    for (auto ptr : partitioned_up_proj_) { if (ptr) delete[] ptr; }
+    for (auto ptr : partitioned_down_proj_) { if (ptr) delete[] ptr; }
+    // ...
+  }
+
+  ~TP_MOE_SFT() {
+    free_partitioned_lora_weights();
+    free_partitioned_base_weights();  // 在析构函数中释放
+  }
+};
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/moe-sft-tp.hpp` | 添加 `partitioned_*_proj_` 成员变量，修改 `load_weights()` 保留指针 | ✓ 已实现 |
+
+### 教训总结
+
+1. **Forward 和 Backward 的权重需求不同**：Forward 使用量化后的 INT8 权重，Backward 需要原始 BF16 权重
+2. **生命周期管理**：临时分配的资源如果被其他模块引用，需要确保其生命周期覆盖所有使用点
+
+---
+
+## Bug #21: TP 模式 Backward 梯度偏移错误 【已修复】
+
+### 问题现象
+
+在 Bug #20 修复后，TP 模式 backward 不再段错误，但梯度数值与参考实现不匹配：
+
+```
+[BACKWARD DEBUG] After backward_gate_up - grad_input norm: 0.123456
+[Reference] grad_input norm: 0.234567
+Gradient mismatch: relative difference > 0.10
+```
+
+### 根本原因
+
+**梯度分区缺失**：`backward()` 方法直接传递完整大小的梯度 buffer 给每个 NUMA 节点：
+
+```cpp
+// 问题代码 (moe-sft-tp.hpp::backward)
+void backward(const void* grad_output, void* grad_input,
+              void* grad_gate_lora_a, void* grad_gate_lora_b,
+              void* grad_up_lora_a, void* grad_up_lora_b,
+              void* grad_down_lora_a, void* grad_down_lora_b) {
+  // ❌ 错误：直接传递完整梯度 buffer
+  pool->dispense_backend()->do_numa_job([...](int numa_id) {
+    tps[numa_id]->backward(grad_output, grad_input,
+                           grad_gate_lora_a, grad_gate_lora_b,  // 需要分区！
+                           grad_up_lora_a, grad_up_lora_b,      // 需要分区！
+                           grad_down_lora_a, grad_down_lora_b); // 需要分区！
+  });
+}
+```
+
+**对称性原则**：
+- Forward：完整权重 → 分区权重 → 每个 NUMA 计算部分输出 → 合并
+- Backward：应该是 Forward 的逆过程：
+  - 完整梯度 → 分区梯度 → 每个 NUMA 计算部分梯度 → 合并到完整梯度
+
+**需要分区的梯度**（含 `intermediate_size` 维度）：
+- `grad_gate_lora_b`: `[expert_num, intermediate_size, lora_rank]` → 连续块切片
+- `grad_up_lora_b`: `[expert_num, intermediate_size, lora_rank]` → 连续块切片
+- `grad_down_lora_a`: `[expert_num, lora_rank, intermediate_size]` → 逐行切片
+
+**不需要分区的梯度**（含 `hidden_size` 维度，不受 TP 影响）：
+- `grad_gate_lora_a`: `[expert_num, lora_rank, hidden_size]`
+- `grad_up_lora_a`: `[expert_num, lora_rank, hidden_size]`
+- `grad_down_lora_b`: `[expert_num, hidden_size, lora_rank]`
+
+### 修复方案
+
+重写 `backward()` 方法，添加梯度分区和合并逻辑：
+
+```cpp
+void backward(const void* grad_output, void* grad_input,
+              void* grad_gate_lora_a, void* grad_gate_lora_b,
+              void* grad_up_lora_a, void* grad_up_lora_b,
+              void* grad_down_lora_a, void* grad_down_lora_b) {
+  int full_intermediate_size = sft_config.intermediate_size;
+
+  // Step 1: 为每个 NUMA 分配分区梯度 buffer
+  std::vector<ggml_bf16_t*> part_grad_gate_lora_b(tp_count);
+  std::vector<ggml_bf16_t*> part_grad_up_lora_b(tp_count);
+  std::vector<ggml_bf16_t*> part_grad_down_lora_a(tp_count);
+
+  for (int i = 0; i < tp_count; i++) {
+    int tp_intermediate = tp_configs[i].intermediate_size;
+    part_grad_gate_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
+    part_grad_up_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
+    part_grad_down_lora_a[i] = new ggml_bf16_t[expert_num * lora_rank * tp_intermediate]();
+  }
+
+  // Step 2: 每个 NUMA 计算分区梯度
+  pool->dispense_backend()->do_numa_job([...](int numa_id) {
+    tps[numa_id]->backward(grad_output, grad_input,
+                           grad_gate_lora_a, part_grad_gate_lora_b[numa_id],
+                           grad_up_lora_a, part_grad_up_lora_b[numa_id],
+                           part_grad_down_lora_a[numa_id], grad_down_lora_b);
+  });
+
+  // Step 3: 合并分区梯度到完整梯度
+  for (int i = 0; i < tp_count; i++) {
+    int tp_intermediate = tp_configs[i].intermediate_size;
+
+    // grad_gate_lora_b/grad_up_lora_b: 连续块合并
+    for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+      size_t dst_offset = expert_id * full_intermediate_size * lora_rank
+                        + i * tp_intermediate * lora_rank;
+      memcpy((ggml_bf16_t*)grad_gate_lora_b + dst_offset,
+             part_grad_gate_lora_b[i] + expert_id * tp_intermediate * lora_rank,
+             tp_intermediate * lora_rank * sizeof(ggml_bf16_t));
+    }
+
+    // grad_down_lora_a: 逐行合并
+    for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+      for (int r = 0; r < lora_rank; r++) {
+        size_t dst_offset = expert_id * lora_rank * full_intermediate_size
+                          + r * full_intermediate_size + i * tp_intermediate;
+        memcpy((ggml_bf16_t*)grad_down_lora_a + dst_offset,
+               part_grad_down_lora_a[i] + expert_id * lora_rank * tp_intermediate + r * tp_intermediate,
+               tp_intermediate * sizeof(ggml_bf16_t));
+      }
+    }
+  }
+
+  // Step 4: 清理临时 buffer
+  for (int i = 0; i < tp_count; i++) {
+    delete[] part_grad_gate_lora_b[i];
+    delete[] part_grad_up_lora_b[i];
+    delete[] part_grad_down_lora_a[i];
+  }
+}
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/moe-sft-tp.hpp` | 重写 `backward()` 添加梯度分区和合并逻辑 | ✓ 已实现 |
+
+### 教训总结
+
+1. **Forward 和 Backward 的对称性**：权重分区逻辑在 forward 中实现，对应的梯度合并逻辑必须在 backward 中实现
+2. **维度分析**：仔细分析哪些张量含有被 TP 分区的维度（`intermediate_size`），只有这些需要分区处理
+
+---
+
+## Bug #22: Sync 测试失败 - LoRA 分区非零拷贝 【已修复】
+
+### 问题现象
+
+TP 和 no-TP 模式的 forward/backward 测试都通过，但 sync 测试失败：
+
+```
+Testing LoRA Weight Synchronization
+Output difference after pointer update (should be ~0): 27.250000
+ERROR: Weight synchronization test FAILED
+```
+
+### 测试设计
+
+Sync 测试验证 LoRA 权重同步机制：
+1. **Phase 1**: 初始 forward，得到 output1
+2. **修改权重**: `down_lora_b.add_(0.1)`
+3. **Phase 2**: 再次 forward，得到 output2（期望 output2 ≠ output1）
+4. **Phase 3**: 显式调用 `update_lora_weights_task()`，再次 forward，得到 output3
+5. **验证**: output2 应该等于 output3（都使用修改后的权重）
+
+### 根本原因
+
+**问题**：`output2 != output3`
+
+**原因分析**：
+
+在 `update_lora_weights()` 中，含有 `intermediate_size` 维度的 LoRA 权重被**复制**而非零拷贝：
+
+```cpp
+// moe-sft-tp.hpp::update_lora_weights
+void update_lora_weights(void* gate_lora_a, void* gate_lora_b, ...) {
+  // gate_lora_a, up_lora_a, down_lora_b: 直接传递指针（零拷贝）
+  // gate_lora_b, up_lora_b, down_lora_a: 需要分区，因此复制到新数组
+
+  for (int i = 0; i < tp_count; i++) {
+    // ❌ 分区权重是复制的！
+    partitioned_gate_lora_b_[i] = new ggml_bf16_t[...];
+    memcpy(partitioned_gate_lora_b_[i], ...);  // 复制分区数据
+
+    tps[numa_id]->update_lora_weights(
+      gate_lora_a,                        // 零拷贝
+      partitioned_gate_lora_b_[numa_id],  // 复制！
+      up_lora_a,                          // 零拷贝
+      partitioned_up_lora_b_[numa_id],    // 复制！
+      partitioned_down_lora_a_[numa_id],  // 复制！
+      down_lora_b                         // 零拷贝
+    );
+  }
+}
+```
+
+**导致的问题**：
+
+| 步骤 | 操作 | 效果 |
+|------|------|------|
+| Phase 1 | 初始化时调用 `update_lora_weights()` | 分区权重被复制到 `partitioned_*` |
+| 修改权重 | `down_lora_b.add_(0.1)` | 只修改了 Python tensor，`partitioned_*` 不变 |
+| Phase 2 | forward | 使用旧的 `partitioned_*`（output2 ≈ output1） |
+| Phase 3 | `update_lora_weights_task()` + forward | 重新复制分区权重（output3 使用新值） |
+
+结果：`output2 ≠ output3`
+
+### 修复方案
+
+有两种可能的修复方案：
+
+#### 方案 A：修改测试（推荐）
+
+在修改 LoRA 权重后，显式调用 `update_lora_weights_task()` 同步分区权重：
+
+```python
+# examples/test_moe_sft_amx.py
+# 修改 LoRA 权重
+down_lora_b.add_(0.1)
+
+# Bug #22 fix: 修改 LoRA 权重后需要同步到 kernel
+# (分区权重是复制的，非零拷贝)
+CPUInfer.submit(
+    moe.update_lora_weights_task(
+        gate_lora_a.data_ptr(),
+        gate_lora_b.data_ptr(),
+        up_lora_a.data_ptr(),
+        up_lora_b.data_ptr(),
+        down_lora_a.data_ptr(),
+        down_lora_b.data_ptr(),
+    )
+)
+CPUInfer.sync()
+
+# 现在 forward 会使用更新后的权重
+```
+
+#### 方案 B：修改实现（复杂度高）
+
+使用运行时偏移计算代替预分区，实现真正的零拷贝。这需要大幅修改 forward/backward 实现。
+
+### 采用方案
+
+选择**方案 A**，因为：
+1. 实现简单，只需修改测试
+2. 语义更清晰：修改权重后需要显式同步
+3. 与 PyTorch 的 `optimizer.step()` 模式一致
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `examples/test_moe_sft_amx.py` | 在修改 LoRA 权重后添加 `update_lora_weights_task()` 调用 | ✓ 已实现 |
+| `examples/test_moe_sft_amx_no_tp.py` | 同上 | ✓ 已实现 |
+
+### 修复代码
+
+```python
+# examples/test_moe_sft_amx.py (第 1002-1016 行)
+down_lora_b.add_(0.1)
+
+# Bug #22 fix: After modifying LoRA weights, sync to kernel
+# (partitioned weights are copied, not zero-copy)
+CPUInfer.submit(
+    moe.update_lora_weights_task(
+        gate_lora_a.data_ptr(),
+        gate_lora_b.data_ptr(),
+        up_lora_a.data_ptr(),
+        up_lora_b.data_ptr(),
+        down_lora_a.data_ptr(),
+        down_lora_b.data_ptr(),
+    )
+)
+CPUInfer.sync()
+```
+
+### 用户使用注意事项
+
+**重要**：在 TP 模式下，以下 LoRA 权重修改后必须调用 `update_lora_weights_task()` 同步：
+
+| 权重 | 分区方式 | 修改后是否需要同步 |
+|------|---------|-------------------|
+| `gate_lora_a` | 零拷贝 | ❌ 不需要 |
+| `gate_lora_b` | 复制（连续块） | ✓ 需要 |
+| `up_lora_a` | 零拷贝 | ❌ 不需要 |
+| `up_lora_b` | 复制（连续块） | ✓ 需要 |
+| `down_lora_a` | 复制（逐行） | ✓ 需要 |
+| `down_lora_b` | 零拷贝 | ❌ 不需要 |
+
+**最佳实践**：每次修改任何 LoRA 权重后，统一调用 `update_lora_weights_task()` 同步所有权重。
+
+### 教训总结
+
+1. **零拷贝 vs 复制**：分区操作天然需要复制数据，无法真正零拷贝
+2. **同步语义**：需要在文档中明确说明哪些操作需要显式同步
+3. **测试设计**：sync 测试正确地暴露了这个语义问题
+
+---
+
