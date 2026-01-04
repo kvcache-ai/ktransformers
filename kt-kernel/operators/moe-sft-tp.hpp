@@ -189,11 +189,22 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
+    // Debug code for Bug #18 - commented out after fix verified
+    // printf("[DEBUG TP update_lora_weights] tp_count=%d, gate_lora_a=%p\n", tp_count, gate_lora_a);
     auto pool = config.pool;
+    // printf("[DEBUG TP update_lora_weights] before do_numa_job, pool=%p\n", (void*)pool);
     pool->dispense_backend()->do_numa_job(
         [this, gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b](int numa_id) {
+          // printf("[DEBUG TP do_numa_job] numa_id=%d, calling tps[%d]->update_lora_weights\n", numa_id, numa_id);
           tps[numa_id]->update_lora_weights(gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b);
+          // printf("[DEBUG TP do_numa_job] numa_id=%d done\n", numa_id);
         });
+    // printf("[DEBUG TP update_lora_weights] after do_numa_job\n");
+    // Verify pointers were updated
+    // for (size_t i = 0; i < tps.size(); i++) {
+    //   printf("[VERIFY] tps[%zu]->get_gate_lora_a() = %p (should equal %p)\n", i, tps[i]->get_gate_lora_a(),
+    //   gate_lora_a);
+    // }
   }
 
   void update_lora_weights_binding(intptr_t gate_lora_a, intptr_t gate_lora_b, intptr_t up_lora_a, intptr_t up_lora_b,

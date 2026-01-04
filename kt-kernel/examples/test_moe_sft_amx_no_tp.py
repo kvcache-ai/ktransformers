@@ -1021,6 +1021,12 @@ def test_moe_sft_lora_weight_sync_no_tp():
     print(f"Output difference after weight update: {diff:.6f}")
     assert diff > 1e-6, "Outputs should differ after LoRA weight update"
 
+    # Debug: Print current pointer and value before clone
+    print(f"\n[PYTHON DEBUG] Phase 2 - Original pointers:")
+    print(f"  gate_lora_a ptr: {hex(gate_lora_a.data_ptr())}")
+    print(f"  gate_lora_a[0,0,0]: {gate_lora_a[0,0,0].item():.6f}")
+    print(f"  gate_lora_b ptr: {hex(gate_lora_b.data_ptr())}")
+
     # Test explicit update_lora_weights_task (for when tensors are reallocated)
     new_gate_lora_a = gate_lora_a.clone()
     new_gate_lora_b = gate_lora_b.clone()
@@ -1029,7 +1035,17 @@ def test_moe_sft_lora_weight_sync_no_tp():
     new_down_lora_a = down_lora_a.clone()
     new_down_lora_b = down_lora_b.clone()
 
+    # Debug: Verify cloned values match and print new pointers
+    print(f"\n[PYTHON DEBUG] Phase 3 - Cloned pointers:")
+    print(f"  new_gate_lora_a ptr: {hex(new_gate_lora_a.data_ptr())}")
+    print(f"  new_gate_lora_a[0,0,0]: {new_gate_lora_a[0,0,0].item():.6f}")
+    print(f"  new_gate_lora_b ptr: {hex(new_gate_lora_b.data_ptr())}")
+    assert torch.allclose(gate_lora_a, new_gate_lora_a), "Clone failed for gate_lora_a!"
+    assert torch.allclose(gate_lora_b, new_gate_lora_b), "Clone failed for gate_lora_b!"
+    print(f"  Clone verification: PASSED")
+
     # Update pointers using update_lora_weights_task
+    print(f"\n[PYTHON DEBUG] Calling update_lora_weights_task...")
     CPUInfer.submit(
         moe.update_lora_weights_task(
             new_gate_lora_a.data_ptr(),
@@ -1041,8 +1057,10 @@ def test_moe_sft_lora_weight_sync_no_tp():
         )
     )
     CPUInfer.sync()
+    print(f"[PYTHON DEBUG] update_lora_weights_task completed")
 
     # Third forward with new tensor pointers
+    print(f"\n[PYTHON DEBUG] Phase 3 - Running forward with new pointers...")
     output3 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(

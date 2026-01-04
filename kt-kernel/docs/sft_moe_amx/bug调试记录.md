@@ -2031,3 +2031,162 @@ PASSED
 | Bug #17c | backward_down 使用激活前 cache | ✓ 已修复 |
 
 ---
+
+# LoRA 参数同步
+
+本板块记录 LoRA 权重指针同步相关的 bug 及调试过程。
+
+---
+
+## Bug #18: LoRA 权重同步测试失败 【已解决】
+
+### 问题现象
+
+- Forward 和 Backward 测试通过
+- `test_moe_sft_lora_weight_sync_no_tp` 测试失败
+- 初始 `diff = 3.515625`
+
+### 测试流程分析
+
+```
+Phase 1: forward(initial_weights) → output1
+Phase 2: weights += 0.1 (in-place), forward → output2
+         (output2 - output1 = 25.375 ✓ 正确，权重修改生效)
+Phase 3: clone weights, update_lora_weights_task(), forward → output3
+         (output3 - output2 = 3.515625 ✗ 应该是 ~0)
+```
+
+**关键问题**：Phase 3 期望 `output3 ≈ output2`，因为 clone 后的权重值与 Phase 2 修改后的值相同。
+
+### 根因
+
+**Race Condition in `lora_intermediate_` Buffer**
+
+`compute_lora_gate_up` 中 `activated_expert * 2` 个任务并行写入共享 `lora_intermediate_` buffer，导致数据竞争。
+
+#### Race Condition 分析
+
+```cpp
+pool->do_work_stealing_job(
+    activated_expert * 2, nullptr,  // 每个 expert 有 2 个任务 (gate 和 up)
+    [this](int task_id) {
+        bool do_up = task_id % 2;
+        int expert_idx = m_expert_id_map_[task_id / 2];
+        // task_id=0 和 task_id=1 有相同的 expert_idx！
+        // 它们同时写入 lora_intermediate_[t * lora_rank_ + r]
+    });
+```
+
+### 修复尝试历程
+
+| 尝试 | 方案 | 结果 | 问题 |
+|------|------|------|------|
+| 1 | `lora_intermediate_offset_` 为每个 expert 分配独立偏移 | diff: 3.625 → 55.75 | gate/up 共享同一 expert_idx，仍然冲突 |
+| 2 | 在方案1基础上添加 `half_buffer` 分离 gate/up | diff: 55.75 → 736.0 | **Buffer Overflow**: 偏移后访问超出 buffer 大小 |
+| 3 | **线程本地临时 buffer** | **diff ≈ 0** | **成功** |
+
+#### Buffer Overflow 分析 (第二次修复失败原因)
+
+```cpp
+// Buffer 分配: 512 元素
+lora_intermediate_ = alloc_aligned(
+    config_.max_len * config_.num_experts_per_tok * lora_rank_ * sizeof(ggml_bf16_t)
+);
+// 以 qlen=4, num_experts_per_tok=8, lora_rank=16 为例: 4 * 8 * 16 = 512
+
+// 错误的 half_buffer 计算
+half_buffer = config_.max_len * config_.num_experts_per_tok / 2;  // = 4 * 8 / 2 = 16
+
+// 最大偏移 (所有 expert tokens 累加) ≈ 32
+// 对于 up 任务: base_offset = 32 + 16 = 48
+// 访问索引: (48 + t) * 16 = 768 (当 t=0)
+// 但 buffer 只有 512 元素！  ← 内存越界！
+```
+
+### 最终解决方案
+
+使用**线程本地临时 buffer**，完全消除共享状态：
+
+```cpp
+void compute_lora_gate_up(int qlen, int activated_expert) {
+  auto pool = config_.pool->get_subpool(tp_part_idx);
+
+  pool->do_work_stealing_job(
+      activated_expert * 2, nullptr,
+      [this](int task_id) {
+        bool do_up = task_id % 2;
+        int expert_idx = m_expert_id_map_[task_id / 2];
+        int num_tokens = m_local_num_[expert_idx];
+
+        if (num_tokens == 0) return;
+
+        // 获取权重指针
+        ggml_bf16_t* lora_a = do_up ? up_lora_a_ : gate_lora_a_;
+        ggml_bf16_t* lora_b = do_up ? up_lora_b_ : gate_lora_b_;
+        ggml_bf16_t* input = m_local_input_ptr_[expert_idx];
+        ggml_bf16_t* output = do_up ? m_local_up_output_ptr_[expert_idx]
+                                    : m_local_gate_output_ptr_[expert_idx];
+
+        if (lora_a == nullptr || lora_b == nullptr) return;
+
+        // Expert 权重偏移
+        size_t lora_a_offset = expert_idx * lora_rank_ * config_.hidden_size;
+        size_t lora_b_offset = expert_idx * config_.intermediate_size * lora_rank_;
+        ggml_bf16_t* expert_lora_a = lora_a + lora_a_offset;
+        ggml_bf16_t* expert_lora_b = lora_b + lora_b_offset;
+
+        // 关键修复：使用线程本地 buffer，无 race condition
+        std::vector<float> local_intermediate(num_tokens * lora_rank_);
+
+        // Step 1: intermediate = input @ lora_A^T
+        for (int t = 0; t < num_tokens; t++) {
+          for (int r = 0; r < lora_rank_; r++) {
+            float sum = 0.0f;
+            for (int h = 0; h < config_.hidden_size; h++) {
+              float inp = GGML_BF16_TO_FP32(input[t * config_.hidden_size + h]);
+              float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.hidden_size + h]);
+              sum += inp * w;
+            }
+            local_intermediate[t * lora_rank_ + r] = sum;  // 本地存储，无竞争
+          }
+        }
+
+        // Step 2: output += intermediate @ lora_B^T * scaling
+        for (int t = 0; t < num_tokens; t++) {
+          for (int i = 0; i < config_.intermediate_size; i++) {
+            float sum = 0.0f;
+            for (int r = 0; r < lora_rank_; r++) {
+              float inter = local_intermediate[t * lora_rank_ + r];
+              float w = GGML_BF16_TO_FP32(expert_lora_b[i * lora_rank_ + r]);
+              sum += inter * w;
+            }
+            float out_val = GGML_BF16_TO_FP32(output[t * config_.intermediate_size + i]);
+            out_val += sum * lora_scaling_;
+            output[t * config_.intermediate_size + i] = GGML_FP32_TO_BF16(out_val);
+          }
+        }
+      }, nullptr);
+}
+```
+
+同样的修复也应用于 `compute_lora_down`。
+
+### 代码变更清单
+
+| 文件 | 变更 | 状态 |
+|------|------|------|
+| `operators/amx/sft_moe.hpp` | 移除 `lora_intermediate_offset_` 成员变量 | ✅ |
+| `operators/amx/sft_moe.hpp` | 移除 `forward_sft()` 中偏移预计算代码 | ✅ |
+| `operators/amx/sft_moe.hpp` | `compute_lora_gate_up` 改用 `local_intermediate` | ✅ |
+| `operators/amx/sft_moe.hpp` | `compute_lora_down` 改用 `local_intermediate` | ✅ |
+| `operators/amx/sft_moe.hpp` | 调试语句已注释 | ✅ |
+| `operators/moe-sft-tp.hpp` | 调试语句已注释 | ✅ |
+| `ext_bindings.cpp` | 调试语句已注释 | ✅ |
+
+### 关键教训
+
+1. **共享 buffer 的并行写入需要仔细分析**：即使每个 expert 有独立偏移，同一 expert 的多个任务 (gate/up) 仍可能冲突
+2. **修复方案要考虑 buffer 边界**：`half_buffer` 方案未考虑累加偏移已接近 buffer 末尾
+3. **线程本地存储是消除 race condition 的最安全方案**：牺牲少量栈空间换取零竞争风险
+
+---

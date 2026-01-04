@@ -334,10 +334,17 @@ class MOESFTBindings {
       intptr_t down_lora_b;
     };
     static void inner(void* args) {
+      // Debug code for Bug #18 - commented out after fix verified
+      // printf("[DEBUG UpdateLoRAWeightsBindings::inner] called\n");
       Args* args_ = (Args*)args;
+      // printf("  moe=%p, gate_lora_a=%p, gate_lora_b=%p\n", (void*)args_->moe, (void*)args_->gate_lora_a,
+      // (void*)args_->gate_lora_b); printf("  up_lora_a=%p, up_lora_b=%p\n", (void*)args_->up_lora_a,
+      // (void*)args_->up_lora_b); printf("  down_lora_a=%p, down_lora_b=%p\n", (void*)args_->down_lora_a,
+      // (void*)args_->down_lora_b);
       args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::update_lora_weights_binding, args_->moe, args_->gate_lora_a,
                                args_->gate_lora_b, args_->up_lora_a, args_->up_lora_b, args_->down_lora_a,
                                args_->down_lora_b);
+      // printf("[DEBUG UpdateLoRAWeightsBindings::inner] enqueue done\n");
     }
     static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t gate_lora_a,
                                                             intptr_t gate_lora_b, intptr_t up_lora_a,

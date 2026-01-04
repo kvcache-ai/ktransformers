@@ -94,7 +94,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
 
   // LoRA intermediate buffer (using shared_mem_buffer pool allocation)
   // For lora_A @ x results
-  ggml_bf16_t* lora_intermediate_;  // [max_len * k, lora_rank]
+  ggml_bf16_t* lora_intermediate_;  // [max_len * k, lora_rank] - kept for compatibility but not used
   void* lora_intermediate_pool_;
   size_t lora_intermediate_pool_bytes_;
 
@@ -163,6 +163,11 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
    */
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
+    // Debug code for Bug #18 - commented out after fix verified
+    // printf("[DEBUG AMX forward_sft] tp_part_idx=%d, gate_lora_a_=%p\n", tp_part_idx, (void*)gate_lora_a_);
+    // if (gate_lora_a_) {
+    //   printf("  gate_lora_a_[0] value = %f\n", GGML_BF16_TO_FP32(gate_lora_a_[0]));
+    // }
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
     // Step 1: Expert routing (reuse base class logic)
@@ -427,13 +432,26 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
+    // Debug code for Bug #18 - commented out after fix verified
+    // printf("[DEBUG AMX update_lora_weights] tp_part_idx=%d\n", tp_part_idx);
+    // printf("  OLD: gate_lora_a_=%p, gate_lora_b_=%p, up_lora_a_=%p\n", (void*)gate_lora_a_, (void*)gate_lora_b_,
+    // (void*)up_lora_a_); printf("       up_lora_b_=%p, down_lora_a_=%p, down_lora_b_=%p\n", (void*)up_lora_b_,
+    // (void*)down_lora_a_, (void*)down_lora_b_); printf("  NEW: gate_lora_a=%p, gate_lora_b=%p, up_lora_a=%p\n",
+    // gate_lora_a, gate_lora_b, up_lora_a); printf("       up_lora_b=%p, down_lora_a=%p, down_lora_b=%p\n", up_lora_b,
+    // down_lora_a, down_lora_b);
+
     gate_lora_a_ = (ggml_bf16_t*)gate_lora_a;
     gate_lora_b_ = (ggml_bf16_t*)gate_lora_b;
     up_lora_a_ = (ggml_bf16_t*)up_lora_a;
     up_lora_b_ = (ggml_bf16_t*)up_lora_b;
     down_lora_a_ = (ggml_bf16_t*)down_lora_a;
     down_lora_b_ = (ggml_bf16_t*)down_lora_b;
+
+    // printf("  AFTER: gate_lora_a_=%p (should equal NEW)\n", (void*)gate_lora_a_);
   }
+
+  // Debug getter for LoRA pointer verification
+  void* get_gate_lora_a() const { return (void*)gate_lora_a_; }
 
  private:
   /**
@@ -542,6 +560,10 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
           ggml_bf16_t* expert_lora_a = lora_a + lora_a_offset;
           ggml_bf16_t* expert_lora_b = lora_b + lora_b_offset;
 
+          // Use thread-local intermediate buffer to avoid race conditions
+          // This completely eliminates the shared buffer contention issue
+          std::vector<float> local_intermediate(num_tokens * lora_rank_);
+
           // Step 1: intermediate = input @ lora_A^T
           // [num_tokens, hidden_size] @ [lora_rank, hidden_size]^T → [num_tokens, lora_rank]
           for (int t = 0; t < num_tokens; t++) {
@@ -552,7 +574,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
                 float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.hidden_size + h]);
                 sum += inp * w;
               }
-              lora_intermediate_[t * lora_rank_ + r] = GGML_FP32_TO_BF16(sum);
+              local_intermediate[t * lora_rank_ + r] = sum;
             }
           }
 
@@ -562,7 +584,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
             for (int i = 0; i < config_.intermediate_size; i++) {
               float sum = 0.0f;
               for (int r = 0; r < lora_rank_; r++) {
-                float inter = GGML_BF16_TO_FP32(lora_intermediate_[t * lora_rank_ + r]);
+                float inter = local_intermediate[t * lora_rank_ + r];
                 float w = GGML_BF16_TO_FP32(expert_lora_b[i * lora_rank_ + r]);
                 sum += inter * w;
               }
@@ -601,6 +623,9 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
           ggml_bf16_t* expert_lora_a = down_lora_a_ + lora_a_offset;
           ggml_bf16_t* expert_lora_b = down_lora_b_ + lora_b_offset;
 
+          // Use thread-local intermediate buffer to avoid race conditions
+          std::vector<float> local_intermediate(num_tokens * lora_rank_);
+
           // Step 1: intermediate = input @ lora_A^T
           // [num_tokens, intermediate_size] @ [lora_rank, intermediate_size]^T → [num_tokens, lora_rank]
           for (int t = 0; t < num_tokens; t++) {
@@ -611,7 +636,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
                 float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.intermediate_size + i]);
                 sum += inp * w;
               }
-              lora_intermediate_[t * lora_rank_ + r] = GGML_FP32_TO_BF16(sum);
+              local_intermediate[t * lora_rank_ + r] = sum;
             }
           }
 
@@ -621,7 +646,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
             for (int h = 0; h < config_.hidden_size; h++) {
               float sum = 0.0f;
               for (int r = 0; r < lora_rank_; r++) {
-                float inter = GGML_BF16_TO_FP32(lora_intermediate_[t * lora_rank_ + r]);
+                float inter = local_intermediate[t * lora_rank_ + r];
                 float w = GGML_BF16_TO_FP32(expert_lora_b[h * lora_rank_ + r]);
                 sum += inter * w;
               }
