@@ -32,8 +32,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   using Base::down_bc_;
   using Base::m_local_num_;
 
-  std::filesystem::path prefix;
-
   void* gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if
                      // quantized)]
   void* up_proj_;    // [expert_num * intermediate_size * hidden_size ( /32 if
@@ -144,7 +142,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     auto& load = config_.load;
     auto& save = config_.save;
 
-    prefix = config_.path;
+    std::filesystem::path prefix = config_.path;
     prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
     if (save) {
       std::cout << "Creating " << prefix << std::endl;
@@ -260,6 +258,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     } else {
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
+      std::filesystem::path prefix = config_.path;
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+      
       if (config_.load) {
         std::cout << "Loading from " << prefix << std::endl;
         for (int task_id = 0; task_id < config_.expert_num * mat_type_all * mat_split; task_id++) {
@@ -335,7 +336,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (config_.save) {
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
-            [this, physical_to_logical_map](int task_id) {
+            [this, physical_to_logical_map, prefix](int task_id) {
               int64_t expert_idx = task_id / mat_type_all;
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
@@ -426,7 +427,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
 
       this->weights_loaded = true;
     } else if (config.path != "") {
-      printf("TP Load from file\n");
+      printf("TP Load from file %s\n",  config.path.c_str());
       DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {
