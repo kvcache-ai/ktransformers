@@ -1,6 +1,6 @@
-name: "\U0001F41B Bug / help"
+name: "\U0001F41B Bug / Help"
 description: Create a report to help us improve the ktransformers project
-labels: ["bug", "pending"]
+labels: ["pending"]
 body:
   - type: markdown
     attributes:
