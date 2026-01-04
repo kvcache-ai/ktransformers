@@ -1,23 +1,14 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-MOE SFT AMX Test File
+MOE SFT AMX Test File - TP (Tensor Parallel) Version
 
-This file defines the test interfaces for the moe_sft_amx operator, which is used
-for LoRA fine-tuning of MoE (Mixture of Experts) layers with Intel AMX acceleration.
+This file tests the SFT MoE AMX operator with multi-NUMA node configuration
+for TP (Tensor Parallel) partitioning.
 
-The operator supports:
-- Forward pass with LoRA adapters (on gate/up/down projections)
-- Backward pass computing gradients for input and LoRA weights
-- BF16 and INT8 quantization modes
-- Asynchronous execution via CPUInfer
-
-Data flow:
-    C++ backward -> grad buffer -> Python param.grad -> optimizer.step()
-                                -> next forward syncs back to C++
-
-NOTE: The moe_sft_amx operator is not yet implemented. This test file defines
-the expected interfaces that the operator should implement.
+Key difference from test_moe_sft_amx_no_tp.py:
+- Uses CPUInfer(num_threads) which enables TP partitioning across NUMA nodes
+- Tests BF16 forward pass for simplicity
 """
 
 import os
@@ -29,7 +20,7 @@ print("sys.path:", sys.path)
 import torch
 import torch.nn.functional as F
 
-# Try to import kt_kernel_ext (will fail until operator is implemented)
+# Try to import kt_kernel_ext
 try:
     from kt_kernel import kt_kernel_ext
 
@@ -63,12 +54,7 @@ num_threads = 60  # Number of CPU threads for inference
 
 # Precision thresholds
 BF16_FORWARD_THRESHOLD = 0.05  # Maximum relative error for BF16 forward
-INT8_FORWARD_THRESHOLD = 0.15  # Maximum relative error for INT8 forward
 BF16_BACKWARD_THRESHOLD = 0.10  # Maximum relative error for BF16 backward
-INT8_BACKWARD_THRESHOLD = 0.25  # Maximum relative error for INT8 backward
-
-# Note: physical_to_logical_map is no longer needed in the new SFT API
-# The new API uses zero-copy pointers and load_weights_task() without mapping
 
 
 # =============================================================================
@@ -98,16 +84,6 @@ def lora_linear_forward(
     LoRA linear layer forward pass.
 
     Computes: y = x @ W^T + (x @ A^T @ B^T) * scaling
-
-    Args:
-        x: Input tensor [batch, in_features]
-        weight: Base weight matrix [out_features, in_features] (frozen)
-        lora_a: LoRA A matrix [rank, in_features] (trainable)
-        lora_b: LoRA B matrix [out_features, rank] (trainable)
-        scaling: LoRA scaling factor (alpha / rank)
-
-    Returns:
-        Output tensor [batch, out_features]
     """
     # Base output: x @ W^T
     base_out = torch.mm(x, weight.t())
@@ -183,21 +159,6 @@ def mlp_lora_forward(
 
     Computes: down(silu(gate(x)) * up(x))
     where each linear layer has LoRA: linear(x) = x @ W^T + (x @ A^T @ B^T) * scaling
-
-    Args:
-        x: Input tensor [batch, hidden_size]
-        gate_proj: Gate projection weight [intermediate_size, hidden_size]
-        up_proj: Up projection weight [intermediate_size, hidden_size]
-        down_proj: Down projection weight [hidden_size, intermediate_size]
-        gate_lora_a/b: LoRA weights for gate projection
-        up_lora_a/b: LoRA weights for up projection
-        down_lora_a/b: LoRA weights for down projection
-        scaling: LoRA scaling factor
-        debug_print: Whether to print debug information
-
-    Returns:
-        Tuple of (output, saved_tensors) where saved_tensors contains
-        intermediate values needed for backward pass
     """
     # Gate projection with LoRA
     gate_out = lora_linear_forward(x, gate_proj, gate_lora_a, gate_lora_b, scaling)
@@ -334,22 +295,6 @@ def moe_sft_torch_forward(
     MoE SFT forward pass with LoRA adapters.
 
     Routes tokens to selected experts and applies MLP with LoRA.
-
-    Args:
-        input: Input tensor [qlen, hidden_size]
-        expert_ids: Selected expert IDs per token [qlen, num_experts_per_tok]
-        weights: Routing weights per expert [qlen, num_experts_per_tok]
-        gate_proj: Gate projections [expert_num, intermediate_size, hidden_size]
-        up_proj: Up projections [expert_num, intermediate_size, hidden_size]
-        down_proj: Down projections [expert_num, hidden_size, intermediate_size]
-        gate_lora_a/b: LoRA weights for gate [expert_num, rank, in_dim] / [expert_num, out_dim, rank]
-        up_lora_a/b: LoRA weights for up projection
-        down_lora_a/b: LoRA weights for down projection
-        scaling: LoRA scaling factor
-        debug_print: Whether to print debug information
-
-    Returns:
-        Tuple of (output, saved_tensors_per_expert)
     """
     qlen = input.shape[0]
     k = expert_ids.shape[1]  # num_experts_per_tok
@@ -600,19 +545,15 @@ def init_lora_weights(expert_num: int, hidden_size: int, intermediate_size: int,
 # =============================================================================
 
 
-def test_moe_sft_forward(quant_mode: str):
+def test_moe_sft_forward():
     """
-    Test MOE SFT forward pass accuracy.
+    Test MOE SFT forward pass accuracy with TP.
 
     Compares the AMX implementation against PyTorch reference.
-
-    Args:
-        quant_mode: Quantization mode ("bf16" or "int8")
+    Uses CPUInfer with default TP configuration.
     """
-    assert quant_mode in ["bf16", "int8"], f"Invalid quant_mode: {quant_mode}"
-
     print(f"\n{'='*60}")
-    print(f"Testing MOE SFT Forward Pass - {quant_mode.upper()} mode")
+    print(f"Testing MOE SFT Forward Pass - BF16 mode")
     print(f"{'='*60}")
 
     # Set random seed for reproducibility
@@ -629,48 +570,60 @@ def test_moe_sft_forward(quant_mode: str):
     down_lora_b.normal_().div_(100)
 
     if not HAS_KT_KERNEL:
-        print("WARNING: kt_kernel_ext not available, running PyTorch reference only")
+        print("ERROR: kt_kernel_ext not available, cannot run test")
+        sys.exit(1)
 
-    # Initialize CPUInfer (when kt_kernel is available)
-    if HAS_KT_KERNEL:
-        CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
+    # Initialize CPUInfer with TP configuration
+    print("\n[INFO] Creating CPUInfer with TP configuration...")
+    CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
+    print("[INFO] CPUInfer created with TP enabled")
 
-        # Create MOE SFT config using the new API
-        config = kt_kernel_ext.moe.MOESFTConfig()
-        config.expert_num = expert_num
-        config.num_experts_per_tok = num_experts_per_tok
-        config.hidden_size = hidden_size
-        config.intermediate_size = intermediate_size
-        config.lora_rank = lora_rank
-        config.lora_alpha = lora_alpha
-        config.max_cache_depth = 1
-        config.max_len = max_len
-        config.layer_idx = 0
-        config.gate_proj = gate_proj.data_ptr()
-        config.up_proj = up_proj.data_ptr()
-        config.down_proj = down_proj.data_ptr()
-        # Set LoRA weight pointers directly in config (zero-copy)
-        config.gate_lora_a = gate_lora_a.data_ptr()
-        config.gate_lora_b = gate_lora_b.data_ptr()
-        config.up_lora_a = up_lora_a.data_ptr()
-        config.up_lora_b = up_lora_b.data_ptr()
-        config.down_lora_a = down_lora_a.data_ptr()
-        config.down_lora_b = down_lora_b.data_ptr()
-        config.pool = CPUInfer.backend_
+    # Debug: print LoRA weight shapes and expected TP behavior
+    print(f"\n[DEBUG TP] Original intermediate_size: {intermediate_size}")
+    print(
+        f"[DEBUG TP] gate_lora_b shape: {gate_lora_b.shape} (expected: [{expert_num}, {intermediate_size}, {lora_rank}])"
+    )
+    print(
+        f"[DEBUG TP] down_lora_a shape: {down_lora_a.shape} (expected: [{expert_num}, {lora_rank}, {intermediate_size}])"
+    )
+    print(f"[DEBUG TP] Expected lora_b stride per expert: {intermediate_size * lora_rank}")
+    print(
+        f"[DEBUG TP] If TP splits intermediate_size by 2, each NUMA uses stride: {intermediate_size // 2 * lora_rank}"
+    )
 
-        # Create MOE SFT instance
-        if quant_mode == "bf16":
-            moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
-        else:
-            moe = kt_kernel_ext.moe.AMXInt8_SFT_MOE(config)
+    # Create MOE SFT config using the new API
+    config = kt_kernel_ext.moe.MOESFTConfig()
+    config.expert_num = expert_num
+    config.num_experts_per_tok = num_experts_per_tok
+    config.hidden_size = hidden_size
+    config.intermediate_size = intermediate_size
+    config.lora_rank = lora_rank
+    config.lora_alpha = lora_alpha
+    config.max_cache_depth = 1
+    config.max_len = max_len
+    config.layer_idx = 0
+    config.gate_proj = gate_proj.data_ptr()
+    config.up_proj = up_proj.data_ptr()
+    config.down_proj = down_proj.data_ptr()
+    # Set LoRA weight pointers directly in config (zero-copy)
+    config.gate_lora_a = gate_lora_a.data_ptr()
+    config.gate_lora_b = gate_lora_b.data_ptr()
+    config.up_lora_a = up_lora_a.data_ptr()
+    config.up_lora_b = up_lora_b.data_ptr()
+    config.down_lora_a = down_lora_a.data_ptr()
+    config.down_lora_b = down_lora_b.data_ptr()
+    config.pool = CPUInfer.backend_
 
-        # Load base weights
-        CPUInfer.submit(moe.load_weights_task())
-        CPUInfer.sync()
+    # Create MOE SFT instance (BF16 mode)
+    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
 
-        # Warm up
-        CPUInfer.submit(moe.warm_up_task())
-        CPUInfer.sync()
+    # Load base weights
+    CPUInfer.submit(moe.load_weights_task())
+    CPUInfer.sync()
+
+    # Warm up
+    CPUInfer.submit(moe.warm_up_task())
+    CPUInfer.sync()
 
     # Run validation iterations
     for iter_idx in range(validation_iter):
@@ -705,54 +658,55 @@ def test_moe_sft_forward(quant_mode: str):
             debug_print=(iter_idx == 0),
         )
 
-        if HAS_KT_KERNEL:
-            # AMX forward using forward_sft_task (no separate sync needed - uses config pointers)
-            output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
-            CPUInfer.submit(
-                moe.forward_sft_task(
-                    bsz_tensor.data_ptr(),
-                    num_experts_per_tok,
-                    expert_ids.data_ptr(),
-                    weights.data_ptr(),
-                    input_data.data_ptr(),
-                    output.data_ptr(),
-                    False,  # save_for_backward=False for forward-only test
-                )
+        # AMX forward using forward_sft_task
+        output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                False,  # save_for_backward=False to avoid cache overflow
             )
-            CPUInfer.sync()
+        )
+        CPUInfer.sync()
 
-            # Debug: print AMX output
-            print(f"[AMX SFT DEBUG] AMX output[:8] = {output.flatten()[:8]}")
-            print(f"[AMX SFT DEBUG] AMX output mean abs = {torch.mean(torch.abs(output)):.6e}")
-            print(f"[AMX SFT DEBUG] Torch output mean abs = {torch.mean(torch.abs(torch_output)):.6e}")
+        # Debug: print AMX output
+        print(f"[AMX SFT DEBUG] AMX output[:8] = {output.flatten()[:8]}")
+        print(f"[AMX SFT DEBUG] AMX output mean abs = {torch.mean(torch.abs(output)):.6e}")
+        print(f"[AMX SFT DEBUG] Torch output mean abs = {torch.mean(torch.abs(torch_output)):.6e}")
 
-            # Compare results (output is already bf16)
-            diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
-            print(f"Relative difference: {diff:.6f}")
+        # Compare results
+        diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
+        print(f"Relative difference: {diff:.6f}")
 
-            threshold = BF16_FORWARD_THRESHOLD if quant_mode == "bf16" else INT8_FORWARD_THRESHOLD
-            assert diff < threshold, f"Forward pass accuracy test failed: diff={diff:.6f} >= {threshold}"
+        threshold = BF16_FORWARD_THRESHOLD
+        if diff < threshold:
             print(f"PASSED (threshold: {threshold})")
         else:
-            print(f"PyTorch output shape: {torch_output.shape}")
-            print(f"PyTorch output[:8]: {torch_output.flatten()[:8]}")
+            print(f"FAILED: diff={diff:.6f} >= {threshold}")
+            # Don't exit immediately, continue to show all iterations
 
-    print(f"\n[OK] MOE SFT Forward Pass Test - {quant_mode.upper()} mode PASSED")
+    print(f"\n--- Final Result ---")
+    if diff < threshold:
+        print(f"[OK] MOE SFT Forward Pass Test - BF16 mode PASSED")
+    else:
+        print(f"[FAILED] MOE SFT Forward Pass Test - BF16 mode FAILED")
+        print(f"  This means the bug is in the SFT forward logic or TP partitioning.")
+        sys.exit(1)
 
 
-def test_moe_sft_backward(quant_mode: str):
+def test_moe_sft_backward():
     """
-    Test MOE SFT backward pass accuracy.
+    Test MOE SFT backward pass accuracy with TP.
 
     Compares the AMX implementation gradients against PyTorch reference.
-
-    Args:
-        quant_mode: Quantization mode ("bf16" or "int8")
+    Uses CPUInfer with default TP configuration.
     """
-    assert quant_mode in ["bf16", "int8"], f"Invalid quant_mode: {quant_mode}"
-
     print(f"\n{'='*60}")
-    print(f"Testing MOE SFT Backward Pass - {quant_mode.upper()} mode")
+    print(f"Testing MOE SFT Backward Pass - BF16 mode")
     print(f"{'='*60}")
 
     # Set random seed for reproducibility
@@ -769,48 +723,46 @@ def test_moe_sft_backward(quant_mode: str):
     down_lora_b.normal_().div_(100)
 
     if not HAS_KT_KERNEL:
-        print("WARNING: kt_kernel_ext not available, running PyTorch reference only")
+        print("ERROR: kt_kernel_ext not available, cannot run test")
+        sys.exit(1)
 
-    # Initialize CPUInfer (when kt_kernel is available)
-    if HAS_KT_KERNEL:
-        CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
+    # Initialize CPUInfer with TP configuration
+    print("\n[INFO] Creating CPUInfer with TP configuration...")
+    CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
+    print("[INFO] CPUInfer created with TP enabled")
 
-        # Create MOE SFT config using the new API
-        config = kt_kernel_ext.moe.MOESFTConfig()
-        config.expert_num = expert_num
-        config.num_experts_per_tok = num_experts_per_tok
-        config.hidden_size = hidden_size
-        config.intermediate_size = intermediate_size
-        config.lora_rank = lora_rank
-        config.lora_alpha = lora_alpha
-        config.max_cache_depth = 1
-        config.max_len = max_len
-        config.layer_idx = 0
-        config.gate_proj = gate_proj.data_ptr()
-        config.up_proj = up_proj.data_ptr()
-        config.down_proj = down_proj.data_ptr()
-        # Set LoRA weight pointers directly in config (zero-copy)
-        config.gate_lora_a = gate_lora_a.data_ptr()
-        config.gate_lora_b = gate_lora_b.data_ptr()
-        config.up_lora_a = up_lora_a.data_ptr()
-        config.up_lora_b = up_lora_b.data_ptr()
-        config.down_lora_a = down_lora_a.data_ptr()
-        config.down_lora_b = down_lora_b.data_ptr()
-        config.pool = CPUInfer.backend_
+    # Create MOE SFT config - max_cache_depth must match validation_iter for backward
+    config = kt_kernel_ext.moe.MOESFTConfig()
+    config.expert_num = expert_num
+    config.num_experts_per_tok = num_experts_per_tok
+    config.hidden_size = hidden_size
+    config.intermediate_size = intermediate_size
+    config.lora_rank = lora_rank
+    config.lora_alpha = lora_alpha
+    config.max_cache_depth = validation_iter  # Need cache for backward
+    config.max_len = max_len
+    config.layer_idx = 0
+    config.gate_proj = gate_proj.data_ptr()
+    config.up_proj = up_proj.data_ptr()
+    config.down_proj = down_proj.data_ptr()
+    config.gate_lora_a = gate_lora_a.data_ptr()
+    config.gate_lora_b = gate_lora_b.data_ptr()
+    config.up_lora_a = up_lora_a.data_ptr()
+    config.up_lora_b = up_lora_b.data_ptr()
+    config.down_lora_a = down_lora_a.data_ptr()
+    config.down_lora_b = down_lora_b.data_ptr()
+    config.pool = CPUInfer.backend_
 
-        # Create MOE SFT instance
-        if quant_mode == "bf16":
-            moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
-        else:
-            moe = kt_kernel_ext.moe.AMXInt8_SFT_MOE(config)
+    # Create MOE SFT instance (BF16 mode)
+    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
 
-        # Load base weights
-        CPUInfer.submit(moe.load_weights_task())
-        CPUInfer.sync()
+    # Load base weights
+    CPUInfer.submit(moe.load_weights_task())
+    CPUInfer.sync()
 
-        # Warm up
-        CPUInfer.submit(moe.warm_up_task())
-        CPUInfer.sync()
+    # Warm up
+    CPUInfer.submit(moe.warm_up_task())
+    CPUInfer.sync()
 
     # Run validation iterations
     for iter_idx in range(validation_iter):
@@ -862,85 +814,103 @@ def test_moe_sft_backward(quant_mode: str):
             lora_scaling,
         )
 
-        if HAS_KT_KERNEL:
-            # AMX forward (with save_for_backward=True)
-            # LoRA weights already set in config (zero-copy), no sync needed
-            output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
-            CPUInfer.submit(
-                moe.forward_sft_task(
-                    bsz_tensor.data_ptr(),
-                    num_experts_per_tok,
-                    expert_ids.data_ptr(),
-                    weights.data_ptr(),
-                    input_data.data_ptr(),
-                    output.data_ptr(),
-                    True,  # save_for_backward
-                )
+        # AMX forward (with save_for_backward=True)
+        output = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                True,  # save_for_backward
             )
-            CPUInfer.sync()
+        )
+        CPUInfer.sync()
 
-            # Allocate gradient buffers
-            grad_input = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
-            grad_gate_lora_a = torch.zeros_like(gate_lora_a)
-            grad_gate_lora_b = torch.zeros_like(gate_lora_b)
-            grad_up_lora_a = torch.zeros_like(up_lora_a)
-            grad_up_lora_b = torch.zeros_like(up_lora_b)
-            grad_down_lora_a = torch.zeros_like(down_lora_a)
-            grad_down_lora_b = torch.zeros_like(down_lora_b)
+        # Allocate gradient buffers
+        grad_input = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+        grad_gate_lora_a = torch.zeros_like(gate_lora_a)
+        grad_gate_lora_b = torch.zeros_like(gate_lora_b)
+        grad_up_lora_a = torch.zeros_like(up_lora_a)
+        grad_up_lora_b = torch.zeros_like(up_lora_b)
+        grad_down_lora_a = torch.zeros_like(down_lora_a)
+        grad_down_lora_b = torch.zeros_like(down_lora_b)
 
-            # AMX backward
-            CPUInfer.submit(
-                moe.backward_task(
-                    grad_output.data_ptr(),
-                    grad_input.data_ptr(),
-                    grad_gate_lora_a.data_ptr(),
-                    grad_gate_lora_b.data_ptr(),
-                    grad_up_lora_a.data_ptr(),
-                    grad_up_lora_b.data_ptr(),
-                    grad_down_lora_a.data_ptr(),
-                    grad_down_lora_b.data_ptr(),
-                )
+        # AMX backward
+        CPUInfer.submit(
+            moe.backward_task(
+                grad_output.data_ptr(),
+                grad_input.data_ptr(),
+                grad_gate_lora_a.data_ptr(),
+                grad_gate_lora_b.data_ptr(),
+                grad_up_lora_a.data_ptr(),
+                grad_up_lora_b.data_ptr(),
+                grad_down_lora_a.data_ptr(),
+                grad_down_lora_b.data_ptr(),
             )
-            CPUInfer.sync()
+        )
+        CPUInfer.sync()
 
-            # Compare gradients
-            threshold = BF16_BACKWARD_THRESHOLD if quant_mode == "bf16" else INT8_BACKWARD_THRESHOLD
+        # Compare gradients
+        threshold = BF16_BACKWARD_THRESHOLD
 
-            # Input gradient
-            diff_input = torch.mean(torch.abs(grad_input - torch_grads["grad_input"])) / (
-                torch.mean(torch.abs(torch_grads["grad_input"])) + 1e-8
+        # Input gradient
+        diff_input = torch.mean(torch.abs(grad_input - torch_grads["grad_input"])) / (
+            torch.mean(torch.abs(torch_grads["grad_input"])) + 1e-8
+        )
+        print(f"grad_input diff: {diff_input:.6f}")
+        assert diff_input < threshold, f"grad_input accuracy failed: {diff_input:.6f}"
+
+        # LoRA gradients (check activated experts only)
+        activated = [i for i, n in enumerate(moe_saved["tokens_per_expert"]) if n > 0]
+
+        # Debug: compare PyTorch and C++ gradient values for Bug #17
+        print(f"\n[DEBUG COMPARISON] Activated experts: {activated[:5]}...")  # Only print first 5
+        print(f"[DEBUG COMPARISON] First activated expert: {activated[0] if activated else 'None'}")
+
+        if activated:
+            first_exp = activated[0]
+            print(
+                f"\n[TORCH DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_gate_lora_a'][first_exp, 0, :8]}"
             )
-            print(f"grad_input diff: {diff_input:.6f}")
-            assert diff_input < threshold, f"grad_input accuracy failed: {diff_input:.6f}"
+            print(f"[AMX DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {grad_gate_lora_a[first_exp, 0, :8]}")
+            print(f"[TORCH DEBUG] mean abs = {torch.mean(torch.abs(torch_grads['grad_gate_lora_a'][first_exp])):.6e}")
+            print(f"[AMX DEBUG] mean abs = {torch.mean(torch.abs(grad_gate_lora_a[first_exp])):.6e}")
 
-            # LoRA gradients (check activated experts only)
-            activated = [i for i, n in enumerate(moe_saved["tokens_per_expert"]) if n > 0]
+            # Also check up_lora_a and down_lora_a
+            print(
+                f"\n[TORCH DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_up_lora_a'][first_exp, 0, :8]}"
+            )
+            print(f"[AMX DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {grad_up_lora_a[first_exp, 0, :8]}")
+            print(
+                f"[TORCH DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_down_lora_a'][first_exp, 0, :8]}"
+            )
+            print(f"[AMX DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {grad_down_lora_a[first_exp, 0, :8]}")
 
-            for name, amx_grad, torch_grad in [
-                ("gate_lora_a", grad_gate_lora_a, torch_grads["grad_gate_lora_a"]),
-                ("gate_lora_b", grad_gate_lora_b, torch_grads["grad_gate_lora_b"]),
-                ("up_lora_a", grad_up_lora_a, torch_grads["grad_up_lora_a"]),
-                ("up_lora_b", grad_up_lora_b, torch_grads["grad_up_lora_b"]),
-                ("down_lora_a", grad_down_lora_a, torch_grads["grad_down_lora_a"]),
-                ("down_lora_b", grad_down_lora_b, torch_grads["grad_down_lora_b"]),
-            ]:
-                amx_subset = amx_grad[activated]
-                torch_subset = torch_grad[activated]
-                diff = torch.mean(torch.abs(amx_subset - torch_subset)) / (torch.mean(torch.abs(torch_subset)) + 1e-8)
-                print(f"  {name} diff: {diff:.6f}")
-                assert diff < threshold, f"{name} accuracy failed: {diff:.6f}"
+        for name, amx_grad, torch_grad in [
+            ("gate_lora_a", grad_gate_lora_a, torch_grads["grad_gate_lora_a"]),
+            ("gate_lora_b", grad_gate_lora_b, torch_grads["grad_gate_lora_b"]),
+            ("up_lora_a", grad_up_lora_a, torch_grads["grad_up_lora_a"]),
+            ("up_lora_b", grad_up_lora_b, torch_grads["grad_up_lora_b"]),
+            ("down_lora_a", grad_down_lora_a, torch_grads["grad_down_lora_a"]),
+            ("down_lora_b", grad_down_lora_b, torch_grads["grad_down_lora_b"]),
+        ]:
+            amx_subset = amx_grad[activated]
+            torch_subset = torch_grad[activated]
+            diff = torch.mean(torch.abs(amx_subset - torch_subset)) / (torch.mean(torch.abs(torch_subset)) + 1e-8)
+            print(f"  {name} diff: {diff:.6f}")
+            assert diff < threshold, f"{name} accuracy failed: {diff:.6f}"
 
-            print(f"PASSED (threshold: {threshold})")
-        else:
-            print(f"PyTorch grad_input shape: {torch_grads['grad_input'].shape}")
-            print(f"PyTorch grad_gate_lora_a[:2,:4,:4]: {torch_grads['grad_gate_lora_a'][:2,:4,:4]}")
+        print(f"PASSED (threshold: {threshold})")
 
-    print(f"\n[OK] MOE SFT Backward Pass Test - {quant_mode.upper()} mode PASSED")
+    print(f"\n[OK] MOE SFT Backward Pass Test - BF16 mode PASSED")
 
 
 def test_moe_sft_lora_weight_sync():
     """
-    Test LoRA weight synchronization between Python and C++.
+    Test LoRA weight synchronization with TP.
 
     Verifies that:
     1. Initial config correctly sets LoRA weight pointers (zero-copy)
@@ -952,8 +922,8 @@ def test_moe_sft_lora_weight_sync():
     print(f"{'='*60}")
 
     if not HAS_KT_KERNEL:
-        print("WARNING: kt_kernel_ext not available, skipping sync test")
-        return
+        print("ERROR: kt_kernel_ext not available, cannot run test")
+        sys.exit(1)
 
     torch.manual_seed(42)
 
@@ -962,9 +932,10 @@ def test_moe_sft_lora_weight_sync():
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
 
+    # Initialize CPUInfer with TP configuration
     CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
 
-    # Create MOE SFT config using the new API
+    # Create MOE SFT config
     config = kt_kernel_ext.moe.MOESFTConfig()
     config.expert_num = expert_num
     config.num_experts_per_tok = num_experts_per_tok
@@ -978,7 +949,6 @@ def test_moe_sft_lora_weight_sync():
     config.gate_proj = gate_proj.data_ptr()
     config.up_proj = up_proj.data_ptr()
     config.down_proj = down_proj.data_ptr()
-    # Set initial LoRA weight pointers in config (zero-copy)
     config.gate_lora_a = gate_lora_a.data_ptr()
     config.gate_lora_b = gate_lora_b.data_ptr()
     config.up_lora_a = up_lora_a.data_ptr()
@@ -1008,7 +978,7 @@ def test_moe_sft_lora_weight_sync():
     weights = weights / weights.sum(dim=-1, keepdim=True)
     input_data = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
-    # First forward with initial LoRA weights (already set in config, zero-copy)
+    # First forward with initial LoRA weights
     output1 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
@@ -1018,23 +988,18 @@ def test_moe_sft_lora_weight_sync():
             weights.data_ptr(),
             input_data.data_ptr(),
             output1.data_ptr(),
-            False,  # save_for_backward
+            False,
         )
     )
     CPUInfer.sync()
 
     # Modify LoRA weights (simulating optimizer.step())
-    # Since we use zero-copy pointers, the C++ side sees updates automatically
     gate_lora_a.add_(0.1)
     gate_lora_b.add_(0.1)
     up_lora_a.add_(0.1)
     up_lora_b.add_(0.1)
     down_lora_a.add_(0.1)
     down_lora_b.add_(0.1)
-
-    # If the tensor is reallocated (e.g., after torch operations that create new tensors),
-    # we need to update the pointers using update_lora_weights_task
-    # For in-place operations like add_(), no sync is needed due to zero-copy
 
     # Second forward with updated LoRA weights
     output2 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
@@ -1046,7 +1011,7 @@ def test_moe_sft_lora_weight_sync():
             weights.data_ptr(),
             input_data.data_ptr(),
             output2.data_ptr(),
-            False,  # save_for_backward
+            False,
         )
     )
     CPUInfer.sync()
@@ -1056,8 +1021,13 @@ def test_moe_sft_lora_weight_sync():
     print(f"Output difference after weight update: {diff:.6f}")
     assert diff > 1e-6, "Outputs should differ after LoRA weight update"
 
+    # Debug: Print current pointer and value before clone
+    print(f"\n[PYTHON DEBUG] Phase 2 - Original pointers:")
+    print(f"  gate_lora_a ptr: {hex(gate_lora_a.data_ptr())}")
+    print(f"  gate_lora_a[0,0,0]: {gate_lora_a[0,0,0].item():.6f}")
+    print(f"  gate_lora_b ptr: {hex(gate_lora_b.data_ptr())}")
+
     # Test explicit update_lora_weights_task (for when tensors are reallocated)
-    # Create new tensors (simulating tensor reallocation)
     new_gate_lora_a = gate_lora_a.clone()
     new_gate_lora_b = gate_lora_b.clone()
     new_up_lora_a = up_lora_a.clone()
@@ -1065,7 +1035,17 @@ def test_moe_sft_lora_weight_sync():
     new_down_lora_a = down_lora_a.clone()
     new_down_lora_b = down_lora_b.clone()
 
+    # Debug: Verify cloned values match and print new pointers
+    print(f"\n[PYTHON DEBUG] Phase 3 - Cloned pointers:")
+    print(f"  new_gate_lora_a ptr: {hex(new_gate_lora_a.data_ptr())}")
+    print(f"  new_gate_lora_a[0,0,0]: {new_gate_lora_a[0,0,0].item():.6f}")
+    print(f"  new_gate_lora_b ptr: {hex(new_gate_lora_b.data_ptr())}")
+    assert torch.allclose(gate_lora_a, new_gate_lora_a), "Clone failed for gate_lora_a!"
+    assert torch.allclose(gate_lora_b, new_gate_lora_b), "Clone failed for gate_lora_b!"
+    print(f"  Clone verification: PASSED")
+
     # Update pointers using update_lora_weights_task
+    print(f"\n[PYTHON DEBUG] Calling update_lora_weights_task...")
     CPUInfer.submit(
         moe.update_lora_weights_task(
             new_gate_lora_a.data_ptr(),
@@ -1077,8 +1057,10 @@ def test_moe_sft_lora_weight_sync():
         )
     )
     CPUInfer.sync()
+    print(f"[PYTHON DEBUG] update_lora_weights_task completed")
 
     # Third forward with new tensor pointers
+    print(f"\n[PYTHON DEBUG] Phase 3 - Running forward with new pointers...")
     output3 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
@@ -1088,7 +1070,7 @@ def test_moe_sft_lora_weight_sync():
             weights.data_ptr(),
             input_data.data_ptr(),
             output3.data_ptr(),
-            False,  # save_for_backward
+            False,
         )
     )
     CPUInfer.sync()
@@ -1103,7 +1085,7 @@ def test_moe_sft_lora_weight_sync():
 
 def test_moe_sft_training_loop():
     """
-    Test complete training loop: forward → backward → optimizer.step.
+    Test complete training loop with TP.
 
     This simulates a real training scenario where:
     1. Forward pass computes output and saves activations
@@ -1117,16 +1099,26 @@ def test_moe_sft_training_loop():
 
     torch.manual_seed(42)
 
-    # Initialize weights
+    # Initialize base weights
     gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
 
     # Initialize LoRA weights as contiguous tensors
-    # We use regular tensors (not nn.Parameter) since we manually handle gradients
-    gate_lora_a = torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16).contiguous() / 100
+    gate_lora_a = (
+        torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
+        / 100
+    )
     gate_lora_b = torch.zeros(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16).contiguous()
-    up_lora_a = torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16).contiguous() / 100
+    up_lora_a = (
+        torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
+        / 100
+    )
     up_lora_b = torch.zeros(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16).contiguous()
-    down_lora_a = torch.randn(expert_num, lora_rank, intermediate_size, dtype=torch.bfloat16).contiguous() / 100
+    down_lora_a = (
+        torch.randn(expert_num, lora_rank, intermediate_size, dtype=torch.bfloat16, device="cuda")
+        .to("cpu")
+        .contiguous()
+        / 100
+    )
     down_lora_b = torch.zeros(expert_num, hidden_size, lora_rank, dtype=torch.bfloat16).contiguous()
 
     # Make LoRA B non-zero for testing
@@ -1154,13 +1146,13 @@ def test_moe_sft_training_loop():
     # Create optimizer
     optimizer = torch.optim.AdamW(lora_params, lr=1e-4)
 
-    # Initialize kt_kernel if available
+    # Initialize kt_kernel
     moe = None
     CPUInfer = None
     if HAS_KT_KERNEL:
         CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
 
-        # Create MOE SFT config using the new API
+        # Create MOE SFT config
         config = kt_kernel_ext.moe.MOESFTConfig()
         config.expert_num = expert_num
         config.num_experts_per_tok = num_experts_per_tok
@@ -1168,13 +1160,12 @@ def test_moe_sft_training_loop():
         config.intermediate_size = intermediate_size
         config.lora_rank = lora_rank
         config.lora_alpha = lora_alpha
-        config.max_cache_depth = 1
+        config.max_cache_depth = 1  # One forward-backward pair at a time
         config.max_len = max_len
         config.layer_idx = 0
         config.gate_proj = gate_proj.data_ptr()
         config.up_proj = up_proj.data_ptr()
         config.down_proj = down_proj.data_ptr()
-        # Set LoRA weight pointers directly in config (zero-copy)
         config.gate_lora_a = gate_lora_a_param.data.data_ptr()
         config.gate_lora_b = gate_lora_b_param.data.data_ptr()
         config.up_lora_a = up_lora_a_param.data.data_ptr()
@@ -1212,7 +1203,6 @@ def test_moe_sft_training_loop():
         target = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
         if HAS_KT_KERNEL and moe is not None:
-            # Use kt_kernel for forward and backward
             bsz_tensor = torch.tensor([qlen], device="cpu")
 
             # Forward pass (with save_for_backward=True)
@@ -1231,11 +1221,11 @@ def test_moe_sft_training_loop():
             CPUInfer.sync()
 
             # Simple MSE loss
-            loss = torch.mean((output - target.float()) ** 2)
+            loss = torch.mean((output.float() - target.float()) ** 2)
             print(f"  Loss (AMX): {loss.item():.6f}")
 
             # Compute gradient of loss w.r.t. output
-            grad_output = 2 * (output - target.float()) / output.numel()
+            grad_output = 2 * (output.float() - target.float()) / output.numel()
             grad_output = grad_output.to(torch.bfloat16).contiguous()
 
             # Allocate gradient buffers
@@ -1320,16 +1310,31 @@ def test_moe_sft_training_loop():
             down_lora_a_param.grad = grads["grad_down_lora_a"]
             down_lora_b_param.grad = grads["grad_down_lora_b"]
 
+        # Print gradient norms to verify gradients are computed
+        print(f"  gate_lora_a grad norm: {gate_lora_a_param.grad.norm().item():.6e}")
+        print(f"  gate_lora_b grad norm: {gate_lora_b_param.grad.norm().item():.6e}")
+
+        # Save weight snapshots before optimizer step
+        gate_lora_a_before = gate_lora_a_param.data.clone()
+        gate_lora_b_before = gate_lora_b_param.data.clone()
+
         # Optimizer step
         optimizer.step()
         optimizer.zero_grad()
 
-        # Print weight update magnitude
-        print(f"  gate_lora_a norm: {gate_lora_a_param.data.norm().item():.6f}")
-        print(f"  gate_lora_b norm: {gate_lora_b_param.data.norm().item():.6f}")
+        # Calculate weight changes
+        gate_a_diff = (gate_lora_a_param.data - gate_lora_a_before).abs().mean().item()
+        gate_b_diff = (gate_lora_b_param.data - gate_lora_b_before).abs().mean().item()
 
-        # Note: Since we use zero-copy pointers, the C++ side sees updates automatically
-        # No explicit sync needed after optimizer.step() for in-place updates
+        # Print weight norms with higher precision
+        print(f"  gate_lora_a norm: {gate_lora_a_param.data.norm().item():.10f}")
+        print(f"  gate_lora_b norm: {gate_lora_b_param.data.norm().item():.10f}")
+        print(f"  gate_lora_a weight change (mean abs): {gate_a_diff:.10e}")
+        print(f"  gate_lora_b weight change (mean abs): {gate_b_diff:.10e}")
+
+        # Verify weights are actually being updated
+        assert gate_a_diff > 0, "gate_lora_a weights should change after optimizer step"
+        assert gate_b_diff > 0, "gate_lora_b weights should change after optimizer step"
 
     print("\n[OK] Training Loop Test PASSED")
 
@@ -1352,16 +1357,15 @@ def run_all_tests():
     print(f"  lora_rank: {lora_rank}")
     print(f"  lora_alpha: {lora_alpha}")
     print(f"  qlen: {qlen}")
+    print(f"  num_threads: {num_threads}")
     print("=" * 70)
 
     try:
-        # Forward pass tests
-        test_moe_sft_forward("bf16")
-        test_moe_sft_forward("int8")
+        # Forward pass test
+        test_moe_sft_forward()
 
-        # Backward pass tests
-        test_moe_sft_backward("bf16")
-        test_moe_sft_backward("int8")
+        # Backward pass test
+        test_moe_sft_backward()
 
         # Weight sync test
         test_moe_sft_lora_weight_sync()

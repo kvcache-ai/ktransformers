@@ -2190,3 +2190,391 @@ void compute_lora_gate_up(int qlen, int activated_expert) {
 3. **线程本地存储是消除 race condition 的最安全方案**：牺牲少量栈空间换取零竞争风险
 
 ---
+
+# TP 模式 Forward 测试失败
+
+本板块记录 TP (Tensor Parallel) 模式下 SFT forward 测试失败的问题。
+
+---
+
+## Bug #19: TP 模式下 LoRA 权重分区/偏移问题 【已确认】
+
+### 调试结果确认
+
+调试输出已确认根本原因。
+
+**Python 端（完整权重）**:
+```
+[DEBUG TP] Original intermediate_size: 2048
+[DEBUG TP] gate_lora_b shape: torch.Size([256, 2048, 16]) (expected: [256, 2048, 16])
+[DEBUG TP] Expected lora_b stride per expert: 32768
+[DEBUG TP] If TP splits intermediate_size by 2, each NUMA uses stride: 16384
+```
+
+**C++ 端（分区后配置）**:
+```
+[DEBUG AMX_SFT_MOE_TP] tp_part_idx=0, config_.intermediate_size=1024, config.intermediate_size=1024
+[DEBUG AMX_SFT_MOE_TP] tp_part_idx=1, config_.intermediate_size=1024, config.intermediate_size=1024
+
+[DEBUG compute_lora_gate_up] tp_part_idx=0, config_.intermediate_size=1024, lora_rank_=16
+[DEBUG] Expected lora_b stride per expert (if full_intermediate=2048): 32768
+[DEBUG] Actual lora_b stride per expert (config_.intermediate_size=1024): 16384
+
+[DEBUG compute_lora_down] tp_part_idx=0, config_.intermediate_size=1024, lora_rank_=16
+[DEBUG] Expected down_lora_a stride per expert (if full_intermediate=2048): 32768
+[DEBUG] Actual down_lora_a stride per expert: 16384
+```
+
+**结论**: Python 传入完整 LoRA 权重（每 expert stride=32768），但 C++ 使用分区后的 `config_.intermediate_size=1024` 计算 offset（stride=16384），导致：
+- 访问 expert 1 时，正确 offset=32768，实际 offset=16384 → 读取到 expert 0 的后半部分
+- 这解释了为什么测试失败但数值范围正常（读取的是有效数据，只是错误的 expert 数据）
+
+### 问题现象
+
+TP 模式测试失败，relative difference ~1.78（阈值 0.05）：
+
+```
+[AMX SFT DEBUG] AMX output[:8] = tensor([  5.7500,   7.2188,   9.7500,   6.5312,  27.5000,  10.8750, -12.1250,
+         -3.6719], dtype=torch.bfloat16)
+[AMX SFT DEBUG] AMX output mean abs = 8.937500e+00
+[AMX SFT DEBUG] Torch output mean abs = 6.031250e+00
+Relative difference: 1.781250
+FAILED: diff=1.781250 >= 0.05
+```
+
+- **no-TP 测试 (`test_moe_sft_amx_no_tp.py`)**: 通过
+- **TP 测试 (`test_moe_sft_amx.py`)**: 失败
+- **输出数值范围正常**（非 NaN/Inf），但值明显不同
+
+### 问题原因分析
+
+#### 背景：TP 模式配置修改
+
+在 `moe-tp.hpp:117` 中，每个 NUMA 节点的 config 被修改：
+
+```cpp
+tp_config.intermediate_size /= tp_count;  // 2048 -> 1024 (当 tp_count=2)
+```
+
+Bug #8 已修复基础权重 (gate_proj, up_proj, down_proj) 的 TP 分区问题。
+
+#### LoRA 权重未正确处理
+
+**LoRA 权重维度分析：**
+
+| 权重 | 形状 | 是否需要 TP 分区 |
+|------|------|------------------|
+| `gate_lora_a` | [expert_num, lora_rank, hidden_size] | 否 |
+| `gate_lora_b` | [expert_num, **intermediate_size**, lora_rank] | **是** |
+| `up_lora_a` | [expert_num, lora_rank, hidden_size] | 否 |
+| `up_lora_b` | [expert_num, **intermediate_size**, lora_rank] | **是** |
+| `down_lora_a` | [expert_num, lora_rank, **intermediate_size**] | **是** |
+| `down_lora_b` | [expert_num, hidden_size, lora_rank] | 否 |
+
+**问题 1: offset 计算使用分区后尺寸 (sft_moe.hpp:559)**
+
+```cpp
+size_t lora_b_offset = expert_idx * config_.intermediate_size * lora_rank_;
+// 实际: expert_idx * 1024 * 16 = expert_idx * 16384
+// 应该: expert_idx * 2048 * 16 = expert_idx * 32768
+```
+
+**问题 2: 循环范围错误 (sft_moe.hpp:584)**
+
+```cpp
+for (int i = 0; i < config_.intermediate_size; i++) {
+// 只遍历了 1024 而不是 2048
+```
+
+**问题 3: down_lora_a offset (sft_moe.hpp:621)**
+
+```cpp
+size_t lora_a_offset = expert_idx * lora_rank_ * config_.intermediate_size;
+// 同样使用了分区后的尺寸
+```
+
+#### 数值示例
+
+- 原始 `intermediate_size = 2048`, `tp_count = 2`
+- NUMA 0 的 `config_.intermediate_size = 1024`
+- expert 1 的 `gate_lora_b` 正确 offset = `1 * 2048 * 16 = 32768`
+- 实际计算 offset = `1 * 1024 * 16 = 16384` → **错误！读取到 expert 0 的数据**
+
+### 已添加的调试信息
+
+为确认问题根因，已在以下位置添加调试信息：
+
+**sft_moe.hpp 构造函数 (Line 126-127)：**
+```cpp
+printf("[DEBUG AMX_SFT_MOE_TP] tp_part_idx=%d, config_.intermediate_size=%d, config.intermediate_size=%d\n",
+       tp_part_idx, config_.intermediate_size, config.intermediate_size);
+```
+
+**compute_lora_gate_up (Line 544-553)：**
+```cpp
+static bool lora_debug_printed = false;
+if (!lora_debug_printed) {
+  printf("[DEBUG compute_lora_gate_up] tp_part_idx=%d, config_.intermediate_size=%d, lora_rank_=%d\n",
+         tp_part_idx, config_.intermediate_size, lora_rank_);
+  printf("[DEBUG] gate_lora_a_=%p, gate_lora_b_=%p\n", (void*)gate_lora_a_, (void*)gate_lora_b_);
+  printf("[DEBUG] Expected lora_b stride per expert (if full_intermediate=2048): %d\n",
+         2048 * lora_rank_);
+  printf("[DEBUG] Actual lora_b stride per expert (config_.intermediate_size=%d): %zu\n",
+         config_.intermediate_size, (size_t)config_.intermediate_size * lora_rank_);
+  lora_debug_printed = true;
+}
+```
+
+**compute_lora_down (Line 624-633)：**
+```cpp
+static bool down_lora_debug_printed = false;
+if (!down_lora_debug_printed) {
+  printf("[DEBUG compute_lora_down] tp_part_idx=%d, config_.intermediate_size=%d, lora_rank_=%d\n",
+         tp_part_idx, config_.intermediate_size, lora_rank_);
+  printf("[DEBUG] down_lora_a_=%p, down_lora_b_=%p\n", (void*)down_lora_a_, (void*)down_lora_b_);
+  printf("[DEBUG] Expected down_lora_a stride per expert (if full_intermediate=2048): %d\n",
+         lora_rank_ * 2048);
+  printf("[DEBUG] Actual down_lora_a stride per expert: %zu\n",
+         (size_t)lora_rank_ * config_.intermediate_size);
+  down_lora_debug_printed = true;
+}
+```
+
+**test_moe_sft_amx.py (Line 581-586)：**
+```python
+print(f"\n[DEBUG TP] Original intermediate_size: {intermediate_size}")
+print(f"[DEBUG TP] gate_lora_b shape: {gate_lora_b.shape}")
+print(f"[DEBUG TP] down_lora_a shape: {down_lora_a.shape}")
+print(f"[DEBUG TP] Expected lora_b stride per expert: {intermediate_size * lora_rank}")
+print(f"[DEBUG TP] If TP splits intermediate_size by 2, each NUMA uses stride: {intermediate_size // 2 * lora_rank}")
+```
+
+### 预期解决方案
+
+类似 Bug #8，需要在 `TP_MOE_SFT` 中对 LoRA 权重进行分区。
+
+#### 方案：修改 `update_lora_weights()` 添加 LoRA 分区逻辑
+
+```cpp
+void update_lora_weights(void* gate_lora_a, void* gate_lora_b,
+                         void* up_lora_a, void* up_lora_b,
+                         void* down_lora_a, void* down_lora_b) {
+  // 需要分区的权重: gate_lora_b, up_lora_b, down_lora_a
+  // 不需要分区的: gate_lora_a, up_lora_a, down_lora_b
+
+  for (int i = 0; i < tp_count; i++) {
+    auto& tpc = tps[i]->config_;
+    int tp_intermediate = tpc.intermediate_size;  // 分区后尺寸
+
+    // gate_lora_b/up_lora_b: [expert_num, intermediate_size, lora_rank]
+    // 每个 NUMA 获取 intermediate_size 的一个切片（连续块）
+    void* partitioned_gate_lora_b = new bf16[expert_num * tp_intermediate * lora_rank];
+    for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+      memcpy((bf16*)partitioned_gate_lora_b + expert_id * tp_intermediate * lora_rank,
+             (bf16*)gate_lora_b + expert_id * full_intermediate * lora_rank + i * tp_intermediate * lora_rank,
+             sizeof(bf16) * tp_intermediate * lora_rank);
+    }
+
+    // down_lora_a: [expert_num, lora_rank, intermediate_size]
+    // 需要按 intermediate_size 维度切片（逐行复制）
+    void* partitioned_down_lora_a = new bf16[expert_num * lora_rank * tp_intermediate];
+    for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+      for (int r = 0; r < lora_rank; r++) {
+        memcpy((bf16*)partitioned_down_lora_a + expert_id * lora_rank * tp_intermediate + r * tp_intermediate,
+               (bf16*)down_lora_a + expert_id * lora_rank * full_intermediate + r * full_intermediate + i * tp_intermediate,
+               sizeof(bf16) * tp_intermediate);
+      }
+    }
+
+    tps[i]->update_lora_weights(
+        gate_lora_a,              // 不变
+        partitioned_gate_lora_b,  // 分区后
+        up_lora_a,                // 不变
+        partitioned_up_lora_b,    // 分区后
+        partitioned_down_lora_a,  // 分区后
+        down_lora_b               // 不变
+    );
+  }
+}
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/moe-sft-tp.hpp` | 修改 `update_lora_weights()` 添加 LoRA 分区逻辑 | ✓ 已实现 |
+| `operators/amx/sft_moe.hpp` | 添加调试信息 | ✓ 已添加 |
+| `examples/test_moe_sft_amx.py` | 添加调试信息 | ✓ 已添加 |
+
+### 实际修复代码 (moe-sft-tp.hpp)
+
+**核心修改**：在 `TP_MOE_SFT` 类中：
+
+1. 添加成员变量保存分区后的指针：
+```cpp
+std::vector<ggml_bf16_t*> partitioned_gate_lora_b_;
+std::vector<ggml_bf16_t*> partitioned_up_lora_b_;
+std::vector<ggml_bf16_t*> partitioned_down_lora_a_;
+```
+
+2. 重写 `update_lora_weights()` 实现分区逻辑（参见 `moe-sft-tp.hpp:209-271`）
+
+3. 添加 `free_partitioned_lora_weights()` 和析构函数释放内存
+
+### 后续步骤
+
+1. ✓ 运行 TP 测试，观察调试输出确认问题
+2. ✓ 实现 LoRA 权重分区
+3. 验证 forward pass（需用户编译测试）
+4. 验证 backward pass（可能有类似问题）
+
+---
+
+## Bug #19: TP 模式 Base Weight 分区缺失 【已修复】
+
+### 问题现象
+
+在实施 Bug #18 的 LoRA 权重分区修复后，TP 模式测试仍然失败：
+- relative difference ~1.78（阈值 0.05）
+- no-TP 测试通过，TP 测试失败
+
+### 调试过程
+
+#### 第一阶段：错误的初始假设
+
+**初始假设**：问题在于 LoRA 权重分区。
+
+**验证**：添加调试输出确认 LoRA 分区逻辑正确：
+```
+[DEBUG] NUMA 0: tp_configs[0].intermediate_size=1024 (expected 1024)
+[DEBUG] NUMA 1: tp_configs[1].intermediate_size=1024 (expected 1024)
+[DEBUG] NUMA 0 gate_lora_b partition [0:4] = -0.0081 -0.0153 0.0041 0.0017
+[DEBUG] Source offset for NUMA 0: 0, src[offset:offset+4] = -0.0081 -0.0153 0.0041 0.0017  ← 匹配！
+```
+
+**结论**：LoRA 分区正确，但测试仍然失败。
+
+#### 第二阶段：发现真正的根本原因
+
+**关键调试输出**（PRE-MERGE）：
+```
+[DEBUG PRE-MERGE] NUMA 0 output[0:4] = 2.8697 3.5897 4.8852 3.2736
+[DEBUG PRE-MERGE] NUMA 1 output[0:4] = 2.8636 3.6164 4.8857 3.2740
+```
+
+**观察**：两个 NUMA 的输出几乎相同！这是不正确的。
+
+**期望**：
+- NUMA 0 计算 intermediate[0:1024] → ~1.7
+- NUMA 1 计算 intermediate[1024:2048] → ~1.7
+- 合并后 → ~3.4
+
+**实际**：
+- 两个 NUMA 都输出 ~2.87
+- 合并后 → ~5.73 (2x 期望值！)
+
+### 根本原因
+
+**`TP_MOE_SFT::load_weights()` 没有实现基础权重分区！**
+
+对比两个 `load_weights` 实现：
+
+| 类 | 文件 | 是否分区基础权重 |
+|----|------|-----------------|
+| `TP_MOE<AMX_MOE_BASE>` | moe.hpp:382-420 | ✅ 是 |
+| `TP_MOE_SFT` | moe-sft-tp.hpp:62-66 | ❌ 否（原始版本）|
+
+**问题代码**：
+```cpp
+void load_weights() override {
+  auto pool = config.pool;
+  pool->dispense_backend()->do_numa_job([this](int numa_id) {
+    tps[numa_id]->load_weights();  // 直接调用，没有分区！
+  });
+  weights_loaded = true;
+}
+```
+
+每个 NUMA 节点加载了完整的 `gate_proj`、`up_proj`、`down_proj`（[expert_num, 2048, hidden_size]），
+而不是分区后的（[expert_num, 1024, hidden_size]）。
+
+### 修复方案
+
+重写 `TP_MOE_SFT::load_weights()`，添加基础权重分区逻辑，参考 `TP_MOE<AMX_MOE_BASE>::load_weights()` 的实现。
+
+### 修复代码 (moe-sft-tp.hpp)
+
+```cpp
+void load_weights() override {
+  auto pool = config.pool;
+  const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+
+  if (config.gate_proj != nullptr) {
+    printf("TP_MOE_SFT: From BF16 with partitioning\n");
+
+    // Step 1: 为每个 NUMA 分配并复制分区后的权重
+    for (int i = 0; i < tp_count; i++) {
+      auto& tpc = tps[i]->config_;
+      size_t gate_up_elcount = (size_t)tpc.intermediate_size * tpc.hidden_size;
+
+      tpc.gate_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      tpc.up_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      tpc.down_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+
+      if (tpc.load == false) {
+        pool->get_subpool(i)->do_work_stealing_job(
+            tpc.expert_num, nullptr,
+            [&, i, gate_up_elcount](int expert_id_) {
+              size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
+
+              // gate_proj/up_proj: 连续块切片
+              memcpy(...);
+              
+              // down_proj: 逐行切片
+              for (size_t col = 0; col < config.hidden_size; col++) {
+                memcpy(...);
+              }
+            },
+            nullptr);
+      }
+    }
+
+    // Step 2: 调用每个 NUMA 的 load_weights
+    pool->dispense_backend()->do_numa_job([this](int numa_id) {
+      tps[numa_id]->config_.physical_to_logical_map = config.physical_to_logical_map;
+      tps[numa_id]->load_weights();
+    });
+
+    // Step 3: 清理临时分配
+    for (int i = 0; i < tp_count; i++) {
+      delete[](ggml_bf16_t*)(tps[i]->config_.gate_proj);
+      delete[](ggml_bf16_t*)(tps[i]->config_.up_proj);
+      delete[](ggml_bf16_t*)(tps[i]->config_.down_proj);
+    }
+  } else {
+    // 其他加载方式
+    pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+  }
+
+  weights_loaded = true;
+}
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/moe-sft-tp.hpp` | 重写 `load_weights()` 添加基础权重分区 | ✓ 已实现 |
+
+### 教训总结
+
+1. **不要只看表面现象**：LoRA offset 问题是真实存在的（Bug #18），但它被 LoRA 分区修复解决了。真正导致测试失败的是更基础的问题。
+
+2. **对比已工作的实现**：no-TP 测试通过说明计算逻辑正确。TP 测试失败应该首先检查 TP 特有逻辑（权重分区）。
+
+3. **继承链中的遗漏**：`TP_MOE_SFT` 重写了 `load_weights()` 但忘记复制 `TP_MOE<AMX_MOE_BASE>` 中的基础权重分区逻辑。
+
+4. **调试输出是关键**：PRE-MERGE 调试输出直接揭示了两个 NUMA 输出相同这一异常。
+
+---
+

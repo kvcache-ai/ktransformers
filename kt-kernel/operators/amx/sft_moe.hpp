@@ -282,7 +282,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
         },
         nullptr);
 
-    // Step 5.5: Gate + Up LoRA (NEW)
+    // Step 5.5: Gate + Up LoRA
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
       compute_lora_gate_up(qlen, activated_expert);
     }
@@ -323,7 +323,7 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
         },
         nullptr);
 
-    // Step 8.5: Down LoRA (NEW)
+    // Step 8.5: Down LoRA
     if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
       compute_lora_down(qlen, activated_expert);
     }
@@ -452,6 +452,21 @@ class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
 
   // Debug getter for LoRA pointer verification
   void* get_gate_lora_a() const { return (void*)gate_lora_a_; }
+
+  /**
+   * @brief Set base weight pointers for TP partitioning.
+   * Used by TP_MOE_SFT::load_weights() to set partitioned weights before calling load_weights().
+   */
+  void set_base_weight_pointers(void* gate_proj, void* up_proj, void* down_proj) {
+    config_.gate_proj = gate_proj;
+    config_.up_proj = up_proj;
+    config_.down_proj = down_proj;
+  }
+
+  /**
+   * @brief Set physical to logical expert mapping.
+   */
+  void set_physical_to_logical_map(const void* map) { config_.physical_to_logical_map = const_cast<void*>(map); }
 
  private:
   /**
