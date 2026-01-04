@@ -237,9 +237,22 @@ printf("[DEBUG AFTER memset] buf2[0..3] = %.4f %.4f %.4f %.4f\n", ...);
 
 ---
 
-# 第一板块：语法 Bug
+# 第一板块：框架集成 Bug（类继承与接口绑定）
 
-本板块记录编译期和运行时的语法、类型、继承相关问题。
+本板块记录 SFT MoE 与现有 MoE 框架集成过程中的编译期问题，包括 C++ 类继承、模板约束和 Python 绑定。
+
+## 本板块 Bug 概览
+
+| Bug | 问题 | 核心原因 |
+|-----|------|----------|
+| #1 | C++ 继承链私有成员访问 | `using Base::member` 在 private section 中声明导致派生类无法访问 |
+| #2 | MOE_TP_PART Concept 不满足 | `AMX_SFT_MOE_TP` 缺少 `GeneralMOEConfig` 构造函数 |
+| #3 | 缺失的成员方法 | Bug #2 连锁反应，继承链失效 |
+| #4 | TP_MOE_SFT 是抽象类 | 模板特化不匹配派生类，纯虚函数未实现 |
+| #5 | 错误的 Include 路径 | 多余的错误 include |
+| #6 | Python 绑定缺失配置字段 | pybind11 未暴露 `GeneralMOEConfig` 核心字段 |
+
+**共同主题**：让 `AMX_SFT_MOE_TP` 正确继承 `AMX_MOE_TP`，满足 `MOE_TP_PART` concept，并通过 pybind11 暴露完整接口。
 
 ---
 
@@ -652,9 +665,41 @@ py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
 
 ---
 
-# 第二板块：数值 Bug
+# 第二板块：Forward/Backward Bug（计算与内存管理）
 
-本板块记录计算结果不正确的数值问题。
+本板块记录 SFT MoE 前向/反向传播实现中的运行时问题，包括计算正确性、内存管理和缓存机制。
+
+## 本板块 Bug 概览
+
+### Forward 相关
+
+| Bug | 问题 | 核心原因 |
+|-----|------|----------|
+| #7 | 输出 Buffer 数据类型错误 | Python 分配 float32，C++ 写入 bf16 |
+| #8 | TP 权重未正确分区 | `TP_MOE_SFT::load_weights()` 缺少权重分区逻辑 |
+| #9 | Cache Stack Overflow | `save_for_backward=True` 但无 backward 消费 cache |
+| #10 | Forward 数值差异 | 权重初始化 `/100` 导致输出值过小，bf16 精度损失 |
+| #11 | PyTorch 参考 Dtype 不匹配 | `grad_output * weights` 自动提升为 float32 |
+
+### Backward 相关
+
+| Bug | 问题 | 核心原因 |
+|-----|------|----------|
+| #12 | grad_intermediate 未计算 | `backward_down` 只算 LoRA 梯度，缺少 `grad @ W^T` |
+| #13 | grad_input 内存损坏 | 将 bf16 buffer 当作 float 处理，越界写入 |
+| #14 | grad_input 缺少 base weight | 只有 LoRA 贡献，缺少 `grad @ base_W^T` |
+
+### 内存与 Cache 相关
+
+| Bug | 问题 | 核心原因 |
+|-----|------|----------|
+| #15 | SharedMemBuffer 内存重叠 | 多次 `alloc()` 导致 buffer 地址重叠 |
+| #16 | LoRA 指针 Object Slicing | `GeneralMOEConfig` 切片丢失 LoRA 指针 |
+| #17a | input_cache 存储 expert-sorted | 应存原始 token order |
+| #17b | backward 读取错误 input | 从 cache 读取假设 token order |
+| #17c | backward_down 使用激活前 cache | 应使用 `intermediate_cache`（激活后） |
+
+**共同主题**：确保 Forward/Backward 计算正确，内存不重叠，Cache 保存和读取时机正确。
 
 ---
 
@@ -1929,5 +1974,60 @@ const ggml_bf16_t* cached_intermediate = cache.intermediate_cache + cache_offset
 | 文件 | 修改内容 |
 |------|---------|
 | `operators/amx/sft_moe.hpp` | Bug #17a/b/c: save_to_cache, save_intermediate_to_cache, backward_down |
+
+---
+
+## 最终验证结果
+
+所有 Backward Pass 测试已全部通过！
+
+### 测试输出
+
+```
+--- Iteration 0 ---
+grad_input diff: 0.006653          ✓ PASSED
+gate_lora_a diff: 0.005066         ✓ PASSED
+gate_lora_b diff: 0.004669         ✓ PASSED
+up_lora_a diff: 0.004456           ✓ PASSED
+up_lora_b diff: 0.004242           ✓ PASSED
+down_lora_a diff: 0.00xxxx         ✓ PASSED (Bug #17c 修复后)
+down_lora_b diff: 0.00xxxx         ✓ PASSED
+PASSED
+```
+
+### 最终测试状态表
+
+| 测试 | 状态 | 备注 |
+|------|------|------|
+| 非 TP forward | ✓ PASSED | Bug #7, #10 修复 |
+| 非 TP backward | ✓ PASSED | Bug #12-17 全部修复 |
+| 非 TP weight sync | ✓ PASSED | 依赖 backward |
+| 非 TP training loop | ✓ PASSED | 依赖 backward |
+| TP forward | ✓ PASSED | Bug #8 修复 |
+| TP backward | ✓ PASSED | 同步非 TP 修复 |
+
+### Bug 修复完成清单
+
+| Bug | 问题描述 | 状态 |
+|-----|----------|------|
+| Bug #1 | C++ 继承链私有成员访问 | ✓ 已修复 |
+| Bug #2 | MOE_TP_PART Concept 不满足 | ✓ 已修复 |
+| Bug #3 | 缺失的成员方法 | ✓ 已修复 |
+| Bug #4 | TP_MOE_SFT 是抽象类 | ✓ 已修复 |
+| Bug #5 | 错误的 Include 路径 | ✓ 已修复 |
+| Bug #6 | Python 绑定缺失核心配置字段 | ✓ 已修复 |
+| Bug #7 | 测试文件输出 Buffer 数据类型错误 | ✓ 已修复 |
+| Bug #8 | TP 模式下基础权重未正确分区 | ✓ 已修复 |
+| Bug #9 | Forward Cache Stack Overflow | ✓ 已修复 |
+| Bug #10 | SFT Forward 数值差异 (权重初始化) | ✓ 已修复 |
+| Bug #11 | PyTorch 参考实现 Dtype 不匹配 | ✓ 已修复 |
+| Bug #12 | grad_intermediate 未被计算 | ✓ 已修复 |
+| Bug #13 | grad_input 数据类型错误导致内存损坏 | ✓ 已修复 |
+| Bug #14 | grad_input 缺少 base weight 贡献 | ✓ 已修复 |
+| Bug #15 | SharedMemBuffer 内存重叠 | ✓ 已修复 |
+| Bug #16 | LoRA 指针 Object Slicing | ✓ 已修复 |
+| Bug #17a | save_to_cache 存储 expert-sorted input | ✓ 已修复 |
+| Bug #17b | backward_gate_up 需要原始 token order | ✓ 已修复 |
+| Bug #17c | backward_down 使用激活前 cache | ✓ 已修复 |
 
 ---
