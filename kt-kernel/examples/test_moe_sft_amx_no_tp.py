@@ -1001,6 +1001,20 @@ def test_moe_sft_lora_weight_sync_no_tp():
     down_lora_a.add_(0.1)
     down_lora_b.add_(0.1)
 
+    # Bug #22 fix: After modifying LoRA weights, sync to kernel
+    # (partitioned weights are copied, not zero-copy)
+    CPUInfer.submit(
+        moe.update_lora_weights_task(
+            gate_lora_a.data_ptr(),
+            gate_lora_b.data_ptr(),
+            up_lora_a.data_ptr(),
+            up_lora_b.data_ptr(),
+            down_lora_a.data_ptr(),
+            down_lora_b.data_ptr(),
+        )
+    )
+    CPUInfer.sync()
+
     # Second forward with updated LoRA weights
     output2 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(

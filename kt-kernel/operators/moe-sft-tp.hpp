@@ -45,6 +45,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> partitioned_up_lora_b_;
   std::vector<ggml_bf16_t*> partitioned_down_lora_a_;
 
+  // Bug #20 fix: Partitioned base weight pointers for backward pass
+  // (Need to be freed on destruction - backward uses original BF16 weights)
+  std::vector<ggml_bf16_t*> partitioned_gate_proj_;
+  std::vector<ggml_bf16_t*> partitioned_up_proj_;
+  std::vector<ggml_bf16_t*> partitioned_down_proj_;
+
   TP_MOE_SFT(MOESFTConfig config) : Base(static_cast<GeneralMOEConfig>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
 
@@ -123,11 +129,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
-      // Step 3: Clean up temporary allocations (already copied to internal buffers by load_weights)
+      // Bug #20 fix: Save partitioned weights for backward pass (do NOT delete them!)
+      // backward_down() uses config_.down_proj to compute gradients
+      partitioned_gate_proj_.resize(tp_count);
+      partitioned_up_proj_.resize(tp_count);
+      partitioned_down_proj_.resize(tp_count);
       for (int i = 0; i < tp_count; i++) {
-        delete[] temp_gate[i];
-        delete[] temp_up[i];
-        delete[] temp_down[i];
+        partitioned_gate_proj_[i] = temp_gate[i];
+        partitioned_up_proj_[i] = temp_up[i];
+        partitioned_down_proj_[i] = temp_down[i];
       }
     } else {
       // Other loading methods (from loader or file)
@@ -224,32 +234,88 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   /**
-   * @brief Backward pass with NUMA distribution.
+   * @brief Backward pass with NUMA distribution and gradient partitioning.
    *
-   * Computes gradients for LoRA weights across all NUMA nodes.
+   * Bug #21 fix: Gradients containing intermediate_size dimension need to be partitioned
+   * for TP mode, similar to how update_lora_weights() partitions weights.
+   * - Forward: partition full weights → each NUMA gets partitioned weights
+   * - Backward: each NUMA computes partitioned gradients → merge to full gradients
    *
-   * @param grad_output Gradient of loss w.r.t. output [qlen, hidden_size]
-   * @param grad_input Gradient of loss w.r.t. input [qlen, hidden_size]
-   * @param grad_gate_lora_a Gradient for gate LoRA A
-   * @param grad_gate_lora_b Gradient for gate LoRA B
-   * @param grad_up_lora_a Gradient for up LoRA A
-   * @param grad_up_lora_b Gradient for up LoRA B
-   * @param grad_down_lora_a Gradient for down LoRA A
-   * @param grad_down_lora_b Gradient for down LoRA B
+   * Gradients requiring partitioning:
+   * - grad_gate_lora_b: [expert_num, intermediate_size, lora_rank] - contiguous slice
+   * - grad_up_lora_b: [expert_num, intermediate_size, lora_rank] - contiguous slice
+   * - grad_down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
+   *
+   * Gradients NOT requiring partitioning:
+   * - grad_gate_lora_a: [expert_num, lora_rank, hidden_size]
+   * - grad_up_lora_a: [expert_num, lora_rank, hidden_size]
+   * - grad_down_lora_b: [expert_num, hidden_size, lora_rank]
    */
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b) {
     auto pool = config.pool;
 
-    // Run backward on each NUMA node
-    // Note: Each NUMA node computes partial gradients for the experts it handles
-    // The gradients need to be accumulated across NUMA nodes by the caller
-    pool->dispense_backend()->do_numa_job([this, grad_output, grad_input, grad_gate_lora_a, grad_gate_lora_b,
-                                           grad_up_lora_a, grad_up_lora_b, grad_down_lora_a,
-                                           grad_down_lora_b](int numa_id) {
-      tps[numa_id]->backward(grad_output, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a,
-                             grad_up_lora_b, grad_down_lora_a, grad_down_lora_b);
+    // Get full intermediate_size (before TP partitioning)
+    int full_intermediate_size = sft_config.intermediate_size;
+    int expert_num = config.expert_num;
+    int lora_rank = sft_config.lora_rank;
+
+    // Allocate partitioned gradient buffers for each NUMA
+    std::vector<ggml_bf16_t*> part_grad_gate_lora_b(tp_count);
+    std::vector<ggml_bf16_t*> part_grad_up_lora_b(tp_count);
+    std::vector<ggml_bf16_t*> part_grad_down_lora_a(tp_count);
+
+    for (int i = 0; i < tp_count; i++) {
+      int tp_intermediate = tp_configs[i].intermediate_size;
+      // Zero-initialize with ()
+      part_grad_gate_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
+      part_grad_up_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
+      part_grad_down_lora_a[i] = new ggml_bf16_t[expert_num * lora_rank * tp_intermediate]();
+    }
+
+    // Run backward on each NUMA node with partitioned gradient buffers
+    pool->dispense_backend()->do_numa_job([this, grad_output, grad_input, grad_gate_lora_a, grad_up_lora_a,
+                                           grad_down_lora_b, &part_grad_gate_lora_b, &part_grad_up_lora_b,
+                                           &part_grad_down_lora_a](int numa_id) {
+      tps[numa_id]->backward(grad_output, grad_input, grad_gate_lora_a, part_grad_gate_lora_b[numa_id], grad_up_lora_a,
+                             part_grad_up_lora_b[numa_id], part_grad_down_lora_a[numa_id], grad_down_lora_b);
     });
+
+    // Merge partitioned gradients to full gradients
+    for (int i = 0; i < tp_count; i++) {
+      int tp_intermediate = tp_configs[i].intermediate_size;
+
+      // grad_gate_lora_b/grad_up_lora_b: [expert_num, intermediate_size, lora_rank]
+      // Contiguous block slice
+      for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+        size_t src_offset = (size_t)expert_id * tp_intermediate * lora_rank;
+        size_t dst_offset =
+            (size_t)expert_id * full_intermediate_size * lora_rank + (size_t)i * tp_intermediate * lora_rank;
+        memcpy((ggml_bf16_t*)grad_gate_lora_b + dst_offset, part_grad_gate_lora_b[i] + src_offset,
+               tp_intermediate * lora_rank * sizeof(ggml_bf16_t));
+        memcpy((ggml_bf16_t*)grad_up_lora_b + dst_offset, part_grad_up_lora_b[i] + src_offset,
+               tp_intermediate * lora_rank * sizeof(ggml_bf16_t));
+      }
+
+      // grad_down_lora_a: [expert_num, lora_rank, intermediate_size]
+      // Row-wise slice
+      for (int expert_id = 0; expert_id < expert_num; expert_id++) {
+        for (int r = 0; r < lora_rank; r++) {
+          size_t src_offset = (size_t)expert_id * lora_rank * tp_intermediate + (size_t)r * tp_intermediate;
+          size_t dst_offset = (size_t)expert_id * lora_rank * full_intermediate_size +
+                              (size_t)r * full_intermediate_size + (size_t)i * tp_intermediate;
+          memcpy((ggml_bf16_t*)grad_down_lora_a + dst_offset, part_grad_down_lora_a[i] + src_offset,
+                 tp_intermediate * sizeof(ggml_bf16_t));
+        }
+      }
+    }
+
+    // Clean up temporary buffers
+    for (int i = 0; i < tp_count; i++) {
+      delete[] part_grad_gate_lora_b[i];
+      delete[] part_grad_up_lora_b[i];
+      delete[] part_grad_down_lora_a[i];
+    }
   }
 
   /**
@@ -360,9 +426,31 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   /**
+   * @brief Free previously allocated partitioned base weights.
+   * Bug #20 fix: These are needed for backward pass and must not be freed in load_weights().
+   */
+  void free_partitioned_base_weights() {
+    for (auto ptr : partitioned_gate_proj_) {
+      if (ptr) delete[] ptr;
+    }
+    for (auto ptr : partitioned_up_proj_) {
+      if (ptr) delete[] ptr;
+    }
+    for (auto ptr : partitioned_down_proj_) {
+      if (ptr) delete[] ptr;
+    }
+    partitioned_gate_proj_.clear();
+    partitioned_up_proj_.clear();
+    partitioned_down_proj_.clear();
+  }
+
+  /**
    * @brief Destructor - free partitioned weights.
    */
-  ~TP_MOE_SFT() { free_partitioned_lora_weights(); }
+  ~TP_MOE_SFT() {
+    free_partitioned_lora_weights();
+    free_partitioned_base_weights();
+  }
 
   void update_lora_weights_binding(intptr_t gate_lora_a, intptr_t gate_lora_b, intptr_t up_lora_a, intptr_t up_lora_b,
                                    intptr_t down_lora_a, intptr_t down_lora_b) {
