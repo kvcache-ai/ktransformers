@@ -785,6 +785,296 @@ inline void nvfp4_matmul_opt2(int m, int n, int k, std::shared_ptr<BufferANVFP4I
 }
 
 // ============================================================================
+// Fused LUT + Reduction (no intermediate memory)
+// ============================================================================
+
+/**
+ * Fused LUT multiplication + block reduction
+ * Returns 4 int32 sums for 4 blocks of 16 elements each
+ * No intermediate memory stores - everything stays in registers
+ */
+inline void nvfp4_mul_64_reduce_to_4blocks(__m512i a_fp4, __m512i b_fp4, int32_t* block_sums) {
+  using namespace nvfp4_lut;
+
+  const __m512i SIGN_MASK = _mm512_set1_epi8(0x08);
+  const __m512i VALUE_MASK = _mm512_set1_epi8(0x07);
+
+  // Extract signs and compute result sign
+  __m512i sign_a = _mm512_and_si512(a_fp4, SIGN_MASK);
+  __m512i sign_b = _mm512_and_si512(b_fp4, SIGN_MASK);
+  __m512i sign_result = _mm512_xor_si512(sign_a, sign_b);
+
+  // Extract value indices
+  __m512i val_a = _mm512_and_si512(a_fp4, VALUE_MASK);
+  __m512i val_b = _mm512_and_si512(b_fp4, VALUE_MASK);
+
+  // Combine into 6-bit index
+  __m512i combined_idx = _mm512_or_si512(_mm512_slli_epi32(val_a, 3), val_b);
+  combined_idx = _mm512_and_si512(combined_idx, _mm512_set1_epi8(0x3F));
+
+  // LUT lookups
+  __m512i lut = _mm512_load_si512((const __m512i*)INDEX_LUT);
+  __m512i result_idx = _mm512_permutexvar_epi8(combined_idx, lut);
+  __m512i result_table = _mm512_load_si512((const __m512i*)RESULT_TABLE);
+  __m512i result_bytes = _mm512_permutexvar_epi8(result_idx, result_table);
+
+  // Convert to int16 and apply sign
+  __m256i result_lo_256 = _mm512_castsi512_si256(result_bytes);
+  __m256i result_hi_256 = _mm512_extracti64x4_epi64(result_bytes, 1);
+  __m512i result_lo = _mm512_cvtepu8_epi16(result_lo_256);
+  __m512i result_hi = _mm512_cvtepu8_epi16(result_hi_256);
+
+  __m256i sign_lo_256 = _mm512_castsi512_si256(sign_result);
+  __m256i sign_hi_256 = _mm512_extracti64x4_epi64(sign_result, 1);
+  __mmask32 sign_mask_lo = _mm256_test_epi8_mask(sign_lo_256, _mm256_set1_epi8(0x08));
+  __mmask32 sign_mask_hi = _mm256_test_epi8_mask(sign_hi_256, _mm256_set1_epi8(0x08));
+
+  __m512i zero = _mm512_setzero_si512();
+  __m512i final_lo = _mm512_mask_sub_epi16(result_lo, sign_mask_lo, zero, result_lo);
+  __m512i final_hi = _mm512_mask_sub_epi16(result_hi, sign_mask_hi, zero, result_hi);
+
+  // Now reduce to 4 block sums directly
+  // final_lo contains elements 0-31 (blocks 0,1)
+  // final_hi contains elements 32-63 (blocks 2,3)
+
+  // Use madd to sum pairs: int16 * 1 -> int32
+  __m512i sum32_lo = _mm512_madd_epi16(final_lo, _mm512_set1_epi16(1));  // 16 int32
+  __m512i sum32_hi = _mm512_madd_epi16(final_hi, _mm512_set1_epi16(1));  // 16 int32
+
+  // Extract 128-bit chunks and reduce
+  // Block 0: elements 0-15 -> sum32_lo[0:7]
+  // Block 1: elements 16-31 -> sum32_lo[8:15]
+  // Block 2: elements 32-47 -> sum32_hi[0:7]
+  // Block 3: elements 48-63 -> sum32_hi[8:15]
+
+  // Reduce each block of 8 int32 to single int32
+  __m256i lo_256 = _mm512_castsi512_si256(sum32_lo);       // Block 0 (first 8 int32)
+  __m256i lo_hi = _mm512_extracti64x4_epi64(sum32_lo, 1);  // Block 1 (next 8 int32)
+  __m256i hi_256 = _mm512_castsi512_si256(sum32_hi);       // Block 2
+  __m256i hi_hi = _mm512_extracti64x4_epi64(sum32_hi, 1);  // Block 3
+
+  // Horizontal sum for each 256-bit chunk (8 int32 -> 1 int32)
+  // Use hadd twice then extract
+  auto reduce8 = [](__m256i v) -> int32_t {
+    __m128i lo = _mm256_castsi256_si128(v);
+    __m128i hi = _mm256_extracti128_si256(v, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+    sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+    return _mm_cvtsi128_si32(sum);
+  };
+
+  block_sums[0] = reduce8(lo_256);
+  block_sums[1] = reduce8(lo_hi);
+  block_sums[2] = reduce8(hi_256);
+  block_sums[3] = reduce8(hi_hi);
+}
+
+// ============================================================================
+// Optimized Version 4: Fully inline with no intermediate stores
+// ============================================================================
+
+/**
+ * Inline unpack + LUT + reduce in one function
+ * No intermediate memory writes - everything stays in registers
+ */
+inline __m512i unpack_packed_to_512(const uint8_t* packed32) {
+  __m256i src = _mm256_loadu_si256((const __m256i*)packed32);
+  __m256i mask = _mm256_set1_epi8(0x0F);
+  __m256i lo = _mm256_and_si256(src, mask);
+  __m256i hi = _mm256_and_si256(_mm256_srli_epi16(src, 4), mask);
+  __m256i interleaved_lo = _mm256_unpacklo_epi8(lo, hi);
+  __m256i interleaved_hi = _mm256_unpackhi_epi8(lo, hi);
+  __m256i perm = _mm256_permute2x128_si256(interleaved_lo, interleaved_hi, 0x20);
+  __m256i perm_hi = _mm256_permute2x128_si256(interleaved_lo, interleaved_hi, 0x31);
+  return _mm512_inserti64x4(_mm512_castsi256_si512(perm), perm_hi, 1);
+}
+
+/**
+ * Fully fused: unpack + LUT multiply + reduce to 4 block sums
+ * Input: 32 packed bytes from A and B each
+ * Output: 4 int32 block sums
+ */
+inline void fused_mul_reduce_64(const uint8_t* a_packed32, const uint8_t* b_packed32, int32_t* block_sums) {
+  using namespace nvfp4_lut;
+
+  // Unpack both inputs to 64 bytes in registers
+  __m512i a_fp4 = unpack_packed_to_512(a_packed32);
+  __m512i b_fp4 = unpack_packed_to_512(b_packed32);
+
+  // LUT multiplication
+  const __m512i SIGN_MASK = _mm512_set1_epi8(0x08);
+  const __m512i VALUE_MASK = _mm512_set1_epi8(0x07);
+
+  __m512i sign_a = _mm512_and_si512(a_fp4, SIGN_MASK);
+  __m512i sign_b = _mm512_and_si512(b_fp4, SIGN_MASK);
+  __m512i sign_result = _mm512_xor_si512(sign_a, sign_b);
+
+  __m512i val_a = _mm512_and_si512(a_fp4, VALUE_MASK);
+  __m512i val_b = _mm512_and_si512(b_fp4, VALUE_MASK);
+  __m512i combined_idx = _mm512_or_si512(_mm512_slli_epi32(val_a, 3), val_b);
+  combined_idx = _mm512_and_si512(combined_idx, _mm512_set1_epi8(0x3F));
+
+  __m512i lut = _mm512_load_si512((const __m512i*)INDEX_LUT);
+  __m512i result_idx = _mm512_permutexvar_epi8(combined_idx, lut);
+  __m512i result_table = _mm512_load_si512((const __m512i*)RESULT_TABLE);
+  __m512i result_bytes = _mm512_permutexvar_epi8(result_idx, result_table);
+
+  // Convert to int16 and apply sign
+  __m256i result_lo_256 = _mm512_castsi512_si256(result_bytes);
+  __m256i result_hi_256 = _mm512_extracti64x4_epi64(result_bytes, 1);
+  __m512i result_lo = _mm512_cvtepu8_epi16(result_lo_256);
+  __m512i result_hi = _mm512_cvtepu8_epi16(result_hi_256);
+
+  __m256i sign_lo_256 = _mm512_castsi512_si256(sign_result);
+  __m256i sign_hi_256 = _mm512_extracti64x4_epi64(sign_result, 1);
+  __mmask32 sign_mask_lo = _mm256_test_epi8_mask(sign_lo_256, _mm256_set1_epi8(0x08));
+  __mmask32 sign_mask_hi = _mm256_test_epi8_mask(sign_hi_256, _mm256_set1_epi8(0x08));
+
+  __m512i zero = _mm512_setzero_si512();
+  __m512i final_lo = _mm512_mask_sub_epi16(result_lo, sign_mask_lo, zero, result_lo);
+  __m512i final_hi = _mm512_mask_sub_epi16(result_hi, sign_mask_hi, zero, result_hi);
+
+  // Reduce to 4 block sums using madd
+  __m512i sum32_lo = _mm512_madd_epi16(final_lo, _mm512_set1_epi16(1));
+  __m512i sum32_hi = _mm512_madd_epi16(final_hi, _mm512_set1_epi16(1));
+
+  // Extract 256-bit chunks and reduce each to single int32
+  __m256i lo_256 = _mm512_castsi512_si256(sum32_lo);
+  __m256i lo_hi = _mm512_extracti64x4_epi64(sum32_lo, 1);
+  __m256i hi_256 = _mm512_castsi512_si256(sum32_hi);
+  __m256i hi_hi = _mm512_extracti64x4_epi64(sum32_hi, 1);
+
+  // Reduce each 256-bit (8 int32) to scalar
+  __m128i t0 = _mm_add_epi32(_mm256_castsi256_si128(lo_256), _mm256_extracti128_si256(lo_256, 1));
+  t0 = _mm_add_epi32(t0, _mm_srli_si128(t0, 8));
+  t0 = _mm_add_epi32(t0, _mm_srli_si128(t0, 4));
+  block_sums[0] = _mm_cvtsi128_si32(t0);
+
+  __m128i t1 = _mm_add_epi32(_mm256_castsi256_si128(lo_hi), _mm256_extracti128_si256(lo_hi, 1));
+  t1 = _mm_add_epi32(t1, _mm_srli_si128(t1, 8));
+  t1 = _mm_add_epi32(t1, _mm_srli_si128(t1, 4));
+  block_sums[1] = _mm_cvtsi128_si32(t1);
+
+  __m128i t2 = _mm_add_epi32(_mm256_castsi256_si128(hi_256), _mm256_extracti128_si256(hi_256, 1));
+  t2 = _mm_add_epi32(t2, _mm_srli_si128(t2, 8));
+  t2 = _mm_add_epi32(t2, _mm_srli_si128(t2, 4));
+  block_sums[2] = _mm_cvtsi128_si32(t2);
+
+  __m128i t3 = _mm_add_epi32(_mm256_castsi256_si128(hi_hi), _mm256_extracti128_si256(hi_hi, 1));
+  t3 = _mm_add_epi32(t3, _mm_srli_si128(t3, 8));
+  t3 = _mm_add_epi32(t3, _mm_srli_si128(t3, 4));
+  block_sums[3] = _mm_cvtsi128_si32(t3);
+}
+
+/**
+ * Optimized matmul with fully fused kernel
+ * Process 4 K_STEPs at once to reduce loop overhead
+ */
+inline void nvfp4_matmul_opt4(int m, int n, int k, std::shared_ptr<BufferANVFP4Impl<GemmKernelNVFP4>> ba,
+                              std::shared_ptr<BufferBNVFP4Impl<GemmKernelNVFP4>> bb,
+                              std::shared_ptr<BufferCNVFP4Impl<GemmKernelNVFP4>> bc, int ith, int nth) {
+  auto [n_start, n_end] = GemmKernelNVFP4::split_range_n(n, ith, nth);
+
+  constexpr int BLOCK_SIZE = 16;
+  constexpr int K_STEP = 64;
+  constexpr int K_STEP4 = K_STEP * 4;  // Process 256 elements at once
+  constexpr int N_BATCH = 64;
+
+  const float base_scale = (ba->tensor_scale * bb->tensor_scale) / 4.0f;
+  const float* fp8_lut = fp8_lut::get_fp8_e4m3_lut();
+  const int total_k = ba->k;
+
+  alignas(16) int32_t block_sums1[4];
+  alignas(16) int32_t block_sums2[4];
+  alignas(16) int32_t block_sums3[4];
+  alignas(16) int32_t block_sums4[4];
+
+  for (int m_idx = 0; m_idx < m; m_idx++) {
+    const uint8_t* a_scale_base = ba->get_block_scale(m_idx, 0);
+
+    for (int n_idx = n_start; n_idx < n_end; n_idx += N_BATCH) {
+      const int n_batch = std::min(N_BATCH, n_end - n_idx);
+      alignas(64) float acc[N_BATCH] = {};
+
+      // Process 4 K_STEPs at once
+      int k_begin = 0;
+      for (; k_begin + K_STEP4 <= total_k; k_begin += K_STEP4) {
+        const uint8_t* a_ptr1 = ba->get_fp4_data(m_idx, k_begin);
+        const uint8_t* a_ptr2 = ba->get_fp4_data(m_idx, k_begin + K_STEP);
+        const uint8_t* a_ptr3 = ba->get_fp4_data(m_idx, k_begin + K_STEP * 2);
+        const uint8_t* a_ptr4 = ba->get_fp4_data(m_idx, k_begin + K_STEP * 3);
+        const int k_block_base = k_begin / BLOCK_SIZE;
+
+        // Precompute A scales for all 4 K_STEPs (16 blocks)
+        float a_s[16];
+        for (int i = 0; i < 16; i++) {
+          a_s[i] = fp8_lut[a_scale_base[k_block_base + i]] * base_scale;
+        }
+
+        for (int nb = 0; nb < n_batch; nb++) {
+          const uint8_t* b_ptr1 = bb->get_fp4_data(n_idx + nb, k_begin);
+          const uint8_t* b_ptr2 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP);
+          const uint8_t* b_ptr3 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP * 2);
+          const uint8_t* b_ptr4 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP * 3);
+          const uint8_t* b_scale_ptr = bb->get_block_scale(n_idx + nb, k_begin);
+
+          // Process all 4 K_STEPs
+          fused_mul_reduce_64(a_ptr1, b_ptr1, block_sums1);
+          fused_mul_reduce_64(a_ptr2, b_ptr2, block_sums2);
+          fused_mul_reduce_64(a_ptr3, b_ptr3, block_sums3);
+          fused_mul_reduce_64(a_ptr4, b_ptr4, block_sums4);
+
+          // Apply scales and accumulate for all
+          float sum = 0.0f;
+          sum += block_sums1[0] * a_s[0] * fp8_lut[b_scale_ptr[0]];
+          sum += block_sums1[1] * a_s[1] * fp8_lut[b_scale_ptr[1]];
+          sum += block_sums1[2] * a_s[2] * fp8_lut[b_scale_ptr[2]];
+          sum += block_sums1[3] * a_s[3] * fp8_lut[b_scale_ptr[3]];
+          sum += block_sums2[0] * a_s[4] * fp8_lut[b_scale_ptr[4]];
+          sum += block_sums2[1] * a_s[5] * fp8_lut[b_scale_ptr[5]];
+          sum += block_sums2[2] * a_s[6] * fp8_lut[b_scale_ptr[6]];
+          sum += block_sums2[3] * a_s[7] * fp8_lut[b_scale_ptr[7]];
+          sum += block_sums3[0] * a_s[8] * fp8_lut[b_scale_ptr[8]];
+          sum += block_sums3[1] * a_s[9] * fp8_lut[b_scale_ptr[9]];
+          sum += block_sums3[2] * a_s[10] * fp8_lut[b_scale_ptr[10]];
+          sum += block_sums3[3] * a_s[11] * fp8_lut[b_scale_ptr[11]];
+          sum += block_sums4[0] * a_s[12] * fp8_lut[b_scale_ptr[12]];
+          sum += block_sums4[1] * a_s[13] * fp8_lut[b_scale_ptr[13]];
+          sum += block_sums4[2] * a_s[14] * fp8_lut[b_scale_ptr[14]];
+          sum += block_sums4[3] * a_s[15] * fp8_lut[b_scale_ptr[15]];
+          acc[nb] += sum;
+        }
+      }
+
+      // Handle remaining K_STEPs
+      for (; k_begin < total_k; k_begin += K_STEP) {
+        const uint8_t* a_ptr = ba->get_fp4_data(m_idx, k_begin);
+        const int k_block_base = k_begin / BLOCK_SIZE;
+        float a_s0 = fp8_lut[a_scale_base[k_block_base]] * base_scale;
+        float a_s1 = fp8_lut[a_scale_base[k_block_base + 1]] * base_scale;
+        float a_s2 = fp8_lut[a_scale_base[k_block_base + 2]] * base_scale;
+        float a_s3 = fp8_lut[a_scale_base[k_block_base + 3]] * base_scale;
+
+        for (int nb = 0; nb < n_batch; nb++) {
+          const uint8_t* b_ptr = bb->get_fp4_data(n_idx + nb, k_begin);
+          const uint8_t* b_scale_ptr = bb->get_block_scale(n_idx + nb, k_begin);
+          fused_mul_reduce_64(a_ptr, b_ptr, block_sums1);
+          acc[nb] += block_sums1[0] * a_s0 * fp8_lut[b_scale_ptr[0]];
+          acc[nb] += block_sums1[1] * a_s1 * fp8_lut[b_scale_ptr[1]];
+          acc[nb] += block_sums1[2] * a_s2 * fp8_lut[b_scale_ptr[2]];
+          acc[nb] += block_sums1[3] * a_s3 * fp8_lut[b_scale_ptr[3]];
+        }
+      }
+
+      for (int nb = 0; nb < n_batch; nb++) {
+        bc->c_fp32[m_idx * n + n_idx + nb] = acc[nb];
+      }
+    }
+  }
+}
+
+// ============================================================================
 // Aggressively Optimized Version: Precompute scales + FMA accumulation
 // ============================================================================
 
@@ -909,6 +1199,302 @@ inline void nvfp4_matmul_opt3(int m, int n, int k, std::shared_ptr<BufferANVFP4I
       }
     }
   }
+}
+
+// ============================================================================
+// MoE (Mixture of Experts) NVFP4 Implementation
+// ============================================================================
+
+/**
+ * MoE Expert Weight Buffer
+ * Stores multiple experts' weights in NVFP4 format
+ */
+template <typename K>
+struct MoEBufferBNVFP4Impl {
+  std::vector<std::shared_ptr<BufferBNVFP4Impl<K>>> experts;
+  int num_experts;
+  int n;  // output dim per expert
+  int k;  // input dim
+
+  MoEBufferBNVFP4Impl(int num_experts, int n, int k) : num_experts(num_experts), n(n), k(k) {
+    experts.resize(num_experts);
+  }
+
+  void set_expert(int expert_idx, std::shared_ptr<BufferBNVFP4Impl<K>> expert_buffer) {
+    assert(expert_idx >= 0 && expert_idx < num_experts);
+    experts[expert_idx] = expert_buffer;
+  }
+
+  BufferBNVFP4Impl<K>* get_expert(int expert_idx) { return experts[expert_idx].get(); }
+};
+
+/**
+ * MoE forward pass with NVFP4 quantized experts
+ *
+ * Algorithm:
+ * 1. For each token, use gate_weights to select top-K experts
+ * 2. Compute expert outputs: out[token] = sum(gate_weight[i] * expert[i](input[token]))
+ *
+ * @param num_tokens: number of input tokens (M dimension)
+ * @param hidden_dim: input hidden dimension (K dimension)
+ * @param expert_dim: output dimension per expert (N dimension)
+ * @param num_experts: total number of experts
+ * @param top_k: number of experts to select per token
+ * @param input: input activation buffer [num_tokens × hidden_dim]
+ * @param experts: MoE expert weight buffer
+ * @param gate_logits: gate scores [num_tokens × num_experts] (pre-softmax)
+ * @param output: output buffer [num_tokens × expert_dim]
+ */
+inline void nvfp4_moe_forward(int num_tokens, int hidden_dim, int expert_dim, int num_experts, int top_k,
+                              std::shared_ptr<BufferANVFP4Impl<GemmKernelNVFP4>> input,
+                              MoEBufferBNVFP4Impl<GemmKernelNVFP4>& experts, const float* gate_logits, float* output,
+                              int ith, int nth) {
+  // Thread-local workspace
+  std::vector<float> expert_output(expert_dim);
+  std::vector<std::pair<float, int>> gate_scores(num_experts);
+
+  // Allocate temporary output buffer for single expert
+  size_t bc_size = BufferCNVFP4Impl<GemmKernelNVFP4>::required_size(1, expert_dim);
+  void* bc_buffer = std::aligned_alloc(64, bc_size);
+  auto bc = std::make_shared<BufferCNVFP4Impl<GemmKernelNVFP4>>(1, expert_dim, bc_buffer);
+
+  // Process tokens assigned to this thread
+  int tokens_per_thread = (num_tokens + nth - 1) / nth;
+  int token_start = ith * tokens_per_thread;
+  int token_end = std::min(token_start + tokens_per_thread, num_tokens);
+
+  for (int token = token_start; token < token_end; token++) {
+    // Step 1: Compute softmax gate weights and select top-K experts
+    const float* token_gate = gate_logits + token * num_experts;
+
+    // Find max for numerical stability
+    float max_logit = token_gate[0];
+    for (int e = 1; e < num_experts; e++) {
+      max_logit = std::max(max_logit, token_gate[e]);
+    }
+
+    // Compute softmax
+    float sum_exp = 0.0f;
+    for (int e = 0; e < num_experts; e++) {
+      float exp_val = std::exp(token_gate[e] - max_logit);
+      gate_scores[e] = {exp_val, e};
+      sum_exp += exp_val;
+    }
+
+    // Normalize and sort to get top-K
+    for (int e = 0; e < num_experts; e++) {
+      gate_scores[e].first /= sum_exp;
+    }
+
+    // Partial sort to get top-K
+    std::partial_sort(gate_scores.begin(), gate_scores.begin() + top_k, gate_scores.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    // Renormalize top-K weights
+    float top_k_sum = 0.0f;
+    for (int i = 0; i < top_k; i++) {
+      top_k_sum += gate_scores[i].first;
+    }
+    for (int i = 0; i < top_k; i++) {
+      gate_scores[i].first /= top_k_sum;
+    }
+
+    // Step 2: Clear output for this token
+    float* token_output = output + token * expert_dim;
+    std::memset(token_output, 0, expert_dim * sizeof(float));
+
+    // Step 3: Compute weighted sum of expert outputs
+    for (int i = 0; i < top_k; i++) {
+      float weight = gate_scores[i].first;
+      int expert_idx = gate_scores[i].second;
+
+      auto expert = experts.get_expert(expert_idx);
+      if (!expert) continue;
+
+      // Create a view of input for this token
+      // Note: This requires input to support per-row access
+      bc->clear(1);
+
+      // Run matmul for this expert
+      nvfp4_matmul_opt4(1, expert_dim, hidden_dim, input, experts.experts[expert_idx], bc, 0, 1);
+
+      // Weighted accumulate to output
+      for (int j = 0; j < expert_dim; j++) {
+        token_output[j] += weight * bc->c_fp32[j];
+      }
+    }
+  }
+
+  std::free(bc_buffer);
+}
+
+/**
+ * Optimized MoE forward for batch processing
+ * Groups tokens by selected experts for better cache efficiency
+ */
+inline void nvfp4_moe_forward_grouped(int num_tokens, int hidden_dim, int expert_dim, int num_experts, int top_k,
+                                      std::shared_ptr<BufferANVFP4Impl<GemmKernelNVFP4>> input,
+                                      MoEBufferBNVFP4Impl<GemmKernelNVFP4>& experts, const float* gate_logits,
+                                      float* output, int ith, int nth) {
+  // Step 1: Compute gate assignments for all tokens
+  struct TokenAssignment {
+    int token_idx;
+    float weight;
+  };
+
+  std::vector<std::vector<TokenAssignment>> expert_assignments(num_experts);
+  std::vector<std::pair<float, int>> gate_scores(num_experts);
+
+  for (int token = 0; token < num_tokens; token++) {
+    const float* token_gate = gate_logits + token * num_experts;
+
+    // Softmax
+    float max_logit = token_gate[0];
+    for (int e = 1; e < num_experts; e++) {
+      max_logit = std::max(max_logit, token_gate[e]);
+    }
+
+    float sum_exp = 0.0f;
+    for (int e = 0; e < num_experts; e++) {
+      float exp_val = std::exp(token_gate[e] - max_logit);
+      gate_scores[e] = {exp_val, e};
+      sum_exp += exp_val;
+    }
+
+    for (int e = 0; e < num_experts; e++) {
+      gate_scores[e].first /= sum_exp;
+    }
+
+    std::partial_sort(gate_scores.begin(), gate_scores.begin() + top_k, gate_scores.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    float top_k_sum = 0.0f;
+    for (int i = 0; i < top_k; i++) {
+      top_k_sum += gate_scores[i].first;
+    }
+
+    for (int i = 0; i < top_k; i++) {
+      float weight = gate_scores[i].first / top_k_sum;
+      int expert_idx = gate_scores[i].second;
+      expert_assignments[expert_idx].push_back({token, weight});
+    }
+  }
+
+  // Clear output
+  std::memset(output, 0, num_tokens * expert_dim * sizeof(float));
+
+  // Step 2: Process experts in parallel
+  // Each thread processes a subset of experts
+  int experts_per_thread = (num_experts + nth - 1) / nth;
+  int expert_start = ith * experts_per_thread;
+  int expert_end = std::min(expert_start + experts_per_thread, num_experts);
+
+  // Allocate workspace
+  size_t bc_size = BufferCNVFP4Impl<GemmKernelNVFP4>::required_size(1, expert_dim);
+  void* bc_buffer = std::aligned_alloc(64, bc_size);
+  auto bc = std::make_shared<BufferCNVFP4Impl<GemmKernelNVFP4>>(1, expert_dim, bc_buffer);
+
+  for (int expert_idx = expert_start; expert_idx < expert_end; expert_idx++) {
+    auto& assignments = expert_assignments[expert_idx];
+    if (assignments.empty()) continue;
+
+    auto expert = experts.get_expert(expert_idx);
+    if (!expert) continue;
+
+    // Process all tokens assigned to this expert
+    for (const auto& assign : assignments) {
+      int token = assign.token_idx;
+      float weight = assign.weight;
+
+      bc->clear(1);
+
+      // Run matmul
+      // Note: input should be set up to access token's row
+      nvfp4_matmul_opt4(1, expert_dim, hidden_dim, input, experts.experts[expert_idx], bc, 0, 1);
+
+      // Accumulate to output (needs atomic or per-thread accumulation for thread safety)
+      float* token_output = output + token * expert_dim;
+      for (int j = 0; j < expert_dim; j++) {
+#pragma omp atomic
+        token_output[j] += weight * bc->c_fp32[j];
+      }
+    }
+  }
+
+  std::free(bc_buffer);
+}
+
+/**
+ * Single-token MoE inference (optimized for autoregressive decoding)
+ *
+ * @param hidden_dim: input dimension (K)
+ * @param expert_dim: output dimension per expert (N)
+ * @param num_experts: total experts
+ * @param top_k: experts to select
+ * @param input: single token input [1 × hidden_dim]
+ * @param experts: expert weights
+ * @param gate_logits: gate scores for this token [num_experts]
+ * @param output: output [expert_dim]
+ */
+inline void nvfp4_moe_single_token(int hidden_dim, int expert_dim, int num_experts, int top_k,
+                                   std::shared_ptr<BufferANVFP4Impl<GemmKernelNVFP4>> input,
+                                   MoEBufferBNVFP4Impl<GemmKernelNVFP4>& experts, const float* gate_logits,
+                                   float* output) {
+  // Compute softmax gate weights
+  std::vector<std::pair<float, int>> gate_scores(num_experts);
+
+  float max_logit = gate_logits[0];
+  for (int e = 1; e < num_experts; e++) {
+    max_logit = std::max(max_logit, gate_logits[e]);
+  }
+
+  float sum_exp = 0.0f;
+  for (int e = 0; e < num_experts; e++) {
+    float exp_val = std::exp(gate_logits[e] - max_logit);
+    gate_scores[e] = {exp_val, e};
+    sum_exp += exp_val;
+  }
+
+  for (int e = 0; e < num_experts; e++) {
+    gate_scores[e].first /= sum_exp;
+  }
+
+  // Get top-K
+  std::partial_sort(gate_scores.begin(), gate_scores.begin() + top_k, gate_scores.end(),
+                    [](const auto& a, const auto& b) { return a.first > b.first; });
+
+  // Renormalize
+  float top_k_sum = 0.0f;
+  for (int i = 0; i < top_k; i++) {
+    top_k_sum += gate_scores[i].first;
+  }
+
+  // Clear output
+  std::memset(output, 0, expert_dim * sizeof(float));
+
+  // Allocate workspace
+  size_t bc_size = BufferCNVFP4Impl<GemmKernelNVFP4>::required_size(1, expert_dim);
+  void* bc_buffer = std::aligned_alloc(64, bc_size);
+  auto bc = std::make_shared<BufferCNVFP4Impl<GemmKernelNVFP4>>(1, expert_dim, bc_buffer);
+
+  // Compute each selected expert
+  for (int i = 0; i < top_k; i++) {
+    float weight = gate_scores[i].first / top_k_sum;
+    int expert_idx = gate_scores[i].second;
+
+    auto expert = experts.get_expert(expert_idx);
+    if (!expert) continue;
+
+    bc->clear(1);
+    nvfp4_matmul_opt4(1, expert_dim, hidden_dim, input, experts.experts[expert_idx], bc, 0, 1);
+
+    // Weighted accumulate
+    for (int j = 0; j < expert_dim; j++) {
+      output[j] += weight * bc->c_fp32[j];
+    }
+  }
+
+  std::free(bc_buffer);
 }
 
 }  // namespace nvfp4

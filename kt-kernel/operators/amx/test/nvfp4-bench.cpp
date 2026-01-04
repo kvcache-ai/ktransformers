@@ -71,7 +71,7 @@ void bench_lut_mul_64pairs(int iters) {
 // Benchmark full matrix multiplication (with version selection)
 void bench_matmul(const BenchConfig& cfg, int version = 0) {
   const char* version_names[] = {"nvfp4_matmul (baseline)", "nvfp4_matmul_opt", "nvfp4_matmul_opt2 (N-batch)",
-                                 "nvfp4_matmul_opt3 (aggressive)"};
+                                 "nvfp4_matmul_opt3 (aggressive)", "nvfp4_matmul_opt4 (fused)"};
   std::cout << "\n=== Benchmark: " << version_names[version] << " ===" << std::endl;
   printf("  Matrix sizes: M=%d, N=%d, K=%d\n", cfg.m, cfg.n, cfg.k);
 
@@ -158,6 +158,9 @@ void bench_matmul(const BenchConfig& cfg, int version = 0) {
         break;
       case 3:
         nvfp4::nvfp4_matmul_opt3(cfg.m, cfg.n, cfg.k, ba, bb, bc, 0, 1);
+        break;
+      case 4:
+        nvfp4::nvfp4_matmul_opt4(cfg.m, cfg.n, cfg.k, ba, bb, bc, 0, 1);
         break;
     }
   };
@@ -293,6 +296,8 @@ int main(int argc, char** argv) {
       version = 2;
     } else if (strcmp(argv[i], "--opt3") == 0) {
       version = 3;
+    } else if (strcmp(argv[i], "--opt4") == 0) {
+      version = 4;
     } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
       cfg.m = atoi(argv[++i]);
     } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
@@ -312,6 +317,8 @@ int main(int argc, char** argv) {
       printf("  --lut         Benchmark LUT multiplication only\n");
       printf("  --opt         Use optimized version 1\n");
       printf("  --opt2        Use optimized version 2 (N-batch)\n");
+      printf("  --opt3        Use optimized version 3 (aggressive)\n");
+      printf("  --opt4        Use optimized version 4 (fused)\n");
       printf("  --compare     Compare all versions\n");
       printf("  --help        Show this help\n");
       return 0;
@@ -329,6 +336,7 @@ int main(int argc, char** argv) {
     bench_matmul(cfg, 1);  // opt
     bench_matmul(cfg, 2);  // opt2
     bench_matmul(cfg, 3);  // opt3
+    bench_matmul(cfg, 4);  // opt4 (fused)
   } else if (run_sweep) {
     bench_sweep();
   } else if (!run_lut) {
