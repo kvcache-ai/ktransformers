@@ -28,9 +28,9 @@ num_experts_per_tok = 8
 fp8_group_size = 128
 max_len = 25600
 
-layer_num = 2
+layer_num = 5
 qlen = 1
-warm_up_iter = 100
+warm_up_iter = 1000
 test_iter = 10000
 CPUINFER_PARAM = 64
 

@@ -31,11 +31,9 @@ k_group_size = 32
 
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
-worker_config = kt_kernel_ext.WorkerPoolConfig()
-worker_config.subpool_count = 2
-worker_config.subpool_numa_map = [0, 1]
-worker_config.subpool_thread_count = [40, 40]
-CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
+CPUINFER_PARAM = 64
+
+CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
 
 def get_git_commit():
