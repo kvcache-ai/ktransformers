@@ -31,3 +31,4 @@ tzdata==2025.2
 xxhash==3.5.0
 yarl==1.20.0
 torchviz
+trl==0.9.6

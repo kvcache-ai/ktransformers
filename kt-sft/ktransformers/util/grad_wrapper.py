@@ -16,7 +16,7 @@ def maybe_no_grad(_func=None):
         # print(f"decorate_sit: {GLOBAL_CONFIG._config['mod']}")
         def wrapper(*args, **kwargs):
             # print(f"wrap_sit: {GLOBAL_CONFIG._config['mod']}")
-            if GLOBAL_CONFIG._config["mod"] == "sft":
+            if GLOBAL_CONFIG._config["mod"] == "train":
                 return func(*args, **kwargs)
             elif GLOBAL_CONFIG._config["mod"] == "infer":
                 with torch.no_grad():
