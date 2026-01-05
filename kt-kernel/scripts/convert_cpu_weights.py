@@ -864,15 +864,16 @@ class OnlineQuantConverter(ConverterBase):
         }
         amx_method = quant_to_amx_map.get(self.quant_method, "AMXINT4")
 
-        # Create AMXMoEWrapper instance for this layer
-        # num_gpu_experts=0 since we're converting all experts to CPU format
+        # Create KTMoEWrapper instance for this layer
+        # gpu_experts_mask: all False means all experts are on CPU for conversion
+        gpu_experts_mask = torch.zeros(self.num_experts, dtype=torch.bool)
         wrapper = KTMoEWrapper(
             layer_idx=layer_idx,
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             hidden_size=self.hidden_size,
             moe_intermediate_size=self.moe_intermediate_size,
-            num_gpu_experts=0,  # All experts on CPU for conversion
+            gpu_experts_mask=gpu_experts_mask,  # All experts on CPU for conversion
             cpuinfer_threads=self.cpuinfer_threads,
             threadpool_count=self.threadpool_count,
             weight_path=self.output_path,  # Output path for quantized weights
