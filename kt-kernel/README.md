@@ -32,6 +32,10 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - ✅ **Kimi-K2 Native INT4 (RAWINT4)**: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)
 - ✅ **FP8 weights (e.g., MiniMax-M2.1)**: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md)
 
+**KT-CLI**
+
+We are developing a simpler way to use KTransformers. Check out the [KT-CLI Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md) for more details.
+
 ## Features
 
 - **CPU-Optimized MoE Kernels**: High-throughput MoE expert kernels optimized for instruction sets.
@@ -43,67 +47,107 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 ### Option 1: Install from PyPI (Recommended for Most Users)
 
-Install the latest stable version:
+Install the latest version with a single command:
 
 ```bash
 pip install kt-kernel
-```
-
-Or install a specific version:
-
-```bash
-pip install kt-kernel==0.4.3
 ```
 
 > **Note**: Check the [latest version on PyPI](https://pypi.org/project/kt-kernel/#history)
 
 **Features:**
 - ✅ **Automatic CPU detection**: Detects your CPU and loads the optimal kernel variant
-- ✅ **Multi-variant wheel**: Includes AMX, AVX512, and AVX2 variants in a single package
+- ✅ **CPU multi-variant support**: Includes AMX, AVX512 (Base/VNNI/VBMI/BF16), and AVX2 variants
+- ✅ **CUDA support included**: GPU acceleration for NVIDIA GPUs (SM 80, 86, 89, 90)
 - ✅ **No compilation needed**: Pre-built wheels for Python 3.10, 3.11, 3.12
-- ✅ **Universal compatibility**: Works on any x86-64 Linux system (2013+)
+- ✅ **Static CUDA runtime**: No CUDA toolkit installation required
+- ✅ **Works on CPU-only systems**: CUDA features automatically disabled when GPU not available
 
 **Requirements:**
 - Python 3.10, 3.11, or 3.12
 - Linux x86-64 (manylinux_2_17 compatible)
 - CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)
+- Optional: NVIDIA GPU with compute capability 8.0+ for CUDA features
+
+<<<<<<< HEAD
+**GPU Compatibility (Optional):**
+=======
+#### CUDA Installation (GPU Acceleration)
+
+For NVIDIA GPU-accelerated inference:
+
+```bash
+pip install kt-kernel-cuda
+```
+
+**Features:**
+- ✅ **Multi-architecture support**: Single wheel supports SM 80/86/89/90 (Ampere, Ada, Hopper)
+- ✅ **Static CUDA runtime**: No CUDA toolkit installation required
+- ✅ **Broad compatibility**: Works with CUDA 11.8+ and 12.x drivers
+- ✅ **PyTorch compatible**: Works with any PyTorch CUDA variant (cu118, cu121, cu124)
+
+**Requirements:**
+- Python 3.10, 3.11, or 3.12
+- Linux x86-64 (manylinux_2_17 compatible)
+- NVIDIA GPU with compute capability 8.0+ (Ampere or newer)
+  - ✅ Supported: A100, RTX 3000/4000 series, H100
+  - ❌ Not supported: V100, P100, GTX 1000/2000 series (too old)
+- NVIDIA driver with CUDA 11.8+ or 12.x support (no CUDA toolkit needed)
+
+**GPU Compatibility Matrix:**
+>>>>>>> main
+
+| GPU Architecture | Compute Capability | Supported | Example GPUs |
+|-----------------|-------------------|-----------|-------------|
+| Hopper | 9.0 | ✅ | H100, H200 |
+| Ada Lovelace | 8.9 | ✅ | RTX 4090, 4080, 4070 |
+| Ampere | 8.6 | ✅ | RTX 3090, 3080, 3070, 3060 |
+| Ampere | 8.0 | ✅ | A100, A30 |
+| Turing | 7.5 | ❌ | RTX 2080, T4 |
+| Volta | 7.0 | ❌ | V100 |
+
+**CUDA Driver Compatibility (for GPU features):**
+- CUDA 11.8, 11.9, 12.0-12.6+: Full support
+- CUDA 11.0-11.7: Not supported (upgrade driver or use CPU-only)
 
 **CPU Variants Included:**
 
-The wheel includes 3 optimized variants that are **automatically selected at runtime** based on your CPU:
+The wheel includes 6 optimized variants that are **automatically selected at runtime** based on your CPU:
 
 | Variant | CPU Support | Performance | Auto-Selected When |
 |---------|-------------|-------------|-------------------|
 | **AMX** | Intel Sapphire Rapids+ (2023+) | ⚡⚡⚡ Best | AMX instructions detected |
-| **AVX512** | Intel Skylake-X/Ice Lake/Cascade Lake (2017+) | ⚡⚡ Great | AVX512 instructions detected |
-| **AVX2** | Intel Haswell+ (2013+), AMD Zen+ | ⚡ Good | Fallback for maximum compatibility |
+| **AVX512+BF16** | Ice Lake server, Zen 4+ (2021+) | ⚡⚡⚡ Excellent | AVX512 + BF16 detected |
+| **AVX512+VBMI** | Ice Lake client (2019+) | ⚡⚡ Great | AVX512 + VBMI detected |
+| **AVX512+VNNI** | Cascade Lake+ (2019+) | ⚡⚡ Great | AVX512 + VNNI detected |
+| **AVX512 Base** | Skylake-X+ (2017+) | ⚡⚡ Good | AVX512 base detected |
+| **AVX2** | Haswell+ (2013+), AMD Zen+ | ⚡ Good | Fallback for maximum compatibility |
 
 **Verify installation:**
 ```python
 import kt_kernel
 
 # Check which CPU variant was loaded
-print(f"CPU variant: {kt_kernel.__cpu_variant__}")  # 'amx', 'avx512', or 'avx2'
+print(f"CPU variant: {kt_kernel.__cpu_variant__}")
 print(f"Version: {kt_kernel.__version__}")
 
-# Test import
-from kt_kernel import KTMoEWrapper
+# Check CUDA support
+from kt_kernel import kt_kernel_ext
+cpu_infer = kt_kernel_ext.CPUInfer(4)
+has_cuda = hasattr(cpu_infer, 'submit_with_cuda_stream')
+print(f"CUDA support: {has_cuda}")
+
 print("✓ kt-kernel installed successfully!")
 ```
 
 **Environment Variables:**
 ```bash
 # Override automatic CPU detection (for testing or debugging)
-export KT_KERNEL_CPU_VARIANT=avx2  # Force AVX2 variant (options: 'avx2', 'avx512', 'amx')
+export KT_KERNEL_CPU_VARIANT=avx2  # Force specific variant
 
 # Enable debug output to see detection process
 export KT_KERNEL_DEBUG=1
 python -c "import kt_kernel"
-# Output:
-# [kt-kernel] Detected AMX support via /proc/cpuinfo
-# [kt-kernel] Selected CPU variant: amx
-# [kt-kernel] Loading amx from: /path/to/_kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
-# [kt-kernel] Successfully loaded AMX variant
 ```
 
 ---

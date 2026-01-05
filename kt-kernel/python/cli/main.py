@@ -68,7 +68,8 @@ def _update_help_texts() -> None:
 
 # Register commands
 app.command(name="version", help="Show version information")(version.version)
-app.command(name="run", help="Start model inference server")(run.run)
+# Run command is handled specially in main() to allow extra args
+# (not registered here to avoid typer's argument parsing)
 app.command(name="chat", help="Interactive chat with running model")(chat.chat)
 app.command(name="quant", help="Quantize model weights")(quant.quant)
 app.command(name="bench", help="Run full benchmark")(bench.bench)
@@ -428,6 +429,15 @@ def main():
     # Check first run before running commands
     if should_check_first_run and args:
         check_first_run()
+
+    # Handle "run" command specially to pass through unknown options
+    if args and args[0] == "run":
+        # Get args after "run"
+        run_args = args[1:]
+        # Use click command directly with ignore_unknown_options
+        from kt_kernel.cli.commands import run as run_module
+
+        sys.exit(run_module.run.main(args=run_args, standalone_mode=False))
 
     app()
 
