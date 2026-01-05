@@ -55,6 +55,8 @@ num_threads = 60  # Number of CPU threads for inference
 # Precision thresholds
 BF16_FORWARD_THRESHOLD = 0.05  # Maximum relative error for BF16 forward
 BF16_BACKWARD_THRESHOLD = 0.10  # Maximum relative error for BF16 backward
+INT4_FORWARD_THRESHOLD = 0.35  # Maximum relative error for INT4 forward (same as inference)
+INT4_BACKWARD_THRESHOLD = 0.40  # Maximum relative error for INT4 backward
 
 
 # =============================================================================
@@ -66,7 +68,7 @@ def get_moe_sft_class(quant_mode: str):
     """根据量化模式返回对应的 MOE SFT 类。
 
     Args:
-        quant_mode: 量化模式，支持 "bf16" 或 "int8"
+        quant_mode: 量化模式，支持 "bf16", "int8", "int4", "int4_1"
 
     Returns:
         对应的 MOE SFT 类
@@ -78,8 +80,12 @@ def get_moe_sft_class(quant_mode: str):
         return kt_kernel_ext.moe.AMXBF16_SFT_MOE
     elif quant_mode == "int8":
         return kt_kernel_ext.moe.AMXInt8_SFT_MOE
+    elif quant_mode == "int4":
+        return kt_kernel_ext.moe.AMXInt4_SFT_MOE
+    elif quant_mode == "int4_1":
+        return kt_kernel_ext.moe.AMXInt4_1_SFT_MOE
     else:
-        raise ValueError(f"Unsupported quant_mode: {quant_mode}. Supported: bf16, int8")
+        raise ValueError(f"Unsupported quant_mode: {quant_mode}. Supported: bf16, int8, int4, int4_1")
 
 
 def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
@@ -92,7 +98,12 @@ def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
     Returns:
         精度阈值
     """
-    # BF16 和 INT8 使用相同阈值（与推理测试一致）
+    # INT4 使用更高的阈值（与推理测试一致）
+    if quant_mode in ("int4", "int4_1"):
+        if is_backward:
+            return INT4_BACKWARD_THRESHOLD  # 0.40
+        return INT4_FORWARD_THRESHOLD  # 0.35
+    # BF16 和 INT8 使用相同阈值
     if is_backward:
         return BF16_BACKWARD_THRESHOLD  # 0.10
     return BF16_FORWARD_THRESHOLD  # 0.05
@@ -1446,7 +1457,7 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    quant_modes = ["bf16", "int8"]
+    quant_modes = ["bf16", "int8", "int4", "int4_1"]
 
     try:
         for quant_mode in quant_modes:
