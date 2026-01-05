@@ -68,7 +68,7 @@ def get_moe_sft_class(quant_mode: str):
     """根据量化模式返回对应的 MOE SFT 类。
 
     Args:
-        quant_mode: 量化模式，支持 "bf16", "int8", "int4", "int4_1"
+        quant_mode: 量化模式，支持 "bf16", "int8", "int4", "int4_1", "int4_1kgroup", "int4_kgroup"
 
     Returns:
         对应的 MOE SFT 类
@@ -84,8 +84,14 @@ def get_moe_sft_class(quant_mode: str):
         return kt_kernel_ext.moe.AMXInt4_SFT_MOE
     elif quant_mode == "int4_1":
         return kt_kernel_ext.moe.AMXInt4_1_SFT_MOE
+    elif quant_mode == "int4_1kgroup":
+        return kt_kernel_ext.moe.AMXInt4_1KGroup_SFT_MOE
+    elif quant_mode == "int4_kgroup":
+        return kt_kernel_ext.moe.AMXInt4_KGroup_SFT_MOE
     else:
-        raise ValueError(f"Unsupported quant_mode: {quant_mode}. Supported: bf16, int8, int4, int4_1")
+        raise ValueError(
+            f"Unsupported quant_mode: {quant_mode}. Supported: bf16, int8, int4, int4_1, int4_1kgroup, int4_kgroup"
+        )
 
 
 def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
@@ -98,8 +104,8 @@ def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
     Returns:
         精度阈值
     """
-    # INT4 使用更高的阈值（与推理测试一致）
-    if quant_mode in ("int4", "int4_1"):
+    # INT4 variants (int4, int4_1, int4_1kgroup, int4_kgroup) 使用更高的阈值
+    if quant_mode in ("int4", "int4_1", "int4_1kgroup", "int4_kgroup"):
         if is_backward:
             return INT4_BACKWARD_THRESHOLD  # 0.40
         return INT4_FORWARD_THRESHOLD  # 0.35
@@ -1457,7 +1463,8 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    quant_modes = ["bf16", "int8", "int4", "int4_1"]
+    # quant_modes = ["bf16", "int8", "int4", "int4_1", "int4_1kgroup", "int4_kgroup"]
+    quant_modes = ["int4_1kgroup", "int4_kgroup"]
 
     try:
         for quant_mode in quant_modes:

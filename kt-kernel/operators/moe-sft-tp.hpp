@@ -14,7 +14,7 @@
 #include "moe-tp.hpp"
 
 // Forward declaration
-template <class T>
+template <class T, template <class> class BaseMOE>
 class AMX_SFT_MOE_TP;
 
 /**

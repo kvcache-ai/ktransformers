@@ -26,6 +26,7 @@
  */
 template <class T = amx::GemmKernel224Int4SmallKGroup>
 class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
+ protected:
   using Base = AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>>;
   using Base::config_;
   using Base::down_ba_;

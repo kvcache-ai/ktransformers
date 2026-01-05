@@ -49,11 +49,12 @@ struct ForwardCache {
  * - Backward pass implementation
  *
  * @tparam T The GEMM kernel type (e.g., GemmKernel224BF, GemmKernel224Int8)
+ * @tparam BaseMOE The base MOE class template (default: AMX_MOE_TP, can be AMX_AWQ_MOE_TP or AMX_K2_MOE_TP)
  */
-template <class T>
-class AMX_SFT_MOE_TP : public AMX_MOE_TP<T> {
+template <class T, template <class> class BaseMOE = AMX_MOE_TP>
+class AMX_SFT_MOE_TP : public BaseMOE<T> {
  protected:
-  using Base = AMX_MOE_TP<T>;
+  using Base = BaseMOE<T>;
   using Base::config_;
   using Base::down_ba_;
   using Base::down_bb_;
