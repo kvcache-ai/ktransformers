@@ -1077,6 +1077,119 @@ inline void nvfp4_matmul_opt4(int m, int n, int k, std::shared_ptr<BufferANVFP4I
 }
 
 // ============================================================================
+// Vectorized Scale Application (opt5) - SIMD gather + reduce
+// ============================================================================
+
+/**
+ * Optimized matmul with vectorized scale application
+ * Key optimizations:
+ * - Use _mm512_i32gather_ps to batch load 16 B scales from fp8_lut
+ * - Store all 16 block sums in contiguous array for SIMD processing
+ * - Use _mm512_reduce_add_ps for horizontal sum
+ * - Eliminates 16 scalar fp8_lut lookups per iteration
+ */
+inline void nvfp4_matmul_opt5(int m, int n, int k, std::shared_ptr<BufferANVFP4Impl<GemmKernelNVFP4>> ba,
+                              std::shared_ptr<BufferBNVFP4Impl<GemmKernelNVFP4>> bb,
+                              std::shared_ptr<BufferCNVFP4Impl<GemmKernelNVFP4>> bc, int ith, int nth) {
+  auto [n_start, n_end] = GemmKernelNVFP4::split_range_n(n, ith, nth);
+
+  constexpr int BLOCK_SIZE = 16;
+  constexpr int K_STEP = 64;
+  constexpr int K_STEP4 = K_STEP * 4;  // Process 256 elements at once
+  constexpr int N_BATCH = 64;
+
+  const float base_scale = (ba->tensor_scale * bb->tensor_scale) / 4.0f;
+  const float* fp8_lut = fp8_lut::get_fp8_e4m3_lut();
+  const int total_k = ba->k;
+
+  // Combined block sums for all 4 K_STEPs (16 blocks total)
+  alignas(64) int32_t block_sums_all[16];
+
+  for (int m_idx = 0; m_idx < m; m_idx++) {
+    const uint8_t* a_scale_base = ba->get_block_scale(m_idx, 0);
+
+    for (int n_idx = n_start; n_idx < n_end; n_idx += N_BATCH) {
+      const int n_batch = std::min(N_BATCH, n_end - n_idx);
+      alignas(64) float acc[N_BATCH] = {};
+
+      // Process 4 K_STEPs at once
+      int k_begin = 0;
+      for (; k_begin + K_STEP4 <= total_k; k_begin += K_STEP4) {
+        const uint8_t* a_ptr1 = ba->get_fp4_data(m_idx, k_begin);
+        const uint8_t* a_ptr2 = ba->get_fp4_data(m_idx, k_begin + K_STEP);
+        const uint8_t* a_ptr3 = ba->get_fp4_data(m_idx, k_begin + K_STEP * 2);
+        const uint8_t* a_ptr4 = ba->get_fp4_data(m_idx, k_begin + K_STEP * 3);
+        const int k_block_base = k_begin / BLOCK_SIZE;
+
+        // Precompute A scales for all 4 K_STEPs (16 blocks)
+        // Use SIMD gather to load A scales from fp8_lut
+        __m128i a_scale_bytes = _mm_loadu_si128((const __m128i*)(a_scale_base + k_block_base));
+        __m512i a_scale_indices = _mm512_cvtepu8_epi32(a_scale_bytes);
+        __m512 a_scales_raw = _mm512_i32gather_ps(a_scale_indices, fp8_lut, 4);
+        __m512 a_scales_vec = _mm512_mul_ps(a_scales_raw, _mm512_set1_ps(base_scale));
+
+        for (int nb = 0; nb < n_batch; nb++) {
+          const uint8_t* b_ptr1 = bb->get_fp4_data(n_idx + nb, k_begin);
+          const uint8_t* b_ptr2 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP);
+          const uint8_t* b_ptr3 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP * 2);
+          const uint8_t* b_ptr4 = bb->get_fp4_data(n_idx + nb, k_begin + K_STEP * 3);
+          const uint8_t* b_scale_ptr = bb->get_block_scale(n_idx + nb, k_begin);
+
+          // Process all 4 K_STEPs, storing results in contiguous array
+          fused_mul_reduce_64(a_ptr1, b_ptr1, block_sums_all);
+          fused_mul_reduce_64(a_ptr2, b_ptr2, block_sums_all + 4);
+          fused_mul_reduce_64(a_ptr3, b_ptr3, block_sums_all + 8);
+          fused_mul_reduce_64(a_ptr4, b_ptr4, block_sums_all + 12);
+
+          // === Vectorized scale application ===
+          // Load 16 B scale bytes and convert to int32 indices
+          __m128i b_scale_bytes = _mm_loadu_si128((const __m128i*)b_scale_ptr);
+          __m512i b_scale_indices = _mm512_cvtepu8_epi32(b_scale_bytes);
+
+          // Gather 16 floats from fp8_lut using indices
+          __m512 b_scales_vec = _mm512_i32gather_ps(b_scale_indices, fp8_lut, 4);
+
+          // Load 16 block sums and convert to float
+          __m512i block_sums_vec = _mm512_load_si512((const __m512i*)block_sums_all);
+          __m512 block_sums_float = _mm512_cvtepi32_ps(block_sums_vec);
+
+          // Multiply: block_sums * a_scales * b_scales
+          __m512 scaled = _mm512_mul_ps(block_sums_float, a_scales_vec);
+          scaled = _mm512_mul_ps(scaled, b_scales_vec);
+
+          // Horizontal sum using reduce_add
+          acc[nb] += _mm512_reduce_add_ps(scaled);
+        }
+      }
+
+      // Handle remaining K_STEPs (use scalar path for simplicity)
+      for (; k_begin < total_k; k_begin += K_STEP) {
+        const uint8_t* a_ptr = ba->get_fp4_data(m_idx, k_begin);
+        const int k_block_base = k_begin / BLOCK_SIZE;
+        float a_s0 = fp8_lut[a_scale_base[k_block_base]] * base_scale;
+        float a_s1 = fp8_lut[a_scale_base[k_block_base + 1]] * base_scale;
+        float a_s2 = fp8_lut[a_scale_base[k_block_base + 2]] * base_scale;
+        float a_s3 = fp8_lut[a_scale_base[k_block_base + 3]] * base_scale;
+
+        for (int nb = 0; nb < n_batch; nb++) {
+          const uint8_t* b_ptr = bb->get_fp4_data(n_idx + nb, k_begin);
+          const uint8_t* b_scale_ptr = bb->get_block_scale(n_idx + nb, k_begin);
+          fused_mul_reduce_64(a_ptr, b_ptr, block_sums_all);
+          acc[nb] += block_sums_all[0] * a_s0 * fp8_lut[b_scale_ptr[0]];
+          acc[nb] += block_sums_all[1] * a_s1 * fp8_lut[b_scale_ptr[1]];
+          acc[nb] += block_sums_all[2] * a_s2 * fp8_lut[b_scale_ptr[2]];
+          acc[nb] += block_sums_all[3] * a_s3 * fp8_lut[b_scale_ptr[3]];
+        }
+      }
+
+      for (int nb = 0; nb < n_batch; nb++) {
+        bc->c_fp32[m_idx * n + n_idx + nb] = acc[nb];
+      }
+    }
+  }
+}
+
+// ============================================================================
 // Aggressively Optimized Version: Precompute scales + FMA accumulation
 // ============================================================================
 

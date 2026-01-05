@@ -138,13 +138,15 @@ class AMX_NVFP4_MOE_TP : public AMX_MOE_BASE<T, AMX_NVFP4_MOE_TP<T>> {
     auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
-    nvfp4::nvfp4_matmul_opt4(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+    // Use opt5 with vectorized scale application (SIMD gather + reduce)
+    nvfp4::nvfp4_matmul_opt5(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
 
-    nvfp4::nvfp4_matmul_opt4(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx],
+    // Use opt5 with vectorized scale application (SIMD gather + reduce)
+    nvfp4::nvfp4_matmul_opt5(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx],
                              down_bb_[expert_idx], down_bc_[expert_idx], ith, nth);
   }
 
