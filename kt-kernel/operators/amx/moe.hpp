@@ -32,13 +32,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   using Base::up_bb_;
   using Base::up_bc_;
 
-  void* gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if
-                     // quantized)]
-  void* up_proj_;    // [expert_num * intermediate_size * hidden_size ( /32 if
-                     // quantized)]
-  void* down_proj_;  // [expert_num * hidden_size * intermediate_size ( /32 if
-                     // quantized)]
-
 #ifdef CHECK
   char verify_bb[100000000];
   char check_bb[100000000];
@@ -159,10 +152,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         throw std::runtime_error("Path not found: " + prefix.string());
       }
     }
-
-    gate_proj_ = config_.gate_proj;
-    up_proj_ = config_.up_proj;
-    down_proj_ = config_.down_proj;
   }
 
   ~AMX_MOE_TP() = default;
