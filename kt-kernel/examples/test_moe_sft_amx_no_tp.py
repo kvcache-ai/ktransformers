@@ -58,6 +58,47 @@ BF16_BACKWARD_THRESHOLD = 0.10  # Maximum relative error for BF16 backward
 
 
 # =============================================================================
+# Quantization Mode Utilities
+# =============================================================================
+
+
+def get_moe_sft_class(quant_mode: str):
+    """根据量化模式返回对应的 MOE SFT 类。
+
+    Args:
+        quant_mode: 量化模式，支持 "bf16" 或 "int8"
+
+    Returns:
+        对应的 MOE SFT 类
+    """
+    if not HAS_KT_KERNEL:
+        raise RuntimeError("kt_kernel_ext not available")
+
+    if quant_mode == "bf16":
+        return kt_kernel_ext.moe.AMXBF16_SFT_MOE
+    elif quant_mode == "int8":
+        return kt_kernel_ext.moe.AMXInt8_SFT_MOE
+    else:
+        raise ValueError(f"Unsupported quant_mode: {quant_mode}. Supported: bf16, int8")
+
+
+def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
+    """根据量化模式返回精度阈值（与推理测试保持一致）。
+
+    Args:
+        quant_mode: 量化模式
+        is_backward: 是否为 backward 阈值
+
+    Returns:
+        精度阈值
+    """
+    # BF16 和 INT8 使用相同阈值（与推理测试一致）
+    if is_backward:
+        return BF16_BACKWARD_THRESHOLD  # 0.10
+    return BF16_FORWARD_THRESHOLD  # 0.05
+
+
+# =============================================================================
 # Activation Functions
 # =============================================================================
 
@@ -545,15 +586,18 @@ def init_lora_weights(expert_num: int, hidden_size: int, intermediate_size: int,
 # =============================================================================
 
 
-def test_moe_sft_forward_no_tp():
+def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
     """
     Test MOE SFT forward pass accuracy with single NUMA node (no TP).
 
     Compares the AMX implementation against PyTorch reference.
     Uses WorkerPoolConfig to force single subpool.
+
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
     """
     print(f"\n{'='*60}")
-    print(f"Testing MOE SFT Forward Pass - BF16 mode (NO TP)")
+    print(f"Testing MOE SFT Forward Pass - {quant_mode.upper()} mode (NO TP)")
     print(f"{'='*60}")
 
     # Set random seed for reproducibility
@@ -606,8 +650,10 @@ def test_moe_sft_forward_no_tp():
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
 
-    # Create MOE SFT instance (BF16 mode)
-    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
+    # Create MOE SFT instance based on quant_mode
+    MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
+    moe = MOE_SFT_CLASS(config)
+    print(f"[INFO] Using {quant_mode.upper()} MOE SFT class: {MOE_SFT_CLASS.__name__}")
 
     # Load base weights
     CPUInfer.submit(moe.load_weights_task())
@@ -616,6 +662,9 @@ def test_moe_sft_forward_no_tp():
     # Warm up
     CPUInfer.submit(moe.warm_up_task())
     CPUInfer.sync()
+
+    # Get threshold for this quant_mode
+    threshold = get_threshold(quant_mode)
 
     # Run validation iterations
     for iter_idx in range(validation_iter):
@@ -674,7 +723,6 @@ def test_moe_sft_forward_no_tp():
         diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
         print(f"Relative difference: {diff:.6f}")
 
-        threshold = BF16_FORWARD_THRESHOLD
         if diff < threshold:
             print(f"PASSED (threshold: {threshold})")
         else:
@@ -683,22 +731,25 @@ def test_moe_sft_forward_no_tp():
 
     print(f"\n--- Final Result ---")
     if diff < threshold:
-        print(f"[OK] MOE SFT Forward Pass Test - BF16 mode (NO TP) PASSED")
+        print(f"[OK] MOE SFT Forward Pass Test - {quant_mode.upper()} mode (NO TP) PASSED")
     else:
-        print(f"[FAILED] MOE SFT Forward Pass Test - BF16 mode (NO TP) FAILED")
+        print(f"[FAILED] MOE SFT Forward Pass Test - {quant_mode.upper()} mode (NO TP) FAILED")
         print(f"  This means the bug is in the basic SFT forward logic, not TP partitioning.")
         sys.exit(1)
 
 
-def test_moe_sft_backward_no_tp():
+def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
     """
     Test MOE SFT backward pass accuracy with single NUMA node (no TP).
 
     Compares the AMX implementation gradients against PyTorch reference.
     Uses WorkerPoolConfig to force single subpool.
+
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
     """
     print(f"\n{'='*60}")
-    print(f"Testing MOE SFT Backward Pass - BF16 mode (NO TP)")
+    print(f"Testing MOE SFT Backward Pass - {quant_mode.upper()} mode (NO TP)")
     print(f"{'='*60}")
 
     # Set random seed for reproducibility
@@ -749,8 +800,10 @@ def test_moe_sft_backward_no_tp():
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
 
-    # Create MOE SFT instance (BF16 mode)
-    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
+    # Create MOE SFT instance based on quant_mode
+    MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
+    moe = MOE_SFT_CLASS(config)
+    print(f"[INFO] Using {quant_mode.upper()} MOE SFT class: {MOE_SFT_CLASS.__name__}")
 
     # Load base weights
     CPUInfer.submit(moe.load_weights_task())
@@ -759,6 +812,9 @@ def test_moe_sft_backward_no_tp():
     # Warm up
     CPUInfer.submit(moe.warm_up_task())
     CPUInfer.sync()
+
+    # Get threshold for this quant_mode
+    threshold = get_threshold(quant_mode, is_backward=True)
 
     # Run validation iterations
     for iter_idx in range(validation_iter):
@@ -849,9 +905,7 @@ def test_moe_sft_backward_no_tp():
         )
         CPUInfer.sync()
 
-        # Compare gradients
-        threshold = BF16_BACKWARD_THRESHOLD
-
+        # Compare gradients (threshold already set before loop)
         # Input gradient
         diff_input = torch.mean(torch.abs(grad_input - torch_grads["grad_input"])) / (
             torch.mean(torch.abs(torch_grads["grad_input"])) + 1e-8
@@ -901,10 +955,10 @@ def test_moe_sft_backward_no_tp():
 
         print(f"PASSED (threshold: {threshold})")
 
-    print(f"\n[OK] MOE SFT Backward Pass Test - BF16 mode (NO TP) PASSED")
+    print(f"\n[OK] MOE SFT Backward Pass Test - {quant_mode.upper()} mode (NO TP) PASSED")
 
 
-def test_moe_sft_lora_weight_sync_no_tp():
+def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     """
     Test LoRA weight synchronization with single NUMA node (no TP).
 
@@ -912,9 +966,12 @@ def test_moe_sft_lora_weight_sync_no_tp():
     1. Initial config correctly sets LoRA weight pointers (zero-copy)
     2. Modified weights are correctly reflected via update_lora_weights_task
     3. Forward pass uses the updated weights
+
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
     """
     print(f"\n{'='*60}")
-    print("Testing LoRA Weight Synchronization (NO TP)")
+    print(f"Testing LoRA Weight Synchronization - {quant_mode.upper()} mode (NO TP)")
     print(f"{'='*60}")
 
     if not HAS_KT_KERNEL:
@@ -957,7 +1014,10 @@ def test_moe_sft_lora_weight_sync_no_tp():
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
 
-    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
+    # Create MOE SFT instance based on quant_mode
+    MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
+    moe = MOE_SFT_CLASS(config)
+    print(f"[INFO] Using {quant_mode.upper()} MOE SFT class: {MOE_SFT_CLASS.__name__}")
 
     # Load base weights
     CPUInfer.submit(moe.load_weights_task())
@@ -1094,10 +1154,10 @@ def test_moe_sft_lora_weight_sync_no_tp():
     print(f"Output difference after pointer update (should be ~0): {diff_same:.6f}")
     assert diff_same < 1e-5, f"Outputs should match after pointer update: {diff_same:.6f}"
 
-    print("[OK] LoRA Weight Synchronization Test (NO TP) PASSED")
+    print(f"[OK] LoRA Weight Synchronization Test - {quant_mode.upper()} mode (NO TP) PASSED")
 
 
-def test_moe_sft_training_loop_no_tp():
+def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
     """
     Test complete training loop with single NUMA node (no TP).
 
@@ -1106,9 +1166,12 @@ def test_moe_sft_training_loop_no_tp():
     2. Backward pass computes gradients for LoRA weights
     3. Optimizer updates LoRA weights
     4. Next forward uses updated weights (zero-copy via pointers)
+
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
     """
     print(f"\n{'='*60}")
-    print("Testing Complete Training Loop (NO TP)")
+    print(f"Testing Complete Training Loop - {quant_mode.upper()} mode (NO TP)")
     print(f"{'='*60}")
 
     torch.manual_seed(42)
@@ -1192,7 +1255,10 @@ def test_moe_sft_training_loop_no_tp():
         config.down_lora_b = down_lora_b_param.data.data_ptr()
         config.pool = CPUInfer.backend_
 
-        moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
+        # Create MOE SFT instance based on quant_mode
+        MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
+        moe = MOE_SFT_CLASS(config)
+        print(f"[INFO] Using {quant_mode.upper()} MOE SFT class: {MOE_SFT_CLASS.__name__}")
 
         # Load base weights
         CPUInfer.submit(moe.load_weights_task())
@@ -1354,7 +1420,7 @@ def test_moe_sft_training_loop_no_tp():
         assert gate_a_diff > 0, "gate_lora_a weights should change after optimizer step"
         assert gate_b_diff > 0, "gate_lora_b weights should change after optimizer step"
 
-    print("\n[OK] Training Loop Test (NO TP) PASSED")
+    print(f"\n[OK] Training Loop Test - {quant_mode.upper()} mode (NO TP) PASSED")
 
 
 # =============================================================================
@@ -1363,7 +1429,7 @@ def test_moe_sft_training_loop_no_tp():
 
 
 def run_all_tests():
-    """Run all MOE SFT tests in non-TP mode."""
+    """Run all MOE SFT tests for all quantization modes in non-TP mode."""
     print("\n" + "=" * 70)
     print(" MOE SFT AMX Test Suite - Non-TP Version (Single NUMA Node)")
     print("=" * 70)
@@ -1379,21 +1445,30 @@ def run_all_tests():
     print(f"  TP mode: DISABLED (single NUMA node)")
     print("=" * 70)
 
+    # Quantization modes to test
+    quant_modes = ["bf16", "int8"]
+
     try:
-        # Forward pass test
-        test_moe_sft_forward_no_tp()
+        for quant_mode in quant_modes:
+            print(f"\n{'='*70}")
+            print(f" Testing MOE SFT AMX - {quant_mode.upper()} Mode (NO TP)")
+            print(f"{'='*70}")
 
-        # Backward pass test
-        test_moe_sft_backward_no_tp()
+            # Forward pass test
+            test_moe_sft_forward_no_tp(quant_mode)
 
-        # Weight sync test
-        test_moe_sft_lora_weight_sync_no_tp()
+            # Backward pass test
+            test_moe_sft_backward_no_tp(quant_mode)
 
-        # Full training loop test
-        test_moe_sft_training_loop_no_tp()
+            # Weight sync test
+            test_moe_sft_lora_weight_sync_no_tp(quant_mode)
+
+            # Full training loop test
+            test_moe_sft_training_loop_no_tp(quant_mode)
 
         print("\n" + "=" * 70)
         print(" ALL TESTS PASSED!")
+        print(f" Tested quantization modes: {', '.join(m.upper() for m in quant_modes)}")
         print("=" * 70)
 
     except Exception as e:
