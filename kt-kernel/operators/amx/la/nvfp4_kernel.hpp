@@ -268,7 +268,9 @@ struct BufferANVFP4Impl {
     // tensor_scale stored in member variable
   }
 
-  // Quantize from BF16 activation
+  // Quantize from BF16 activation (alias: from_mat for moe_base.hpp compatibility)
+  void from_mat(int m, ggml_bf16_t* src, int ith, int nth) { from_bf16(m, src, ith, nth); }
+
   void from_bf16(int m, const ggml_bf16_t* src, int ith, int nth) {
     assert(m <= max_m);
     assert(ith == 0 && nth == 1);  // Single-threaded for now
