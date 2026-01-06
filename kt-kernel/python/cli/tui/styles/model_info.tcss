@@ -1,0 +1,192 @@
+/* Model Information Screens Styles */
+
+/* InfoScreen */
+InfoScreen {
+    align: center middle;
+}
+
+#info-dialog {
+    width: 80;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#info-content {
+    width: 100%;
+    height: auto;
+    padding: 1 0;
+}
+
+#info-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+/* RepoEditScreen */
+RepoEditScreen {
+    align: center middle;
+}
+
+#repo-dialog {
+    width: 70;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#repo-providers {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0;
+}
+
+#repo-providers Button {
+    min-width: 20;
+    margin: 0 1;
+}
+
+#repo-actions {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0;
+}
+
+#repo-actions Button {
+    margin: 0 1;
+}
+
+#btn-huggingface {
+    background: $success;
+    color: $text;
+}
+
+#btn-modelscope {
+    background: $primary;
+    color: $text;
+}
+
+/* RepoInputScreen */
+RepoInputScreen {
+    align: center middle;
+}
+
+#input-dialog {
+    width: 70;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#input-dialog Input {
+    width: 100%;
+    margin: 1 0;
+}
+
+#input-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#input-buttons Button {
+    margin: 0 1;
+}
+
+/* RenameInputScreen */
+RenameInputScreen {
+    align: center middle;
+}
+
+#rename-dialog {
+    width: 70;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#rename-dialog Input {
+    width: 100%;
+    margin: 1 0;
+}
+
+#rename-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#rename-buttons Button {
+    margin: 0 1;
+}
+
+/* AutoRepoSelectScreen */
+AutoRepoSelectScreen {
+    align: center middle;
+}
+
+#auto-repo-dialog {
+    width: 100;
+    height: auto;
+    max-height: 90%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#auto-repo-table {
+    width: 100%;
+    height: auto;
+    max-height: 30;
+    margin: 1 0;
+}
+
+#auto-repo-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#auto-repo-buttons Button {
+    margin: 0 1;
+}
+
+#auto-repo-hint {
+    width: 100%;
+    padding: 1 0;
+}
+
+/* EditModelScreen */
+EditModelScreen {
+    align: center middle;
+}
+
+#edit-dialog {
+    width: 80;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#edit-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#edit-buttons Button {
+    margin: 0 1;
+}

@@ -1,0 +1,112 @@
+/* Configuration Screens Styles */
+
+/* QuantConfigScreen */
+QuantConfigScreen {
+    align: center middle;
+}
+
+#quant-dialog {
+    width: 80;
+    height: auto;
+    background: $surface;
+    border: heavy $primary;
+    padding: 1 2;
+}
+
+#quant-params {
+    width: 100%;
+    height: auto;
+}
+
+#quant-params > Label {
+    height: 1;
+}
+
+#quant-params > Horizontal {
+    height: 3;
+    margin-bottom: 0;
+}
+
+#quant-params > Input {
+    height: 3;
+    margin-bottom: 0;
+}
+
+#quant-params > Checkbox {
+    height: 3;
+    margin: 1 0;
+}
+
+#quant-buttons {
+    width: 100%;
+    height: 3;
+    align: center middle;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+#quant-buttons > Button {
+    min-width: 20;
+    margin: 0 1;
+}
+
+/* RunConfigScreen */
+RunConfigScreen {
+    align: center middle;
+}
+
+#run-dialog {
+    width: 90;
+    height: auto;
+    background: $surface;
+    border: heavy $primary;
+    padding: 1 2;
+}
+
+#run-content {
+    width: 100%;
+    height: auto;
+    max-height: 35;
+    overflow-y: auto;
+    padding: 1 0;
+    margin-bottom: 1;
+}
+
+#run-params {
+    width: 100%;
+    height: auto;
+}
+
+#run-params > Label {
+    height: 1;
+    margin: 1 0 0 0;
+}
+
+#run-params > Horizontal {
+    height: 3;
+    margin-bottom: 0;
+}
+
+#run-params > Input {
+    height: 3;
+    margin-bottom: 1;
+}
+
+#run-params > Select {
+    height: 3;
+    margin-bottom: 1;
+}
+
+#run-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    layout: horizontal;
+    margin-top: 1;
+    padding: 1 0;
+}
+
+#run-buttons > Button {
+    min-width: 15;
+    margin: 0 1;
+}

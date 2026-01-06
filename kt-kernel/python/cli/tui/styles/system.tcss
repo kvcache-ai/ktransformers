@@ -1,0 +1,93 @@
+/* System Screens Styles */
+
+/* DoctorScreen */
+
+    DoctorScreen {
+        align: center middle;
+    }
+
+    #doctor-dialog {
+        width: 100;
+        height: auto;
+        max-height: 90%;
+        background: $surface;
+        border: heavy $primary;
+        padding: 1 2;
+    }
+
+    #doctor-content {
+        width: 100%;
+        height: auto;
+        max-height: 60;
+        overflow-y: auto;
+        padding: 1 0;
+    }
+
+    #doctor-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        margin-top: 1;
+    }
+
+    #doctor-buttons > Button {
+        min-width: 20;
+    }
+
+    .doctor-section {
+        width: 100%;
+        height: auto;
+        margin: 1 0;
+    }
+
+    .doctor-item {
+        width: 100%;
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    
+
+/* SettingsScreen */
+
+    SettingsScreen {
+        align: center middle;
+    }
+
+    #settings-dialog {
+        width: 90;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #settings-content {
+        width: 100%;
+        height: auto;
+        max-height: 30;
+        overflow-y: auto;
+        padding: 1 0;
+    }
+
+    #settings-actions {
+        width: 100%;
+        height: auto;
+        padding: 1 0;
+    }
+
+    #settings-actions Button {
+        margin: 0 1;
+    }
+
+    #settings-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        padding: 1 0 0 0;
+    }
+
+    #settings-buttons Button {
+        margin: 0 1;
+    }
+    

@@ -90,7 +90,7 @@ class ModelScanner:
 
             # Check if size meets minimum threshold
             if total_size < self.min_size_bytes:
-                continue
+                continue  # Too small, but keep scanning subdirectories
 
             # Detect format
             if safetensors_files and gguf_files:
@@ -100,7 +100,7 @@ class ModelScanner:
                     f"{len(safetensors_files)} safetensors + {len(gguf_files)} gguf files. "
                     "Please separate into different folders and re-scan."
                 )
-                dirs[:] = []  # Don't descend
+                dirs[:] = []  # Don't descend into mixed format directories
                 continue
 
             # Determine format
@@ -117,8 +117,8 @@ class ModelScanner:
 
             results.append(scanned)
 
-            # Don't descend into subdirectories (this folder is a model)
-            dirs[:] = []
+            # Continue scanning subdirectories - they might also contain models
+            # Each subdirectory will be independently checked for size >= 10GB
 
         return results, warnings
 

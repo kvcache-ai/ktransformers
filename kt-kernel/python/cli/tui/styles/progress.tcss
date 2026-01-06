@@ -1,0 +1,88 @@
+/* Progress Screens Styles */
+
+/* QuantProgressScreen */
+
+    QuantProgressScreen {
+        align: center middle;
+    }
+
+    #quant-progress-dialog {
+        width: 100;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: heavy $primary;
+        padding: 1 2;
+    }
+
+    #quant-output {
+        width: 100%;
+        height: 30;
+        background: $surface-darken-1;
+        color: $text;
+        border: solid $primary;
+    }
+
+    #quant-status {
+        width: 100%;
+        height: auto;
+        margin: 1 0;
+        text-align: center;
+    }
+
+    #quant-close-container {
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+
+    Button#btn-close {
+        min-width: 20;
+        height: auto;
+        min-height: 3;
+        padding: 1 2;
+    }
+    
+
+/* DownloadProgressScreen */
+
+    DownloadProgressScreen {
+        align: center middle;
+    }
+
+    #download-progress-dialog {
+        width: auto;
+        height: auto;
+        max-height: 80%;
+        background: $surface;
+        border: heavy $primary;
+        padding: 1 2;
+    }
+
+    #download-progress-output {
+        width: 100%;
+        height: 30;
+        background: $surface-darken-1;
+        color: $text;
+        border: solid $primary;
+    }
+
+    #download-progress-status {
+        width: 100%;
+        height: auto;
+        margin: 1 0;
+        text-align: center;
+    }
+
+    #download-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        layout: horizontal;
+    }
+
+    Button#btn-close-download, Button#btn-cancel-download {
+        min-width: 15;
+        margin: 0 1;
+    }
+    
