@@ -456,14 +456,46 @@ class ConverterBase:
             print("Conversion completed successfully!")
 
     def _copy_config_files(self):
-        """Copy configuration files to output directory"""
-        config_files = ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]
+        """Copy configuration files to output directory and add AMX metadata to config.json"""
+        import shutil
 
-        for config_file in config_files:
+        # Handle config.json specially - add AMX metadata
+        config_path = os.path.join(self.input_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                config = json.load(f)
+
+            # Add AMX conversion metadata
+            # Determine quantization method and NUMA count based on converter type
+            if isinstance(self, AWQToColumnMajorConverter):
+                quant_method = "awq"
+                numa_count = 0  # AWQ doesn't use NUMA splitting
+            elif isinstance(self, OnlineQuantConverter):
+                quant_method = self.quant_method  # int4, int8, moe_int4, moe_int8
+                numa_count = self.threadpool_count
+            else:
+                quant_method = "unknown"
+                numa_count = 0
+
+            config["amx_quantization"] = {
+                "converted": True,
+                "method": quant_method,
+                "numa_count": numa_count,
+                "cpuinfer_threads": self.cpuinfer_threads,
+                "input_type": self.input_type,
+            }
+
+            # Save modified config
+            dst_path = os.path.join(self.output_path, "config.json")
+            with open(dst_path, "w") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            print(f"Copied and updated: config.json (added amx_quantization metadata)")
+
+        # Copy other config files as-is
+        other_config_files = ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]
+        for config_file in other_config_files:
             src_path = os.path.join(self.input_path, config_file)
             if os.path.exists(src_path):
-                import shutil
-
                 dst_path = os.path.join(self.output_path, config_file)
                 shutil.copy2(src_path, dst_path)
                 print(f"Copied: {config_file}")

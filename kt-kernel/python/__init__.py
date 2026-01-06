@@ -36,20 +36,56 @@ Environment Variables:
 from __future__ import annotations
 
 # Detect CPU and load optimal extension variant
-from ._cpu_detect import initialize as _initialize_cpu
+_kt_kernel_ext = None
+__cpu_variant__ = None
+_extension_load_error = None
 
-_kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
+try:
+    from ._cpu_detect import initialize as _initialize_cpu
 
-# Make the extension module available to other modules in this package
-import sys
+    _kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
 
-sys.modules["kt_kernel_ext"] = _kt_kernel_ext
+    # Make the extension module available to other modules in this package
+    import sys
 
-# Also expose kt_kernel_ext as an attribute for backward compatibility
-kt_kernel_ext = _kt_kernel_ext
+    sys.modules["kt_kernel_ext"] = _kt_kernel_ext
 
-# Import main API
-from .experts import KTMoEWrapper
+    # Also expose kt_kernel_ext as an attribute for backward compatibility
+    kt_kernel_ext = _kt_kernel_ext
+except Exception as e:
+    # Extension loading failed - this is expected in some environments
+    # (e.g., dev environments with version mismatches, or CLI-only usage)
+    # Store the error for diagnostic purposes
+    _extension_load_error = e
+    kt_kernel_ext = None
+
+# Import main API only if extension loaded successfully
+if _kt_kernel_ext is not None:
+    try:
+        from .experts import KTMoEWrapper
+    except Exception:
+        # If experts import fails, define a placeholder that will error helpfully
+        class KTMoEWrapper:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError(
+                    f"KTMoEWrapper unavailable: extension failed to load.\n"
+                    f"Error: {_extension_load_error}\n"
+                    f"The CLI tools are still available. For inference, please reinstall kt-kernel."
+                )
+
+else:
+    # Extension not loaded - define placeholder
+    class KTMoEWrapper:
+        def __init__(self, *args, **kwargs):
+            if _extension_load_error:
+                raise RuntimeError(
+                    f"KTMoEWrapper unavailable: extension failed to load.\n"
+                    f"Error: {_extension_load_error}\n"
+                    f"The CLI tools are still available. For inference, please reinstall kt-kernel."
+                )
+            else:
+                raise RuntimeError("KTMoEWrapper unavailable: extension not loaded.")
+
 
 # Read version from package metadata (preferred) or fallback to project root
 try:

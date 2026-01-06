@@ -1,0 +1,132 @@
+/* KTransformers TUI Styles */
+
+/* Main container */
+#main-container {
+    width: 100%;
+    height: 1fr;
+    background: $surface;
+}
+
+/* Model sections */
+.model-section {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+    border: solid $primary;
+    background: $surface;
+}
+
+.section-header {
+    width: 100%;
+    height: 1;
+    content-align: left middle;
+    text-style: bold;
+    color: $accent;
+    background: $surface-darken-1;
+    padding: 0 2;
+}
+
+/* Model tables */
+.model-table {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    max-height: 15;
+    border: none;
+}
+
+DataTable {
+    background: $surface;
+}
+
+DataTable > .datatable--header {
+    text-style: bold;
+    color: $text;
+    background: $surface-lighten-1;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent 30%;
+    color: $text;
+}
+
+DataTable:focus > .datatable--cursor {
+    background: $accent;
+    color: $text;
+}
+
+/* Action panel */
+#action-panel {
+    width: 100%;
+    height: auto;
+    min-height: 5;
+    dock: bottom;
+    background: $surface-darken-1;
+    border-top: heavy $primary;
+    padding: 1 2;
+}
+
+#selected-info {
+    width: 100%;
+    height: 1;
+    content-align: left middle;
+    margin-bottom: 1;
+    color: $text;
+}
+
+#action-buttons {
+    width: 100%;
+    height: auto;
+    min-height: 1;
+    layout: horizontal;
+}
+
+.action-btn {
+    width: auto;
+    height: 1;
+    content-align: center middle;
+    color: $accent;
+    text-style: bold;
+    padding: 0 1;
+}
+
+/* Color theme */
+Screen {
+    background: $background;
+}
+
+/* Status colors */
+.status-ok {
+    color: $success;
+}
+
+.status-warning {
+    color: $warning;
+}
+
+.status-error {
+    color: $error;
+}
+
+.status-pending {
+    color: $text-muted;
+}
+
+/* Verification progress widget */
+#verify-progress {
+    height: auto;
+    min-height: 5;
+    max-height: 12;
+    width: 100%;
+    background: $accent;
+    color: $text;
+    padding: 1 2;
+    border: heavy $primary;
+    margin: 0 0 1 0;
+    overflow-y: auto;
+    scrollbar-size-vertical: 1;
+}
+
+#verify-progress.hidden {
+    display: none;
+}

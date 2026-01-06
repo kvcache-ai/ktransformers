@@ -23,6 +23,54 @@ import sys
 from pathlib import Path
 
 
+def detect_so_instructions(so_path):
+    """
+    Detect actual instruction sets present in a compiled .so file.
+
+    This function uses objdump to disassemble the binary and search for
+    characteristic instructions of different SIMD instruction sets.
+
+    Args:
+        so_path (str): Path to the .so file to analyze
+
+    Returns:
+        dict: Dictionary mapping instruction set names to boolean values
+              {'amx': bool, 'avx512_vbmi': bool, 'avx512_vnni': bool, ...}
+              Returns None if objdump is not available or fails.
+    """
+    try:
+        import subprocess
+        import re
+
+        # Run objdump to disassemble the .so file
+        output = subprocess.check_output(
+            ["objdump", "-d", so_path], stderr=subprocess.DEVNULL, universal_newlines=True, timeout=10
+        )
+
+        # Define characteristic instructions for each instruction set
+        # These are specific instructions that uniquely identify each feature
+        instruction_patterns = {
+            "amx": r"\b(tileloadd|tilestored|tdpb)",  # AMX tile operations
+            "avx512_vbmi": r"\b(vpermb|vpermt2b|vpermi2b)",  # Byte permutation
+            "avx512_vnni": r"\b(vpdpbusd|vpdpwssd)",  # VNNI dot product
+            "avx512_bf16": r"\b(vdpbf16ps|vcvtne2ps2bf16)",  # BF16 operations
+            "avx512f": r"\b(vmovdqu64|vpaddd.*%zmm)",  # AVX512 foundation (zmm registers)
+        }
+
+        result = {}
+        for feature, pattern in instruction_patterns.items():
+            result[feature] = bool(re.search(pattern, output))
+
+        return result
+
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ImportError):
+        # objdump not available or failed - return None to indicate detection failed
+        return None
+    except Exception:
+        # Any other error - silently fail
+        return None
+
+
 def detect_cpu_features():
     """
     Detect CPU features and determine the best kernel variant using progressive matching.
@@ -229,7 +277,34 @@ def load_extension(variant):
         spec.loader.exec_module(ext)
 
         if os.environ.get("KT_KERNEL_DEBUG") == "1":
-            print(f"[kt-kernel] Successfully loaded {variant.upper()} variant")
+            # 检测是否是 multi-variant 还是 single-variant
+            is_single_variant = "kt_kernel_ext." in os.path.basename(so_file)
+
+            if is_single_variant:
+                print(f"[kt-kernel] Successfully loaded extension (single-variant build)")
+
+                # 检测 .so 文件中实际包含的指令集
+                actual_instructions = detect_so_instructions(so_file)
+
+                if actual_instructions is not None:
+                    print(f"[kt-kernel] CPU supports: {variant.upper()}")
+                    print(f"[kt-kernel] Actual instruction sets in binary:")
+
+                    # 按层次顺序显示指令集
+                    ordered_features = ["amx", "avx512_bf16", "avx512_vbmi", "avx512_vnni", "avx512f"]
+                    for feature in ordered_features:
+                        if feature in actual_instructions:
+                            status = "✅" if actual_instructions[feature] else "❌"
+                            feature_display = feature.upper().replace("_", " ")
+                            print(f"[kt-kernel]   {status} {feature_display}")
+                else:
+                    # objdump 不可用，显示警告
+                    print(
+                        f"[kt-kernel] Note: CPU supports {variant.upper()}, but binary may not contain all {variant.upper()} instructions"
+                    )
+                    print(f"[kt-kernel] (Install 'binutils' package to enable detailed instruction set detection)")
+            else:
+                print(f"[kt-kernel] Successfully loaded {variant.upper()} variant (multi-variant build)")
         return ext
 
     except (ImportError, ModuleNotFoundError, FileNotFoundError) as e:

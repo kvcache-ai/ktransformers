@@ -43,9 +43,10 @@ def _get_help(key: str) -> str:
 app = typer.Typer(
     name="kt",
     help="KTransformers CLI - A unified command-line interface for KTransformers.",
-    no_args_is_help=True,
+    no_args_is_help=False,  # Changed: handle no args specially to launch TUI
     add_completion=False,  # Use static completion scripts instead of dynamic completion
     rich_markup_mode="rich",
+    invoke_without_command=True,  # Allow callback without subcommand
 )
 
 
@@ -403,6 +404,79 @@ def _apply_saved_language() -> None:
         set_lang(lang)
 
 
+def _launch_tui():
+    """Launch the TUI interface."""
+    # First check if textual is available
+    try:
+        import textual
+    except ImportError:
+        from rich.console import Console
+
+        console = Console()
+        console.print()
+        console.print("[yellow]Interactive TUI not available - Textual not installed.[/yellow]")
+        console.print()
+        console.print("  Install with: [cyan]pip install textual>=0.47.0[/cyan]")
+        console.print("  Or use CLI commands: [cyan]kt --help[/cyan]")
+        console.print()
+        return None
+
+    # Try to import TUI app
+    try:
+        from kt_kernel.cli.tui import ModelManagerApp
+
+        if ModelManagerApp is None:
+            raise ImportError("TUI module not properly initialized")
+
+        app_instance = ModelManagerApp()
+        result = app_instance.run()
+
+        # Check if TUI exited with a message (command to execute)
+        if hasattr(app_instance, "_return_value") and app_instance._return_value:
+            return app_instance._return_value
+
+        return None
+
+    except ImportError as e:
+        # Check if the error is about kt_kernel extension (expected in dev environment)
+        error_msg = str(e)
+        if "kt_kernel_ext" in error_msg or "_PyThreadState" in error_msg:
+            from rich.console import Console
+
+            console = Console()
+            console.print()
+            console.print("[yellow]TUI cannot run in current environment (kt_kernel extension not loaded)[/yellow]")
+            console.print()
+            console.print("  This is a development environment issue.")
+            console.print("  The TUI will work correctly in a properly installed environment.")
+            console.print()
+            console.print("  For now, use CLI commands: [cyan]kt model list[/cyan]")
+            console.print()
+            return None
+        else:
+            # Real Textual import error
+            from rich.console import Console
+
+            console = Console()
+            console.print()
+            console.print(f"[red]Failed to load TUI: {e}[/red]")
+            console.print()
+            console.print("  Use CLI commands: [cyan]kt --help[/cyan]")
+            console.print()
+            return None
+
+    except Exception as e:
+        from rich.console import Console
+
+        console = Console()
+        console.print()
+        console.print(f"[red]TUI error: {e}[/red]")
+        console.print()
+        console.print("  Use CLI commands: [cyan]kt --help[/cyan]")
+        console.print()
+        return None
+
+
 def main():
     """Main entry point."""
     # Apply saved language setting first (before anything else for correct help display)
@@ -414,7 +488,7 @@ def main():
     # Check for first run (but not for certain commands)
     # Skip first-run check for: --help, config commands, version
     args = sys.argv[1:] if len(sys.argv) > 1 else []
-    skip_commands = ["--help", "-h", "config", "version", "--version"]
+    skip_commands = ["--help", "-h", "config", "version", "--version", "--no-tui"]
 
     should_check_first_run = True
     for arg in args:
@@ -429,6 +503,47 @@ def main():
     # Check first run before running commands
     if should_check_first_run and args:
         check_first_run()
+
+    # Handle no args - launch TUI if interactive terminal
+    if not args and sys.stdout.isatty():
+        tui_result = _launch_tui()
+
+        # If TUI returned a command to execute, run it
+        if tui_result:
+            # Parse TUI result (format: "command:arg")
+            if ":" in tui_result:
+                cmd, arg = tui_result.split(":", 1)
+
+                # Re-enter CLI with the command
+                if cmd == "run":
+                    sys.argv = ["kt", "run", arg]
+                elif cmd == "edit":
+                    sys.argv = ["kt", "model", "edit", arg]
+                elif cmd == "verify":
+                    sys.argv = ["kt", "model", "verify", arg]
+                elif cmd == "remove":
+                    # Auto-confirm removal from TUI (user already clicked remove in TUI)
+                    sys.argv = ["kt", "model", "remove", arg, "--yes"]
+                elif cmd == "info":
+                    sys.argv = ["kt", "model", "info", arg]
+                elif cmd == "scan":
+                    sys.argv = ["kt", "model", "scan"]
+                elif cmd == "download":
+                    sys.argv = ["kt", "model", "download"]
+
+                # Re-run main with new args
+                args = sys.argv[1:]
+            else:
+                # Unknown result, just exit
+                return
+        else:
+            # TUI exited normally or failed to load
+            return
+
+    # Show help if no args and not interactive
+    if not args:
+        app(["--help"])
+        return
 
     # Handle "run" command specially to pass through unknown options
     if args and args[0] == "run":

@@ -28,7 +28,7 @@ from kt_kernel.cli.utils.console import (
     prompt_choice,
 )
 from kt_kernel.cli.utils.environment import detect_cpu_info, detect_gpus, detect_ram_gb
-from kt_kernel.cli.utils.model_registry import MODEL_COMPUTE_FUNCTIONS, ModelInfo, get_registry
+from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 
 
 @click.command(
@@ -214,13 +214,13 @@ def _run_impl(
         raise typer.Exit(1)
 
     settings = get_settings()
-    registry = get_registry()
+    user_registry = UserModelRegistry()
 
     console.print()
 
     # If no model specified, show interactive selection
     if model is None:
-        model = _interactive_model_selection(registry, settings)
+        model = _interactive_model_selection(user_registry, settings)
         if model is None:
             raise typer.Exit(0)
 
@@ -246,7 +246,7 @@ def _run_impl(
     console.print()
     print_step(t("run_checking_model"))
 
-    model_info = None
+    user_model = None
     resolved_model_path = model_path
 
     # Check if model is a path
@@ -254,68 +254,45 @@ def _run_impl(
         resolved_model_path = Path(model)
         print_info(t("run_model_path", path=str(resolved_model_path)))
 
-        # Try to infer model type from path to use default configurations
-        # Check directory name against known models
-        dir_name = resolved_model_path.name.lower()
-        for registered_model in registry.list_all():
-            # Check if directory name matches model name or aliases
-            if dir_name == registered_model.name.lower():
-                model_info = registered_model
-                print_info(f"Detected model type: {registered_model.name}")
-                break
-            for alias in registered_model.aliases:
-                if dir_name == alias.lower() or alias.lower() in dir_name:
-                    model_info = registered_model
-                    print_info(f"Detected model type: {registered_model.name}")
-                    break
-            if model_info:
-                break
-
-        # Also check HuggingFace repo format (org--model)
-        if not model_info:
-            for registered_model in registry.list_all():
-                repo_slug = registered_model.hf_repo.replace("/", "--").lower()
-                if repo_slug in dir_name or dir_name in repo_slug:
-                    model_info = registered_model
-                    print_info(f"Detected model type: {registered_model.name}")
-                    break
-
-        if not model_info:
-            print_warning("Could not detect model type from path. Using default parameters.")
-            console.print("  [dim]Tip: Use model name (e.g., 'kt run m2') to apply optimized configurations[/dim]")
+        # Try to find in user registry by path
+        user_model = user_registry.find_by_path(str(resolved_model_path))
+        if user_model:
+            print_info(f"Using registered model: {user_model.name}")
+        else:
+            print_warning("Using unregistered model path. Consider adding it with 'kt model add'")
     else:
-        # Search in registry
-        matches = registry.search(model)
+        # Search in user registry by name
+        user_model = user_registry.get_model(model)
 
-        if not matches:
+        if not user_model:
             print_error(t("run_model_not_found", name=model))
             console.print()
-            console.print("Available models:")
-            for m in registry.list_all()[:5]:
-                console.print(f"  - {m.name} ({', '.join(m.aliases[:2])})")
+
+            # Show available models
+            all_models = user_registry.list_models()
+            if all_models:
+                console.print("Available registered models:")
+                for m in all_models[:5]:
+                    console.print(f"  - {m.name}")
+                if len(all_models) > 5:
+                    console.print(f"  ... and {len(all_models) - 5} more")
+            else:
+                console.print("No models registered yet.")
+
+            console.print()
+            console.print(f"Add your model with: [cyan]kt model add /path/to/model[/cyan]")
+            console.print(f"Or scan for models: [cyan]kt model scan[/cyan]")
             raise typer.Exit(1)
 
-        if len(matches) == 1:
-            model_info = matches[0]
-        else:
-            # Multiple matches - prompt user
-            console.print()
-            print_info(t("run_multiple_matches"))
-            choices = [f"{m.name} ({m.hf_repo})" for m in matches]
-            selected = prompt_choice(t("run_select_model"), choices)
-            idx = choices.index(selected)
-            model_info = matches[idx]
+        # Use model path from registry
+        resolved_model_path = Path(user_model.path)
 
-        # Find model path
-        if model_path is None:
-            resolved_model_path = _find_model_path(model_info, settings)
-            if resolved_model_path is None:
-                print_error(t("run_model_not_found", name=model_info.name))
-                console.print()
-                console.print(
-                    f"  Download with: kt download {model_info.aliases[0] if model_info.aliases else model_info.name}"
-                )
-                raise typer.Exit(1)
+        # Verify path exists
+        if not resolved_model_path.exists():
+            print_error(f"Model path does not exist: {resolved_model_path}")
+            console.print()
+            console.print(f"Run 'kt model refresh' to check all models")
+            raise typer.Exit(1)
 
         print_info(t("run_model_path", path=str(resolved_model_path)))
 
@@ -344,136 +321,58 @@ def _run_impl(
         print_info("Using original precision model (no quantization)")
 
     # Step 4: Build command
-    # Resolve all parameters (CLI > model defaults > config > auto-detect)
+    # Resolve all parameters (CLI > config > auto-detect)
     final_host = host or settings.get("server.host", "0.0.0.0")
     final_port = port or settings.get("server.port", 30000)
 
-    # Get defaults from model info if available
-    model_defaults = model_info.default_params if model_info else {}
-
-    # Determine tensor parallel size first (needed for GPU expert calculation)
-    # Priority: CLI > model defaults > config > auto-detect (with model constraints)
-
-    # Check if explicitly specified by user or configuration
-    explicitly_specified = (
-        tensor_parallel_size  # CLI argument (highest priority)
-        or model_defaults.get("tensor-parallel-size")  # Model defaults
-        or settings.get("inference.tensor_parallel_size")  # Config file
-    )
-
-    if explicitly_specified:
-        # Use explicitly specified value
-        requested_tensor_parallel_size = explicitly_specified
+    # Determine tensor parallel size
+    # Priority: CLI > config > auto-detect
+    if tensor_parallel_size:
+        final_tensor_parallel_size = tensor_parallel_size
+    elif settings.get("inference.tensor_parallel_size"):
+        final_tensor_parallel_size = settings.get("inference.tensor_parallel_size")
     else:
-        # Auto-detect from GPUs, considering model's max constraint
-        detected_gpu_count = len(gpus) if gpus else 1
-        if model_info and model_info.max_tensor_parallel_size is not None:
-            # Automatically limit to model's maximum to use as many GPUs as possible
-            requested_tensor_parallel_size = min(detected_gpu_count, model_info.max_tensor_parallel_size)
-        else:
-            requested_tensor_parallel_size = detected_gpu_count
-
-    # Apply model's max_tensor_parallel_size constraint if explicitly specified value exceeds it
-    final_tensor_parallel_size = requested_tensor_parallel_size
-    if model_info and model_info.max_tensor_parallel_size is not None:
-        if requested_tensor_parallel_size > model_info.max_tensor_parallel_size:
-            console.print()
-            print_warning(
-                f"Model {model_info.name} only supports up to {model_info.max_tensor_parallel_size}-way "
-                f"tensor parallelism, but {requested_tensor_parallel_size} was requested. "
-                f"Reducing to {model_info.max_tensor_parallel_size}."
-            )
-            final_tensor_parallel_size = model_info.max_tensor_parallel_size
+        # Auto-detect from GPUs
+        final_tensor_parallel_size = len(gpus) if gpus else 1
 
     # CPU/GPU configuration with smart defaults
     # kt-cpuinfer: default to 80% of total CPU threads (cores * NUMA nodes)
     total_threads = cpu.cores * cpu.numa_nodes
-    final_cpu_threads = (
-        cpu_threads
-        or model_defaults.get("kt-cpuinfer")
-        or settings.get("inference.cpu_threads")
-        or int(total_threads * 0.8)
-    )
+    final_cpu_threads = cpu_threads or settings.get("inference.cpu_threads") or int(total_threads * 0.8)
 
     # kt-threadpool-count: default to NUMA node count
-    final_numa_nodes = (
-        numa_nodes
-        or model_defaults.get("kt-threadpool-count")
-        or settings.get("inference.numa_nodes")
-        or cpu.numa_nodes
-    )
+    final_numa_nodes = numa_nodes or settings.get("inference.numa_nodes") or cpu.numa_nodes
 
-    # kt-num-gpu-experts: use model-specific computation if available and not explicitly set
-    if gpu_experts is not None:
-        # User explicitly set it
-        final_gpu_experts = gpu_experts
-    elif model_info and model_info.name in MODEL_COMPUTE_FUNCTIONS and gpus:
-        # Use model-specific computation function (only if GPUs detected)
-        vram_per_gpu = gpus[0].vram_gb
-        compute_func = MODEL_COMPUTE_FUNCTIONS[model_info.name]
-        final_gpu_experts = compute_func(final_tensor_parallel_size, vram_per_gpu)
-        console.print()
-        print_info(
-            f"Auto-computed kt-num-gpu-experts: {final_gpu_experts} (TP={final_tensor_parallel_size}, VRAM={vram_per_gpu}GB per GPU)"
-        )
-    else:
-        # Fall back to defaults
-        final_gpu_experts = model_defaults.get("kt-num-gpu-experts") or settings.get("inference.gpu_experts", 1)
+    # kt-num-gpu-experts: use CLI or config value
+    final_gpu_experts = gpu_experts or settings.get("inference.gpu_experts", 1)
 
     # KT-kernel options
-    final_kt_method = kt_method or model_defaults.get("kt-method") or settings.get("inference.kt_method", "AMXINT4")
-    final_kt_gpu_prefill_threshold = (
-        kt_gpu_prefill_threshold
-        or model_defaults.get("kt-gpu-prefill-token-threshold")
-        or settings.get("inference.kt_gpu_prefill_token_threshold", 4096)
+    final_kt_method = kt_method or settings.get("inference.kt_method", "AMXINT4")
+    final_kt_gpu_prefill_threshold = kt_gpu_prefill_threshold or settings.get(
+        "inference.kt_gpu_prefill_token_threshold", 4096
     )
 
     # SGLang options
-    final_attention_backend = (
-        attention_backend
-        or model_defaults.get("attention-backend")
-        or settings.get("inference.attention_backend", "triton")
-    )
-    final_max_total_tokens = (
-        max_total_tokens or model_defaults.get("max-total-tokens") or settings.get("inference.max_total_tokens", 40000)
-    )
-    final_max_running_requests = (
-        max_running_requests
-        or model_defaults.get("max-running-requests")
-        or settings.get("inference.max_running_requests", 32)
-    )
-    final_chunked_prefill_size = (
-        chunked_prefill_size
-        or model_defaults.get("chunked-prefill-size")
-        or settings.get("inference.chunked_prefill_size", 4096)
-    )
-    final_mem_fraction_static = (
-        mem_fraction_static
-        or model_defaults.get("mem-fraction-static")
-        or settings.get("inference.mem_fraction_static", 0.98)
-    )
-    final_watchdog_timeout = (
-        watchdog_timeout or model_defaults.get("watchdog-timeout") or settings.get("inference.watchdog_timeout", 3000)
-    )
-    final_served_model_name = (
-        served_model_name or model_defaults.get("served-model-name") or settings.get("inference.served_model_name", "")
-    )
+    final_attention_backend = attention_backend or settings.get("inference.attention_backend", "triton")
+    final_max_total_tokens = max_total_tokens or settings.get("inference.max_total_tokens", 40000)
+    final_max_running_requests = max_running_requests or settings.get("inference.max_running_requests", 32)
+    final_chunked_prefill_size = chunked_prefill_size or settings.get("inference.chunked_prefill_size", 4096)
+    final_mem_fraction_static = mem_fraction_static or settings.get("inference.mem_fraction_static", 0.98)
+    final_watchdog_timeout = watchdog_timeout or settings.get("inference.watchdog_timeout", 3000)
+    final_served_model_name = served_model_name or settings.get("inference.served_model_name", "")
 
     # Performance flags
     if disable_shared_experts_fusion is not None:
         final_disable_shared_experts_fusion = disable_shared_experts_fusion
-    elif "disable-shared-experts-fusion" in model_defaults:
-        final_disable_shared_experts_fusion = model_defaults["disable-shared-experts-fusion"]
     else:
         final_disable_shared_experts_fusion = settings.get("inference.disable_shared_experts_fusion", False)
 
-    # Pass all model default params to handle any extra parameters
-    extra_params = model_defaults if model_info else {}
+    # Pass extra CLI parameters
+    extra_params = {}
 
     cmd = _build_sglang_command(
         model_path=resolved_model_path,
         weights_path=resolved_weights_path,
-        model_info=model_info,
         host=final_host,
         port=final_port,
         gpu_experts=final_gpu_experts,
@@ -509,8 +408,9 @@ def _run_impl(
     print_step("Configuration")
 
     # Model info
-    if model_info:
-        console.print(f"  Model: [bold]{model_info.name}[/bold]")
+    # Display model name
+    if user_model:
+        console.print(f"  Model: [bold]{user_model.name}[/bold]")
     else:
         console.print(f"  Model: [bold]{resolved_model_path.name}[/bold]")
 
@@ -572,88 +472,13 @@ def _run_impl(
         raise typer.Exit(1)
 
 
-def _find_model_path(model_info: ModelInfo, settings, max_depth: int = 3) -> Optional[Path]:
-    """Find the model path on disk by searching all configured model paths.
-
-    Args:
-        model_info: Model information to search for
-        settings: Settings instance
-        max_depth: Maximum depth to search within each model path (default: 3)
-
-    Returns:
-        Path to the model directory, or None if not found
-    """
-    model_paths = settings.get_model_paths()
-
-    # Generate possible names to search for
-    possible_names = [
-        model_info.name,
-        model_info.name.lower(),
-        model_info.name.replace(" ", "-"),
-        model_info.hf_repo.split("/")[-1],
-        model_info.hf_repo.replace("/", "--"),
-    ]
-
-    # Add alias-based names
-    for alias in model_info.aliases:
-        possible_names.append(alias)
-        possible_names.append(alias.lower())
-
-    # Search in all configured model directories
-    for models_dir in model_paths:
-        if not models_dir.exists():
-            continue
-
-        # Search recursively up to max_depth
-        for depth in range(max_depth):
-            for name in possible_names:
-                if depth == 0:
-                    # Direct children: models_dir / name
-                    search_paths = [models_dir / name]
-                else:
-                    # Nested: use rglob to find directories matching the name
-                    search_paths = list(models_dir.rglob(name))
-
-                for path in search_paths:
-                    if path.exists() and (path / "config.json").exists():
-                        return path
-
-    return None
-
-
-def _find_weights_path(model_info: ModelInfo, settings) -> Optional[Path]:
-    """Find the quantized weights path on disk by searching all configured paths."""
-    model_paths = settings.get_model_paths()
-    weights_dir = settings.weights_dir
-
-    # Check common patterns
-    base_names = [
-        model_info.name,
-        model_info.name.lower(),
-        model_info.hf_repo.split("/")[-1],
-    ]
-
-    suffixes = ["-INT4", "-int4", "_INT4", "_int4", "-quant", "-quantized"]
-
-    # Prepare search directories
-    search_dirs = [weights_dir] if weights_dir else []
-    search_dirs.extend(model_paths)
-
-    for base in base_names:
-        for suffix in suffixes:
-            for dir_path in search_dirs:
-                if dir_path:
-                    path = dir_path / f"{base}{suffix}"
-                    if path.exists():
-                        return path
-
-    return None
+# Dead code removed: _find_model_path() and _find_weights_path()
+# These functions were part of the old builtin model system
 
 
 def _build_sglang_command(
     model_path: Path,
     weights_path: Optional[Path],
-    model_info: Optional[ModelInfo],
     host: str,
     port: int,
     gpu_experts: int,
@@ -699,9 +524,6 @@ def _build_sglang_command(
         use_kt_kernel = True
     elif cpu_threads > 0 or gpu_experts > 1:
         # CPU offloading configured - use kt-kernel
-        use_kt_kernel = True
-    elif model_info and model_info.type == "moe":
-        # MoE model - likely needs kt-kernel for expert offloading
         use_kt_kernel = True
 
     if use_kt_kernel:
@@ -801,30 +623,31 @@ def _build_sglang_command(
     return cmd
 
 
-def _interactive_model_selection(registry, settings) -> Optional[str]:
+def _interactive_model_selection(user_registry, settings) -> Optional[str]:
     """Show interactive model selection interface.
 
     Returns:
         Selected model name or None if cancelled.
     """
     from rich.panel import Panel
-    from rich.table import Table
     from rich.prompt import Prompt
 
-    from kt_kernel.cli.i18n import get_lang
+    # Get all user models
+    all_models = user_registry.list_models()
 
-    lang = get_lang()
-
-    # Find local models first
-    local_models = registry.find_local_models()
-
-    # Get all registered models
-    all_models = registry.list_all()
+    if not all_models:
+        console.print()
+        print_warning("No models registered.")
+        console.print()
+        console.print(f"  Add models with: [cyan]kt model scan[/cyan]")
+        console.print(f"  Or manually: [cyan]kt model add /path/to/model[/cyan]")
+        console.print()
+        return None
 
     console.print()
     console.print(
         Panel.fit(
-            t("run_select_model_title"),
+            "Select a model to run",
             border_style="cyan",
         )
     )
@@ -834,54 +657,30 @@ def _interactive_model_selection(registry, settings) -> Optional[str]:
     choices = []
     choice_map = {}  # index -> model name
 
-    # Section 1: Local models (downloaded)
-    if local_models:
-        console.print(f"[bold green]{t('run_local_models')}[/bold green]")
-        console.print()
-
-        for i, (model_info, path) in enumerate(local_models, 1):
-            desc = model_info.description_zh if lang == "zh" else model_info.description
-            short_desc = desc[:50] + "..." if len(desc) > 50 else desc
-            console.print(f"  [cyan][{i}][/cyan] [bold]{model_info.name}[/bold]")
-            console.print(f"      [dim]{short_desc}[/dim]")
-            console.print(f"      [dim]{path}[/dim]")
-            choices.append(str(i))
-            choice_map[str(i)] = model_info.name
-
-        console.print()
-
-    # Section 2: All registered models (for reference)
-    start_idx = len(local_models) + 1
-    console.print(f"[bold yellow]{t('run_registered_models')}[/bold yellow]")
+    # Show all user models
+    console.print(f"[bold green]Available Models:[/bold green]")
     console.print()
 
-    # Filter out already shown local models
-    local_model_names = {m.name for m, _ in local_models}
-
-    for i, model_info in enumerate(all_models, start_idx):
-        if model_info.name in local_model_names:
-            continue
-
-        desc = model_info.description_zh if lang == "zh" else model_info.description
-        short_desc = desc[:50] + "..." if len(desc) > 50 else desc
-        console.print(f"  [cyan][{i}][/cyan] [bold]{model_info.name}[/bold]")
-        console.print(f"      [dim]{short_desc}[/dim]")
-        console.print(f"      [dim]{model_info.hf_repo}[/dim]")
+    for i, model in enumerate(all_models, 1):
+        # Check if path exists
+        path_status = "✓" if model.path_exists() else "✗ Missing"
+        console.print(f"  [cyan][{i}][/cyan] [bold]{model.name}[/bold] [{path_status}]")
+        console.print(f"      [dim]{model.format} - {model.path}[/dim]")
         choices.append(str(i))
-        choice_map[str(i)] = model_info.name
+        choice_map[str(i)] = model.name
 
     console.print()
 
     # Add cancel option
     cancel_idx = str(len(choices) + 1)
-    console.print(f"  [cyan][{cancel_idx}][/cyan] [dim]{t('cancel')}[/dim]")
+    console.print(f"  [cyan][{cancel_idx}][/cyan] [dim]Cancel[/dim]")
     choices.append(cancel_idx)
     console.print()
 
     # Prompt for selection
     try:
         selection = Prompt.ask(
-            t("run_select_model_prompt"),
+            "Select model",
             choices=choices,
             default="1" if choices else cancel_idx,
         )
