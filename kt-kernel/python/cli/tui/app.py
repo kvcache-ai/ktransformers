@@ -15,2527 +15,39 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 import asyncio
 
-
-class InfoScreen(ModalScreen):
-    """Modal screen for displaying model information"""
-
-    CSS = """
-    InfoScreen {
-        align: center middle;
-    }
-
-    #info-dialog {
-        width: 80;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #info-content {
-        width: 100%;
-        height: auto;
-        padding: 1 0;
-    }
-
-    #info-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-    """
-
-    def __init__(self, model, moe_info=None):
-        super().__init__()
-        self.model = model
-        self.moe_info = moe_info or {}
-
-    def compose(self) -> ComposeResult:
-        status_map = {
-            "passed": "✓ Passed",
-            "failed": "✗ Failed",
-            "not_checked": "Not Checked",
-            "checking": "Checking...",
-            "no_repo": "-",
-        }
-        sha256_display = status_map.get(self.model.sha256_status, self.model.sha256_status)
-
-        # Build info content
-        info_lines = [
-            f"[bold]Name:[/bold] {self.model.name}",
-            f"[bold]Format:[/bold] {self.model.format}",
-            f"[bold]Path:[/bold] {self.model.path}",
-        ]
-
-        if self.model.repo_id:
-            prefix = (
-                "hf:"
-                if self.model.repo_type == "huggingface"
-                else "ms:" if self.model.repo_type == "modelscope" else ""
-            )
-            repo_display = f"{prefix}{self.model.repo_id}"
-            info_lines.append(f"[bold]Repo:[/bold] {repo_display}")
-        elif self.model.repo_type:
-            info_lines.append(f"[bold]Repo Type:[/bold] {self.model.repo_type}")
-
-        info_lines.append(f"[bold]SHA256:[/bold] {sha256_display}")
-
-        # Add MoE info if available
-        if self.moe_info and "error" not in self.moe_info:
-            info_lines.append("")
-            info_lines.append("[bold cyan]MoE Analysis:[/bold cyan]")
-            num_experts = self.moe_info.get("num_experts", 0)
-            num_layers = self.moe_info.get("num_layers", 0)
-            info_lines.append(f"  Experts per layer: {num_experts}")
-            info_lines.append(f"  Number of layers: {num_layers}")
-            info_lines.append(f"  Total experts: {num_experts}×{num_layers} = {num_experts * num_layers}")
-            info_lines.append(f"  Total size: {self.moe_info.get('total_size_gb', 0):.2f} GB")
-            info_lines.append(f"  Single expert size: {self.moe_info.get('single_expert_size_gb', 0):.2f} GB")
-            info_lines.append(f"  Skeleton size: {self.moe_info.get('rest_size_gb', 0):.2f} GB")
-
-        with Container(id="info-dialog"):
-            yield Label(f"[bold cyan]Model Information[/bold cyan]")
-            yield Label("")
-            with Container(id="info-content"):
-                yield Static("\n".join(info_lines))
-            yield Label("")
-            yield Label("[dim]Press 'i' again or ESC to close[/dim]")
-            with Horizontal(id="info-buttons"):
-                yield Button("Close", id="btn-close", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss()
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "i" or event.key == "escape":
-            self.dismiss()
-
-
-class RepoEditScreen(ModalScreen):
-    """Modal screen for editing repository information"""
-
-    CSS = """
-    RepoEditScreen {
-        align: center middle;
-    }
-
-    #repo-dialog {
-        width: 70;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #repo-providers {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0;
-    }
-
-    #repo-providers Button {
-        min-width: 20;
-        margin: 0 1;
-    }
-
-    #repo-actions {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0;
-    }
-
-    #repo-actions Button {
-        margin: 0 1;
-    }
-
-    #btn-huggingface {
-        background: $success;
-        color: $text;
-    }
-
-    #btn-modelscope {
-        background: $primary;
-        color: $text;
-    }
-    """
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self.selected_type = None
-
-    def compose(self) -> ComposeResult:
-        if self.model.repo_id:
-            prefix = (
-                "hf:"
-                if self.model.repo_type == "huggingface"
-                else "ms:" if self.model.repo_type == "modelscope" else ""
-            )
-            current_repo = f"{prefix}{self.model.repo_id}"
-        else:
-            current_repo = "None"
-
-        with Container(id="repo-dialog"):
-            yield Label(f"[bold cyan]Edit Repository Info: {self.model.name}[/bold cyan]")
-            yield Label("")
-            yield Label(f"[bold]Current:[/bold] {current_repo}")
-            yield Label("")
-            yield Label("[bold]Select Repository Type:[/bold]")
-
-            # Repository providers in one row
-            with Horizontal(id="repo-providers"):
-                yield Button("🤗 HuggingFace", id="btn-huggingface", variant="success")
-                yield Button("🔷 ModelScope", id="btn-modelscope", variant="primary")
-
-            # Actions in another row
-            with Horizontal(id="repo-actions"):
-                yield Button("Remove Repo Info", id="btn-remove", variant="warning")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-
-        if button_id == "btn-cancel":
-            self.dismiss(None)
-        elif button_id == "btn-remove":
-            self.dismiss({"action": "remove"})
-        elif button_id == "btn-huggingface":
-            self.selected_type = "huggingface"
-            self._show_input_dialog()
-        elif button_id == "btn-modelscope":
-            self.selected_type = "modelscope"
-            self._show_input_dialog()
-
-    def _show_input_dialog(self) -> None:
-        """Show input dialog for repo ID"""
-        example = "deepseek-ai/DeepSeek-V3" if self.selected_type == "huggingface" else "deepseek/DeepSeek-V3"
-        self.app.push_screen(
-            RepoInputScreen(
-                self.selected_type,
-                example,
-                model_name=self.model.name,
-                model_path=self.model.path,
-                default_value=self.model.repo_id or "",
-            ),
-            callback=self._on_input_done,
-        )
-
-    def _on_input_done(self, result) -> None:
-        """Handle input dialog result"""
-        if result:
-            self.dismiss({"action": "set", "repo_type": self.selected_type, "repo_id": result})
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(None)
-
-
-class RepoInputScreen(ModalScreen):
-    """Modal screen for inputting repository ID"""
-
-    CSS = """
-    RepoInputScreen {
-        align: center middle;
-    }
-
-    #input-dialog {
-        width: 70;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    Input {
-        width: 100%;
-        margin: 1 0;
-    }
-
-    #input-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(
-        self, repo_type: str, example: str, model_name: str = "", model_path: str = "", default_value: str = ""
-    ):
-        super().__init__()
-        self.repo_type = repo_type
-        self.example = example
-        self.model_name = model_name
-        self.model_path = model_path
-        self.default_value = default_value or ""
-
-    def compose(self) -> ComposeResult:
-        type_display = "HuggingFace" if self.repo_type == "huggingface" else "ModelScope"
-
-        with Container(id="input-dialog"):
-            yield Label(f"[bold cyan]Enter {type_display} Repository ID[/bold cyan]")
-            yield Label("")
-            yield Label(f"[dim]Example: {self.example}[/dim]")
-            if self.model_name:
-                yield Label(f"[dim]Model: {self.model_name}[/dim]")
-            if self.model_path:
-                yield Label(f"[dim]Path: {self.model_path}[/dim]")
-            yield Input(placeholder=self.example, value=self.default_value, id="repo-input")
-            with Horizontal(id="input-buttons"):
-                yield Button("OK", id="btn-ok", variant="primary")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-ok":
-            self._submit()
-        else:
-            self.dismiss(None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle Enter key in input"""
-        self._submit()
-
-    def _submit(self) -> None:
-        """Submit the input value"""
-        input_widget = self.query_one("#repo-input", Input)
-        value = input_widget.value.strip()
-        if value:
-            self.dismiss(value)
-        else:
-            self.notify("Repository ID cannot be empty", severity="warning")
-
-    def on_mount(self) -> None:
-        """Focus input when screen mounts"""
-        self.query_one("#repo-input", Input).focus()
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(None)
-
-
-class RenameInputScreen(ModalScreen):
-    """Modal screen for renaming a model"""
-
-    CSS = """
-    RenameInputScreen {
-        align: center middle;
-    }
-
-    #rename-dialog {
-        width: 70;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    Input {
-        width: 100%;
-        margin: 1 0;
-    }
-
-    #rename-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, current_name: str):
-        super().__init__()
-        self.current_name = current_name
-
-    def compose(self) -> ComposeResult:
-        with Container(id="rename-dialog"):
-            yield Label("[bold cyan]Rename Model[/bold cyan]")
-            yield Label("")
-            yield Label(f"[dim]Current name: {self.current_name}[/dim]")
-            yield Input(placeholder="New model name", value=self.current_name, id="rename-input")
-            with Horizontal(id="rename-buttons"):
-                yield Button("Rename", id="btn-rename", variant="primary")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-rename":
-            self._submit()
-        else:
-            self.dismiss(None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle Enter key in input"""
-        self._submit()
-
-    def _submit(self) -> None:
-        """Submit the new name"""
-        input_widget = self.query_one("#rename-input", Input)
-        new_name = input_widget.value.strip()
-
-        if not new_name:
-            self.notify("Name cannot be empty", severity="warning")
-            return
-
-        if new_name == self.current_name:
-            self.notify("Name unchanged", severity="warning")
-            return
-
-        self.dismiss(new_name)
-
-    def on_mount(self) -> None:
-        """Focus input when screen mounts and select all text"""
-        input_widget = self.query_one("#rename-input", Input)
-        input_widget.focus()
-        # Select all text for easy replacement
-        input_widget.action_end()
-        input_widget.action_select_all()
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(None)
-
-
-class ConfirmDialog(ModalScreen):
-    """Modal confirmation dialog"""
-
-    CSS = """
-    ConfirmDialog {
-        align: center middle;
-    }
-
-    #confirm-dialog {
-        width: 60;
-        height: auto;
-        border: thick $warning;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #confirm-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, title: str, message: str):
-        super().__init__()
-        self.title = title
-        self.message = message
-
-    def compose(self) -> ComposeResult:
-        with Container(id="confirm-dialog"):
-            yield Label(f"[bold yellow]{self.title}[/bold yellow]")
-            yield Label("")
-            yield Static(self.message)
-            yield Label("")
-            with Horizontal(id="confirm-buttons"):
-                yield Button("Yes", id="btn-yes", variant="error")
-                yield Button("No", id="btn-no", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-yes":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(False)
-
-
-class PathInputScreen(ModalScreen):
-    """Modal screen for inputting a path"""
-
-    CSS = """
-    PathInputScreen {
-        align: center middle;
-    }
-
-    #path-input-dialog {
-        width: 80;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    Input {
-        width: 100%;
-        margin: 1 0;
-    }
-
-    #path-input-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, title: str = "Enter Path", default_value: str = ""):
-        super().__init__()
-        self.title = title
-        self.default_value = default_value
-
-    def compose(self) -> ComposeResult:
-        with Container(id="path-input-dialog"):
-            yield Label(f"[bold cyan]{self.title}[/bold cyan]")
-            yield Label("")
-            yield Label("[dim]Enter absolute path to model directory[/dim]")
-            yield Input(placeholder="/path/to/models", value=self.default_value, id="path-input")
-            with Horizontal(id="path-input-buttons"):
-                yield Button("OK", id="btn-ok", variant="primary")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-ok":
-            self._submit()
-        else:
-            self.dismiss(None)
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle Enter key in input"""
-        self._submit()
-
-    def _submit(self) -> None:
-        """Submit the path"""
-        input_widget = self.query_one("#path-input", Input)
-        path = input_widget.value.strip()
-
-        if not path:
-            self.notify("Path cannot be empty", severity="warning")
-            return
-
-        self.dismiss(path)
-
-    def on_mount(self) -> None:
-        """Focus input when screen mounts"""
-        self.query_one("#path-input", Input).focus()
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(None)
-
-
-class PathSelectScreen(ModalScreen):
-    """Modal screen for selecting a path from a list"""
-
-    CSS = """
-    PathSelectScreen {
-        align: center middle;
-    }
-
-    #path-select-dialog {
-        width: 80;
-        height: auto;
-        max-height: 80%;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #path-select-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    #path-list {
-        width: 100%;
-        height: auto;
-        max-height: 20;
-        overflow-y: auto;
-        padding: 1 0;
-    }
-
-    .path-item {
-        width: 100%;
-        height: auto;
-        margin: 0 0 1 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, title: str, paths: list):
-        super().__init__()
-        self.title = title
-        self.paths = paths
-
-    def compose(self) -> ComposeResult:
-        with Container(id="path-select-dialog"):
-            yield Label(f"[bold cyan]{self.title}[/bold cyan]")
-            yield Label("")
-
-            with Container(id="path-list"):
-                for i, path in enumerate(self.paths):
-                    yield Button(f"{i+1}. {path}", id=f"path-{i}", classes="path-item")
-
-            with Horizontal(id="path-select-buttons"):
-                yield Button("Cancel", id="btn-cancel", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-cancel":
-            self.dismiss(None)
-        elif event.button.id.startswith("path-"):
-            index = int(event.button.id.split("-")[1])
-            self.dismiss(index)
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "escape":
-            self.dismiss(None)
-
-
-class AutoRepoSelectScreen(ModalScreen):
-    """Modal screen for selecting models to apply auto-detected repo info"""
-
-    CSS = """
-    AutoRepoSelectScreen {
-        align: center middle;
-    }
-
-    #auto-repo-dialog {
-        width: 100;
-        height: auto;
-        max-height: 90%;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #auto-repo-table {
-        width: 100%;
-        height: auto;
-        max-height: 30;
-        margin: 1 0;
-    }
-
-    #auto-repo-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    #auto-repo-buttons Button {
-        margin: 0 1;
-    }
-
-    #auto-repo-hint {
-        width: 100%;
-        padding: 1 0;
-    }
-    """
-
-    def __init__(self, detected_models):
-        """
-        Args:
-            detected_models: List of (model, repo_id, repo_type) tuples
-        """
-        super().__init__()
-        self.detected_models = detected_models
-        self.selected_indices = set(range(len(detected_models)))  # All selected by default
-
-    def compose(self) -> ComposeResult:
-        from textual.widgets import DataTable
-
-        with Container(id="auto-repo-dialog"):
-            yield Label("[bold cyan]🔍 Auto-Detect Repository[/bold cyan]")
-            yield Label("")
-            yield Label(f"[bold]Detected {len(self.detected_models)} model(s) with repository information[/bold]")
-
-            with Container(id="auto-repo-hint"):
-                yield Label("[dim]↑↓ Navigate  │  Space Toggle  │  Enter/OK Apply  │  ESC/Cancel Exit[/dim]")
-
-            # Create table
-            table = DataTable(id="auto-repo-table", cursor_type="row")
-            table.add_columns("✓", "Model Name", "Repository", "Type")
-
-            for i, (model, repo_id, repo_type) in enumerate(self.detected_models):
-                checkmark = "[green]✓[/green]" if i in self.selected_indices else "[dim] [/dim]"
-                # Add prefix to repo display
-                prefix = "hf:" if repo_type == "huggingface" else "ms:" if repo_type == "modelscope" else ""
-                repo_display = f"{prefix}{repo_id}"
-                table.add_row(checkmark, model.name, repo_display, repo_type, key=str(i))
-
-            yield table
-
-            with Horizontal(id="auto-repo-buttons"):
-                yield Button("OK", id="btn-ok", variant="success")
-                yield Button("Select All", id="btn-select-all")
-                yield Button("Deselect All", id="btn-deselect-all")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_mount(self) -> None:
-        """Focus the table when mounted"""
-        table = self.query_one("#auto-repo-table", DataTable)
-        table.focus()
-
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        """Handle row selection with space key"""
-        pass
-
-    def on_key(self, event) -> None:
-        """Handle key presses"""
-        if event.key == "space":
-            table = self.query_one("#auto-repo-table", DataTable)
-            if table.cursor_row is not None:
-                # Get row index from cursor position
-                row_index = table.cursor_row
-                self._toggle_selection(row_index)
-        elif event.key == "enter":
-            self._apply_selection()
-        elif event.key == "escape":
-            self.dismiss(None)
-
-    def _toggle_selection(self, row_index: int) -> None:
-        """Toggle selection state for a row"""
-        table = self.query_one("#auto-repo-table", DataTable)
-
-        if row_index in self.selected_indices:
-            self.selected_indices.remove(row_index)
-            checkmark = "[dim] [/dim]"
-        else:
-            self.selected_indices.add(row_index)
-            checkmark = "[green]✓[/green]"
-
-        # Update the checkmark column
-        table.update_cell_at((table.cursor_row, 0), checkmark)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-ok":
-            self._apply_selection()
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
-        elif event.button.id == "btn-select-all":
-            self._select_all(True)
-        elif event.button.id == "btn-deselect-all":
-            self._select_all(False)
-
-    def _select_all(self, select: bool) -> None:
-        """Select or deselect all items"""
-        table = self.query_one("#auto-repo-table", DataTable)
-
-        if select:
-            self.selected_indices = set(range(len(self.detected_models)))
-            checkmark = "[green]✓[/green]"
-        else:
-            self.selected_indices.clear()
-            checkmark = "[dim] [/dim]"
-
-        # Update all checkmarks
-        for i in range(len(self.detected_models)):
-            try:
-                table.update_cell_at((i, 0), checkmark)
-            except:
-                pass
-
-    def _apply_selection(self) -> None:
-        """Apply selected items"""
-        selected_models = [self.detected_models[i] for i in sorted(self.selected_indices)]
-        self.dismiss(selected_models)
-
-
-class QuantConfigScreen(ModalScreen):
-    """Modal screen for configuring quantization parameters"""
-
-    CSS = """
-    QuantConfigScreen {
-        align: center middle;
-    }
-
-    #quant-dialog {
-        width: 80;
-        height: auto;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #quant-params {
-        width: 100%;
-        height: auto;
-    }
-
-    #quant-params > Label {
-        height: 1;
-    }
-
-    #quant-params > Horizontal {
-        height: 3;
-        margin-bottom: 0;
-    }
-
-    #quant-params > Input {
-        height: 3;
-        margin-bottom: 0;
-    }
-
-    #quant-params > Checkbox {
-        height: 3;
-        margin: 1 0;
-    }
-
-    #quant-buttons {
-        width: 100%;
-        height: 3;
-        align: center middle;
-        layout: horizontal;
-        margin-top: 1;
-    }
-
-    #quant-buttons > Button {
-        min-width: 20;
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, model):
-        """
-        Args:
-            model: UserModel to quantize
-        """
-        super().__init__()
-        self.model = model
-        self.method = "int4"  # Default
-        self.input_type = "fp8"  # Default input type
-        self.use_gpu = False  # Default: CPU only
-        self.numa_nodes = None  # Will be set in on_mount
-        self.cpu_threads = None  # Will be set in on_mount
-        self.output_path = None  # Will be set in on_mount
-
-    def compose(self) -> ComposeResult:
-        from kt_kernel.cli.utils.environment import detect_cpu_info
-
-        # Detect CPU info
-        cpu_info = detect_cpu_info()
-        self.numa_nodes = cpu_info.numa_nodes
-        self.cpu_threads = cpu_info.cores
-
-        # Generate default output path
-        from pathlib import Path
-
-        model_path = Path(self.model.path)
-        default_output = model_path.parent / f"{model_path.name}-AMXINT4-NUMA{self.numa_nodes}"
-        self.output_path = str(default_output)
-
-        with Container(id="quant-dialog"):
-            yield Label(f"[bold cyan]Quantize Model: {self.model.name}[/bold cyan]")
-            yield Label("")
-
-            # Check AMX support
-            amx_available = any("amx" in s.lower() for s in cpu_info.instruction_sets)
-            if amx_available:
-                yield Label("[green]✓ AMX supported on this CPU[/green]")
-            else:
-                yield Label("[yellow]⚠ AMX not detected (will use fallback)[/yellow]")
-            yield Label("")
-
-            with Vertical(id="quant-params"):
-                # Method selection
-                yield Label("[bold]Quantization Method:[/bold]")
-                with Horizontal():
-                    yield Button("INT4", id="btn-int4", variant="primary")
-                    yield Button("INT8", id="btn-int8")
-
-                # Input type selection
-                yield Label("[bold]Input Weight Type:[/bold]")
-                with Horizontal():
-                    yield Button("FP8", id="btn-fp8", variant="primary")
-                    yield Button("FP16", id="btn-fp16")
-                    yield Button("BF16", id="btn-bf16")
-
-                # GPU option
-                yield Label("[bold]GPU Acceleration:[/bold]")
-                yield Checkbox("Use GPU (add --gpu flag)", id="check-gpu", value=False)
-
-                # NUMA nodes
-                yield Label(f"[bold]NUMA Nodes:[/bold] (Max: {self.numa_nodes})")
-                yield Input(value=str(self.numa_nodes), placeholder=f"1-{self.numa_nodes}", id="input-numa")
-
-                # CPU threads
-                yield Label(f"[bold]CPU Threads:[/bold] (Max: {self.cpu_threads})")
-                yield Input(value=str(self.cpu_threads), placeholder=f"1-{self.cpu_threads}", id="input-threads")
-
-                # Output path
-                yield Label("[bold]Output Path:[/bold]")
-                yield Input(value=self.output_path, id="input-output", placeholder="Output directory")
-
-            with Horizontal(id="quant-buttons"):
-                yield Button("Start Quantization", id="btn-start", variant="success")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-int4":
-            self.method = "int4"
-            event.button.variant = "primary"
-            self.query_one("#btn-int8", Button).variant = "default"
-            self._update_output_path()
-        elif event.button.id == "btn-int8":
-            self.method = "int8"
-            event.button.variant = "primary"
-            self.query_one("#btn-int4", Button).variant = "default"
-            self._update_output_path()
-        elif event.button.id == "btn-fp8":
-            self.input_type = "fp8"
-            event.button.variant = "primary"
-            self.query_one("#btn-fp16", Button).variant = "default"
-            self.query_one("#btn-bf16", Button).variant = "default"
-        elif event.button.id == "btn-fp16":
-            self.input_type = "fp16"
-            event.button.variant = "primary"
-            self.query_one("#btn-fp8", Button).variant = "default"
-            self.query_one("#btn-bf16", Button).variant = "default"
-        elif event.button.id == "btn-bf16":
-            self.input_type = "bf16"
-            event.button.variant = "primary"
-            self.query_one("#btn-fp8", Button).variant = "default"
-            self.query_one("#btn-fp16", Button).variant = "default"
-        elif event.button.id == "btn-start":
-            self._start_quantization()
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
-
-    def on_input_changed(self, event: Input.Changed) -> None:
-        """Update output path when NUMA nodes change"""
-        if event.input.id == "input-numa":
-            self._update_output_path()
-
-    def _update_output_path(self) -> None:
-        """Update output path based on current settings"""
-        try:
-            numa_input = self.query_one("#input-numa", Input)
-            numa_value = int(numa_input.value) if numa_input.value else self.numa_nodes
-
-            from pathlib import Path
-
-            model_path = Path(self.model.path)
-            method_str = self.method.upper()
-            new_output = model_path.parent / f"{model_path.name}-AMX{method_str}-NUMA{numa_value}"
-
-            output_input = self.query_one("#input-output", Input)
-            output_input.value = str(new_output)
-        except:
-            pass
-
-    def _start_quantization(self) -> None:
-        """Validate inputs and start quantization"""
-        from kt_kernel.cli.utils.environment import detect_cpu_info
-
-        cpu_info = detect_cpu_info()
-
-        # Get values
-        try:
-            numa_input = self.query_one("#input-numa", Input)
-            numa_value = int(numa_input.value) if numa_input.value else self.numa_nodes
-
-            threads_input = self.query_one("#input-threads", Input)
-            threads_value = int(threads_input.value) if threads_input.value else self.cpu_threads
-
-            output_input = self.query_one("#input-output", Input)
-            output_value = output_input.value.strip()
-
-            # Get GPU checkbox value
-            gpu_checkbox = self.query_one("#check-gpu", Checkbox)
-            use_gpu = gpu_checkbox.value
-        except ValueError:
-            self.app.notify("Invalid input values", severity="error")
-            return
-
-        # Validate NUMA
-        if numa_value < 1 or numa_value > cpu_info.numa_nodes:
-            self.app.notify(f"NUMA nodes must be between 1 and {cpu_info.numa_nodes}", severity="error")
-            return
-
-        # Validate threads
-        if threads_value < 1 or threads_value > cpu_info.cores:
-            self.app.notify(f"CPU threads must be between 1 and {cpu_info.cores}", severity="error")
-            return
-
-        # Validate output
-        if not output_value:
-            self.app.notify("Output path cannot be empty", severity="error")
-            return
-
-        # Build config and return
-        config = {
-            "method": self.method,
-            "input_type": self.input_type,
-            "use_gpu": use_gpu,
-            "numa_nodes": numa_value,
-            "cpu_threads": threads_value,
-            "output_path": output_value,
-        }
-
-        self.dismiss(config)
-
-
-class QuantProgressScreen(ModalScreen):
-    """Modal screen for showing quantization progress"""
-
-    CSS = """
-    QuantProgressScreen {
-        align: center middle;
-    }
-
-    #quant-progress-dialog {
-        width: 100;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #quant-output {
-        width: 100%;
-        height: 30;
-        background: $surface-darken-1;
-        color: $text;
-        border: solid $primary;
-    }
-
-    #quant-status {
-        width: 100%;
-        height: auto;
-        margin: 1 0;
-        text-align: center;
-    }
-
-    #quant-close-container {
-        width: 100%;
-        height: auto;
-        align: center middle;
-    }
-
-    Button#btn-close {
-        min-width: 20;
-        height: auto;
-        min-height: 3;
-        padding: 1 2;
-    }
-    """
-
-    def __init__(self, model_name: str):
-        super().__init__()
-        self.model_name = model_name
-        self._quant_running = True
-        self.success = None
-
-    def compose(self) -> ComposeResult:
-        from textual.widgets import RichLog
-
-        with Container(id="quant-progress-dialog"):
-            yield Label(f"[bold cyan]Quantizing: {self.model_name}[/bold cyan]")
-            yield Label("")
-            yield Static("", id="quant-status")
-            yield RichLog(id="quant-output", wrap=False, highlight=True, markup=True)
-            yield Label("")
-            with Center():
-                yield Button("Close", id="btn-close", variant="primary", disabled=True)
-
-    def append_output(self, line: str) -> None:
-        """Append a line to the output display"""
-        from textual.widgets import RichLog
-
-        try:
-            output_widget = self.query_one("#quant-output", RichLog)
-            output_widget.write(line)
-            # Auto-scroll to bottom
-            self.call_after_refresh(output_widget.scroll_end, animate=False)
-        except:
-            pass  # Screen not mounted yet
-
-    def update_status(self, status: str, running: bool = True) -> None:
-        """Update the status message"""
-        self._quant_running = running
-
-        try:
-            status_widget = self.query_one("#quant-status", Static)
-            status_widget.update(status)
-
-            # Enable close button when done
-            if not running:
-                close_btn = self.query_one("#btn-close", Button)
-                close_btn.disabled = False
-        except:
-            pass  # Screen not mounted yet
-
-    def set_success(self, success: bool) -> None:
-        """Mark quantization as successful or failed"""
-        self.success = success
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-close":
-            self.dismiss(self.success)
-
-
-class DoctorScreen(ModalScreen):
-    """Modal screen for system diagnostics"""
-
-    CSS = """
-    DoctorScreen {
-        align: center middle;
-    }
-
-    #doctor-dialog {
-        width: 100;
-        height: auto;
-        max-height: 90%;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #doctor-content {
-        width: 100%;
-        height: auto;
-        max-height: 60;
-        overflow-y: auto;
-        padding: 1 0;
-    }
-
-    #doctor-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        margin-top: 1;
-    }
-
-    #doctor-buttons > Button {
-        min-width: 20;
-    }
-
-    .doctor-section {
-        width: 100%;
-        height: auto;
-        margin: 1 0;
-    }
-
-    .doctor-item {
-        width: 100%;
-        height: auto;
-        margin: 0 0 1 0;
-    }
-    """
-
-    def compose(self) -> ComposeResult:
-        from kt_kernel.cli.utils.environment import (
-            detect_cpu_info,
-            detect_gpus,
-            detect_cuda_version,
-            detect_ram_gb,
-        )
-        import platform
-
-        with Container(id="doctor-dialog"):
-            yield Label("[bold cyan]System Diagnostics[/bold cyan]")
-            yield Label("")
-
-            with ScrollableContainer(id="doctor-content"):
-                # Python info
-                python_version = platform.python_version()
-                yield Static(f"[bold]Python Version:[/bold] {python_version}", classes="doctor-item")
-
-                # CPU info
-                cpu_info = detect_cpu_info()
-                yield Static(f"[bold]CPU:[/bold] {cpu_info.name}", classes="doctor-item")
-                yield Static(
-                    f"[bold]Cores/Threads:[/bold] {cpu_info.cores} cores / {cpu_info.threads} threads",
-                    classes="doctor-item",
-                )
-                yield Static(f"[bold]NUMA Nodes:[/bold] {cpu_info.numa_nodes}", classes="doctor-item")
-
-                # CPU Instruction Sets
-                isa_list = cpu_info.instruction_sets
-                has_amx = any("amx" in s.lower() for s in isa_list)
-                has_avx512 = any("avx512" in s.lower() for s in isa_list)
-                has_avx2 = "AVX2" in isa_list
-
-                if has_amx:
-                    isa_status = "[green]AMX available - best performance[/green]"
-                elif has_avx512:
-                    isa_status = "[yellow]AVX512 available - good performance[/yellow]"
-                elif has_avx2:
-                    isa_status = "[yellow]AVX2 only - basic support[/yellow]"
-                else:
-                    isa_status = "[red]No advanced instruction sets[/red]"
-
-                # Display all instruction sets (no truncation)
-                display_isa = ", ".join(isa_list)
-
-                yield Static(f"[bold]Instruction Sets:[/bold]", classes="doctor-item")
-                yield Static(f"  {display_isa}", classes="doctor-item")
-                yield Static(f"  Status: {isa_status}", classes="doctor-item")
-
-                # GPU info
-                gpus = detect_gpus()
-                if gpus:
-                    gpu_names = ", ".join(g.name for g in gpus)
-                    total_vram = sum(g.vram_gb for g in gpus)
-                    yield Static(f"[bold]GPUs:[/bold] {len(gpus)} found", classes="doctor-item")
-                    yield Static(f"  {gpu_names}", classes="doctor-item")
-                    yield Static(f"  Total VRAM: {total_vram:.1f} GB", classes="doctor-item")
-                else:
-                    yield Static("[bold]GPUs:[/bold] [yellow]No GPU detected[/yellow]", classes="doctor-item")
-
-                # CUDA info
-                cuda_version = detect_cuda_version()
-                if cuda_version:
-                    yield Static(f"[bold]CUDA Version:[/bold] {cuda_version}", classes="doctor-item")
-                else:
-                    yield Static("[bold]CUDA Version:[/bold] [yellow]Not available[/yellow]", classes="doctor-item")
-
-                # RAM info
-                ram_gb = detect_ram_gb()
-                yield Static(f"[bold]System RAM:[/bold] {ram_gb:.1f} GB", classes="doctor-item")
-
-                # kt-kernel info
-                try:
-                    import kt_kernel
-
-                    kt_version = getattr(kt_kernel, "__version__", "unknown")
-                    kt_variant = getattr(kt_kernel, "__cpu_variant__", "unknown")
-                    yield Static(f"[bold]kt-kernel:[/bold] v{kt_version} ({kt_variant})", classes="doctor-item")
-                except ImportError:
-                    yield Static("[bold]kt-kernel:[/bold] [red]Not installed[/red]", classes="doctor-item")
-
-            yield Label("")
-            with Horizontal(id="doctor-buttons"):
-                yield Button("Close", id="btn-close", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-close":
-            self.dismiss()
-
-
-class LinkModelsScreen(ModalScreen):
-    """Modal screen for linking GPU/CPU models"""
-
-    CSS = """
-    LinkModelsScreen {
-        align: center middle;
-    }
-
-    #link-dialog {
-        width: 80;
-        height: auto;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #link-content {
-        width: 100%;
-        height: auto;
-        max-height: 30;
-        overflow-y: auto;
-        padding: 1 0;
-        margin-bottom: 1;
-    }
-
-    #link-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        layout: horizontal;
-        margin-top: 1;
-        padding: 1 0;
-    }
-
-    #link-buttons > Button {
-        min-width: 20;
-        margin: 0 1;
-    }
-
-    .link-item {
-        width: 100%;
-        height: auto;
-        margin: 0 0 1 0;
-    }
-    """
-
-    def __init__(self, source_model, target_type: str):
-        """
-        Args:
-            source_model: The model being configured
-            target_type: "gpu" or "cpu" - what type of models to link to
-        """
-        super().__init__()
-        self.source_model = source_model
-        self.target_type = target_type
-        self.checkboxes = {}  # model_id -> Checkbox widget
-
-    def _detect_amx_quant_type(self, model_path: str) -> str:
-        """
-        Detect AMX quantization type from config.json metadata or model path
-
-        Priority:
-        1. Read from config.json amx_quantization.method (new format)
-        2. Fallback to path-based detection (legacy)
-
-        Returns:
-            "amx-int4", "amx-int8", "amx-awq", "amx-moe_int4", "amx-moe_int8", or "amx"
-        """
-        from pathlib import Path
-        import json
-
-        path = Path(model_path)
-
-        # Priority 1: Read from config.json
-        config_path = path / "config.json"
-        if config_path.exists():
-            try:
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-
-                # Check for amx_quantization metadata
-                amx_meta = config.get("amx_quantization")
-                if amx_meta and amx_meta.get("converted"):
-                    method = amx_meta.get("method", "").lower()
-                    if method:
-                        # Map method to display format
-                        method_map = {
-                            "int4": "amx-int4",
-                            "int8": "amx-int8",
-                            "awq": "amx-awq",
-                            "moe_int4": "amx-moe-int4",
-                            "moe_int8": "amx-moe-int8",
-                        }
-                        return method_map.get(method, f"amx-{method}")
-            except Exception:
-                pass  # Fallback to path detection
-
-        # Priority 2: Fallback to path-based detection (legacy)
-        path_str = str(path).upper()
-
-        if "INT4" in path_str or "AMXINT4" in path_str:
-            return "amx-int4"
-        elif "INT8" in path_str or "AMXINT8" in path_str:
-            return "amx-int8"
-        elif "AWQ" in path_str:
-            return "amx-awq"
-
-        # Default to int4 as it's the most common
-        return "amx-int4"
-
-    def compose(self) -> ComposeResult:
-        from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
-        from kt_kernel.cli.commands.model import is_amx_weights
-
-        registry = UserModelRegistry()
-        all_models = registry.list_models()
-
-        # Filter to get target type models
-        target_models = []
-        for model in all_models:
-            if model.id == self.source_model.id:
-                continue  # Skip self
-
-            if self.target_type == "gpu":
-                # Looking for GPU models (safetensors non-AMX)
-                if model.format == "safetensors":
-                    is_amx, _ = is_amx_weights(model.path)
-                    if not is_amx:
-                        target_models.append(model)
-            elif self.target_type == "cpu":
-                # Looking for CPU models (AMX or GGUF)
-                if model.format == "gguf":
-                    target_models.append(model)
-                elif model.format == "safetensors":
-                    is_amx, _ = is_amx_weights(model.path)
-                    if is_amx:
-                        target_models.append(model)
-
-        # Get currently linked model IDs
-        current_links = self.source_model.gpu_model_ids or []
-
-        with Container(id="link-dialog"):
-            title = f"Link {self.target_type.upper()} Models"
-            yield Label(f"[bold cyan]{title}[/bold cyan]")
-            yield Label(f"Source: {self.source_model.name}")
-            yield Label("")
-
-            with ScrollableContainer(id="link-content"):
-                if not target_models:
-                    yield Static(f"[yellow]No {self.target_type.upper()} models found[/yellow]")
-                else:
-                    for model in target_models:
-                        # Check if currently linked
-                        is_linked = model.id in current_links
-
-                        # Detect format display
-                        if model.format == "safetensors":
-                            # Check if it's AMX
-                            is_amx, _ = is_amx_weights(model.path)
-                            if is_amx:
-                                format_display = self._detect_amx_quant_type(model.path)
-                            else:
-                                format_display = model.format
-                        else:
-                            format_display = model.format
-
-                        checkbox = Checkbox(f"{model.name} ({format_display})", value=is_linked, id=f"check-{model.id}")
-                        self.checkboxes[model.id] = checkbox
-                        yield checkbox
-
-            with Horizontal(id="link-buttons"):
-                yield Button("Save", id="btn-save", variant="success")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-save":
-            # Collect selected model IDs
-            selected_ids = []
-            for model_id, checkbox in self.checkboxes.items():
-                if checkbox.value:
-                    selected_ids.append(model_id)
-
-            self.dismiss(selected_ids)
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
-
-
-class ConfirmDialog(ModalScreen):
-    """Modal dialog for confirmation"""
-
-    CSS = """
-    ConfirmDialog {
-        align: center middle;
-    }
-
-    #confirm-dialog {
-        width: 60;
-        height: auto;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #confirm-message {
-        width: 100%;
-        height: auto;
-        padding: 1 0;
-        margin-bottom: 1;
-    }
-
-    #confirm-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        layout: horizontal;
-        margin-top: 1;
-    }
-
-    #confirm-buttons > Button {
-        min-width: 15;
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, title: str, message: str, confirm_variant: str = "error"):
-        """
-        Args:
-            title: Dialog title
-            message: Confirmation message
-            confirm_variant: Variant for confirm button (default: "error" for destructive actions)
-        """
-        super().__init__()
-        self.title = title
-        self.message = message
-        self.confirm_variant = confirm_variant
-
-    def compose(self) -> ComposeResult:
-        with Container(id="confirm-dialog"):
-            yield Label(f"[bold]{self.title}[/bold]")
-            yield Static(self.message, id="confirm-message")
-            with Horizontal(id="confirm-buttons"):
-                yield Button("Confirm", id="btn-confirm", variant=self.confirm_variant)
-                yield Button("Cancel", id="btn-cancel", variant="primary")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-confirm":
-            self.dismiss(True)
-        elif event.button.id == "btn-cancel":
-            self.dismiss(False)
-
-
-class DownloadScreen(ModalScreen):
-    """Modal screen for downloading models"""
-
-    CSS = """
-    DownloadScreen {
-        align: center middle;
-    }
-
-    #download-dialog {
-        width: 100;
-        height: auto;
-        max-height: 90%;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #download-content {
-        width: 100%;
-        height: auto;
-        max-height: 35;
-        overflow-y: auto;
-        padding: 1 0;
-        margin-bottom: 1;
-    }
-
-    #download-params {
-        width: 100%;
-        height: auto;
-    }
-
-    #download-params > Label {
-        height: 1;
-        margin: 1 0 0 0;
-    }
-
-    #download-params > Horizontal {
-        height: 3;
-        margin-bottom: 0;
-    }
-
-    #download-params > Input {
-        height: 3;
-        margin-bottom: 1;
-    }
-
-    #download-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        layout: horizontal;
-        margin-top: 1;
-        padding: 1 0;
-    }
-
-    #download-buttons > Button {
-        min-width: 20;
-        margin: 0 1;
-    }
-
-    #download-status {
-        width: 100%;
-        height: auto;
-        margin: 1 0;
-    }
-
-    .file-item {
-        width: 100%;
-        height: auto;
-    }
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.repo_type = "huggingface"
-        self.verified = False
-        self.files = []
-        self.total_size = 0
-
-    def compose(self) -> ComposeResult:
-        from kt_kernel.cli.config.settings import get_settings
-
-        settings = get_settings()
-        model_paths = settings.get_model_paths()
-        default_dir = str(model_paths[0]) if model_paths else ""
-
-        with Container(id="download-dialog"):
-            yield Label("[bold cyan]Download Model[/bold cyan]")
-            yield Label("")
-
-            with ScrollableContainer(id="download-content"):
-                yield Static("", id="download-status")
-
-                with Vertical(id="download-params"):
-                    # Repository type selection
-                    yield Label("[bold]Repository Source:[/bold]")
-                    with Horizontal():
-                        yield Button("HuggingFace", id="btn-hf", variant="primary")
-                        yield Button("ModelScope", id="btn-ms")
-
-                    # Repository ID input
-                    yield Label("[bold]Repository ID:[/bold]")
-                    yield Input(placeholder="e.g., deepseek-ai/DeepSeek-V3", id="input-repo")
-
-                    # File pattern input
-                    yield Label("[bold]File Pattern:[/bold]")
-                    yield Input(
-                        value="*", placeholder="* for all files, or *.safetensors, *.gguf, etc.", id="input-pattern"
-                    )
-
-                    # Model name input (added)
-                    yield Label("[bold]Model Name:[/bold]")
-                    yield Input(placeholder="Auto-filled after verification", id="input-model-name")
-
-                    # Save path input (added)
-                    yield Label("[bold]Save Path:[/bold]")
-                    yield Input(value=default_dir, placeholder="Path to save the model", id="input-save-path")
-
-            yield Label("")
-            with Horizontal(id="download-buttons"):
-                yield Button("Verify Repository", id="btn-verify", variant="primary")
-                yield Button("Download", id="btn-download", variant="success", disabled=True)
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-hf":
-            self.repo_type = "huggingface"
-            event.button.variant = "primary"
-            self.query_one("#btn-ms", Button).variant = "default"
-            self.verified = False
-            self.query_one("#btn-download", Button).disabled = True
-        elif event.button.id == "btn-ms":
-            self.repo_type = "modelscope"
-            event.button.variant = "primary"
-            self.query_one("#btn-hf", Button).variant = "default"
-            self.verified = False
-            self.query_one("#btn-download", Button).disabled = True
-        elif event.button.id == "btn-verify":
-            self._verify_repository()
-        elif event.button.id == "btn-download":
-            self._start_download()
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
-
-    def _verify_repository(self) -> None:
-        """Verify repository and list files"""
-        repo_input = self.query_one("#input-repo", Input)
-        pattern_input = self.query_one("#input-pattern", Input)
-        status_widget = self.query_one("#download-status", Static)
-
-        repo_id = repo_input.value.strip()
-        pattern = pattern_input.value.strip() or "*"
-
-        # Validate repo_id
-        if not repo_id:
-            status_widget.update("[red]Please enter a repository ID[/red]")
-            return
-
-        if "/" not in repo_id:
-            status_widget.update("[red]Repository ID must be in format: namespace/model-name[/red]")
-            return
-
-        # Show verifying message
-        status_widget.update(f"[yellow]Verifying repository: {repo_id}...[/yellow]")
-        self.query_one("#btn-verify", Button).disabled = True
-
-        # Run verification in worker
-        from kt_kernel.cli.utils.download_helper import (
-            verify_repo_exists,
-            list_remote_files_hf,
-            list_remote_files_ms,
-            filter_files_by_pattern,
-            calculate_total_size,
-        )
-        from kt_kernel.cli.utils.model_verifier import check_huggingface_connectivity
-
-        try:
-            # Check connectivity for HuggingFace
-            use_mirror = False
-            if self.repo_type == "huggingface":
-                is_accessible, msg = check_huggingface_connectivity(timeout=5)
-                if not is_accessible:
-                    use_mirror = True
-                    status_widget.update("[yellow]HuggingFace not accessible, using mirror...[/yellow]")
-
-            # Verify repository exists
-            exists, msg = verify_repo_exists(repo_id, self.repo_type, use_mirror)
-            if not exists:
-                status_widget.update(f"[red]Repository not found: {msg}[/red]")
-                self.query_one("#btn-verify", Button).disabled = False
-                return
-
-            # List files
-            if self.repo_type == "huggingface":
-                all_files = list_remote_files_hf(repo_id, use_mirror)
-            else:
-                all_files = list_remote_files_ms(repo_id)
-
-            # Filter by pattern
-            filtered_files = filter_files_by_pattern(all_files, pattern)
-
-            if not filtered_files:
-                status_widget.update(f"[yellow]No files match pattern '{pattern}'[/yellow]")
-                self.query_one("#btn-verify", Button).disabled = False
-                return
-
-            # Calculate total size
-            self.total_size = calculate_total_size(filtered_files)
-            self.files = filtered_files
-
-            # Auto-fill model name (default: last part of repo_id)
-            model_name = repo_id.split("/")[-1]
-            model_name_input = self.query_one("#input-model-name", Input)
-            if not model_name_input.value:
-                model_name_input.value = model_name
-
-            # Update save path with model name
-            save_path_input = self.query_one("#input-save-path", Input)
-            from pathlib import Path
-
-            current_path = Path(save_path_input.value or "")
-
-            # Determine base directory
-            if current_path.is_dir():
-                # It's an existing directory, use it as base
-                base_dir = current_path
-            elif current_path.parent.exists():
-                # Parent exists, use parent as base (current path might be a full path with model name)
-                base_dir = current_path.parent
-            else:
-                # Use the path as-is (might be a default value)
-                base_dir = current_path if current_path.is_absolute() else Path(save_path_input.value or "").parent
-
-            # Build full path with model name
-            if base_dir:
-                full_path = base_dir / model_name
-                # Check if path already exists
-                if full_path.exists():
-                    # Find a unique name
-                    counter = 1
-                    while (base_dir / f"{model_name}-{counter}").exists():
-                        counter += 1
-                    full_path = base_dir / f"{model_name}-{counter}"
-
-                save_path_input.value = str(full_path)
-
-            # Format size
-            size_gb = self.total_size / (1024**3)
-
-            # Show results
-            file_count = len(filtered_files)
-            status_text = f"[green]✓ Repository found![/green]\n\n"
-            status_text += f"Files to download: {file_count}\n"
-            status_text += f"Total size: {size_gb:.2f} GB\n\n"
-
-            # Show first few files
-            status_text += "Files:\n"
-            for i, f in enumerate(filtered_files[:10]):
-                file_size_mb = f["size"] / (1024**2)
-                status_text += f"  • {f['path']} ({file_size_mb:.1f} MB)\n"
-
-            if len(filtered_files) > 10:
-                status_text += f"  ... and {len(filtered_files) - 10} more files"
-
-            status_widget.update(status_text)
-
-            # Enable download button
-            self.verified = True
-            self.query_one("#btn-download", Button).disabled = False
-            self.query_one("#btn-verify", Button).disabled = False
-
-        except Exception as e:
-            status_widget.update(f"[red]Verification failed: {e}[/red]")
-            self.query_one("#btn-verify", Button).disabled = False
-
-    def _start_download(self) -> None:
-        """Start download process"""
-        if not self.verified:
-            return
-
-        repo_input = self.query_one("#input-repo", Input)
-        pattern_input = self.query_one("#input-pattern", Input)
-        model_name_input = self.query_one("#input-model-name", Input)
-        save_path_input = self.query_one("#input-save-path", Input)
-
-        model_name = model_name_input.value.strip()
-        save_path = save_path_input.value.strip()
-
-        if not model_name:
-            model_name = repo_input.value.strip().split("/")[-1]
-
-        if not save_path:
-            from kt_kernel.cli.config.settings import get_settings
-
-            settings = get_settings()
-            model_paths = settings.get_model_paths()
-            from pathlib import Path
-
-            save_path = str(Path(model_paths[0]) / model_name) if model_paths else model_name
-
-        config = {
-            "repo_type": self.repo_type,
-            "repo_id": repo_input.value.strip(),
-            "pattern": pattern_input.value.strip() or "*",
-            "model_name": model_name,
-            "save_path": save_path,
-            "files": self.files,
-            "total_size": self.total_size,
-        }
-
-        self.dismiss(config)
-
-
-class DownloadProgressScreen(ModalScreen):
-    """Modal screen for showing download progress"""
-
-    CSS = """
-    DownloadProgressScreen {
-        align: center middle;
-    }
-
-    #download-progress-dialog {
-        width: auto;
-        height: auto;
-        max-height: 80%;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #download-progress-output {
-        width: 100%;
-        height: 30;
-        background: $surface-darken-1;
-        color: $text;
-        border: solid $primary;
-    }
-
-    #download-progress-status {
-        width: 100%;
-        height: auto;
-        margin: 1 0;
-        text-align: center;
-    }
-
-    #download-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        layout: horizontal;
-    }
-
-    Button#btn-close-download, Button#btn-cancel-download {
-        min-width: 15;
-        margin: 0 1;
-    }
-    """
-
-    def __init__(
-        self,
-        cmd: list,
-        model_name: str,
-        repo_id: str,
-        repo_type: str,
-        save_path: str,
-        files: list = None,
-        total_size: int = 0,
-    ):
-        super().__init__()
-        self.cmd = cmd
-        self.model_name = model_name
-        self.repo_id = repo_id
-        self.repo_type = repo_type
-        self.save_path = save_path
-        self.files = files or []  # Already verified files from DownloadScreen
-        self.total_size = total_size  # Already calculated total size
-        self._download_running = True
-        self.success = None
-        self.process = None
-
-    def compose(self) -> ComposeResult:
-        from textual.widgets import RichLog
-        from textual.containers import Horizontal
-
-        with Container(id="download-progress-dialog"):
-            yield Label(f"[bold cyan]Downloading: {self.repo_id}[/bold cyan]")
-            yield Label("")
-            yield Static("[yellow]Starting download...[/yellow]", id="download-progress-status")
-            yield RichLog(id="download-progress-output", wrap=False, highlight=True, markup=True)
-            yield Label("")
-            with Center():
-                with Horizontal(id="download-buttons"):
-                    yield Button("Cancel", id="btn-cancel-download", variant="error")
-                    yield Button("Close", id="btn-close-download", variant="primary", disabled=True)
-
-    def on_mount(self) -> None:
-        """Start download process when screen is mounted"""
-        # Get parent app to use run_worker
-        app = self.app
-        if hasattr(app, "run_worker"):
-            app.run_worker(self.download_async(), name=f"download-{self.repo_id}", group="download", exclusive=False)
-        else:
-            # Fallback to thread
-            import threading
-
-            threading.Thread(target=self._run_download_sync, daemon=True).start()
-
-    def append_output(self, line: str) -> None:
-        """Append a line to the output display"""
-        from textual.widgets import RichLog
-
-        try:
-            output_widget = self.query_one("#download-progress-output", RichLog)
-            output_widget.write(line)
-            self.call_after_refresh(output_widget.scroll_end, animate=False)
-        except:
-            pass
-
-    def update_status(self, status: str, running: bool = True) -> None:
-        """Update the status message"""
-        self._download_running = running
-
-        try:
-            status_widget = self.query_one("#download-progress-status", Static)
-            status_widget.update(status)
-            # Note: Button states are now managed explicitly in download_async and _cancel_download
-        except:
-            pass
-
-    async def download_async(self):
-        """Download model in subprocess and capture stdout"""
-        import sys
-        import subprocess
-        from pathlib import Path
-
-        try:
-            # Update initial status
-            self.update_status("[bold yellow]Preparing download...[/bold yellow]")
-
-            self.append_output(f"[cyan]Repository: {self.repo_id}[/cyan]")
-            self.append_output(f"[cyan]Type: {self.repo_type}[/cyan]")
-            self.append_output(f"[cyan]Destination: {self.save_path}[/cyan]")
-            self.append_output("")
-
-            # Show verified file info
-            if self.files:
-                from kt_kernel.cli.utils.model_scanner import format_size
-
-                self.append_output(
-                    f"[green]Files to download: {len(self.files)} files ({format_size(self.total_size)})[/green]"
-                )
-                for i, file in enumerate(self.files[:5]):
-                    file_name = Path(file["path"]).name
-                    self.append_output(f"  • {file_name} ({format_size(file['size'])})")
-                if len(self.files) > 5:
-                    self.append_output(f"  ... and {len(self.files) - 5} more")
-                self.append_output("")
-
-            # Extract pattern
-            pattern = "*"
-            if "--pattern" in self.cmd:
-                pattern_idx = self.cmd.index("--pattern") + 1
-                if pattern_idx < len(self.cmd):
-                    pattern = self.cmd[pattern_idx]
-
-            # Create download directory
-            download_path = Path(self.save_path)
-            download_path.mkdir(parents=True, exist_ok=True)
-
-            self.update_status("[bold yellow]Downloading files...[/bold yellow]")
-            self.append_output("[yellow]Starting download...[/yellow]")
-            self.append_output("")
-
-            # Build Python code to execute in subprocess
-            if self.repo_type == "huggingface":
-                download_code = f"""
-import sys
-from huggingface_hub import snapshot_download
-
-print("Downloading from HuggingFace...", file=sys.stderr)
-sys.stderr.flush()
-
-snapshot_download(
-    repo_id="{self.repo_id}",
-    local_dir="{download_path}",
-    allow_patterns={repr(pattern if pattern != "*" else None)},
-    local_dir_use_symlinks=False,
-    resume_download=True
+# Local - Screen modules
+from .screens.dialogs import ConfirmDialog, PathInputScreen, PathSelectScreen
+from .screens.model_info import (
+    InfoScreen,
+    EditModelScreen,
+    RenameInputScreen,
+    RepoEditScreen,
+    RepoInputScreen,
+    AutoRepoSelectScreen,
 )
+from .screens.config import QuantConfigScreen, RunConfigScreen
+from .screens.progress import QuantProgressScreen, DownloadProgressScreen
+from .screens.download import DownloadScreen
+from .screens.linking import LinkModelsScreen
+from .screens.system import DoctorScreen, SettingsScreen
 
-print("Download complete!", file=sys.stderr)
-"""
-            else:  # modelscope
-                download_code = f"""
-import sys
-from modelscope.hub.snapshot_download import snapshot_download
 
-print("Downloading from ModelScope...", file=sys.stderr)
-sys.stderr.flush()
+# InfoScreen, RepoEditScreen, RepoInputScreen, RenameInputScreen,
+# AutoRepoSelectScreen, EditModelScreen moved to screens/model_info.py
 
-snapshot_download(
-    model_id="{self.repo_id}",
-    local_dir="{download_path}",
-    allow_file_pattern={repr(pattern if pattern != "*" else None)}
-)
 
-print("Download complete!", file=sys.stderr)
-"""
+# QuantConfigScreen moved to screens/config.py
 
-            # Execute in subprocess and capture output
-            self.process = await asyncio.create_subprocess_exec(
-                sys.executable, "-u", "-c", download_code, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-            )
 
-            # Read output line by line
-            while True:
-                line = await self.process.stdout.readline()
-                if not line:
-                    break
+# QuantProgressScreen moved to screens/
 
-                line_str = line.decode("utf-8", errors="replace").rstrip()
-                if line_str:
-                    self.append_output(line_str)
+# DoctorScreen moved to screens/
 
-            # Wait for completion
-            await self.process.wait()
+# LinkModelsScreen moved to screens/
 
-            # Check result
-            if self.process.returncode == 0:
-                # Check downloaded files
-                files_on_disk = list(download_path.glob("*"))
-                self.append_output("")
-                self.append_output(f"[green]✓ Download completed![/green]")
-                self.append_output(f"[green]✓ {len(files_on_disk)} files in destination[/green]")
+# DownloadScreen moved to screens/
 
-                self.update_status("[bold green]✓ Download completed successfully![/bold green]", running=False)
-                self.set_success(True)
-                # Add to registry
-                self._add_to_registry()
-                # Enable Close button, disable Cancel
-                self.query_one("#btn-close-download", Button).disabled = False
-                self.query_one("#btn-cancel-download", Button).disabled = True
-            else:
-                self.append_output("")
-                self.append_output(f"[red]✗ Download failed with exit code {self.process.returncode}[/red]")
-                self.update_status(f"[bold red]✗ Download failed[/bold red]", running=False)
-                self.set_success(False)
-                # Enable Close button, disable Cancel
-                self.query_one("#btn-close-download", Button).disabled = False
-                self.query_one("#btn-cancel-download", Button).disabled = True
-
-        except Exception as e:
-            self.append_output("")
-            self.append_output(f"[red]✗ Error: {e}[/red]")
-            import traceback
-
-            tb = traceback.format_exc()
-            for line in tb.split("\n")[:10]:
-                if line.strip():
-                    self.append_output(f"[dim]{line}[/dim]")
-
-            self.update_status(f"[bold red]✗ Download failed[/bold red]", running=False)
-            self.set_success(False)
-            # Enable Close button, disable Cancel
-            try:
-                self.query_one("#btn-close-download", Button).disabled = False
-                self.query_one("#btn-cancel-download", Button).disabled = True
-            except:
-                pass
-
-    def _run_download_sync(self) -> None:
-        """Fallback sync download (kept for compatibility)"""
-        import subprocess
-        from pathlib import Path
-
-        try:
-            self.call_from_thread(self.append_output, f"[cyan]Repository: {self.repo_id}[/cyan]")
-            self.call_from_thread(self.append_output, f"[cyan]Type: {self.repo_type}[/cyan]")
-            self.call_from_thread(self.append_output, f"[cyan]Destination: {self.save_path}[/cyan]")
-            self.call_from_thread(self.append_output, "")
-            self.call_from_thread(self.append_output, f"Command: {' '.join(self.cmd)}")
-            self.call_from_thread(self.append_output, "")
-
-            # Run subprocess
-            process = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-
-            # Read output line by line
-            for line in process.stdout:
-                line = line.rstrip()
-                if line:
-                    self.call_from_thread(self.append_output, line)
-
-            process.wait()
-
-            if process.returncode == 0:
-                self.call_from_thread(self.append_output, "")
-                self.call_from_thread(self.append_output, "[green]✓ Download completed![/green]")
-                self.call_from_thread(self.update_status, "[green]✓ Download completed successfully[/green]", False)
-                self.call_from_thread(self.set_success, True)
-                self.call_from_thread(self._add_to_registry)
-            else:
-                self.call_from_thread(
-                    self.update_status, f"[red]✗ Download failed (exit code {process.returncode})[/red]", False
-                )
-                self.call_from_thread(self.set_success, False)
-
-        except Exception as e:
-            self.call_from_thread(self.append_output, f"[red]Error: {e}[/red]")
-            self.call_from_thread(self.update_status, "[red]✗ Download failed[/red]", False)
-            self.call_from_thread(self.set_success, False)
-
-    def _add_to_registry(self) -> None:
-        """Add downloaded model to registry"""
-        from pathlib import Path
-        from kt_kernel.cli.utils.user_model_registry import UserModelRegistry, UserModel
-        from kt_kernel.cli.utils.model_scanner import scan_single_path
-
-        try:
-            output_path = Path(self.save_path)
-            if output_path.exists():
-                scanned = scan_single_path(output_path)
-                if scanned:
-                    registry = UserModelRegistry()
-                    # Check if already exists
-                    if not registry.find_by_path(str(output_path)):
-                        new_model = UserModel(
-                            name=self.model_name,
-                            path=str(output_path),
-                            format=scanned.format,
-                            repo_id=self.repo_id,
-                            repo_type=self.repo_type,
-                        )
-                        registry.add_model(new_model)
-                        self.append_output(f"[green]✓ Model added to registry: {self.model_name}[/green]")
-        except Exception as e:
-            self.append_output(f"[yellow]Warning: Failed to add to registry: {e}[/yellow]")
-
-    def set_success(self, success: bool) -> None:
-        """Mark download as successful or failed"""
-        self.success = success
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button clicks"""
-        if event.button.id == "btn-close-download":
-            # Close button - just dismiss
-            self.dismiss(self.success)
-        elif event.button.id == "btn-cancel-download":
-            # Cancel button - kill process and cleanup
-            self._cancel_download()
-
-    def _cancel_download(self) -> None:
-        """Cancel the download and cleanup"""
-        import shutil
-        from pathlib import Path
-
-        self.append_output("")
-        self.append_output("[yellow]Cancelling download...[/yellow]")
-
-        # Kill the download process if it's running
-        if self.process and self.process.returncode is None:
-            try:
-                self.process.kill()
-                self.append_output("[yellow]Download process terminated[/yellow]")
-            except Exception as e:
-                self.append_output(f"[yellow]Warning: Failed to kill process: {e}[/yellow]")
-
-        # Delete the download directory
-        download_path = Path(self.save_path)
-        if download_path.exists():
-            try:
-                shutil.rmtree(download_path)
-                self.append_output(f"[yellow]Deleted directory: {self.save_path}[/yellow]")
-            except Exception as e:
-                self.append_output(f"[yellow]Warning: Failed to delete directory: {e}[/yellow]")
-
-        self.append_output("")
-        self.append_output("[red]✗ Download cancelled by user[/red]")
-        self.update_status("[bold red]✗ Download cancelled[/bold red]", running=False)
-        self.set_success(False)
-
-        # Disable Cancel button, enable Close
-        try:
-            self.query_one("#btn-cancel-download", Button).disabled = True
-            self.query_one("#btn-close-download", Button).disabled = False
-        except:
-            pass
-
-
-class RunConfigScreen(ModalScreen):
-    """Modal screen for configuring model run parameters"""
-
-    CSS = """
-    RunConfigScreen {
-        align: center middle;
-    }
-
-    #run-dialog {
-        width: 90;
-        height: auto;
-        max-height: 90%;
-        background: $surface;
-        border: heavy $primary;
-        padding: 1 2;
-    }
-
-    #run-content {
-        width: 100%;
-        height: auto;
-        max-height: 35;
-        overflow-y: auto;
-        padding: 1 0;
-        margin-bottom: 1;
-    }
-
-    #run-params {
-        width: 100%;
-        height: auto;
-    }
-
-    #run-params > Label {
-        height: 1;
-        margin: 1 0 0 0;
-    }
-
-    #run-params > Input {
-        height: 3;
-        margin-bottom: 1;
-    }
-
-    #cpu-model-list {
-        width: 100%;
-        height: auto;
-        max-height: 15;
-        overflow-y: auto;
-        border: solid $primary;
-        padding: 1;
-        margin-bottom: 1;
-    }
-
-    #vram-display {
-        width: 100%;
-        height: auto;
-        padding: 1;
-        background: $surface-lighten-1;
-        border: solid $accent;
-        margin: 1 0;
-    }
-
-    #run-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        layout: horizontal;
-        margin-top: 1;
-        padding: 1 0;
-    }
-
-    #run-buttons > Button {
-        min-width: 20;
-        margin: 0 1;
-    }
-
-    .cpu-model-item {
-        width: 100%;
-        height: auto;
-        margin: 0 0 1 0;
-    }
-
-    .cpu-model-linked {
-        color: $accent;
-        text-style: bold;
-    }
-    """
-
-    def __init__(self, gpu_model, moe_result: dict):
-        """
-        Args:
-            gpu_model: The GPU model to run
-            moe_result: MoE analysis result containing expert info
-        """
-        super().__init__()
-        self.gpu_model = gpu_model
-        self.moe_result = moe_result
-        self.selected_cpu_model_id = None
-        self._is_mounted = False  # Track mount status to avoid duplicate updates
-        self._updating_cpu_list = False  # Lock to prevent concurrent updates
-
-        # Get system info
-        from kt_kernel.cli.utils.environment import detect_cpu_info
-
-        cpu_info = detect_cpu_info()
-        self.max_cpu_cores = cpu_info.cores
-        self.max_numa_nodes = cpu_info.numa_nodes
-
-        # Get MoE info
-        self.num_experts = moe_result.get("num_experts", 0)
-        self.rest_size_gb = moe_result.get("rest_size_gb", 0)
-        self.single_expert_size_gb = moe_result.get("single_expert_size_gb", 0)
-
-    def compose(self) -> ComposeResult:
-        with Container(id="run-dialog"):
-            yield Label(f"[bold cyan]Run Configuration: {self.gpu_model.name}[/bold cyan]")
-            yield Label("")
-
-            with ScrollableContainer(id="run-content"):
-                with Vertical(id="run-params"):
-                    # GPU Experts
-                    yield Label(f"[bold]GPU Experts[/bold] (0 to {self.num_experts}):")
-                    yield Input(placeholder=f"0-{self.num_experts}", id="input-gpu-experts")
-
-                    # CPU Threads
-                    yield Label(f"[bold]CPU Threads[/bold] (1 to {self.max_cpu_cores}):")
-                    yield Input(placeholder=f"1-{self.max_cpu_cores}", id="input-cpu-threads")
-
-                    # NUMA Nodes
-                    yield Label(f"[bold]NUMA Nodes[/bold] (1 to {self.max_numa_nodes}):")
-                    yield Input(placeholder=f"1-{self.max_numa_nodes}", id="input-numa-nodes")
-
-                    # Total Tokens
-                    yield Label("[bold]Total Tokens[/bold] (1 to 10000):")
-                    yield Input(placeholder="1-10000", id="input-total-tokens")
-
-                    # CPU Model Selection
-                    yield Label("[bold]CPU Model:[/bold]")
-                    yield Container(id="cpu-model-list")
-
-                # VRAM Display
-                yield Container(id="vram-display")
-
-            yield Label("")
-            with Horizontal(id="run-buttons"):
-                yield Button("Run", id="btn-run", variant="success")
-                yield Button("Cancel", id="btn-cancel")
-
-    async def on_mount(self) -> None:
-        """Initialize CPU model list and VRAM display"""
-        # First set flag to prevent event handling
-        self._is_mounted = False
-
-        # Use prevent context manager to block Input.Changed events
-        numa_input = self.query_one("#input-numa-nodes", Input)
-        gpu_input = self.query_one("#input-gpu-experts", Input)
-        cpu_input = self.query_one("#input-cpu-threads", Input)
-        tokens_input = self.query_one("#input-total-tokens", Input)
-
-        with (
-            numa_input.prevent(Input.Changed),
-            gpu_input.prevent(Input.Changed),
-            cpu_input.prevent(Input.Changed),
-            tokens_input.prevent(Input.Changed),
-        ):
-            gpu_input.value = "1"
-            cpu_input.value = str(int(self.max_cpu_cores * 0.8))
-            numa_input.value = str(self.max_numa_nodes)
-            tokens_input.value = "4096"
-
-        # Populate initial data
-        await self._update_cpu_model_list()
-        self._update_vram_display()
-
-        # Now allow input changes to trigger updates
-        self._is_mounted = True
-
-    async def on_input_changed(self, event: Input.Changed) -> None:
-        """Handle input changes"""
-        # Only respond to changes after mount to avoid duplicate initialization
-        if not self._is_mounted:
-            return
-
-        if event.input.id == "input-numa-nodes":
-            # NUMA changed, refresh CPU model list
-            await self._update_cpu_model_list()
-        elif event.input.id == "input-gpu-experts":
-            # GPU experts changed, update VRAM
-            self._update_vram_display()
-
-    async def _update_cpu_model_list(self) -> None:
-        """Update CPU model list based on NUMA selection"""
-        # Prevent concurrent updates
-        if self._updating_cpu_list:
-            return
-
-        self._updating_cpu_list = True
-
-        try:
-            from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
-            from kt_kernel.cli.commands.model import is_amx_weights
-
-            registry = UserModelRegistry()
-            all_models = registry.list_models()
-
-            # Get selected NUMA value
-            try:
-                numa_input = self.query_one("#input-numa-nodes", Input)
-                selected_numa = int(numa_input.value) if numa_input.value else self.max_numa_nodes
-            except:
-                selected_numa = self.max_numa_nodes
-
-            # Get linked CPU models
-            linked_ids = set(self.gpu_model.gpu_model_ids or [])
-
-            # Filter CPU models
-            cpu_models = []
-            for model in all_models:
-                if model.format == "gguf":
-                    # GGUF models: always show
-                    is_linked = model.id in linked_ids
-                    cpu_models.append((model, is_linked, True))
-                elif model.format == "safetensors":
-                    is_amx, numa_count = is_amx_weights(model.path)
-                    if is_amx:
-                        # AMX models: only show if NUMA matches
-                        if numa_count == selected_numa:
-                            is_linked = model.id in linked_ids
-                            cpu_models.append((model, is_linked, True))
-
-            # Sort: linked first, then by name
-            cpu_models.sort(key=lambda x: (not x[1], x[0].name))
-
-            # Update display - safely remove all children first
-            cpu_list_container = self.query_one("#cpu-model-list", Container)
-
-            # Use remove_children() to safely remove all widgets (async)
-            await cpu_list_container.remove_children()
-
-            # Now add new widgets
-            if not cpu_models:
-                await cpu_list_container.mount(
-                    Static("[yellow]No compatible CPU models found[/yellow]", classes="cpu-model-item")
-                )
-            else:
-                widgets_to_mount = []
-                for model, is_linked, _ in cpu_models:
-                    if is_linked:
-                        label = f"✓ [bold]{model.name}[/bold] ({model.format}) [dim]- linked[/dim]"
-                        style_class = "cpu-model-item cpu-model-linked"
-                    else:
-                        label = f"  {model.name} ({model.format})"
-                        style_class = "cpu-model-item"
-
-                    # Create clickable button for each CPU model
-                    btn = Button(label, id=f"cpu-{model.id}", classes=style_class)
-                    widgets_to_mount.append(btn)
-
-                # Mount all widgets at once
-                if widgets_to_mount:
-                    await cpu_list_container.mount(*widgets_to_mount)
-
-        finally:
-            # Always release the lock
-            self._updating_cpu_list = False
-
-    def _update_vram_display(self) -> None:
-        """Update GPU VRAM requirement display"""
-        try:
-            gpu_experts_input = self.query_one("#input-gpu-experts", Input)
-            gpu_experts = int(gpu_experts_input.value) if gpu_experts_input.value else 0
-        except:
-            gpu_experts = 0
-
-        # Calculate VRAM: backbone + (gpu_experts × expert_size)
-        total_vram = self.rest_size_gb + (gpu_experts * self.single_expert_size_gb)
-
-        vram_display = self.query_one("#vram-display", Container)
-
-        # Safely remove old content
-        try:
-            for child in list(vram_display.children):
-                child.remove()
-        except Exception:
-            pass
-
-        vram_text = f"[bold]GPU VRAM Requirement:[/bold]\n"
-        vram_text += f"  Backbone: {self.rest_size_gb:.2f} GB\n"
-        vram_text += f"  Experts ({gpu_experts}): {gpu_experts * self.single_expert_size_gb:.2f} GB\n"
-        vram_text += f"  [bold cyan]Total: {total_vram:.2f} GB[/bold cyan]"
-
-        vram_display.mount(Static(vram_text))
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-run":
-            self._validate_and_run()
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
-        elif event.button.id and event.button.id.startswith("cpu-"):
-            # CPU model selected
-            model_id = event.button.id[4:]  # Remove "cpu-" prefix
-            self.selected_cpu_model_id = model_id
-            # Highlight selected
-            for btn in self.query("Button"):
-                if btn.id and btn.id.startswith("cpu-"):
-                    if btn.id == event.button.id:
-                        btn.variant = "primary"
-                    else:
-                        btn.variant = "default"
-
-    def _validate_and_run(self) -> None:
-        """Validate inputs and prepare to run"""
-        try:
-            # Get all inputs
-            gpu_experts_input = self.query_one("#input-gpu-experts", Input)
-            cpu_threads_input = self.query_one("#input-cpu-threads", Input)
-            numa_nodes_input = self.query_one("#input-numa-nodes", Input)
-            total_tokens_input = self.query_one("#input-total-tokens", Input)
-
-            gpu_experts = int(gpu_experts_input.value) if gpu_experts_input.value else 0
-            cpu_threads = int(cpu_threads_input.value) if cpu_threads_input.value else 1
-            numa_nodes = int(numa_nodes_input.value) if numa_nodes_input.value else self.max_numa_nodes
-            total_tokens = int(total_tokens_input.value) if total_tokens_input.value else 4096
-
-            # Validate ranges
-            if gpu_experts < 0 or gpu_experts > self.num_experts:
-                self.app.notify(f"GPU experts must be between 0 and {self.num_experts}", severity="error")
-                return
-
-            if cpu_threads < 1 or cpu_threads > self.max_cpu_cores:
-                self.app.notify(f"CPU threads must be between 1 and {self.max_cpu_cores}", severity="error")
-                return
-
-            if numa_nodes < 1 or numa_nodes > self.max_numa_nodes:
-                self.app.notify(f"NUMA nodes must be between 1 and {self.max_numa_nodes}", severity="error")
-                return
-
-            if total_tokens < 1 or total_tokens > 10000:
-                self.app.notify("Total tokens must be between 1 and 10000", severity="error")
-                return
-
-            # Check if CPU model selected
-            if not self.selected_cpu_model_id:
-                self.app.notify("Please select a CPU model", severity="warning")
-                return
-
-            # Prepare config
-            config = {
-                "gpu_model": self.gpu_model,
-                "cpu_model_id": self.selected_cpu_model_id,
-                "gpu_experts": gpu_experts,
-                "cpu_threads": cpu_threads,
-                "numa_nodes": numa_nodes,
-                "total_tokens": total_tokens,
-            }
-
-            self.dismiss(config)
-
-        except ValueError:
-            self.app.notify("Please enter valid numbers", severity="error")
+# DownloadProgressScreen moved to screens/
 
 
 class SettingsScreen(ModalScreen):
@@ -2642,99 +154,7 @@ class SettingsScreen(ModalScreen):
             self.dismiss(None)
 
 
-class EditModelScreen(ModalScreen):
-    """Modal screen for editing model information"""
-
-    CSS = """
-    EditModelScreen {
-        align: center middle;
-    }
-
-    #edit-dialog {
-        width: 80;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    #edit-buttons {
-        width: 100%;
-        height: auto;
-        align: center middle;
-        padding: 1 0 0 0;
-    }
-
-    Button {
-        margin: 0 1;
-    }
-    """
-
-    def __init__(self, model, moe_info=None):
-        super().__init__()
-        self.model = model
-        self.moe_info = moe_info or {}
-
-    def compose(self) -> ComposeResult:
-        status_map = {
-            "passed": "✓ Passed",
-            "failed": "✗ Failed",
-            "not_checked": "Not Checked",
-            "checking": "Checking...",
-            "no_repo": "-",
-        }
-        sha256_display = status_map.get(self.model.sha256_status, self.model.sha256_status)
-
-        # Build info content
-        info_parts = [
-            f"[bold]Name:[/bold] {self.model.name}",
-            f"[bold]Format:[/bold] {self.model.format}",
-            f"[bold]Path:[/bold] {self.model.path}",
-        ]
-
-        if self.model.repo_id:
-            prefix = (
-                "hf:"
-                if self.model.repo_type == "huggingface"
-                else "ms:" if self.model.repo_type == "modelscope" else ""
-            )
-            repo_display = f"{prefix}{self.model.repo_id}"
-            info_parts.append(f"[bold]Repo:[/bold] {repo_display}")
-        elif self.model.repo_type:
-            info_parts.append(f"[bold]Repo Type:[/bold] {self.model.repo_type}")
-
-        info_parts.append(f"[bold]SHA256:[/bold] {sha256_display}")
-
-        if self.moe_info and "error" not in self.moe_info:
-            info_parts.append("")
-            info_parts.append(
-                f"[bold]MoE:[/bold] {self.moe_info.get('num_experts', 0)}×{self.moe_info.get('num_layers', 0)}, {self.moe_info.get('total_size_gb', 0):.1f}GB"
-            )
-
-        with Container(id="edit-dialog"):
-            yield Label(f"[bold cyan]Edit Model: {self.model.name}[/bold cyan]")
-            yield Label("")
-            yield Static("\n".join(info_parts))
-            yield Label("")
-            yield Label("[bold]What would you like to edit?[/bold]")
-            yield Label("")
-            with Horizontal(id="edit-buttons"):
-                yield Button("Rename", id="btn-rename", variant="primary")
-                yield Button("Repo Info", id="btn-repo")
-                yield Button("Delete", id="btn-delete", variant="error")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-
-        if button_id == "btn-cancel":
-            self.dismiss(None)
-        elif button_id == "btn-rename":
-            self.dismiss("rename")
-        elif button_id == "btn-repo":
-            self.dismiss("repo")
-        elif button_id == "btn-delete":
-            self.dismiss("delete")
+# EditModelScreen moved to screens/model_info.py
 
 
 class ModelManagerApp(App):
@@ -2940,6 +360,36 @@ class ModelManagerApp(App):
             gpu_table = self.query_one("#gpu-table", DataTable)
             if gpu_table.row_count > 0:
                 gpu_table.move_cursor(row=0)
+
+            # Check if no models found - auto scan on first run
+            if total == 0 and not hasattr(self, "_initial_scan_done"):
+                self._initial_scan_done = True
+                # Check if this is truly first run (no paths configured or only default empty path)
+                from kt_kernel.cli.config.settings import get_settings, DEFAULT_MODELS_DIR
+
+                settings = get_settings()
+                model_paths = settings.get_model_paths()
+
+                # Check if we only have the default path and it doesn't exist (first run)
+                is_first_run = not model_paths or (
+                    len(model_paths) == 1
+                    and str(model_paths[0]) == str(DEFAULT_MODELS_DIR)
+                    and not model_paths[0].exists()
+                )
+
+                if is_first_run:
+                    # First run - automatically scan all disks in background
+                    self.notify(
+                        "🌍 First run detected - scanning all disks for models...", severity="information", timeout=5
+                    )
+                    self.run_worker(self._global_scan_async(), name="global-scan", group="scan", exclusive=True)
+                else:
+                    # Paths exist but no models - just notify
+                    self.notify(
+                        "No models found. Add models or scan paths in Settings (press 's' or '7')",
+                        severity="warning",
+                        timeout=5,
+                    )
 
         except Exception as e:
             self.sub_title = f"Error loading models: {e}"
@@ -4272,8 +1722,9 @@ class ModelManagerApp(App):
             settings = get_settings()
             model_paths = settings.get_model_paths()
 
-            if not model_paths:
-                self.notify("No model paths configured", severity="warning")
+            # If no paths configured, use global scan
+            if not model_paths or not any(p.exists() for p in model_paths):
+                self._global_scan()
                 return
 
             # Scan all configured paths
@@ -4305,6 +1756,7 @@ class ModelManagerApp(App):
 
             # Re-add all scanned models
             added_count = 0
+            models_without_repo = []  # Track models without repo_id for auto-detection
             self.sub_title = f"Adding models..."
 
             for scanned in all_scanned:
@@ -4333,7 +1785,58 @@ class ModelManagerApp(App):
                 registry.add_model(new_model)
                 added_count += 1
 
+                # Track models without repo_id for auto-detection
+                if not repo_id:
+                    models_without_repo.append(new_model)
+
+            # Auto-detect repo_id for models without it
+            if models_without_repo:
+                from kt_kernel.cli.utils.repo_detector import detect_repo_for_model
+
+                self.sub_title = "Detecting repository information..."
+                repo_detected_count = 0
+
+                for i, model in enumerate(models_without_repo, 1):
+                    self.sub_title = f"Analyzing model {i}/{len(models_without_repo)}: {model.name}"
+
+                    try:
+                        repo_info = detect_repo_for_model(model.path)
+                        if repo_info:
+                            repo_id, repo_type = repo_info
+                            registry.update_model(model.name, {"repo_id": repo_id, "repo_type": repo_type})
+                            repo_detected_count += 1
+                    except Exception as e:
+                        self.log.warning(f"Failed to detect repo for {model.name}: {e}")
+
+                if repo_detected_count > 0:
+                    self.notify(f"✓ Detected {repo_detected_count} repository IDs", severity="information", timeout=3)
+
+            # Analyze MoE models (all models, using cache)
+            if all_scanned:
+                from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
+
+                self.sub_title = "Analyzing MoE models..."
+                moe_analyzed_count = 0
+                all_models_list = registry.list_models()
+
+                for i, model in enumerate(all_models_list, 1):
+                    if model.format != "safetensors":
+                        continue
+
+                    self.sub_title = f"Analyzing MoE {i}/{len(all_models_list)}: {model.name}"
+
+                    try:
+                        result = analyze_moe_model(model.path, use_cache=True)
+                        if result and result.get("num_experts"):
+                            moe_analyzed_count += 1
+                    except Exception as e:
+                        self.log.warning(f"Failed to analyze MoE for {model.name}: {e}")
+
+                if moe_analyzed_count > 0:
+                    self.notify(f"✓ Analyzed {moe_analyzed_count} MoE models", severity="information", timeout=3)
+
             self.notify(f"✓ Force refresh complete: {added_count} models", severity="information", timeout=5)
+            self.sub_title = ""
 
             # Reload models display
             self.load_models()
@@ -4341,6 +1844,169 @@ class ModelManagerApp(App):
         except Exception as e:
             self.notify(f"Force refresh failed: {e}", severity="error", timeout=10)
             self.log.error(f"Force refresh error: {e}")
+
+    async def _global_scan_async(self) -> None:
+        """
+        Async version: Scan all disks and common locations for models.
+        Used when no model paths are configured.
+        Runs in background worker to avoid blocking UI.
+        """
+        from kt_kernel.cli.utils.environment import scan_storage_locations, scan_models_in_location
+        from kt_kernel.cli.utils.user_model_registry import UserModelRegistry, UserModel
+        from kt_kernel.cli.utils.model_scanner import scan_single_path
+        from kt_kernel.cli.config.settings import get_settings
+        from pathlib import Path
+
+        try:
+            self.call_from_thread(self.notify, "🌍 Scanning all disks for models...", "information", 3)
+            self.call_from_thread(setattr, self, "sub_title", "Scanning storage locations...")
+
+            # Scan all storage locations (disks + common paths)
+            locations = scan_storage_locations(min_size_gb=10.0)
+
+            if not locations:
+                self.call_from_thread(self.notify, "No suitable storage locations found", "warning", 5)
+                return
+
+            # Find models in each location
+            all_models = []
+
+            for i, loc in enumerate(locations[:10], 1):  # Scan top 10 locations
+                self.call_from_thread(
+                    setattr, self, "sub_title", f"Scanning location {i}/{min(len(locations), 10)}: {loc.path}"
+                )
+
+                try:
+                    models = scan_models_in_location(loc, max_depth=3)
+                    if models:
+                        all_models.extend(models)
+                except Exception as e:
+                    self.log.warning(f"Failed to scan {loc.path}: {e}")
+
+            if not all_models:
+                self.call_from_thread(self.notify, "No models found in any location", "warning", 5)
+                self.call_from_thread(setattr, self, "sub_title", "")
+                return
+
+            # Add models to registry
+            registry = UserModelRegistry()
+            added_count = 0
+            added_models = []  # Track newly added models for post-processing
+            self.call_from_thread(setattr, self, "sub_title", "Adding models to registry...")
+
+            for model in all_models:
+                # Scan the specific path to get detailed info
+                scanned = scan_single_path(Path(model.path))
+                if not scanned:
+                    continue
+
+                # Suggest unique name
+                name = registry.suggest_name(scanned.folder_name)
+
+                new_model = UserModel(
+                    name=name,
+                    path=scanned.path,
+                    format=scanned.format,
+                    repo_id=None,
+                    repo_type=None,
+                    sha256_status="not_checked",
+                )
+                registry.add_model(new_model)
+                added_models.append(new_model)
+                added_count += 1
+
+            # Auto-detect repo_id from README.md
+            if added_models:
+                from kt_kernel.cli.utils.repo_detector import detect_repo_for_model
+
+                self.call_from_thread(setattr, self, "sub_title", "Detecting repository information...")
+                repo_detected_count = 0
+
+                for i, model in enumerate(added_models, 1):
+                    self.call_from_thread(
+                        setattr, self, "sub_title", f"📖 Analyzing model {i}/{len(added_models)}: {model.name}"
+                    )
+
+                    try:
+                        # Detect repo from README
+                        repo_info = detect_repo_for_model(model.path)
+                        if repo_info:
+                            repo_id, repo_type = repo_info
+                            registry.update_model(model.name, {"repo_id": repo_id, "repo_type": repo_type})
+                            repo_detected_count += 1
+                            self.log.info(f"Detected repo for {model.name}: {repo_id}")
+                    except Exception as e:
+                        self.log.warning(f"Failed to detect repo for {model.name}: {e}")
+
+                if repo_detected_count > 0:
+                    self.call_from_thread(
+                        self.notify,
+                        f"✓ Detected {repo_detected_count}/{len(added_models)} repository IDs",
+                        "information",
+                        3,
+                    )
+
+            # Analyze MoE models
+            if added_models:
+                from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
+
+                self.call_from_thread(setattr, self, "sub_title", "Analyzing MoE models...")
+                moe_analyzed_count = 0
+
+                for i, model in enumerate(added_models, 1):
+                    # Only analyze safetensors models
+                    if model.format != "safetensors":
+                        continue
+
+                    self.call_from_thread(
+                        setattr, self, "sub_title", f"🔬 Analyzing MoE {i}/{len(added_models)}: {model.name}"
+                    )
+
+                    try:
+                        result = analyze_moe_model(model.path, use_cache=True)
+                        if result and result.get("num_experts"):
+                            moe_analyzed_count += 1
+                            self.log.info(
+                                f"MoE detected for {model.name}: "
+                                f"{result['num_experts']} experts, "
+                                f"{result.get('experts_per_tok', 'N/A')} per token"
+                            )
+                    except Exception as e:
+                        self.log.warning(f"Failed to analyze MoE for {model.name}: {e}")
+
+                if moe_analyzed_count > 0:
+                    self.call_from_thread(self.notify, f"✓ Analyzed {moe_analyzed_count} MoE models", "information", 3)
+
+            # Calculate common parent directories for all found models
+            # This groups models by their parent directory
+            model_parent_dirs = {}  # parent_dir -> [model_paths]
+            for model in all_models:
+                parent = str(Path(model.path).parent)
+                if parent not in model_parent_dirs:
+                    model_parent_dirs[parent] = []
+                model_parent_dirs[parent].append(model.path)
+
+            # Save discovered parent directories to settings
+            settings = get_settings()
+            current_paths = settings.get_model_paths()
+            current_path_strs = {str(p) for p in current_paths}
+
+            # Add new unique parent paths (directories that contain models)
+            for parent_dir in model_parent_dirs.keys():
+                if parent_dir not in current_path_strs:
+                    settings.add_model_path(parent_dir)
+                    self.log.info(f"Added path: {parent_dir} ({len(model_parent_dirs[parent_dir])} models)")
+
+            self.call_from_thread(self.notify, f"✓ Global scan complete: {added_count} models found", "information", 5)
+            self.call_from_thread(setattr, self, "sub_title", "")
+
+            # Reload models display
+            self.call_from_thread(self.load_models)
+
+        except Exception as e:
+            self.call_from_thread(self.notify, f"Global scan failed: {e}", "error", 10)
+            self.log.error(f"Global scan error: {e}")
+            self.call_from_thread(setattr, self, "sub_title", "")
 
     def _add_path(self) -> None:
         """Add a new model path"""
