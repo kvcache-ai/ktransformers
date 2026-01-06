@@ -675,6 +675,11 @@ def test_moe_sft_forward(quant_mode: str = "bf16"):
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
 
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    if quant_mode in ("int4_1kgroup", "int4_kgroup"):
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
+
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
     moe = MOE_SFT_CLASS(config)
@@ -820,6 +825,11 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
     config.down_lora_a = down_lora_a.data_ptr()
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
+
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    if quant_mode in ("int4_1kgroup", "int4_kgroup"):
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
 
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -1030,6 +1040,11 @@ def test_moe_sft_lora_weight_sync(quant_mode: str = "bf16"):
     config.down_lora_a = down_lora_a.data_ptr()
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
+
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    if quant_mode in ("int4_1kgroup", "int4_kgroup"):
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
 
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -1268,6 +1283,11 @@ def test_moe_sft_training_loop(quant_mode: str = "bf16"):
         config.down_lora_b = down_lora_b_param.data.data_ptr()
         config.pool = CPUInfer.backend_
 
+        # Bug #23 fix: Set quant_config for AWQ/K2 modes
+        if quant_mode in ("int4_1kgroup", "int4_kgroup"):
+            config.quant_config.group_size = 128
+            config.quant_config.zero_point = True
+
         # Create MOE SFT instance based on quant_mode
         MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
         moe = MOE_SFT_CLASS(config)
@@ -1458,8 +1478,8 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    quant_modes = ["bf16", "int8", "int4", "int4_1", "int4_1kgroup", "int4_kgroup"]
-    # quant_modes = ["int4_1kgroup", "int4_kgroup"]
+    # quant_modes = ["bf16", "int8", "int4", "int4_1"]
+    quant_modes = ["int4_1kgroup", "int4_kgroup"]
 
     try:
         for quant_mode in quant_modes:

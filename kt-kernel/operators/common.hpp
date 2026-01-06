@@ -240,17 +240,17 @@ struct GeneralMOEConfig {
   int num_gpu_experts = 0;
   void* physical_to_logical_map = nullptr;
 
-  void* gate_proj;
-  void* up_proj;
-  void* down_proj;
+  void* gate_proj = nullptr;
+  void* up_proj = nullptr;
+  void* down_proj = nullptr;
 
-  void* gate_scale;
-  void* up_scale;
-  void* down_scale;
+  void* gate_scale = nullptr;
+  void* up_scale = nullptr;
+  void* down_scale = nullptr;
 
-  void* gate_zero;
-  void* up_zero;
-  void* down_zero;
+  void* gate_zero = nullptr;
+  void* up_zero = nullptr;
+  void* down_zero = nullptr;
 
   QuantConfig quant_config;
 

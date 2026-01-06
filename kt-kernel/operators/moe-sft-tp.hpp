@@ -74,7 +74,23 @@ class TP_MOE_SFT : public TP_MOE<T> {
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
-    if (config.gate_proj != nullptr) {
+    // Bug #27 fix: K2 pre-quantized mode detection
+    // K2 uses gate_scale != nullptr and zero_point = false
+    // AWQ also has gate_scale but has zero_point = true
+    bool is_k2_prequantized = (config.gate_scale != nullptr && !config.quant_config.zero_point);
+
+    if (is_k2_prequantized) {
+      printf("TP_MOE_SFT: K2 pre-quantized mode (no BF16 partitioning)\n");
+      // For K2, weights are already int4-packed with scales
+      // tp_configs[i] already has all pointers from config (copied in TP_MOE constructor)
+      if (tp_count == 1) {
+        // No-TP: just call load_weights directly
+        pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+      } else {
+        // TP mode with K2 would need int4-aware partitioning (not implemented yet)
+        throw std::runtime_error("K2 pre-quantized mode does not support TP > 1 yet");
+      }
+    } else if (config.gate_proj != nullptr) {
       printf("TP_MOE_SFT: From BF16 with partitioning\n");
 
       // Temporary storage for partitioned weights

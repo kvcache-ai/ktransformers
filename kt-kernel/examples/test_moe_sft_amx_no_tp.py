@@ -13,6 +13,8 @@ Key difference from test_moe_sft_amx.py:
 
 import os
 import sys
+import math
+from typing import Literal, Dict
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 print("sys.path:", sys.path)
@@ -113,6 +115,141 @@ def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
     if is_backward:
         return BF16_BACKWARD_THRESHOLD  # 0.10
     return BF16_FORWARD_THRESHOLD  # 0.05
+
+
+# =============================================================================
+# K2 Quantization Utilities (for INT4_KGROUP mode)
+# =============================================================================
+
+
+def pack_to_int32(value: torch.Tensor, num_bits: int, packed_dim: Literal[0, 1] = 1) -> torch.Tensor:
+    """Pack int4 values into int32 tensor.
+
+    Args:
+        value: int8 tensor to pack
+        num_bits: number of bits per value (4 for int4)
+        packed_dim: dimension to pack along
+
+    Returns:
+        int32 tensor with packed values
+    """
+    if value.dtype is not torch.int8:
+        raise ValueError("Tensor must be torch.int8 before packing")
+    if not (1 <= num_bits <= 8):
+        raise ValueError(f"num_bits must be in [1, 8], got {num_bits}")
+
+    offset = 1 << (num_bits - 1)
+    value = (value + offset).to(torch.uint8)
+    device = value.device
+
+    pack_factor = 32 // num_bits
+
+    if packed_dim == 0:
+        value = value.transpose(0, 1)
+
+    rows, cols = value.shape
+    padded_cols = math.ceil(cols / pack_factor) * pack_factor
+    pad_len = padded_cols - cols
+
+    if pad_len > 0:
+        value = torch.nn.functional.pad(value, (0, pad_len))
+
+    num_groups = padded_cols // pack_factor
+
+    # Use int32 here
+    reshaped = value.view(rows, num_groups, pack_factor).to(torch.int32)
+    bit_shifts = torch.arange(pack_factor, device=device, dtype=torch.int32) * num_bits
+    packed = (reshaped << bit_shifts).sum(dim=2, dtype=torch.int32)
+
+    if packed_dim == 0:
+        packed = packed.transpose(0, 1)
+
+    return packed
+
+
+def pack_tensor_per_row(q: torch.Tensor, num_bits: int) -> torch.Tensor:
+    """Pack tensor per row for K2 quantization.
+
+    Args:
+        q: [expert_num, rows, cols] int8 tensor
+        num_bits: number of bits per value
+
+    Returns:
+        Packed int32 tensor
+    """
+    e, rows, cols = q.shape
+    flat = q.view(e * rows, cols)
+    packed = pack_to_int32(flat, num_bits)
+    return packed.view(e, rows, -1).contiguous()
+
+
+def quantize_k2_tensor(weights: torch.Tensor, group_size: int):
+    """
+    K2 symmetric max-abs/7 quantization per k-group.
+
+    Args:
+        weights: [expert_num, rows (N), cols (K)] bfloat16 tensor
+
+    Returns:
+        packed_q: int32 tensor storing 8 int4s per element with shape [expert_num, rows * (cols // 8)]
+        scales: bfloat16 tensor with shape [expert_num, rows * (cols // group_size)]
+    """
+    weights_f32 = weights.to(torch.float32)
+    e, rows, cols = weights_f32.shape
+    if cols % group_size != 0 or cols % 2 != 0:
+        raise ValueError(f"cols ({cols}) must be divisible by group_size ({group_size}) and 2")
+
+    reshaped = weights_f32.view(e, rows, cols // group_size, group_size)
+    max_abs = reshaped.abs().amax(dim=-1, keepdim=True)
+    max_abs = torch.clamp(max_abs, min=1e-8)
+    scales = (max_abs / 7.0).squeeze(-1)
+    q = torch.round(reshaped / scales.unsqueeze(-1)).clamp(-8, 7).to(torch.int8)
+    q = q.view(e, rows, cols)
+    packed = pack_tensor_per_row(q, num_bits=4).view(e, rows, cols // 8).contiguous()
+    scales = scales.to(torch.bfloat16).contiguous().view(e, rows, cols // group_size).contiguous()
+
+    return packed, scales
+
+
+def init_base_weights_for_k2(
+    expert_num: int, hidden_size: int, intermediate_size: int, group_size: int = 128
+) -> Dict[str, torch.Tensor]:
+    """Initialize pre-quantized K2 weights for INT4_KGROUP mode.
+
+    Args:
+        expert_num: number of experts
+        hidden_size: hidden dimension
+        intermediate_size: intermediate dimension
+        group_size: quantization group size
+
+    Returns:
+        Dictionary containing:
+        - gate_qweight, up_qweight, down_qweight: packed int4 weights
+        - gate_scales, up_scales, down_scales: bf16 scales
+        - gate_proj_bf16, up_proj_bf16, down_proj_bf16: original bf16 weights for reference
+    """
+    # Create random BF16 weights
+    gate_proj_bf16 = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.bfloat16)
+    up_proj_bf16 = torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.bfloat16)
+    down_proj_bf16 = torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.bfloat16)
+
+    # Quantize to int4
+    gate_qweight, gate_scales = quantize_k2_tensor(gate_proj_bf16, group_size)
+    up_qweight, up_scales = quantize_k2_tensor(up_proj_bf16, group_size)
+    down_qweight, down_scales = quantize_k2_tensor(down_proj_bf16, group_size)
+
+    return {
+        "gate_qweight": gate_qweight.contiguous(),
+        "up_qweight": up_qweight.contiguous(),
+        "down_qweight": down_qweight.contiguous(),
+        "gate_scales": gate_scales.contiguous(),
+        "up_scales": up_scales.contiguous(),
+        "down_scales": down_scales.contiguous(),
+        # Keep original BF16 for gradient verification
+        "gate_proj_bf16": gate_proj_bf16.contiguous(),
+        "up_proj_bf16": up_proj_bf16.contiguous(),
+        "down_proj_bf16": down_proj_bf16.contiguous(),
+    }
 
 
 # =============================================================================
@@ -620,8 +757,19 @@ def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
     # Set random seed for reproducibility
     torch.manual_seed(42)
 
-    # Initialize weights
-    gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+    # Initialize weights based on quant_mode
+    k2_weights = None  # Will be set for K2 mode
+    if quant_mode == "int4_kgroup":
+        # K2 needs pre-quantized int4 weights
+        k2_weights = init_base_weights_for_k2(expert_num, hidden_size, intermediate_size, group_size=128)
+        # Use original BF16 for reference computation
+        gate_proj = k2_weights["gate_proj_bf16"]
+        up_proj = k2_weights["up_proj_bf16"]
+        down_proj = k2_weights["down_proj_bf16"]
+    else:
+        # Other modes use BF16 weights
+        gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
 
@@ -655,9 +803,20 @@ def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
     config.max_cache_depth = 1
     config.max_len = max_len
     config.layer_idx = 0
-    config.gate_proj = gate_proj.data_ptr()
-    config.up_proj = up_proj.data_ptr()
-    config.down_proj = down_proj.data_ptr()
+
+    # Bug #26 fix: K2 uses pre-quantized weights with scales
+    if quant_mode == "int4_kgroup" and k2_weights is not None:
+        config.gate_proj = k2_weights["gate_qweight"].data_ptr()
+        config.up_proj = k2_weights["up_qweight"].data_ptr()
+        config.down_proj = k2_weights["down_qweight"].data_ptr()
+        config.gate_scale = k2_weights["gate_scales"].data_ptr()
+        config.up_scale = k2_weights["up_scales"].data_ptr()
+        config.down_scale = k2_weights["down_scales"].data_ptr()
+    else:
+        config.gate_proj = gate_proj.data_ptr()
+        config.up_proj = up_proj.data_ptr()
+        config.down_proj = down_proj.data_ptr()
+
     # Set LoRA weight pointers directly in config (zero-copy)
     config.gate_lora_a = gate_lora_a.data_ptr()
     config.gate_lora_b = gate_lora_b.data_ptr()
@@ -666,6 +825,15 @@ def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
     config.down_lora_a = down_lora_a.data_ptr()
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
+
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    # Bug #25 fix: AWQ (int4_1kgroup) uses zero_point, K2 (int4_kgroup) does NOT
+    if quant_mode == "int4_1kgroup":  # AWQ supports zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
+    elif quant_mode == "int4_kgroup":  # K2 does NOT support zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = False
 
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -772,8 +940,19 @@ def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
     # Set random seed for reproducibility
     torch.manual_seed(42)
 
-    # Initialize weights
-    gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+    # Initialize weights based on quant_mode
+    k2_weights = None  # Will be set for K2 mode
+    if quant_mode == "int4_kgroup":
+        # K2 needs pre-quantized int4 weights
+        k2_weights = init_base_weights_for_k2(expert_num, hidden_size, intermediate_size, group_size=128)
+        # Use original BF16 for reference computation
+        gate_proj = k2_weights["gate_proj_bf16"]
+        up_proj = k2_weights["up_proj_bf16"]
+        down_proj = k2_weights["down_proj_bf16"]
+    else:
+        # Other modes use BF16 weights
+        gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
 
@@ -806,9 +985,20 @@ def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
     config.max_cache_depth = validation_iter  # Need cache for backward
     config.max_len = max_len
     config.layer_idx = 0
-    config.gate_proj = gate_proj.data_ptr()
-    config.up_proj = up_proj.data_ptr()
-    config.down_proj = down_proj.data_ptr()
+
+    # Bug #26 fix: K2 uses pre-quantized weights with scales
+    if quant_mode == "int4_kgroup" and k2_weights is not None:
+        config.gate_proj = k2_weights["gate_qweight"].data_ptr()
+        config.up_proj = k2_weights["up_qweight"].data_ptr()
+        config.down_proj = k2_weights["down_qweight"].data_ptr()
+        config.gate_scale = k2_weights["gate_scales"].data_ptr()
+        config.up_scale = k2_weights["up_scales"].data_ptr()
+        config.down_scale = k2_weights["down_scales"].data_ptr()
+    else:
+        config.gate_proj = gate_proj.data_ptr()
+        config.up_proj = up_proj.data_ptr()
+        config.down_proj = down_proj.data_ptr()
+
     config.gate_lora_a = gate_lora_a.data_ptr()
     config.gate_lora_b = gate_lora_b.data_ptr()
     config.up_lora_a = up_lora_a.data_ptr()
@@ -816,6 +1006,15 @@ def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
     config.down_lora_a = down_lora_a.data_ptr()
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
+
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    # Bug #25 fix: AWQ (int4_1kgroup) uses zero_point, K2 (int4_kgroup) does NOT
+    if quant_mode == "int4_1kgroup":  # AWQ supports zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
+    elif quant_mode == "int4_kgroup":  # K2 does NOT support zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = False
 
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -997,8 +1196,19 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
 
     torch.manual_seed(42)
 
-    # Initialize weights
-    gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+    # Initialize weights based on quant_mode
+    k2_weights = None  # Will be set for K2 mode
+    if quant_mode == "int4_kgroup":
+        # K2 needs pre-quantized int4 weights
+        k2_weights = init_base_weights_for_k2(expert_num, hidden_size, intermediate_size, group_size=128)
+        # Use original BF16 for reference computation
+        gate_proj = k2_weights["gate_proj_bf16"]
+        up_proj = k2_weights["up_proj_bf16"]
+        down_proj = k2_weights["down_proj_bf16"]
+    else:
+        # Other modes use BF16 weights
+        gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
 
@@ -1020,9 +1230,20 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     config.max_cache_depth = 1
     config.max_len = max_len
     config.layer_idx = 0
-    config.gate_proj = gate_proj.data_ptr()
-    config.up_proj = up_proj.data_ptr()
-    config.down_proj = down_proj.data_ptr()
+
+    # Bug #26 fix: K2 uses pre-quantized weights with scales
+    if quant_mode == "int4_kgroup" and k2_weights is not None:
+        config.gate_proj = k2_weights["gate_qweight"].data_ptr()
+        config.up_proj = k2_weights["up_qweight"].data_ptr()
+        config.down_proj = k2_weights["down_qweight"].data_ptr()
+        config.gate_scale = k2_weights["gate_scales"].data_ptr()
+        config.up_scale = k2_weights["up_scales"].data_ptr()
+        config.down_scale = k2_weights["down_scales"].data_ptr()
+    else:
+        config.gate_proj = gate_proj.data_ptr()
+        config.up_proj = up_proj.data_ptr()
+        config.down_proj = down_proj.data_ptr()
+
     config.gate_lora_a = gate_lora_a.data_ptr()
     config.gate_lora_b = gate_lora_b.data_ptr()
     config.up_lora_a = up_lora_a.data_ptr()
@@ -1030,6 +1251,15 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     config.down_lora_a = down_lora_a.data_ptr()
     config.down_lora_b = down_lora_b.data_ptr()
     config.pool = CPUInfer.backend_
+
+    # Bug #23 fix: Set quant_config for AWQ/K2 modes
+    # Bug #25 fix: AWQ (int4_1kgroup) uses zero_point, K2 (int4_kgroup) does NOT
+    if quant_mode == "int4_1kgroup":  # AWQ supports zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = True
+    elif quant_mode == "int4_kgroup":  # K2 does NOT support zero_point
+        config.quant_config.group_size = 128
+        config.quant_config.zero_point = False
 
     # Create MOE SFT instance based on quant_mode
     MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -1193,8 +1423,18 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
 
     torch.manual_seed(42)
 
-    # Initialize base weights
-    gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+    # Initialize base weights based on quant_mode
+    k2_weights = None  # Will be set for K2 mode
+    if quant_mode == "int4_kgroup":
+        # K2 needs pre-quantized int4 weights
+        k2_weights = init_base_weights_for_k2(expert_num, hidden_size, intermediate_size, group_size=128)
+        # Use original BF16 for reference computation
+        gate_proj = k2_weights["gate_proj_bf16"]
+        up_proj = k2_weights["up_proj_bf16"]
+        down_proj = k2_weights["down_proj_bf16"]
+    else:
+        # Other modes use BF16 weights
+        gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
 
     # Initialize LoRA weights as contiguous tensors
     gate_lora_a = (
@@ -1261,9 +1501,20 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
         config.max_cache_depth = 1  # One forward-backward pair at a time
         config.max_len = max_len
         config.layer_idx = 0
-        config.gate_proj = gate_proj.data_ptr()
-        config.up_proj = up_proj.data_ptr()
-        config.down_proj = down_proj.data_ptr()
+
+        # Bug #26 fix: K2 uses pre-quantized weights with scales
+        if quant_mode == "int4_kgroup" and k2_weights is not None:
+            config.gate_proj = k2_weights["gate_qweight"].data_ptr()
+            config.up_proj = k2_weights["up_qweight"].data_ptr()
+            config.down_proj = k2_weights["down_qweight"].data_ptr()
+            config.gate_scale = k2_weights["gate_scales"].data_ptr()
+            config.up_scale = k2_weights["up_scales"].data_ptr()
+            config.down_scale = k2_weights["down_scales"].data_ptr()
+        else:
+            config.gate_proj = gate_proj.data_ptr()
+            config.up_proj = up_proj.data_ptr()
+            config.down_proj = down_proj.data_ptr()
+
         config.gate_lora_a = gate_lora_a_param.data.data_ptr()
         config.gate_lora_b = gate_lora_b_param.data.data_ptr()
         config.up_lora_a = up_lora_a_param.data.data_ptr()
@@ -1271,6 +1522,15 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
         config.down_lora_a = down_lora_a_param.data.data_ptr()
         config.down_lora_b = down_lora_b_param.data.data_ptr()
         config.pool = CPUInfer.backend_
+
+        # Bug #23 fix: Set quant_config for AWQ/K2 modes
+        # Bug #25 fix: AWQ (int4_1kgroup) uses zero_point, K2 (int4_kgroup) does NOT
+        if quant_mode == "int4_1kgroup":  # AWQ supports zero_point
+            config.quant_config.group_size = 128
+            config.quant_config.zero_point = True
+        elif quant_mode == "int4_kgroup":  # K2 does NOT support zero_point
+            config.quant_config.group_size = 128
+            config.quant_config.zero_point = False
 
         # Create MOE SFT instance based on quant_mode
         MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
@@ -1463,8 +1723,9 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    # quant_modes = ["bf16", "int8", "int4", "int4_1", "int4_1kgroup", "int4_kgroup"]
-    quant_modes = ["int4_1kgroup", "int4_kgroup"]
+    # quant_modes = ["bf16", "int8", "int4", "int4_1"]
+    # quant_modes = ["int4_1kgroup", "int4_kgroup"]
+    quant_modes = ["int4_kgroup"]
 
     try:
         for quant_mode in quant_modes:
