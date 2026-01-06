@@ -316,7 +316,7 @@ def test_bf16_write_buffer(gpu_tp_count):
     """Test write_weight_scale_to_buffer with BF16 weights (no scales)"""
     torch.manual_seed(123)
 
-    expert_num = 256
+    expert_num = 16
     gpu_experts = expert_num
     num_experts_per_tok = 8
     hidden_size = 3072

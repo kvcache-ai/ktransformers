@@ -16,6 +16,7 @@
 #include "la/amx_kernels.hpp"  // For vec_mul/mat_mul
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
+#include "la/amx_utils.hpp"  // For transpose_16x16_32bit
 #include "moe_base.hpp"
 
 /**
@@ -244,25 +245,35 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     constexpr int TILE_N = T::TILE_N;  // 16
 
     // The packed format has two 16x16 blocks (32-bit view) that were transposed
-    // We need to reverse the transpose and copy back
+    // We need to reverse the transpose first, then copy to n-major layout
 
-    // Process first 16x16 block (rows 0-15, cols 0-31 in BF16 = 0-15 in 32-bit)
+    // Create aligned temporary buffers for transpose
+    alignas(64) __m512i temp_block1[TILE_N];
+    alignas(64) __m512i temp_block2[TILE_N];
+
+    // Copy source data to temporary buffers
+    const __m512i* src_vec = reinterpret_cast<const __m512i*>(src);
     for (int i = 0; i < TILE_N; i++) {
-      for (int j = 0; j < K_STEP; j++) {
-        // In packed format: after transpose, element at [i][j] came from [j/2][i*2 + j%2]
-        // Reverse: dst[i][j] = src[packed_index]
-        int src_idx = i * K_STEP + j;  // Linear index in source
-        dst[i * dst_row_stride + j] = src[src_idx];
-      }
+      temp_block1[i] = src_vec[i];
+      temp_block2[i] = src_vec[TILE_N + i];
     }
 
-    // Process second 16x16 block (rows 16-31, cols 0-31 in BF16)
-    const ggml_bf16_t* src2 = src + TILE_N * K_STEP;
+    // Reverse transpose (transpose is self-inverse)
+    amx::transpose_16x16_32bit(temp_block1);
+    amx::transpose_16x16_32bit(temp_block2);
+
+    // Copy transposed data to destination in n-major layout
+    const ggml_bf16_t* temp1_bf16 = reinterpret_cast<const ggml_bf16_t*>(temp_block1);
+    const ggml_bf16_t* temp2_bf16 = reinterpret_cast<const ggml_bf16_t*>(temp_block2);
+
+    // First 16 rows (block 1)
     for (int i = 0; i < TILE_N; i++) {
-      for (int j = 0; j < K_STEP; j++) {
-        int src_idx = i * K_STEP + j;
-        dst[(TILE_N + i) * dst_row_stride + j] = src2[src_idx];
-      }
+      std::memcpy(dst + i * dst_row_stride, temp1_bf16 + i * K_STEP, K_STEP * sizeof(ggml_bf16_t));
+    }
+
+    // Next 16 rows (block 2)
+    for (int i = 0; i < TILE_N; i++) {
+      std::memcpy(dst + (TILE_N + i) * dst_row_stride, temp2_bf16 + i * K_STEP, K_STEP * sizeof(ggml_bf16_t));
     }
   }
 
