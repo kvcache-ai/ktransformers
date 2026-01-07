@@ -60,6 +60,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
                           config.down_lora_a, config.down_lora_b);
     }
+
+    // Bug #007 fix: TP_MOE base class uses GeneralMOEConfig which doesn't have
+    // lora_rank/lora_alpha. Propagate both to all NUMA node instances.
+    for (int i = 0; i < tp_count; i++) {
+      tps[i]->set_lora_params(config.lora_rank, config.lora_alpha);
+    }
   }
 
   /**
