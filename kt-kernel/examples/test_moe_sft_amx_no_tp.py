@@ -54,6 +54,11 @@ validation_iter = 2  # Number of validation iterations
 debug_print_count = 8  # Number of values to print in debug output
 num_threads = 60  # Number of CPU threads for inference
 
+# Performance test configuration
+perf_warmup_iter = 5  # Number of warmup iterations for performance test
+perf_test_iter = 20  # Number of iterations for performance measurement
+perf_qlen = 128  # Sequence length for performance testing
+
 # Precision thresholds
 BF16_FORWARD_THRESHOLD = 0.05  # Maximum relative error for BF16 forward
 BF16_BACKWARD_THRESHOLD = 0.10  # Maximum relative error for BF16 backward
@@ -899,11 +904,6 @@ def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
         )
         CPUInfer.sync()
 
-        # Debug: print AMX output
-        print(f"[AMX SFT DEBUG] AMX output[:8] = {output.flatten()[:8]}")
-        print(f"[AMX SFT DEBUG] AMX output mean abs = {torch.mean(torch.abs(output)):.6e}")
-        print(f"[AMX SFT DEBUG] Torch output mean abs = {torch.mean(torch.abs(torch_output)):.6e}")
-
         # Compare results
         diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
         print(f"Relative difference: {diff:.6f}")
@@ -1132,29 +1132,6 @@ def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
         # LoRA gradients (check activated experts only)
         activated = [i for i, n in enumerate(moe_saved["tokens_per_expert"]) if n > 0]
 
-        # Debug: compare PyTorch and C++ gradient values for Bug #17
-        print(f"\n[DEBUG COMPARISON] Activated experts: {activated[:5]}...")  # Only print first 5
-        print(f"[DEBUG COMPARISON] First activated expert: {activated[0] if activated else 'None'}")
-
-        if activated:
-            first_exp = activated[0]
-            print(
-                f"\n[TORCH DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_gate_lora_a'][first_exp, 0, :8]}"
-            )
-            print(f"[AMX DEBUG] grad_gate_lora_a[{first_exp}][0, 0:8] = {grad_gate_lora_a[first_exp, 0, :8]}")
-            print(f"[TORCH DEBUG] mean abs = {torch.mean(torch.abs(torch_grads['grad_gate_lora_a'][first_exp])):.6e}")
-            print(f"[AMX DEBUG] mean abs = {torch.mean(torch.abs(grad_gate_lora_a[first_exp])):.6e}")
-
-            # Also check up_lora_a and down_lora_a
-            print(
-                f"\n[TORCH DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_up_lora_a'][first_exp, 0, :8]}"
-            )
-            print(f"[AMX DEBUG] grad_up_lora_a[{first_exp}][0, 0:8] = {grad_up_lora_a[first_exp, 0, :8]}")
-            print(
-                f"[TORCH DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {torch_grads['grad_down_lora_a'][first_exp, 0, :8]}"
-            )
-            print(f"[AMX DEBUG] grad_down_lora_a[{first_exp}][0, 0:8] = {grad_down_lora_a[first_exp, 0, :8]}")
-
         for name, amx_grad, torch_grad in [
             ("gate_lora_a", grad_gate_lora_a, torch_grads["grad_gate_lora_a"]),
             ("gate_lora_b", grad_gate_lora_b, torch_grads["grad_gate_lora_b"]),
@@ -1342,12 +1319,6 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     print(f"Output difference after weight update: {diff:.6f}")
     assert diff > 1e-6, "Outputs should differ after LoRA weight update"
 
-    # Debug: Print current pointer and value before clone
-    print(f"\n[PYTHON DEBUG] Phase 2 - Original pointers:")
-    print(f"  gate_lora_a ptr: {hex(gate_lora_a.data_ptr())}")
-    print(f"  gate_lora_a[0,0,0]: {gate_lora_a[0,0,0].item():.6f}")
-    print(f"  gate_lora_b ptr: {hex(gate_lora_b.data_ptr())}")
-
     # Test explicit update_lora_weights_task (for when tensors are reallocated)
     new_gate_lora_a = gate_lora_a.clone()
     new_gate_lora_b = gate_lora_b.clone()
@@ -1356,17 +1327,7 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     new_down_lora_a = down_lora_a.clone()
     new_down_lora_b = down_lora_b.clone()
 
-    # Debug: Verify cloned values match and print new pointers
-    print(f"\n[PYTHON DEBUG] Phase 3 - Cloned pointers:")
-    print(f"  new_gate_lora_a ptr: {hex(new_gate_lora_a.data_ptr())}")
-    print(f"  new_gate_lora_a[0,0,0]: {new_gate_lora_a[0,0,0].item():.6f}")
-    print(f"  new_gate_lora_b ptr: {hex(new_gate_lora_b.data_ptr())}")
-    assert torch.allclose(gate_lora_a, new_gate_lora_a), "Clone failed for gate_lora_a!"
-    assert torch.allclose(gate_lora_b, new_gate_lora_b), "Clone failed for gate_lora_b!"
-    print(f"  Clone verification: PASSED")
-
     # Update pointers using update_lora_weights_task
-    print(f"\n[PYTHON DEBUG] Calling update_lora_weights_task...")
     CPUInfer.submit(
         moe.update_lora_weights_task(
             new_gate_lora_a.data_ptr(),
@@ -1378,10 +1339,8 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
         )
     )
     CPUInfer.sync()
-    print(f"[PYTHON DEBUG] update_lora_weights_task completed")
 
     # Third forward with new tensor pointers
-    print(f"\n[PYTHON DEBUG] Phase 3 - Running forward with new pointers...")
     output3 = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
     CPUInfer.submit(
         moe.forward_sft_task(
@@ -1701,6 +1660,376 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
 
 
 # =============================================================================
+# Performance Test Functions
+# =============================================================================
+
+
+def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
+    """
+    Test MOE SFT performance (forward + backward latency and throughput) with NO TP.
+
+    Measures:
+    - Forward pass latency (ms)
+    - Backward pass latency (ms)
+    - Forward + Backward combined latency (ms)
+    - Throughput (tokens/second)
+
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
+    """
+    import time
+
+    print(f"\n{'='*60}")
+    print(f"Performance Test - {quant_mode.upper()} mode (NO TP)")
+    print(f"{'='*60}")
+    print(f"Configuration:")
+    print(f"  qlen (batch size): {perf_qlen}")
+    print(f"  warmup iterations: {perf_warmup_iter}")
+    print(f"  test iterations: {perf_test_iter}")
+    print(f"  num_threads: {num_threads}")
+    print(f"  TP mode: DISABLED (single NUMA node)")
+    print(f"{'='*60}")
+
+    if not HAS_KT_KERNEL:
+        print("ERROR: kt_kernel_ext not available, cannot run performance test")
+        sys.exit(1)
+
+    # Set random seed for reproducibility
+    torch.manual_seed(42)
+
+    # Initialize weights
+    gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
+    lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
+    gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
+
+    # Make LoRA B non-zero for testing
+    gate_lora_b.normal_().div_(100)
+    up_lora_b.normal_().div_(100)
+    down_lora_b.normal_().div_(100)
+
+    # Initialize CPUInfer with single NUMA node configuration (NO TP)
+    print("\n[INFO] Creating CPUInfer with single NUMA node (NO TP)...")
+    pool_config = kt_kernel_ext.WorkerPoolConfig()
+    pool_config.subpool_count = 1
+    pool_config.subpool_numa_map = [0]
+    pool_config.subpool_thread_count = [num_threads]
+    CPUInfer = kt_kernel_ext.CPUInfer(pool_config)
+    print("[INFO] CPUInfer created with single subpool (tp_count=1)")
+
+    # Create MOE SFT config
+    config = kt_kernel_ext.moe.MOESFTConfig()
+    config.expert_num = expert_num
+    config.num_experts_per_tok = num_experts_per_tok
+    config.hidden_size = hidden_size
+    config.intermediate_size = intermediate_size
+    config.lora_rank = lora_rank
+    config.lora_alpha = lora_alpha
+    config.max_cache_depth = 1  # Only need one for forward-backward pair
+    config.max_len = max_len
+    config.layer_idx = 0
+    config.gate_proj = gate_proj.data_ptr()
+    config.up_proj = up_proj.data_ptr()
+    config.down_proj = down_proj.data_ptr()
+    config.gate_lora_a = gate_lora_a.data_ptr()
+    config.gate_lora_b = gate_lora_b.data_ptr()
+    config.up_lora_a = up_lora_a.data_ptr()
+    config.up_lora_b = up_lora_b.data_ptr()
+    config.down_lora_a = down_lora_a.data_ptr()
+    config.down_lora_b = down_lora_b.data_ptr()
+    config.pool = CPUInfer.backend_
+
+    # Create MOE SFT instance based on quant_mode
+    MOE_SFT_CLASS = get_moe_sft_class(quant_mode)
+    moe = MOE_SFT_CLASS(config)
+    print(f"[INFO] Using {quant_mode.upper()} MOE SFT class: {MOE_SFT_CLASS.__name__}")
+
+    # Load base weights
+    CPUInfer.submit(moe.load_weights_task())
+    CPUInfer.sync()
+
+    # Warm up
+    CPUInfer.submit(moe.warm_up_task())
+    CPUInfer.sync()
+
+    # Prepare test data
+    bsz_tensor = torch.tensor([perf_qlen], device="cpu")
+    expert_ids = (
+        torch.stack([torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(perf_qlen)])
+        .to(torch.int64)
+        .contiguous()
+    )
+    weights = torch.rand((perf_qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
+    weights = weights / weights.sum(dim=-1, keepdim=True)
+    input_data = torch.randn((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
+    output = torch.zeros((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+    grad_output = torch.randn((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
+    grad_input = torch.zeros((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+    grad_gate_lora_a = torch.zeros_like(gate_lora_a)
+    grad_gate_lora_b = torch.zeros_like(gate_lora_b)
+    grad_up_lora_a = torch.zeros_like(up_lora_a)
+    grad_up_lora_b = torch.zeros_like(up_lora_b)
+    grad_down_lora_a = torch.zeros_like(down_lora_a)
+    grad_down_lora_b = torch.zeros_like(down_lora_b)
+
+    # =========================================================================
+    # Warmup Phase
+    # =========================================================================
+    print(f"\n[INFO] Warmup phase ({perf_warmup_iter} iterations)...")
+    for _ in range(perf_warmup_iter):
+        # Forward pass
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                True,  # save_for_backward
+            )
+        )
+        CPUInfer.sync()
+
+        # Backward pass
+        CPUInfer.submit(
+            moe.backward_task(
+                grad_output.data_ptr(),
+                grad_input.data_ptr(),
+                grad_gate_lora_a.data_ptr(),
+                grad_gate_lora_b.data_ptr(),
+                grad_up_lora_a.data_ptr(),
+                grad_up_lora_b.data_ptr(),
+                grad_down_lora_a.data_ptr(),
+                grad_down_lora_b.data_ptr(),
+            )
+        )
+        CPUInfer.sync()
+
+    # =========================================================================
+    # Forward Performance Test
+    # =========================================================================
+    print(f"\n[INFO] Testing forward pass performance ({perf_test_iter} iterations)...")
+    forward_times = []
+    for _ in range(perf_test_iter):
+        start_time = time.perf_counter()
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                True,  # save_for_backward
+            )
+        )
+        CPUInfer.sync()
+        end_time = time.perf_counter()
+        forward_times.append((end_time - start_time) * 1000)  # Convert to ms
+
+    # =========================================================================
+    # Backward Performance Test
+    # =========================================================================
+    print(f"[INFO] Testing backward pass performance ({perf_test_iter} iterations)...")
+    backward_times = []
+    for _ in range(perf_test_iter):
+        # Need a forward pass first to populate cache
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                True,  # save_for_backward
+            )
+        )
+        CPUInfer.sync()
+
+        start_time = time.perf_counter()
+        CPUInfer.submit(
+            moe.backward_task(
+                grad_output.data_ptr(),
+                grad_input.data_ptr(),
+                grad_gate_lora_a.data_ptr(),
+                grad_gate_lora_b.data_ptr(),
+                grad_up_lora_a.data_ptr(),
+                grad_up_lora_b.data_ptr(),
+                grad_down_lora_a.data_ptr(),
+                grad_down_lora_b.data_ptr(),
+            )
+        )
+        CPUInfer.sync()
+        end_time = time.perf_counter()
+        backward_times.append((end_time - start_time) * 1000)  # Convert to ms
+
+    # =========================================================================
+    # Combined Forward + Backward Performance Test
+    # =========================================================================
+    print(f"[INFO] Testing combined forward+backward performance ({perf_test_iter} iterations)...")
+    combined_times = []
+    for _ in range(perf_test_iter):
+        start_time = time.perf_counter()
+
+        # Forward pass
+        CPUInfer.submit(
+            moe.forward_sft_task(
+                bsz_tensor.data_ptr(),
+                num_experts_per_tok,
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_data.data_ptr(),
+                output.data_ptr(),
+                True,  # save_for_backward
+            )
+        )
+        CPUInfer.sync()
+
+        # Backward pass
+        CPUInfer.submit(
+            moe.backward_task(
+                grad_output.data_ptr(),
+                grad_input.data_ptr(),
+                grad_gate_lora_a.data_ptr(),
+                grad_gate_lora_b.data_ptr(),
+                grad_up_lora_a.data_ptr(),
+                grad_up_lora_b.data_ptr(),
+                grad_down_lora_a.data_ptr(),
+                grad_down_lora_b.data_ptr(),
+            )
+        )
+        CPUInfer.sync()
+
+        end_time = time.perf_counter()
+        combined_times.append((end_time - start_time) * 1000)  # Convert to ms
+
+    # =========================================================================
+    # Results Summary
+    # =========================================================================
+    import statistics
+
+    avg_forward = statistics.mean(forward_times)
+    std_forward = statistics.stdev(forward_times) if len(forward_times) > 1 else 0
+    min_forward = min(forward_times)
+    max_forward = max(forward_times)
+
+    avg_backward = statistics.mean(backward_times)
+    std_backward = statistics.stdev(backward_times) if len(backward_times) > 1 else 0
+    min_backward = min(backward_times)
+    max_backward = max(backward_times)
+
+    avg_combined = statistics.mean(combined_times)
+    std_combined = statistics.stdev(combined_times) if len(combined_times) > 1 else 0
+    min_combined = min(combined_times)
+    max_combined = max(combined_times)
+
+    # Calculate throughput (tokens per second)
+    forward_throughput = perf_qlen / (avg_forward / 1000)  # tokens/second
+    backward_throughput = perf_qlen / (avg_backward / 1000)  # tokens/second
+    combined_throughput = perf_qlen / (avg_combined / 1000)  # tokens/second
+
+    print(f"\n{'='*60}")
+    print(f"Performance Results - {quant_mode.upper()} mode (NO TP)")
+    print(f"{'='*60}")
+    print(f"\nForward Pass:")
+    print(f"  Average latency: {avg_forward:.3f} ms (±{std_forward:.3f})")
+    print(f"  Min latency:     {min_forward:.3f} ms")
+    print(f"  Max latency:     {max_forward:.3f} ms")
+    print(f"  Throughput:      {forward_throughput:.1f} tokens/s")
+
+    print(f"\nBackward Pass:")
+    print(f"  Average latency: {avg_backward:.3f} ms (±{std_backward:.3f})")
+    print(f"  Min latency:     {min_backward:.3f} ms")
+    print(f"  Max latency:     {max_backward:.3f} ms")
+    print(f"  Throughput:      {backward_throughput:.1f} tokens/s")
+
+    print(f"\nCombined (Forward + Backward):")
+    print(f"  Average latency: {avg_combined:.3f} ms (±{std_combined:.3f})")
+    print(f"  Min latency:     {min_combined:.3f} ms")
+    print(f"  Max latency:     {max_combined:.3f} ms")
+    print(f"  Throughput:      {combined_throughput:.1f} tokens/s")
+
+    print(f"\n[OK] Performance Test - {quant_mode.upper()} mode (NO TP) completed")
+
+    return {
+        "quant_mode": quant_mode,
+        "forward_avg_ms": avg_forward,
+        "forward_std_ms": std_forward,
+        "forward_throughput": forward_throughput,
+        "backward_avg_ms": avg_backward,
+        "backward_std_ms": std_backward,
+        "backward_throughput": backward_throughput,
+        "combined_avg_ms": avg_combined,
+        "combined_std_ms": std_combined,
+        "combined_throughput": combined_throughput,
+    }
+
+
+def run_performance_tests():
+    """Run performance tests for AMXBF16 and AMXINT8 modes (NO TP)."""
+    print("\n" + "=" * 70)
+    print(" MOE SFT AMX Performance Test Suite - Non-TP Version")
+    print("=" * 70)
+    print(f"Configuration:")
+    print(f"  expert_num: {expert_num}")
+    print(f"  hidden_size: {hidden_size}")
+    print(f"  intermediate_size: {intermediate_size}")
+    print(f"  num_experts_per_tok: {num_experts_per_tok}")
+    print(f"  lora_rank: {lora_rank}")
+    print(f"  lora_alpha: {lora_alpha}")
+    print(f"  perf_qlen: {perf_qlen}")
+    print(f"  num_threads: {num_threads}")
+    print(f"  TP mode: DISABLED (single NUMA node)")
+    print("=" * 70)
+
+    # Only test BF16 and INT8 as requested
+    quant_modes = ["bf16", "int8"]
+
+    results = []
+    try:
+        for quant_mode in quant_modes:
+            result = test_moe_sft_performance_no_tp(quant_mode)
+            results.append(result)
+
+        # Print comparison table
+        print("\n" + "=" * 70)
+        print(" Performance Comparison Summary (NO TP)")
+        print("=" * 70)
+        print(f"\n{'Mode':<10} {'Forward(ms)':<15} {'Backward(ms)':<15} {'Combined(ms)':<15} {'Throughput(tok/s)':<20}")
+        print("-" * 75)
+        for r in results:
+            print(
+                f"{r['quant_mode'].upper():<10} "
+                f"{r['forward_avg_ms']:<15.3f} "
+                f"{r['backward_avg_ms']:<15.3f} "
+                f"{r['combined_avg_ms']:<15.3f} "
+                f"{r['combined_throughput']:<20.1f}"
+            )
+        print("-" * 75)
+
+        # Calculate speedup if we have both results
+        if len(results) == 2:
+            bf16_combined = results[0]["combined_avg_ms"]
+            int8_combined = results[1]["combined_avg_ms"]
+            speedup = bf16_combined / int8_combined
+            print(f"\nINT8 vs BF16 speedup: {speedup:.2f}x")
+
+        print("\n" + "=" * 70)
+        print(" PERFORMANCE TESTS COMPLETED!")
+        print("=" * 70)
+
+    except Exception as e:
+        print(f"\n[FAILED] Performance test failed with error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+    return results
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -1723,9 +2052,9 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    # quant_modes = ["bf16", "int8", "int4", "int4_1"]
+    quant_modes = ["bf16", "int8"]
     # quant_modes = ["int4_1kgroup", "int4_kgroup"]
-    quant_modes = ["int4_kgroup"]
+    # quant_modes = ["int4_kgroup"]
 
     try:
         for quant_mode in quant_modes:
@@ -1759,4 +2088,49 @@ def run_all_tests():
 
 
 if __name__ == "__main__":
-    run_all_tests()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MOE SFT AMX Test Suite - Non-TP Version")
+    parser.add_argument(
+        "--mode",
+        choices=["all", "accuracy", "perf"],
+        default="all",
+        help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests",
+    )
+    parser.add_argument(
+        "--qlen",
+        type=int,
+        default=None,
+        help=f"Override perf_qlen for performance tests (default: {perf_qlen})",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=None,
+        help=f"Override warmup iterations for performance tests (default: {perf_warmup_iter})",
+    )
+    parser.add_argument(
+        "--iter",
+        type=int,
+        default=None,
+        help=f"Override test iterations for performance tests (default: {perf_test_iter})",
+    )
+    args = parser.parse_args()
+
+    # Override performance test parameters if specified
+    if args.qlen is not None or args.warmup is not None or args.iter is not None:
+        # Need to use global to modify module-level variables
+        if args.qlen is not None:
+            globals()["perf_qlen"] = args.qlen
+        if args.warmup is not None:
+            globals()["perf_warmup_iter"] = args.warmup
+        if args.iter is not None:
+            globals()["perf_test_iter"] = args.iter
+
+    if args.mode == "all":
+        run_all_tests()
+        run_performance_tests()
+    elif args.mode == "accuracy":
+        run_all_tests()
+    elif args.mode == "perf":
+        run_performance_tests()
