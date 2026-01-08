@@ -85,6 +85,11 @@ std::vector<std::shared_ptr<typename T::BufferB>> down_lora_a_bb_;  // [expert_n
 std::vector<std::shared_ptr<typename T::BufferB>> gate_lora_b_bb_;  // [expert_num]
 std::vector<std::shared_ptr<typename T::BufferB>> up_lora_b_bb_;    // [expert_num]
 std::vector<std::shared_ptr<typename T::BufferB>> down_lora_b_bb_;  // [expert_num]
+// Backward LoRA GEMM 需要的转置 BufferB
+std::vector<std::shared_ptr<typename T::BufferB>> gate_lora_a_t_bb_;
+std::vector<std::shared_ptr<typename T::BufferB>> up_lora_a_t_bb_;
+std::vector<std::shared_ptr<typename T::BufferB>> gate_lora_b_t_bb_;
+std::vector<std::shared_ptr<typename T::BufferB>> up_lora_b_t_bb_;
 
 // LoRA intermediate BufferA and BufferC
 std::vector<std::shared_ptr<typename T::BufferA>> lora_intermediate_ba_;  // [expert_num]
@@ -143,25 +148,66 @@ void prepare_lora_weights() {
   auto pool = config_.pool->get_subpool(tp_part_idx);
 
   pool->do_work_stealing_job(
-      config_.expert_num * 6, nullptr,
+      config_.expert_num * 10, nullptr,
       [this](int task_id) {
-        int expert_idx = task_id / 6;
-        int lora_type = task_id % 6;
+        int expert_idx = task_id / 10;
+        int lora_type = task_id % 10;
 
         switch (lora_type) {
           case 0:  // gate_lora_a
-            convert_lora_a_to_buffer_b(gate_lora_a_, gate_lora_a_bb_[expert_idx],
-                                       expert_idx, lora_rank_, config_.hidden_size,
-                                       padded_lora_rank_, config_.hidden_size);
+            convert_lora_a_to_buffer_b(gate_lora_a_, gate_lora_a_bb_[expert_idx], expert_idx,
+                                       lora_rank_, config_.hidden_size, padded_lora_rank_, config_.hidden_size);
             break;
-          // ... 其他 5 个矩阵
+          case 1:  // up_lora_a
+            convert_lora_a_to_buffer_b(up_lora_a_, up_lora_a_bb_[expert_idx], expert_idx,
+                                       lora_rank_, config_.hidden_size, padded_lora_rank_, config_.hidden_size);
+            break;
+          case 2:  // gate_lora_b
+            convert_lora_b_to_buffer_b(gate_lora_b_, gate_lora_b_bb_[expert_idx], expert_idx,
+                                       config_.intermediate_size, lora_rank_, config_.intermediate_size,
+                                       padded_lora_rank_);
+            break;
+          case 3:  // up_lora_b
+            convert_lora_b_to_buffer_b(up_lora_b_, up_lora_b_bb_[expert_idx], expert_idx,
+                                       config_.intermediate_size, lora_rank_, config_.intermediate_size,
+                                       padded_lora_rank_);
+            break;
+          case 4:  // down_lora_a
+            convert_lora_a_to_buffer_b(down_lora_a_, down_lora_a_bb_[expert_idx], expert_idx,
+                                       lora_rank_, config_.intermediate_size, padded_lora_rank_,
+                                       config_.intermediate_size);
+            break;
+          case 5:  // down_lora_b
+            convert_lora_b_to_buffer_b(down_lora_b_, down_lora_b_bb_[expert_idx], expert_idx,
+                                       config_.hidden_size, lora_rank_, config_.hidden_size, padded_lora_rank_);
+            break;
+          case 6:  // gate_lora_a^T for backward (hidden_size, padded_rank)
+            convert_lora_a_transposed_to_buffer_b(gate_lora_a_, gate_lora_a_t_bb_[expert_idx], expert_idx,
+                                                  lora_rank_, config_.hidden_size, config_.hidden_size,
+                                                  padded_lora_rank_);
+            break;
+          case 7:  // up_lora_a^T
+            convert_lora_a_transposed_to_buffer_b(up_lora_a_, up_lora_a_t_bb_[expert_idx], expert_idx,
+                                                  lora_rank_, config_.hidden_size, config_.hidden_size,
+                                                  padded_lora_rank_);
+            break;
+          case 8:  // gate_lora_b^T for backward (padded_rank, intermediate_size)
+            convert_lora_b_transposed_to_buffer_b(gate_lora_b_, gate_lora_b_t_bb_[expert_idx], expert_idx,
+                                                  config_.intermediate_size, lora_rank_, padded_lora_rank_,
+                                                  config_.intermediate_size);
+            break;
+          case 9:  // up_lora_b^T
+            convert_lora_b_transposed_to_buffer_b(up_lora_b_, up_lora_b_t_bb_[expert_idx], expert_idx,
+                                                  config_.intermediate_size, lora_rank_, padded_lora_rank_,
+                                                  config_.intermediate_size);
+            break;
         }
       },
       nullptr);
 
   lora_weights_prepared_ = true;
 }
-```
+``` 
 
 ### 3.4 `compute_lora_gate_up_amx()` 方法
 
@@ -380,16 +426,22 @@ backward_down_amx()
 
 ### 7.4 `backward_gate_up_amx()` 方法
 
-AMX 优化的 backward_gate_up：
+AMX 优化的 backward_gate_up（新增 LoRA 反向 GEMM）：
 
 ```
 backward_gate_up_amx()
   ├── prepare_backward_weights()
-  └── For each expert (gate and up in parallel):
-        ├── AMX GEMM: token_grad_input = grad @ W
-        │     └── mat_mul with gate_backward_bb_/up_backward_bb_
-        ├── Scatter to grad_input
-        └── LoRA gradient computation (for-loop)
+  ├── prepare_lora_weights()  // 同步生成 A/B 及 A^T/B^T BufferB
+  ├── Base path (gate / up 两个 pass):
+  │     ├── grad -> BufferA(down_ba_)
+  │     ├── AMX mat_mul grad @ W^T(backward_bb_) -> grad_gate_up_bc_
+  │     └── to_mat + scatter 累加到 grad_input
+  └── LoRA path (gate / up):
+        ├── input @ A^T (amx)  → U (BF16)
+        ├── grad_B: grad^T @ U  (for-loop，rank 较小)
+        ├── grad @ B^T (amx，使用新转置 BufferB) → G_B
+        ├── G_B 量化 → G_B @ A^T (amx) → grad_input LoRA 部分，scatter * lora_scaling_
+        └── grad_A: input^T @ G_B (for-loop，rank 较小)
 ```
 
 ## 8. 已知限制

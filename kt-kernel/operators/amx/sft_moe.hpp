@@ -158,6 +158,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   std::vector<std::shared_ptr<typename T::BufferB>> gate_lora_b_bb_;  // [expert_num]
   std::vector<std::shared_ptr<typename T::BufferB>> up_lora_b_bb_;    // [expert_num]
   std::vector<std::shared_ptr<typename T::BufferB>> down_lora_b_bb_;  // [expert_num]
+  // Transposed weights for backward GEMM
+  std::vector<std::shared_ptr<typename T::BufferB>> gate_lora_a_t_bb_;  // [expert_num] [hidden_size, padded_lora_rank]
+  std::vector<std::shared_ptr<typename T::BufferB>> up_lora_a_t_bb_;    // [expert_num]
+  std::vector<std::shared_ptr<typename T::BufferB>>
+      gate_lora_b_t_bb_;  // [expert_num] [padded_lora_rank, intermediate_size]
+  std::vector<std::shared_ptr<typename T::BufferB>> up_lora_b_t_bb_;  // [expert_num]
 
   // LoRA intermediate BufferA and BufferC
   // For step 1 output / step 2 input: [num_tokens, padded_lora_rank]
@@ -617,15 +623,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (gate_lora_a_ == nullptr) return;  // No LoRA weights to prepare
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    int nth = T::recommended_nth(config_.hidden_size);
 
     // Parallel conversion of all LoRA weights to BufferB format
-    // 6 matrices per expert: gate_a, up_a, gate_b, up_b, down_a, down_b
+    // 10 matrices per expert: gate/up (A, B, A^T, B^T) + down (A, B)
     pool->do_work_stealing_job(
-        config_.expert_num * 6, nullptr,
-        [this, nth](int task_id) {
-          int expert_idx = task_id / 6;
-          int lora_type = task_id % 6;
+        config_.expert_num * 10, nullptr,
+        [this](int task_id) {
+          int expert_idx = task_id / 10;
+          int lora_type = task_id % 10;
 
           switch (lora_type) {
             case 0:  // gate_lora_a [lora_rank, hidden_size] -> [padded_lora_rank, hidden_size]
@@ -652,6 +657,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             case 5:  // down_lora_b [hidden_size, lora_rank] -> [hidden_size, padded_lora_rank]
               convert_lora_b_to_buffer_b(down_lora_b_, down_lora_b_bb_[expert_idx], expert_idx, config_.hidden_size,
                                          lora_rank_, config_.hidden_size, padded_lora_rank_);
+              break;
+            case 6:  // gate_lora_a^T [hidden_size, lora_rank] -> [hidden_size, padded_lora_rank]
+              convert_lora_a_transposed_to_buffer_b(gate_lora_a_, gate_lora_a_t_bb_[expert_idx], expert_idx, lora_rank_,
+                                                    config_.hidden_size, config_.hidden_size, padded_lora_rank_);
+              break;
+            case 7:  // up_lora_a^T
+              convert_lora_a_transposed_to_buffer_b(up_lora_a_, up_lora_a_t_bb_[expert_idx], expert_idx, lora_rank_,
+                                                    config_.hidden_size, config_.hidden_size, padded_lora_rank_);
+              break;
+            case 8:  // gate_lora_b^T [lora_rank, intermediate_size] -> [padded_lora_rank, intermediate_size]
+              convert_lora_b_transposed_to_buffer_b(gate_lora_b_, gate_lora_b_t_bb_[expert_idx], expert_idx,
+                                                    config_.intermediate_size, lora_rank_, padded_lora_rank_,
+                                                    config_.intermediate_size);
+              break;
+            case 9:  // up_lora_b^T
+              convert_lora_b_transposed_to_buffer_b(up_lora_b_, up_lora_b_t_bb_[expert_idx], expert_idx,
+                                                    config_.intermediate_size, lora_rank_, padded_lora_rank_,
+                                                    config_.intermediate_size);
               break;
           }
         },
@@ -819,6 +842,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Variables for buffer sizes (used in init_lora_amx_buffers)
     size_t lora_a_gate_up_bb_size = 0;
     size_t lora_b_gate_up_bb_size = 0;
+    size_t lora_a_gate_up_t_bb_size = 0;
+    size_t lora_b_gate_up_t_bb_size = 0;
     size_t lora_a_down_bb_size = 0;
     size_t lora_b_down_bb_size = 0;
     size_t lora_intermediate_ba_size = 0;
@@ -837,16 +862,23 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       lora_a_gate_up_bb_size = T::BufferB::required_size(padded_lora_rank_, config_.hidden_size);
       // gate/up lora_B: [intermediate_size, padded_lora_rank] per expert
       lora_b_gate_up_bb_size = T::BufferB::required_size(config_.intermediate_size, padded_lora_rank_);
+      // Transposed weights for backward LoRA GEMM
+      // gate/up lora_A^T: [hidden_size, padded_lora_rank] per expert
+      lora_a_gate_up_t_bb_size = T::BufferB::required_size(config_.hidden_size, padded_lora_rank_);
+      // gate/up lora_B^T: [padded_lora_rank, intermediate_size] per expert
+      lora_b_gate_up_t_bb_size = T::BufferB::required_size(padded_lora_rank_, config_.intermediate_size);
       // down lora_A: [padded_lora_rank, intermediate_size] per expert
       lora_a_down_bb_size = T::BufferB::required_size(padded_lora_rank_, config_.intermediate_size);
       // down lora_B: [hidden_size, padded_lora_rank] per expert
       lora_b_down_bb_size = T::BufferB::required_size(config_.hidden_size, padded_lora_rank_);
 
-      // Total BufferB pool size for all experts (6 matrices per expert)
-      lora_bb_pool_bytes_ = config_.expert_num * (lora_a_gate_up_bb_size * 2 +  // gate_a, up_a
-                                                  lora_b_gate_up_bb_size * 2 +  // gate_b, up_b
-                                                  lora_a_down_bb_size +         // down_a
-                                                  lora_b_down_bb_size);         // down_b
+      // Total BufferB pool size for all experts (10 matrices per expert)
+      lora_bb_pool_bytes_ = config_.expert_num * (lora_a_gate_up_bb_size * 2 +    // gate_a, up_a
+                                                  lora_b_gate_up_bb_size * 2 +    // gate_b, up_b
+                                                  lora_a_gate_up_t_bb_size * 2 +  // gate_a^T, up_a^T
+                                                  lora_b_gate_up_t_bb_size * 2 +  // gate_b^T, up_b^T
+                                                  lora_a_down_bb_size +           // down_a
+                                                  lora_b_down_bb_size);           // down_b
 
       // BufferA for LoRA intermediate: [max_m, padded_lora_rank] per expert
       // Need 2x for gate and up separate buffers (to avoid race condition)
@@ -972,11 +1004,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Initialize LoRA AMX buffer objects (only for supported kernels)
     // =====================================================
     if constexpr (supports_standard_mat_mul_v<T>) {
-      init_lora_amx_buffers(max_m, lora_a_gate_up_bb_size, lora_b_gate_up_bb_size, lora_a_down_bb_size,
-                            lora_b_down_bb_size, lora_intermediate_ba_size, lora_intermediate_bc_size,
-                            lora_gate_up_out_bc_size, lora_down_out_bc_size, grad_output_ba_size,
-                            grad_intermediate_bc_size, grad_gate_up_bc_size, gate_up_backward_bb_size,
-                            down_backward_bb_size);
+      init_lora_amx_buffers(max_m, lora_a_gate_up_bb_size, lora_b_gate_up_bb_size, lora_a_gate_up_t_bb_size,
+                            lora_b_gate_up_t_bb_size, lora_a_down_bb_size, lora_b_down_bb_size,
+                            lora_intermediate_ba_size, lora_intermediate_bc_size, lora_gate_up_out_bc_size,
+                            lora_down_out_bc_size, grad_output_ba_size, grad_intermediate_bc_size, grad_gate_up_bc_size,
+                            gate_up_backward_bb_size, down_backward_bb_size);
     }
   }
 
@@ -984,6 +1016,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @brief Initialize LoRA AMX buffer objects (including backward pass buffers).
    */
   void init_lora_amx_buffers(size_t max_m, size_t lora_a_gate_up_bb_size, size_t lora_b_gate_up_bb_size,
+                             size_t lora_a_gate_up_t_bb_size, size_t lora_b_gate_up_t_bb_size,
                              size_t lora_a_down_bb_size, size_t lora_b_down_bb_size, size_t lora_intermediate_ba_size,
                              size_t lora_intermediate_bc_size, size_t lora_gate_up_out_bc_size,
                              size_t lora_down_out_bc_size, size_t grad_output_ba_size, size_t grad_intermediate_bc_size,
@@ -996,6 +1029,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     gate_lora_b_bb_.resize(config_.expert_num);
     up_lora_b_bb_.resize(config_.expert_num);
     down_lora_b_bb_.resize(config_.expert_num);
+    gate_lora_a_t_bb_.resize(config_.expert_num);
+    up_lora_a_t_bb_.resize(config_.expert_num);
+    gate_lora_b_t_bb_.resize(config_.expert_num);
+    up_lora_b_t_bb_.resize(config_.expert_num);
     // Separate buffers for gate and up to avoid race condition
     lora_gate_intermediate_ba_.resize(config_.expert_num);
     lora_up_intermediate_ba_.resize(config_.expert_num);
@@ -1042,6 +1079,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       up_lora_b_bb_[i] =
           std::make_shared<typename T::BufferB>(config_.intermediate_size, padded_lora_rank_, (void*)bb_ptr);
       bb_ptr += lora_b_gate_up_bb_size;
+
+      gate_lora_a_t_bb_[i] =
+          std::make_shared<typename T::BufferB>(config_.hidden_size, padded_lora_rank_, (void*)bb_ptr);
+      bb_ptr += lora_a_gate_up_t_bb_size;
+
+      up_lora_a_t_bb_[i] = std::make_shared<typename T::BufferB>(config_.hidden_size, padded_lora_rank_, (void*)bb_ptr);
+      bb_ptr += lora_a_gate_up_t_bb_size;
+
+      gate_lora_b_t_bb_[i] =
+          std::make_shared<typename T::BufferB>(padded_lora_rank_, config_.intermediate_size, (void*)bb_ptr);
+      bb_ptr += lora_b_gate_up_t_bb_size;
+
+      up_lora_b_t_bb_[i] =
+          std::make_shared<typename T::BufferB>(padded_lora_rank_, config_.intermediate_size, (void*)bb_ptr);
+      bb_ptr += lora_b_gate_up_t_bb_size;
 
       down_lora_a_bb_[i] =
           std::make_shared<typename T::BufferB>(padded_lora_rank_, config_.intermediate_size, (void*)bb_ptr);
@@ -1182,6 +1234,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Convert to BufferB format using from_mat
+    dst_bb->from_mat(padded.data(), 0, 1);
+  }
+
+  /**
+   * @brief Convert LoRA A^T matrix to BufferB format with padding on rank dimension.
+   *
+   * Input shape: [expert_num, lora_rank, hidden_size]
+   * Output shape: [expert_num, hidden_size, padded_lora_rank]
+   */
+  void convert_lora_a_transposed_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb,
+                                             int expert_idx, int src_n, int src_k, int dst_n, int dst_k) {
+    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
+
+    for (int h = 0; h < src_k && h < dst_n; h++) {
+      for (int r = 0; r < src_n && r < dst_k; r++) {
+        padded[h * dst_k + r] = expert_src[r * src_k + h];
+      }
+    }
+
+    dst_bb->from_mat(padded.data(), 0, 1);
+  }
+
+  /**
+   * @brief Convert LoRA B^T matrix to BufferB format with padding on rank dimension.
+   *
+   * Input shape: [expert_num, intermediate_size, lora_rank]
+   * Output shape: [expert_num, padded_lora_rank, intermediate_size]
+   */
+  void convert_lora_b_transposed_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb,
+                                             int expert_idx, int src_n, int src_k, int dst_n, int dst_k) {
+    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
+
+    for (int r = 0; r < src_k && r < dst_n; r++) {
+      for (int i = 0; i < src_n && i < dst_k; i++) {
+        padded[r * dst_k + i] = expert_src[i * src_k + r];
+      }
+    }
+
     dst_bb->from_mat(padded.data(), 0, 1);
   }
 
@@ -2265,11 +2357,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   /**
    * @brief AMX-optimized backward pass for gate and up projections.
    *
-   * Optimizes the main GEMM: token_grad_input = grad @ W
-   * Using AMX mat_mul with gate_backward_bb_/up_backward_bb_ (transposed weights).
-   *
-   * LoRA gradient computation is kept as for-loop for now due to complexity
-   * and small matrix sizes involved.
+   * Uses AMX GEMM for base weight contribution and LoRA grad_input. LoRA weight gradients
+   * remain small for-loops.
    */
   void backward_gate_up_amx(const ForwardCache& cache, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                             void* grad_up_lora_a, void* grad_up_lora_b) {
@@ -2283,207 +2372,266 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     ggml_bf16_t* grad_up_a = (ggml_bf16_t*)grad_up_lora_a;
     ggml_bf16_t* grad_up_b = (ggml_bf16_t*)grad_up_lora_b;
 
-    // Ensure backward weights are prepared
     prepare_backward_weights();
+    if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
+      prepare_lora_weights();
+    }
 
-    // Initialize grad_input to zero (bf16 type)
     memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
 
-    // =====================================================
-    // Step 1: Quantize grad_gate_output and grad_up_output to BufferA
-    // Note: grad_gate_output_ and grad_up_output_ are already in expert-sorted order
-    // from backward_activation, with shape [total_tokens, intermediate_size]
-    // We need BufferA for each expert with shape [num_tokens, intermediate_size]
-    // =====================================================
+    // Offsets into contiguous grad_gate/up buffers
+    std::vector<size_t> expert_offsets(activated_expert);
+    {
+      size_t offset = 0;
+      for (int i = 0; i < activated_expert; i++) {
+        expert_offsets[i] = offset;
+        offset += m_local_num_[m_expert_id_map_[i]];
+      }
+    }
 
-    // We need intermediate BufferA for the gradient - reuse lora_intermediate_ba_
-    // But we need a different size [num_tokens, intermediate_size] vs [num_tokens, padded_lora_rank]
-    // For simplicity, we'll use the existing infrastructure but with a different approach:
-    // We'll directly use grad_gate_output_/grad_up_output_ and gate_up_ba_ pattern
+    auto scatter_to_grad_input = [&](float scale) {
+      ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, scale](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int num_tokens = m_local_num_[expert_idx];
+            if (num_tokens == 0) return;
 
-    // For backward_gate_up, the gradient flow is:
-    // grad_input += grad_gate @ gate_proj + grad_up @ up_proj
-    // where gate_proj/up_proj are [intermediate_size, hidden_size]
+            ggml_bf16_t* contrib = grad_output_bf16_ptr_[expert_idx];
 
-    // AMX operation: grad @ W where W is [intermediate_size, hidden_size]
-    // To express as A @ B^T:
-    // - A = grad [num_tokens, intermediate_size]
-    // - B = W^T [hidden_size, intermediate_size] -> B^T = W [intermediate_size, hidden_size]
-    // So we need BufferB with shape [hidden_size, intermediate_size] which is what we have
-
-    // =====================================================
-    // Process gate and up in parallel for all experts
-    // =====================================================
-    pool->do_work_stealing_job(
-        activated_expert * 2, nullptr,
-        [this, &cache, grad_input, grad_gate_a, grad_gate_b, grad_up_a, grad_up_b, qlen, k](int task_id) {
-          bool do_up = task_id % 2;
-          int expert_idx = m_expert_id_map_[task_id / 2];
-          int num_tokens = m_local_num_[expert_idx];
-
-          if (num_tokens == 0) return;
-
-          // Compute offset into gradient buffers
-          size_t offset = 0;
-          for (int i = 0; i < task_id / 2; i++) {
-            offset += m_local_num_[m_expert_id_map_[i]];
-          }
-
-          ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
-                                    : (grad_gate_output_ + offset * config_.intermediate_size);
-
-          // =====================================================
-          // AMX GEMM for base weight gradient contribution
-          // token_grad_input = grad @ W
-          // where W is [intermediate_size, hidden_size]
-          // =====================================================
-          // For now, we still use for-loop but with optimized memory access
-          // Full AMX version would require additional BufferA for grad
-          {
-            ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
-            const ggml_bf16_t* base_proj =
-                do_up ? (const ggml_bf16_t*)config_.up_proj : (const ggml_bf16_t*)config_.gate_proj;
-            size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
-
-            // Pre-compute grad_input contribution per token, then scatter
-            std::vector<float> token_grad_input(num_tokens * config_.hidden_size, 0.0f);
-
-            // Optimized loop order for better cache utilization
-            for (int t = 0; t < num_tokens; t++) {
-              for (int i = 0; i < config_.intermediate_size; i++) {
-                float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
-                if (std::abs(g) < 1e-10f) continue;  // Skip near-zero gradients
-                for (int h = 0; h < config_.hidden_size; h++) {
-                  float w = GGML_BF16_TO_FP32(base_proj[expert_offset + i * config_.hidden_size + h]);
-                  token_grad_input[t * config_.hidden_size + h] += g * w;
-                }
-              }
-            }
-
-            // Scatter back to grad_input
             for (int i = 0; i < qlen; i++) {
               for (int j = 0; j < k; j++) {
                 if (cache.expert_ids_cache[i * k + j] == expert_idx) {
                   int pos = cache.m_local_pos_cache[i][j];
                   for (int h = 0; h < config_.hidden_size; h++) {
                     float current = GGML_BF16_TO_FP32(grad_input_bf16[i * config_.hidden_size + h]);
-                    grad_input_bf16[i * config_.hidden_size + h] =
-                        GGML_FP32_TO_BF16(current + token_grad_input[pos * config_.hidden_size + h]);
+                    float add = GGML_BF16_TO_FP32(contrib[pos * config_.hidden_size + h]) * scale;
+                    grad_input_bf16[i * config_.hidden_size + h] = GGML_FP32_TO_BF16(current + add);
                   }
                 }
               }
             }
-          }
+          },
+          nullptr);
+    };
 
-          // LoRA gradients and contribution - only if LoRA is enabled
-          ggml_bf16_t* lora_a = do_up ? up_lora_a_ : gate_lora_a_;
-          ggml_bf16_t* lora_b = do_up ? up_lora_b_ : gate_lora_b_;
-          ggml_bf16_t* grad_lora_a = do_up ? grad_up_a : grad_gate_a;
-          ggml_bf16_t* grad_lora_b = do_up ? grad_up_b : grad_gate_b;
+    auto base_pass = [&](bool do_up) {
+      // Quantize grad to BufferA
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, do_up](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
 
-          if (lora_a == nullptr || lora_b == nullptr) return;
+            size_t offset = expert_offsets[task_id];
+            ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
+                                      : (grad_gate_output_ + offset * config_.intermediate_size);
+            down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
+          },
+          nullptr);
 
-          // Get cached input
-          ggml_bf16_t* input = cache.input_cache;
+      int nth = T::recommended_nth(config_.hidden_size);
+      pool->do_work_stealing_job(
+          nth * activated_expert, [](int _) { T::config(); },
+          [&, do_up, nth](int task_id) {
+            int task_idx = task_id / nth;
+            int expert_idx = m_expert_id_map_[task_idx];
+            int ith = task_id % nth;
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
 
-          // Get expert's LoRA weights
-          size_t lora_a_offset = expert_idx * lora_rank_ * config_.hidden_size;
-          size_t lora_b_offset = expert_idx * config_.intermediate_size * lora_rank_;
-          ggml_bf16_t* expert_lora_a = lora_a + lora_a_offset;
-          ggml_bf16_t* expert_lora_b = lora_b + lora_b_offset;
+            auto& ba = down_ba_[expert_idx];
+            auto& bb = do_up ? up_backward_bb_[expert_idx] : gate_backward_bb_[expert_idx];
+            auto& bc = grad_gate_up_bc_[expert_idx];
 
-          // Collect expert's input from cached input using routing
-          std::vector<float> expert_input(num_tokens * config_.hidden_size, 0.0f);
-          for (int i = 0; i < qlen; i++) {
-            for (int j = 0; j < k; j++) {
-              if (cache.expert_ids_cache[i * k + j] == expert_idx) {
-                int pos = cache.m_local_pos_cache[i][j];
-                for (int h = 0; h < config_.hidden_size; h++) {
-                  expert_input[pos * config_.hidden_size + h] = GGML_BF16_TO_FP32(input[i * config_.hidden_size + h]);
-                }
-              }
-            }
-          }
+            amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+            bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
+          },
+          nullptr);
 
-          // Gradient for LoRA B: grad_B = grad^T @ (input @ lora_A^T) * scaling
-          // First compute input @ lora_A^T → [num_tokens, lora_rank]
-          std::vector<float> input_proj(num_tokens * lora_rank_, 0.0f);
-          for (int t = 0; t < num_tokens; t++) {
-            for (int r = 0; r < lora_rank_; r++) {
-              float sum = 0.0f;
-              for (int h = 0; h < config_.hidden_size; h++) {
-                float inp = expert_input[t * config_.hidden_size + h];
-                float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.hidden_size + h]);
-                sum += inp * w;
-              }
-              input_proj[t * lora_rank_ + r] = sum;
-            }
-          }
+      scatter_to_grad_input(1.0f);
+    };
 
-          // grad_B = grad^T @ input_proj * scaling
-          for (int i = 0; i < config_.intermediate_size; i++) {
-            for (int r = 0; r < lora_rank_; r++) {
-              float sum = 0.0f;
-              for (int t = 0; t < num_tokens; t++) {
-                float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
-                sum += g * input_proj[t * lora_rank_ + r];
-              }
-              float current = GGML_BF16_TO_FP32(grad_lora_b[lora_b_offset + i * lora_rank_ + r]);
-              grad_lora_b[lora_b_offset + i * lora_rank_ + r] = GGML_FP32_TO_BF16(current + sum * lora_scaling_);
-            }
-          }
+    base_pass(false);  // gate
+    base_pass(true);   // up
 
-          // Gradient for LoRA A
-          // First: grad @ lora_B → [num_tokens, lora_rank]
-          std::vector<float> grad_times_b(num_tokens * lora_rank_, 0.0f);
-          for (int t = 0; t < num_tokens; t++) {
-            for (int r = 0; r < lora_rank_; r++) {
-              float sum = 0.0f;
-              for (int i = 0; i < config_.intermediate_size; i++) {
-                float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
-                float b = GGML_BF16_TO_FP32(expert_lora_b[i * lora_rank_ + r]);
-                sum += g * b;
-              }
-              grad_times_b[t * lora_rank_ + r] = sum;
-            }
-          }
+    if (gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
+      return;
+    }
 
-          // grad_A = input^T @ grad_times_b * scaling
-          for (int r = 0; r < lora_rank_; r++) {
-            for (int h = 0; h < config_.hidden_size; h++) {
-              float sum = 0.0f;
-              for (int t = 0; t < num_tokens; t++) {
-                sum += expert_input[t * config_.hidden_size + h] * grad_times_b[t * lora_rank_ + r];
-              }
-              float current = GGML_BF16_TO_FP32(grad_lora_a[lora_a_offset + r * config_.hidden_size + h]);
-              grad_lora_a[lora_a_offset + r * config_.hidden_size + h] =
-                  GGML_FP32_TO_BF16(current + sum * lora_scaling_);
-            }
-          }
-
-          // Compute grad_input contribution from this expert's LoRA
-          // grad_input += grad @ lora_B @ lora_A * scaling
-          // = grad_times_b @ lora_A * scaling
-          // Need to scatter back to original positions
-          ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
-          for (int i = 0; i < qlen; i++) {
-            for (int j = 0; j < k; j++) {
-              if (cache.expert_ids_cache[i * k + j] == expert_idx) {
-                int pos = cache.m_local_pos_cache[i][j];
-                for (int h = 0; h < config_.hidden_size; h++) {
-                  float sum = 0.0f;
-                  for (int r = 0; r < lora_rank_; r++) {
-                    sum += grad_times_b[pos * lora_rank_ + r] *
-                           GGML_BF16_TO_FP32(expert_lora_a[r * config_.hidden_size + h]);
-                  }
-                  float current = GGML_BF16_TO_FP32(grad_input_bf16[i * config_.hidden_size + h]);
-                  grad_input_bf16[i * config_.hidden_size + h] = GGML_FP32_TO_BF16(current + sum * lora_scaling_);
-                }
-              }
-            }
-          }
+    // Re-quantize inputs for LoRA path
+    pool->do_work_stealing_job(
+        activated_expert, nullptr,
+        [this](int task_id) {
+          int expert_idx = m_expert_id_map_[task_id];
+          int m = m_local_num_[expert_idx];
+          if (m == 0) return;
+          gate_up_ba_[expert_idx]->from_mat(m, m_local_input_ptr_[expert_idx], 0, 1);
         },
         nullptr);
+
+    auto lora_pass = [&](bool do_up) {
+      // Step 1: input @ lora_A^T -> U
+      int nth_inter = T::recommended_nth(padded_lora_rank_);
+      pool->do_work_stealing_job(
+          nth_inter * activated_expert, [](int _) { T::config(); },
+          [&, do_up, nth_inter](int task_id) {
+            int task_idx = task_id / nth_inter;
+            int expert_idx = m_expert_id_map_[task_idx];
+            int ith = task_id % nth_inter;
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
+
+            auto& ba = gate_up_ba_[expert_idx];
+            auto& bb = do_up ? up_lora_a_bb_[expert_idx] : gate_lora_a_bb_[expert_idx];
+            auto& bc = do_up ? lora_up_intermediate_bc_[expert_idx] : lora_gate_intermediate_bc_[expert_idx];
+            ggml_bf16_t* inter_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+
+            amx::mat_mul(m, padded_lora_rank_, config_.hidden_size, ba, bb, bc, ith, nth_inter);
+            bc->to_mat(m, inter_ptr, ith, nth_inter);
+          },
+          nullptr);
+
+      // Step 2: grad_B = grad^T @ U
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, do_up](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int num_tokens = m_local_num_[expert_idx];
+            if (num_tokens == 0) return;
+
+            size_t offset = expert_offsets[task_id];
+            ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
+                                      : (grad_gate_output_ + offset * config_.intermediate_size);
+            ggml_bf16_t* grad_lora_b = do_up ? grad_up_b : grad_gate_b;
+            size_t lora_b_offset = expert_idx * config_.intermediate_size * lora_rank_;
+            ggml_bf16_t* u_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+
+            for (int i = 0; i < config_.intermediate_size; i++) {
+              for (int r = 0; r < lora_rank_; r++) {
+                float sum = 0.0f;
+                for (int t = 0; t < num_tokens; t++) {
+                  float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
+                  float u = GGML_BF16_TO_FP32(u_ptr[t * padded_lora_rank_ + r]);
+                  sum += g * u;
+                }
+                float current = GGML_BF16_TO_FP32(grad_lora_b[lora_b_offset + i * lora_rank_ + r]);
+                grad_lora_b[lora_b_offset + i * lora_rank_ + r] = GGML_FP32_TO_BF16(current + sum * lora_scaling_);
+              }
+            }
+          },
+          nullptr);
+
+      // Step 3: grad @ lora_B -> G_B
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, do_up](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
+
+            size_t offset = expert_offsets[task_id];
+            ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
+                                      : (grad_gate_output_ + offset * config_.intermediate_size);
+            down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
+          },
+          nullptr);
+
+      int nth_gb = T::recommended_nth(padded_lora_rank_);
+      pool->do_work_stealing_job(
+          nth_gb * activated_expert, [](int _) { T::config(); },
+          [&, do_up, nth_gb](int task_id) {
+            int task_idx = task_id / nth_gb;
+            int expert_idx = m_expert_id_map_[task_idx];
+            int ith = task_id % nth_gb;
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
+
+            auto& ba = down_ba_[expert_idx];
+            auto& bb = do_up ? up_lora_b_t_bb_[expert_idx] : gate_lora_b_t_bb_[expert_idx];
+            auto& bc = do_up ? lora_up_intermediate_bc_[expert_idx] : lora_gate_intermediate_bc_[expert_idx];
+            ggml_bf16_t* inter_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+
+            amx::mat_mul(m, padded_lora_rank_, config_.intermediate_size, ba, bb, bc, ith, nth_gb);
+            bc->to_mat(m, inter_ptr, ith, nth_gb);
+          },
+          nullptr);
+
+      // Step 4: Quantize G_B
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, do_up](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
+
+            ggml_bf16_t* g_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+            auto& ba = do_up ? lora_up_intermediate_ba_[expert_idx] : lora_gate_intermediate_ba_[expert_idx];
+            ba->from_mat(m, g_ptr, 0, 1);
+          },
+          nullptr);
+
+      // Step 5: G_B @ lora_A -> grad_input (LoRA part)
+      int nth_input = T::recommended_nth(config_.hidden_size);
+      pool->do_work_stealing_job(
+          nth_input * activated_expert, [](int _) { T::config(); },
+          [&, do_up, nth_input](int task_id) {
+            int task_idx = task_id / nth_input;
+            int expert_idx = m_expert_id_map_[task_idx];
+            int ith = task_id % nth_input;
+            int m = m_local_num_[expert_idx];
+            if (m == 0) return;
+
+            auto& ba = do_up ? lora_up_intermediate_ba_[expert_idx] : lora_gate_intermediate_ba_[expert_idx];
+            auto& bb = do_up ? up_lora_a_t_bb_[expert_idx] : gate_lora_a_t_bb_[expert_idx];
+            auto& bc = grad_gate_up_bc_[expert_idx];
+
+            amx::mat_mul(m, config_.hidden_size, padded_lora_rank_, ba, bb, bc, ith, nth_input);
+            bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth_input);
+          },
+          nullptr);
+
+      scatter_to_grad_input(lora_scaling_);
+
+      // Step 6: grad_A = input^T @ G_B
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [&, do_up](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            int num_tokens = m_local_num_[expert_idx];
+            if (num_tokens == 0) return;
+
+            ggml_bf16_t* g_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+            ggml_bf16_t* grad_lora_a = do_up ? grad_up_a : grad_gate_a;
+            size_t lora_a_offset = expert_idx * lora_rank_ * config_.hidden_size;
+            ggml_bf16_t* expert_input = m_local_input_ptr_[expert_idx];
+
+            for (int r = 0; r < lora_rank_; r++) {
+              for (int h = 0; h < config_.hidden_size; h++) {
+                float sum = 0.0f;
+                for (int t = 0; t < num_tokens; t++) {
+                  float gb = GGML_BF16_TO_FP32(g_ptr[t * padded_lora_rank_ + r]);
+                  float inp = GGML_BF16_TO_FP32(expert_input[t * config_.hidden_size + h]);
+                  sum += inp * gb;
+                }
+                float current = GGML_BF16_TO_FP32(grad_lora_a[lora_a_offset + r * config_.hidden_size + h]);
+                grad_lora_a[lora_a_offset + r * config_.hidden_size + h] =
+                    GGML_FP32_TO_BF16(current + sum * lora_scaling_);
+              }
+            }
+          },
+          nullptr);
+    };
+
+    lora_pass(false);  // gate
+    lora_pass(true);   // up
   }
 };
 
