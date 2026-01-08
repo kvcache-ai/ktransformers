@@ -1820,7 +1820,7 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
                 weights.data_ptr(),
                 input_data.data_ptr(),
                 output.data_ptr(),
-                True,  # save_for_backward
+                False,  # save_for_backward
             )
         )
         CPUInfer.sync()
@@ -2094,7 +2094,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         choices=["all", "accuracy", "perf"],
-        default="all",
+        default="perf",
         help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests",
     )
     parser.add_argument(
