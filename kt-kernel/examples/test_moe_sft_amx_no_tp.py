@@ -15,6 +15,7 @@ import os
 import sys
 import math
 from typing import Literal, Dict
+import nvtx
 
 sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 print("sys.path:", sys.path)
@@ -1810,8 +1811,10 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
     # =========================================================================
     print(f"\n[INFO] Testing forward pass performance ({perf_test_iter} iterations)...")
     forward_times = []
-    for _ in range(perf_test_iter):
+    for step in range(perf_test_iter):
         start_time = time.perf_counter()
+        if step == 2:
+            nvtx.push_range("forward_only")
         CPUInfer.submit(
             moe.forward_sft_task(
                 bsz_tensor.data_ptr(),
@@ -1824,6 +1827,8 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
             )
         )
         CPUInfer.sync()
+        if step == 2:
+            nvtx.pop_range()
         end_time = time.perf_counter()
         forward_times.append((end_time - start_time) * 1000)  # Convert to ms
 
@@ -1832,7 +1837,7 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
     # =========================================================================
     print(f"[INFO] Testing backward pass performance ({perf_test_iter} iterations)...")
     backward_times = []
-    for _ in range(perf_test_iter):
+    for step in range(perf_test_iter):
         # Need a forward pass first to populate cache
         CPUInfer.submit(
             moe.forward_sft_task(
@@ -1848,6 +1853,9 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
         CPUInfer.sync()
 
         start_time = time.perf_counter()
+
+        if step == 2:
+            nvtx.push_range("backward_only")
         CPUInfer.submit(
             moe.backward_task(
                 grad_output.data_ptr(),
@@ -1861,6 +1869,10 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
             )
         )
         CPUInfer.sync()
+
+        if step == 2:
+            nvtx.pop_range()
+
         end_time = time.perf_counter()
         backward_times.append((end_time - start_time) * 1000)  # Convert to ms
 
@@ -1869,9 +1881,11 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
     # =========================================================================
     print(f"[INFO] Testing combined forward+backward performance ({perf_test_iter} iterations)...")
     combined_times = []
-    for _ in range(perf_test_iter):
+    for step in range(perf_test_iter):
         start_time = time.perf_counter()
 
+        if step == 2:
+            nvtx.push_range("full_train_loop")
         # Forward pass
         CPUInfer.submit(
             moe.forward_sft_task(
@@ -1885,7 +1899,6 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
             )
         )
         CPUInfer.sync()
-
         # Backward pass
         CPUInfer.submit(
             moe.backward_task(
@@ -1900,6 +1913,8 @@ def test_moe_sft_performance_no_tp(quant_mode: str = "bf16"):
             )
         )
         CPUInfer.sync()
+        if step == 2:
+            nvtx.pop_range()
 
         end_time = time.perf_counter()
         combined_times.append((end_time - start_time) * 1000)  # Convert to ms
@@ -1984,7 +1999,7 @@ def run_performance_tests():
     print("=" * 70)
 
     # Only test BF16 and INT8 as requested
-    quant_modes = ["bf16", "int8"]
+    quant_modes = ["bf16"]
 
     results = []
     try:

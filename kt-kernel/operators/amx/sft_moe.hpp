@@ -8,12 +8,49 @@
 #ifndef CPUINFER_OPERATOR_AMX_SFT_MOE_H
 #define CPUINFER_OPERATOR_AMX_SFT_MOE_H
 
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
 
 #include "moe.hpp"
+
+// =====================================================
+// Backward timing macros for profiling
+// Uses counter to skip warmup iterations and print at specific call
+// Default: print at 8th call (warmup=5 + backward_test step 0,1,2)
+// Can be overridden via SFT_MOE_PRINT_AT_CALL environment variable
+// =====================================================
+inline int get_print_at_call() {
+  static int print_at = -1;
+  if (print_at < 0) {
+    const char* env = getenv("SFT_MOE_PRINT_AT_CALL");
+    print_at = env ? atoi(env) : 8;  // Default: 8th call
+  }
+  return print_at;
+}
+
+#define BACKWARD_TIMER_START()                                       \
+  static int _bwd_call_count = 0;                                    \
+  _bwd_call_count++;                                                 \
+  bool _bwd_should_print = (_bwd_call_count == get_print_at_call()); \
+  auto _bwd_start = std::chrono::high_resolution_clock::now();       \
+  auto _bwd_last = _bwd_start;
+
+#define BACKWARD_TIMER_CHECKPOINT(name)                                                          \
+  do {                                                                                           \
+    auto _bwd_now = std::chrono::high_resolution_clock::now();                                   \
+    if (_bwd_should_print) {                                                                     \
+      double _elapsed = std::chrono::duration<double, std::milli>(_bwd_now - _bwd_last).count(); \
+      double _total = std::chrono::duration<double, std::milli>(_bwd_now - _bwd_start).count();  \
+      printf("[BWD TIMER] %s: %.3f ms (total: %.3f ms)\n", name, _elapsed, _total);              \
+    }                                                                                            \
+    _bwd_last = _bwd_now;                                                                        \
+  } while (0)
+
+#define BACKWARD_TIMER_END() (void)0
 
 // =====================================================
 // Type trait to detect if kernel supports standard mat_mul API
@@ -518,6 +555,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b) {
+    BACKWARD_TIMER_START();
+
     // Pop cache from stack
     ForwardCache cache = pop_cache();
     if (!cache.valid) {
@@ -560,14 +599,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     } else {
       backward_down(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
     }
-    // printf("[BACKWARD DEBUG] After backward_down - grad_intermediate norm: %f\n",
-    //        compute_bf16_norm(grad_intermediate_, total_tokens * config_.intermediate_size));
+    BACKWARD_TIMER_CHECKPOINT("backward_down");
 
     // Step 2: Activation backward
     backward_activation(cache);
-    // printf("[BACKWARD DEBUG] After backward_activation - grad_gate norm: %f, grad_up norm: %f\n",
-    //        compute_bf16_norm(grad_gate_output_, total_tokens * config_.intermediate_size),
-    //        compute_bf16_norm(grad_up_output_, total_tokens * config_.intermediate_size));
+    BACKWARD_TIMER_CHECKPOINT("backward_activation");
 
     // Step 3: Gate + Up projection backward
     if constexpr (supports_standard_mat_mul_v<T>) {
@@ -575,6 +611,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     } else {
       backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
     }
+    BACKWARD_TIMER_CHECKPOINT("backward_gate_up");
+    BACKWARD_TIMER_END();
     // printf("[BACKWARD DEBUG] After backward_gate_up - grad_input norm: %f\n",
     //        compute_bf16_norm((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size));
 
@@ -1895,6 +1933,22 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward_down_amx(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
                          void* grad_down_lora_b) {
+    // Timing for backward_down_amx substeps
+    static int _down_call_count = 0;
+    _down_call_count++;
+    bool _down_should_print = (_down_call_count == get_print_at_call());
+    auto _down_start = std::chrono::high_resolution_clock::now();
+    auto _down_last = _down_start;
+
+#define DOWN_CHECKPOINT(name)                                                                                       \
+  do {                                                                                                              \
+    auto _now = std::chrono::high_resolution_clock::now();                                                          \
+    if (_down_should_print) {                                                                                       \
+      printf("  [DOWN] %s: %.3f ms\n", name, std::chrono::duration<double, std::milli>(_now - _down_last).count()); \
+    }                                                                                                               \
+    _down_last = _now;                                                                                              \
+  } while (0)
+
     auto pool = config_.pool->get_subpool(tp_part_idx);
     int activated_expert = cache.activated_expert_cache;
     int qlen = cache.qlen_cache;
@@ -1909,6 +1963,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Initialize gradient intermediate buffer
     memset(grad_intermediate_, 0,
            config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t));
+
+    DOWN_CHECKPOINT("D0_prepare+memset");
 
     // =====================================================
     // Step 1: Scatter grad_output to per-expert BF16 buffers
@@ -1944,6 +2000,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
+    DOWN_CHECKPOINT("D1_scatter");
+
     // =====================================================
     // Step 2: Quantize scattered grad_output to BufferA
     // =====================================================
@@ -1959,6 +2017,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           grad_output_ba_[expert_idx]->from_mat(num_tokens, grad_output_bf16_ptr_[expert_idx], 0, 1);
         },
         nullptr);
+
+    DOWN_CHECKPOINT("D2_quantize");
 
     // =====================================================
     // Step 3+4: AMX GEMM + to_mat (merged to use same ith/nth)
@@ -2002,6 +2062,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
         },
         nullptr);
+
+    DOWN_CHECKPOINT("D3_gemm");
 
     // =====================================================
     // Step 5: LoRA gradient computation (kept as for-loop due to small matrices)
@@ -2096,10 +2158,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           },
           nullptr);
+      DOWN_CHECKPOINT("D4_lora_grad");
     }
+
+#undef DOWN_CHECKPOINT
   }
 
   void backward_activation(const ForwardCache& cache) {
+    // Timing for backward_activation
+    static int _act_call_count = 0;
+    _act_call_count++;
+    bool _act_should_print = (_act_call_count == get_print_at_call());
+    auto _act_start = std::chrono::high_resolution_clock::now();
+
     auto pool = config_.pool->get_subpool(tp_part_idx);
     int activated_expert = cache.activated_expert_cache;
 
@@ -2168,6 +2239,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           }
         },
         nullptr);
+
+    if (_act_should_print) {
+      auto _act_end = std::chrono::high_resolution_clock::now();
+      printf("  [ACT] silu_backward: %.3f ms\n",
+             std::chrono::duration<double, std::milli>(_act_end - _act_start).count());
+    }
   }
 
   void backward_gate_up(const ForwardCache& cache, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
@@ -2362,6 +2439,22 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward_gate_up_amx(const ForwardCache& cache, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                             void* grad_up_lora_a, void* grad_up_lora_b) {
+    // Timing for backward_gate_up_amx substeps (counter-based)
+    static int _gu_call_count = 0;
+    _gu_call_count++;
+    bool _gu_should_print = (_gu_call_count == get_print_at_call());
+    auto _gu_start = std::chrono::high_resolution_clock::now();
+    auto _gu_last = _gu_start;
+
+#define GU_CHECKPOINT(name)                                                                                     \
+  do {                                                                                                          \
+    auto _now = std::chrono::high_resolution_clock::now();                                                      \
+    if (_gu_should_print) {                                                                                     \
+      printf("  [GU] %s: %.3f ms\n", name, std::chrono::duration<double, std::milli>(_now - _gu_last).count()); \
+    }                                                                                                           \
+    _gu_last = _now;                                                                                            \
+  } while (0)
+
     auto pool = config_.pool->get_subpool(tp_part_idx);
     int activated_expert = cache.activated_expert_cache;
     int qlen = cache.qlen_cache;
@@ -2378,6 +2471,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+
+    GU_CHECKPOINT("GU0_prepare+memset");
 
     // Offsets into contiguous grad_gate/up buffers
     std::vector<size_t> expert_offsets(activated_expert);
@@ -2417,6 +2512,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     };
 
     auto base_pass = [&](bool do_up) {
+      auto _bp_start = std::chrono::high_resolution_clock::now();
+
       // Quantize grad to BufferA
       pool->do_work_stealing_job(
           activated_expert, nullptr,
@@ -2452,14 +2549,32 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           nullptr);
 
       scatter_to_grad_input(1.0f);
+
+      if (_gu_should_print) {
+        auto _bp_end = std::chrono::high_resolution_clock::now();
+        printf("  [GU] base_pass(%s): %.3f ms\n", do_up ? "up" : "gate",
+               std::chrono::duration<double, std::milli>(_bp_end - _bp_start).count());
+      }
     };
 
     base_pass(false);  // gate
     base_pass(true);   // up
+    GU_CHECKPOINT("GU1_base_passes_total");
 
     if (gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
+#undef GU_CHECKPOINT
       return;
     }
+
+// Re-define GU_CHECKPOINT for the rest of the function
+#define GU_CHECKPOINT(name)                                                                                     \
+  do {                                                                                                          \
+    auto _now = std::chrono::high_resolution_clock::now();                                                      \
+    if (_gu_should_print) {                                                                                     \
+      printf("  [GU] %s: %.3f ms\n", name, std::chrono::duration<double, std::milli>(_now - _gu_last).count()); \
+    }                                                                                                           \
+    _gu_last = _now;                                                                                            \
+  } while (0)
 
     // Re-quantize inputs for LoRA path
     pool->do_work_stealing_job(
@@ -2472,7 +2587,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
+    GU_CHECKPOINT("GU2_requantize_for_lora");
+
     auto lora_pass = [&](bool do_up) {
+      auto _lp_start = std::chrono::high_resolution_clock::now();
       // Step 1: input @ lora_A^T -> U
       int nth_inter = T::recommended_nth(padded_lora_rank_);
       pool->do_work_stealing_job(
@@ -2628,10 +2746,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           },
           nullptr);
+
+      if (_gu_should_print) {
+        auto _lp_end = std::chrono::high_resolution_clock::now();
+        printf("  [GU] lora_pass(%s): %.3f ms\n", do_up ? "up" : "gate",
+               std::chrono::duration<double, std::milli>(_lp_end - _lp_start).count());
+      }
     };
 
     lora_pass(false);  // gate
     lora_pass(true);   // up
+    GU_CHECKPOINT("GU3_lora_passes_total");
+
+#undef GU_CHECKPOINT
   }
 };
 
