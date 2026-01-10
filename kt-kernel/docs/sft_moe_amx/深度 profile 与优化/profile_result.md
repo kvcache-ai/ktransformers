@@ -395,3 +395,253 @@ nsys stats /mnt/data/lpl/nsys/run1.nsys-rep --report nvtx_pushpop_trace
 # 查看 OS runtime 统计
 nsys stats /mnt/data/lpl/nsys/run1.nsys-rep --report osrt_sum --timeunit=ms
 ```
+
+## 10. Forward vs Backward 计算量分析
+
+### 10.1 为什么 Backward 是 Forward 的 ~2 倍？
+
+从 profile 数据：
+- Forward: 131.5 ms
+- Backward: 359.2 ms → 比例 **2.73x**
+
+这是合理的，因为 **backward 需要的 GEMM 数量本身就比 forward 多**。
+
+### 10.2 Forward GEMM 数量 (~9 个)
+
+| 操作 | GEMM 数量 | 说明 |
+|------|----------|------|
+| x @ gate_proj | 1 | Base weight |
+| x @ up_proj | 1 | Base weight |
+| x @ gate_lora_A → @ gate_lora_B | 2 | LoRA |
+| x @ up_lora_A → @ up_lora_B | 2 | LoRA |
+| intermediate @ down_proj | 1 | Base weight |
+| intermediate @ down_lora_A → @ down_lora_B | 2 | LoRA |
+| **总计** | **9** | |
+
+### 10.3 Backward GEMM 数量 (~17 个)
+
+#### backward_down (5 个 GEMM)
+
+| 操作 | 目的 | GEMM |
+|------|------|------|
+| grad_output @ down_proj^T | 计算 grad_intermediate | 1 |
+| cached_inter @ down_lora_A^T | 准备计算 grad_B | 1 |
+| grad_output^T @ inter_proj | grad_down_lora_B | 1 |
+| grad_output @ down_lora_B | 准备计算 grad_A | 1 |
+| cached_inter^T @ grad_times_b | grad_down_lora_A | 1 |
+
+#### backward_gate_up base (2 个 GEMM)
+
+| 操作 | 目的 | GEMM |
+|------|------|------|
+| grad_gate @ gate_proj^T | 传回 grad_input | 1 |
+| grad_up @ up_proj^T | 传回 grad_input | 1 |
+
+#### backward_gate_up LoRA (10 个 GEMM，gate 和 up 各 5 个)
+
+以 gate 为例（up 完全相同）：
+
+| Step | 操作 | 目的 | GEMM |
+|------|------|------|------|
+| 1 | input @ gate_lora_A^T | 准备 U 用于 grad_B | 1 |
+| 2 | grad^T @ U | grad_gate_lora_B | 1 |
+| 3 | grad @ gate_lora_B | 准备 G_B | 1 |
+| 5 | G_B @ gate_lora_A | LoRA 部分的 grad_input | 1 |
+| 6 | input^T @ G_B | grad_gate_lora_A | 1 |
+
+### 10.4 理论 vs 实际对比
+
+| | Forward | Backward | 比例 |
+|---|---------|----------|------|
+| Base weights (冻结) | 3 GEMM | 3 GEMM | 1:1 |
+| LoRA weights (训练) | 6 GEMM | ~14 GEMM | ~2.3:1 |
+| **总计** | **9 GEMM** | **~17 GEMM** | **~1.9:1** |
+
+**关键结论**: 即使保存了所有激活值，backward 计算量仍然是 forward 的约 2 倍，因为：
+1. 对于需要训练的权重，需要额外计算 grad_weight
+2. `Forward: y = W @ x` → 1 GEMM
+3. `Backward: grad_x = W^T @ grad_y` → 1 GEMM + `grad_W = grad_y @ x^T` → 1 GEMM
+
+## 11. For-loop 实现的 LoRA 梯度计算
+
+### 11.1 具体代码位置
+
+#### D4_lora_grad (`backward_down_amx`)
+
+**文件**: `sft_moe.hpp:2106-2157`
+
+```cpp
+// 计算 inter_proj = cached_intermediate @ lora_A^T (for-loop)
+for (int t = 0; t < num_tokens; t++) {
+  for (int r = 0; r < lora_rank_; r++) {
+    float sum = 0.0f;
+    for (int i = 0; i < config_.intermediate_size; i++) {
+      float inp = GGML_BF16_TO_FP32(cached_intermediate[t * config_.intermediate_size + i]);
+      float w = GGML_BF16_TO_FP32(expert_lora_a[r * config_.intermediate_size + i]);
+      sum += inp * w;
+    }
+    inter_proj[t * lora_rank_ + r] = sum;
+  }
+}
+
+// 计算 grad_B = grad_output^T @ inter_proj (for-loop)
+for (int h = 0; h < config_.hidden_size; h++) {
+  for (int r = 0; r < lora_rank_; r++) {
+    float sum = 0.0f;
+    for (int t = 0; t < num_tokens; t++) {
+      sum += expert_grad_out[t * config_.hidden_size + h] * inter_proj[t * lora_rank_ + r];
+    }
+    // ... 累加到 grad_down_b
+  }
+}
+```
+
+#### lora_pass Step 2 (`backward_gate_up_amx`)
+
+**文件**: `sft_moe.hpp:2632-2643`
+
+```cpp
+// Step 2: grad_B = grad^T @ U (for-loop)
+for (int i = 0; i < config_.intermediate_size; i++) {
+  for (int r = 0; r < lora_rank_; r++) {
+    float sum = 0.0f;
+    for (int t = 0; t < num_tokens; t++) {
+      float g = GGML_BF16_TO_FP32(grad[t * config_.intermediate_size + i]);
+      float u = GGML_BF16_TO_FP32(u_ptr[t * padded_lora_rank_ + r]);
+      sum += g * u;
+    }
+    // ... 累加到 grad_lora_b
+  }
+}
+```
+
+#### lora_pass Step 6 (`backward_gate_up_amx`)
+
+**文件**: `sft_moe.hpp:2734-2746`
+
+```cpp
+// Step 6: grad_A = input^T @ G_B (for-loop)
+for (int r = 0; r < lora_rank_; r++) {
+  for (int h = 0; h < config_.hidden_size; h++) {
+    float sum = 0.0f;
+    for (int t = 0; t < num_tokens; t++) {
+      float gb = GGML_BF16_TO_FP32(g_ptr[t * padded_lora_rank_ + r]);
+      float inp = GGML_BF16_TO_FP32(expert_input[t * config_.hidden_size + h]);
+      sum += inp * gb;
+    }
+    // ... 累加到 grad_lora_a
+  }
+}
+```
+
+### 11.2 For-loop 耗时汇总
+
+| 位置 | 代码行 | 操作 | 耗时 |
+|------|--------|------|------|
+| `backward_down_amx` D4 | 2106-2157 | LoRA 梯度 (4个 for-loop) | 72.4 ms |
+| `lora_pass` Step 2 | 2632-2643 | grad_B = grad^T @ U | 99.6 ms (gate+up 共享) |
+| `lora_pass` Step 6 | 2734-2746 | grad_A = input^T @ G_B | |
+
+**总计**: 172 ms (**53.7%** 的 backward 时间)
+
+### 11.3 For-loop 中的隐式转置
+
+以 `grad_B = grad^T @ U` 为例：
+
+```cpp
+// grad: [num_tokens, intermediate_size]
+// U:    [num_tokens, lora_rank]
+// 结果: [intermediate_size, lora_rank]
+
+for (int i = 0; i < intermediate_size; i++) {        // 输出行 (grad 的列)
+  for (int r = 0; r < lora_rank_; r++) {              // 输出列
+    for (int t = 0; t < num_tokens; t++) {            // reduction
+      sum += grad[t * intermediate_size + i] * u[t * lora_rank + r];
+      //          ↑ 按列访问 grad，等效于 grad^T
+    }
+  }
+}
+```
+
+**隐式转置的本质**: 通过改变循环访问模式 `grad[t, i]` → 按 `i` 迭代外层，等效于访问 `grad^T[i, t]`。
+
+## 12. AMX 权重预转置机制
+
+### 12.1 为什么需要预转置？
+
+AMX `mat_mul` 的设计：
+```cpp
+// amx_kernels.hpp:1933
+inline void mat_mul(int m, int n, int k,
+                    std::shared_ptr<BufferA> ba,  // 输入矩阵 [m, k]
+                    std::shared_ptr<BufferB> bb,  // 权重矩阵 [n, k] (已转置存储)
+                    std::shared_ptr<BufferC> bc,  // 输出矩阵 [m, n]
+                    int ith, int nth);
+```
+
+**关键**: AMX mat_mul 没有转置参数，它假设 BufferB 存储的是已转置的权重，计算的是 `A @ B^T`。
+
+### 12.2 Base Weights 预转置
+
+**函数**: `prepare_backward_weights()` (sft_moe.hpp:738-815)
+
+```cpp
+// gate_proj: [intermediate_size, hidden_size] → 转置为 [hidden_size, intermediate_size]
+std::vector<ggml_bf16_t> transposed(config_.hidden_size * config_.intermediate_size);
+for (int i = 0; i < config_.intermediate_size; i++) {
+  for (int h = 0; h < config_.hidden_size; h++) {
+    transposed[h * config_.intermediate_size + i] =
+        gate_proj[expert_offset + i * config_.hidden_size + h];
+  }
+}
+gate_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);
+```
+
+**特点**: 权重是冻结的，只需转置一次。
+
+### 12.3 LoRA Weights 预转置
+
+**函数**: `prepare_lora_weights()` (sft_moe.hpp:654-728)
+
+每个 LoRA 权重准备**两个版本**（原始 + 转置）：
+
+| 函数 | 输出 BufferB | 是否转置 |
+|------|-------------|---------|
+| `convert_lora_a_to_buffer_b` | `gate_lora_a_bb_` | ❌ 不转置 |
+| `convert_lora_b_to_buffer_b` | `gate_lora_b_bb_` | ❌ 不转置 |
+| `convert_lora_a_transposed_to_buffer_b` | `gate_lora_a_t_bb_` | ✅ **转置** |
+| `convert_lora_b_transposed_to_buffer_b` | `gate_lora_b_t_bb_` | ✅ **转置** |
+
+### 12.4 转置函数实现
+
+**不转置版本** (`convert_lora_a_to_buffer_b`, sft_moe.hpp:1235-1250):
+```cpp
+// 直接复制 + padding
+for (int r = 0; r < src_n; r++) {
+  for (int c = 0; c < src_k; c++) {
+    padded[r * dst_k + c] = expert_src[r * src_k + c];
+  }
+}
+dst_bb->from_mat(padded.data(), 0, 1);
+```
+
+**转置版本** (`convert_lora_a_transposed_to_buffer_b`, sft_moe.hpp:1284-1296):
+```cpp
+// LoRA A: [lora_rank, hidden_size] → A^T: [hidden_size, padded_lora_rank]
+for (int h = 0; h < src_k; h++) {        // hidden_size
+  for (int r = 0; r < src_n; r++) {      // lora_rank
+    padded[h * dst_k + r] = expert_src[r * src_k + h];  // 转置: [h,r] ← [r,h]
+  }
+}
+dst_bb->from_mat(padded.data(), 0, 1);
+```
+
+### 12.5 优化 For-loop 需要转置什么？
+
+| 矩阵 | 类型 | 是否需要转置 | 说明 |
+|------|------|-------------|------|
+| `grad` | 激活值 | **需要** | 每次 backward 不同 |
+| `U` (lora_intermediate) | 激活值 | **需要** | 每次 backward 不同 |
+| `lora_A`, `lora_B` | 权重 | **不需要** | 已在 `prepare_lora_weights()` 准备好 |
+
+**结论**: 将 for-loop 换成 AMX GEMM 时，需要每次转置激活值（grad, U, input），权重已经预转置好了。
