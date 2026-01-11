@@ -609,3 +609,268 @@ assert diff < threshold
 ---
 
 ## Bug-A 状态: ✅ 已解决
+
+---
+
+# Bug-C: accuracy 模式内存问题
+
+## 问题概述
+
+| 属性 | 值 |
+|------|-----|
+| 触发条件 | 运行 `python test_moe_sft_amx_no_tp.py --mode accuracy` |
+| 问题表现 | 首次创建 MOE 对象时内存持续增长到 300+ GB |
+| 关联 | Bug-A 修复的副作用 |
+
+---
+
+## 🔴 为什么 Bug-A 修复导致内存增加
+
+### Bug-A 修复内容回顾
+
+为了解决 Expert 17-24 的 NaN 问题，将 LoRA 缓冲区从 `shared_mem_buffer` 共享池改为 `aligned_alloc` 独立分配：
+
+```cpp
+// 修复前 (447dd6b): 通过 shared_mem_buffer 分配
+mem_requests.append_pointer(&lora_bb_pool_, lora_bb_pool_bytes_);
+mem_requests.append_pointer(&lora_ba_pool_, lora_ba_pool_bytes_);
+// ... 所有缓冲区都用 mem_requests
+shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
+
+// 修复后: LoRA 缓冲区独立分配
+lora_bb_pool_ = aligned_alloc(64, lora_bb_pool_bytes_);
+lora_ba_pool_ = aligned_alloc(64, lora_ba_pool_bytes_);
+// ... 其他缓冲区仍用 mem_requests
+shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
+```
+
+### shared_mem_buffer 的内存复用机制
+
+`shared_mem_buffer` 是一种内存优化机制：
+
+```cpp
+// shared_mem_buffer.cpp:49-72
+void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
+  size_t total_size = requests.total_size();
+  object_requests.push_back(requests);
+
+  if (total_size > size) {
+    // 只有当请求大于当前缓冲区时才重新分配
+    if (buffer) free(buffer);
+    posix_memalign(&newbuf, 64, total_size);
+    buffer = newbuf;
+    size = total_size;
+    // 更新所有已注册对象的指针
+    for (auto& req : object_requests) {
+      req.update_base_ptr(buffer);
+    }
+  } else {
+    // 复用现有缓冲区！
+    requests.update_base_ptr(buffer);
+  }
+}
+```
+
+**关键点**：
+1. 多个对象的 `append_pointer` 请求会**共享同一片物理内存**
+2. 只要总大小不超过已分配的大小，就会复用内存
+3. 这在**缓冲区不会同时使用**时是安全的内存优化
+4. 但如果缓冲区**会同时使用**，就会产生数据污染（Bug-A 的根因）
+
+### 内存增加的原因
+
+| 方面 | 修复前 (shared_mem_buffer) | 修复后 (aligned_alloc) |
+|------|--------------------------|------------------------|
+| LoRA 缓冲区分配 | 与其他缓冲区共享内存 | 独立内存空间 |
+| 内存复用 | ✅ 高效（多个缓冲区共用） | ❌ 无复用（独立分配） |
+| NaN 问题 | ❌ 内存污染导致 NaN | ✅ 无污染 |
+| 内存占用 | 低（复用） | 高（独立） |
+
+**结论**：Bug-A 修复是必要的（否则有 NaN），但它暴露了原本被"隐藏"的内存需求问题。
+
+---
+
+## accuracy 模式配置分析
+
+```python
+# test_moe_sft_amx_no_tp.py:40-44
+expert_num = 256          # 专家数量 (vs real_data: 64)
+hidden_size = 7168        # 隐藏维度 (vs real_data: 2048)
+intermediate_size = 2048  # MLP 中间维度 (vs real_data: 1408)
+max_len = 25600          # 最大序列长度
+num_experts_per_tok = 8   # 每 token 激活的专家数
+```
+
+### 问题 1: max_m 计算错误
+
+```cpp
+// sft_moe.hpp:935 (修复前)
+size_t max_m = ((config_.max_len * config_.num_experts_per_tok + M_STEP - 1) / M_STEP) * M_STEP;
+            = ((25600 * 8 + 63) / 64) * 64 = 204,800  // 错误！
+
+// 正确计算: 每个 expert 最多处理 max_len 个 token
+size_t max_m = ((config_.max_len + M_STEP - 1) / M_STEP) * M_STEP;
+            = ((25600 + 63) / 64) * 64 = 25,600  // 正确
+```
+
+**影响**: 内存需求差 8 倍
+
+### 问题 2: 每个 expert 独立分配大缓冲区
+
+原始代码为每个 expert 都分配 max_m 大小的缓冲区：
+
+```cpp
+// 每个 expert 都分配 max_m × output_dim 的 BufferC
+lora_bc_out_pool_bytes_ = config_.expert_num * (lora_gate_up_out_bc_size * 2 + lora_down_out_bc_size);
+//                      = 256 × (大尺寸) = 巨大内存
+```
+
+而实际上，所有 256 个 expert **共享**同一组 token（最多 max_len 个），应该用**共享池**而不是独立分配。
+
+---
+
+## 修复完成 [2026-01-11] ✅ 成功
+
+### 已实现的修改
+
+#### Step 1: 修正 max_m 计算 ✅
+
+```cpp
+// sft_moe.hpp:935
+// 修改前: max_m = max_len * num_experts_per_tok = 25600 × 8 = 204800 (错误!)
+// 修改后: max_m = max_len = 25600 (正确: 每个 expert 最多处理 max_len 个 token)
+size_t max_m = ((config_.max_len + M_STEP - 1) / M_STEP) * M_STEP;
+```
+
+#### Step 2: 使用共享缓冲区池 ✅
+
+修改了以下部分：
+1. `init_all_buffers` 中的池大小计算 (sft_moe.hpp:980-1021)
+2. `init_lora_amx_buffers` 使用 nullptr 初始化 BufferA/BufferC (sft_moe.hpp:1219-1253)
+3. `compute_lora_gate_up_amx` / `compute_lora_down_amx` 动态分配
+4. `backward_down_amx` / `backward_gate_up_amx` 动态分配
+
+### 测试结果 ✅
+
+```
+========== Memory Allocation Summary ==========
+Config: expert_num=256, hidden_size=7168, intermediate_size=2048
+Config: max_len=25600, num_experts_per_tok=8, lora_rank=16, padded_lora_rank=32
+Calculated max_m=25600, max_total_tokens=204800
+
+--- LoRA Buffers (aligned_alloc) ---
+  lora_bb_pool_bytes_:              754,974,720 bytes (720.00 MB)
+  lora_ba_pool_bytes_:               26,214,400 bytes ( 25.00 MB)
+  lora_bc_inter_pool_bytes_:         52,428,800 bytes ( 50.00 MB)
+  lora_bc_out_pool_bytes_:        9,227,468,800 bytes (  8.59 GB)
+  lora_intermediate_bf16_pool_bytes_: 26,214,400 bytes ( 25.00 MB)
+
+--- Backward Buffers (shared_mem_buffer) ---
+  backward_ba_pool_bytes_:        2,936,012,800 bytes (  2.73 GB)
+  backward_bc_pool_bytes_:        7,549,747,200 bytes (  7.03 GB)
+  grad_output_bf16_pool_bytes_:   2,936,012,800 bytes (  2.73 GB)
+  backward_bb_pool_bytes_:       22,548,578,304 bytes ( 21.00 GB)
+
+--- Other Buffers (shared_mem_buffer) ---
+  lora_intermediate_pool_bytes_:      6,553,600 bytes (  0.01 GB)
+  grad_buffer_bytes (×3):         2,516,582,400 bytes (  2.34 GB)
+  cache_total (depth=1):          2,883,584,000 bytes (  2.69 GB)
+
+--- Summary ---
+  Total aligned_alloc:           10,087,301,120 bytes (  9.39 GB)
+  Total shared_mem_buffer:       41,377,071,104 bytes ( 38.54 GB)
+  GRAND TOTAL:                   51,464,372,224 bytes ( 47.93 GB)
+===============================================
+```
+
+内存需求约 **48 GB**，与理论计算一致。
+
+---
+
+## 内存计算公式
+
+### 配置参数
+
+| 参数 | 符号 | accuracy 模式值 |
+|------|------|-----------------|
+| 专家数量 | E | 256 |
+| 隐藏维度 | H | 7168 |
+| MLP 中间维度 | I | 2048 |
+| 最大序列长度 | L | 25600 |
+| 每 token 激活专家数 | K | 8 |
+| LoRA rank | R | 16 |
+| Padded LoRA rank | R' | 32 (对齐到 K_STEP=32) |
+
+### 计算公式
+
+```
+max_m = align64(L) = 25600
+max_total_tokens = L × K = 204800
+
+--- LoRA 缓冲区 (aligned_alloc) ---
+lora_bb_pool = E × (BufferB(R', H) × 2 + BufferB(I, R') × 2 +
+                    BufferB(H, R') × 2 + BufferB(R', I) × 2 +
+                    BufferB(R', I) + BufferB(H, R'))
+             ≈ 720 MB
+
+lora_ba_pool = BufferA(max_total_tokens, R') × 2
+             = 204800 × 32 × 2 × 2 = 26 MB
+
+lora_bc_inter_pool = BufferC(max_total_tokens, R') × 2
+                   = 204800 × 32 × 4 × 2 = 52 MB
+
+lora_bc_out_pool = BufferC(max_total_tokens, I) × 2 + BufferC(max_total_tokens, H)
+                 = (204800 × 2048 × 4 × 2) + (204800 × 7168 × 4)
+                 = 3.35 GB + 5.87 GB = 8.59 GB (实测)
+
+lora_intermediate_bf16_pool = max_total_tokens × R' × 2 × 2 = 26 MB
+
+--- Backward 缓冲区 (shared_mem_buffer) ---
+backward_ba_pool = BufferA(max_total_tokens, H)
+                 = 204800 × 7168 × 2 = 2.73 GB
+
+backward_bc_pool = BufferC(max_total_tokens, I) + BufferC(max_total_tokens, H)
+                 = (204800 × 2048 × 4) + (204800 × 7168 × 4)
+                 = 1.67 GB + 5.87 GB = 7.03 GB (实测)
+
+grad_output_bf16_pool = max_total_tokens × H × 2 = 2.73 GB
+
+backward_bb_pool = E × (BufferB(H, I) × 2 + BufferB(I, H))
+                 ≈ 21 GB
+
+--- 其他缓冲区 ---
+grad_buffer × 3 = L × K × I × 2 × 3 = 2.34 GB
+cache_total = (L × H × 2 + L × K × I × 2 × 3) × depth
+            = (367 MB + 2.52 GB) × 1 = 2.69 GB
+```
+
+### 总计
+
+| 类别 | 大小 |
+|------|------|
+| LoRA (aligned_alloc) | ~9.4 GB |
+| Backward (shared_mem_buffer) | ~38.5 GB |
+| **总计** | **~47.9 GB** |
+
+---
+
+## Bug-C 状态: ✅ 已解决
+
+### 修复总结
+
+| 问题 | 原因 | 修复方案 | 效果 |
+|------|------|----------|------|
+| max_m 计算错误 | 错误地乘以 num_experts_per_tok | 改为 max_len 直接对齐 | 内存从 ~4 TB 降到 ~500 GB |
+| 每个 expert 独立分配 | 为每个 expert 分配 max_m 大小缓冲区 | 使用共享池，forward/backward 时动态分配 | 内存从 ~500 GB 降到 ~48 GB |
+
+### 关键代码位置
+
+| 文件 | 位置 | 修改内容 |
+|------|------|----------|
+| sft_moe.hpp:935 | init_all_buffers | max_m 计算修正 |
+| sft_moe.hpp:980-1021 | init_all_buffers | 池大小计算 |
+| sft_moe.hpp:1219-1253 | init_lora_amx_buffers | Buffer 初始化为 nullptr |
+| sft_moe.hpp:1392-1444 | compute_lora_gate_up_amx | 动态分配 |
+| sft_moe.hpp:1538-1573 | compute_lora_down_amx | 动态分配 |
+| sft_moe.hpp:2111-2141 | backward_down_amx | 动态分配 |
+| sft_moe.hpp:2653-2723 | backward_gate_up_amx | 动态分配 |

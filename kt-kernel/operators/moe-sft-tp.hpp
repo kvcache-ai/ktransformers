@@ -368,14 +368,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
-    // BUG-010 Debug: enabled for LlamaFactory integration debugging
-    printf("[DEBUG C++ TP_MOE_SFT::update_lora_weights] layer=%d, tp_count=%d\n", sft_config.layer_idx, tp_count);
-    printf("  gate_lora_a=%p, gate_lora_b=%p\n", gate_lora_a, gate_lora_b);
-    if (gate_lora_a) {
-      float val = GGML_BF16_TO_FP32(((ggml_bf16_t*)gate_lora_a)[0]);
-      printf("  gate_lora_a[0] = %f (isnan=%d, isinf=%d)\n", val, std::isnan(val), std::isinf(val));
-    }
-
     // Free previously allocated partitioned weights
     free_partitioned_lora_weights();
 
@@ -427,7 +419,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Update each NUMA node with partitioned weights
     auto pool = config.pool;
-    printf("  Dispatching to %d NUMA nodes...\n", tp_count);
     pool->dispense_backend()->do_numa_job([this, gate_lora_a, up_lora_a, down_lora_b](int numa_id) {
       tps[numa_id]->update_lora_weights(gate_lora_a,                        // Not partitioned
                                         partitioned_gate_lora_b_[numa_id],  // Partitioned
@@ -436,7 +427,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                         partitioned_down_lora_a_[numa_id],  // Partitioned
                                         down_lora_b);                       // Not partitioned
     });
-    printf("[DEBUG C++ TP_MOE_SFT::update_lora_weights] DONE\n");
   }
 
   /**

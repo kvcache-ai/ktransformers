@@ -923,6 +923,13 @@ def test_moe_sft_forward_no_tp(quant_mode: str = "bf16"):
         print(f"  This means the bug is in the basic SFT forward logic, not TP partitioning.")
         sys.exit(1)
 
+    # Cleanup to prevent memory leak (Bug-A fix uses aligned_alloc which needs explicit free)
+    del moe
+    del CPUInfer
+    import gc
+
+    gc.collect()
+
 
 def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
     """
@@ -1151,6 +1158,13 @@ def test_moe_sft_backward_no_tp(quant_mode: str = "bf16"):
 
     print(f"\n[OK] MOE SFT Backward Pass Test - {quant_mode.upper()} mode (NO TP) PASSED")
 
+    # Cleanup to prevent memory leak (Bug-A fix uses aligned_alloc which needs explicit free)
+    del moe
+    del CPUInfer
+    import gc
+
+    gc.collect()
+
 
 def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     """
@@ -1362,6 +1376,13 @@ def test_moe_sft_lora_weight_sync_no_tp(quant_mode: str = "bf16"):
     assert diff_same < 1e-5, f"Outputs should match after pointer update: {diff_same:.6f}"
 
     print(f"[OK] LoRA Weight Synchronization Test - {quant_mode.upper()} mode (NO TP) PASSED")
+
+    # Cleanup to prevent memory leak (Bug-A fix uses aligned_alloc which needs explicit free)
+    del moe
+    del CPUInfer
+    import gc
+
+    gc.collect()
 
 
 def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
@@ -1658,6 +1679,13 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
         assert gate_b_diff > 0, "gate_lora_b weights should change after optimizer step"
 
     print(f"\n[OK] Training Loop Test - {quant_mode.upper()} mode (NO TP) PASSED")
+
+    # Cleanup to prevent memory leak (Bug-A fix uses aligned_alloc which needs explicit free)
+    del moe
+    del CPUInfer
+    import gc
+
+    gc.collect()
 
 
 # =============================================================================
@@ -2353,7 +2381,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         choices=["all", "accuracy", "perf", "real_data"],
-        default="perf",
+        default="preal_dataerf",
         help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests, 'real_data' runs real data NaN test",
     )
     parser.add_argument(

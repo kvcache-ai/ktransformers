@@ -775,7 +775,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    printf("  DONE: BufferB conversion complete\n");
     lora_weights_prepared_ = true;
   }
 
@@ -933,7 +932,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Only for kernels that support standard mat_mul API
     // =====================================================
     // Max tokens per expert (with M_STEP alignment)
-    size_t max_m = ((config_.max_len * config_.num_experts_per_tok + M_STEP - 1) / M_STEP) * M_STEP;
+    // Bug-C Fix: Each expert processes at most max_len tokens (worst case: all tokens select this expert)
+    // Previously used max_len * num_experts_per_tok which is incorrect and wastes 8x memory
+    size_t max_m = ((config_.max_len + M_STEP - 1) / M_STEP) * M_STEP;
 
     // Variables for buffer sizes (used in init_lora_amx_buffers)
     size_t lora_a_gate_up_bb_size = 0;
@@ -976,42 +977,48 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                                   lora_a_down_bb_size +           // down_a
                                                   lora_b_down_bb_size);           // down_b
 
-      // BufferA for LoRA intermediate: [max_m, padded_lora_rank] per expert
-      // Need 2x for gate and up separate buffers (to avoid race condition)
-      lora_intermediate_ba_size = T::BufferA::required_size(max_m, padded_lora_rank_);
-      lora_ba_pool_bytes_ = config_.expert_num * lora_intermediate_ba_size * 2;  // gate + up
+      // Bug-C Fix Step 2: Use shared buffer pool instead of per-expert allocation
+      // Max total tokens across all activated experts per forward pass
+      // (each of max_len tokens selects num_experts_per_tok experts)
+      size_t max_total_tokens = ((config_.max_len * config_.num_experts_per_tok + M_STEP - 1) / M_STEP) * M_STEP;
 
-      // BufferC for LoRA step 1 output: [max_m, padded_lora_rank] per expert
+      // BufferA for LoRA intermediate: shared pool for all activated experts
       // Need 2x for gate and up separate buffers (to avoid race condition)
-      lora_intermediate_bc_size = T::BufferC::required_size(max_m, padded_lora_rank_);
-      lora_bc_inter_pool_bytes_ = config_.expert_num * lora_intermediate_bc_size * 2;  // gate + up
+      lora_intermediate_ba_size = T::BufferA::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
+      lora_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
 
-      // BufferC for LoRA step 2 output (gate, up, down): [max_m, output_dim] per expert
-      lora_gate_up_out_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);
-      lora_down_out_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);
-      lora_bc_out_pool_bytes_ = config_.expert_num * (lora_gate_up_out_bc_size * 2 + lora_down_out_bc_size);
+      // BufferC for LoRA step 1 output: shared pool for all activated experts
+      // Need 2x for gate and up separate buffers (to avoid race condition)
+      lora_intermediate_bc_size = T::BufferC::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
+      lora_bc_inter_pool_bytes_ = T::BufferC::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
+
+      // BufferC for LoRA step 2 output (gate, up, down): shared pool for all activated experts
+      lora_gate_up_out_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
+      lora_down_out_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);           // per-expert size
+      lora_bc_out_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) * 2 +
+                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
 
       // BF16 intermediate buffer for step 1 -> step 2 conversion
       // Need 2x for gate and up separate buffers (to avoid race condition)
-      lora_intermediate_bf16_pool_bytes_ =
-          config_.expert_num * max_m * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2;  // gate + up
+      lora_intermediate_bf16_pool_bytes_ = max_total_tokens * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2;  // gate + up
 
       // =====================================================
       // Calculate Backward pass AMX buffer sizes
       // =====================================================
-      // BufferA for scattered grad_output: [max_m, hidden_size] per expert
-      grad_output_ba_size = T::BufferA::required_size(max_m, config_.hidden_size);
-      backward_ba_pool_bytes_ = config_.expert_num * grad_output_ba_size;
+      // BufferA for scattered grad_output: shared pool for all activated experts
+      grad_output_ba_size = T::BufferA::required_size(max_m, config_.hidden_size);  // per-expert size
+      backward_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, config_.hidden_size);
 
-      // BufferC for backward GEMM outputs
-      // grad_intermediate: [max_m, intermediate_size] per expert
-      grad_intermediate_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);
-      // grad_gate_up: [max_m, hidden_size] per expert
-      grad_gate_up_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);
-      backward_bc_pool_bytes_ = config_.expert_num * (grad_intermediate_bc_size + grad_gate_up_bc_size);
+      // BufferC for backward GEMM outputs: shared pool for all activated experts
+      // grad_intermediate: [max_total_tokens, intermediate_size]
+      grad_intermediate_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
+      // grad_gate_up: [max_total_tokens, hidden_size]
+      grad_gate_up_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);  // per-expert size
+      backward_bc_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) +
+                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
 
       // BF16 buffer for scattered grad_output
-      grad_output_bf16_pool_bytes_ = config_.expert_num * max_m * config_.hidden_size * sizeof(ggml_bf16_t);
+      grad_output_bf16_pool_bytes_ = max_total_tokens * config_.hidden_size * sizeof(ggml_bf16_t);
 
       // =====================================================
       // Calculate Backward pass BufferB sizes (transposed base weights)
@@ -1122,6 +1129,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                             lora_down_out_bc_size, grad_output_ba_size, grad_intermediate_bc_size, grad_gate_up_bc_size,
                             gate_up_backward_bb_size, down_backward_bb_size);
     }
+
+    // Bug-C Debug: Memory allocation summary (commented out after verification)
+    // Uncomment to see memory allocation details
+    /*
+    printf("\n========== Memory Allocation Summary ==========\n");
+    printf("Config: expert_num=%d, hidden_size=%d, intermediate_size=%d\n",
+           config_.expert_num, config_.hidden_size, config_.intermediate_size);
+    printf("Config: max_len=%d, num_experts_per_tok=%d, lora_rank=%d, padded_lora_rank=%d\n",
+           config_.max_len, config_.num_experts_per_tok, lora_rank_, padded_lora_rank_);
+    printf("Calculated max_m=%zu, max_total_tokens=%zu\n",
+           max_m, (size_t)config_.max_len * config_.num_experts_per_tok);
+    printf("\n--- LoRA Buffers (aligned_alloc) ---\n");
+    printf("  lora_bb_pool_bytes_:              %12zu bytes (%6.2f MB)\n", lora_bb_pool_bytes_, lora_bb_pool_bytes_ /
+    1024.0 / 1024.0); printf("  lora_ba_pool_bytes_:              %12zu bytes (%6.2f MB)\n", lora_ba_pool_bytes_,
+    lora_ba_pool_bytes_ / 1024.0 / 1024.0); printf("  lora_bc_inter_pool_bytes_:        %12zu bytes (%6.2f MB)\n",
+    lora_bc_inter_pool_bytes_, lora_bc_inter_pool_bytes_ / 1024.0 / 1024.0); printf("  lora_bc_out_pool_bytes_: %12zu
+    bytes (%6.2f GB)\n", lora_bc_out_pool_bytes_, lora_bc_out_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("
+    lora_intermediate_bf16_pool_bytes_:%12zu bytes (%6.2f MB)\n", lora_intermediate_bf16_pool_bytes_,
+    lora_intermediate_bf16_pool_bytes_ / 1024.0 / 1024.0); printf("\n--- Backward Buffers (shared_mem_buffer) ---\n");
+    printf("  backward_ba_pool_bytes_:          %12zu bytes (%6.2f GB)\n", backward_ba_pool_bytes_,
+    backward_ba_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("  backward_bc_pool_bytes_:          %12zu bytes (%6.2f
+    GB)\n", backward_bc_pool_bytes_, backward_bc_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("
+    grad_output_bf16_pool_bytes_:     %12zu bytes (%6.2f GB)\n", grad_output_bf16_pool_bytes_,
+    grad_output_bf16_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("  backward_bb_pool_bytes_:          %12zu bytes
+    (%6.2f GB)\n", backward_bb_pool_bytes_, backward_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("\n--- Other
+    Buffers (shared_mem_buffer) ---\n"); printf("  lora_intermediate_pool_bytes_:    %12zu bytes (%6.2f GB)\n",
+    lora_intermediate_pool_bytes_, lora_intermediate_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf(" grad_buffer_bytes
+    (×3):           %12zu bytes (%6.2f GB)\n", grad_buffer_bytes * 3, grad_buffer_bytes * 3 / 1024.0 / 1024.0 / 1024.0);
+    size_t cache_total = (cache_slot_bytes_input_ + cache_slot_bytes_intermediate_ * 3) * max_cache_depth_;
+    printf("  cache_total (depth=%d):           %12zu bytes (%6.2f GB)\n", max_cache_depth_, cache_total, cache_total /
+    1024.0 / 1024.0 / 1024.0); size_t total_aligned = lora_bb_pool_bytes_ + lora_ba_pool_bytes_ +
+    lora_bc_inter_pool_bytes_ + lora_bc_out_pool_bytes_ + lora_intermediate_bf16_pool_bytes_; size_t total_shared =
+    backward_ba_pool_bytes_ + backward_bc_pool_bytes_ + grad_output_bf16_pool_bytes_ + backward_bb_pool_bytes_ +
+    lora_intermediate_pool_bytes_ + grad_buffer_bytes * 3 + cache_total; printf("\n--- Summary ---\n"); printf("  Total
+    aligned_alloc:              %12zu bytes (%6.2f GB)\n", total_aligned, total_aligned / 1024.0 / 1024.0 / 1024.0);
+    printf("  Total shared_mem_buffer:          %12zu bytes (%6.2f GB)\n", total_shared, total_shared / 1024.0 / 1024.0
+    / 1024.0); printf("  GRAND TOTAL:                      %12zu bytes (%6.2f GB)\n", total_aligned + total_shared,
+    (total_aligned + total_shared) / 1024.0 / 1024.0 / 1024.0);
+    printf("===============================================\n\n");
+    */
   }
 
   /**
@@ -1168,16 +1215,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     down_backward_bb_.resize(config_.expert_num);
 
     // Calculate offsets and create buffer objects
+    // Bug-C Fix Step 2: BufferA/BufferC use shared pools, data will be assigned in forward/backward
     char* bb_ptr = (char*)lora_bb_pool_;
-    char* ba_ptr = (char*)lora_ba_pool_;
-    char* bc_inter_ptr = (char*)lora_bc_inter_pool_;
-    char* bc_out_ptr = (char*)lora_bc_out_pool_;
-    char* bf16_inter_ptr = (char*)lora_intermediate_bf16_pool_;
-
-    size_t bf16_inter_size_per_expert = max_m * padded_lora_rank_ * sizeof(ggml_bf16_t);
 
     for (int i = 0; i < config_.expert_num; i++) {
-      // BufferB for LoRA weights
+      // BufferB for LoRA weights (still per-expert, as weights are different for each expert)
       gate_lora_a_bb_[i] = std::make_shared<typename T::BufferB>(padded_lora_rank_, config_.hidden_size, (void*)bb_ptr);
       bb_ptr += lora_a_gate_up_bb_size;
 
@@ -1214,62 +1256,40 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       down_lora_b_bb_[i] = std::make_shared<typename T::BufferB>(config_.hidden_size, padded_lora_rank_, (void*)bb_ptr);
       bb_ptr += lora_b_down_bb_size;
 
-      // BufferA for LoRA intermediate (separate for gate and up to avoid race condition)
-      lora_gate_intermediate_ba_[i] = std::make_shared<typename T::BufferA>(max_m, padded_lora_rank_, (void*)ba_ptr);
-      ba_ptr += lora_intermediate_ba_size;
-      lora_up_intermediate_ba_[i] = std::make_shared<typename T::BufferA>(max_m, padded_lora_rank_, (void*)ba_ptr);
-      ba_ptr += lora_intermediate_ba_size;
+      // BufferA for LoRA intermediate: create with nullptr, will set_data in forward
+      lora_gate_intermediate_ba_[i] = std::make_shared<typename T::BufferA>(max_m, padded_lora_rank_, nullptr);
+      lora_up_intermediate_ba_[i] = std::make_shared<typename T::BufferA>(max_m, padded_lora_rank_, nullptr);
 
-      // BufferC for LoRA step 1 output (separate for gate and up to avoid race condition)
-      lora_gate_intermediate_bc_[i] =
-          std::make_shared<typename T::BufferC>(max_m, padded_lora_rank_, (void*)bc_inter_ptr);
-      bc_inter_ptr += lora_intermediate_bc_size;
-      lora_up_intermediate_bc_[i] =
-          std::make_shared<typename T::BufferC>(max_m, padded_lora_rank_, (void*)bc_inter_ptr);
-      bc_inter_ptr += lora_intermediate_bc_size;
+      // BufferC for LoRA step 1 output: create with nullptr, will set_data in forward
+      lora_gate_intermediate_bc_[i] = std::make_shared<typename T::BufferC>(max_m, padded_lora_rank_, nullptr);
+      lora_up_intermediate_bc_[i] = std::make_shared<typename T::BufferC>(max_m, padded_lora_rank_, nullptr);
 
-      // BufferC for LoRA step 2 output
-      lora_gate_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, (void*)bc_out_ptr);
-      bc_out_ptr += lora_gate_up_out_bc_size;
+      // BufferC for LoRA step 2 output: create with nullptr, will set_data in forward
+      lora_gate_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
+      lora_up_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
+      lora_down_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
 
-      lora_up_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, (void*)bc_out_ptr);
-      bc_out_ptr += lora_gate_up_out_bc_size;
-
-      lora_down_out_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, (void*)bc_out_ptr);
-      bc_out_ptr += lora_down_out_bc_size;
-
-      // BF16 intermediate pointer for step 1 -> step 2 (separate for gate and up)
-      lora_gate_intermediate_ptr_[i] = (ggml_bf16_t*)bf16_inter_ptr;
-      bf16_inter_ptr += bf16_inter_size_per_expert;
-      lora_up_intermediate_ptr_[i] = (ggml_bf16_t*)bf16_inter_ptr;
-      bf16_inter_ptr += bf16_inter_size_per_expert;
+      // BF16 intermediate pointer: will be assigned in forward
+      lora_gate_intermediate_ptr_[i] = nullptr;
+      lora_up_intermediate_ptr_[i] = nullptr;
     }
 
     // =====================================================
     // Initialize backward pass buffer objects
+    // Bug-C Fix Step 2: Use shared pools, data will be assigned in backward
     // =====================================================
-    char* backward_ba_ptr = (char*)backward_ba_pool_;
-    char* backward_bc_ptr = (char*)backward_bc_pool_;
-    char* grad_output_bf16_ptr = (char*)grad_output_bf16_pool_;
-    size_t grad_output_bf16_size_per_expert = max_m * config_.hidden_size * sizeof(ggml_bf16_t);
-
     for (int i = 0; i < config_.expert_num; i++) {
-      // BufferA for grad_output (per expert)
-      grad_output_ba_[i] = std::make_shared<typename T::BufferA>(max_m, config_.hidden_size, (void*)backward_ba_ptr);
-      backward_ba_ptr += grad_output_ba_size;
+      // BufferA for grad_output: create with nullptr, will set_data in backward
+      grad_output_ba_[i] = std::make_shared<typename T::BufferA>(max_m, config_.hidden_size, nullptr);
 
-      // BufferC for grad_intermediate
-      grad_intermediate_bc_[i] =
-          std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, (void*)backward_bc_ptr);
-      backward_bc_ptr += grad_intermediate_bc_size;
+      // BufferC for grad_intermediate: create with nullptr, will set_data in backward
+      grad_intermediate_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
 
-      // BufferC for grad_gate_up (used in backward_gate_up)
-      grad_gate_up_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, (void*)backward_bc_ptr);
-      backward_bc_ptr += grad_gate_up_bc_size;
+      // BufferC for grad_gate_up: create with nullptr, will set_data in backward
+      grad_gate_up_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
 
-      // BF16 pointer for scattered grad_output
-      grad_output_bf16_ptr_[i] = (ggml_bf16_t*)grad_output_bf16_ptr;
-      grad_output_bf16_ptr += grad_output_bf16_size_per_expert;
+      // BF16 pointer: will be assigned in backward
+      grad_output_bf16_ptr_[i] = nullptr;
     }
 
     // =====================================================
@@ -1410,6 +1430,60 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     prepare_lora_weights();
 
     // =====================================================
+    // Bug-C Fix Step 2: Allocate LoRA buffers from shared pool
+    // =====================================================
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+
+    // Pool pointers for forward LoRA buffers
+    char* lora_ba_ptr = (char*)lora_ba_pool_;
+    char* lora_bc_inter_ptr = (char*)lora_bc_inter_pool_;
+    char* lora_bc_out_ptr = (char*)lora_bc_out_pool_;
+    char* bf16_inter_ptr = (char*)lora_intermediate_bf16_pool_;
+
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      int m = m_local_num_[expert_idx];
+      if (m == 0) continue;
+
+      size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+
+      // Allocate BufferA for intermediate (gate and up)
+      lora_gate_intermediate_ba_[expert_idx]->max_m = local_max_m;
+      lora_gate_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+
+      lora_up_intermediate_ba_[expert_idx]->max_m = local_max_m;
+      lora_up_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+
+      // Allocate BufferC for intermediate (gate and up)
+      lora_gate_intermediate_bc_[expert_idx]->max_m = local_max_m;
+      lora_gate_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+
+      lora_up_intermediate_bc_[expert_idx]->max_m = local_max_m;
+      lora_up_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+
+      // Allocate BufferC for output (gate, up, down - but down is done in compute_lora_down_amx)
+      lora_gate_out_bc_[expert_idx]->max_m = local_max_m;
+      lora_gate_out_bc_[expert_idx]->set_data(lora_bc_out_ptr);
+      lora_bc_out_ptr += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size));
+
+      lora_up_out_bc_[expert_idx]->max_m = local_max_m;
+      lora_up_out_bc_[expert_idx]->set_data(lora_bc_out_ptr);
+      lora_bc_out_ptr += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size));
+
+      // Allocate BF16 intermediate buffer (gate and up)
+      lora_gate_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
+      bf16_inter_ptr += align64(local_max_m * padded_lora_rank_ * sizeof(ggml_bf16_t));
+
+      lora_up_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
+      bf16_inter_ptr += align64(local_max_m * padded_lora_rank_ * sizeof(ggml_bf16_t));
+    }
+
+    // =====================================================
     // Step 1: input @ lora_A^T -> lora_intermediate
     // Uses gate_up_ba_ (already quantized input)
     // Gate and Up use SEPARATE intermediate buffers to avoid race condition
@@ -1500,6 +1574,43 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Ensure LoRA weights are prepared
     prepare_lora_weights();
+
+    // =====================================================
+    // Bug-C Fix Step 2: Allocate lora_down_out_bc_ from shared pool
+    // Note: lora_gate_intermediate_bc_ and lora_gate_intermediate_ba_ are reused
+    // from compute_lora_gate_up_amx (they are not used simultaneously)
+    // =====================================================
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+
+    // Use offset after gate and up output buffers in lora_bc_out_pool_
+    // Pool layout: [gate_out × N] [up_out × N] [down_out × N]
+    // But since we allocate dynamically, we need to track the offset
+    // Actually, we can reuse the lora_bc_out_pool_ starting position since
+    // gate/up outputs are already consumed by this point
+
+    // For simplicity, allocate from the end of the pool (after gate+up)
+    // Calculate gate+up total size first
+    size_t gate_up_total = 0;
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      size_t local_max_m = ((m_local_num_[expert_idx] + M_STEP - 1) / M_STEP) * M_STEP;
+      gate_up_total += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size)) * 2;  // gate + up
+    }
+
+    char* lora_down_bc_ptr = (char*)lora_bc_out_pool_ + gate_up_total;
+
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      int m = m_local_num_[expert_idx];
+      if (m == 0) continue;
+
+      size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+
+      lora_down_out_bc_[expert_idx]->max_m = local_max_m;
+      lora_down_out_bc_[expert_idx]->set_data(lora_down_bc_ptr);
+      lora_down_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
+    }
 
     // =====================================================
     // Step 1: intermediate @ down_lora_A^T -> lora_intermediate
@@ -2037,6 +2148,38 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Ensure backward weights are prepared
     prepare_backward_weights();
 
+    // =====================================================
+    // Bug-C Fix Step 2: Allocate backward buffers from shared pool
+    // =====================================================
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+
+    char* backward_ba_ptr = (char*)backward_ba_pool_;
+    char* backward_bc_ptr = (char*)backward_bc_pool_;
+    char* grad_output_bf16_ptr = (char*)grad_output_bf16_pool_;
+
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      int m = m_local_num_[expert_idx];
+      if (m == 0) continue;
+
+      size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+
+      // Allocate BufferA for grad_output
+      grad_output_ba_[expert_idx]->max_m = local_max_m;
+      grad_output_ba_[expert_idx]->set_data(backward_ba_ptr);
+      backward_ba_ptr += align64(T::BufferA::required_size(local_max_m, config_.hidden_size));
+
+      // Allocate BufferC for grad_intermediate
+      grad_intermediate_bc_[expert_idx]->max_m = local_max_m;
+      grad_intermediate_bc_[expert_idx]->set_data(backward_bc_ptr);
+      backward_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size));
+
+      // Allocate BF16 buffer for scattered grad_output
+      grad_output_bf16_ptr_[expert_idx] = (ggml_bf16_t*)grad_output_bf16_ptr;
+      grad_output_bf16_ptr += align64(local_max_m * config_.hidden_size * sizeof(ggml_bf16_t));
+    }
+
     // Initialize gradient intermediate buffer
     memset(grad_intermediate_, 0,
            config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t));
@@ -2545,6 +2688,78 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     prepare_backward_weights();
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
       prepare_lora_weights();
+    }
+
+    // =====================================================
+    // Bug-C Fix Step 2: Allocate backward buffers from shared pool
+    // Note: backward_down_amx already allocated grad_output_ba_ and grad_intermediate_bc_
+    // Here we need grad_gate_up_bc_ which uses the remaining part of backward_bc_pool_
+    // =====================================================
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+
+    // Calculate offset after grad_intermediate_bc_ allocations
+    size_t grad_intermediate_total = 0;
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      size_t local_max_m = ((m_local_num_[expert_idx] + M_STEP - 1) / M_STEP) * M_STEP;
+      grad_intermediate_total += align64(T::BufferC::required_size(local_max_m, config_.intermediate_size));
+    }
+
+    char* grad_gate_up_bc_ptr = (char*)backward_bc_pool_ + grad_intermediate_total;
+
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      int m = m_local_num_[expert_idx];
+      if (m == 0) continue;
+
+      size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+
+      // Allocate BufferC for grad_gate_up
+      grad_gate_up_bc_[expert_idx]->max_m = local_max_m;
+      grad_gate_up_bc_[expert_idx]->set_data(grad_gate_up_bc_ptr);
+      grad_gate_up_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
+    }
+
+    // Allocate LoRA intermediate buffers from shared pools (for LoRA backward pass)
+    char* lora_ba_ptr = (char*)lora_ba_pool_;
+    char* lora_bc_inter_ptr = (char*)lora_bc_inter_pool_;
+    char* bf16_inter_ptr = (char*)lora_intermediate_bf16_pool_;
+
+    for (int task_id = 0; task_id < activated_expert; task_id++) {
+      int expert_idx = m_expert_id_map_[task_id];
+      int m = m_local_num_[expert_idx];
+      if (m == 0) continue;
+
+      size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+
+      // BufferA for LoRA intermediate (gate)
+      lora_gate_intermediate_ba_[expert_idx]->max_m = local_max_m;
+      lora_gate_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+
+      // BufferA for LoRA intermediate (up)
+      lora_up_intermediate_ba_[expert_idx]->max_m = local_max_m;
+      lora_up_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+
+      // BufferC for LoRA step 1 output (gate)
+      lora_gate_intermediate_bc_[expert_idx]->max_m = local_max_m;
+      lora_gate_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+
+      // BufferC for LoRA step 1 output (up)
+      lora_up_intermediate_bc_[expert_idx]->max_m = local_max_m;
+      lora_up_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+
+      // BF16 intermediate pointers (gate)
+      lora_gate_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
+      bf16_inter_ptr += align64(local_max_m * padded_lora_rank_ * sizeof(ggml_bf16_t));
+
+      // BF16 intermediate pointers (up)
+      lora_up_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
+      bf16_inter_ptr += align64(local_max_m * padded_lora_rank_ * sizeof(ggml_bf16_t));
     }
 
     memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
