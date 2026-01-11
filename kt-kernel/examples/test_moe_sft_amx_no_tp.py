@@ -1661,6 +1661,250 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
 
 
 # =============================================================================
+# Real Data Test (BUG-010: NaN Reproduction)
+# =============================================================================
+
+
+def test_with_real_data(data_path: str = "/mnt/data/lpl/kt_nan_debug_data.pt"):
+    """
+    Test with real training data from LlamaFactory to reproduce NaN bug.
+
+    This test loads actual data (input, weights, expert_ids) captured from
+    a real training run that produced NaN, and verifies whether the AMX
+    operator also produces NaN with the same data.
+
+    Args:
+        data_path: Path to the debug data file saved by LlamaFactory
+
+    Expected Result:
+        This test is expected to FAIL with NaN until the bug is fixed.
+        The PyTorch reference should produce clean output (0 NaN).
+        The AMX operator should also produce clean output after fix.
+    """
+    print(f"\n{'='*70}")
+    print(f"Testing with REAL DATA from LlamaFactory Training")
+    print(f"{'='*70}")
+    print(f"Data path: {data_path}")
+
+    if not os.path.exists(data_path):
+        print(f"\n[SKIP] Debug data file not found: {data_path}")
+        print("       Run LlamaFactory training first to generate debug data.")
+        print("       The data is saved automatically when NaN is detected.")
+        return
+
+    # Load real data
+    data = torch.load(data_path)
+    print(f"\n[INFO] Loaded debug data successfully")
+    print(f"[INFO] Data keys: {list(data.keys())}")
+
+    # Extract configuration
+    real_expert_num = data["expert_num"]
+    real_hidden_size = data["hidden_size"]
+    real_intermediate_size = data["intermediate_size"]
+    real_num_experts_per_tok = data["num_experts_per_tok"]
+    real_qlen = data["input_data"].shape[0]
+    real_lora_rank = data["gate_lora_a"].shape[1]
+    real_lora_alpha = 16.0  # Default from LlamaFactory
+    real_lora_scaling = real_lora_alpha / real_lora_rank
+
+    print(f"\n[INFO] Real data configuration:")
+    print(f"  expert_num: {real_expert_num}")
+    print(f"  hidden_size: {real_hidden_size}")
+    print(f"  intermediate_size: {real_intermediate_size}")
+    print(f"  num_experts_per_tok: {real_num_experts_per_tok}")
+    print(f"  qlen: {real_qlen}")
+    print(f"  lora_rank: {real_lora_rank}")
+    print(f"  lora_alpha: {real_lora_alpha}")
+    print(f"  layer_idx: {data['layer_idx']}")
+
+    # Extract data tensors
+    input_data = data["input_data"].contiguous()
+    expert_ids = data["expert_ids"].contiguous()
+    weights = data["weights"].contiguous()
+
+    # Extract weights
+    gate_proj = data["gate_proj"].contiguous()
+    up_proj = data["up_proj"].contiguous()
+    down_proj = data["down_proj"].contiguous()
+
+    gate_lora_a = data["gate_lora_a"].contiguous()
+    gate_lora_b = data["gate_lora_b"].contiguous()
+    up_lora_a = data["up_lora_a"].contiguous()
+    up_lora_b = data["up_lora_b"].contiguous()
+    down_lora_a = data["down_lora_a"].contiguous()
+    down_lora_b = data["down_lora_b"].contiguous()
+
+    # Check input data
+    print(f"\n[Input Data Check]")
+    print(f"  input_data NaN: {torch.isnan(input_data).any().item()}")
+    print(f"  input_data range: [{input_data.min().item():.4f}, {input_data.max().item():.4f}]")
+    print(f"  weights NaN: {torch.isnan(weights).any().item()}")
+
+    # Check base weights
+    print(f"\n[Base Weights Check]")
+    for name, w in [("gate_proj", gate_proj), ("up_proj", up_proj), ("down_proj", down_proj)]:
+        has_nan = torch.isnan(w).any().item()
+        has_inf = torch.isinf(w).any().item()
+        print(f"  {name}: NaN={has_nan}, Inf={has_inf}, range=[{w.min().item():.4f}, {w.max().item():.4f}]")
+
+    # Check LoRA weights
+    print(f"\n[LoRA Weights Check]")
+    for name, w in [
+        ("gate_lora_a", gate_lora_a),
+        ("gate_lora_b", gate_lora_b),
+        ("up_lora_a", up_lora_a),
+        ("up_lora_b", up_lora_b),
+        ("down_lora_a", down_lora_a),
+        ("down_lora_b", down_lora_b),
+    ]:
+        has_nan = torch.isnan(w).any().item()
+        has_inf = torch.isinf(w).any().item()
+        print(f"  {name}: NaN={has_nan}, Inf={has_inf}, range=[{w.min().item():.4f}, {w.max().item():.4f}]")
+
+    # Run PyTorch reference forward
+    print(f"\n{'='*70}")
+    print(f"PyTorch Reference Forward")
+    print(f"{'='*70}")
+
+    torch_output, _ = moe_sft_torch_forward(
+        input_data,
+        expert_ids,
+        weights,
+        gate_proj,
+        up_proj,
+        down_proj,
+        gate_lora_a,
+        gate_lora_b,
+        up_lora_a,
+        up_lora_b,
+        down_lora_a,
+        down_lora_b,
+        real_lora_scaling,
+        debug_print=False,
+    )
+
+    torch_nan_count = torch.isnan(torch_output).sum().item()
+    print(f"\n[PyTorch Output]")
+    print(f"  NaN count: {torch_nan_count}")
+    print(f"  Output range: [{torch_output.min().item():.4f}, {torch_output.max().item():.4f}]")
+
+    # Run AMX forward
+    if not HAS_KT_KERNEL:
+        print("\n[SKIP] kt_kernel_ext not available, cannot test AMX")
+        return
+
+    print(f"\n{'='*70}")
+    print(f"AMX Forward")
+    print(f"{'='*70}")
+
+    # Initialize CPUInfer
+    pool_config = kt_kernel_ext.WorkerPoolConfig()
+    pool_config.subpool_count = 1
+    pool_config.subpool_numa_map = [0]
+    pool_config.subpool_thread_count = [num_threads]
+    CPUInfer = kt_kernel_ext.CPUInfer(pool_config)
+
+    # Create config with real parameters
+    config = kt_kernel_ext.moe.MOESFTConfig()
+    config.expert_num = real_expert_num
+    config.num_experts_per_tok = real_num_experts_per_tok
+    config.hidden_size = real_hidden_size
+    config.intermediate_size = real_intermediate_size
+    config.lora_rank = real_lora_rank
+    config.lora_alpha = real_lora_alpha
+    config.max_cache_depth = 1
+    config.max_len = max(real_qlen * 2, 4096)
+    config.layer_idx = data["layer_idx"]
+
+    # Set weight pointers
+    config.gate_proj = gate_proj.data_ptr()
+    config.up_proj = up_proj.data_ptr()
+    config.down_proj = down_proj.data_ptr()
+    config.gate_lora_a = gate_lora_a.data_ptr()
+    config.gate_lora_b = gate_lora_b.data_ptr()
+    config.up_lora_a = up_lora_a.data_ptr()
+    config.up_lora_b = up_lora_b.data_ptr()
+    config.down_lora_a = down_lora_a.data_ptr()
+    config.down_lora_b = down_lora_b.data_ptr()
+    config.pool = CPUInfer.backend_
+
+    # Create and initialize MOE
+    moe = kt_kernel_ext.moe.AMXBF16_SFT_MOE(config)
+    CPUInfer.submit(moe.load_weights_task())
+    CPUInfer.sync()
+    CPUInfer.submit(moe.warm_up_task())
+    CPUInfer.sync()
+
+    # Run forward
+    bsz_tensor = torch.tensor([real_qlen], device="cpu")
+    amx_output = torch.zeros((real_qlen, real_hidden_size), dtype=torch.bfloat16).contiguous()
+
+    CPUInfer.submit(
+        moe.forward_sft_task(
+            bsz_tensor.data_ptr(),
+            real_num_experts_per_tok,
+            expert_ids.data_ptr(),
+            weights.data_ptr(),
+            input_data.data_ptr(),
+            amx_output.data_ptr(),
+            False,  # save_for_backward
+        )
+    )
+    CPUInfer.sync()
+
+    amx_nan_count = torch.isnan(amx_output).sum().item()
+    print(f"\n[AMX Output]")
+    print(f"  NaN count: {amx_nan_count}")
+
+    if amx_nan_count > 0:
+        print(f"\n*** AMX PRODUCED NaN - BUG REPRODUCED! ***")
+        nan_positions = torch.nonzero(torch.isnan(amx_output))
+        affected_tokens = nan_positions[:, 0].unique()
+        print(f"  Affected tokens: {len(affected_tokens)} / {real_qlen}")
+        print(f"  Token indices: {affected_tokens.tolist()[:20]}...")
+
+        # Show which experts are selected by affected tokens
+        print(f"\n[Expert Analysis for affected tokens]")
+        for tok_idx in affected_tokens[:5]:
+            experts = expert_ids[tok_idx].tolist()
+            print(f"  Token {tok_idx}: experts = {experts}")
+    else:
+        print(f"\n*** AMX output is clean - no NaN ***")
+
+    # Compare with PyTorch reference
+    print(f"\n{'='*70}")
+    print(f"Comparison Summary")
+    print(f"{'='*70}")
+    print(f"  PyTorch Reference: {torch_nan_count} NaN")
+    print(f"  AMX Implementation: {amx_nan_count} NaN")
+
+    # Accuracy verification (same as accuracy mode)
+    # Use relative error: diff = mean(abs(amx - torch)) / (mean(abs(torch)) + 1e-8)
+    threshold = BF16_FORWARD_THRESHOLD  # 0.05
+    rel_diff = torch.mean(torch.abs(amx_output.float() - torch_output.float())) / (
+        torch.mean(torch.abs(torch_output.float())) + 1e-8
+    )
+
+    print(f"\n[AMX vs PyTorch Accuracy]")
+    print(f"  Relative diff: {rel_diff:.6f} (threshold: {threshold})")
+
+    # Also show absolute diff for reference
+    abs_diff = torch.abs(amx_output.float() - torch_output.float())
+    print(f"  Max abs diff: {abs_diff.max().item():.6f}")
+    print(f"  Mean abs diff: {abs_diff.mean().item():.6f}")
+
+    # Assert for test status
+    if amx_nan_count > 0:
+        print(f"\n[FAILED] AMX produced {amx_nan_count} NaN values")
+        assert False, f"AMX produced {amx_nan_count} NaN values"
+    elif rel_diff >= threshold:
+        print(f"\n[FAILED] Accuracy test failed: {rel_diff:.6f} >= {threshold}")
+        assert False, f"Real data accuracy test failed: {rel_diff:.6f} >= {threshold}"
+    else:
+        print(f"\n[OK] Real Data Test PASSED - AMX output is clean and accurate")
+
+
+# =============================================================================
 # Performance Test Functions
 # =============================================================================
 
@@ -2108,9 +2352,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MOE SFT AMX Test Suite - Non-TP Version")
     parser.add_argument(
         "--mode",
-        choices=["all", "accuracy", "perf"],
+        choices=["all", "accuracy", "perf", "real_data"],
         default="perf",
-        help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests",
+        help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests, 'real_data' runs real data NaN test",
     )
     parser.add_argument(
         "--qlen",
@@ -2129,6 +2373,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help=f"Override test iterations for performance tests (default: {perf_test_iter})",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default="/mnt/data/lpl/kt_nan_debug_data.pt",
+        help="Path to debug data file for real_data test (default: /mnt/data/lpl/kt_nan_debug_data.pt)",
     )
     args = parser.parse_args()
 
@@ -2149,3 +2399,5 @@ if __name__ == "__main__":
         run_all_tests()
     elif args.mode == "perf":
         run_performance_tests()
+    elif args.mode == "real_data":
+        test_with_real_data(args.data_path)

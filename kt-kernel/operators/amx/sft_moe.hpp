@@ -53,6 +53,65 @@ inline int get_print_at_call() {
 #define BACKWARD_TIMER_END() (void)0
 
 // =====================================================
+// BUG-010: NaN Diagnostic Helper Functions
+// =====================================================
+struct NaNCheckResult {
+  int nan_count = 0;
+  int inf_count = 0;
+  int first_nan_idx = -1;
+  float first_nan_input_val = 0.0f;
+};
+
+// Check BF16 buffer for NaN/Inf
+inline NaNCheckResult check_bf16_buffer_for_nan(const ggml_bf16_t* buf, int size, const char* label = nullptr) {
+  NaNCheckResult result;
+  for (int i = 0; i < size; i++) {
+    float val = GGML_BF16_TO_FP32(buf[i]);
+    if (std::isnan(val)) {
+      result.nan_count++;
+      if (result.first_nan_idx < 0) {
+        result.first_nan_idx = i;
+      }
+    }
+    if (std::isinf(val)) {
+      result.inf_count++;
+      if (result.first_nan_idx < 0) {
+        result.first_nan_idx = i;
+      }
+    }
+  }
+  if (label && (result.nan_count > 0 || result.inf_count > 0)) {
+    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
+           result.first_nan_idx);
+  }
+  return result;
+}
+
+// Check FP32 buffer for NaN/Inf
+inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, const char* label = nullptr) {
+  NaNCheckResult result;
+  for (int i = 0; i < size; i++) {
+    if (std::isnan(buf[i])) {
+      result.nan_count++;
+      if (result.first_nan_idx < 0) {
+        result.first_nan_idx = i;
+      }
+    }
+    if (std::isinf(buf[i])) {
+      result.inf_count++;
+      if (result.first_nan_idx < 0) {
+        result.first_nan_idx = i;
+      }
+    }
+  }
+  if (label && (result.nan_count > 0 || result.inf_count > 0)) {
+    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
+           result.first_nan_idx);
+  }
+  return result;
+}
+
+// =====================================================
 // Type trait to detect if kernel supports standard mat_mul API
 // Only these kernels have the standard amx::mat_mul(m,n,k,ba,bb,bc,ith,nth) overload
 // KGroup kernels use mat_mul_kgroup() with different BufferB interface
@@ -306,7 +365,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   // Constructor to satisfy MOE_TP_PART concept (takes GeneralMOEConfig)
   AMX_SFT_MOE_TP(GeneralMOEConfig config, int tp_part_idx) : AMX_SFT_MOE_TP(MOESFTConfig(config), tp_part_idx) {}
 
-  ~AMX_SFT_MOE_TP() = default;
+  ~AMX_SFT_MOE_TP() {
+    // Free LoRA buffers allocated with aligned_alloc
+    if (lora_bb_pool_) free(lora_bb_pool_);
+    if (lora_ba_pool_) free(lora_ba_pool_);
+    if (lora_bc_inter_pool_) free(lora_bc_inter_pool_);
+    if (lora_bc_out_pool_) free(lora_bc_out_pool_);
+    if (lora_intermediate_bf16_pool_) free(lora_intermediate_bf16_pool_);
+  }
 
   /**
    * @brief Set LoRA parameters after construction (Bug #007 fix).
@@ -339,11 +405,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
-    // Debug code for Bug #18 - commented out after fix verified
-    // printf("[DEBUG AMX forward_sft] tp_part_idx=%d, gate_lora_a_=%p\n", tp_part_idx, (void*)gate_lora_a_);
-    // if (gate_lora_a_) {
-    //   printf("  gate_lora_a_[0] value = %f\n", GGML_BF16_TO_FP32(gate_lora_a_[0]));
-    // }
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
     // Step 1: Expert routing (reuse base class logic)
@@ -625,14 +686,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
-    // Debug code for Bug #18 - commented out after fix verified
-    // printf("[DEBUG AMX update_lora_weights] tp_part_idx=%d\n", tp_part_idx);
-    // printf("  OLD: gate_lora_a_=%p, gate_lora_b_=%p, up_lora_a_=%p\n", (void*)gate_lora_a_, (void*)gate_lora_b_,
-    // (void*)up_lora_a_); printf("       up_lora_b_=%p, down_lora_a_=%p, down_lora_b_=%p\n", (void*)up_lora_b_,
-    // (void*)down_lora_a_, (void*)down_lora_b_); printf("  NEW: gate_lora_a=%p, gate_lora_b=%p, up_lora_a=%p\n",
-    // gate_lora_a, gate_lora_b, up_lora_a); printf("       up_lora_b=%p, down_lora_a=%p, down_lora_b=%p\n", up_lora_b,
-    // down_lora_a, down_lora_b);
-
     gate_lora_a_ = (ggml_bf16_t*)gate_lora_a;
     gate_lora_b_ = (ggml_bf16_t*)gate_lora_b;
     up_lora_a_ = (ggml_bf16_t*)up_lora_a;
@@ -657,8 +710,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       return;  // KGroup kernels use for-loop implementation
     }
 
-    if (lora_weights_prepared_) return;
-    if (gate_lora_a_ == nullptr) return;  // No LoRA weights to prepare
+    if (lora_weights_prepared_) {
+      return;
+    }
+    if (gate_lora_a_ == nullptr) {
+      return;  // No LoRA weights to prepare
+    }
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -718,6 +775,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
+    printf("  DONE: BufferB conversion complete\n");
     lora_weights_prepared_ = true;
   }
 
@@ -995,12 +1053,28 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     mem_requests.append_pointer(&grad_gate_output_pool_, grad_buffer_bytes);
     mem_requests.append_pointer(&grad_up_output_pool_, grad_buffer_bytes);
 
-    // LoRA AMX buffers
-    mem_requests.append_pointer(&lora_bb_pool_, lora_bb_pool_bytes_);
-    mem_requests.append_pointer(&lora_ba_pool_, lora_ba_pool_bytes_);
-    mem_requests.append_pointer(&lora_bc_inter_pool_, lora_bc_inter_pool_bytes_);
-    mem_requests.append_pointer(&lora_bc_out_pool_, lora_bc_out_pool_bytes_);
-    mem_requests.append_pointer(&lora_intermediate_bf16_pool_, lora_intermediate_bf16_pool_bytes_);
+    // LoRA AMX buffers - use aligned_alloc for independent allocation
+    // (shared_mem_buffer would cause memory sharing issues)
+    if (lora_bb_pool_bytes_ > 0) {
+      lora_bb_pool_ = aligned_alloc(64, lora_bb_pool_bytes_);
+      memset(lora_bb_pool_, 0, lora_bb_pool_bytes_);
+    }
+    if (lora_ba_pool_bytes_ > 0) {
+      lora_ba_pool_ = aligned_alloc(64, lora_ba_pool_bytes_);
+      memset(lora_ba_pool_, 0, lora_ba_pool_bytes_);
+    }
+    if (lora_bc_inter_pool_bytes_ > 0) {
+      lora_bc_inter_pool_ = aligned_alloc(64, lora_bc_inter_pool_bytes_);
+      memset(lora_bc_inter_pool_, 0, lora_bc_inter_pool_bytes_);
+    }
+    if (lora_bc_out_pool_bytes_ > 0) {
+      lora_bc_out_pool_ = aligned_alloc(64, lora_bc_out_pool_bytes_);
+      memset(lora_bc_out_pool_, 0, lora_bc_out_pool_bytes_);
+    }
+    if (lora_intermediate_bf16_pool_bytes_ > 0) {
+      lora_intermediate_bf16_pool_ = aligned_alloc(64, lora_intermediate_bf16_pool_bytes_);
+      memset(lora_intermediate_bf16_pool_, 0, lora_intermediate_bf16_pool_bytes_);
+    }
 
     // Backward pass AMX buffers
     mem_requests.append_pointer(&backward_ba_pool_, backward_ba_pool_bytes_);
@@ -1265,6 +1339,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Copy source data (with potential padding on K dimension)
     const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
+
     for (int r = 0; r < src_n && r < dst_n; r++) {
       for (int c = 0; c < src_k && c < dst_k; c++) {
         padded[r * dst_k + c] = expert_src[r * src_k + c];
@@ -1325,7 +1400,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * This is the AMX-optimized version replacing the naive for-loop implementation.
    */
   void compute_lora_gate_up_amx(int qlen, int activated_expert) {
-    if (gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) return;
+    if (gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
+      return;
+    }
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
