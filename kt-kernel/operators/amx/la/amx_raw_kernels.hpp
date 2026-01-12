@@ -121,6 +121,137 @@ struct GemmKernel224BF16 {
   using BufferA = BufferABF16Impl<GemmKernel224BF16>;
   using BufferB = BufferBBF16Impl<GemmKernel224BF16>;
   using BufferC = BufferCFP32Impl<GemmKernel224BF16>;
+
+  // Basic AVX kernel for BF16: process entire K_BLOCK
+  static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
+                         BufferB* bb) {
+    __m512* c512 = (__m512*)c;
+    int m_block_end = std::min(m - m_begin, M_STEP);
+
+    // Zero out accumulator at the start of k_block
+    if (k_block_begin == 0) {
+      for (int m_i = 0; m_i < m_block_end; m_i++) {
+        c512[m_i * 2] = _mm512_setzero_ps();
+        c512[m_i * 2 + 1] = _mm512_setzero_ps();
+      }
+    }
+
+    // Process entire K_BLOCK
+    for (int k_begin = 0; k_begin < K_BLOCK && k_block_begin + k_begin < k; k_begin += K_STEP) {
+      int32_t* a32 = (int32_t*)ba->get_submat(m, k, m_begin, k_block_begin + k_begin);
+      __m512bh* b512 = (__m512bh*)bb->get_submat(n, k, n_begin, k_block_begin + k_begin);
+
+      for (int m_i = 0; m_i < m_block_end; m_i++) {
+        for (int k_i = 0; k_i < 16; k_i++) {
+          __m512bh ma = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i]);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma, b512[k_i]);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma, b512[16 + k_i]);
+        }
+      }
+    }
+  }
+
+  // Optimized AVX kernel: process 4 k_i at once, unroll m rows by 2
+  static void avx_kernel_4(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
+                           BufferB* bb) {
+    __m512* c512 = (__m512*)c;
+    int m_block_end = std::min(m - m_begin, M_STEP);
+
+    // Zero out accumulator at the start of k_block
+    if (k_block_begin == 0) {
+      for (int m_i = 0; m_i < m_block_end; m_i++) {
+        c512[m_i * 2] = _mm512_setzero_ps();
+        c512[m_i * 2 + 1] = _mm512_setzero_ps();
+      }
+    }
+
+    // Process entire K_BLOCK
+    for (int k_begin = 0; k_begin < K_BLOCK && k_block_begin + k_begin < k; k_begin += K_STEP) {
+      int32_t* a32 = (int32_t*)ba->get_submat(m, k, m_begin, k_block_begin + k_begin);
+      __m512bh* b512 = (__m512bh*)bb->get_submat(n, k, n_begin, k_block_begin + k_begin);
+
+      // Process 4 k_i at once - load B vectors and reuse across all m rows
+      for (int k_i = 0; k_i < 16; k_i += 4) {
+        // Load 4 B vector pairs (lo and hi for each k_i)
+        __m512bh b0_lo = b512[k_i];
+        __m512bh b0_hi = b512[16 + k_i];
+        __m512bh b1_lo = b512[k_i + 1];
+        __m512bh b1_hi = b512[16 + k_i + 1];
+        __m512bh b2_lo = b512[k_i + 2];
+        __m512bh b2_hi = b512[16 + k_i + 2];
+        __m512bh b3_lo = b512[k_i + 3];
+        __m512bh b3_hi = b512[16 + k_i + 3];
+
+        // Process m rows - unroll by 2 for better ILP
+        int m_i = 0;
+        for (; m_i + 1 < m_block_end; m_i += 2) {
+          // Load A values for 2 rows, 4 k_i each
+          __m512bh ma0_0 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i]);
+          __m512bh ma1_0 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 1]);
+          __m512bh ma2_0 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 2]);
+          __m512bh ma3_0 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 3]);
+          __m512bh ma0_1 = (__m512bh)_mm512_set1_epi32(a32[(m_i + 1) * 16 + k_i]);
+          __m512bh ma1_1 = (__m512bh)_mm512_set1_epi32(a32[(m_i + 1) * 16 + k_i + 1]);
+          __m512bh ma2_1 = (__m512bh)_mm512_set1_epi32(a32[(m_i + 1) * 16 + k_i + 2]);
+          __m512bh ma3_1 = (__m512bh)_mm512_set1_epi32(a32[(m_i + 1) * 16 + k_i + 3]);
+
+          // Process row 0
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0_0, b0_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0_0, b0_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1_0, b1_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1_0, b1_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2_0, b2_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2_0, b2_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3_0, b3_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3_0, b3_hi);
+
+          // Process row 1
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma0_1, b0_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma0_1, b0_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma1_1, b1_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma1_1, b1_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma2_1, b2_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma2_1, b2_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma3_1, b3_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma3_1, b3_hi);
+        }
+        // Handle remaining row
+        for (; m_i < m_block_end; m_i++) {
+          __m512bh ma0 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i]);
+          __m512bh ma1 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 1]);
+          __m512bh ma2 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 2]);
+          __m512bh ma3 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 3]);
+
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, b0_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, b0_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, b1_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, b1_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2, b2_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2, b2_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3, b3_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3, b3_hi);
+        }
+      }
+    }
+  }
+
+  // AMX kernel for BF16: process entire K_BLOCK using AMX tiles
+  static void amx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
+                         BufferB* bb) {
+    if (k_block_begin == 0) {
+      clean_c();
+    } else {
+      load_c(c, N_STEP * sizeof(float));
+    }
+
+    for (int k_begin = 0; k_begin < K_BLOCK && k_block_begin + k_begin < k; k_begin += K_STEP) {
+      load_a(ba->get_submat(m, k, m_begin, k_block_begin + k_begin), K_STEP * sizeof(ggml_bf16_t));
+      load_b(bb->get_submat(n, k, n_begin, k_block_begin + k_begin), K_STEP * sizeof(ggml_bf16_t));
+      run_tile();
+    }
+
+    store_c(c, N_STEP * sizeof(float));
+  }
 };
 
 // FP8 (e4m3) AMX kernel that mirrors the GemmKernel224BF16 interface.
@@ -427,7 +558,7 @@ void float_mat_vec_kgroup(int m, int n, int k, int k_group_size, typename K::Buf
           }
         } else {
           // Single call processes entire k_group
-          K::avx_kernel_4(m, n, k, m_begin, n_begin, k_group_begin, reduce_c, ba, bb, k_group_size);
+          K::avx_kernel(m, n, k, m_begin, n_begin, k_group_begin, reduce_c, ba, bb, k_group_size);
         }
         K::apply_scale_kgroup(m, n, m_begin, n_begin, k_group_begin, c, reduce_c, ba, bb, k, k_group_size);
       }
@@ -435,17 +566,45 @@ void float_mat_vec_kgroup(int m, int n, int k, int k_group_size, typename K::Buf
   }
 }
 
-// inline void vec_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224BF16::BufferA> ba,
-//                            std::shared_ptr<GemmKernel224BF16::BufferB> bb,
-//                            std::shared_ptr<GemmKernel224BF16::BufferC> bc, int ith, int nth) {
-//   float_mat_mul_kgroup<GemmKernel224BF16, false>(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
-// }
+// ============================================================================
+// GemmKernel224BF16 vec_mul/mat_mul
+// ============================================================================
 
-// inline void mat_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224BF16::BufferA> ba,
-//                            std::shared_ptr<GemmKernel224BF16::BufferB> bb,
-//                            std::shared_ptr<GemmKernel224BF16::BufferC> bc, int ith, int nth) {
-//   float_mat_mul_kgroup<GemmKernel224BF16, true>(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
-// }
+// Template function for BF16 mat_mul/vec_mul with AMX or AVX backend
+template <typename K, bool amx_or_avx = true>
+void float_mat_vec(int m, int n, int k, typename K::BufferA* ba, typename K::BufferB* bb, typename K::BufferC* bc,
+                   int ith, int nth) {
+  assert(n % K::N_STEP == 0);
+  assert(k % K::K_STEP == 0);
+
+  auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+
+  for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K::K_BLOCK) {
+    for (int m_begin = 0; m_begin < m; m_begin += K::M_STEP) {
+      for (int n_begin = n_start; n_begin < n_end; n_begin += K::N_STEP) {
+        float* c = bc->get_submat(m, n, m_begin, n_begin);
+
+        if constexpr (amx_or_avx && AMX_AVAILABLE) {
+          K::amx_kernel(m, n, k, m_begin, n_begin, k_block_begin, c, ba, bb);
+        } else {
+          K::avx_kernel_4(m, n, k, m_begin, n_begin, k_block_begin, c, ba, bb);
+        }
+      }
+    }
+  }
+}
+
+inline void mat_mul(int m, int n, int k, std::shared_ptr<GemmKernel224BF16::BufferA> ba,
+                    std::shared_ptr<GemmKernel224BF16::BufferB> bb, std::shared_ptr<GemmKernel224BF16::BufferC> bc,
+                    int ith, int nth) {
+  float_mat_vec<GemmKernel224BF16, true>(m, n, k, ba.get(), bb.get(), bc.get(), ith, nth);
+}
+
+inline void vec_mul(int m, int n, int k, std::shared_ptr<GemmKernel224BF16::BufferA> ba,
+                    std::shared_ptr<GemmKernel224BF16::BufferB> bb, std::shared_ptr<GemmKernel224BF16::BufferC> bc,
+                    int ith, int nth) {
+  float_mat_vec<GemmKernel224BF16, false>(m, n, k, ba.get(), bb.get(), bc.get(), ith, nth);
+}
 
 inline void vec_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_ptr<GemmKernel224FP8::BufferA> ba,
                            std::shared_ptr<GemmKernel224FP8::BufferB> bb, std::shared_ptr<GemmKernel224FP8::BufferC> bc,
