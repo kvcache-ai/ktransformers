@@ -765,3 +765,99 @@ pool->do_work_stealing_job(
 - 所有列（0-2047）都会正确输出
 - Per-expert diff 应该接近 0（只有数值精度差异）
 - backward_down_amx 测试应该通过
+
+---
+
+## Bug #4: gate_backward_bb_ 和 up_backward_bb_ 的 from_mat 参数错误 【已修复】
+
+**日期**: 2026-01-11
+
+**状态**: ✅ **已修复**
+
+### 1. 根本原因
+
+在 `prepare_backward_weights()` 中，`gate_backward_bb_` 和 `up_backward_bb_` 的 `from_mat` 调用使用了错误的参数！
+
+这与 Bug #3 完全相同的问题，只是发生在不同的 BufferB 上。
+
+**问题代码（修复前）**：
+```cpp
+// case 0: gate_proj
+gate_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);  // ❌ 只填充第一个 N_BLOCK
+
+// case 1: up_proj
+up_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);  // ❌ 只填充第一个 N_BLOCK
+
+// case 2: down_proj (已修复)
+int nth = T::recommended_nth(config_.intermediate_size);
+for (int ith = 0; ith < nth; ith++) {
+  down_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);  // ✅ 正确
+}
+```
+
+**在 `backward_gate_up_amx` 中的使用**：
+```cpp
+int nth = T::recommended_nth(config_.hidden_size);  // hidden_size=7168 → nth=28
+amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+// ↑ mat_mul 使用 (ith, 28)，但 BufferB 只用 (0, 1) 填充
+```
+
+**结果**：
+- 只有前 256 列有数据
+- 其他 6912 列全为 0
+- 导致 grad_input diff: 0.972656
+
+### 2. 测试输出
+
+accuracy 模式测试失败：
+```
+============================================================
+Testing MOE SFT Backward Pass - BF16 mode (NO TP)
+============================================================
+--- Iteration 0 ---
+grad_input diff: 0.972656
+[FAILED] Test failed with error: grad_input accuracy failed: 0.972656
+```
+
+### 3. 修复方案
+
+与 Bug #3 的修复相同，为 `gate_backward_bb_` 和 `up_backward_bb_` 使用循环调用 `from_mat`：
+
+**修复后代码** (sft_moe.hpp:829-834, 847-852):
+```cpp
+// case 0: gate_proj
+int nth = T::recommended_nth(config_.hidden_size);  // 使用 hidden_size
+for (int ith = 0; ith < nth; ith++) {
+  gate_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+}
+
+// case 1: up_proj
+int nth = T::recommended_nth(config_.hidden_size);
+for (int ith = 0; ith < nth; ith++) {
+  up_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+}
+```
+
+### 4. 关键点
+
+不同 BufferB 使用不同的 nth 计算：
+
+| 矩阵 | 输出维度 N | nth 计算 |
+|------|-----------|----------|
+| `down_backward_bb_` | intermediate_size (2048) | `recommended_nth(2048)` = 8 |
+| `gate_backward_bb_` | hidden_size (7168) | `recommended_nth(7168)` = 28 |
+| `up_backward_bb_` | hidden_size (7168) | `recommended_nth(7168)` = 28 |
+
+### 5. 修改的文件和行号
+
+| 文件 | 行号 | 修改内容 |
+|------|------|----------|
+| `sft_moe.hpp` | 829-834 | `gate_backward_bb_` 使用循环 from_mat |
+| `sft_moe.hpp` | 847-852 | `up_backward_bb_` 使用循环 from_mat |
+
+### 6. 预期结果
+
+修复后：
+- 所有 7168 列都会正确填充
+- grad_input diff 应该接近 0（与 for-loop 版本一致）
+- Backward Pass 测试应该通过

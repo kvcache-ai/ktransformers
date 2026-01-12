@@ -826,7 +826,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                       gate_proj[expert_offset + i * config_.hidden_size + h];
                 }
               }
-              gate_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);
+              // FIX: Use the same nth as mat_mul will use, to ensure BufferB layout matches.
+              // mat_mul uses nth = recommended_nth(hidden_size) which partitions by N_BLOCK.
+              int nth = T::recommended_nth(config_.hidden_size);
+              for (int ith = 0; ith < nth; ith++) {
+                gate_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+              }
               break;
             }
             case 1: {  // up_proj: same as gate
@@ -839,7 +844,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   transposed[h * config_.intermediate_size + i] = up_proj[expert_offset + i * config_.hidden_size + h];
                 }
               }
-              up_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);
+              // FIX: Use the same nth as mat_mul will use, to ensure BufferB layout matches.
+              // mat_mul uses nth = recommended_nth(hidden_size) which partitions by N_BLOCK.
+              int nth = T::recommended_nth(config_.hidden_size);
+              for (int ith = 0; ith < nth; ith++) {
+                up_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+              }
               break;
             }
             case 2: {  // down_proj: [hidden_size, intermediate_size] -> transposed [intermediate_size, hidden_size]

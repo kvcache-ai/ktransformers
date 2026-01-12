@@ -2381,7 +2381,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         choices=["all", "accuracy", "perf", "real_data"],
-        default="preal_dataerf",
+        default="accuracy",
         help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests, 'real_data' runs real data NaN test",
     )
     parser.add_argument(
