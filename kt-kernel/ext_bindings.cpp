@@ -37,8 +37,9 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
 #if defined(__AVX512BF16__)
-#include "operators/amx/bf16-moe.hpp"  // Native BF16 MoE using CRTP pattern
-#include "operators/amx/fp8-moe.hpp"   // FP8 MoE requires AVX512 BF16 support
+#include "operators/amx/bf16-moe.hpp"            // Native BF16 MoE using CRTP pattern
+#include "operators/amx/fp8-moe.hpp"             // FP8 MoE requires AVX512 BF16 support
+#include "operators/amx/fp8-perchannel-moe.hpp"  // FP8 Per-Channel MoE for GLM-4.7-FP8
 #endif
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
@@ -585,7 +586,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("quant_method", &QuantConfig::quant_method)
       .def_readwrite("bits", &QuantConfig::bits)
       .def_readwrite("group_size", &QuantConfig::group_size)
-      .def_readwrite("zero_point", &QuantConfig::zero_point);
+      .def_readwrite("zero_point", &QuantConfig::zero_point)
+      .def_readwrite("per_channel", &QuantConfig::per_channel);
 
   auto moe_module = m.def_submodule("moe");
 
@@ -660,6 +662,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
+  bind_moe_module<AMX_FP8_PERCHANNEL_MOE_TP<amx::GemmKernel224FP8PerChannel>>(moe_module, "AMXFP8PerChannel_MOE");
 #endif
 #endif
 #if defined(USE_MOE_KERNEL)

@@ -223,7 +223,8 @@ struct QuantConfig {
   std::string quant_method = "";
   int bits = 0;
   int group_size = 0;
-  bool zero_point;
+  bool zero_point = false;
+  bool per_channel = false;  // Per-channel quantization (GLM-4.7-FP8 style)
 };
 
 struct GeneralMOEConfig {
