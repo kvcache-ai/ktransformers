@@ -285,7 +285,7 @@ struct GemmKernel224FP8 {
 
   static void config() {}
 
- private:
+  // FP8->BF16 conversion lookup tables (public for reuse by GemmKernel224FP8PerChannel)
   alignas(64) static constexpr uint8_t bf16_hi_0_val[64] = {
       0x00, 0x3b, 0x3b, 0x3b, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c, 0x3c,
       0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d, 0x3d,
@@ -317,8 +317,6 @@ struct GemmKernel224FP8 {
   static inline __m512i bf16_lo_0_mask() { return _mm512_load_si512((__m512i const*)bf16_lo_0_val); }
   static inline __m512i bf16_lo_1_mask() { return _mm512_load_si512((__m512i const*)bf16_lo_1_val); }
   static inline __m512i sign_mask() { return _mm512_set1_epi8(0x80); }
-
- public:
   using BufferA = BufferABF16Impl<GemmKernel224FP8>;
   using BufferB = BufferBFP8Impl<GemmKernel224FP8>;
   using BufferC = BufferCFP32ReduceImpl<GemmKernel224FP8>;
@@ -616,6 +614,231 @@ inline void mat_mul_kgroup(int m, int n, int k, int k_group_size, std::shared_pt
                            std::shared_ptr<GemmKernel224FP8::BufferB> bb, std::shared_ptr<GemmKernel224FP8::BufferC> bc,
                            int ith, int nth) {
   float_mat_vec_kgroup<GemmKernel224FP8, false>(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+}
+
+// ============================================================================
+// Per-Channel FP8 GEMM (for GLM-4.7-FP8 style quantization)
+// ============================================================================
+
+/**
+ * @brief FP8 Per-Channel Kernel
+ *
+ * Similar to GemmKernel224FP8 but with per-channel scaling instead of block-wise scaling.
+ * - Block-wise: scale shape = [n/128, k/128], one scale per 128x128 block
+ * - Per-channel: scale shape = [n], one scale per output row
+ */
+struct GemmKernel224FP8PerChannel {
+  using fp8_t = uint8_t;
+  using output_t = float;
+
+  static constexpr double ELEMENT_SIZE = 1.0;
+  static const int TILE_M = 16;
+  static const int TILE_K = 32;
+  static const int TILE_N = 16;
+  static const int VNNI_BLK = 2;
+
+  static const int M_STEP = TILE_M * 2;
+  static const int N_STEP = TILE_N * 2;
+  static const int K_STEP = TILE_K;
+
+  // Use smaller N_BLOCK for per-channel to allow efficient scale application
+  static inline const int N_BLOCK = 128;
+  static inline const int K_BLOCK = 7168;
+
+  static std::string name() { return "FP8PerChannel"; }
+
+  static int recommended_nth(int n) { return (n + N_BLOCK - 1) / N_BLOCK; }
+
+  static std::pair<int, int> split_range_n(int n, int ith, int nth) {
+    int n_start = N_BLOCK * ith;
+    int n_end = std::min(n, N_BLOCK * (ith + 1));
+    return {n_start, n_end};
+  }
+
+  static void config() {}
+
+  using BufferA = BufferABF16Impl<GemmKernel224FP8PerChannel>;
+  using BufferB = BufferBFP8PerChannelImpl<GemmKernel224FP8PerChannel>;
+  using BufferC = BufferCFP32Impl<GemmKernel224FP8PerChannel>;
+
+  // Reuse FP8->BF16 conversion from GemmKernel224FP8
+  static inline std::pair<__m512i, __m512i> fp8x64_to_bf16x64(__m512i bfp8_512) {
+    return GemmKernel224FP8::fp8x64_to_bf16x64(bfp8_512);
+  }
+
+  /**
+   * @brief Apply per-channel scale to result
+   *
+   * Unlike block-wise scaling, per-channel scaling applies a different scale to each column
+   * of the result (each output channel).
+   *
+   * @param m Total rows
+   * @param n Total columns
+   * @param m_begin Starting row
+   * @param n_begin Starting column
+   * @param c Output buffer (M_STEP x N_STEP)
+   * @param bb BufferB containing per-channel scales
+   */
+  static void apply_scale_perchannel(int m, [[maybe_unused]] int n, int m_begin, int n_begin, float* c, BufferB* bb) {
+    int to = std::min(m - m_begin, M_STEP);
+
+    // Load N_STEP per-channel scales (32 floats)
+    __m512 bs_lo = _mm512_loadu_ps(bb->get_scale(n_begin));           // scale[n_begin..n_begin+15]
+    __m512 bs_hi = _mm512_loadu_ps(bb->get_scale(n_begin + TILE_N));  // scale[n_begin+16..n_begin+31]
+
+    for (int i = 0; i < to; i++) {
+      // Each row gets multiplied by the same set of per-channel scales
+      __m512 c_lo = _mm512_load_ps(c + i * N_STEP);
+      __m512 c_hi = _mm512_load_ps(c + i * N_STEP + TILE_N);
+      _mm512_store_ps(c + i * N_STEP, _mm512_mul_ps(c_lo, bs_lo));
+      _mm512_store_ps(c + i * N_STEP + TILE_N, _mm512_mul_ps(c_hi, bs_hi));
+    }
+  }
+
+  // AVX kernel for per-channel FP8 GEMM - processes entire K dimension
+  static void avx_kernel_4(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
+                           BufferB* bb) {
+    const __m512i bf16_hi_0 = GemmKernel224FP8::bf16_hi_0_mask();
+    const __m512i bf16_hi_1 = GemmKernel224FP8::bf16_hi_1_mask();
+    const __m512i bf16_lo_0 = GemmKernel224FP8::bf16_lo_0_mask();
+    const __m512i bf16_lo_1 = GemmKernel224FP8::bf16_lo_1_mask();
+    const __m512i sign_mask_v = GemmKernel224FP8::sign_mask();
+
+    __m512* c512 = (__m512*)c;
+    int m_block_end = std::min(m - m_begin, M_STEP);
+
+    // Zero out accumulator at start of K_BLOCK
+    if (k_block_begin == 0) {
+      for (int m_i = 0; m_i < m_block_end; m_i++) {
+        c512[m_i * 2] = _mm512_setzero_ps();
+        c512[m_i * 2 + 1] = _mm512_setzero_ps();
+      }
+    }
+
+    // Process K_BLOCK
+    for (int k_begin = 0; k_begin < K_BLOCK && k_block_begin + k_begin < k; k_begin += K_STEP) {
+      ggml_bf16_t* abf16 = (ggml_bf16_t*)ba->get_submat(m, k, m_begin, k_block_begin + k_begin);
+      __m512i* bfp8_512 = (__m512i*)bb->get_submat(n, k, n_begin, k_block_begin + k_begin);
+
+      // Process 4 k_i at once
+      for (int k_i = 0; k_i < 16; k_i += 4) {
+        // Load 4 B vectors
+        __m512i bfp8_0 = bfp8_512[k_i];
+        __m512i bfp8_1 = bfp8_512[k_i + 1];
+        __m512i bfp8_2 = bfp8_512[k_i + 2];
+        __m512i bfp8_3 = bfp8_512[k_i + 3];
+
+        // Convert all 4 FP8 -> BF16
+        __m512i b_hi, b_lo;
+
+        b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask_v, bfp8_0),
+                               _mm512_permutex2var_epi8(bf16_hi_0, bfp8_0, bf16_hi_1));
+        b_lo = _mm512_permutex2var_epi8(bf16_lo_0, bfp8_0, bf16_lo_1);
+        __m512bh bbf16_0_lo = (__m512bh)_mm512_unpacklo_epi8(b_lo, b_hi);
+        __m512bh bbf16_0_hi = (__m512bh)_mm512_unpackhi_epi8(b_lo, b_hi);
+
+        b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask_v, bfp8_1),
+                               _mm512_permutex2var_epi8(bf16_hi_0, bfp8_1, bf16_hi_1));
+        b_lo = _mm512_permutex2var_epi8(bf16_lo_0, bfp8_1, bf16_lo_1);
+        __m512bh bbf16_1_lo = (__m512bh)_mm512_unpacklo_epi8(b_lo, b_hi);
+        __m512bh bbf16_1_hi = (__m512bh)_mm512_unpackhi_epi8(b_lo, b_hi);
+
+        b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask_v, bfp8_2),
+                               _mm512_permutex2var_epi8(bf16_hi_0, bfp8_2, bf16_hi_1));
+        b_lo = _mm512_permutex2var_epi8(bf16_lo_0, bfp8_2, bf16_lo_1);
+        __m512bh bbf16_2_lo = (__m512bh)_mm512_unpacklo_epi8(b_lo, b_hi);
+        __m512bh bbf16_2_hi = (__m512bh)_mm512_unpackhi_epi8(b_lo, b_hi);
+
+        b_hi = _mm512_or_si512(_mm512_and_si512(sign_mask_v, bfp8_3),
+                               _mm512_permutex2var_epi8(bf16_hi_0, bfp8_3, bf16_hi_1));
+        b_lo = _mm512_permutex2var_epi8(bf16_lo_0, bfp8_3, bf16_lo_1);
+        __m512bh bbf16_3_lo = (__m512bh)_mm512_unpacklo_epi8(b_lo, b_hi);
+        __m512bh bbf16_3_hi = (__m512bh)_mm512_unpackhi_epi8(b_lo, b_hi);
+
+        // Process m rows
+        int m_i = 0;
+        for (; m_i + 1 < m_block_end; m_i += 2) {
+          __m512bh ma0_0 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + k_i * 2]);
+          __m512bh ma1_0 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 1) * 2]);
+          __m512bh ma2_0 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 2) * 2]);
+          __m512bh ma3_0 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 3) * 2]);
+          __m512bh ma0_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + k_i * 2]);
+          __m512bh ma1_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 1) * 2]);
+          __m512bh ma2_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 2) * 2]);
+          __m512bh ma3_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 3) * 2]);
+
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0_0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0_0, bbf16_0_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1_0, bbf16_1_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1_0, bbf16_1_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2_0, bbf16_2_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2_0, bbf16_2_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3_0, bbf16_3_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3_0, bbf16_3_hi);
+
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma0_1, bbf16_0_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma0_1, bbf16_0_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma1_1, bbf16_1_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma1_1, bbf16_1_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma2_1, bbf16_2_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma2_1, bbf16_2_hi);
+          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma3_1, bbf16_3_lo);
+          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma3_1, bbf16_3_hi);
+        }
+        // Handle remaining row
+        for (; m_i < m_block_end; m_i++) {
+          __m512bh ma0 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + k_i * 2]);
+          __m512bh ma1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 1) * 2]);
+          __m512bh ma2 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 2) * 2]);
+          __m512bh ma3 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 3) * 2]);
+
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, bbf16_0_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, bbf16_1_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, bbf16_1_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2, bbf16_2_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2, bbf16_2_hi);
+          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3, bbf16_3_lo);
+          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3, bbf16_3_hi);
+        }
+      }
+    }
+  }
+};
+
+/**
+ * @brief Per-channel FP8 GEMM function
+ *
+ * Unlike block-wise FP8 which applies scale per 128x128 block during computation,
+ * per-channel FP8 processes entire K dimension first, then applies per-channel scale at the end.
+ */
+template <typename K>
+void float_mat_vec_perchannel(int m, int n, int k, typename K::BufferA* ba, typename K::BufferB* bb,
+                              typename K::BufferC* bc, int ith, int nth) {
+  assert(n % K::N_STEP == 0);
+  assert(k % K::K_STEP == 0);
+
+  auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+
+  for (int m_begin = 0; m_begin < m; m_begin += K::M_STEP) {
+    for (int n_begin = n_start; n_begin < n_end; n_begin += K::N_STEP) {
+      float* c = bc->get_submat(m, n, m_begin, n_begin);
+
+      // Process entire K dimension with K_BLOCKs
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K::K_BLOCK) {
+        K::avx_kernel_4(m, n, k, m_begin, n_begin, k_block_begin, c, ba, bb);
+      }
+
+      // Apply per-channel scale once after all K is processed
+      K::apply_scale_perchannel(m, n, m_begin, n_begin, c, bb);
+    }
+  }
+}
+
+inline void vec_mul_perchannel(int m, int n, int k, std::shared_ptr<GemmKernel224FP8PerChannel::BufferA> ba,
+                               std::shared_ptr<GemmKernel224FP8PerChannel::BufferB> bb,
+                               std::shared_ptr<GemmKernel224FP8PerChannel::BufferC> bc, int ith, int nth) {
+  float_mat_vec_perchannel<GemmKernel224FP8PerChannel>(m, n, k, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
 }  // namespace amx
