@@ -222,9 +222,8 @@ def detect_repo_for_model(model_path: str) -> Optional[Tuple[str, str]]:
     Detect repository information for a model
 
     Strategy:
-    1. Try to extract from YAML frontmatter (most reliable)
-    2. If not found, globally search for URLs in README.md (aggressive)
-    3. If multiple different URLs found, use the last one
+    Only extract from YAML frontmatter metadata in README.md
+    (Removed global URL search to avoid false positives)
 
     Args:
         model_path: Path to model directory
@@ -242,15 +241,12 @@ def detect_repo_for_model(model_path: str) -> Optional[Tuple[str, str]]:
     if not readme_path.exists():
         return None
 
-    # Strategy 1: Parse frontmatter (preferred)
+    # Only parse YAML frontmatter (no fallback to global search)
     frontmatter = parse_readme_frontmatter(readme_path)
     if frontmatter:
-        result = extract_repo_from_frontmatter(frontmatter)
-        if result:
-            return result
+        return extract_repo_from_frontmatter(frontmatter)
 
-    # Strategy 2: Global URL search (aggressive fallback)
-    return extract_repo_from_global_search(readme_path)
+    return None
 
 
 def scan_models_for_repo(model_list) -> Dict:

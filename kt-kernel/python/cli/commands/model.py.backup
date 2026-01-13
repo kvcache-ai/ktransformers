@@ -629,7 +629,7 @@ def list_models(
                             "is_moe": True,
                             "num_experts": model.moe_num_experts,
                             "num_experts_per_tok": model.moe_num_experts_per_tok,
-                            "cached": True,
+                            "cached": True
                         }
                     # If is_moe is False, don't add to moe_results
                 else:
@@ -701,14 +701,11 @@ def list_models(
                             moe_results[model_name] = result
                             # Update model registry with MoE info
                             if result and result.get("is_moe"):
-                                registry.update_model(
-                                    model_name,
-                                    {
-                                        "is_moe": True,
-                                        "moe_num_experts": result.get("num_experts"),
-                                        "moe_num_experts_per_tok": result.get("num_experts_per_tok"),
-                                    },
-                                )
+                                registry.update_model(model_name, {
+                                    "is_moe": True,
+                                    "moe_num_experts": result.get("num_experts"),
+                                    "moe_num_experts_per_tok": result.get("num_experts_per_tok")
+                                })
                             else:
                                 registry.update_model(model_name, {"is_moe": False})
 
@@ -800,15 +797,14 @@ def list_models(
         if gguf_models:
             console.print("[bold yellow]GGUF Models (Llamafile)[/bold yellow]")
             table = Table(show_header=True, header_style="bold")
-            table.add_column("#", justify="right", style="cyan", no_wrap=True)
             table.add_column(t("model_column_name"), style="cyan", no_wrap=True)
             table.add_column("Path", style="dim", overflow="fold")
             table.add_column("Total", justify="right")
             table.add_column(t("model_column_repo"), style="dim", overflow="fold")
             table.add_column(t("model_column_sha256"), justify="center")
 
-            for i, model in enumerate(gguf_models, 1):
-                row = [str(i)] + format_model_row(model)
+            for model in gguf_models:
+                row = format_model_row(model)
                 table.add_row(*row)
 
             console.print(table)
@@ -816,89 +812,18 @@ def list_models(
 
         # Table 2: AMX Models
         if amx_models:
-            from kt_kernel.cli.utils.model_scanner import format_size
-            import json
-
             console.print("[bold magenta]AMX Models (CPU)[/bold magenta]")
-            table = Table(show_header=True, header_style="bold", show_lines=False)
-            table.add_column("#", justify="right", style="cyan", no_wrap=True)
+            table = Table(show_header=True, header_style="bold")
             table.add_column(t("model_column_name"), style="cyan", no_wrap=True)
             table.add_column("Path", style="dim", overflow="fold")
             table.add_column("Total", justify="right")
-            table.add_column("Method", justify="center", style="yellow")
-            table.add_column("NUMA", justify="center", style="green")
-            table.add_column("Source", style="dim", overflow="fold")
+            table.add_column("NUMA", justify="center")
+            table.add_column(t("model_column_repo"), style="dim", overflow="fold")
+            table.add_column(t("model_column_sha256"), justify="center")
 
-            # Build reverse map: AMX model ID -> GPU models using it
-            amx_used_by_gpu = {}  # {amx_model_id: [gpu_model_names]}
-            for model, _ in amx_models:
-                if model.gpu_model_ids:
-                    # This AMX is linked to these GPU models
-                    gpu_names = []
-                    for gpu_id in model.gpu_model_ids:
-                        # Find GPU model by ID
-                        for gpu_model in gpu_models:
-                            if gpu_model.id == gpu_id:
-                                gpu_names.append(gpu_model.name)
-                                break
-                    if gpu_names:
-                        amx_used_by_gpu[model.id] = gpu_names
-
-            for i, (model, numa_count) in enumerate(amx_models, 1):
-                # Calculate size
-                if model.path_exists():
-                    path_obj = Path(model.path)
-                    try:
-                        files = list(path_obj.glob("*.safetensors"))
-                        total_size = sum(f.stat().st_size for f in files if f.exists())
-                        size_display = format_size(total_size)
-                    except:
-                        size_display = "[dim]-[/dim]"
-                else:
-                    size_display = "[dim]-[/dim]"
-
-                # Read AMX metadata from config.json (fallback if not in UserModel)
-                method_from_config = None
-                numa_from_config = None
-                if model.path_exists():
-                    config_path = Path(model.path) / "config.json"
-                    if config_path.exists():
-                        try:
-                            with open(config_path, "r", encoding="utf-8") as f:
-                                config = json.load(f)
-                                amx_quant = config.get("amx_quantization", {})
-                                if amx_quant.get("converted"):
-                                    method_from_config = amx_quant.get("method")
-                                    numa_from_config = amx_quant.get("numa_count")
-                        except:
-                            pass
-
-                # AMX-specific metadata (priority: UserModel > config.json > detected numa_count)
-                method_display = (
-                    model.amx_quant_method.upper()
-                    if model.amx_quant_method
-                    else method_from_config.upper() if method_from_config else "[dim]?[/dim]"
-                )
-                numa_display = (
-                    str(model.amx_numa_nodes)
-                    if model.amx_numa_nodes
-                    else (
-                        str(numa_from_config) if numa_from_config else str(numa_count) if numa_count else "[dim]?[/dim]"
-                    )
-                )
-                source_display = model.amx_source_model if model.amx_source_model else "[dim]-[/dim]"
-
-                table.add_row(
-                    str(i), model.name, model.path, size_display, method_display, numa_display, source_display
-                )
-
-                # Add linked GPU models info below this AMX model
-                if model.id in amx_used_by_gpu:
-                    gpu_list = amx_used_by_gpu[model.id]
-                    gpu_names_str = ", ".join([f"[dim]{name}[/dim]" for name in gpu_list])
-                    # Create a sub-row with empty cells except for the first column (7 columns total with #)
-                    sub_row = ["", f"  [dim]↳ GPU: {gpu_names_str}[/dim]", "", "", "", "", ""]
-                    table.add_row(*sub_row, style="dim")
+            for model, numa_count in amx_models:
+                row = format_model_row(model, numa_count=numa_count)
+                table.add_row(*row)
 
             console.print(table)
             console.print()
@@ -907,7 +832,6 @@ def list_models(
         if gpu_models_to_display:
             console.print("[bold green]GPU Models (Safetensors)[/bold green]")
             table = Table(show_header=True, header_style="bold", show_lines=False)
-            table.add_column("#", justify="right", style="cyan", no_wrap=True)
             table.add_column(t("model_column_name"), style="cyan", no_wrap=True)
             table.add_column("Path", style="dim", overflow="fold")
             table.add_column("Total", justify="right")
@@ -936,9 +860,9 @@ def list_models(
                             attached_cpu_models[gpu_id] = []
                         attached_cpu_models[gpu_id].append((model, "AMX"))
 
-            for i, model in enumerate(gpu_models_to_display, 1):
+            for model in gpu_models_to_display:
                 moe_info = moe_results.get(model.name) if show_moe and analyze_moe_model else None
-                row = [str(i)] + format_model_row(model, moe_info=moe_info)
+                row = format_model_row(model, moe_info=moe_info)
                 table.add_row(*row)
 
                 # Add attached CPU models info below this GPU model (using UUID matching)
@@ -947,7 +871,7 @@ def list_models(
                     cpu_names = ", ".join([f"[dim]{m.name} ({t})[/dim]" for m, t in cpu_list])
                     # Create a sub-row with empty cells except for the first column
                     num_cols = len(row)
-                    sub_row = ["", f"  [dim]↳ CPU: {cpu_names}[/dim]"] + [""] * (num_cols - 2)
+                    sub_row = [f"  [dim]↳ CPU: {cpu_names}[/dim]"] + [""] * (num_cols - 1)
                     table.add_row(*sub_row, style="dim")
 
             console.print(table)
@@ -958,13 +882,12 @@ def list_models(
             console.print("[bold red]Failed MoE Analysis[/bold red]")
             console.print("[yellow]These models may not be MoE models or have analysis errors:[/yellow]\n")
             table = Table(show_header=True, header_style="bold")
-            table.add_column("#", justify="right", style="cyan", no_wrap=True)
             table.add_column(t("model_column_name"), style="red", no_wrap=True)
             table.add_column("Path", style="dim", overflow="fold")
             table.add_column("Total", justify="right")
             table.add_column("Error", style="yellow", overflow="fold")
 
-            for i, (model, error) in enumerate(moe_failed_models, 1):
+            for model, error in moe_failed_models:
                 from kt_kernel.cli.utils.model_scanner import format_size
 
                 if model.path_exists():
@@ -978,7 +901,7 @@ def list_models(
                 else:
                     size_display = "[dim]-[/dim]"
 
-                table.add_row(str(i), model.name, model.path, size_display, error)
+                table.add_row(model.name, model.path, size_display, error)
 
             console.print(table)
             console.print()
@@ -1004,14 +927,13 @@ def list_models(
         # Show usage hints (only in non-verbose mode)
         if not verbose and models:
             console.print(f"[bold cyan]{t('model_usage_title')}[/bold cyan]")
-            console.print(f"  {t('model_usage_info'):<17} [cyan]kt model info <name>[/cyan]")
-            console.print(f"  {t('model_usage_edit'):<17} [cyan]kt model edit <name>[/cyan]")
-            console.print(f"  {t('model_usage_verify'):<17} [cyan]kt model verify <name>[/cyan]")
-            console.print(f"  {t('model_usage_quant'):<17} [cyan]kt quant <name>[/cyan]")
-            console.print(f"  {t('model_usage_run'):<17} [cyan]kt run <name>[/cyan]")
+            console.print(f"  {t('model_usage_info')}     [cyan]kt model info <name>[/cyan]")
+            console.print(f"  {t('model_usage_edit')}     [cyan]kt model edit <name>[/cyan]")
+            console.print(f"  {t('model_usage_verify')} [cyan]kt model verify <name>[/cyan]")
+            console.print(f"  {t('model_usage_run')}      [cyan]kt run <name>[/cyan]")
             console.print()
-            console.print(f"  {t('model_usage_scan'):<17} [cyan]kt model scan[/cyan]")
-            console.print(f"  {t('model_usage_add'):<17} [cyan]kt model add <path>[/cyan]")
+            console.print(f"  {t('model_usage_scan')}     [cyan]kt model scan[/cyan]")
+            console.print(f"  {t('model_usage_add')}      [cyan]kt model add <path>[/cyan]")
             console.print()
 
 
@@ -1206,6 +1128,41 @@ def path_remove(
         raise typer.Exit(1)
 
 
+# NOTE: search command disabled - no longer using builtin model registry
+# Users can use 'kt model list' instead
+# @app.command(name="search")
+# def search(
+#     query: str = typer.Argument(..., help="Search query (model name or keyword)"),
+# ) -> None:
+#     """Search for models in the registry."""
+#     from rich.table import Table
+#     from kt_kernel.cli.utils.model_registry import get_registry
+#
+#     registry = get_registry()
+#     matches = registry.search(query)
+#
+#     console.print()
+#
+#     if not matches:
+#         print_warning(t("model_search_no_results", query=query))
+#         console.print()
+#         return
+#
+#     table = Table(title=t("model_search_results_title", query=query), show_header=True)
+#     table.add_column(t("model_column_name"), style="cyan")
+#     table.add_column(t("model_column_hf_repo"), style="dim")
+#     table.add_column(t("model_column_aliases"), style="yellow")
+#
+#     for model in matches:
+#         aliases = ", ".join(model.aliases[:3])
+#         if len(model.aliases) > 3:
+#             aliases += f" +{len(model.aliases) - 3} more"
+#         table.add_row(model.name, model.hf_repo, aliases)
+#
+#     console.print(table)
+#     console.print()
+
+
 @app.command(name="scan")
 def scan(
     min_size: float = typer.Option(2.0, "--min-size", help="Minimum model file size in GB (default: 2.0)"),
@@ -1228,7 +1185,10 @@ def scan(
 
     try:
         total_found, new_found, registered = discover_and_register_global(
-            min_size_gb=min_size, max_depth=max_depth, show_progress=True, lang=lang
+            min_size_gb=min_size,
+            max_depth=max_depth,
+            show_progress=True,
+            lang=lang
         )
 
         format_discovery_summary(
@@ -1237,7 +1197,7 @@ def scan(
             registered=registered,
             lang=lang,
             show_models=True,
-            max_show=20,
+            max_show=20
         )
 
         if new_found > 0:
@@ -1257,7 +1217,6 @@ def scan(
     except Exception as e:
         print_error(f"Scan failed: {e}")
         raise typer.Exit(1)
-
 
 @app.command(name="add")
 def add_model(
@@ -1286,7 +1245,11 @@ def add_model(
     console.print()
     try:
         total_found, new_found, registered = discover_and_register_path(
-            path=str(path_obj), min_size_gb=2.0, existing_paths=None, show_progress=True, lang=lang
+            path=str(path_obj),
+            min_size_gb=2.0,
+            existing_paths=None,
+            show_progress=True,
+            lang=lang
         )
 
         console.print()
@@ -1295,9 +1258,7 @@ def add_model(
                 if lang == "zh":
                     console.print(f"[yellow]在此路径找到 {total_found} 个模型，但所有模型均已在列表中[/yellow]")
                 else:
-                    console.print(
-                        f"[yellow]Found {total_found} models in this path, but all already in the list[/yellow]"
-                    )
+                    console.print(f"[yellow]Found {total_found} models in this path, but all already in the list[/yellow]")
             else:
                 if lang == "zh":
                     console.print("[yellow]未找到模型[/yellow]")
@@ -1309,13 +1270,9 @@ def add_model(
                     console.print("  Supported formats: *.gguf, *.safetensors (with config.json)")
         else:
             if lang == "zh":
-                console.print(
-                    f"[green]✓[/green] 在此路径找到 {total_found} 个模型，成功添加 {len(registered)} 个新模型"
-                )
+                console.print(f"[green]✓[/green] 在此路径找到 {total_found} 个模型，成功添加 {len(registered)} 个新模型")
             else:
-                console.print(
-                    f"[green]✓[/green] Found {total_found} models in this path, added {len(registered)} new models"
-                )
+                console.print(f"[green]✓[/green] Found {total_found} models in this path, added {len(registered)} new models")
 
             if registered:
                 console.print()
@@ -1337,94 +1294,36 @@ def add_model(
 
 @app.command(name="edit")
 def edit_model(
-    name: Optional[str] = typer.Argument(
-        None, help="Name of model to edit (optional - will show selection if not provided)"
-    ),
+    name: str = typer.Argument(..., help="Name of model to edit"),
 ) -> None:
     """Edit model information interactively."""
     from rich.prompt import Prompt, Confirm
     from rich.panel import Panel
-    from rich.table import Table
     from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 
     registry = UserModelRegistry()
 
-    # If no name provided, show interactive selection
-    if name is None:
-        all_models = registry.list_models()
-
-        # Filter to only show MoE GPU models (safetensors that are not AMX)
-        moe_models = []
-        for m in all_models:
-            if m.format == "safetensors":
-                is_amx_model, _ = is_amx_weights(m.path)
-                if not is_amx_model:
-                    moe_models.append(m)
-
-        if not moe_models:
-            print_error(t("model_edit_no_models"))
-            console.print()
-            console.print(f"  {t('model_edit_add_hint_scan')} [cyan]kt model scan[/cyan]")
-            console.print(f"  {t('model_edit_add_hint_add')} [cyan]kt model add <path>[/cyan]")
-            console.print()
-            raise typer.Exit(1)
-
-        # Display models table with # column
+    # Load model
+    model = registry.get_model(name)
+    if not model:
+        print_error(t("model_edit_not_found", name=name))
         console.print()
-        console.print(f"[bold cyan]{t('model_edit_select_title')}[/bold cyan]")
+        console.print(f"  {t('model_edit_list_hint')} [cyan]kt model list[/cyan]")
         console.print()
-
-        table = Table(show_header=True, header_style="bold", show_lines=False)
-        table.add_column("#", justify="right", style="cyan", no_wrap=True)
-        table.add_column("Name", style="cyan", no_wrap=True)
-        table.add_column("Format", style="dim")
-        table.add_column("Path", style="dim", overflow="fold")
-
-        for i, model_item in enumerate(moe_models, 1):
-            table.add_row(str(i), model_item.name, model_item.format, model_item.path)
-
-        console.print(table)
-        console.print()
-
-        from rich.prompt import IntPrompt
-
-        choice = IntPrompt.ask(t("model_edit_select_model"), default=1, show_choices=False)
-
-        if choice < 1 or choice > len(moe_models):
-            print_error(t("model_edit_invalid_choice"))
-            raise typer.Exit(1)
-
-        model = moe_models[choice - 1]
-    else:
-        # Load model by name
-        model = registry.get_model(name)
-        if not model:
-            print_error(t("model_edit_not_found", name=name))
-            console.print()
-            console.print(f"  {t('model_edit_list_hint')} [cyan]kt model list[/cyan]")
-            console.print()
-            raise typer.Exit(1)
-
-    # Keep track of original values to detect changes
-    original_name = model.name
-    original_repo_type = model.repo_type
-    original_repo_id = model.repo_id
-    original_gpu_model_ids = model.gpu_model_ids.copy() if model.gpu_model_ids else None
-
-    # Working copy for edits (not saved until user confirms)
-    edited_name = model.name
-    edited_repo_type = model.repo_type
-    edited_repo_id = model.repo_id
-    edited_gpu_model_ids = model.gpu_model_ids.copy() if model.gpu_model_ids else None
-
-    has_changes = False
+        raise typer.Exit(1)
 
     while True:
-        # Display current configuration (show edited values)
+        # Display current configuration
         console.print()
         console.print(f"[bold cyan]{t('model_edit_current_config')}[/bold cyan]\n")
 
-        # Format SHA256 status (from original model)
+        # Format repo info
+        if model.repo_id:
+            repo_info = f"{model.repo_type}: {model.repo_id}"
+        else:
+            repo_info = "-"
+
+        # Format SHA256 status
         sha256_display = SHA256_STATUS_MAP_PLAIN.get(model.sha256_status, model.sha256_status)
 
         # Check if this is a CPU model (GGUF or AMX)
@@ -1435,34 +1334,26 @@ def edit_model(
 
         # Format GPU links info (for CPU models)
         gpu_links_info = ""
-        if is_cpu_model and edited_gpu_model_ids:
+        if is_cpu_model and model.gpu_model_ids:
             gpu_names = []
-            for gpu_id in edited_gpu_model_ids:
+            for gpu_id in model.gpu_model_ids:
                 gpu_obj = registry.get_model_by_id(gpu_id)
                 if gpu_obj:
                     gpu_names.append(gpu_obj.name)
                 else:
                     gpu_names.append(f"[dim red]{gpu_id[:8]}... (deleted)[/dim red]")
-            gpu_links_info = f"\n[bold]{t('model_edit_gpu_links')}[/bold]  {', '.join(gpu_names)}"
+            gpu_links_info = f"\n[bold]GPU Links:[/bold]  {', '.join(gpu_names)}"
 
-        content = f"""[bold]Name:[/bold]       {edited_name}
+        content = f"""[bold]Name:[/bold]       {model.name}
 [bold]Path:[/bold]       {model.path}
 [bold]Format:[/bold]     {model.format}
-[bold]Repo Type:[/bold]  {edited_repo_type or '-'}
-[bold]Repo ID:[/bold]    {edited_repo_id or '-'}
+[bold]Repo Type:[/bold]  {model.repo_type or '-'}
+[bold]Repo ID:[/bold]    {model.repo_id or '-'}
 [bold]SHA256:[/bold]     {sha256_display}{gpu_links_info}"""
 
         panel = Panel(content, border_style="cyan", padding=(0, 1))
         console.print(panel)
         console.print()
-
-        # Check if there are any changes
-        has_changes = (
-            edited_name != original_name
-            or edited_repo_type != original_repo_type
-            or edited_repo_id != original_repo_id
-            or edited_gpu_model_ids != original_gpu_model_ids
-        )
 
         # Show menu
         console.print(f"[bold]{t('model_edit_what_to_edit')}[/bold]")
@@ -1470,52 +1361,34 @@ def edit_model(
         console.print("  [2] " + t("model_edit_option_repo"))
         console.print("  [3] " + t("model_edit_option_delete"))
         if is_cpu_model:
-            console.print("  [4] " + t("model_edit_manage_gpu_links"))
-            save_option = "5"
-            cancel_option = "6"
-            console.print(
-                f"  [{save_option}] {t('model_edit_save_changes')}"
-                + (
-                    f" [cyan]{t('model_edit_has_changes')}[/cyan]"
-                    if has_changes
-                    else f" [dim]{t('model_edit_no_changes')}[/dim]"
-                )
-            )
-            console.print(f"  [{cancel_option}] " + t("model_edit_option_cancel"))
-            console.print()
-            choice = Prompt.ask(t("model_edit_choice_prompt"), choices=["1", "2", "3", "4", "5", "6"], default="6")
-        else:
-            save_option = "4"
-            cancel_option = "5"
-            console.print(
-                f"  [{save_option}] {t('model_edit_save_changes')}"
-                + (
-                    f" [cyan]{t('model_edit_has_changes')}[/cyan]"
-                    if has_changes
-                    else f" [dim]{t('model_edit_no_changes')}[/dim]"
-                )
-            )
-            console.print(f"  [{cancel_option}] " + t("model_edit_option_cancel"))
+            console.print("  [4] Manage GPU Links")
+            console.print("  [5] " + t("model_edit_option_cancel"))
             console.print()
             choice = Prompt.ask(t("model_edit_choice_prompt"), choices=["1", "2", "3", "4", "5"], default="5")
+        else:
+            console.print("  [4] " + t("model_edit_option_cancel"))
+            console.print()
+            choice = Prompt.ask(t("model_edit_choice_prompt"), choices=["1", "2", "3", "4"], default="4")
 
         if choice == "1":
-            # Edit name (update working copy only)
+            # Edit name
             console.print()
-            new_name = Prompt.ask(t("model_edit_new_name"), default=edited_name)
+            new_name = Prompt.ask(t("model_edit_new_name"), default=model.name)
 
-            if new_name != edited_name:
-                # Check for conflict (excluding both original and edited names)
-                if new_name != original_name and registry.check_name_conflict(new_name, exclude_name=original_name):
+            if new_name != model.name:
+                # Check for conflict
+                if registry.check_name_conflict(new_name, exclude_name=model.name):
                     print_error(t("model_edit_name_conflict", name=new_name))
                     continue
 
-                edited_name = new_name
-                console.print()
-                print_info(f"[dim]{t('model_edit_name_pending')}[/dim]")
+                # Update
+                old_name = model.name
+                registry.update_model(old_name, {"name": new_name})
+                model.name = new_name  # Update local copy
+                print_success(t("model_edit_name_updated", old_name=old_name, new_name=new_name))
 
         elif choice == "2":
-            # Edit repo configuration (update working copy only)
+            # Edit repo configuration
             console.print()
             console.print(t("model_edit_repo_type_prompt"))
             console.print("  [1] HuggingFace")
@@ -1527,25 +1400,29 @@ def edit_model(
 
             if repo_choice == "3":
                 # Remove repo
-                edited_repo_type = None
-                edited_repo_id = None
-                console.print()
-                print_info(f"[dim]{t('model_edit_repo_remove_pending')}[/dim]")
+                updates = {"repo_type": None, "repo_id": None, "sha256_status": "no_repo"}
+                registry.update_model(model.name, updates)
+                model.repo_type = None
+                model.repo_id = None
+                model.sha256_status = "no_repo"
+                print_success(t("model_edit_repo_removed"))
             else:
                 # Set repo
                 repo_type = "huggingface" if repo_choice == "1" else "modelscope"
                 example = "deepseek-ai/DeepSeek-V3" if repo_choice == "1" else "deepseek/DeepSeek-V3"
 
-                current_default = edited_repo_id if edited_repo_id and edited_repo_type == repo_type else ""
+                current_default = model.repo_id if model.repo_id and model.repo_type == repo_type else ""
                 repo_id = Prompt.ask(
                     t("model_edit_repo_id_prompt", example=example),
                     default=current_default if current_default else None,
                 )
 
-                edited_repo_type = repo_type
-                edited_repo_id = repo_id
-                console.print()
-                print_info(f"[dim]{t('model_edit_repo_update_pending')}[/dim]")
+                updates = {"repo_type": repo_type, "repo_id": repo_id, "sha256_status": "not_checked"}
+                registry.update_model(model.name, updates)
+                model.repo_type = repo_type
+                model.repo_id = repo_id
+                model.sha256_status = "not_checked"
+                print_success(t("model_edit_repo_updated"))
 
         elif choice == "3":
             # Delete model
@@ -1565,15 +1442,15 @@ def edit_model(
                 print_info(t("model_edit_delete_cancelled"))
 
         elif choice == "4" and is_cpu_model:
-            # Manage GPU Links (only for CPU models) - update working copy
+            # Manage GPU Links (only for CPU models)
             console.print()
-            console.print(f"[bold cyan]{t('model_edit_gpu_links_title', name=edited_name)}[/bold cyan]")
+            console.print(f"[bold cyan]Manage GPU Links for {model.name}[/bold cyan]")
             console.print()
 
-            # Show current links (from edited values)
-            if edited_gpu_model_ids:
-                console.print(f"[bold]{t('model_edit_current_gpu_links')}[/bold]")
-                for i, gpu_id in enumerate(edited_gpu_model_ids, 1):
+            # Show current links
+            if model.gpu_model_ids:
+                console.print("[bold]Current GPU links:[/bold]")
+                for i, gpu_id in enumerate(model.gpu_model_ids, 1):
                     gpu_obj = registry.get_model_by_id(gpu_id)
                     if gpu_obj:
                         console.print(f"  [{i}] {gpu_obj.name}")
@@ -1581,17 +1458,17 @@ def edit_model(
                         console.print(f"  [{i}] [red]{gpu_id[:8]}... (deleted)[/red]")
                 console.print()
             else:
-                console.print(f"[dim]{t('model_edit_no_gpu_links')}[/dim]")
+                console.print("[dim]No GPU links configured.[/dim]")
                 console.print()
 
-            console.print(f"{t('model_edit_gpu_options')}")
-            console.print(f"  [1] {t('model_edit_gpu_add')}")
-            console.print(f"  [2] {t('model_edit_gpu_remove')}")
-            console.print(f"  [3] {t('model_edit_gpu_clear')}")
-            console.print(f"  [4] {t('model_edit_gpu_back')}")
+            console.print("Options:")
+            console.print("  [1] Add GPU link")
+            console.print("  [2] Remove GPU link")
+            console.print("  [3] Clear all GPU links")
+            console.print("  [4] Back to main menu")
             console.print()
 
-            link_choice = Prompt.ask(t("model_edit_gpu_choose_option"), choices=["1", "2", "3", "4"], default="4")
+            link_choice = Prompt.ask("Choose option", choices=["1", "2", "3", "4"], default="4")
 
             if link_choice == "1":
                 # Add GPU link
@@ -1606,194 +1483,97 @@ def edit_model(
 
                 if not available_gpu_models:
                     console.print()
-                    console.print(f"[yellow]{t('model_edit_gpu_none_available')}[/yellow]")
+                    console.print("[yellow]No GPU models available to link.[/yellow]")
                     console.print()
                 else:
                     console.print()
-                    console.print(f"{t('model_edit_gpu_available_models')}")
+                    console.print("Available GPU models:")
                     for i, gpu_m in enumerate(available_gpu_models, 1):
-                        already_linked = edited_gpu_model_ids and gpu_m.id in edited_gpu_model_ids
-                        status = f" [dim]{t('model_edit_gpu_already_linked')}[/dim]" if already_linked else ""
+                        already_linked = model.gpu_model_ids and gpu_m.id in model.gpu_model_ids
+                        status = " [dim](already linked)[/dim]" if already_linked else ""
                         console.print(f"  [{i}] {gpu_m.name}{status}")
                     console.print()
 
-                    gpu_choice = Prompt.ask(t("model_edit_gpu_enter_number"), default="0")
+                    gpu_choice = Prompt.ask("Enter GPU model number to add", default="0")
                     try:
                         gpu_idx = int(gpu_choice) - 1
                         if 0 <= gpu_idx < len(available_gpu_models):
                             selected_gpu = available_gpu_models[gpu_idx]
 
-                            # Add to edited_gpu_model_ids
-                            current_ids = list(edited_gpu_model_ids) if edited_gpu_model_ids else []
+                            # Add to gpu_model_ids
+                            current_ids = list(model.gpu_model_ids) if model.gpu_model_ids else []
                             if selected_gpu.id not in current_ids:
                                 current_ids.append(selected_gpu.id)
-                                edited_gpu_model_ids = current_ids
+                                registry.update_model(model.name, {"gpu_model_ids": current_ids})
+                                model.gpu_model_ids = current_ids
                                 console.print()
-                                print_info(f"[dim]{t('model_edit_gpu_link_pending', name=selected_gpu.name)}[/dim]")
+                                print_success(f"Added GPU link: {selected_gpu.name}")
                             else:
                                 console.print()
-                                console.print(f"[yellow]{t('model_edit_gpu_already_exists')}[/yellow]")
+                                console.print("[yellow]This GPU model is already linked.[/yellow]")
                         else:
                             console.print()
-                            console.print(f"[red]{t('model_edit_gpu_invalid_choice')}[/red]")
+                            console.print("[red]Invalid choice.[/red]")
                     except ValueError:
                         console.print()
-                        console.print(f"[red]{t('model_edit_gpu_invalid_input')}[/red]")
+                        console.print("[red]Invalid input.[/red]")
 
             elif link_choice == "2":
                 # Remove GPU link
-                if not edited_gpu_model_ids:
+                if not model.gpu_model_ids:
                     console.print()
-                    console.print(f"[yellow]{t('model_edit_gpu_none_to_remove')}[/yellow]")
+                    console.print("[yellow]No GPU links to remove.[/yellow]")
                     console.print()
                 else:
                     console.print()
-                    console.print(f"{t('model_edit_gpu_choose_to_remove')}")
+                    console.print("Choose GPU link to remove:")
                     gpu_list = []
-                    for i, gpu_id in enumerate(edited_gpu_model_ids, 1):
+                    for i, gpu_id in enumerate(model.gpu_model_ids, 1):
                         gpu_obj = registry.get_model_by_id(gpu_id)
                         gpu_name = gpu_obj.name if gpu_obj else f"{gpu_id[:8]}... (deleted)"
                         gpu_list.append((gpu_id, gpu_name))
                         console.print(f"  [{i}] {gpu_name}")
                     console.print()
 
-                    remove_choice = Prompt.ask(t("model_edit_gpu_enter_to_remove"), default="0")
+                    remove_choice = Prompt.ask("Enter number to remove", default="0")
                     try:
                         remove_idx = int(remove_choice) - 1
                         if 0 <= remove_idx < len(gpu_list):
                             removed_id, removed_name = gpu_list[remove_idx]
-                            new_ids = [gid for gid in edited_gpu_model_ids if gid != removed_id]
-                            edited_gpu_model_ids = new_ids if new_ids else None
+                            new_ids = [gid for gid in model.gpu_model_ids if gid != removed_id]
+                            registry.update_model(model.name, {"gpu_model_ids": new_ids if new_ids else None})
+                            model.gpu_model_ids = new_ids if new_ids else None
                             console.print()
-                            print_info(f"[dim]{t('model_edit_gpu_remove_pending', name=removed_name)}[/dim]")
+                            print_success(f"Removed GPU link: {removed_name}")
                         else:
                             console.print()
-                            console.print(f"[red]{t('model_edit_gpu_invalid_choice')}[/red]")
+                            console.print("[red]Invalid choice.[/red]")
                     except ValueError:
                         console.print()
-                        console.print(f"[red]{t('model_edit_gpu_invalid_input')}[/red]")
+                        console.print("[red]Invalid input.[/red]")
 
             elif link_choice == "3":
                 # Clear all GPU links
-                if not edited_gpu_model_ids:
+                if not model.gpu_model_ids:
                     console.print()
-                    console.print(f"[yellow]{t('model_edit_gpu_none_to_clear')}[/yellow]")
+                    console.print("[yellow]No GPU links to clear.[/yellow]")
                     console.print()
                 else:
-                    if Confirm.ask(t("model_edit_gpu_clear_confirm"), default=False):
-                        edited_gpu_model_ids = None
+                    if Confirm.ask("Remove all GPU links?", default=False):
+                        registry.update_model(model.name, {"gpu_model_ids": None})
+                        model.gpu_model_ids = None
                         console.print()
-                        print_info(f"[dim]{t('model_edit_gpu_clear_pending')}[/dim]")
+                        print_success("All GPU links removed.")
                     else:
                         console.print()
-                        print_info(t("model_edit_cancelled_short"))
+                        print_info("Cancelled.")
 
-        elif choice == save_option:
-            # Save changes
-            if not has_changes:
-                console.print()
-                print_info(f"[dim]{t('model_edit_no_changes_to_save')}[/dim]")
-                continue
-
-            console.print()
-            console.print(f"[bold cyan]{t('model_edit_saving')}[/bold cyan]")
-            console.print()
-
-            # Determine if repo info changed (for verification prompt)
-            repo_changed = (original_repo_id is None and edited_repo_id is not None) or (
-                original_repo_id != edited_repo_id
-            )
-
-            # Build updates dict
-            updates = {}
-            if edited_name != original_name:
-                updates["name"] = edited_name
-            if edited_repo_type != original_repo_type:
-                updates["repo_type"] = edited_repo_type
-            if edited_repo_id != original_repo_id:
-                updates["repo_id"] = edited_repo_id
-                # Update SHA256 status when repo changes
-                if edited_repo_id is None:
-                    updates["sha256_status"] = "no_repo"
-                else:
-                    updates["sha256_status"] = "not_checked"
-            if edited_gpu_model_ids != original_gpu_model_ids:
-                updates["gpu_model_ids"] = edited_gpu_model_ids
-
-            # Save to registry
-            registry.update_model(original_name, updates)
-            print_success(t("model_edit_saved"))
-
-            # Update local model object
-            if "name" in updates:
-                model.name = edited_name
-            if "repo_type" in updates:
-                model.repo_type = edited_repo_type
-            if "repo_id" in updates:
-                model.repo_id = edited_repo_id
-            if "sha256_status" in updates:
-                model.sha256_status = updates["sha256_status"]
-            if "gpu_model_ids" in updates:
-                model.gpu_model_ids = edited_gpu_model_ids
-
-            # Update original values for next iteration
-            original_name = edited_name
-            original_repo_type = edited_repo_type
-            original_repo_id = edited_repo_id
-            original_gpu_model_ids = edited_gpu_model_ids.copy() if edited_gpu_model_ids else None
-
-            # Display updated configuration
-            console.print()
-            console.print(f"[bold cyan]{t('model_edit_updated_config')}[/bold cyan]\n")
-
-            sha256_display = SHA256_STATUS_MAP_PLAIN.get(model.sha256_status, model.sha256_status)
-            gpu_links_info = ""
-            if is_cpu_model and model.gpu_model_ids:
-                gpu_names = []
-                for gpu_id in model.gpu_model_ids:
-                    gpu_obj = registry.get_model_by_id(gpu_id)
-                    if gpu_obj:
-                        gpu_names.append(gpu_obj.name)
-                    else:
-                        gpu_names.append(f"[dim red]{gpu_id[:8]}... (deleted)[/dim red]")
-                gpu_links_info = f"\n[bold]{t('model_edit_gpu_links')}[/bold]  {', '.join(gpu_names)}"
-
-            content = f"""[bold]Name:[/bold]       {model.name}
-[bold]Path:[/bold]       {model.path}
-[bold]Format:[/bold]     {model.format}
-[bold]Repo Type:[/bold]  {model.repo_type or '-'}
-[bold]Repo ID:[/bold]    {model.repo_id or '-'}
-[bold]SHA256:[/bold]     {sha256_display}{gpu_links_info}"""
-
-            panel = Panel(content, border_style="green", padding=(0, 1))
-            console.print(panel)
-            console.print()
-
-            # If repo changed, suggest verification
-            if repo_changed and model.repo_id:
-                console.print()
-                console.print(f"[bold yellow]{t('model_edit_repo_changed_warning')}[/bold yellow]")
-                console.print()
-                console.print(f"  {t('model_edit_verify_hint')}")
-                console.print()
-
-            return
-
-        elif choice == cancel_option:
+        elif choice == "4" or (choice == "5" and is_cpu_model):
             # Cancel
             console.print()
-            if has_changes:
-                if Confirm.ask(f"[yellow]{t('model_edit_discard_changes')}[/yellow]", default=False):
-                    print_info(t("model_edit_cancelled"))
-                    console.print()
-                    return
-                else:
-                    # Go back to menu
-                    continue
-            else:
-                print_info(t("model_edit_cancelled"))
-                console.print()
-                return
+            print_info(t("model_edit_cancelled"))
+            console.print()
+            return
 
 
 @app.command(name="info")
@@ -1850,7 +1630,6 @@ def info_model(
                     # Check for MOE model
                     try:
                         from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
-
                         moe_result = analyze_moe_model(str(path_obj))
                         if moe_result and moe_result.get("num_experts", 0) > 0:
                             moe_info = f"""
@@ -2143,9 +1922,7 @@ def verify_model(
             console.print()
             console.print("[yellow]No MoE models with repo_id found for verification.[/yellow]")
             console.print()
-            console.print(
-                f"[dim]Only MoE models can be verified. Use [cyan]kt model list[/cyan] to see all models.[/dim]"
-            )
+            console.print(f"[dim]Only MoE models can be verified. Use [cyan]kt model list[/cyan] to see all models.[/dim]")
             console.print()
             return None
 
@@ -2201,7 +1978,7 @@ def verify_model(
                 experts_display,
                 activated_display,
                 repo_display,
-                status_icon,
+                status_icon
             )
 
         console.print(table)
@@ -2295,37 +2072,52 @@ def verify_model(
 
         # Helper function to fetch remote hashes with timeout (using console.status like connectivity check)
         def fetch_remote_hashes_with_timeout(repo_type, repo_id, use_mirror, timeout_seconds):
-            """Fetch remote hashes with timeout, returns (hashes_dict, timed_out)."""
+            """Fetch remote hashes with timeout, returns (hashes_dict, timed_out)"""
+            import time
             from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
             from kt_kernel.cli.utils.model_verifier import fetch_model_sha256
 
-            def fetch_hashes():
+            def fetch_simple():
+                """Fetch hashes"""
                 platform = "hf" if repo_type == "huggingface" else "ms"
                 return fetch_model_sha256(repo_id, platform, use_mirror=use_mirror, timeout=timeout_seconds)
 
+            start_time = time.time()
             executor = ThreadPoolExecutor(max_workers=1)
             try:
-                future = executor.submit(fetch_hashes)
+                future = executor.submit(fetch_simple)
                 hashes = future.result(timeout=timeout_seconds)
-                executor.shutdown(wait=False)
-                return (hashes, False)
-            except (FutureTimeoutError, Exception):
-                executor.shutdown(wait=False)
-                return (None, True)
+                elapsed = time.time() - start_time
+                console.print(f"[dim]DEBUG: Completed in {elapsed:.1f}s[/dim]")
+                executor.shutdown(wait=False)  # Don't wait for cleanup
+                return (hashes, False)  # Success
+            except FutureTimeoutError:
+                elapsed = time.time() - start_time
+                console.print(f"[dim]DEBUG: Timeout after {elapsed:.1f}s[/dim]")
+                executor.shutdown(wait=False)  # Force shutdown without waiting
+                return (None, True)  # Timeout
+            except Exception as e:
+                elapsed = time.time() - start_time
+                console.print(f"[dim]DEBUG: Error after {elapsed:.1f}s: {type(e).__name__}[/dim]")
+                executor.shutdown(wait=False)  # Force shutdown without waiting
+                return (None, True)  # Error
 
         # Step 1: Fetch remote hashes with timeout and fallback
+        result = None
+        lang = get_lang()
         official_hashes = None
 
         if selected_model.repo_type == "huggingface":
             # HF fallback chain: HF → HF-mirror → MS
 
             # Try 1: HuggingFace (or HF-mirror if already set)
-            status = console.status(
-                "[dim]Fetching remote hashes from HuggingFace{}...[/dim]".format(" mirror" if use_mirror else "")
-            )
+            status = console.status("[dim]Fetching remote hashes from HuggingFace{}...[/dim]".format(" mirror" if use_mirror else ""))
             status.start()
             official_hashes, timed_out = fetch_remote_hashes_with_timeout(
-                repo_type="huggingface", repo_id=selected_model.repo_id, use_mirror=use_mirror, timeout_seconds=10
+                repo_type="huggingface",
+                repo_id=selected_model.repo_id,
+                use_mirror=use_mirror,
+                timeout_seconds=10
             )
             status.stop()
 
@@ -2342,7 +2134,7 @@ def verify_model(
                     repo_type="huggingface",
                     repo_id=selected_model.repo_id,
                     use_mirror=True,  # Use mirror
-                    timeout_seconds=10,
+                    timeout_seconds=10
                 )
                 status.stop()
 
@@ -2359,7 +2151,7 @@ def verify_model(
                     repo_type="modelscope",
                     repo_id=selected_model.repo_id,  # Use same repo_id
                     use_mirror=False,
-                    timeout_seconds=10,
+                    timeout_seconds=10
                 )
                 status.stop()
 
@@ -2380,7 +2172,10 @@ def verify_model(
             status = console.status("[dim]Fetching remote hashes from ModelScope...[/dim]")
             status.start()
             official_hashes, timed_out = fetch_remote_hashes_with_timeout(
-                repo_type="modelscope", repo_id=selected_model.repo_id, use_mirror=False, timeout_seconds=10
+                repo_type="modelscope",
+                repo_id=selected_model.repo_id,
+                use_mirror=False,
+                timeout_seconds=10
             )
             status.stop()
 
@@ -2417,10 +2212,11 @@ def verify_model(
             # Determine which files to hash
             if files_to_verify:
                 # Only hash files that need re-verification
-                clean_filenames = {
-                    Path(f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()).name
-                    for f in files_to_verify
-                }
+                clean_filenames = set()
+                for f in files_to_verify:
+                    clean_f = f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()
+                    clean_filenames.add(Path(clean_f).name)
+
                 files_to_hash = [
                     f for f in local_dir_path.glob("*.safetensors") if f.is_file() and f.name in clean_filenames
                 ]
@@ -2442,7 +2238,11 @@ def verify_model(
                     completed_count[0] += 1
                     if "✓" in msg:
                         filename = msg.split("✓")[1].strip().split("(")[0].strip()
-                        progress.update(hash_task_id, advance=1, description=f"[yellow]Hashing: {filename[:40]}...")
+                        progress.update(
+                            hash_task_id,
+                            advance=1,
+                            description=f"[yellow]Hashing: {filename[:40]}..."
+                        )
 
             local_hashes = calculate_local_sha256(
                 local_dir_path,
@@ -2461,7 +2261,7 @@ def verify_model(
             files_missing = []
             files_passed = 0
 
-            for filename, official_hash in official_hashes.items():
+            for idx, (filename, official_hash) in enumerate(official_hashes.items(), 1):
                 file_basename = Path(filename).name
 
                 # Find matching local file
@@ -2537,10 +2337,16 @@ def verify_model(
                 console.print()
                 print_info("Repairing failed files...")
 
-                # Extract clean filenames by removing status suffixes
-                files_to_download = [
-                    f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip() for f in result["files_failed"]
-                ]
+                # Extract clean filenames
+                files_to_download = []
+                for f in result["files_failed"]:
+                    if "(missing)" in f:
+                        clean_name = f.replace(" (missing)", "").strip()
+                    elif "(hash mismatch)" in f:
+                        clean_name = f.replace(" (hash mismatch)", "").strip()
+                    else:
+                        clean_name = f.strip()
+                    files_to_download.append(clean_name)
 
                 # Download each failed file
                 success_count = 0
@@ -2622,6 +2428,14 @@ def verify_model(
                         name = selected_model.name
                         files_to_verify = files_to_download
                         continue
+        elif result["status"] == "error":
+            console.print()
+            console.print("─" * 60)
+            console.print()
+            print_error("Verification Error")
+            console.print()
+            console.print(f"  {result['error_message']}")
+            console.print()
 
 
 @app.command(name="verify-all")

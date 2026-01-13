@@ -283,7 +283,7 @@ class ModelManagerApp(App):
 
         # AMX table
         amx_table = self.query_one("#amx-table", DataTable)
-        amx_table.add_columns("Name", "NUMA", "Size", "GPU Links", "Path")
+        amx_table.add_columns("Name", "Format", "NUMA", "Size", "GPU Links", "Path")
         amx_table.cursor_type = "row"
         amx_table.zebra_stripes = True
 
@@ -294,12 +294,22 @@ class ModelManagerApp(App):
         non_moe_table.zebra_stripes = True
 
     def load_models(self) -> None:
-        """Load models from registry"""
+        """Load models from registry - runs analysis in background"""
+        # Start async loading in background worker
+        self.run_worker(self._load_models_async(), name="load-models", group="load", exclusive=True)
+
+    async def _load_models_async(self) -> None:
+        """Async version: Load models from registry with MoE analysis in background"""
+        import threading
+
         try:
             from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
             from kt_kernel.cli.commands.model import is_amx_weights
             from kt_kernel.cli.utils.model_scanner import format_size
             from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
+
+            # Check if we're in a worker thread
+            is_worker = threading.current_thread() != threading.main_thread()
 
             registry = UserModelRegistry()
             models = registry.list_models()
@@ -327,10 +337,19 @@ class ModelManagerApp(App):
             non_moe_models = []
 
             if gpu_models:
-                self.sub_title = f"Analyzing {len(gpu_models)} GPU models..."
+                if is_worker:
+                    self.call_from_thread(setattr, self, "sub_title", f"🔬 Analyzing {len(gpu_models)} GPU models...")
+                else:
+                    self.sub_title = f"🔬 Analyzing {len(gpu_models)} GPU models..."
+
                 for i, model in enumerate(gpu_models):
                     # Update progress in subtitle
-                    self.sub_title = f"Analyzing GPU models... ({i+1}/{len(gpu_models)})"
+                    if is_worker:
+                        self.call_from_thread(
+                            setattr, self, "sub_title", f"🔬 Analyzing GPU models... ({i+1}/{len(gpu_models)})"
+                        )
+                    else:
+                        self.sub_title = f"🔬 Analyzing GPU models... ({i+1}/{len(gpu_models)})"
                     try:
                         result = analyze_moe_model(model.path, use_cache=True)
                         if result and result.get("num_experts", 0) > 0:
@@ -346,20 +365,28 @@ class ModelManagerApp(App):
                         reason = f"Analysis failed"
                         non_moe_models.append((model, reason))
 
-            # Populate tables
-            self.populate_gpu_table(moe_models)
-            self.populate_non_moe_table(non_moe_models)
-            self.populate_gguf_table(gguf_models)
-            self.populate_amx_table(amx_models)
-
-            # Update subtitle
+            # Calculate total before UI update
             total = len(moe_models) + len(non_moe_models) + len(gguf_models) + len(amx_models)
-            self.sub_title = f"Total: {total} models | MoE: {len(moe_models)} | Non-MoE: {len(non_moe_models)} | GGUF: {len(gguf_models)} | AMX: {len(amx_models)}"
 
-            # Auto-select first model in GPU table
-            gpu_table = self.query_one("#gpu-table", DataTable)
-            if gpu_table.row_count > 0:
-                gpu_table.move_cursor(row=0)
+            # Populate tables and update UI
+            def update_ui():
+                self.populate_gpu_table(moe_models)
+                self.populate_non_moe_table(non_moe_models)
+                self.populate_gguf_table(gguf_models)
+                self.populate_amx_table(amx_models)
+
+                # Update subtitle
+                self.sub_title = f"Total: {total} models | MoE: {len(moe_models)} | Non-MoE: {len(non_moe_models)} | GGUF: {len(gguf_models)} | AMX: {len(amx_models)}"
+
+                # Auto-select first model in GPU table
+                gpu_table = self.query_one("#gpu-table", DataTable)
+                if gpu_table.row_count > 0:
+                    gpu_table.move_cursor(row=0)
+
+            if is_worker:
+                self.call_from_thread(update_ui)
+            else:
+                update_ui()
 
             # Check if no models found - auto scan on first run
             if total == 0 and not hasattr(self, "_initial_scan_done"):
@@ -379,20 +406,36 @@ class ModelManagerApp(App):
 
                 if is_first_run:
                     # First run - automatically scan all disks in background
-                    self.notify(
-                        "🌍 First run detected - scanning all disks for models...", severity="information", timeout=5
-                    )
-                    self.run_worker(self._global_scan_async(), name="global-scan", group="scan", exclusive=True)
+                    if is_worker:
+                        self.call_from_thread(
+                            self.notify,
+                            "🌍 First run detected - scanning all disks for models...",
+                            "information",
+                            5,
+                        )
+                    else:
+                        self.notify("🌍 First run detected - scanning all disks for models...", "information", 5)
+                    # Note: Cannot call run_worker from worker thread - global scan will be triggered on next load
+                    await self._global_scan_async()
                 else:
                     # Paths exist but no models - just notify
-                    self.notify(
-                        "No models found. Add models or scan paths in Settings (press 's' or '7')",
-                        severity="warning",
-                        timeout=5,
-                    )
+                    if is_worker:
+                        self.call_from_thread(
+                            self.notify,
+                            "No models found. Add models or scan paths in Settings (press 's' or '7')",
+                            "warning",
+                            5,
+                        )
+                    else:
+                        self.notify(
+                            "No models found. Add models or scan paths in Settings (press 's' or '7')", "warning", 5
+                        )
 
         except Exception as e:
-            self.sub_title = f"Error loading models: {e}"
+            if is_worker:
+                self.call_from_thread(setattr, self, "sub_title", f"Error loading models: {e}")
+            else:
+                self.sub_title = f"Error loading models: {e}"
 
     def populate_gpu_table(self, models: List) -> None:
         """Populate GPU models table"""
@@ -578,7 +621,12 @@ class ModelManagerApp(App):
                     if len(gpu_names) > 2:
                         gpu_links += f" +{len(gpu_names) - 2}"
 
-            table.add_row(model.name, f"{numa_count} NUMA", size_str, gpu_links, model.path, key=model.id)  # Path
+            # Detect AMX quantization format
+            format_str = self._detect_amx_quant_type(model.path)
+
+            table.add_row(
+                model.name, format_str, f"{numa_count} NUMA", size_str, gpu_links, model.path, key=model.id
+            )  # Path
 
     def on_model_manager_app_verify_progress(self, message: VerifyProgress) -> None:
         """Handle verification progress message"""
@@ -920,19 +968,225 @@ class ModelManagerApp(App):
         if config is None:
             return
 
-        # TODO: Implement actual run logic
-        gpu_model = config["gpu_model"]
-        cpu_model_id = config["cpu_model_id"]
-        gpu_experts = config["gpu_experts"]
-        cpu_threads = config["cpu_threads"]
-        numa_nodes = config["numa_nodes"]
-        total_tokens = config["total_tokens"]
+        try:
+            import sys
+            import subprocess
+            from pathlib import Path
+            from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
+            from kt_kernel.cli.config.settings import get_settings
 
-        self.notify(
-            f"Run config ready: GPU={gpu_model.name}, Experts={gpu_experts}, "
-            f"Threads={cpu_threads}, NUMA={numa_nodes}, Tokens={total_tokens}",
-            severity="information",
-        )
+            # Extract config
+            gpu_model = config["gpu_model"]
+            cpu_model_id = config["cpu_model_id"]
+            gpu_experts = config["gpu_experts"]
+            cpu_threads = config["cpu_threads"]
+            numa_nodes = config["numa_nodes"]
+            total_tokens = config["total_tokens"]
+            tensor_parallel = config.get("tensor_parallel", 1)
+            selected_gpus = config.get("selected_gpus", list(range(tensor_parallel)))
+
+            # Get CPU model from registry
+            registry = UserModelRegistry()
+            cpu_model = registry.get_model_by_id(cpu_model_id)
+            if not cpu_model:
+                self.notify("CPU model not found", severity="error")
+                return
+
+            # Detect kt-method based on CPU model format
+            kt_method = self._detect_kt_method(cpu_model)
+            self.log.info(f"Detected kt-method: {kt_method} for model {cpu_model.name} ({cpu_model.format})")
+
+            # Get settings
+            settings = get_settings()
+            host = settings.get("server.host", "0.0.0.0")
+            port = settings.get("server.port", 30000)
+
+            # Build sglang.launch_server command
+            cmd = [
+                sys.executable,
+                "-m",
+                "sglang.launch_server",
+                "--host",
+                str(host),
+                "--port",
+                str(port),
+                "--model",
+                str(gpu_model.path),
+                "--trust-remote-code",
+                "--mem-fraction-static",
+                "0.92",
+                "--chunked-prefill-size",
+                "4096",
+                "--max-running-requests",
+                "32",
+                "--max-total-tokens",
+                str(total_tokens),
+                "--watchdog-timeout",
+                "3000",
+                "--enable-mixed-chunk",
+                "--tensor-parallel-size",
+                str(tensor_parallel),
+                "--enable-p2p-check",
+                "--attention-backend",
+                "triton",
+            ]
+
+            # Add kt-kernel parameters (only if using CPU offloading or quantized weights)
+            if cpu_threads > 0 or gpu_experts >= 0:
+                cmd.extend(
+                    [
+                        "--kt-weight-path",
+                        str(cpu_model.path),
+                        "--kt-cpuinfer",
+                        str(cpu_threads),
+                        "--kt-threadpool-count",
+                        str(numa_nodes),
+                        "--kt-num-gpu-experts",
+                        str(gpu_experts),
+                        "--kt-method",
+                        kt_method,
+                        "--kt-gpu-prefill-token-threshold",
+                        "4096",
+                    ]
+                )
+
+            # Add served model name if available
+            if gpu_model.name:
+                cmd.extend(["--served-model-name", gpu_model.name])
+
+            # Build environment variables
+            import os
+
+            env = os.environ.copy()
+
+            # Set CUDA_VISIBLE_DEVICES to selected GPUs
+            if selected_gpus:
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in selected_gpus)
+                self.log.info(f"CUDA_VISIBLE_DEVICES: {env['CUDA_VISIBLE_DEVICES']}")
+
+            # Add default env vars
+            env.update(
+                {
+                    "PYTORCH_ALLOC_CONF": "expandable_segments:True",
+                    "SGLANG_ENABLE_JIT_DEEPGEMM": "0",
+                }
+            )
+
+            # Add custom env vars from config
+            inference_env = settings.get("inference.env", {})
+            if isinstance(inference_env, dict):
+                env.update({k: str(v) for k, v in inference_env.items()})
+
+            # Show command preview
+            cmd_str = " ".join(cmd)
+            self.notify(
+                f"Starting server: {gpu_model.name} (kt-method: {kt_method})", severity="information", timeout=5
+            )
+            self.log.info(f"Command: {cmd_str}")
+
+            # Execute command in new terminal or subprocess
+            # For now, just show the command and ask user to run it
+            self.notify("Server starting... Check terminal for output", severity="information", timeout=10)
+
+            # Execute in background
+            try:
+                process = subprocess.Popen(
+                    cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+                )
+
+                self.notify(f"✓ Server started (PID: {process.pid})", severity="information", timeout=5)
+                self.log.info(f"Server process PID: {process.pid}")
+
+            except Exception as e:
+                self.notify(f"Failed to start server: {e}", severity="error", timeout=10)
+                self.log.error(f"Server start error: {e}")
+
+        except Exception as e:
+            self.notify(f"Run config error: {e}", severity="error", timeout=10)
+            self.log.error(f"Run config error: {e}")
+
+    def _detect_amx_quant_type(self, model_path: str) -> str:
+        """
+        Detect AMX quantization type from config.json metadata or model path
+
+        Priority:
+        1. Read from config.json amx_quantization.method (new format)
+        2. Fallback to path-based detection (legacy)
+
+        Returns:
+            "amx-int4", "amx-int8", "amx-awq", "amx-moe-int4", "amx-moe-int8", or "amx"
+        """
+        from pathlib import Path
+        import json
+
+        path = Path(model_path)
+
+        # Priority 1: Read from config.json
+        config_path = path / "config.json"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+
+                # Check for amx_quantization metadata
+                amx_meta = config.get("amx_quantization")
+                if amx_meta and amx_meta.get("converted"):
+                    method = amx_meta.get("method", "").lower()
+                    if method:
+                        # Map method to display format
+                        method_map = {
+                            "int4": "amx-int4",
+                            "int8": "amx-int8",
+                            "awq": "amx-awq",
+                            "moe_int4": "amx-moe-int4",
+                            "moe_int8": "amx-moe-int8",
+                        }
+                        return method_map.get(method, f"amx-{method}")
+            except Exception:
+                pass  # Fallback to path detection
+
+        # Priority 2: Fallback to path-based detection (legacy)
+        path_str = str(path).upper()
+
+        if "INT4" in path_str or "AMXINT4" in path_str:
+            return "amx-int4"
+        elif "INT8" in path_str or "AMXINT8" in path_str:
+            return "amx-int8"
+        elif "AWQ" in path_str:
+            return "amx-awq"
+
+        # Default to int4 as it's the most common
+        return "amx-int4"
+
+    def _detect_kt_method(self, cpu_model) -> str:
+        """
+        Detect kt-method based on CPU model format
+
+        Returns:
+            "LLAMAFILE" for GGUF models
+            "AMXINT4" or "AMXINT8" for AMX safetensors models
+        """
+        # GGUF models use LLAMAFILE
+        if cpu_model.format == "gguf":
+            return "LLAMAFILE"
+
+        # Safetensors (AMX) models - convert display format to kt-method
+        if cpu_model.format == "safetensors":
+            amx_type = self._detect_amx_quant_type(cpu_model.path)
+
+            # Convert display format to kt-method format
+            # "amx-int4" → "AMXINT4"
+            method_map = {
+                "amx-int4": "AMXINT4",
+                "amx-int8": "AMXINT8",
+                "amx-awq": "AMXAWQ",
+                "amx-moe-int4": "AMXINT4",  # MoE still uses AMXINT4
+                "amx-moe-int8": "AMXINT8",  # MoE still uses AMXINT8
+            }
+            return method_map.get(amx_type, "AMXINT4")
+
+        # Fallback
+        return "LLAMAFILE"
 
     def action_edit(self) -> None:
         """Edit selected model"""
@@ -1697,7 +1951,8 @@ class ModelManagerApp(App):
     def _on_settings_action(self, result) -> None:
         """Handle settings dialog result"""
         if result == "force_refresh":
-            self._force_refresh_all()
+            # Run force refresh in background to avoid blocking UI
+            self.run_worker(self._force_refresh_all_async(), name="force-refresh", group="scan", exclusive=True)
         elif result == "add_path":
             self._add_path()
         elif result == "edit_path":
@@ -1709,31 +1964,50 @@ class ModelManagerApp(App):
         elif result == "verify_all":
             self._verify_all()
 
-    def _force_refresh_all(self) -> None:
-        """Force refresh all models and recalculate SHA256"""
+    async def _force_refresh_all_async(self) -> None:
+        """
+        Async version: Force refresh all models and recalculate SHA256.
+        Runs in background worker to avoid blocking UI.
+        """
+        import threading
         from kt_kernel.cli.utils.model_scanner import scan_directory
         from kt_kernel.cli.utils.user_model_registry import UserModelRegistry, UserModel
         from kt_kernel.cli.config.settings import get_settings
         from pathlib import Path
 
+        # Check if we're in a worker thread
+        is_worker = threading.current_thread() != threading.main_thread()
+
         try:
-            self.notify("🔄 Force refreshing all models...", severity="information", timeout=3)
+            if is_worker:
+                self.call_from_thread(self.notify, "🔄 Force refreshing all models...", "information", 3)
+            else:
+                self.notify("🔄 Force refreshing all models...", severity="information", timeout=3)
 
             settings = get_settings()
             model_paths = settings.get_model_paths()
 
             # If no paths configured, use global scan
             if not model_paths or not any(p.exists() for p in model_paths):
-                self._global_scan()
+                await self._global_scan_async()
                 return
 
             # Scan all configured paths
-            self.sub_title = "Scanning directories..."
+            if is_worker:
+                self.call_from_thread(setattr, self, "sub_title", "📂 Scanning directories...")
+            else:
+                self.sub_title = "📂 Scanning directories..."
 
             all_scanned = []
             all_warnings = []
 
-            for model_path in model_paths:
+            for i, model_path in enumerate(model_paths, 1):
+                if is_worker:
+                    self.call_from_thread(
+                        setattr, self, "sub_title", f"📂 Scanning path {i}/{len(model_paths)}: {model_path.name}"
+                    )
+                else:
+                    self.sub_title = f"📂 Scanning path {i}/{len(model_paths)}: {model_path.name}"
                 scanned_models, warnings = scan_directory(
                     Path(model_path), min_size_gb=1.0, exclude_paths=None  # Don't exclude anything for force refresh
                 )
@@ -1750,16 +2024,31 @@ class ModelManagerApp(App):
             # Get existing models to preserve custom settings
             existing_models = {m.path: m for m in registry.list_models()}
 
+            # Helper function to update UI
+            def set_subtitle(text):
+                if is_worker:
+                    self.call_from_thread(setattr, self, "sub_title", text)
+                else:
+                    self.sub_title = text
+
+            def notify(msg, severity="information", timeout=3):
+                if is_worker:
+                    self.call_from_thread(self.notify, msg, severity, timeout)
+                else:
+                    self.notify(msg, severity=severity, timeout=timeout)
+
             # Clear all models
+            set_subtitle("🗑️  Clearing registry...")
             for model in registry.list_models():
                 registry.remove_model(model.name)
 
             # Re-add all scanned models
             added_count = 0
             models_without_repo = []  # Track models without repo_id for auto-detection
-            self.sub_title = f"Adding models..."
+            set_subtitle("➕ Adding models...")
 
-            for scanned in all_scanned:
+            for i, scanned in enumerate(all_scanned, 1):
+                set_subtitle(f"➕ Adding model {i}/{len(all_scanned)}: {scanned.folder_name}")
                 path = scanned.path
 
                 # Preserve repo info if it existed
@@ -1793,11 +2082,11 @@ class ModelManagerApp(App):
             if models_without_repo:
                 from kt_kernel.cli.utils.repo_detector import detect_repo_for_model
 
-                self.sub_title = "Detecting repository information..."
+                set_subtitle("📖 Detecting repository information...")
                 repo_detected_count = 0
 
                 for i, model in enumerate(models_without_repo, 1):
-                    self.sub_title = f"Analyzing model {i}/{len(models_without_repo)}: {model.name}"
+                    set_subtitle(f"📖 Analyzing model {i}/{len(models_without_repo)}: {model.name}")
 
                     try:
                         repo_info = detect_repo_for_model(model.path)
@@ -1809,13 +2098,13 @@ class ModelManagerApp(App):
                         self.log.warning(f"Failed to detect repo for {model.name}: {e}")
 
                 if repo_detected_count > 0:
-                    self.notify(f"✓ Detected {repo_detected_count} repository IDs", severity="information", timeout=3)
+                    notify(f"✓ Detected {repo_detected_count} repository IDs", "information", 3)
 
             # Analyze MoE models (all models, using cache)
             if all_scanned:
                 from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
 
-                self.sub_title = "Analyzing MoE models..."
+                set_subtitle("🔬 Analyzing MoE models...")
                 moe_analyzed_count = 0
                 all_models_list = registry.list_models()
 
@@ -1823,7 +2112,7 @@ class ModelManagerApp(App):
                     if model.format != "safetensors":
                         continue
 
-                    self.sub_title = f"Analyzing MoE {i}/{len(all_models_list)}: {model.name}"
+                    set_subtitle(f"🔬 Analyzing MoE {i}/{len(all_models_list)}: {model.name}")
 
                     try:
                         result = analyze_moe_model(model.path, use_cache=True)
@@ -1833,17 +2122,139 @@ class ModelManagerApp(App):
                         self.log.warning(f"Failed to analyze MoE for {model.name}: {e}")
 
                 if moe_analyzed_count > 0:
-                    self.notify(f"✓ Analyzed {moe_analyzed_count} MoE models", severity="information", timeout=3)
+                    notify(f"✓ Analyzed {moe_analyzed_count} MoE models", "information", 3)
 
-            self.notify(f"✓ Force refresh complete: {added_count} models", severity="information", timeout=5)
-            self.sub_title = ""
+            notify(f"✓ Force refresh complete: {added_count} models", "information", 5)
+            set_subtitle("")
 
-            # Reload models display
-            self.load_models()
+            # Reload models display - call async version directly since we're already in a worker
+            await self._load_models_async()
 
         except Exception as e:
-            self.notify(f"Force refresh failed: {e}", severity="error", timeout=10)
+            if is_worker:
+                self.call_from_thread(self.notify, f"Force refresh failed: {e}", "error", 10)
+            else:
+                self.notify(f"Force refresh failed: {e}", severity="error", timeout=10)
             self.log.error(f"Force refresh error: {e}")
+
+    async def _scan_and_add_path_async(self, path: Path) -> None:
+        """
+        Async version: Scan a newly added path and add models to registry.
+        Runs in background worker to avoid blocking UI.
+        """
+        import threading
+        from kt_kernel.cli.utils.model_scanner import scan_directory
+        from kt_kernel.cli.utils.user_model_registry import UserModelRegistry, UserModel
+        from kt_kernel.cli.utils.repo_detector import detect_repo_for_model
+        from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
+
+        # Check if we're in a worker thread
+        is_worker = threading.current_thread() != threading.main_thread()
+
+        # Helper functions
+        def set_subtitle(text):
+            if is_worker:
+                self.call_from_thread(setattr, self, "sub_title", text)
+            else:
+                self.sub_title = text
+
+        def notify(msg, severity="information", timeout=3):
+            if is_worker:
+                self.call_from_thread(self.notify, msg, severity, timeout)
+            else:
+                self.notify(msg, severity=severity, timeout=timeout)
+
+        try:
+            set_subtitle(f"📂 Scanning {path.name}...")
+
+            # Scan the new path
+            scanned_models, warnings = scan_directory(path, min_size_gb=1.0, exclude_paths=None)
+
+            # Show warnings if any
+            for warning in warnings:
+                self.log.warning(warning)
+
+            if not scanned_models:
+                notify(f"No models found in {path.name}", "warning", 5)
+                set_subtitle("")
+                # Reload models display - call async version directly since we're already in a worker
+                await self._load_models_async()
+                return
+
+            # Add models to registry
+            registry = UserModelRegistry()
+            added_count = 0
+            added_models = []
+
+            for i, scanned in enumerate(scanned_models, 1):
+                set_subtitle(f"➕ Adding model {i}/{len(scanned_models)}: {scanned.folder_name}")
+
+                # Suggest unique name
+                name = registry.suggest_name(scanned.folder_name)
+
+                new_model = UserModel(
+                    name=name,
+                    path=scanned.path,
+                    format=scanned.format,
+                    repo_id=None,
+                    repo_type=None,
+                    sha256_status="not_checked",
+                )
+                registry.add_model(new_model)
+                added_count += 1
+                added_models.append(new_model)
+
+            # Auto-detect repo_id
+            if added_models:
+                set_subtitle("📖 Detecting repository information...")
+                repo_detected_count = 0
+
+                for i, model in enumerate(added_models, 1):
+                    set_subtitle(f"📖 Analyzing model {i}/{len(added_models)}: {model.name}")
+
+                    try:
+                        repo_info = detect_repo_for_model(model.path)
+                        if repo_info:
+                            repo_id, repo_type = repo_info
+                            registry.update_model(model.name, {"repo_id": repo_id, "repo_type": repo_type})
+                            repo_detected_count += 1
+                    except Exception as e:
+                        self.log.warning(f"Failed to detect repo for {model.name}: {e}")
+
+                if repo_detected_count > 0:
+                    notify(f"✓ Detected {repo_detected_count} repository IDs", "information", 3)
+
+            # Analyze MoE models
+            if added_models:
+                set_subtitle("🔬 Analyzing MoE models...")
+                moe_analyzed_count = 0
+
+                for i, model in enumerate(added_models, 1):
+                    if model.format != "safetensors":
+                        continue
+
+                    set_subtitle(f"🔬 Analyzing MoE {i}/{len(added_models)}: {model.name}")
+
+                    try:
+                        result = analyze_moe_model(model.path, use_cache=True)
+                        if result and result.get("num_experts"):
+                            moe_analyzed_count += 1
+                    except Exception as e:
+                        self.log.warning(f"Failed to analyze MoE for {model.name}: {e}")
+
+                if moe_analyzed_count > 0:
+                    notify(f"✓ Analyzed {moe_analyzed_count} MoE models", "information", 3)
+
+            notify(f"✓ Added {added_count} models from {path.name}", "information", 5)
+            set_subtitle("")
+
+            # Reload models display - call async version directly since we're already in a worker
+            await self._load_models_async()
+
+        except Exception as e:
+            notify(f"Failed to scan path: {e}", "error", 10)
+            self.log.error(f"Scan path error: {e}")
+            set_subtitle("")
 
     async def _global_scan_async(self) -> None:
         """
@@ -1851,30 +2262,45 @@ class ModelManagerApp(App):
         Used when no model paths are configured.
         Runs in background worker to avoid blocking UI.
         """
+        import threading
         from kt_kernel.cli.utils.environment import scan_storage_locations, scan_models_in_location
         from kt_kernel.cli.utils.user_model_registry import UserModelRegistry, UserModel
         from kt_kernel.cli.utils.model_scanner import scan_single_path
         from kt_kernel.cli.config.settings import get_settings
         from pathlib import Path
 
+        # Check if we're in a worker thread
+        is_worker = threading.current_thread() != threading.main_thread()
+
+        # Helper functions
+        def set_subtitle(text):
+            if is_worker:
+                self.call_from_thread(setattr, self, "sub_title", text)
+            else:
+                self.sub_title = text
+
+        def notify(msg, severity="information", timeout=3):
+            if is_worker:
+                self.call_from_thread(self.notify, msg, severity, timeout)
+            else:
+                self.notify(msg, severity=severity, timeout=timeout)
+
         try:
-            self.call_from_thread(self.notify, "🌍 Scanning all disks for models...", "information", 3)
-            self.call_from_thread(setattr, self, "sub_title", "Scanning storage locations...")
+            notify("🌍 Scanning all disks for models...", "information", 3)
+            set_subtitle("Scanning storage locations...")
 
             # Scan all storage locations (disks + common paths)
             locations = scan_storage_locations(min_size_gb=10.0)
 
             if not locations:
-                self.call_from_thread(self.notify, "No suitable storage locations found", "warning", 5)
+                notify("No suitable storage locations found", "warning", 5)
                 return
 
             # Find models in each location
             all_models = []
 
             for i, loc in enumerate(locations[:10], 1):  # Scan top 10 locations
-                self.call_from_thread(
-                    setattr, self, "sub_title", f"Scanning location {i}/{min(len(locations), 10)}: {loc.path}"
-                )
+                set_subtitle(f"Scanning location {i}/{min(len(locations), 10)}: {loc.path}")
 
                 try:
                     models = scan_models_in_location(loc, max_depth=3)
@@ -1884,15 +2310,15 @@ class ModelManagerApp(App):
                     self.log.warning(f"Failed to scan {loc.path}: {e}")
 
             if not all_models:
-                self.call_from_thread(self.notify, "No models found in any location", "warning", 5)
-                self.call_from_thread(setattr, self, "sub_title", "")
+                notify("No models found in any location", "warning", 5)
+                set_subtitle("")
                 return
 
             # Add models to registry
             registry = UserModelRegistry()
             added_count = 0
             added_models = []  # Track newly added models for post-processing
-            self.call_from_thread(setattr, self, "sub_title", "Adding models to registry...")
+            set_subtitle("Adding models to registry...")
 
             for model in all_models:
                 # Scan the specific path to get detailed info
@@ -1919,13 +2345,11 @@ class ModelManagerApp(App):
             if added_models:
                 from kt_kernel.cli.utils.repo_detector import detect_repo_for_model
 
-                self.call_from_thread(setattr, self, "sub_title", "Detecting repository information...")
+                set_subtitle("Detecting repository information...")
                 repo_detected_count = 0
 
                 for i, model in enumerate(added_models, 1):
-                    self.call_from_thread(
-                        setattr, self, "sub_title", f"📖 Analyzing model {i}/{len(added_models)}: {model.name}"
-                    )
+                    set_subtitle(f"📖 Analyzing model {i}/{len(added_models)}: {model.name}")
 
                     try:
                         # Detect repo from README
@@ -1939,8 +2363,7 @@ class ModelManagerApp(App):
                         self.log.warning(f"Failed to detect repo for {model.name}: {e}")
 
                 if repo_detected_count > 0:
-                    self.call_from_thread(
-                        self.notify,
+                    notify(
                         f"✓ Detected {repo_detected_count}/{len(added_models)} repository IDs",
                         "information",
                         3,
@@ -1950,7 +2373,7 @@ class ModelManagerApp(App):
             if added_models:
                 from kt_kernel.cli.utils.analyze_moe_model import analyze_moe_model
 
-                self.call_from_thread(setattr, self, "sub_title", "Analyzing MoE models...")
+                set_subtitle("Analyzing MoE models...")
                 moe_analyzed_count = 0
 
                 for i, model in enumerate(added_models, 1):
@@ -1958,9 +2381,7 @@ class ModelManagerApp(App):
                     if model.format != "safetensors":
                         continue
 
-                    self.call_from_thread(
-                        setattr, self, "sub_title", f"🔬 Analyzing MoE {i}/{len(added_models)}: {model.name}"
-                    )
+                    set_subtitle(f"🔬 Analyzing MoE {i}/{len(added_models)}: {model.name}")
 
                     try:
                         result = analyze_moe_model(model.path, use_cache=True)
@@ -1975,7 +2396,7 @@ class ModelManagerApp(App):
                         self.log.warning(f"Failed to analyze MoE for {model.name}: {e}")
 
                 if moe_analyzed_count > 0:
-                    self.call_from_thread(self.notify, f"✓ Analyzed {moe_analyzed_count} MoE models", "information", 3)
+                    notify(f"✓ Analyzed {moe_analyzed_count} MoE models", "information", 3)
 
             # Calculate common parent directories for all found models
             # This groups models by their parent directory
@@ -1997,16 +2418,16 @@ class ModelManagerApp(App):
                     settings.add_model_path(parent_dir)
                     self.log.info(f"Added path: {parent_dir} ({len(model_parent_dirs[parent_dir])} models)")
 
-            self.call_from_thread(self.notify, f"✓ Global scan complete: {added_count} models found", "information", 5)
-            self.call_from_thread(setattr, self, "sub_title", "")
+            notify(f"✓ Global scan complete: {added_count} models found", "information", 5)
+            set_subtitle("")
 
-            # Reload models display
-            self.call_from_thread(self.load_models)
+            # Reload models display - call async version directly since we're already in a worker
+            await self._load_models_async()
 
         except Exception as e:
-            self.call_from_thread(self.notify, f"Global scan failed: {e}", "error", 10)
+            notify(f"Global scan failed: {e}", "error", 10)
             self.log.error(f"Global scan error: {e}")
-            self.call_from_thread(setattr, self, "sub_title", "")
+            set_subtitle("")
 
     def _add_path(self) -> None:
         """Add a new model path"""
@@ -2037,6 +2458,12 @@ class ModelManagerApp(App):
             # Add to settings
             settings.add_model_path(str(new_path_obj))
             self.notify(f"✓ Added path: {new_path_obj}", severity="information")
+
+            # Scan the new path in background and update models
+            self.notify("🔍 Scanning new path for models...", severity="information", timeout=3)
+            self.run_worker(
+                self._scan_and_add_path_async(new_path_obj), name="scan-new-path", group="scan", exclusive=True
+            )
 
             # Reopen settings to show updated paths
             self.push_screen(SettingsScreen(), callback=self._on_settings_action)

@@ -30,6 +30,14 @@ class UserModel:
     gpu_model_ids: Optional[List[str]] = None  # For llamafile/AMX: list of GPU model UUIDs to run with
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_verified: Optional[str] = None  # ISO format datetime
+    # MoE information (cached from analyze_moe_model)
+    is_moe: Optional[bool] = None  # True if MoE model, False if non-MoE, None if not analyzed
+    moe_num_experts: Optional[int] = None  # Total number of experts (for MoE models)
+    moe_num_experts_per_tok: Optional[int] = None  # Number of active experts per token (for MoE models)
+    # AMX quantization metadata (for format == "amx")
+    amx_source_model: Optional[str] = None  # Name of the source MoE model that was quantized
+    amx_quant_method: Optional[str] = None  # "int4" | "int8"
+    amx_numa_nodes: Optional[int] = None  # Number of NUMA nodes used for quantization
 
     def __post_init__(self):
         """Ensure ID is set after initialization"""

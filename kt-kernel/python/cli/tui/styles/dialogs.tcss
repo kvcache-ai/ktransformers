@@ -1,0 +1,102 @@
+/* Common Dialog Styles */
+
+/* ConfirmDialog */
+ConfirmDialog {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 60;
+    height: auto;
+    background: $surface;
+    border: heavy $primary;
+    padding: 1 2;
+}
+
+#confirm-message {
+    width: 100%;
+    height: auto;
+    padding: 1 0;
+    margin-bottom: 1;
+}
+
+#confirm-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+#confirm-buttons > Button {
+    min-width: 15;
+    margin: 0 1;
+}
+
+/* PathInputScreen */
+PathInputScreen {
+    align: center middle;
+}
+
+#path-input-dialog {
+    width: 80;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#path-input-dialog Input {
+    width: 100%;
+    margin: 1 0;
+}
+
+#path-input-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#path-input-buttons Button {
+    margin: 0 1;
+}
+
+/* PathSelectScreen */
+PathSelectScreen {
+    align: center middle;
+}
+
+#path-select-dialog {
+    width: 80;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#path-select-buttons {
+    width: 100%;
+    height: auto;
+    align: center middle;
+    padding: 1 0 0 0;
+}
+
+#path-list {
+    width: 100%;
+    height: auto;
+    max-height: 20;
+    overflow-y: auto;
+    padding: 1 0;
+}
+
+.path-item {
+    width: 100%;
+    height: auto;
+    margin: 0 0 1 0;
+}
+
+#path-select-buttons Button {
+    margin: 0 1;
+}

@@ -9,7 +9,7 @@ import sys
 import typer
 
 from kt_kernel.cli import __version__
-from kt_kernel.cli.commands import bench, chat, config, doctor, model, quant, run, sft, version
+from kt_kernel.cli.commands import bench, chat, config, doctor, model, quant, run, sft, tuna, version
 from kt_kernel.cli.i18n import t, set_lang, get_lang
 
 
@@ -28,6 +28,7 @@ def _get_help(key: str) -> str:
         "run": {"en": "Start model inference server", "zh": "启动模型推理服务器"},
         "chat": {"en": "Interactive chat with running model", "zh": "与运行中的模型进行交互式聊天"},
         "quant": {"en": "Quantize model weights", "zh": "量化模型权重"},
+        "edit": {"en": "Edit model information", "zh": "编辑模型信息"},
         "bench": {"en": "Run full benchmark", "zh": "运行完整基准测试"},
         "microbench": {"en": "Run micro-benchmark", "zh": "运行微基准测试"},
         "doctor": {"en": "Diagnose environment issues", "zh": "诊断环境问题"},
@@ -43,10 +44,9 @@ def _get_help(key: str) -> str:
 app = typer.Typer(
     name="kt",
     help="KTransformers CLI - A unified command-line interface for KTransformers.",
-    no_args_is_help=False,  # Changed: handle no args specially to launch TUI
+    no_args_is_help=False,  # Handle no-args case manually to support first-run setup
     add_completion=False,  # Use static completion scripts instead of dynamic completion
     rich_markup_mode="rich",
-    invoke_without_command=True,  # Allow callback without subcommand
 )
 
 
@@ -67,20 +67,7 @@ def _update_help_texts() -> None:
             group_info.help = _get_help(group_info.name)
 
 
-# Register commands
-app.command(name="version", help="Show version information")(version.version)
-# Run command is handled specially in main() to allow extra args
-# (not registered here to avoid typer's argument parsing)
-app.command(name="chat", help="Interactive chat with running model")(chat.chat)
-app.command(name="quant", help="Quantize model weights")(quant.quant)
-app.command(name="bench", help="Run full benchmark")(bench.bench)
-app.command(name="microbench", help="Run micro-benchmark")(bench.microbench)
-app.command(name="doctor", help="Diagnose environment issues")(doctor.doctor)
-
-# Register sub-apps
-app.add_typer(model.app, name="model", help="Manage models and storage paths")
-app.add_typer(config.app, name="config", help="Manage configuration")
-app.add_typer(sft.app, name="sft", help="Fine-tuning with LlamaFactory")
+# Commands are registered later after tui_command is defined
 
 
 def check_first_run() -> None:
@@ -117,7 +104,7 @@ def _show_first_run_setup(settings) -> None:
     from rich.spinner import Spinner
     from rich.live import Live
 
-    from kt_kernel.cli.utils.environment import scan_storage_locations, format_size_gb, scan_models_in_location
+    from kt_kernel.cli.utils.environment import scan_storage_locations, format_size_gb
 
     console = Console()
 
@@ -141,15 +128,8 @@ def _show_first_run_setup(settings) -> None:
     console.print("  [cyan][2][/cyan] 中文 (Chinese)")
     console.print()
 
-    while True:
-        choice = Prompt.ask("Enter choice / 输入选择", choices=["1", "2"], default="1")
-
-        if choice == "1":
-            lang = "en"
-            break
-        elif choice == "2":
-            lang = "zh"
-            break
+    choice = Prompt.ask("Enter choice / 输入选择", choices=["1", "2"], default="1")
+    lang = "en" if choice == "1" else "zh"
 
     # Save language setting
     settings.set("general.language", lang)
@@ -161,6 +141,131 @@ def _show_first_run_setup(settings) -> None:
         console.print("[green]✓[/green] 语言已设置为中文")
     else:
         console.print("[green]✓[/green] Language set to English")
+
+    # Model discovery section
+    console.print()
+    if lang == "zh":
+        console.print("[bold]发现模型权重[/bold]")
+        console.print()
+        console.print("[dim]扫描系统中已有的模型权重文件，以便快速添加到模型列表。[/dim]")
+        console.print()
+        console.print("  [cyan][1][/cyan] 全局扫描 (自动扫描所有非系统路径)")
+        console.print("  [cyan][2][/cyan] 手动指定路径 (可添加多个)")
+        console.print("  [cyan][3][/cyan] 跳过 (稍后手动添加)")
+        console.print()
+        scan_choice = Prompt.ask("选择扫描方式", choices=["1", "2", "3"], default="1")
+    else:
+        console.print("[bold]Discover Model Weights[/bold]")
+        console.print()
+        console.print("[dim]Scan existing model weights on your system to quickly add them to the model list.[/dim]")
+        console.print()
+        console.print("  [cyan][1][/cyan] Global scan (auto-scan all non-system paths)")
+        console.print("  [cyan][2][/cyan] Manual paths (add multiple paths)")
+        console.print("  [cyan][3][/cyan] Skip (add manually later)")
+        console.print()
+        scan_choice = Prompt.ask("Select scan method", choices=["1", "2", "3"], default="1")
+
+    if scan_choice == "1":
+        # Global scan
+        from kt_kernel.cli.utils.model_discovery import discover_and_register_global, format_discovery_summary
+
+        console.print()
+        try:
+            total_found, new_found, registered = discover_and_register_global(
+                min_size_gb=2.0, max_depth=6, show_progress=True, lang=lang
+            )
+
+            format_discovery_summary(
+                total_found=total_found,
+                new_found=new_found,
+                registered=registered,
+                lang=lang,
+                show_models=True,
+                max_show=10,
+            )
+
+        except Exception as e:
+            console.print(f"[yellow]Warning: Scan failed - {e}[/yellow]")
+
+    elif scan_choice == "2":
+        # Manual path specification
+        from kt_kernel.cli.utils.model_discovery import discover_and_register_path
+        import os
+
+        discovered_paths = set()  # Track paths discovered in this session
+        total_registered = []
+
+        while True:
+            console.print()
+            if lang == "zh":
+                path = Prompt.ask("输入要扫描的路径 (例如: /mnt/data/models)")
+            else:
+                path = Prompt.ask("Enter path to scan (e.g., /mnt/data/models)")
+
+            # Expand and validate path
+            path = os.path.expanduser(path)
+
+            if not os.path.exists(path):
+                if lang == "zh":
+                    console.print(f"[yellow]警告: 路径不存在: {path}[/yellow]")
+                else:
+                    console.print(f"[yellow]Warning: Path does not exist: {path}[/yellow]")
+                continue
+
+            if not os.path.isdir(path):
+                if lang == "zh":
+                    console.print(f"[yellow]警告: 不是一个目录: {path}[/yellow]")
+                else:
+                    console.print(f"[yellow]Warning: Not a directory: {path}[/yellow]")
+                continue
+
+            # Scan this path
+            console.print()
+            try:
+                total_found, new_found, registered = discover_and_register_path(
+                    path=path, min_size_gb=2.0, existing_paths=discovered_paths, show_progress=True, lang=lang
+                )
+
+                # Update discovered paths
+                for model in registered:
+                    discovered_paths.add(model.path)
+                total_registered.extend(registered)
+
+                console.print()
+                if lang == "zh":
+                    console.print(f"[green]✓[/green] 在此路径找到 {total_found} 个模型，其中 {new_found} 个为新模型")
+                else:
+                    console.print(f"[green]✓[/green] Found {total_found} models in this path, {new_found} are new")
+
+                if new_found > 0:
+                    for model in registered[:5]:
+                        console.print(f"  • {model.name} ({model.format})")
+
+                    if len(registered) > 5:
+                        if lang == "zh":
+                            console.print(f"  [dim]... 还有 {len(registered) - 5} 个新模型[/dim]")
+                        else:
+                            console.print(f"  [dim]... and {len(registered) - 5} more new models[/dim]")
+
+            except Exception as e:
+                console.print(f"[red]Error scanning path: {e}[/red]")
+
+            # Ask if continue
+            console.print()
+            if lang == "zh":
+                continue_scan = Confirm.ask("是否继续添加其他路径?", default=False)
+            else:
+                continue_scan = Confirm.ask("Continue adding more paths?", default=False)
+
+            if not continue_scan:
+                break
+
+        if total_registered:
+            console.print()
+            if lang == "zh":
+                console.print(f"[green]✓[/green] 总共发现 {len(total_registered)} 个新模型")
+            else:
+                console.print(f"[green]✓[/green] Total {len(total_registered)} new models discovered")
 
     # Model storage path selection
     console.print()
@@ -175,16 +280,7 @@ def _show_first_run_setup(settings) -> None:
     console.print()
 
     if locations:
-        # Scan for models in each location
-        console.print(f"[dim]{t('setup_scanning_models')}[/dim]")
-        location_models: dict[str, list] = {}
-        for loc in locations[:5]:
-            models = scan_models_in_location(loc, max_depth=2)
-            if models:
-                location_models[loc.path] = models
-        console.print()
-
-        # Show options
+        # Show storage location options
         for i, loc in enumerate(locations[:5], 1):  # Show top 5 options
             available = format_size_gb(loc.available_gb)
             total = format_size_gb(loc.total_gb)
@@ -195,21 +291,7 @@ def _show_first_run_setup(settings) -> None:
             else:
                 option_str = t("setup_disk_option", path=loc.path, available=available, total=total)
 
-            # Add model count if any
-            if loc.path in location_models:
-                model_count = len(location_models[loc.path])
-                option_str += f" [green]✓ {t('setup_location_has_models', count=model_count)}[/green]"
-
             console.print(f"  [cyan][{i}][/cyan] {option_str}")
-
-            # Show first few models found in this location
-            if loc.path in location_models:
-                for model in location_models[loc.path][:3]:  # Show up to 3 models
-                    size_str = format_size_gb(model.size_gb)
-                    console.print(f"      [dim]• {model.name} ({size_str})[/dim]")
-                if len(location_models[loc.path]) > 3:
-                    remaining = len(location_models[loc.path]) - 3
-                    console.print(f"      [dim]  ... +{remaining} more[/dim]")
 
         # Custom path option
         custom_idx = min(len(locations), 5) + 1
@@ -324,51 +406,28 @@ def _install_shell_completion() -> None:
 
     # Detect current shell
     shell = os.environ.get("SHELL", "")
-    if "zsh" in shell:
-        shell_name = "zsh"
-    elif "fish" in shell:
-        shell_name = "fish"
-    else:
-        shell_name = "bash"
+    shell_name = "zsh" if "zsh" in shell else "fish" if "fish" in shell else "bash"
 
     try:
         cli_dir = Path(__file__).parent
         completions_dir = cli_dir / "completions"
         home = Path.home()
 
-        installed = False
+        def install_completion(src_name: str, dest_dir: Path, dest_name: str) -> None:
+            """Install completion file from source to destination."""
+            src_file = completions_dir / src_name
+            if src_file.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dest_dir / dest_name)
 
         if shell_name == "bash":
-            # Use XDG standard location for bash-completion (auto-loaded)
-            src_file = completions_dir / "kt-completion.bash"
-            dest_dir = home / ".local" / "share" / "bash-completion" / "completions"
-            dest_file = dest_dir / "kt"
-
-            if src_file.exists():
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dest_file)
-                installed = True
-
+            install_completion(
+                "kt-completion.bash", home / ".local" / "share" / "bash-completion" / "completions", "kt"
+            )
         elif shell_name == "zsh":
-            src_file = completions_dir / "_kt"
-            dest_dir = home / ".zfunc"
-            dest_file = dest_dir / "_kt"
-
-            if src_file.exists():
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dest_file)
-                installed = True
-
+            install_completion("_kt", home / ".zfunc", "_kt")
         elif shell_name == "fish":
-            # Fish auto-loads from this directory
-            src_file = completions_dir / "kt.fish"
-            dest_dir = home / ".config" / "fish" / "completions"
-            dest_file = dest_dir / "kt.fish"
-
-            if src_file.exists():
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dest_file)
-                installed = True
+            install_completion("kt.fish", home / ".config" / "fish" / "completions", "kt.fish")
 
         # Mark as installed
         settings.set("general._completion_installed", True)
@@ -404,8 +463,8 @@ def _apply_saved_language() -> None:
         set_lang(lang)
 
 
-def _launch_tui():
-    """Launch the TUI interface."""
+def tui_command():
+    """Launch the TUI (Text User Interface) for interactive model management."""
     # First check if textual is available
     try:
         import textual
@@ -419,7 +478,7 @@ def _launch_tui():
         console.print("  Install with: [cyan]pip install textual>=0.47.0[/cyan]")
         console.print("  Or use CLI commands: [cyan]kt --help[/cyan]")
         console.print()
-        return None
+        return
 
     # Try to import TUI app
     try:
@@ -429,13 +488,7 @@ def _launch_tui():
             raise ImportError("TUI module not properly initialized")
 
         app_instance = ModelManagerApp()
-        result = app_instance.run()
-
-        # Check if TUI exited with a message (command to execute)
-        if hasattr(app_instance, "_return_value") and app_instance._return_value:
-            return app_instance._return_value
-
-        return None
+        app_instance.run()
 
     except ImportError as e:
         # Check if the error is about kt_kernel extension (expected in dev environment)
@@ -452,7 +505,6 @@ def _launch_tui():
             console.print()
             console.print("  For now, use CLI commands: [cyan]kt model list[/cyan]")
             console.print()
-            return None
         else:
             # Real Textual import error
             from rich.console import Console
@@ -463,7 +515,6 @@ def _launch_tui():
             console.print()
             console.print("  Use CLI commands: [cyan]kt --help[/cyan]")
             console.print()
-            return None
 
     except Exception as e:
         from rich.console import Console
@@ -474,7 +525,25 @@ def _launch_tui():
         console.print()
         console.print("  Use CLI commands: [cyan]kt --help[/cyan]")
         console.print()
-        return None
+
+
+# Register commands after tui_command is defined
+app.command(name="version", help="Show version information")(version.version)
+app.command(name="tui", help="Launch TUI (Text User Interface)")(tui_command)
+app.command(name="tuna", help="Optimize model with TUNA")(tuna.tuna)
+# Run command is handled specially in main() to allow extra args
+# (not registered here to avoid typer's argument parsing)
+app.command(name="chat", help="Interactive chat with running model")(chat.chat)
+app.command(name="quant", help="Quantize model weights")(quant.quant)
+app.command(name="edit", help="Edit model information")(model.edit_model)
+app.command(name="bench", help="Run full benchmark")(bench.bench)
+app.command(name="microbench", help="Run micro-benchmark")(bench.microbench)
+app.command(name="doctor", help="Diagnose environment issues")(doctor.doctor)
+
+# Register sub-apps
+app.add_typer(model.app, name="model", help="Manage models and storage paths")
+app.add_typer(config.app, name="config", help="Manage configuration")
+app.add_typer(sft.app, name="sft", help="Fine-tuning with LlamaFactory")
 
 
 def main():
@@ -496,54 +565,36 @@ def main():
             should_check_first_run = False
             break
 
+    # Handle no arguments case
+    if not args:
+        # Check if this is first run
+        from kt_kernel.cli.config.settings import DEFAULT_CONFIG_FILE, get_settings
+
+        is_first_run = False
+        if not DEFAULT_CONFIG_FILE.exists():
+            is_first_run = True
+        else:
+            settings = get_settings()
+            if not settings.get("general._initialized"):
+                is_first_run = True
+
+        if is_first_run:
+            # First run - start initialization
+            _install_shell_completion()
+            check_first_run()
+            return
+        else:
+            # Not first run - show help
+            app(["--help"])
+            return
+
     # Auto-install shell completion on first run
     if should_check_first_run:
         _install_shell_completion()
 
     # Check first run before running commands
-    if should_check_first_run and args:
+    if should_check_first_run:
         check_first_run()
-
-    # Handle no args - launch TUI if interactive terminal
-    if not args and sys.stdout.isatty():
-        tui_result = _launch_tui()
-
-        # If TUI returned a command to execute, run it
-        if tui_result:
-            # Parse TUI result (format: "command:arg")
-            if ":" in tui_result:
-                cmd, arg = tui_result.split(":", 1)
-
-                # Re-enter CLI with the command
-                if cmd == "run":
-                    sys.argv = ["kt", "run", arg]
-                elif cmd == "edit":
-                    sys.argv = ["kt", "model", "edit", arg]
-                elif cmd == "verify":
-                    sys.argv = ["kt", "model", "verify", arg]
-                elif cmd == "remove":
-                    # Auto-confirm removal from TUI (user already clicked remove in TUI)
-                    sys.argv = ["kt", "model", "remove", arg, "--yes"]
-                elif cmd == "info":
-                    sys.argv = ["kt", "model", "info", arg]
-                elif cmd == "scan":
-                    sys.argv = ["kt", "model", "scan"]
-                elif cmd == "download":
-                    sys.argv = ["kt", "model", "download"]
-
-                # Re-run main with new args
-                args = sys.argv[1:]
-            else:
-                # Unknown result, just exit
-                return
-        else:
-            # TUI exited normally or failed to load
-            return
-
-    # Show help if no args and not interactive
-    if not args:
-        app(["--help"])
-        return
 
     # Handle "run" command specially to pass through unknown options
     if args and args[0] == "run":

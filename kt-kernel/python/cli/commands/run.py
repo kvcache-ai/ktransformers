@@ -120,8 +120,6 @@ def run(
     # Handle disable/enable shared experts fusion flags
     if enable_shared_experts_fusion:
         disable_shared_experts_fusion = False
-    elif disable_shared_experts_fusion is None:
-        disable_shared_experts_fusion = None
 
     # Convert Path objects from click
     model_path_obj = Path(model_path) if model_path else None
@@ -216,156 +214,217 @@ def _run_impl(
     settings = get_settings()
     user_registry = UserModelRegistry()
 
-    console.print()
+    # Check if we should use interactive mode
+    # Interactive mode triggers when:
+    # 1. No model specified, OR
+    # 2. Model specified but missing critical parameters (gpu_experts, tensor_parallel_size, etc.)
+    use_interactive = False
 
-    # If no model specified, show interactive selection
     if model is None:
-        model = _interactive_model_selection(user_registry, settings)
-        if model is None:
+        use_interactive = True
+    elif (
+        gpu_experts is None
+        or tensor_parallel_size is None
+        or cpu_threads is None
+        or numa_nodes is None
+        or max_total_tokens is None
+    ):
+        # Model specified but some parameters missing - use interactive
+        use_interactive = True
+
+    if use_interactive and sys.stdin.isatty():
+        # Use full interactive configuration
+        from kt_kernel.cli.utils.run_interactive import interactive_run_config
+
+        console.print()
+        console.print("[bold cyan]═══ Interactive Run Configuration ═══[/bold cyan]")
+        console.print()
+
+        config = interactive_run_config()
+        if config is None:
+            # User cancelled
             raise typer.Exit(0)
 
-    # Step 1: Detect hardware
-    print_step(t("run_detecting_hardware"))
-    gpus = detect_gpus()
-    cpu = detect_cpu_info()
-    ram = detect_ram_gb()
+        # Extract configuration
+        user_model = config["gpu_model"]
+        model = user_model.id
+        model_path = Path(user_model.path)
 
-    if gpus:
-        gpu_info = f"{gpus[0].name} ({gpus[0].vram_gb}GB VRAM)"
-        if len(gpus) > 1:
-            gpu_info += f" + {len(gpus) - 1} more"
-        print_info(t("run_gpu_info", name=gpus[0].name, vram=gpus[0].vram_gb))
-    else:
-        print_warning(t("doctor_gpu_not_found"))
-        gpu_info = "None"
+        cpu_model_id = config.get("cpu_model_id")
+        if cpu_model_id:
+            cpu_model = user_registry.get_model(cpu_model_id)
+            weights_path = Path(cpu_model.path) if cpu_model else None
 
-    print_info(t("run_cpu_info", name=cpu.name, cores=cpu.cores, numa=cpu.numa_nodes))
-    print_info(t("run_ram_info", total=int(ram)))
+        gpu_experts = config["gpu_experts"]
+        cpu_threads = config["cpu_threads"]
+        numa_nodes = config["numa_nodes"]
+        tensor_parallel_size = config["tensor_parallel"]
+        max_total_tokens = config["total_tokens"]
 
-    # Step 2: Resolve model
-    console.print()
-    print_step(t("run_checking_model"))
+        # Set CUDA_VISIBLE_DEVICES for selected GPUs
+        selected_gpus = config["selected_gpus"]
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in selected_gpus)
 
-    user_model = None
-    resolved_model_path = model_path
-
-    # Check if model is a path
-    if Path(model).exists():
-        resolved_model_path = Path(model)
-        print_info(t("run_model_path", path=str(resolved_model_path)))
-
-        # Try to find in user registry by path
-        user_model = user_registry.find_by_path(str(resolved_model_path))
-        if user_model:
-            print_info(f"Using registered model: {user_model.name}")
-        else:
-            print_warning("Using unregistered model path. Consider adding it with 'kt model add'")
-    else:
-        # Search in user registry by name
-        user_model = user_registry.get_model(model)
-
-        if not user_model:
-            print_error(t("run_model_not_found", name=model))
-            console.print()
-
-            # Show available models
-            all_models = user_registry.list_models()
-            if all_models:
-                console.print("Available registered models:")
-                for m in all_models[:5]:
-                    console.print(f"  - {m.name}")
-                if len(all_models) > 5:
-                    console.print(f"  ... and {len(all_models) - 5} more")
-            else:
-                console.print("No models registered yet.")
-
-            console.print()
-            console.print(f"Add your model with: [cyan]kt model add /path/to/model[/cyan]")
-            console.print(f"Or scan for models: [cyan]kt model scan[/cyan]")
-            raise typer.Exit(1)
-
-        # Use model path from registry
-        resolved_model_path = Path(user_model.path)
-
-        # Verify path exists
-        if not resolved_model_path.exists():
-            print_error(f"Model path does not exist: {resolved_model_path}")
-            console.print()
-            console.print(f"Run 'kt model refresh' to check all models")
-            raise typer.Exit(1)
-
-        print_info(t("run_model_path", path=str(resolved_model_path)))
-
-    # Step 3: Check quantized weights (only if explicitly requested)
-    resolved_weights_path = None
-
-    # Only use quantized weights if explicitly specified by user
-    if weights_path is not None:
-        # User explicitly specified weights path
+        # Use resolved paths instead of registry lookup
+        resolved_model_path = model_path
         resolved_weights_path = weights_path
-        if not resolved_weights_path.exists():
-            print_error(t("run_weights_not_found"))
-            console.print(f"  Path: {resolved_weights_path}")
-            raise typer.Exit(1)
-        print_info(f"Using quantized weights: {resolved_weights_path}")
-    elif quantize:
-        # User requested quantization
+        user_model_obj = user_model
+
         console.print()
-        print_step(t("run_quantizing"))
-        # TODO: Implement quantization
-        print_warning("Quantization not yet implemented. Please run 'kt quant' manually.")
-        raise typer.Exit(1)
+        print_info(f"[green]✓[/green] Configuration complete")
+        console.print()
     else:
-        # Default: use original precision model without quantization
+        # Non-interactive mode - use traditional flow
         console.print()
-        print_info("Using original precision model (no quantization)")
+
+        # If no model specified, show old interactive selection
+        if model is None:
+            model = _interactive_model_selection(user_registry, settings)
+            if model is None:
+                raise typer.Exit(0)
+
+        # Step 1: Detect hardware
+        print_step(t("run_detecting_hardware"))
+        gpus = detect_gpus()
+        cpu = detect_cpu_info()
+        ram = detect_ram_gb()
+
+        if gpus:
+            gpu_info = f"{gpus[0].name} ({gpus[0].vram_gb}GB VRAM)"
+            if len(gpus) > 1:
+                gpu_info += f" + {len(gpus) - 1} more"
+            print_info(t("run_gpu_info", name=gpus[0].name, vram=gpus[0].vram_gb))
+        else:
+            print_warning(t("doctor_gpu_not_found"))
+            gpu_info = "None"
+
+        print_info(t("run_cpu_info", name=cpu.name, cores=cpu.cores, numa=cpu.numa_nodes))
+        print_info(t("run_ram_info", total=int(ram)))
+
+        # Step 2: Resolve model
+        console.print()
+        print_step(t("run_checking_model"))
+
+        user_model_obj = None
+        resolved_model_path = model_path
+
+        # Check if model is a path
+        if Path(model).exists():
+            resolved_model_path = Path(model)
+            print_info(t("run_model_path", path=str(resolved_model_path)))
+
+            # Try to find in user registry by path
+            user_model_obj = user_registry.find_by_path(str(resolved_model_path))
+            if user_model_obj:
+                print_info(f"Using registered model: {user_model_obj.name}")
+            else:
+                print_warning("Using unregistered model path. Consider adding it with 'kt model add'")
+        else:
+            # Search in user registry by name
+            user_model_obj = user_registry.get_model(model)
+
+            if not user_model_obj:
+                print_error(t("run_model_not_found", name=model))
+                console.print()
+
+                # Show available models
+                all_models = user_registry.list_models()
+                if all_models:
+                    console.print("Available registered models:")
+                    for m in all_models[:5]:
+                        console.print(f"  - {m.name}")
+                    if len(all_models) > 5:
+                        console.print(f"  ... and {len(all_models) - 5} more")
+                else:
+                    console.print("No models registered yet.")
+
+                console.print()
+                console.print(f"Add your model with: [cyan]kt model add /path/to/model[/cyan]")
+                console.print(f"Or scan for models: [cyan]kt model scan[/cyan]")
+                raise typer.Exit(1)
+
+            # Use model path from registry
+            resolved_model_path = Path(user_model_obj.path)
+
+            # Verify path exists
+            if not resolved_model_path.exists():
+                print_error(f"Model path does not exist: {resolved_model_path}")
+                console.print()
+                console.print(f"Run 'kt model refresh' to check all models")
+                raise typer.Exit(1)
+
+            print_info(t("run_model_path", path=str(resolved_model_path)))
+
+        # Step 2.5: Pre-run verification (optional integrity check)
+        if user_model_obj and user_model_obj.format == "safetensors":
+            from kt_kernel.cli.utils.model_verifier import pre_operation_verification
+
+            pre_operation_verification(user_model_obj, user_registry, operation_name="running")
+
+        # Step 3: Check quantized weights (only if explicitly requested)
+        resolved_weights_path = None
+
+        # Only use quantized weights if explicitly specified by user
+        if weights_path is not None:
+            # User explicitly specified weights path
+            resolved_weights_path = weights_path
+            if not resolved_weights_path.exists():
+                print_error(t("run_weights_not_found"))
+                console.print(f"  Path: {resolved_weights_path}")
+                raise typer.Exit(1)
+            print_info(f"Using quantized weights: {resolved_weights_path}")
+        elif quantize:
+            # User requested quantization
+            console.print()
+            print_step(t("run_quantizing"))
+            # TODO: Implement quantization
+            print_warning("Quantization not yet implemented. Please run 'kt quant' manually.")
+            raise typer.Exit(1)
+        else:
+            # Default: use original precision model without quantization
+            console.print()
+            print_info("Using original precision model (no quantization)")
 
     # Step 4: Build command
-    # Resolve all parameters (CLI > config > auto-detect)
-    final_host = host or settings.get("server.host", "0.0.0.0")
-    final_port = port or settings.get("server.port", 30000)
+    # Helper to resolve parameter with fallback chain: CLI > config > default
+    def resolve(cli_val, config_key, default):
+        if cli_val is not None:
+            return cli_val
+        config_val = settings.get(config_key)
+        return config_val if config_val is not None else default
 
-    # Determine tensor parallel size
-    # Priority: CLI > config > auto-detect
-    if tensor_parallel_size:
-        final_tensor_parallel_size = tensor_parallel_size
-    elif settings.get("inference.tensor_parallel_size"):
-        final_tensor_parallel_size = settings.get("inference.tensor_parallel_size")
-    else:
-        # Auto-detect from GPUs
-        final_tensor_parallel_size = len(gpus) if gpus else 1
+    # Server configuration
+    final_host = resolve(host, "server.host", "0.0.0.0")
+    final_port = resolve(port, "server.port", 30000)
 
-    # CPU/GPU configuration with smart defaults
-    # kt-cpuinfer: default to 80% of total CPU threads (cores * NUMA nodes)
-    total_threads = cpu.cores * cpu.numa_nodes
-    final_cpu_threads = cpu_threads or settings.get("inference.cpu_threads") or int(total_threads * 0.8)
-
-    # kt-threadpool-count: default to NUMA node count
-    final_numa_nodes = numa_nodes or settings.get("inference.numa_nodes") or cpu.numa_nodes
-
-    # kt-num-gpu-experts: use CLI or config value
-    final_gpu_experts = gpu_experts or settings.get("inference.gpu_experts", 1)
-
-    # KT-kernel options
-    final_kt_method = kt_method or settings.get("inference.kt_method", "AMXINT4")
-    final_kt_gpu_prefill_threshold = kt_gpu_prefill_threshold or settings.get(
-        "inference.kt_gpu_prefill_token_threshold", 4096
+    # Tensor parallel size: CLI > config > auto-detect from GPUs
+    final_tensor_parallel_size = resolve(
+        tensor_parallel_size, "inference.tensor_parallel_size", len(gpus) if gpus else 1
     )
 
+    # CPU/GPU configuration with smart defaults
+    total_threads = cpu.cores * cpu.numa_nodes
+    final_cpu_threads = resolve(cpu_threads, "inference.cpu_threads", int(total_threads * 0.8))
+    final_numa_nodes = resolve(numa_nodes, "inference.numa_nodes", cpu.numa_nodes)
+    final_gpu_experts = resolve(gpu_experts, "inference.gpu_experts", 1)
+
+    # KT-kernel options
+    final_kt_method = resolve(kt_method, "inference.kt_method", "AMXINT4")
+    final_kt_gpu_prefill_threshold = resolve(kt_gpu_prefill_threshold, "inference.kt_gpu_prefill_token_threshold", 4096)
+
     # SGLang options
-    final_attention_backend = attention_backend or settings.get("inference.attention_backend", "triton")
-    final_max_total_tokens = max_total_tokens or settings.get("inference.max_total_tokens", 40000)
-    final_max_running_requests = max_running_requests or settings.get("inference.max_running_requests", 32)
-    final_chunked_prefill_size = chunked_prefill_size or settings.get("inference.chunked_prefill_size", 4096)
-    final_mem_fraction_static = mem_fraction_static or settings.get("inference.mem_fraction_static", 0.98)
-    final_watchdog_timeout = watchdog_timeout or settings.get("inference.watchdog_timeout", 3000)
-    final_served_model_name = served_model_name or settings.get("inference.served_model_name", "")
+    final_attention_backend = resolve(attention_backend, "inference.attention_backend", "triton")
+    final_max_total_tokens = resolve(max_total_tokens, "inference.max_total_tokens", 40000)
+    final_max_running_requests = resolve(max_running_requests, "inference.max_running_requests", 32)
+    final_chunked_prefill_size = resolve(chunked_prefill_size, "inference.chunked_prefill_size", 4096)
+    final_mem_fraction_static = resolve(mem_fraction_static, "inference.mem_fraction_static", 0.98)
+    final_watchdog_timeout = resolve(watchdog_timeout, "inference.watchdog_timeout", 3000)
+    final_served_model_name = resolve(served_model_name, "inference.served_model_name", "")
 
     # Performance flags
-    if disable_shared_experts_fusion is not None:
-        final_disable_shared_experts_fusion = disable_shared_experts_fusion
-    else:
-        final_disable_shared_experts_fusion = settings.get("inference.disable_shared_experts_fusion", False)
+    final_disable_shared_experts_fusion = resolve(
+        disable_shared_experts_fusion, "inference.disable_shared_experts_fusion", False
+    )
 
     # Pass extra CLI parameters
     extra_params = {}
@@ -407,12 +466,9 @@ def _run_impl(
     console.print()
     print_step("Configuration")
 
-    # Model info
     # Display model name
-    if user_model:
-        console.print(f"  Model: [bold]{user_model.name}[/bold]")
-    else:
-        console.print(f"  Model: [bold]{resolved_model_path.name}[/bold]")
+    model_display_name = user_model.name if user_model else resolved_model_path.name
+    console.print(f"  Model: [bold]{model_display_name}[/bold]")
 
     console.print(f"  Path: [dim]{resolved_model_path}[/dim]")
 

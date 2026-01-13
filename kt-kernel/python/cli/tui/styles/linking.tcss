@@ -1,0 +1,45 @@
+/* Linking Screens Styles */
+
+/* LinkModelsScreen */
+
+    LinkModelsScreen {
+        align: center middle;
+    }
+
+    #link-dialog {
+        width: 80;
+        height: auto;
+        background: $surface;
+        border: heavy $primary;
+        padding: 1 2;
+    }
+
+    #link-content {
+        width: 100%;
+        height: auto;
+        max-height: 30;
+        overflow-y: auto;
+        padding: 1 0;
+        margin-bottom: 1;
+    }
+
+    #link-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        layout: horizontal;
+        margin-top: 1;
+        padding: 1 0;
+    }
+
+    #link-buttons > Button {
+        min-width: 20;
+        margin: 0 1;
+    }
+
+    .link-item {
+        width: 100%;
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    
