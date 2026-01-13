@@ -213,6 +213,12 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     _mm512_storeu_si512(dst, data);
   }
 
+  // Fast 64-byte non-temporal store (bypass cache for write-only patterns)
+  static inline void fast_stream_64(void* __restrict dst, const void* __restrict src) {
+    __m512i data = _mm512_loadu_si512(src);
+    _mm512_stream_si512((__m512i*)dst, data);
+  }
+
   // Fast memcpy for arbitrary sizes using AVX512
   static inline void fast_memcpy(void* __restrict dst, const void* __restrict src, size_t bytes) {
     uint8_t* d = (uint8_t*)dst;
@@ -262,19 +268,19 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     amx::transpose_16x16_32bit(temp_block1);
     amx::transpose_16x16_32bit(temp_block2);
 
-    // Copy transposed data to destination in n-major layout
-    const ggml_bf16_t* temp1_bf16 = reinterpret_cast<const ggml_bf16_t*>(temp_block1);
-    const ggml_bf16_t* temp2_bf16 = reinterpret_cast<const ggml_bf16_t*>(temp_block2);
-
+    // Copy transposed data to destination in n-major layout using non-temporal stores
     // First 16 rows (block 1)
     for (int i = 0; i < TILE_N; i++) {
-      std::memcpy(dst + i * dst_row_stride, temp1_bf16 + i * K_STEP, K_STEP * sizeof(ggml_bf16_t));
+      fast_stream_64(dst + i * dst_row_stride, &temp_block1[i]);
     }
 
     // Next 16 rows (block 2)
     for (int i = 0; i < TILE_N; i++) {
-      std::memcpy(dst + (TILE_N + i) * dst_row_stride, temp2_bf16 + i * K_STEP, K_STEP * sizeof(ggml_bf16_t));
+      fast_stream_64(dst + (TILE_N + i) * dst_row_stride, &temp_block2[i]);
     }
+
+    // Ensure all stores complete before returning
+    _mm_sfence();
   }
 
   /**

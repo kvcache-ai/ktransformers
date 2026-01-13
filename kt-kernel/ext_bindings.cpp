@@ -253,8 +253,9 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding);
 
-#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
-  if constexpr (std::is_same_v<MoeTP, AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>) {
+  // Bind write_weight_scale_to_buffer_task for MoE types that support it
+  // Uses SFINAE to detect if MoeClass has write_weight_scale_to_buffer method
+  if constexpr (requires { &MoeClass::write_weight_scale_to_buffer; }) {
     struct WriteWeightScaleToBufferBindings {
       struct Args {
         CPUInfer* cpuinfer;
@@ -296,99 +297,6 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
-
-#if defined(__AVX512BF16__)
-  // FP8 MoE: processes one expert at a time (expert_id instead of gpu_experts_num)
-  // Only available on CPUs with AVX512 BF16 support
-  if constexpr (std::is_same_v<MoeTP, AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>) {
-    struct WriteWeightScaleToBufferBindings {
-      struct Args {
-        CPUInfer* cpuinfer;
-        MoeClass* moe;
-        int gpu_tp_count;
-        int expert_id;
-        std::vector<uintptr_t> w13_weight_ptrs;
-        std::vector<uintptr_t> w13_scale_ptrs;
-        std::vector<uintptr_t> w2_weight_ptrs;
-        std::vector<uintptr_t> w2_scale_ptrs;
-      };
-
-      static void inner(void* args) {
-        Args* args_ = (Args*)args;
-        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe, args_->gpu_tp_count,
-                                 args_->expert_id, args_->w13_weight_ptrs, args_->w13_scale_ptrs, args_->w2_weight_ptrs,
-                                 args_->w2_scale_ptrs);
-      }
-
-      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, int gpu_tp_count,
-                                                              int expert_id, py::list w13_weight_ptrs,
-                                                              py::list w13_scale_ptrs, py::list w2_weight_ptrs,
-                                                              py::list w2_scale_ptrs) {
-        // Convert Python lists to std::vector<uintptr_t>
-        std::vector<uintptr_t> w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec;
-
-        for (auto item : w13_weight_ptrs) w13_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w13_scale_ptrs) w13_scale_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_weight_ptrs) w2_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_scale_ptrs) w2_scale_vec.push_back(py::cast<uintptr_t>(item));
-
-        Args* args = new Args{nullptr,        moe.get(),     gpu_tp_count,  expert_id,
-                              w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec};
-        return std::make_pair((intptr_t)&inner, (intptr_t)args);
-      }
-    };
-
-    moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
-                py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
-                py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
-  }
-
-  // BF16 MoE: processes one expert at a time (expert_id instead of gpu_experts_num)
-  // Only available on CPUs with AVX512 BF16 support
-  if constexpr (std::is_same_v<MoeTP, AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>) {
-    struct WriteWeightScaleToBufferBindings {
-      struct Args {
-        CPUInfer* cpuinfer;
-        MoeClass* moe;
-        int gpu_tp_count;
-        int expert_id;
-        std::vector<uintptr_t> w13_weight_ptrs;
-        std::vector<uintptr_t> w13_scale_ptrs;
-        std::vector<uintptr_t> w2_weight_ptrs;
-        std::vector<uintptr_t> w2_scale_ptrs;
-      };
-
-      static void inner(void* args) {
-        Args* args_ = (Args*)args;
-        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe, args_->gpu_tp_count,
-                                 args_->expert_id, args_->w13_weight_ptrs, args_->w13_scale_ptrs, args_->w2_weight_ptrs,
-                                 args_->w2_scale_ptrs);
-      }
-
-      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, int gpu_tp_count,
-                                                              int expert_id, py::list w13_weight_ptrs,
-                                                              py::list w13_scale_ptrs, py::list w2_weight_ptrs,
-                                                              py::list w2_scale_ptrs) {
-        // Convert Python lists to std::vector<uintptr_t>
-        std::vector<uintptr_t> w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec;
-
-        for (auto item : w13_weight_ptrs) w13_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w13_scale_ptrs) w13_scale_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_weight_ptrs) w2_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_scale_ptrs) w2_scale_vec.push_back(py::cast<uintptr_t>(item));
-
-        Args* args = new Args{nullptr,        moe.get(),     gpu_tp_count,  expert_id,
-                              w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec};
-        return std::make_pair((intptr_t)&inner, (intptr_t)args);
-      }
-    };
-
-    moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
-                py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
-                py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
-  }
-#endif  // __AVX512BF16__
-#endif
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
