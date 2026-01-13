@@ -19,14 +19,14 @@ from kt_kernel import kt_kernel_ext
 import numpy as np
 
 # 测试参数设置
-expert_num = 128
+expert_num = 16
 hidden_size = 7168
 intermediate_size = 2048
 max_len = 25600
 num_experts_per_tok = 8
 layer_num = 2
 
-qlen = 1
+qlen = 2048
 warm_up_iter = 1000
 test_iter = 2000
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
@@ -38,8 +38,8 @@ physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dty
 worker_config = kt_kernel_ext.WorkerPoolConfig()
 worker_config.subpool_count = 2
 worker_config.subpool_numa_map = [0, 1]
-worker_config.subpool_thread_count = [40, 40]
-CPUINFER_PARAM = 80
+worker_config.subpool_thread_count = [80, 80]
+CPUINFER_PARAM = 160
 CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
 
 
@@ -306,5 +306,5 @@ def bench_moe(quant_mode: str):
 if __name__ == "__main__":
     # 选择需要测试的量化模式
     # bench_moe("bf16")
-    # bench_moe("int8")
-    bench_moe("int4")
+    bench_moe("int8")
+    # bench_moe("int4")
