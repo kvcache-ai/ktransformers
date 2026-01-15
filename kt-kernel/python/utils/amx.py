@@ -16,6 +16,14 @@ except (ImportError, AttributeError):
     _HAS_AMX_SUPPORT = False
     AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE, AMXBF16_MOE = None, None, None, None, None
 
+try:
+    from kt_kernel_ext.moe import AMXFP8PerChannel_MOE
+
+    _HAS_FP8_PERCHANNEL_SUPPORT = True
+except (ImportError, AttributeError):
+    _HAS_FP8_PERCHANNEL_SUPPORT = False
+    AMXFP8PerChannel_MOE = None
+
 from typing import Optional
 
 
@@ -308,7 +316,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
 
 class NativeMoEWrapper(BaseMoEWrapper):
-    """Wrapper for RAWINT4/FP8/BF16 experts stored in compressed SafeTensor format."""
+    """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
 
@@ -334,6 +342,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
             raise RuntimeError("AMX backend with RAWINT4 support is not available.")
         if method == "FP8" and AMXFP8_MOE is None:
             raise RuntimeError("AMX backend with FP8 support is not available.")
+        if method == "FP8_PERCHANNEL" and not _HAS_FP8_PERCHANNEL_SUPPORT:
+            raise RuntimeError("AMX backend with FP8 per-channel support is not available.")
         if method == "BF16" and AMXBF16_MOE is None:
             raise RuntimeError("AMX backend with BF16 support is not available.")
 
@@ -358,6 +368,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 NativeMoEWrapper._native_loader_instance = CompressedSafeTensorLoader(weight_path)
             elif method == "FP8":
                 NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path)
+            elif method == "FP8_PERCHANNEL":
+                # Use FP8SafeTensorLoader with per-channel scale format
+                NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
             elif method == "BF16":
                 NativeMoEWrapper._native_loader_instance = BF16SafeTensorLoader(weight_path)
             else:
@@ -412,6 +425,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
             elif self.method == "FP8":
                 assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
+            elif self.method == "FP8_PERCHANNEL":
+                assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8_PERCHANNEL"
 
         t2 = time.time()
 
@@ -466,6 +481,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.group_size = 128
             moe_config.quant_config.zero_point = False
             self.moe = AMXFP8_MOE(moe_config)
+        elif self.method == "FP8_PERCHANNEL":
+            moe_config.quant_config.bits = 8
+            moe_config.quant_config.per_channel = True
+            moe_config.quant_config.zero_point = False
+            self.moe = AMXFP8PerChannel_MOE(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             self.moe = AMXBF16_MOE(moe_config)

@@ -4,12 +4,14 @@
 Benchmark write_weight_scale_to_buffer for AMX MOE operators.
 
 Supports:
-- FP8: FP8 weights (1 byte) + float32 scales
+- FP8: FP8 weights (1 byte) + float32 scales (block-wise)
+- FP8_PERCHANNEL: FP8 weights (1 byte) + float32 per-channel scales
 - BF16: Native BF16 weights (2 bytes), no scales
 
 Usage:
     python bench_write_buffer.py          # Run all modes
     python bench_write_buffer.py fp8      # Run FP8 only
+    python bench_write_buffer.py fp8_perchannel  # Run FP8 per-channel only
     python bench_write_buffer.py bf16     # Run BF16 only
 """
 import json
@@ -31,8 +33,8 @@ expert_num = 256
 num_experts_per_tok = 8
 gpu_tp_count = 2
 
-warm_up_iter = 3
-test_iter = 7
+warm_up_iter = 30
+test_iter = 70
 
 gpu_experts_num = expert_num
 
@@ -147,6 +149,49 @@ def allocate_weights_fp8():
     }
 
 
+def allocate_weights_fp8_perchannel():
+    per_mat_weight_bytes = hidden_size * intermediate_size
+    per_mat_scale_elems_gate_up = intermediate_size
+    per_mat_scale_elems_down = hidden_size
+
+    gate_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    up_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    down_q = (
+        torch.randint(0, 256, (expert_num * per_mat_weight_bytes,), dtype=torch.uint8, device="cuda")
+        .to("cpu")
+        .contiguous()
+    )
+    gate_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    up_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_gate_up, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+    down_scale = (
+        torch.randn(expert_num * per_mat_scale_elems_down, dtype=torch.float32, device="cuda").to("cpu").contiguous()
+    )
+
+    return {
+        "gate_q": gate_q,
+        "up_q": up_q,
+        "down_q": down_q,
+        "gate_scale": gate_scale,
+        "up_scale": up_scale,
+        "down_scale": down_scale,
+        "per_mat_weight_bytes": per_mat_weight_bytes,
+        "per_mat_scale_elems_gate_up": per_mat_scale_elems_gate_up,
+        "per_mat_scale_elems_down": per_mat_scale_elems_down,
+    }
+
+
 def build_moe_fp8(layer_idx=0):
     """Build a single FP8 MOE instance."""
     weights = allocate_weights_fp8()
@@ -178,6 +223,38 @@ def build_moe_fp8(layer_idx=0):
     return moe, buffer_shapes, weights
 
 
+def build_moe_fp8_perchannel(layer_idx=0):
+    """Build a single FP8 per-channel MOE instance."""
+    weights = allocate_weights_fp8_perchannel()
+
+    config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size)
+    config.max_len = max_len
+    config.layer_idx = layer_idx
+    config.quant_config.bits = 8
+    config.quant_config.group_size = 0
+    config.quant_config.zero_point = False
+    config.quant_config.per_channel = True
+    config.pool = CPUInfer.backend_
+    config.gate_proj = weights["gate_q"].data_ptr()
+    config.up_proj = weights["up_q"].data_ptr()
+    config.down_proj = weights["down_q"].data_ptr()
+    config.gate_scale = weights["gate_scale"].data_ptr()
+    config.up_scale = weights["up_scale"].data_ptr()
+    config.down_scale = weights["down_scale"].data_ptr()
+
+    moe = kt_kernel_ext.moe.AMXFP8PerChannel_MOE(config)
+    CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
+    CPUInfer.sync()
+
+    buffer_shapes = {
+        "per_mat_weight_bytes": weights["per_mat_weight_bytes"],
+        "per_mat_scale_elems_gate_up": weights["per_mat_scale_elems_gate_up"],
+        "per_mat_scale_elems_down": weights["per_mat_scale_elems_down"],
+    }
+
+    return moe, buffer_shapes, weights
+
+
 def allocate_buffers_fp8(buffer_shapes):
     """Allocate output buffers for FP8 single expert."""
     per_mat_weight_bytes = buffer_shapes["per_mat_weight_bytes"]
@@ -187,6 +264,40 @@ def allocate_buffers_fp8(buffer_shapes):
     weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
     scale_elems_per_expert_per_tp_gate_up = per_mat_scale_elems_gate_up // gpu_tp_count
     scale_elems_per_expert_per_tp_down = per_mat_scale_elems_down // gpu_tp_count
+
+    w13_weight_bufs = [torch.empty(2 * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w13_scale_bufs = [
+        torch.empty(2 * scale_elems_per_expert_per_tp_gate_up, dtype=torch.float32) for _ in range(gpu_tp_count)
+    ]
+    w2_weight_bufs = [torch.empty(weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w2_scale_bufs = [torch.empty(scale_elems_per_expert_per_tp_down, dtype=torch.float32) for _ in range(gpu_tp_count)]
+
+    buffer_ptrs = {
+        "w13_weight_ptrs": [buf.data_ptr() for buf in w13_weight_bufs],
+        "w13_scale_ptrs": [buf.data_ptr() for buf in w13_scale_bufs],
+        "w2_weight_ptrs": [buf.data_ptr() for buf in w2_weight_bufs],
+        "w2_scale_ptrs": [buf.data_ptr() for buf in w2_scale_bufs],
+    }
+
+    keep_tensors = {
+        "w13_weight_bufs": w13_weight_bufs,
+        "w13_scale_bufs": w13_scale_bufs,
+        "w2_weight_bufs": w2_weight_bufs,
+        "w2_scale_bufs": w2_scale_bufs,
+    }
+
+    return buffer_ptrs, keep_tensors
+
+
+def allocate_buffers_fp8_perchannel(buffer_shapes):
+    """Allocate output buffers for FP8 per-channel single expert."""
+    per_mat_weight_bytes = buffer_shapes["per_mat_weight_bytes"]
+    per_mat_scale_elems_gate_up = buffer_shapes["per_mat_scale_elems_gate_up"]
+    per_mat_scale_elems_down = buffer_shapes["per_mat_scale_elems_down"]
+
+    weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
+    scale_elems_per_expert_per_tp_gate_up = per_mat_scale_elems_gate_up // gpu_tp_count
+    scale_elems_per_expert_per_tp_down = per_mat_scale_elems_down
 
     w13_weight_bufs = [torch.empty(2 * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
     w13_scale_bufs = [
@@ -320,6 +431,20 @@ def bench_write_buffer(quant_mode: str):
         )
         bytes_per_call = total_weights + total_scale_bytes
 
+    elif quant_mode == "fp8_perchannel":
+        bytes_per_elem = 1.0
+        moe_0, buffer_shapes, keep_tensors_0 = build_moe_fp8_perchannel(layer_idx=0)
+        moe_1, _, keep_tensors_1 = build_moe_fp8_perchannel(layer_idx=1)
+        buffer_ptrs, buffer_keep = allocate_buffers_fp8_perchannel(buffer_shapes)
+
+        total_weights = hidden_size * intermediate_size * expert_num * 3
+        total_scale_bytes = (
+            (buffer_shapes["per_mat_scale_elems_gate_up"] * 2 + buffer_shapes["per_mat_scale_elems_down"])
+            * expert_num
+            * 4
+        )
+        bytes_per_call = total_weights + total_scale_bytes
+
     elif quant_mode == "bf16":
         bytes_per_elem = 2.0
         moe_0, buffer_shapes, keep_tensors_0 = build_moe_bf16(layer_idx=0)
@@ -356,7 +481,7 @@ def bench_write_buffer(quant_mode: str):
         end = time.perf_counter()
         iter_time = end - start
         total_time += iter_time
-        print(f"  Iter {iter_idx}: {iter_time*1000:.2f} ms")
+        # print(f"  Iter {iter_idx}: {iter_time*1000:.2f} ms")
         time.sleep(0.3)
 
     # bytes_per_call is for one MOE, we have 2 MOEs
@@ -400,7 +525,7 @@ def bench_write_buffer(quant_mode: str):
 def main(quant_modes=None):
     """Run benchmarks for specified quant modes."""
     if quant_modes is None:
-        quant_modes = ["fp8", "bf16"]
+        quant_modes = ["fp8", "fp8_perchannel", "bf16"]
 
     results = {}
     for mode in quant_modes:
@@ -423,10 +548,10 @@ def main(quant_modes=None):
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         mode = sys.argv[1].lower()
-        if mode in ["fp8", "bf16"]:
+        if mode in ["fp8", "fp8_perchannel", "bf16"]:
             main([mode])
         else:
-            print(f"Unknown mode: {mode}. Use 'fp8' or 'bf16'")
+            print(f"Unknown mode: {mode}. Use 'fp8', 'fp8_perchannel' or 'bf16'")
             sys.exit(1)
     else:
         main()

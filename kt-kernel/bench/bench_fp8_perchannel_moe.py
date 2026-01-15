@@ -1,8 +1,8 @@
 """
-Performance benchmark for FP8 MoE kernel (AVX implementation).
+Performance benchmark for FP8 Per-Channel MoE kernel (GLM-4.7-FP8 style).
 
-This benchmark measures the performance of the FP8 MoE operator with:
-- FP8 (E4M3) weights with 128x128 block-wise scaling
+This benchmark measures the performance of the FP8 Per-Channel MoE operator with:
+- FP8 (E4M3) weights with per-channel scaling (one scale per output row)
 - BF16 activations
 - AVX-512 DPBF16 compute path
 """
@@ -25,7 +25,6 @@ expert_num = 256
 hidden_size = 7168
 intermediate_size = 2048
 num_experts_per_tok = 8
-fp8_group_size = 128
 max_len = 25600
 
 layer_num = 2
@@ -88,65 +87,57 @@ def record_results(result, filename=json_path):
         f.write(json.dumps(result) + "\n")
 
 
-def generate_fp8_weights_direct(shape: tuple, group_size: int = 128):
+def generate_fp8_perchannel_weights_direct(shape: tuple):
     """
-    Directly generate random FP8 weights and e8m0 format scale_inv.
+    Directly generate random FP8 weights and per-channel scales.
 
     Args:
         shape: (expert_num, n, k) - weight tensor shape
-        group_size: block size for scaling (128x128 blocks)
 
     Returns:
         fp8_weights: uint8 tensor with random FP8 E4M3 values
-        scale_inv: fp32 tensor with e8m0 format (powers of 2)
+        scales: fp32 tensor with per-channel scales, shape [expert_num, n]
     """
     e, n, k = shape
-    n_blocks = n // group_size
-    k_blocks = k // group_size
 
     # Directly generate random FP8 weights as uint8
     # FP8 E4M3 format: 1 sign + 4 exp + 3 mantissa
-    # Valid range for normal numbers: exp 1-14 (0 is subnormal, 15 is special)
     fp8_weights = torch.randint(0, 256, (e, n, k), dtype=torch.uint8, device="cuda").to("cpu").contiguous()
 
-    # Generate e8m0 format scale_inv (powers of 2)
-    # e8m0: 8-bit exponent only, no mantissa, bias = 127
-    # Generate random exponents in a reasonable range (e.g., -8 to 8)
-    exponents = torch.randint(-8, 9, (e, n_blocks, k_blocks), dtype=torch.int32, device="cuda").to("cpu").contiguous()
-    scale_inv = (2.0 ** exponents.float()).to(torch.float32).contiguous()
+    # Generate random per-channel scales (one per output row)
+    # Use reasonable scale range (e.g., 2^-8 to 2^8)
+    exponents = torch.randint(-8, 9, (e, n), dtype=torch.int32, device="cuda").to("cpu").contiguous()
+    scales = (2.0 ** exponents.float()).to(torch.float32).contiguous()
 
-    return fp8_weights, scale_inv
+    return fp8_weights, scales
 
 
-def bench_fp8_moe():
-    """Benchmark FP8 MoE performance"""
+def bench_fp8_perchannel_moe():
+    """Benchmark FP8 Per-Channel MoE performance"""
     with torch.inference_mode():
         print("=" * 70)
-        print("FP8 MoE Kernel Performance Benchmark")
+        print("FP8 Per-Channel MoE Kernel Performance Benchmark")
         print("=" * 70)
 
-        # Generate FP8 weights directly (no quantization from fp32)
-        print("\nGenerating FP8 weights directly...")
+        # Generate FP8 weights with per-channel scales
+        print("\nGenerating FP8 weights with per-channel scales...")
         torch.manual_seed(42)
-        gate_fp8, gate_scales = generate_fp8_weights_direct(
-            (expert_num, intermediate_size, hidden_size), fp8_group_size
-        )
-        up_fp8, up_scales = generate_fp8_weights_direct((expert_num, intermediate_size, hidden_size), fp8_group_size)
-        down_fp8, down_scales = generate_fp8_weights_direct(
-            (expert_num, hidden_size, intermediate_size), fp8_group_size
-        )
+        gate_fp8, gate_scales = generate_fp8_perchannel_weights_direct((expert_num, intermediate_size, hidden_size))
+        up_fp8, up_scales = generate_fp8_perchannel_weights_direct((expert_num, intermediate_size, hidden_size))
+        down_fp8, down_scales = generate_fp8_perchannel_weights_direct((expert_num, hidden_size, intermediate_size))
 
         physical_to_logical_map = torch.tensor(range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
         # Build MoE layers
-        print("Building FP8 MoE layers...")
+        print("Building FP8 Per-Channel MoE layers...")
         moes = []
         for _ in tqdm(range(layer_num), desc="Initializing MOEs"):
             config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
             config.max_len = max_len
             config.quant_config.bits = 8
-            config.quant_config.group_size = fp8_group_size
+            config.quant_config.group_size = 0  # Not used for per-channel
             config.quant_config.zero_point = False
+            config.quant_config.per_channel = True  # Enable per-channel mode
 
             config.gate_proj = gate_fp8.data_ptr()
             config.up_proj = up_fp8.data_ptr()
@@ -156,7 +147,7 @@ def bench_fp8_moe():
             config.down_scale = down_scales.data_ptr()
             config.pool = CPUInfer.backend_
 
-            moe = kt_kernel_ext.moe.AMXFP8_MOE(config)
+            moe = kt_kernel_ext.moe.AMXFP8PerChannel_MOE(config)
             CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
             CPUInfer.sync()
             moes.append(moe)
@@ -238,13 +229,13 @@ def bench_fp8_moe():
             * test_iter
             / total_time
             / 1e9
-        )  # 单位：GB/s
+        )
 
         # Print results
         print("\n" + "=" * 70)
         print("Benchmark Results")
         print("=" * 70)
-        print(f"Quant mode: FP8 (E4M3) with {fp8_group_size}x{fp8_group_size} block scaling")
+        print(f"Quant mode: FP8 (E4M3) with per-channel scaling")
         print(f"Total time: {total_time:.4f} s")
         print(f"Iterations: {test_iter}")
         print(f"Time per iteration: {time_per_iter_us:.2f} us")
@@ -255,7 +246,7 @@ def bench_fp8_moe():
         # Record results
         result = {
             "test_name": os.path.basename(__file__),
-            "quant_mode": "fp8_e4m3",
+            "quant_mode": "fp8_e4m3_perchannel",
             "total_time_seconds": total_time,
             "iterations": test_iter,
             "time_per_iteration_us": time_per_iter_us,
@@ -267,7 +258,7 @@ def bench_fp8_moe():
                 "hidden_size": hidden_size,
                 "intermediate_size": intermediate_size,
                 "num_experts_per_tok": num_experts_per_tok,
-                "fp8_group_size": fp8_group_size,
+                "quant_type": "per_channel",
                 "layer_num": layer_num,
                 "qlen": qlen,
                 "warm_up_iter": warm_up_iter,
@@ -283,4 +274,4 @@ def bench_fp8_moe():
 
 
 if __name__ == "__main__":
-    bench_fp8_moe()
+    bench_fp8_perchannel_moe()

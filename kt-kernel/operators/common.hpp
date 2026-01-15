@@ -223,7 +223,8 @@ struct QuantConfig {
   std::string quant_method = "";
   int bits = 0;
   int group_size = 0;
-  bool zero_point;
+  bool zero_point = false;
+  bool per_channel = false;  // Per-channel quantization (GLM-4.7-FP8 style)
 };
 
 struct GeneralMOEConfig {
@@ -237,7 +238,7 @@ struct GeneralMOEConfig {
   WorkerPool* pool = nullptr;
 
   // SGLang offload
-  int num_gpu_experts = 0;  // Computed from gpu_experts_mask
+  int num_gpu_experts = 0;              // Computed from gpu_experts_mask
   uint8_t* gpu_experts_mask = nullptr;  // Bool mask: true = expert on GPU
   void* physical_to_logical_map = nullptr;
 
@@ -253,8 +254,7 @@ struct GeneralMOEConfig {
 
   // Check if expert should be skipped (invalid, out of range, or on GPU)
   inline bool should_skip_expert(int64_t expert_id) const {
-    return expert_id < 0 || expert_id >= expert_num ||
-           (gpu_experts_mask && gpu_experts_mask[expert_id]);
+    return expert_id < 0 || expert_id >= expert_num || (gpu_experts_mask && gpu_experts_mask[expert_id]);
   }
 
   void* gate_proj;

@@ -483,6 +483,119 @@ struct BufferCFP32ReduceImpl {
   }
 };
 
+// ============================================================================
+// BufferBFP8PerChannelImpl: FP8 权重缓冲区（Per Channel 量化）
+// ============================================================================
+
+/**
+ * @brief FP8 Per-Channel 权重缓冲区
+ *
+ * 存储 FP8 格式的权重矩阵，每个输出通道（行）有一个缩放因子。
+ * 这与 GLM-4.7-FP8 的 per-channel 量化格式匹配。
+ *
+ * 与 BufferBFP8Impl (block-wise) 的区别：
+ * - Block-wise: scale shape = [n/128, k/128], 每 128x128 块一个 scale
+ * - Per-channel: scale shape = [n], 每行一个 scale
+ *
+ * @tparam K Kernel 类型
+ */
+template <typename K>
+struct BufferBFP8PerChannelImpl {
+  uint8_t* b;  // FP8 weight [n, k]
+  float* d;    // per-channel scale [n]
+  int n, k;
+
+  static constexpr int N_STEP = K::N_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr int N_BLOCK = K::N_BLOCK;
+  static constexpr int K_BLOCK = K::K_BLOCK;
+  static constexpr bool SCALE = true;
+  static constexpr bool PER_CHANNEL = true;
+
+  /**
+   * @brief 计算所需内存大小
+   * weight: n * k bytes (FP8)
+   * scale: n * sizeof(float) bytes
+   */
+  static size_t required_size(int n, int k) { return sizeof(uint8_t) * n * k + sizeof(float) * n; }
+
+  /**
+   * @brief 构造函数
+   */
+  BufferBFP8PerChannelImpl(int n, int k, void* ptr) : n(n), k(k) { set_data(ptr); }
+
+  void set_data(void* ptr) {
+    assert(reinterpret_cast<intptr_t>(ptr) % 64 == 0);
+    b = reinterpret_cast<uint8_t*>(ptr);
+    d = reinterpret_cast<float*>(b + (size_t)n * k);
+  }
+
+  static constexpr int mat_offset[8] = {0, 2, 4, 6, 1, 3, 5, 7};  // fp8 matrix offset for reordering
+
+  /**
+   * @brief 从原始 FP8 权重加载（per-channel 量化格式）
+   *
+   * @param b_src FP8 权重源数据 (n-major, n×k)
+   * @param d_src FP32 per-channel scale 源数据 (shape: [n] or [n, 1])
+   */
+  void from_mat(const uint8_t* b_src, const float* d_src, int ith, int nth) {
+    assert(b != nullptr && d != nullptr);
+    assert(N_STEP == 32 && K_STEP == 32);
+
+    // Copy per-channel scales. Each thread copies its own n-block range.
+    if (d_src != nullptr) {
+      auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+      memcpy(d + n_start, d_src + n_start, sizeof(float) * (n_end - n_start));
+    }
+
+    // Reorder FP8 weights into KT block-major layout (same as BufferBFP8Impl)
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+      int n_step_size = std::min(N_STEP, n_block_size - n_begin);
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+          int k_step_size = std::min(K_STEP, k_block_size - k_begin);
+          // [k_step_size, n_step_size] block copy
+          const uint8_t* block_b_src = b_src + (size_t)(n_block_begin + n_begin) * k + k_block_begin + k_begin;
+          uint64_t* block_b_dst =
+              reinterpret_cast<uint64_t*>(b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size +
+                                          (size_t)n_begin * k_block_size + (size_t)k_begin * N_STEP);
+          for (int i = 0; i < 8; i++) {
+            const uint16_t* s = reinterpret_cast<const uint16_t*>(block_b_src + (size_t)i * k * 4);
+            for (int j = 0; j < 16; j++) {
+              uint64_t val = (((uint64_t)s[j])) | (((uint64_t)s[j + (k / 2) * 1]) << 16) |
+                             (((uint64_t)s[j + (k / 2) * 2]) << 32) | (((uint64_t)s[j + (k / 2) * 3]) << 48);
+              block_b_dst[8 * j + mat_offset[i]] = val;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * @brief 获取行 n_begin 开始的 per-channel scale 指针
+   */
+  float* get_scale(int n_begin) { return d + n_begin; }
+
+  /**
+   * @brief 获取子矩阵指针
+   */
+  uint8_t* get_submat(int n, int k, int n_begin, int k_begin) {
+    int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
+    n_begin -= n_block_begin;
+    int n_block_size = std::min(N_BLOCK, n - n_block_begin);
+    int k_block_begin = k_begin / K_BLOCK * K_BLOCK;
+    k_begin -= k_block_begin;
+    int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+    return b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size + (size_t)n_begin * k_block_size +
+           (size_t)k_begin * N_STEP;
+  }
+};
+
 }  // namespace amx
 
 #endif  // AMX_RAW_BUFFERS_HPP

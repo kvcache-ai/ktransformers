@@ -22,12 +22,12 @@ from kt_kernel import kt_kernel_ext
 torch.manual_seed(42)
 
 # Model config
-hidden_size = 3072
-intermediate_size = 1536
+hidden_size = 2048
+intermediate_size = 768
 max_len = 25600
 
-expert_num = 16
-num_experts_per_tok = 16
+expert_num = 128
+num_experts_per_tok = 8
 
 qlen = 1
 layer_num = 5
@@ -180,13 +180,13 @@ def run_bf16_moe_test():
     diffs = []
     with torch.inference_mode(mode=True):
         for i in range(validation_iter):
-            torch.manual_seed(100 + i)
+            torch.manual_seed(114514 + i)
             bsz_tensor = torch.tensor([qlen], device="cpu")
             expert_ids = torch.stack(
                 [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
             ).contiguous()
-            weights = torch.randn((qlen, num_experts_per_tok), dtype=torch.float32).contiguous() / 100
-            input_tensor = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() * 1.5
+            weights = torch.randn((qlen, num_experts_per_tok), dtype=torch.float32).contiguous() / 10
+            input_tensor = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() * 3
             output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
 
             moe = moes[i % layer_num]
