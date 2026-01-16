@@ -85,7 +85,7 @@ class KTMoEWrapper:
         # Select backend based on method
         if method in ["AMXINT4", "AMXINT8"]:
             backend_cls = AMXMoEWrapper
-        elif method in ["RAWINT4", "FP8", "BF16"]:
+        elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL"]:
             backend_cls = NativeMoEWrapper
         elif method == "LLAMAFILE":
             backend_cls = LlamafileMoEWrapper
