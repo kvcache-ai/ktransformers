@@ -503,16 +503,21 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
         return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
       }))
-      .def(py::init(
-          [](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int num_gpu_experts) {
-            GeneralMOEConfig cfg(expert_num, routed_expert_num, hidden_size, intermediate_size);
-            cfg.num_gpu_experts = num_gpu_experts;
-            return cfg;
-          }))
+      .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size,
+                       uintptr_t gpu_experts_mask_ptr) {
+        GeneralMOEConfig cfg(expert_num, routed_expert_num, hidden_size, intermediate_size);
+        cfg.gpu_experts_mask = reinterpret_cast<uint8_t*>(gpu_experts_mask_ptr);
+        cfg.compute_num_gpu_experts();
+        return cfg;
+      }))
       .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)
       .def_readwrite("pool", &GeneralMOEConfig::pool)
 
-      .def_readwrite("num_gpu_experts", &GeneralMOEConfig::num_gpu_experts)
+      .def_readonly("num_gpu_experts", &GeneralMOEConfig::num_gpu_experts)
+      .def_property(
+          "gpu_experts_mask",
+          [](const GeneralMOEConfig& self) { return reinterpret_cast<uintptr_t>(self.gpu_experts_mask); },
+          [](GeneralMOEConfig& self, uintptr_t val) { self.gpu_experts_mask = reinterpret_cast<uint8_t*>(val); })
       .DEF_PTR_PROPERTY(GeneralMOEConfig, physical_to_logical_map)
 
       .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_proj)

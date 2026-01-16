@@ -195,7 +195,7 @@ class AMX_MOE_BASE {
     std::fill(m_local_num_.begin(), m_local_num_.end(), 0);
     for (int i = 0; i < qlen; i++) {
       for (int j = 0; j < k; j++) {
-        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+        if (config_.should_skip_expert(expert_ids[i * k + j])) {
           continue;
         }
         m_local_pos_[i][j] = m_local_num_[expert_ids[i * k + j]]++;
@@ -296,7 +296,7 @@ class AMX_MOE_BASE {
 
     direct_or_pool(qlen, [&](int i) {
       for (int j = 0; j < k; j++) {
-        if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+        if (config_.should_skip_expert(expert_ids[i * k + j])) {
           continue;
         }
         memcpy(m_local_input_ptr_[expert_ids[i * k + j]] + m_local_pos_[i][j] * config_.hidden_size,
@@ -403,7 +403,7 @@ class AMX_MOE_BASE {
             __m512 x0 = _mm512_setzero_ps();
             __m512 x1 = _mm512_setzero_ps();
             for (int j = 0; j < k; j++) {
-              if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
+              if (config_.should_skip_expert(expert_ids[i * k + j])) {
                 continue;
               }
               __m512 weight = _mm512_set1_ps(weights[i * k + j]);
@@ -450,7 +450,7 @@ class AMX_MOE_BASE {
     int activated_expert = 0;
     std::fill(m_local_num_.begin(), m_local_num_.end(), 0);
     for (int i = 0; i < k; i++) {
-      if (expert_ids[i] < config_.num_gpu_experts || expert_ids[i] >= config_.expert_num) {
+      if (config_.should_skip_expert(expert_ids[i])) {
         continue;
       }
       m_expert_id_map_[activated_expert] = expert_ids[i];
@@ -607,7 +607,7 @@ class AMX_MOE_BASE {
       __m512 x0 = _mm512_setzero_ps();
       __m512 x1 = _mm512_setzero_ps();
       for (int j = 0; j < k; j++) {
-        if (expert_ids[j] < config_.num_gpu_experts || expert_ids[j] >= config_.expert_num) {
+        if (config_.should_skip_expert(expert_ids[j])) {
           continue;
         }
         __m512 weight = _mm512_set1_ps(weights[j]);

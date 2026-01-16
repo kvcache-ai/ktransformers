@@ -50,6 +50,7 @@ kt_kernel_ext = _kt_kernel_ext
 
 # Import main API
 from .experts import KTMoEWrapper
+from .experts_base import generate_gpu_experts_masks
 
 # Read version from package metadata (preferred) or fallback to project root
 try:
@@ -82,4 +83,4 @@ except ImportError:
     except ImportError:
         __version__ = "0.4.3"
 
-__all__ = ["KTMoEWrapper", "kt_kernel_ext", "__cpu_variant__", "__version__"]
+__all__ = ["KTMoEWrapper", "generate_gpu_experts_masks", "kt_kernel_ext", "__cpu_variant__", "__version__"]
