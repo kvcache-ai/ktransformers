@@ -164,8 +164,12 @@ class SafeTensorLoader:
         return tensor.to(device)
 
     def close_all_handles(self):
-        for handle in self.file_handle_map.values():
-            handle.close()
+        """Close all file handles and clear the handle map.
+
+        Note: safetensors.safe_open doesn't have a close() method,
+        so we just clear the references and let garbage collection handle cleanup.
+        """
+        # safetensors.safe_open doesn't have close(), just clear references
         self.file_handle_map.clear()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
@@ -395,6 +399,111 @@ class CompressedSafeTensorLoader(SafeTensorLoader):
             "gate_scale": gate_scales,
             "up_scale": up_scales,
             "down_scale": down_scales,
+        }
+
+
+class BF16SafeTensorLoader(SafeTensorLoader):
+    """Loader for native BF16 expert weights (no quantization, no scales).
+
+    Supported formats:
+    - DeepSeek style: {base}.mlp.experts.{id}.{gate,up,down}_proj.weight
+    - Mixtral/MiniMax style: {base}.block_sparse_moe.experts.{id}.{w1,w3,w2}.weight
+
+    The format is auto-detected during initialization.
+    """
+
+    MOE_FORMATS = {
+        "deepseek": ("{base}.mlp.experts", "gate_proj", "up_proj", "down_proj"),
+        "mixtral": ("{base}.block_sparse_moe.experts", "w1", "w3", "w2"),
+    }
+
+    def __init__(self, file_path: str):
+        super().__init__(file_path)
+        self._detected_format = None
+        self._detect_format()
+
+    def _detect_format(self):
+        """Auto-detect the MoE naming format by checking tensor keys."""
+        sample_keys = list(self.tensor_file_map.keys())[:1000]
+
+        for fmt_name, (path_tpl, gate, up, down) in self.MOE_FORMATS.items():
+            for key in sample_keys:
+                if ".experts." in key and f".{gate}.weight" in key:
+                    if "block_sparse_moe.experts" in key and fmt_name == "mixtral":
+                        self._detected_format = fmt_name
+                        print(f"[BF16SafeTensorLoader] Detected format: {fmt_name}")
+                        return
+                    elif "mlp.experts" in key and "block_sparse_moe" not in key and fmt_name == "deepseek":
+                        self._detected_format = fmt_name
+                        print(f"[BF16SafeTensorLoader] Detected format: {fmt_name}")
+                        return
+
+        self._detected_format = "deepseek"
+        print("[BF16SafeTensorLoader] No MoE format detected, defaulting to: deepseek")
+
+    def _get_experts_prefix(self, base_key: str) -> str:
+        """Get the experts prefix based on detected format."""
+        path_tpl, _, _, _ = self.MOE_FORMATS[self._detected_format]
+        return path_tpl.format(base=base_key)
+
+    def _get_proj_names(self):
+        """Get projection names (gate, up, down) based on detected format."""
+        _, gate, up, down = self.MOE_FORMATS[self._detected_format]
+        return gate, up, down
+
+    def load_tensor(self, key: str, device: str = "cpu"):
+        if key not in self.tensor_file_map:
+            raise KeyError(f"Key {key} not found in Safetensor files")
+        file = self.tensor_file_map[key]
+        f = self.file_handle_map.get(file)
+        if f is None:
+            raise FileNotFoundError(f"File {file} not found in Safetensor files")
+        tensor = f.get_tensor(key)
+        if device == "cpu":
+            return tensor
+        return tensor.to(device)
+
+    def load_experts(self, base_key: str, device: str = "cpu"):
+        """Load BF16 expert weights (no scales needed).
+
+        Args:
+            base_key: Base key like "model.layers.{layer_index}"
+            device: Target device for tensors
+
+        Returns:
+            Dictionary with keys: gate, up, down, gate_scale (None), up_scale (None), down_scale (None)
+            gate/up/down: list of tensors [expert_id] -> tensor
+        """
+        experts_prefix = self._get_experts_prefix(base_key)
+        gate_name, up_name, down_name = self._get_proj_names()
+
+        expert_count = 0
+        while self.has_tensor(f"{experts_prefix}.{expert_count}.{gate_name}.weight"):
+            expert_count += 1
+
+        if expert_count == 0:
+            raise ValueError(f"No experts found for key {experts_prefix}")
+
+        gate_weights = [None] * expert_count
+        up_weights = [None] * expert_count
+        down_weights = [None] * expert_count
+
+        for exp_id in range(expert_count):
+            gate_w_key = f"{experts_prefix}.{exp_id}.{gate_name}.weight"
+            up_w_key = f"{experts_prefix}.{exp_id}.{up_name}.weight"
+            down_w_key = f"{experts_prefix}.{exp_id}.{down_name}.weight"
+
+            gate_weights[exp_id] = self.load_tensor(gate_w_key, device).contiguous()
+            up_weights[exp_id] = self.load_tensor(up_w_key, device).contiguous()
+            down_weights[exp_id] = self.load_tensor(down_w_key, device).contiguous()
+
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": None,
+            "up_scale": None,
+            "down_scale": None,
         }
 
 
