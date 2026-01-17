@@ -32,16 +32,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   using Base::up_bb_;
   using Base::up_bc_;
 
- private:
-  std::filesystem::path prefix;
-
-  void* gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if
-                     // quantized)]
-  void* up_proj_;    // [expert_num * intermediate_size * hidden_size ( /32 if
-                     // quantized)]
-  void* down_proj_;  // [expert_num * hidden_size * intermediate_size ( /32 if
-                     // quantized)]
-
 #ifdef CHECK
   char verify_bb[100000000];
   char check_bb[100000000];
@@ -141,11 +131,15 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   AMX_MOE_TP() = default;
 
   AMX_MOE_TP(GeneralMOEConfig config, int tp_part_idx = 0) : Base(config, tp_part_idx) {
+    // Initialization now happens in derived_init() which is called by base constructor
+  }
+
+  void derived_init() {
     printf("Creating AMX_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
     auto& load = config_.load;
     auto& save = config_.save;
 
-    prefix = config_.path;
+    std::filesystem::path prefix = config_.path;
     prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
     if (save) {
       std::cout << "Creating " << prefix << std::endl;
@@ -158,10 +152,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         throw std::runtime_error("Path not found: " + prefix.string());
       }
     }
-
-    gate_proj_ = config_.gate_proj;
-    up_proj_ = config_.up_proj;
-    down_proj_ = config_.down_proj;
   }
 
   ~AMX_MOE_TP() = default;
@@ -255,6 +245,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     } else {
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
+      std::filesystem::path prefix = config_.path;
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+
       if (config_.load) {
         std::cout << "Loading from " << prefix << std::endl;
         for (int task_id = 0; task_id < config_.expert_num * mat_type_all * mat_split; task_id++) {
@@ -330,7 +323,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (config_.save) {
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
-            [this, physical_to_logical_map](int task_id) {
+            [this, physical_to_logical_map, prefix](int task_id) {
               int64_t expert_idx = task_id / mat_type_all;
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
@@ -421,7 +414,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
 
       this->weights_loaded = true;
     } else if (config.path != "") {
-      printf("TP Load from file\n");
+      printf("TP Load from file %s\n", config.path.c_str());
       DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {

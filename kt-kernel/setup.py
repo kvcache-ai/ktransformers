@@ -610,6 +610,9 @@ class CMakeBuild(build_ext):
         _forward_str_env(cmake_args, "CPUINFER_LTO_JOBS", "CPUINFER_LTO_JOBS")
         _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
 
+        # CUDA static runtime toggle
+        _forward_bool_env(cmake_args, "CPUINFER_CUDA_STATIC_RUNTIME", "KTRANSFORMERS_CUDA_STATIC_RUNTIME")
+
         # GPU backends (mutually exclusive expected)
         if _env_get_bool("CPUINFER_USE_CUDA", False):
             cmake_args.append("-DKTRANSFORMERS_USE_CUDA=ON")
@@ -632,11 +635,11 @@ class CMakeBuild(build_ext):
                 hostcxx = os.environ["CUDAHOSTCXX"]
                 cmake_args.append(f"-DCMAKE_CUDA_HOST_COMPILER={hostcxx}")
                 print(f"-- Using CUDA host compiler from CUDAHOSTCXX: {hostcxx}")
-            # Respect user-provided architectures only (no default auto-detection).
-            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "").strip()
+            # Set CUDA architectures (default: Ampere/Ada/Hopper)
+            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "80;86;89;90").strip()
             if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
                 cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
-                print(f"-- Set CUDA architectures from CPUINFER_CUDA_ARCHS: {archs_env}")
+                print(f"-- Set CUDA architectures: {archs_env}")
         if _env_get_bool("CPUINFER_USE_ROCM", False):
             cmake_args.append("-DKTRANSFORMERS_USE_ROCM=ON")
         if _env_get_bool("CPUINFER_USE_MUSA", False):
@@ -685,22 +688,40 @@ class CMakeBuild(build_ext):
 ################################################################################
 
 
-# Import version from shared version.py at project root
+# Read base version from version.py
 _version_file = Path(__file__).resolve().parent.parent / "version.py"
 if _version_file.exists():
     _version_ns = {}
     with open(_version_file, "r", encoding="utf-8") as f:
         exec(f.read(), _version_ns)
-    VERSION = os.environ.get("CPUINFER_VERSION", _version_ns.get("__version__", "0.4.2"))
+    _base_version = _version_ns.get("__version__", "0.5.0")
 else:
-    VERSION = os.environ.get("CPUINFER_VERSION", "0.4.2")
+    _base_version = "0.5.0"
+
+# Determine version
+if "CPUINFER_VERSION" in os.environ:
+    # User explicitly set version (e.g., for testing)
+    VERSION = os.environ["CPUINFER_VERSION"]
+    print(f"-- Explicit version: {VERSION}")
+else:
+    VERSION = _base_version
+    print(f"-- Version: {VERSION}")
+
+# Package name is always kt-kernel
+# The CUDA-enabled wheel includes both CPU multi-variant support and CUDA capabilities
+PACKAGE_NAME = "kt-kernel"
+cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
+if cuda_enabled:
+    print(f"-- Building kt-kernel with CUDA support (+ CPU multi-variant)")
+else:
+    print(f"-- Building kt-kernel (CPU-only multi-variant)")
 
 ################################################################################
 # Setup
 ################################################################################
 
 setup(
-    name="kt-kernel",
+    name=PACKAGE_NAME,
     version=VERSION,
     description="KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)",
     author="kvcache-ai",

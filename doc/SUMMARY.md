@@ -18,6 +18,7 @@
 <!-- # For Developer
 - [Makefile Usage](en/makefile_usage.md) -->
 - [kt-kernel part](en/kt-kernel/README.md)
+  - [kt-cli](en/kt-kernel/kt-cli.md)
 # FAQ
 - [FAQ](en/FAQ.md)
 <!-- # V3 Reproduction

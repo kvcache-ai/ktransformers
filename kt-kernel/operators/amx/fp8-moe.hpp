@@ -13,16 +13,6 @@
 
 // #define DEBUG_FP8_MOE
 
-#include <immintrin.h>
-
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "moe_base.hpp"
@@ -57,12 +47,15 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
   AMX_FP8_MOE_TP() = default;
 
   AMX_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
+    // Initialization now happens in derived_init() which is called by base constructor
+  }
+
+  void derived_init() {
     auto& quant_config = config_.quant_config;
     if (quant_config.group_size == 0 || quant_config.zero_point) {
-      throw std::runtime_error("KT-Kernel fp8 MoE only support block-wise FP8. group_size = %d, zero_point = %d",
-                               quant_config.group_size, quant_config.zero_point);
+      throw std::runtime_error("KT-Kernel fp8 MoE only support block-wise FP8");
     }
-    printf("Created AMX_FP8_MOE_TP %d at numa %d\n", tp_part_idx_, numa_node_of_cpu(sched_getcpu()));
+    printf("Created AMX_FP8_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
   }
 
   ~AMX_FP8_MOE_TP() = default;
