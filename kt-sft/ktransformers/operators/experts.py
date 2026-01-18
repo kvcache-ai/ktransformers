@@ -498,7 +498,6 @@ class KSFTExpertsCPU(torch.autograd.Function):
             )
             self.moe = SFT_MOE(moe_config)
         elif self.backend == "AMXBF16":
-            print("GO INTO AMXBF16!!")
             from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXBF16_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
@@ -517,7 +516,6 @@ class KSFTExpertsCPU(torch.autograd.Function):
             self.cpu_infer.submit(self.moe.load_weights())
             self.cpu_infer.sync()
         elif self.backend == "AMXInt8":
-            print("GO INTO AMXInt8!!")
             from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXInt8_MOE
             assert self.gate_type == GGMLQuantizationType.BF16
             assert self.up_type == GGMLQuantizationType.BF16
@@ -739,7 +737,7 @@ class KSFTExpertsCPU(torch.autograd.Function):
                 raise ValueError(f"Experts {key} not found in gguf_loader")
             res = {key:{"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}
         return res
-    
+
 class KExpertsMarlin(KExpertsBase):
     expert_num: int
     loaded_experts_idx: list[int]
@@ -1171,11 +1169,617 @@ class KExpertsTorch(KExpertsBase):
     #     return final_hidden_states
 
 
+
+
+class KSFTRouteExpertsCPU(torch.autograd.Function):
+    """
+    SFT-optimized Routed Experts for CPU inference/training.
+    This class has the same behavior as KSFTExpertsCPU during load(),
+    but can be extended in the future to support LoRA extraction after get_peft_model().
+    """
+    input_tensor_cpu: Tensor = None
+    expert_ids_cpu: Tensor = None
+    weights_cpu: Tensor = None
+    output_cpu: Tensor = None
+    output_gpu_map: dict = {}
+    CPU_INFER = CPUInfer(Config().cpu_infer)
+
+    # Class-level storage for instance information (indexed by layer_idx)
+    _instance_map: dict = {}  # {layer_idx: {'instance': self, 'lora_initialized': bool}}
+
+    def __init__(
+        self,
+        key: str,
+        gguf_loader: GGUFLoader,
+        config: PretrainedConfig,
+        n_routed_experts: int,
+        orig_module: nn.Module = None,
+        device: str = "cpu",
+        out_device: str = "cuda",
+        **kwargs
+    ):
+        # Note: Following KSFTExpertsCPU's pattern, though torch.autograd.Function 
+        # doesn't typically have this __init__ signature
+        super().__init__(key, gguf_loader, config, orig_module, device, **kwargs)
+        self.gguf_loader = gguf_loader
+        assert device.lower() == "cpu", "KSFTRouteExpertsCPU can only be loaded on CPU"
+        self.n_routed_experts = n_routed_experts
+        self.out_device = out_device
+        self.backend = kwargs.get("backend", "llamafile")
+
+        self.key = key
+        self.config = config
+        self.device = device
+        self.orig_module = orig_module  # Save for future LoRA support
+
+        self.call_count = 0
+        self.flops_per_call = []
+        self.times = []
+        self.tflops_fwd = []
+        self.tflops_bwd = []
+
+    def load(self, w: dict | nn.Parameter | tuple | None = None, device: str | None = None, warmup: bool = False):
+        """
+        Load base weights. LoRA will be initialized lazily on first forward() call.
+        """
+        if device:
+            assert device.lower() == "cpu", "KSFTRouteExpertsCPU can only be loaded on CPU"
+
+        if w is None:
+            w = self.load_weights()[self.key]
+
+        self.gate = w["gate"]
+        self.up = w["up"]
+        self.down = w["down"]
+        self.gate_type = w["gate_type"]
+        self.up_type = w["up_type"]
+        self.down_type = w["down_type"]
+
+        self.gate_ptr = ctypes.addressof(
+            ctypes.cast(self.gate.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents
+        )
+        self.up_ptr = ctypes.addressof(
+            ctypes.cast(self.up.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents
+        )
+        self.down_ptr = ctypes.addressof(
+            ctypes.cast(self.down.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents
+        )
+
+        n_routed_experts = self.n_routed_experts
+        self.cpu_infer = KSFTRouteExpertsCPU.CPU_INFER
+
+        # Set flag for lazy LoRA initialization (will be done on first forward)
+        self.lora_initialized = False
+
+        # Extract layer_idx from key (e.g., "model.layers.1.mlp.experts" -> 1)
+        import re
+        layer_idx = int(re.search(r'\.layers\.(\d+)\.', self.key).group(1))
+
+        # Save instance info to class variable (for access in static forward method)
+        KSFTRouteExpertsCPU._instance_map[layer_idx] = {
+            'instance': self,
+            'lora_initialized': False
+        }
+
+        # Create legacy MOE operator first (LoRA not available yet at load() time)
+        print(f"[{self.key}] Initial load: using legacy SFT_MOE (LoRA will be initialized lazily on first forward)")
+
+        model_dtype = torch.get_default_dtype()
+        if torch.xpu.is_available() and model_dtype == torch.float16:
+            hidden_type = 1  # fp16
+        else:
+            hidden_type = 30  # bf16
+
+        if self.backend == "llamafile":
+            moe_config = SFT_MOEConfig(
+                n_routed_experts,
+                self.config.num_experts_per_tok,
+                self.config.hidden_size,
+                self.config.moe_intermediate_size,
+                64,
+                10,
+                1024,
+                self.gate_ptr,
+                self.up_ptr,
+                self.down_ptr,
+                self.gate_type,
+                self.up_type,
+                self.down_type,
+                hidden_type,
+            )
+            self.moe = SFT_MOE(moe_config)
+        elif self.backend == "AMXBF16":
+            from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXBF16_MOE
+            assert self.gate_type == GGMLQuantizationType.BF16
+            assert self.up_type == GGMLQuantizationType.BF16
+            assert self.down_type == GGMLQuantizationType.BF16
+            moe_config = SFT_AMX_MOEConfig(
+                n_routed_experts,
+                self.config.num_experts_per_tok,
+                self.config.hidden_size,
+                self.config.moe_intermediate_size,
+                max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size,
+                self.gate_ptr,
+                self.up_ptr,
+                self.down_ptr,
+            )
+            self.moe = SFT_AMXBF16_MOE(moe_config)
+            self.cpu_infer.submit(self.moe.load_weights())
+            self.cpu_infer.sync()
+        elif self.backend == "AMXInt8":
+            from cpuinfer_ext.sft_moe import SFT_AMX_MOEConfig, SFT_AMXInt8_MOE
+            assert self.gate_type == GGMLQuantizationType.BF16
+            assert self.up_type == GGMLQuantizationType.BF16
+            assert self.down_type == GGMLQuantizationType.BF16
+            moe_config = SFT_AMX_MOEConfig(
+                n_routed_experts,
+                self.config.num_experts_per_tok,
+                self.config.hidden_size,
+                self.config.moe_intermediate_size,
+                max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size,
+                self.gate_ptr,
+                self.up_ptr,
+                self.down_ptr,
+            )
+            self.moe = SFT_AMXInt8_MOE(moe_config)
+            self.cpu_infer.submit(self.moe.load_weights())
+            self.cpu_infer.sync()
+
+        num_experts_per_tok = self.config.num_experts_per_tok
+        if warmup:
+            self.cpu_infer.submit(self.moe.warm_up())
+            self.cpu_infer.sync()
+
+        if self.out_device not in KSFTRouteExpertsCPU.output_gpu_map:
+            KSFTRouteExpertsCPU.output_gpu_map[self.out_device] = torch.zeros(
+                (self.config.hidden_size), device=self.out_device
+            )
+        if KSFTRouteExpertsCPU.input_tensor_cpu is None:
+            KSFTRouteExpertsCPU.input_tensor_cpu = torch.zeros(
+                (self.config.hidden_size), device="cpu", pin_memory=True
+            )
+            KSFTRouteExpertsCPU.expert_ids_cpu = torch.zeros(
+                (num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True
+            )
+            KSFTRouteExpertsCPU.weights_cpu = torch.zeros(
+                (num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True
+            )
+            KSFTRouteExpertsCPU.output_cpu = torch.zeros(
+                (self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16
+            )
+
+        # NOTE: Base weights (self.gate, self.up, self.down) must stay alive here because
+        # the pointers (gate_ptr, up_ptr, down_ptr) reference them.
+        # If LoRA is detected in _initialize_lora(), the weights will be released there
+        # AFTER C++ has copied them to merged buffers in load_weights()->merge_lora_weights().
+        # If no LoRA (legacy SFT_MOE path), base weights must remain for inference.
+
+    def submit_for_one_decode(self, input_tensor, expert_ids, weights):
+        KSFTRouteExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
+        KSFTRouteExpertsCPU.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
+        KSFTRouteExpertsCPU.weights_cpu.copy_(weights, non_blocking=True)
+        self.cpu_infer.submit_with_cuda_stream(
+            torch.cuda.current_stream(self.out_device).cuda_stream,
+            self.moe.forward(
+                1, expert_ids.size(0),
+                KSFTRouteExpertsCPU.expert_ids_cpu.data_ptr(),
+                KSFTRouteExpertsCPU.weights_cpu.data_ptr(),
+                KSFTRouteExpertsCPU.input_tensor_cpu.data_ptr(),
+                KSFTRouteExpertsCPU.output_cpu.data_ptr()
+            )
+        )
+
+    def sync_for_one_decode(self):
+        self.cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream(self.out_device).cuda_stream)
+        KSFTRouteExpertsCPU.output_gpu_map[self.out_device].copy_(
+            KSFTRouteExpertsCPU.output_cpu, non_blocking=True
+        )
+        return KSFTRouteExpertsCPU.output_gpu_map[self.out_device]
+
+    @staticmethod
+    def _initialize_lora(layer_idx, instance):
+        """
+        Lazy LoRA initialization - called on first forward pass.
+        Detects LoRA and replaces the legacy MOE operator with SFT_ROUTE_MOE if LoRA is found.
+        """
+        has_lora = False
+        lora_rank = 0
+        lora_scaling = 1.0
+
+        if instance.orig_module is not None:
+            if isinstance(instance.orig_module, nn.ModuleList) and len(instance.orig_module) > 0:
+                experts_list = instance.orig_module
+
+                # Move all experts to CPU for AMX compatibility
+                for expert in experts_list:
+                    expert.to('cpu')
+
+                first_expert = experts_list[0]
+
+                if hasattr(first_expert, 'gate_proj'):
+                    gate_proj = first_expert.gate_proj
+
+                    if hasattr(gate_proj, 'lora_A') and hasattr(gate_proj, 'lora_B'):
+                        # # TODO: Optional debug output - can be removed if not needed
+                        # print(f"[{instance.key}] LoRA adapters detected in gate_proj")
+                        # print(f"  LoRA keys: {gate_proj.lora_A.keys()}")
+
+                        has_lora = True
+                        lora_rank = gate_proj.lora_A['default'].weight.shape[0]
+
+                        # Get lora_scaling directly from PEFT layer (preferred)
+                        # This ensures consistency with training configuration
+                        if hasattr(gate_proj, 'scaling') and 'default' in gate_proj.scaling:
+                            lora_scaling = gate_proj.scaling['default']
+                            lora_alpha = gate_proj.lora_alpha.get('default', 16)
+                            print(f"  Using PEFT layer scaling: alpha={lora_alpha}, scaling={lora_scaling}")
+                        else:
+                            # Fallback for non-standard setups
+                            lora_alpha = 16
+                            if hasattr(instance.config, 'lora_alpha'):
+                                lora_alpha = instance.config.lora_alpha
+                            lora_scaling = float(lora_alpha) / float(lora_rank)
+                            print(f"  Using fallback scaling: alpha={lora_alpha}, scaling={lora_scaling}")
+
+                        print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}, scaling: {lora_scaling:.2f}")
+
+        # Extract LoRA weights if available
+        if has_lora:
+            experts_list = instance.orig_module
+            gate_lora_A_list = []
+            gate_lora_B_list = []
+            up_lora_A_list = []
+            up_lora_B_list = []
+            down_lora_A_list = []
+            down_lora_B_list = []
+
+            for i, expert in enumerate(experts_list):
+                # Do NOT use .detach() - we need gradient flow!
+                gate_lora_A_list.append(expert.gate_proj.lora_A['default'].weight)
+                gate_lora_B_list.append(expert.gate_proj.lora_B['default'].weight)
+                up_lora_A_list.append(expert.up_proj.lora_A['default'].weight)
+                up_lora_B_list.append(expert.up_proj.lora_B['default'].weight)
+                down_lora_A_list.append(expert.down_proj.lora_A['default'].weight)
+                down_lora_B_list.append(expert.down_proj.lora_B['default'].weight)
+
+                # # TODO: Optional debug output - can be removed if not needed
+                # if i < 3:  # Print first 3 experts
+                #     print(f"  Expert {i}: gate_lora_A {gate_lora_A_list[-1].shape}, gate_lora_B {gate_lora_B_list[-1].shape}")
+
+            # Save reference to expert list
+            instance.experts_list = experts_list
+
+            # Create buffer tensors (will be updated before each forward)
+            # NOTE: No need for .cpu() since experts are already on CPU (moved above)
+            instance.gate_lora_A = torch.stack(gate_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.gate_lora_B = torch.stack(gate_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.up_lora_A = torch.stack(up_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.up_lora_B = torch.stack(up_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.down_lora_A = torch.stack(down_lora_A_list, dim=0).to(torch.bfloat16).contiguous()
+            instance.down_lora_B = torch.stack(down_lora_B_list, dim=0).to(torch.bfloat16).contiguous()
+
+            # # TODO: Optional debug output - can be removed if not needed
+            # print(f"[{instance.key}] LoRA weights stacked:")
+            # print(f"  gate_lora_A: {instance.gate_lora_A.shape}, dtype={instance.gate_lora_A.dtype}, device={instance.gate_lora_A.device}")
+            # print(f"  gate_lora_B: {instance.gate_lora_B.shape}, dtype={instance.gate_lora_B.dtype}, device={instance.gate_lora_B.device}")
+            # print(f"  up_lora_A: {instance.up_lora_A.shape}, dtype={instance.up_lora_A.dtype}, device={instance.up_lora_A.device}")
+            # print(f"  up_lora_B: {instance.up_lora_B.shape}, dtype={instance.up_lora_B.dtype}, device={instance.up_lora_B.device}")
+            # print(f"  down_lora_A: {instance.down_lora_A.shape}, dtype={instance.down_lora_A.dtype}, device={instance.down_lora_A.device}")
+            # print(f"  down_lora_B: {instance.down_lora_B.shape}, dtype={instance.down_lora_B.dtype}, device={instance.down_lora_B.device}")
+
+            # Initialize gradient buffers (CPU, same dtype as weights)
+            instance.grad_gate_lora_A = torch.zeros_like(instance.gate_lora_A).contiguous()
+            instance.grad_gate_lora_B = torch.zeros_like(instance.gate_lora_B).contiguous()
+            instance.grad_up_lora_A = torch.zeros_like(instance.up_lora_A).contiguous()
+            instance.grad_up_lora_B = torch.zeros_like(instance.up_lora_B).contiguous()
+            instance.grad_down_lora_A = torch.zeros_like(instance.down_lora_A).contiguous()
+            instance.grad_down_lora_B = torch.zeros_like(instance.down_lora_B).contiguous()
+            print(f"[{instance.key}] LoRA gradient buffers initialized")
+
+            instance.lora_params_list = [gate_lora_A_list, gate_lora_B_list, up_lora_A_list,
+                                     up_lora_B_list, down_lora_A_list, down_lora_B_list]
+
+            # Replace the legacy MOE operator with SFT_ROUTE_MOE
+            n_routed_experts = instance.n_routed_experts
+            max_len = max(cuda_graphs) if isinstance(cuda_graphs, list) else Config().chunk_size
+
+            if instance.backend == "AMXInt8":
+                from cpuinfer_ext.sft_route_moe import SFT_ROUTE_MOEConfig, SFT_ROUTE_AMXInt8_MOE
+                moe_config = SFT_ROUTE_MOEConfig(
+                    n_routed_experts,
+                    instance.config.num_experts_per_tok,
+                    instance.config.hidden_size,
+                    instance.config.moe_intermediate_size,
+                    max_len,
+                    instance.gate_ptr,
+                    instance.up_ptr,
+                    instance.down_ptr,
+                    instance.gate_lora_A.data_ptr(),
+                    instance.gate_lora_B.data_ptr(),
+                    instance.up_lora_A.data_ptr(),
+                    instance.up_lora_B.data_ptr(),
+                    instance.down_lora_A.data_ptr(),
+                    instance.down_lora_B.data_ptr(),
+                    lora_rank,
+                    lora_scaling,
+                    instance.grad_gate_lora_A.data_ptr(),
+                    instance.grad_gate_lora_B.data_ptr(),
+                    instance.grad_up_lora_A.data_ptr(),
+                    instance.grad_up_lora_B.data_ptr(),
+                    instance.grad_down_lora_A.data_ptr(),
+                    instance.grad_down_lora_B.data_ptr()
+                )
+                instance.moe = SFT_ROUTE_AMXInt8_MOE(moe_config)
+                instance.cpu_infer.submit(instance.moe.load_weights())
+                instance.cpu_infer.sync()
+            elif instance.backend == "AMXBF16":
+                from cpuinfer_ext.sft_route_moe import SFT_ROUTE_MOEConfig, SFT_ROUTE_AMXBF16_MOE
+                moe_config = SFT_ROUTE_MOEConfig(
+                    n_routed_experts,
+                    instance.config.num_experts_per_tok,
+                    instance.config.hidden_size,
+                    instance.config.moe_intermediate_size,
+                    max_len,
+                    instance.gate_ptr,
+                    instance.up_ptr,
+                    instance.down_ptr,
+                    instance.gate_lora_A.data_ptr(),
+                    instance.gate_lora_B.data_ptr(),
+                    instance.up_lora_A.data_ptr(),
+                    instance.up_lora_B.data_ptr(),
+                    instance.down_lora_A.data_ptr(),
+                    instance.down_lora_B.data_ptr(),
+                    lora_rank,
+                    lora_scaling,
+                    instance.grad_gate_lora_A.data_ptr(),
+                    instance.grad_gate_lora_B.data_ptr(),
+                    instance.grad_up_lora_A.data_ptr(),
+                    instance.grad_up_lora_B.data_ptr(),
+                    instance.grad_down_lora_A.data_ptr(),
+                    instance.grad_down_lora_B.data_ptr()
+                )
+                instance.moe = SFT_ROUTE_AMXBF16_MOE(moe_config)
+                instance.cpu_infer.submit(instance.moe.load_weights())
+                instance.cpu_infer.sync()
+
+            # Release base weights after C++ has copied them to merged buffer
+            # This saves significant memory (~8GB for DeepSeek-V2-Lite)
+            # Safe because C++ only reads base weights once in load_weights()->merge_lora_weights()
+            instance.gate = None
+            instance.up = None
+            instance.down = None
+            print(f"[{instance.key}] Base weights released after LoRA merge (memory saved)")
+
+        # Update instance map
+        KSFTRouteExpertsCPU._instance_map[layer_idx]['lora_initialized'] = True
+        if has_lora:
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['lora_params_list'] = instance.lora_params_list
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['experts_list'] = instance.experts_list
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['gate_lora_A'] = instance.gate_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['gate_lora_B'] = instance.gate_lora_B
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['up_lora_A'] = instance.up_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['up_lora_B'] = instance.up_lora_B
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['down_lora_A'] = instance.down_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['down_lora_B'] = instance.down_lora_B
+            # Save gradient buffers
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_gate_lora_A'] = instance.grad_gate_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_gate_lora_B'] = instance.grad_gate_lora_B
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_up_lora_A'] = instance.grad_up_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_up_lora_B'] = instance.grad_up_lora_B
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_down_lora_A'] = instance.grad_down_lora_A
+            KSFTRouteExpertsCPU._instance_map[layer_idx]['grad_down_lora_B'] = instance.grad_down_lora_B
+
+
+    @staticmethod
+    def forward(ctx, input_tensor, expert_ids, weights, cpu_infer, moe, out_device, layer_idx):
+        # 💡 Lazy LoRA initialization on first forward pass
+        if layer_idx in KSFTRouteExpertsCPU._instance_map:
+            instance_info = KSFTRouteExpertsCPU._instance_map[layer_idx]
+            if not instance_info['lora_initialized']:
+                instance = instance_info['instance']
+                KSFTRouteExpertsCPU._initialize_lora(layer_idx, instance)
+                # Update moe and cpu_infer references (might have been replaced)
+                moe = instance.moe
+                cpu_infer = instance.cpu_infer
+
+            # Update LoRA buffers if LoRA is present
+            if 'lora_params_list' in instance_info:
+                gate_lora_A_list, gate_lora_B_list, up_lora_A_list, up_lora_B_list, down_lora_A_list, down_lora_B_list = instance_info['lora_params_list']
+                experts_list = instance_info['experts_list']
+                for i in range(len(experts_list)):
+                    instance_info['gate_lora_A'][i].copy_(gate_lora_A_list[i])
+                    instance_info['gate_lora_B'][i].copy_(gate_lora_B_list[i])
+                    instance_info['up_lora_A'][i].copy_(up_lora_A_list[i])
+                    instance_info['up_lora_B'][i].copy_(up_lora_B_list[i])
+                    instance_info['down_lora_A'][i].copy_(down_lora_A_list[i])
+                    instance_info['down_lora_B'][i].copy_(down_lora_B_list[i])
+                # Update LoRA weights in C++ AMX buffers
+                cpu_infer.submit(moe.update_lora())
+                cpu_infer.sync()
+
+        # Same forward logic as KSFTExpertsCPU
+        if input_tensor.size(0) == 1 and torch.cuda.is_current_stream_capturing():
+            KSFTRouteExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
+            KSFTRouteExpertsCPU.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
+            KSFTRouteExpertsCPU.weights_cpu.copy_(weights, non_blocking=True)
+            cpu_infer.submit_with_cuda_stream(
+                torch.cuda.current_stream().cuda_stream,
+                moe.forward(
+                    1, expert_ids.size(1),
+                    KSFTRouteExpertsCPU.expert_ids_cpu.data_ptr(),
+                    KSFTRouteExpertsCPU.weights_cpu.data_ptr(),
+                    KSFTRouteExpertsCPU.input_tensor_cpu.data_ptr(),
+                    KSFTRouteExpertsCPU.output_cpu.data_ptr()
+                )
+            )
+            cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
+            KSFTRouteExpertsCPU.output_gpu_map[out_device].copy_(
+                KSFTRouteExpertsCPU.output_cpu, non_blocking=True
+            )
+            result = KSFTRouteExpertsCPU.output_gpu_map[out_device]
+        else:
+            input_tensor = input_tensor.contiguous().cpu()
+            expert_ids = expert_ids.contiguous().cpu()
+            weights = weights.contiguous().to(torch.float32).cpu()
+            output = torch.empty_like(input_tensor).contiguous()
+
+            wall_t0 = time.time()
+            cpu_infer.submit(
+                moe.forward(
+                    expert_ids.size(0),
+                    expert_ids.size(1),
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_tensor.data_ptr(),
+                    output.data_ptr(),
+                )
+            )
+            cpu_infer.sync()
+            t_fwd = time.time() - wall_t0
+            result = output.to(device=out_device)
+
+        ctx.save_for_backward(input_tensor, expert_ids, weights)
+        ctx.cpu_infer = cpu_infer
+        ctx.moe = moe
+        ctx.out_device = out_device
+        ctx.layer_idx = layer_idx
+
+        return result
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        # Not Same backward logic as KSFTExpertsCPU
+        input_tensor, expert_ids, weights = ctx.saved_tensors
+
+        output_grad = output_grad.contiguous().cpu()
+        input_grad = torch.empty_like(input_tensor).contiguous()
+        grad_weights = torch.zeros_like(weights, dtype=torch.float32).contiguous()
+
+        # Clear gradient buffers before backward pass (avoid accumulating stale gradients)
+        if ctx.layer_idx in KSFTRouteExpertsCPU._instance_map:
+            instance_info = KSFTRouteExpertsCPU._instance_map[ctx.layer_idx]
+            if 'grad_gate_lora_A' in instance_info:
+                instance_info['grad_gate_lora_A'].zero_()
+                instance_info['grad_gate_lora_B'].zero_()
+                instance_info['grad_up_lora_A'].zero_()
+                instance_info['grad_up_lora_B'].zero_()
+                instance_info['grad_down_lora_A'].zero_()
+                instance_info['grad_down_lora_B'].zero_()
+
+            # Update LoRA weights in C++ AMX buffers before backward
+            if 'lora_params_list' in instance_info:
+                ctx.cpu_infer.submit(ctx.moe.update_lora())
+                ctx.cpu_infer.sync()
+
+        bw_start = time.time()
+        ctx.cpu_infer.submit(
+            ctx.moe.backward(
+                output_grad.size(0),
+                expert_ids.size(1),
+                expert_ids.data_ptr(),
+                weights.data_ptr(),
+                input_tensor.data_ptr(),
+                output_grad.data_ptr(),
+                input_grad.data_ptr(),
+                grad_weights.data_ptr(),
+            )
+        )
+        ctx.cpu_infer.sync()
+        bw_end = time.time()
+
+        # Sync LoRA gradients back to original parameters
+        if ctx.layer_idx in KSFTRouteExpertsCPU._instance_map:
+            instance_info = KSFTRouteExpertsCPU._instance_map[ctx.layer_idx]
+            if 'lora_params_list' in instance_info:
+                # Get gradient buffers and original parameter lists
+                grad_buffers = [
+                    instance_info['grad_gate_lora_A'],
+                    instance_info['grad_gate_lora_B'],
+                    instance_info['grad_up_lora_A'],
+                    instance_info['grad_up_lora_B'],
+                    instance_info['grad_down_lora_A'],
+                    instance_info['grad_down_lora_B']
+                ]
+                param_lists = instance_info['lora_params_list']
+
+                # Sync gradients from CPU buffers to original parameters
+                for grad_buffer, param_list in zip(grad_buffers, param_lists):
+                    for i, param in enumerate(param_list):
+                        # grad_buffer[i] contains the gradient computed by C++
+                        # Accumulate to param.grad (create if needed)
+                        grad_cpu = grad_buffer[i]
+
+                        # Convert to parameter's device and dtype if needed
+                        if param.device != grad_cpu.device or param.dtype != grad_cpu.dtype:
+                            grad_converted = grad_cpu.to(device=param.device, dtype=param.dtype)
+                        else:
+                            grad_converted = grad_cpu
+
+                        # Accumulate gradient
+                        if param.grad is None:
+                            param.grad = grad_converted.clone()
+                        else:
+                            param.grad.add_(grad_converted)
+
+                # Lightweight monitoring: print parameter and gradient stats (only for layer 1)
+                if ctx.layer_idx == 1:
+                    with torch.no_grad():
+                        # Monitor gate_lora_B (index 1 in param_lists)
+                        gate_B_mean = param_lists[1][0].abs().mean().item()
+                        gate_B_grad_mean = param_lists[1][0].grad.abs().mean().item() if param_lists[1][0].grad is not None else 0.0
+                        # print(f"[Layer {ctx.layer_idx} Backward] lora_B: mean={gate_B_mean:.6f}, grad_mean={gate_B_grad_mean:.6f}")
+
+        return input_grad.to(device=ctx.out_device), None, grad_weights.to(device=ctx.out_device), None, None, None, None
+
+    def unload(self):
+        return
+
+    def load_weights(self, override_key: str | None = None, device: str = "cpu"):
+        # Same as KSFTExpertsCPU
+        res = {}
+        if override_key is not None:
+            keys = override_key
+        else:
+            keys = [self.key]
+
+        gate = None
+        up = None
+        down = None
+        gate_type = None
+        up_type = None
+        down_type = None
+
+        for key in keys:
+            if isinstance(self.gguf_loader, SafeTensorLoader):
+                res = self.gguf_loader.load_experts(key)
+                return {key: res}
+            elif self.gguf_loader.has_tensor(key + ".ffn_gate_exps.weight"):
+                gate = self.gguf_loader.get_mmap_tensor(key + ".ffn_gate_exps.weight")
+                up = self.gguf_loader.get_mmap_tensor(key + ".ffn_up_exps.weight")
+                down = self.gguf_loader.get_mmap_tensor(key + ".ffn_down_exps.weight")
+                gate_type = self.gguf_loader.get_ggml_type(key + ".ffn_gate_exps.weight")
+                up_type = self.gguf_loader.get_ggml_type(key + ".ffn_up_exps.weight")
+                down_type = self.gguf_loader.get_ggml_type(key + ".ffn_down_exps.weight")
+            elif key + ".ffn_gate_exps.weight" in self.gguf_loader.tensor_info:
+                gate = self.gguf_loader.get_mmap_tensor(key + ".ffn_gate_exps.weight")
+                up = self.gguf_loader.get_mmap_tensor(key + ".ffn_up_exps.weight")
+                down = self.gguf_loader.get_mmap_tensor(key + ".ffn_down_exps.weight")
+                gate_type = self.gguf_loader.tensor_info[key + ".ffn_gate_exps.weight"]["ggml_type"]
+                up_type = self.gguf_loader.tensor_info[key + ".ffn_up_exps.weight"]["ggml_type"]
+                down_type = self.gguf_loader.tensor_info[key + ".ffn_down_exps.weight"]["ggml_type"]
+            else:
+                raise ValueError(f"Experts {key} not found in gguf_loader")
+            res = {key: {"gate": gate, "up": up, "down": down, "gate_type": gate_type, "up_type": up_type, "down_type": down_type}}
+        return res
+
+
+
 EXPERTS_MAP = {
     "KExpertsCPU": KExpertsCPU,
     "KSFTExpertsCPU": KSFTExpertsCPU,
     "KExpertsTorch": KExpertsTorch,
     "KExpertsMarlin": KExpertsMarlin,
+    "KSFTRouteExpertsCPU": KSFTRouteExpertsCPU,
 }
 
 class KTransformersExperts(BaseInjectedModule, KExpertsBase):
@@ -1193,11 +1797,11 @@ class KTransformersExperts(BaseInjectedModule, KExpertsBase):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, prefill_device, generate_device, **kwargs)
         KExpertsBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         if generate_op is not None:
-            self.generate_experts = EXPERTS_MAP[generate_op](key, gguf_loader, config, len(orig_module), device=generate_device, **kwargs)
+            self.generate_experts = EXPERTS_MAP[generate_op](key, gguf_loader, config, len(orig_module), orig_module=orig_module, device=generate_device, **kwargs)
         else:
             self.generate_experts = None
         if prefill_op is not None:
-            self.prefill_experts = EXPERTS_MAP[prefill_op](key, gguf_loader, config, len(orig_module), device=prefill_device, **kwargs)
+            self.prefill_experts = EXPERTS_MAP[prefill_op](key, gguf_loader, config, len(orig_module), orig_module=orig_module, device=prefill_device, **kwargs)
         else:
             self.prefill_experts = None
         self.gpu_mlp_type = prefill_op
@@ -1234,7 +1838,7 @@ class KTransformersExperts(BaseInjectedModule, KExpertsBase):
     def forward(self, input_tensor, expert_ids, weights):
         if self.mode == InferenceState.GENERATE:
             assert self.generate_experts is not None, "generate_experts is None"
-            if type(self.generate_experts) == KSFTExpertsCPU:
+            if type(self.generate_experts) in (KSFTExpertsCPU, KSFTRouteExpertsCPU):
                 layer_idx = int(re.search(r'\d+', self.key).group())
                 return self.generate_experts.apply(input_tensor, expert_ids, weights, self.generate_experts.cpu_infer, self.generate_experts.moe, self.generate_experts.out_device, layer_idx)
             else:
@@ -1779,11 +2383,11 @@ class KTransformersExpertsV2(BaseInjectedModule, KExpertsBase):
         BaseInjectedModule.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         KExpertsBase.__init__(self, key, gguf_loader, config, orig_module, generate_device, **kwargs)
         if generate_op is not None:
-            self.generate_experts = EXPERTS_MAP[generate_op](key, gguf_loader, config, len(orig_module), device=generate_device, **kwargs)
+            self.generate_experts = EXPERTS_MAP[generate_op](key, gguf_loader, config, len(orig_module), orig_module=orig_module, device=generate_device, **kwargs)
         else:
             self.generate_experts = None
         if prefill_op is not None:
-            self.prefill_experts = EXPERTS_MAP[prefill_op](key, gguf_loader, config, len(orig_module), device=prefill_device, **kwargs)
+            self.prefill_experts = EXPERTS_MAP[prefill_op](key, gguf_loader, config, len(orig_module), orig_module=orig_module, device=prefill_device, **kwargs)
         else:
             self.prefill_experts = None
         self.gpu_mlp_type = prefill_op

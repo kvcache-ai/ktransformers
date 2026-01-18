@@ -111,7 +111,7 @@ def local_chat(
         torch.set_grad_enabled(False)
         
     if is_sft == True or use_adapter == True:
-        GLOBAL_CONFIG._config["mod"] = "sft"
+        GLOBAL_CONFIG._config["mod"] = "train"
     else:
         GLOBAL_CONFIG._config["mod"] = "infer"
 
@@ -178,13 +178,13 @@ def local_chat(
     if is_sft == True:
         if use_adapter == True or is_test_data == True:
             raise AttributeError("We do not support to run sft and inference at the same time.")
-        GLOBAL_CONFIG._config["mod"] = "sft"
+        GLOBAL_CONFIG._config["mod"] = "train"
         print(f"sft with lora in dataset: {sft_data_path} ...")
         print(f"use_cuda_graph:{use_cuda_graph}")
         lora_and_load_adapter(model, tokenizer, sft_data_path, save_adapter_path)
 
     if use_adapter == True:
-        GLOBAL_CONFIG._config["mod"] = "sft"
+        GLOBAL_CONFIG._config["mod"] = "train"
         if is_sft == True:
             raise AttributeError("We do not support more than one adapter up to now...")
         
@@ -261,7 +261,7 @@ def local_chat(
     # else:
     #     os.system("clear")
     
-    if GLOBAL_CONFIG._config["mod"] == "sft" :
+    if GLOBAL_CONFIG._config["mod"] == "train" :
         model.model.embed_tokens.to("cpu")
         
     if is_test_data:
