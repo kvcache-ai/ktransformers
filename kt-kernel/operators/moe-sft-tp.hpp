@@ -10,8 +10,61 @@
 
 #include <immintrin.h>
 
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
+
+// Dump utilities for TP backward debugging
+namespace tp_dump {
+inline bool is_dump_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char* env = getenv("SFT_MOE_DUMP");
+    enabled = (env != nullptr && env[0] == '1') ? 1 : 0;
+  }
+  return enabled == 1;
+}
+
+inline const char* get_dump_dir() {
+  static const char* dir = nullptr;
+  if (dir == nullptr) {
+    dir = getenv("SFT_MOE_DUMP_DIR");
+    if (dir == nullptr) dir = "./cpp_dump";
+  }
+  return dir;
+}
+
+inline void dump_bf16_matrix(const ggml_bf16_t* data, int rows, int cols, const char* name, int tp_idx) {
+  if (!is_dump_enabled()) return;
+  char filename[256];
+  snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
+  std::ofstream file(filename, std::ios::binary);
+  if (!file.is_open()) return;
+  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+  for (int i = 0; i < rows * cols; i++) {
+    float val = GGML_BF16_TO_FP32(data[i]);
+    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+  }
+}
+
+inline void dump_bf16_matrix_final(const ggml_bf16_t* data, int rows, int cols, const char* name) {
+  if (!is_dump_enabled()) return;
+  char filename[256];
+  snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
+  std::ofstream file(filename, std::ios::binary);
+  if (!file.is_open()) return;
+  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+  for (int i = 0; i < rows * cols; i++) {
+    float val = GGML_BF16_TO_FP32(data[i]);
+    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
+  }
+}
+}  // namespace tp_dump
 
 // Forward declaration
 template <class T, template <class> class BaseMOE>
@@ -51,7 +104,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> partitioned_up_proj_;
   std::vector<ggml_bf16_t*> partitioned_down_proj_;
 
-  TP_MOE_SFT(MOESFTConfig config) : Base(static_cast<GeneralMOEConfig>(config)), sft_config(config) {
+  TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
 
     // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
@@ -281,11 +334,18 @@ class TP_MOE_SFT : public TP_MOE<T> {
     int full_intermediate_size = sft_config.intermediate_size;
     int expert_num = config.expert_num;
     int lora_rank = sft_config.lora_rank;
+    int hidden_size = config.hidden_size;
+    int qlen = tps[0]->get_cache_qlen();  // Get qlen from cache
 
     // Allocate partitioned gradient buffers for each NUMA
     std::vector<ggml_bf16_t*> part_grad_gate_lora_b(tp_count);
     std::vector<ggml_bf16_t*> part_grad_up_lora_b(tp_count);
     std::vector<ggml_bf16_t*> part_grad_down_lora_a(tp_count);
+
+    // Bug #22 fix: Allocate separate grad_input buffers for each NUMA
+    // Each NUMA's backward_gate_up does memset(grad_input, 0) first, which would
+    // overwrite the other NUMA's results if they share the same buffer.
+    std::vector<ggml_bf16_t*> part_grad_input(tp_count);
 
     for (int i = 0; i < tp_count; i++) {
       int tp_intermediate = tp_configs[i].intermediate_size;
@@ -293,15 +353,37 @@ class TP_MOE_SFT : public TP_MOE<T> {
       part_grad_gate_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
       part_grad_up_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
       part_grad_down_lora_a[i] = new ggml_bf16_t[expert_num * lora_rank * tp_intermediate]();
+      part_grad_input[i] = new ggml_bf16_t[qlen * hidden_size]();
     }
 
-    // Run backward on each NUMA node with partitioned gradient buffers
-    pool->dispense_backend()->do_numa_job([this, grad_output, grad_input, grad_gate_lora_a, grad_up_lora_a,
+    // Run backward on each NUMA node with separate grad_input buffers
+    pool->dispense_backend()->do_numa_job([this, grad_output, &part_grad_input, grad_gate_lora_a, grad_up_lora_a,
                                            grad_down_lora_b, &part_grad_gate_lora_b, &part_grad_up_lora_b,
                                            &part_grad_down_lora_a](int numa_id) {
-      tps[numa_id]->backward(grad_output, grad_input, grad_gate_lora_a, part_grad_gate_lora_b[numa_id], grad_up_lora_a,
-                             part_grad_up_lora_b[numa_id], part_grad_down_lora_a[numa_id], grad_down_lora_b);
+      tps[numa_id]->backward(grad_output, part_grad_input[numa_id], grad_gate_lora_a, part_grad_gate_lora_b[numa_id],
+                             grad_up_lora_a, part_grad_up_lora_b[numa_id], part_grad_down_lora_a[numa_id],
+                             grad_down_lora_b);
     });
+
+    // DUMP: per-TP grad_input before merge
+    for (int i = 0; i < tp_count; i++) {
+      tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
+    }
+
+    // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
+    {
+      ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+      for (int i = 0; i < qlen * hidden_size; i++) {
+        float sum = 0.0f;
+        for (int numa_id = 0; numa_id < tp_count; numa_id++) {
+          sum += GGML_BF16_TO_FP32(part_grad_input[numa_id][i]);
+        }
+        grad_input_bf16[i] = GGML_FP32_TO_BF16(sum);
+      }
+    }
+
+    // DUMP: final merged grad_input
+    tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
 
     // Merge partitioned gradients to full gradients
     for (int i = 0; i < tp_count; i++) {
@@ -337,6 +419,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       delete[] part_grad_gate_lora_b[i];
       delete[] part_grad_up_lora_b[i];
       delete[] part_grad_down_lora_a[i];
+      delete[] part_grad_input[i];
     }
   }
 

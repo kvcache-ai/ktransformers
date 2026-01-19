@@ -3353,3 +3353,370 @@ if (is_k2_prequantized) {
 
 ---
 
+## Bug #28: exp_avx512 多项式求值顺序错误
+
+**时间**: 2026-01-19
+
+**状态**: ✅ 已修复
+
+### 问题描述
+
+Forward 的 activation 输出与 Python 参考实现有 ~11% 的系统性误差：
+
+```
+[activation_input_gate] - rel_error: 2.12e-03  ✓ PASS
+[activation_input_up]   - rel_error: 2.12e-03  ✓ PASS
+[activation_output]     - rel_error: 1.10e-01  ✗ FAIL (11%!)
+```
+
+Activation 输入只有 0.2% 误差，但输出有 11% 误差，说明 **activation 函数本身有问题**。
+
+### 数值分析
+
+对于 `silu(gate) * up`，当 gate ≈ up ≈ 0.297 时：
+
+| 计算项 | 正确值 | C++ 输出 |
+|--------|--------|----------|
+| exp(-0.297) | 0.743 | ~0.58 (错误!) |
+| sigmoid(0.297) | 0.574 | ~0.63 |
+| silu(0.297) | 0.170 | ~0.188 |
+| activation_output | 0.050 | 0.056 (+12%) |
+
+### 根因分析
+
+`operators/amx/la/amx.hpp` 中的 `exp_avx512` 函数使用错误的多项式求值顺序：
+
+**错误代码**：
+```cpp
+__m512 frac_exp = _mm512_fmadd_ps(
+    frac_part, poly_6,
+    _mm512_fmadd_ps(frac_part, poly_5,
+        _mm512_fmadd_ps(frac_part, poly_4,
+            _mm512_fmadd_ps(frac_part, poly_3,
+                _mm512_fmadd_ps(frac_part, poly_2, poly_1)))));
+```
+
+**展开分析** (`fmadd(a, b, c) = a*b + c`)：
+```
+step1 = frac * poly_2 + poly_1
+step2 = frac * poly_3 + step1 = frac * poly_3 + frac * poly_2 + poly_1
+...
+结果 = poly_1 + frac * (poly_2 + poly_3 + poly_4 + poly_5 + poly_6)  ← 错误!
+```
+
+这不是正确的多项式！正确的 2^frac 近似应该是：
+```
+poly_1 + poly_2*frac + poly_3*frac² + poly_4*frac³ + poly_5*frac⁴ + poly_6*frac⁵
+```
+
+### 修复方案
+
+使用正确的 Horner 方法求值：
+
+```cpp
+// Horner's method: poly_1 + poly_2*frac + poly_3*frac^2 + ...
+// Evaluate as: ((((poly_6*frac + poly_5)*frac + poly_4)*frac + poly_3)*frac + poly_2)*frac + poly_1
+__m512 frac_exp = _mm512_fmadd_ps(
+    _mm512_fmadd_ps(
+        _mm512_fmadd_ps(
+            _mm512_fmadd_ps(
+                _mm512_fmadd_ps(poly_6, frac_part, poly_5),
+                frac_part, poly_4),
+            frac_part, poly_3),
+        frac_part, poly_2),
+    frac_part, poly_1);
+```
+
+**展开分析**：
+```
+step1 = poly_6 * frac + poly_5
+step2 = step1 * frac + poly_4 = poly_6*frac² + poly_5*frac + poly_4
+...
+结果 = poly_1 + poly_2*frac + poly_3*frac² + ...  ← 正确!
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/amx/la/amx.hpp` | 修正 exp_avx512 的 Horner 方法求值顺序 | ✓ 已修复 |
+
+### 测试结果
+
+| 测试项 | 修复前 | 修复后 |
+|--------|--------|--------|
+| activation_output rel_error | 11% (FAIL) | <1% (PASS) |
+| Forward overall | ~4% | ~0.4% |
+
+### 教训总结
+
+1. **fmadd 嵌套顺序**：`fmadd(a, b, c) = a*b + c`，Horner 方法需要从最高次项开始嵌套
+2. **数值验证**：对于数学函数的近似实现，应该用已知输入验证输出
+3. **单元测试**：应该为 exp_avx512 单独编写单元测试，与标准库 expf 比较
+
+---
+
+## Bug #29: TP backward grad_input 竞态条件
+
+**时间**: 2026-01-19
+
+**状态**: ✅ 已修复
+
+### 问题描述
+
+修复 Bug #28 后，Forward 通过了 (~0.4% 误差)，但 Backward 的 `grad_input` 有 ~71% 的巨大误差：
+
+```
+Forward Pass - BF16 mode: PASSED (rel_error: 0.004)
+Backward Pass:
+  grad_input diff: 0.714844  ✗ FAIL (71%!)
+```
+
+### 根因分析
+
+`moe-sft-tp.hpp::backward()` 中，两个 NUMA 节点都直接写入同一个 `grad_input` 缓冲区：
+
+```cpp
+pool->dispense_backend()->do_numa_job([..., grad_input, ...](int numa_id) {
+    tps[numa_id]->backward(grad_output, grad_input, ...);  // 两个 NUMA 写同一个 grad_input!
+});
+```
+
+而每个 NUMA 节点的 `backward_gate_up()` 开始时都会清零 `grad_input`：
+
+```cpp
+// sft_moe.hpp::backward_gate_up()
+memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
+```
+
+**执行时序问题**：
+1. NUMA 0: `memset(grad_input, 0)` → 计算 → 写入 grad_input
+2. NUMA 1: `memset(grad_input, 0)` → **覆盖了 NUMA 0 的结果!** → 计算 → 写入
+
+最终 `grad_input` 只包含 NUMA 1 的贡献，丢失了 NUMA 0 的一半梯度。
+
+### 修复方案
+
+为每个 NUMA 分配独立的 `grad_input` 缓冲区，计算完成后合并：
+
+```cpp
+void backward(...) {
+    int qlen = tps[0]->get_cache_qlen();  // 新增方法获取 qlen
+
+    // 为每个 NUMA 分配独立的 grad_input 缓冲区
+    std::vector<ggml_bf16_t*> part_grad_input(tp_count);
+    for (int i = 0; i < tp_count; i++) {
+        part_grad_input[i] = new ggml_bf16_t[qlen * hidden_size]();
+    }
+
+    // 每个 NUMA 写入自己的缓冲区
+    pool->dispense_backend()->do_numa_job([..., &part_grad_input, ...](int numa_id) {
+        tps[numa_id]->backward(grad_output, part_grad_input[numa_id], ...);
+    });
+
+    // 合并 grad_input (求和)
+    ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+    for (int i = 0; i < qlen * hidden_size; i++) {
+        float sum = 0.0f;
+        for (int numa_id = 0; numa_id < tp_count; numa_id++) {
+            sum += GGML_BF16_TO_FP32(part_grad_input[numa_id][i]);
+        }
+        grad_input_bf16[i] = GGML_FP32_TO_BF16(sum);
+    }
+
+    // 清理
+    for (int i = 0; i < tp_count; i++) {
+        delete[] part_grad_input[i];
+    }
+}
+```
+
+同时在 `sft_moe.hpp` 添加 `get_cache_qlen()` 方法：
+
+```cpp
+int get_cache_qlen() const {
+    if (cache_stack_top_ > 0 && cache_stack_[cache_stack_top_ - 1].valid) {
+        return cache_stack_[cache_stack_top_ - 1].qlen_cache;
+    }
+    return 0;
+}
+```
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/moe-sft-tp.hpp` | 为每个 NUMA 分配独立 grad_input 缓冲区并合并 | ✓ 已修复 |
+| `operators/amx/sft_moe.hpp` | 添加 get_cache_qlen() 方法 | ✓ 已修复 |
+
+### 测试结果
+
+| 测试项 | 修复前 | 修复后 |
+|--------|--------|--------|
+| grad_input diff | 0.714844 (71%, FAIL) | 0.033936 (3.4%, PASS) |
+| Backward Pass | FAILED | PASSED |
+
+### 教训总结
+
+1. **TP 并行一致性**：Forward 有 `merge_results` 合并输出，Backward 也需要类似的合并逻辑
+2. **竞态条件**：多个线程/NUMA 写同一块内存时，必须考虑同步或使用独立缓冲区
+3. **对称设计**：Forward 和 Backward 的 TP 处理逻辑应该对称
+
+---
+
+## Bug #30: BufferB from_mat/to_mat N_BLOCK 分块转换参数错误
+
+**时间**: 2026-01-11
+
+**状态**: ✅ 已修复
+
+### 问题描述
+
+在 AMX GEMM 优化过程中，BufferB 的 `from_mat()` 和 `to_mat()` 函数调用使用了错误的 `(ith, nth)` 参数，导致只有第一个 N_BLOCK 的数据被正确处理，其余数据全为 0。
+
+这个问题影响了两个场景：
+1. **to_mat 输出问题** (backward_down_amx)
+2. **from_mat 输入问题** (gate_backward_bb_, up_backward_bb_)
+
+### 背景知识：BufferB 的 N_BLOCK 分块结构
+
+AMX GEMM 的 BufferB 使用分块存储，N 维度按 `N_BLOCK` 分块：
+
+```
+BF16 kernel 配置：
+- N_BLOCK = 256 (每个线程处理 256 列)
+- nth = (output_dim + N_BLOCK - 1) / N_BLOCK
+- 对于 intermediate_size=2048: nth = 8 (8个N_BLOCK)
+- 对于 hidden_size=7168: nth = 28 (28个N_BLOCK)
+```
+
+`from_mat(src, ith, nth)` 和 `to_mat(m, dst, ith, nth)` 的语义：
+- `ith`: 当前处理第几个 N_BLOCK (0-indexed)
+- `nth`: 总共有多少个 N_BLOCK
+- 使用 `(0, 1)` 表示只处理第一个 N_BLOCK！
+
+### Bug #30a: backward_down_amx to_mat 参数错误
+
+**问题现象**：
+```
+grad_intermediate diff: 0.785156 (78%!)
+列 0-255 正确，列 256-2047 全为 0
+```
+
+**错误代码**：
+```cpp
+// Step 3: mat_mul (多线程，正确)
+int nth = T::recommended_nth(config_.intermediate_size);  // nth = 8
+pool->do_work_stealing_job(
+    nth * activated_expert, [](int _) { T::config(); },
+    [this, nth](int task_id) {
+      int ith = task_id % nth;  // ith = 0,1,2,...,7
+      amx::mat_mul(..., ith, nth);  // 每个线程计算 256 列
+    }, nullptr);
+
+// Step 4: to_mat (单独的任务，参数错误！)
+pool->do_work_stealing_job(
+    activated_expert, nullptr,
+    [this](int task_id) {
+      // ❌ 使用 (0, 1) 只输出第一个 N_BLOCK 的 256 列！
+      grad_intermediate_bc_[expert_idx]->to_mat(m, ptr, 0, 1);
+    }, nullptr);
+```
+
+**修复方案**：合并 mat_mul 和 to_mat，让 to_mat 使用相同的 `(ith, nth)`：
+
+```cpp
+// Step 3+4: mat_mul + to_mat (合并，使用相同的 ith/nth)
+pool->do_work_stealing_job(
+    nth * activated_expert, [](int _) { T::config(); },
+    [this, nth, &expert_offsets](int task_id) {
+      int task_idx = task_id / nth;
+      int expert_idx = m_expert_id_map_[task_idx];
+      int ith = task_id % nth;
+      int m = m_local_num_[expert_idx];
+
+      if (m == 0) return;
+
+      // mat_mul
+      amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+
+      // to_mat - 使用相同的 ith, nth！
+      bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
+    },
+    nullptr);
+```
+
+### Bug #30b: gate/up_backward_bb_ from_mat 参数错误
+
+**问题现象**：
+```
+grad_input diff: 0.972656 (97%!)
+列 0-255 正确，列 256-7167 全为 0
+```
+
+**错误代码**：
+```cpp
+// prepare_backward_weights() 中:
+// case 0: gate_proj
+gate_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);  // ❌ 只填充第一个 N_BLOCK
+
+// case 1: up_proj
+up_backward_bb_[expert_idx]->from_mat(transposed.data(), 0, 1);  // ❌ 只填充第一个 N_BLOCK
+
+// case 2: down_proj (已正确)
+int nth = T::recommended_nth(config_.intermediate_size);
+for (int ith = 0; ith < nth; ith++) {
+  down_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);  // ✅
+}
+```
+
+**修复方案**：使用循环调用 `from_mat` 填充所有 N_BLOCK：
+
+```cpp
+// case 0: gate_proj
+int nth = T::recommended_nth(config_.hidden_size);  // hidden_size → 28 个 N_BLOCK
+for (int ith = 0; ith < nth; ith++) {
+  gate_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+}
+
+// case 1: up_proj
+int nth = T::recommended_nth(config_.hidden_size);
+for (int ith = 0; ith < nth; ith++) {
+  up_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
+}
+```
+
+### 不同 BufferB 的 nth 计算
+
+| 矩阵 | 输出维度 N | nth 计算 |
+|------|-----------|----------|
+| `down_backward_bb_` | intermediate_size (2048) | `recommended_nth(2048)` = 8 |
+| `gate_backward_bb_` | hidden_size (7168) | `recommended_nth(7168)` = 28 |
+| `up_backward_bb_` | hidden_size (7168) | `recommended_nth(7168)` = 28 |
+
+### 修复文件清单
+
+| 文件 | 修改内容 | 状态 |
+|------|---------|------|
+| `operators/amx/sft_moe.hpp` | 合并 backward_down 的 mat_mul 和 to_mat | ✓ 已修复 |
+| `operators/amx/sft_moe.hpp` | gate/up_backward_bb_ 使用循环 from_mat | ✓ 已修复 |
+
+### 测试结果
+
+| 测试项 | 修复前 | 修复后 |
+|--------|--------|--------|
+| grad_intermediate diff | 0.785156 (78%, FAIL) | ~0 (PASS) |
+| grad_input diff | 0.972656 (97%, FAIL) | ~0 (PASS) |
+| Backward Pass | FAILED | PASSED |
+
+### 教训总结
+
+1. **N_BLOCK 分块意识**：AMX BufferB 的 `from_mat/to_mat` 使用 `(ith, nth)` 参数控制哪个 N_BLOCK，`(0, 1)` 只处理第一个 256 列
+2. **参数一致性**：`mat_mul` 和 `to_mat` 必须使用相同的 `(ith, nth)` 参数
+3. **维度匹配**：不同矩阵的输出维度不同，`nth` 计算需要使用对应的维度：
+   - gate/up 输出到 hidden_size → `recommended_nth(hidden_size)`
+   - down 输出到 intermediate_size → `recommended_nth(intermediate_size)`
+4. **测试验证**：通过打印 per-position 差异，可以发现 "列 >= 256 全为 0" 的规律，定位 N_BLOCK 分块问题
+
+---
+
