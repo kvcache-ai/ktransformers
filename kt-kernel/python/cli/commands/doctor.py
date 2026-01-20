@@ -4,6 +4,8 @@ Doctor command for kt-cli.
 Diagnoses environment issues and provides recommendations.
 """
 
+import glob
+import os
 import platform
 import shutil
 from pathlib import Path
@@ -27,6 +29,67 @@ from kt_kernel.cli.utils.environment import (
     detect_ram_gb,
     get_installed_package_version,
 )
+
+
+def _get_kt_kernel_info() -> dict:
+    """Get kt-kernel installation information."""
+    info = {
+        "installed": False,
+        "version": None,
+        "cpu_variant": None,
+        "install_path": None,
+        "available_variants": [],
+        "extension_file": None,
+    }
+
+    try:
+        import kt_kernel
+
+        info["installed"] = True
+        info["version"] = getattr(kt_kernel, "__version__", "unknown")
+        info["cpu_variant"] = getattr(kt_kernel, "__cpu_variant__", "unknown")
+
+        # Get installation path
+        info["install_path"] = os.path.dirname(kt_kernel.__file__)
+
+        # Find available .so files
+        kt_kernel_dir = info["install_path"]
+        so_files = glob.glob(os.path.join(kt_kernel_dir, "_kt_kernel_ext_*.so"))
+        so_files.extend(glob.glob(os.path.join(kt_kernel_dir, "kt_kernel_ext*.so")))
+
+        # Parse variant names from filenames
+        variants = set()
+        for so_file in so_files:
+            basename = os.path.basename(so_file)
+            if "_kt_kernel_ext_" in basename:
+                # Extract variant from _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+                parts = basename.split("_")
+                if len(parts) >= 4:
+                    variant = parts[3]  # "amx" from "_kt_kernel_ext_amx..."
+                    if variant.startswith("avx"):
+                        # Normalize avx variants
+                        if variant in ["avx512", "avx512_bf16", "avx512_vbmi", "avx512_vnni", "avx512_base"]:
+                            variants.add("avx512")
+                        else:
+                            variants.add(variant)
+                    else:
+                        variants.add(variant)
+            elif "kt_kernel_ext" in basename:
+                variants.add("default")
+
+        info["available_variants"] = sorted(list(variants))
+
+        # Get current extension file
+        if hasattr(kt_kernel, "kt_kernel_ext"):
+            ext_module = kt_kernel.kt_kernel_ext
+            info["extension_file"] = getattr(ext_module, "__file__", None)
+
+    except ImportError:
+        info["installed"] = False
+    except Exception as e:
+        info["error"] = str(e)
+
+    return info
 
 
 def doctor(
@@ -157,6 +220,76 @@ def doctor(
         }
     )
 
+    # 6b. kt-kernel installation check
+    kt_info = _get_kt_kernel_info()
+
+    if kt_info["installed"]:
+        # Build display string for kt-kernel
+        variant = kt_info["cpu_variant"]
+        version = kt_info["version"]
+        available_variants = kt_info["available_variants"]
+
+        # Determine status based on CPU variant
+        if variant == "amx":
+            kt_status = "ok"
+            kt_hint = "AMX variant loaded - optimal performance"
+        elif variant.startswith("avx512"):
+            kt_status = "ok"
+            kt_hint = "AVX512 variant loaded - good performance"
+        elif variant == "avx2":
+            kt_status = "warning"
+            kt_hint = "AVX2 variant - consider upgrading CPU for AMX/AVX512"
+        else:
+            kt_status = "warning"
+            kt_hint = f"Unknown variant: {variant}"
+
+        kt_value = f"v{version} ({variant.upper()})"
+        if verbose and available_variants:
+            kt_value += f" [dim] - available: {', '.join(available_variants)}[/dim]"
+
+        checks.append(
+            {
+                "name": "kt-kernel",
+                "status": kt_status,
+                "value": kt_value,
+                "hint": kt_hint,
+            }
+        )
+
+        # Show extension file path in verbose mode
+        if verbose and kt_info.get("extension_file"):
+            ext_file = os.path.basename(kt_info["extension_file"])
+            checks.append(
+                {
+                    "name": "  └─ Extension",
+                    "status": "ok",
+                    "value": ext_file,
+                    "hint": None,
+                }
+            )
+
+        # Show installation path in verbose mode
+        if verbose and kt_info.get("install_path"):
+            checks.append(
+                {
+                    "name": "  └─ Path",
+                    "status": "ok",
+                    "value": kt_info["install_path"],
+                    "hint": None,
+                }
+            )
+    else:
+        error_msg = kt_info.get("error", "Not installed")
+        checks.append(
+            {
+                "name": "kt-kernel",
+                "status": "error",
+                "value": error_msg,
+                "hint": "kt-kernel is required - run: pip install kt-kernel",
+            }
+        )
+        issues_found = True
+
     # 7. System memory (with frequency if available)
     mem_info = detect_memory_info()
     if mem_info.frequency_mhz and mem_info.type:
@@ -204,7 +337,6 @@ def doctor(
     # 6. Required packages
     packages = [
         ("kt-kernel", ">=0.4.0", False),  # name, version_req, required
-        ("ktransformers", ">=0.4.0", False),
         ("sglang", ">=0.4.0", False),
         ("torch", ">=2.4.0", True),
         ("transformers", ">=4.45.0", True),

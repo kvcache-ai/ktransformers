@@ -12,9 +12,11 @@ Supports quantization methods:
 """
 
 import torch
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 from kt_kernel_ext.moe import MOESFTConfig
+
+from .loader import BF16SafeTensorLoader, SafeTensorLoader
 
 try:
     from kt_kernel_ext.moe import (
@@ -158,8 +160,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         """
         Load base weights for this layer.
 
-        Note: For SFT, weights are typically loaded from tensors using
-        load_weights_from_tensors() rather than from pre-quantized files.
+        Supports two loading modes:
+        1. From tensors: Call load_weights_from_tensors() first, then load_weights()
+        2. From files: Automatically load from weight_path if base weights not set
+           - AMXBF16_SFT: Uses BF16SafeTensorLoader (HuggingFace format)
+           - AMXINT8_SFT/AMXINT4_SFT: Uses SafeTensorLoader (pre-quantized format)
 
         Args:
             physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
@@ -167,12 +172,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if self._weights_loaded:
             return
 
-        # Check if we have weights to load
+        # If base weights not set, try to load from file
         if self.gate_proj is None or self.up_proj is None or self.down_proj is None:
-            raise RuntimeError(
-                "Base weights not set. Call load_weights_from_tensors() first, "
-                "or ensure gate_proj, up_proj, down_proj are set before calling load_weights()."
-            )
+            self._load_base_weights_from_file()
 
         # Create MOE SFT config
         config = MOESFTConfig()
@@ -247,6 +249,75 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         # Now load weights
         self.load_weights(physical_to_logical_map_cpu)
+
+    def _load_base_weights_from_file(self) -> None:
+        """
+        Load base MoE weights from file based on the SFT method.
+
+        Loading strategy:
+        - AMXBF16_SFT: Use BF16SafeTensorLoader (HuggingFace format, no scales)
+        - AMXINT8_SFT/AMXINT4_SFT: Use SafeTensorLoader (pre-quantized format with scales)
+        """
+        if not hasattr(self, "weight_path") or self.weight_path is None:
+            raise RuntimeError(
+                "weight_path not set. Cannot load weights from file. "
+                "Either set weight_path or call load_weights_from_tensors() instead."
+            )
+
+        print(
+            f"[AMXSFTMoEWrapper] Loading base weights for layer {self.layer_idx} "
+            f"from {self.weight_path} using method {self.method}"
+        )
+
+        # Determine loader and base key format based on method
+        if self.method == "AMXBF16_SFT":
+            # BF16 mode: Load from HuggingFace model path
+            loader = BF16SafeTensorLoader(self.weight_path)
+            base_key = f"model.layers.{self.layer_idx}"
+        else:
+            # INT8/INT4 mode: Load from pre-quantized path
+            # Note: SafeTensorLoader expects GGUF-style naming (blk.X)
+            loader = SafeTensorLoader(self.weight_path)
+            base_key = f"blk.{self.layer_idx}"
+
+        # Load expert weights
+        experts_data = loader.load_experts(base_key, device="cpu")
+
+        # Extract weights (list of tensors per expert -> stacked tensor)
+        gate_weights: List[torch.Tensor] = experts_data["gate"]
+        up_weights: List[torch.Tensor] = experts_data["up"]
+        down_weights: List[torch.Tensor] = experts_data["down"]
+
+        # Stack expert weights: [num_experts, ...]
+        # For BF16: weights are already tensors
+        # For SafeTensorLoader: weights might be numpy arrays in nested lists
+        if self.method == "AMXBF16_SFT":
+            # BF16SafeTensorLoader returns list of tensors
+            self.gate_proj = torch.stack(gate_weights, dim=0).contiguous()
+            self.up_proj = torch.stack(up_weights, dim=0).contiguous()
+            self.down_proj = torch.stack(down_weights, dim=0).contiguous()
+        else:
+            # SafeTensorLoader returns nested lists [numa_id][expert_id] -> numpy array
+            # For SFT, we typically use numa_id=0
+            import numpy as np
+
+            numa_id = 0
+            self.gate_proj = torch.from_numpy(np.stack(gate_weights[numa_id], axis=0)).contiguous()
+            self.up_proj = torch.from_numpy(np.stack(up_weights[numa_id], axis=0)).contiguous()
+            self.down_proj = torch.from_numpy(np.stack(down_weights[numa_id], axis=0)).contiguous()
+
+            # Also store scales for INT8/INT4 methods
+            self.gate_scale = torch.from_numpy(np.stack(experts_data["gate_scale"][numa_id], axis=0)).contiguous()
+            self.up_scale = torch.from_numpy(np.stack(experts_data["up_scale"][numa_id], axis=0)).contiguous()
+            self.down_scale = torch.from_numpy(np.stack(experts_data["down_scale"][numa_id], axis=0)).contiguous()
+
+        # Close loader handles
+        loader.close_all_handles()
+
+        print(
+            f"[AMXSFTMoEWrapper] Loaded weights: gate_proj={self.gate_proj.shape}, "
+            f"up_proj={self.up_proj.shape}, down_proj={self.down_proj.shape}"
+        )
 
     def init_lora_weights(
         self,

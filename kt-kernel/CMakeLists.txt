@@ -16,6 +16,7 @@ option(LLAMA_AVX512_FANCY_SIMD "llama: enable AVX512-VL, AVX512-BW, AVX512-DQ, A
 option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
 option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
 option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
+option(KTRANSFORMERS_CUDA_STATIC_RUNTIME "ktransformers: statically link CUDA runtime" ON)
 option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX "ktransformers: CPU use AMX" OFF)
@@ -415,6 +416,25 @@ if(KTRANSFORMERS_USE_CUDA)
     message(STATUS "enabling CUDA")
     enable_language(CUDA)
     add_compile_definitions(KTRANSFORMERS_USE_CUDA=1)
+
+    # Set default CUDA architectures if not specified
+    # Target: SM 80/86 (Ampere), 89 (Ada), 90 (Hopper)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90" CACHE STRING "CUDA architectures" FORCE)
+        message(STATUS "CUDA architectures (default): ${CMAKE_CUDA_ARCHITECTURES}")
+    else()
+        message(STATUS "CUDA architectures (user): ${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+
+    # Optimization flags
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
+    message(STATUS "CUDA toolkit: ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA flags: ${CMAKE_CUDA_FLAGS}")
 elseif(KTRANSFORMERS_USE_ROCM)
     find_package(HIP REQUIRED)
     if(HIP_FOUND)
@@ -629,7 +649,32 @@ endif()
 
 
 if(KTRANSFORMERS_USE_CUDA)
-    target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDAToolkit_LIBRARY_DIR}/libcudart.so")
+    # Link CUDA runtime (static or dynamic)
+    if(KTRANSFORMERS_CUDA_STATIC_RUNTIME)
+        # Platform-aware static library path
+        if(WIN32)
+            set(CUDART_STATIC_LIB "${CUDAToolkit_LIBRARY_DIR}/cudart_static.lib")
+        else()
+            set(CUDART_STATIC_LIB "${CUDAToolkit_LIBRARY_DIR}/libcudart_static.a")
+        endif()
+
+        if(EXISTS "${CUDART_STATIC_LIB}")
+            target_link_libraries(${PROJECT_NAME} PRIVATE "${CUDART_STATIC_LIB}")
+            message(STATUS "CUDA runtime: static (${CUDART_STATIC_LIB})")
+
+            # Linux needs additional libs for static cudart
+            if(UNIX AND NOT APPLE)
+                target_link_libraries(${PROJECT_NAME} PRIVATE rt pthread dl)
+            endif()
+        else()
+            message(WARNING "Static CUDA runtime not found, using dynamic")
+            target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+        endif()
+    else()
+        # Dynamic linking
+        target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+        message(STATUS "CUDA runtime: dynamic")
+    endif()
 endif()
 if(KTRANSFORMERS_USE_ROCM)
     add_compile_definitions(USE_HIP=1)
