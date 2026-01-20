@@ -55,197 +55,6 @@ inline int get_print_at_call() {
 #define BACKWARD_TIMER_END() (void)0
 
 // =====================================================
-// Dump Utility Functions for debugging
-// Controlled by SFT_MOE_DUMP environment variable
-// =====================================================
-inline bool is_dump_enabled() {
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char* env = getenv("SFT_MOE_DUMP");
-    enabled = (env && env[0] != '0') ? 1 : 0;
-  }
-  return enabled == 1;
-}
-
-inline const char* get_dump_dir() {
-  static const char* dir = nullptr;
-  if (dir == nullptr) {
-    dir = getenv("SFT_MOE_DUMP_DIR");
-    if (dir == nullptr) {
-      dir = "./cpp_dump";
-    }
-  }
-  return dir;
-}
-
-// Dump BF16 matrix to binary file (format: rows(int32), cols(int32), data(float32))
-// tp_idx: TP partition index (-1 for no TP suffix)
-// expert_id: Expert index (-1 for no expert suffix)
-inline void dump_bf16_matrix(const ggml_bf16_t* data, int rows, int cols, const char* name, int tp_idx = -1,
-                             int expert_id = -1) {
-  if (!is_dump_enabled()) return;
-
-  char filename[512];
-  if (tp_idx >= 0 && expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d_e%d.bin", get_dump_dir(), name, tp_idx, expert_id);
-  } else if (tp_idx >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
-  } else if (expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_e%d.bin", get_dump_dir(), name, expert_id);
-  } else {
-    snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
-  }
-
-  // Create directory if needed
-  char mkdir_cmd[600];
-  snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", get_dump_dir());
-  system(mkdir_cmd);
-
-  FILE* f = fopen(filename, "wb");
-  if (!f) {
-    printf("[DUMP ERROR] Cannot open file: %s\n", filename);
-    return;
-  }
-
-  // Write header
-  int32_t dims[2] = {rows, cols};
-  fwrite(dims, sizeof(int32_t), 2, f);
-
-  // Convert BF16 to FP32 and write
-  for (int i = 0; i < rows * cols; i++) {
-    float val = GGML_BF16_TO_FP32(data[i]);
-    fwrite(&val, sizeof(float), 1, f);
-  }
-
-  fclose(f);
-  printf("[CPP DUMP] Saved %s: [%d x %d]\n", filename, rows, cols);
-}
-
-// Dump BF16 matrix with scaling factor (for LoRA contributions that need lora_scaling applied)
-inline void dump_bf16_matrix_scaled(const ggml_bf16_t* data, int rows, int cols, float scale, const char* name,
-                                    int tp_idx = -1, int expert_id = -1) {
-  if (!is_dump_enabled()) return;
-
-  char filename[512];
-  if (tp_idx >= 0 && expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d_e%d.bin", get_dump_dir(), name, tp_idx, expert_id);
-  } else if (tp_idx >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
-  } else if (expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_e%d.bin", get_dump_dir(), name, expert_id);
-  } else {
-    snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
-  }
-
-  // Create directory if needed
-  char mkdir_cmd[600];
-  snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", get_dump_dir());
-  system(mkdir_cmd);
-
-  FILE* f = fopen(filename, "wb");
-  if (!f) {
-    printf("[DUMP ERROR] Cannot open file: %s\n", filename);
-    return;
-  }
-
-  // Write header
-  int32_t dims[2] = {rows, cols};
-  fwrite(dims, sizeof(int32_t), 2, f);
-
-  // Convert BF16 to FP32, apply scale, and write
-  for (int i = 0; i < rows * cols; i++) {
-    float val = GGML_BF16_TO_FP32(data[i]) * scale;
-    fwrite(&val, sizeof(float), 1, f);
-  }
-
-  fclose(f);
-  printf("[CPP DUMP] Saved %s: [%d x %d] (scaled by %.2f)\n", filename, rows, cols, scale);
-}
-
-// Dump FP32 matrix to binary file
-inline void dump_fp32_matrix(const float* data, int rows, int cols, const char* name, int tp_idx = -1,
-                             int expert_id = -1) {
-  if (!is_dump_enabled()) return;
-
-  char filename[512];
-  if (tp_idx >= 0 && expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d_e%d.bin", get_dump_dir(), name, tp_idx, expert_id);
-  } else if (tp_idx >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
-  } else if (expert_id >= 0) {
-    snprintf(filename, sizeof(filename), "%s/%s_e%d.bin", get_dump_dir(), name, expert_id);
-  } else {
-    snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
-  }
-
-  // Create directory if needed
-  char mkdir_cmd[600];
-  snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", get_dump_dir());
-  system(mkdir_cmd);
-
-  FILE* f = fopen(filename, "wb");
-  if (!f) {
-    printf("[DUMP ERROR] Cannot open file: %s\n", filename);
-    return;
-  }
-
-  // Write header
-  int32_t dims[2] = {rows, cols};
-  fwrite(dims, sizeof(int32_t), 2, f);
-
-  // Write data
-  fwrite(data, sizeof(float), rows * cols, f);
-
-  fclose(f);
-  printf("[CPP DUMP] Saved %s: [%d x %d]\n", filename, rows, cols);
-}
-
-// Dump routing info to binary file
-inline void dump_routing_info(int qlen, int k, const int64_t* expert_ids, const float* weights, int num_experts,
-                              const std::vector<int>& m_local_num, int tp_idx = -1) {
-  if (!is_dump_enabled()) return;
-
-  char filename[512];
-  if (tp_idx >= 0) {
-    snprintf(filename, sizeof(filename), "%s/routing_info_tp%d.bin", get_dump_dir(), tp_idx);
-  } else {
-    snprintf(filename, sizeof(filename), "%s/routing_info.bin", get_dump_dir());
-  }
-
-  // Create directory if needed
-  char mkdir_cmd[600];
-  snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", get_dump_dir());
-  system(mkdir_cmd);
-
-  FILE* f = fopen(filename, "wb");
-  if (!f) {
-    printf("[DUMP ERROR] Cannot open file: %s\n", filename);
-    return;
-  }
-
-  // Write qlen, k
-  int32_t dims[2] = {qlen, k};
-  fwrite(dims, sizeof(int32_t), 2, f);
-
-  // Write expert_ids [qlen * k]
-  fwrite(expert_ids, sizeof(int64_t), qlen * k, f);
-
-  // Write weights [qlen * k]
-  fwrite(weights, sizeof(float), qlen * k, f);
-
-  // Write num_experts and m_local_num
-  int32_t ne = num_experts;
-  fwrite(&ne, sizeof(int32_t), 1, f);
-  for (int i = 0; i < num_experts; i++) {
-    int32_t cnt = m_local_num[i];
-    fwrite(&cnt, sizeof(int32_t), 1, f);
-  }
-
-  fclose(f);
-  printf("[CPP DUMP] Saved %s: qlen=%d, k=%d\n", filename, qlen, k);
-}
-
-// =====================================================
 // Type trait to detect if kernel supports standard mat_mul API
 // Only these kernels have the standard amx::mat_mul(m,n,k,ba,bb,bc,ith,nth) overload
 // KGroup kernels use mat_mul_kgroup() with different BufferB interface
@@ -630,17 +439,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     });
 
-    // DUMP: Routing info and packed input
-    if (is_dump_enabled()) {
-      dump_routing_info(qlen, k, expert_ids, weights, config_.expert_num, m_local_num_, tp_part_idx);
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          dump_bf16_matrix(m_local_input_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
-                           "packed_input", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Routing info and packed input (disabled for performance)
+    // if (is_dump_enabled()) {
+    //   dump_routing_info(qlen, k, expert_ids, weights, config_.expert_num, m_local_num_, tp_part_idx);
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       dump_bf16_matrix(m_local_input_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
+    //                        "packed_input", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Step 4: Quantize input
     direct_or_pool(activated_expert, [this](int task_id) {
@@ -666,18 +475,18 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    // DUMP: Gate/Up base output (before LoRA)
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "gate_base_output", tp_part_idx, expert_idx);
-          dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "up_base_output", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Gate/Up base output (before LoRA) - disabled for performance
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "gate_base_output", tp_part_idx, expert_idx);
+    //       dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "up_base_output", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Step 5.5: Gate + Up LoRA
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
@@ -689,19 +498,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // DUMP: Gate/Up output (after LoRA, before activation)
-    if (is_dump_enabled() && gate_lora_a_ != nullptr) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          // Note: After LoRA, gate/up outputs have been updated in-place
-          // These now include base + lora
-          dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "gate_lora_output", tp_part_idx, expert_idx);
-          dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "up_lora_output", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // if (is_dump_enabled() && gate_lora_a_ != nullptr) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       // Note: After LoRA, gate/up outputs have been updated in-place
+    //       // These now include base + lora
+    //       dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "gate_lora_output", tp_part_idx, expert_idx);
+    //       dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "up_lora_output", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Save gate/up outputs before activation (for backward)
     if (save_for_backward) {
@@ -709,33 +518,33 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
     }
 
-    // DUMP: Activation input (gate_out and up_out before activation)
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "activation_input_gate", tp_part_idx, expert_idx);
-          dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "activation_input_up", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Activation input (gate_out and up_out before activation) - disabled for performance
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "activation_input_gate", tp_part_idx, expert_idx);
+    //       dump_bf16_matrix(m_local_up_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "activation_input_up", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Step 6: Activation (silu(gate) * up)
     Base::apply_activation(activated_expert, nth, qlen);
 
-    // DUMP: Activation output (silu(gate) * up)
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          // After activation, result is stored in m_local_gate_output_ptr_
-          dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
-                           "activation_output", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Activation output (silu(gate) * up) - disabled for performance
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       // After activation, result is stored in m_local_gate_output_ptr_
+    //       dump_bf16_matrix(m_local_gate_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.intermediate_size,
+    //                        "activation_output", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Save intermediate AFTER activation for backward_down (Bug #17c fix)
     if (save_for_backward) {
@@ -764,16 +573,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    // DUMP: Down base output (before LoRA)
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
-                           "down_base_output", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Down base output (before LoRA) - disabled for performance
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
+    //                        "down_base_output", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Step 8.5: Down LoRA
     if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
@@ -784,19 +593,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
-    // DUMP: Down output (after LoRA, before merge)
-    if (is_dump_enabled() && down_lora_a_ != nullptr) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        if (m_local_num_[expert_idx] > 0) {
-          dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
-                           "down_lora_output", tp_part_idx, expert_idx);
-          // down_total_output is same as down_lora_output (lora is added in-place)
-          dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
-                           "down_total_output", tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // DUMP: Down output (after LoRA, before merge) - disabled for performance
+    // if (is_dump_enabled() && down_lora_a_ != nullptr) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     if (m_local_num_[expert_idx] > 0) {
+    //       dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
+    //                        "down_lora_output", tp_part_idx, expert_idx);
+    //       // down_total_output is same as down_lora_output (lora is added in-place)
+    //       dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
+    //                        "down_total_output", tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // Step 9: Weighted merge
     pool->do_work_stealing_job(
@@ -824,11 +633,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    // DUMP: Final output (after weighted merge)
+    // DUMP: Final output (after weighted merge) - disabled for performance
     // Note: Each TP partition outputs a partial result that gets summed later
-    if (is_dump_enabled()) {
-      dump_fp32_matrix((const float*)output, qlen, config_.hidden_size, "final_output", tp_part_idx);
-    }
+    // if (is_dump_enabled()) {
+    //   dump_fp32_matrix((const float*)output, qlen, config_.hidden_size, "final_output", tp_part_idx);
+    // }
   }
 
   /**
@@ -1778,20 +1587,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    // DUMP: LoRA intermediate (input @ lora_A^T) for gate and up
+    // DUMP: LoRA intermediate (input @ lora_A^T) for gate and up - disabled for performance
     // Note: Use padded_lora_rank_ as stride since to_mat writes with this stride
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          dump_bf16_matrix(lora_gate_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "gate_lora_intermediate",
-                           tp_part_idx, expert_idx);
-          dump_bf16_matrix(lora_up_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "up_lora_intermediate",
-                           tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       dump_bf16_matrix(lora_gate_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "gate_lora_intermediate",
+    //                        tp_part_idx, expert_idx);
+    //       dump_bf16_matrix(lora_up_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "up_lora_intermediate",
+    //                        tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // =====================================================
     // Step 2: Quantize lora_intermediate to BufferA
@@ -1815,10 +1624,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Step 3a: lora_intermediate @ lora_B^T -> lora_output (GEMM only)
     // =====================================================
     nth = T::recommended_nth(config_.intermediate_size);
-    if (is_dump_enabled()) {
-      printf("[DEBUG] Step 3a GEMM: nth=%d, activated_expert=%d, total_tasks=%d\n", nth, activated_expert,
-             nth * activated_expert * 2);
-    }
+    // if (is_dump_enabled()) {
+    //   printf("[DEBUG] Step 3a GEMM: nth=%d, activated_expert=%d, total_tasks=%d\n", nth, activated_expert,
+    //          nth * activated_expert * 2);
+    // }
     pool->do_work_stealing_job(
         nth * activated_expert * 2, [](int _) { T::config(); },
         [this, nth](int task_id2) {
@@ -1835,72 +1644,72 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           auto& bb = do_up ? up_lora_b_bb_[expert_idx] : gate_lora_b_bb_[expert_idx];
           auto& bc = do_up ? lora_up_out_bc_[expert_idx] : lora_gate_out_bc_[expert_idx];
 
-          if (is_dump_enabled() && !do_up && expert_idx == 0) {
-            printf("[DEBUG] GEMM task START: expert=%d, ith=%d, nth=%d, m=%d, n=%d, k=%d\n", expert_idx, ith, nth, m,
-                   config_.intermediate_size, padded_lora_rank_);
-          }
+          // if (is_dump_enabled() && !do_up && expert_idx == 0) {
+          //   printf("[DEBUG] GEMM task START: expert=%d, ith=%d, nth=%d, m=%d, n=%d, k=%d\n", expert_idx, ith, nth, m,
+          //          config_.intermediate_size, padded_lora_rank_);
+          // }
 
           // GEMM: [m, padded_lora_rank] @ [intermediate_size, padded_lora_rank]^T -> [m, intermediate_size]
           amx::mat_mul(m, config_.intermediate_size, padded_lora_rank_, ba, bb, bc, ith, nth);
 
-          if (is_dump_enabled() && !do_up && expert_idx == 0) {
-            // Check raw BufferC data immediately after this GEMM task
-            float* raw_c = bc->get_submat(m, config_.intermediate_size, 0, ith * T::N_BLOCK);
-            printf("[DEBUG] GEMM task DONE: expert=%d, ith=%d, raw_c[0]=%.6f, raw_c[1]=%.6f\n", expert_idx, ith,
-                   raw_c[0], raw_c[1]);
-          }
+          // if (is_dump_enabled() && !do_up && expert_idx == 0) {
+          //   // Check raw BufferC data immediately after this GEMM task
+          //   float* raw_c = bc->get_submat(m, config_.intermediate_size, 0, ith * T::N_BLOCK);
+          //   printf("[DEBUG] GEMM task DONE: expert=%d, ith=%d, raw_c[0]=%.6f, raw_c[1]=%.6f\n", expert_idx, ith,
+          //          raw_c[0], raw_c[1]);
+          // }
         },
         nullptr);
 
-    // DUMP: Pure gate/up LoRA GEMM output (before scaling and add)
+    // DUMP: Pure gate/up LoRA GEMM output (before scaling and add) - disabled for performance
     // Note: to_mat with (ith, nth) only reads one N_BLOCK chunk, so we need to loop
-    if (is_dump_enabled()) {
-      int dump_nth = T::recommended_nth(config_.intermediate_size);
-      printf("[DEBUG] gate/up GEMM dump: intermediate_size=%d, N_BLOCK=%d, dump_nth=%d\n", config_.intermediate_size,
-             T::N_BLOCK, dump_nth);
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          printf("[DEBUG] expert=%d, m=%d, BufferC.n=%d\n", expert_idx, m, lora_gate_out_bc_[expert_idx]->n);
-          // Convert BufferC to FP32 and dump for gate
-          std::vector<float> gate_lora_fp32(m * config_.intermediate_size);
-          std::vector<ggml_bf16_t> gate_lora_bf16(m * config_.intermediate_size);
-          // Initialize to a known pattern to detect if to_mat writes anything
-          for (size_t idx = 0; idx < gate_lora_bf16.size(); idx++) {
-            gate_lora_bf16[idx] = GGML_FP32_TO_BF16(999.0f);
-          }
-          for (int ith = 0; ith < dump_nth; ith++) {
-            printf("[DEBUG] calling to_mat with ith=%d, dump_nth=%d\n", ith, dump_nth);
-            lora_gate_out_bc_[expert_idx]->to_mat(m, gate_lora_bf16.data(), ith, dump_nth);
-            // Check what was written
-            float val_at_0 = GGML_BF16_TO_FP32(gate_lora_bf16[0]);
-            float val_at_256 = GGML_BF16_TO_FP32(gate_lora_bf16[256]);
-            float val_at_512 = (m > 1) ? GGML_BF16_TO_FP32(gate_lora_bf16[512]) : 0;
-            float val_at_768 = (m > 1) ? GGML_BF16_TO_FP32(gate_lora_bf16[768]) : 0;
-            printf("[DEBUG] after ith=%d: buf[0]=%.6f, buf[256]=%.6f, buf[512]=%.6f, buf[768]=%.6f\n", ith, val_at_0,
-                   val_at_256, val_at_512, val_at_768);
-          }
-          for (int j = 0; j < m * config_.intermediate_size; j++) {
-            gate_lora_fp32[j] = GGML_BF16_TO_FP32(gate_lora_bf16[j]);
-          }
-          dump_fp32_matrix(gate_lora_fp32.data(), m, config_.intermediate_size, "gate_lora_gemm_output", tp_part_idx,
-                           expert_idx);
-
-          // Convert BufferC to FP32 and dump for up
-          std::vector<float> up_lora_fp32(m * config_.intermediate_size);
-          std::vector<ggml_bf16_t> up_lora_bf16(m * config_.intermediate_size);
-          for (int ith = 0; ith < dump_nth; ith++) {
-            lora_up_out_bc_[expert_idx]->to_mat(m, up_lora_bf16.data(), ith, dump_nth);
-          }
-          for (int j = 0; j < m * config_.intermediate_size; j++) {
-            up_lora_fp32[j] = GGML_BF16_TO_FP32(up_lora_bf16[j]);
-          }
-          dump_fp32_matrix(up_lora_fp32.data(), m, config_.intermediate_size, "up_lora_gemm_output", tp_part_idx,
-                           expert_idx);
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   int dump_nth = T::recommended_nth(config_.intermediate_size);
+    //   printf("[DEBUG] gate/up GEMM dump: intermediate_size=%d, N_BLOCK=%d, dump_nth=%d\n", config_.intermediate_size,
+    //          T::N_BLOCK, dump_nth);
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       printf("[DEBUG] expert=%d, m=%d, BufferC.n=%d\n", expert_idx, m, lora_gate_out_bc_[expert_idx]->n);
+    //       // Convert BufferC to FP32 and dump for gate
+    //       std::vector<float> gate_lora_fp32(m * config_.intermediate_size);
+    //       std::vector<ggml_bf16_t> gate_lora_bf16(m * config_.intermediate_size);
+    //       // Initialize to a known pattern to detect if to_mat writes anything
+    //       for (size_t idx = 0; idx < gate_lora_bf16.size(); idx++) {
+    //         gate_lora_bf16[idx] = GGML_FP32_TO_BF16(999.0f);
+    //       }
+    //       for (int ith = 0; ith < dump_nth; ith++) {
+    //         printf("[DEBUG] calling to_mat with ith=%d, dump_nth=%d\n", ith, dump_nth);
+    //         lora_gate_out_bc_[expert_idx]->to_mat(m, gate_lora_bf16.data(), ith, dump_nth);
+    //         // Check what was written
+    //         float val_at_0 = GGML_BF16_TO_FP32(gate_lora_bf16[0]);
+    //         float val_at_256 = GGML_BF16_TO_FP32(gate_lora_bf16[256]);
+    //         float val_at_512 = (m > 1) ? GGML_BF16_TO_FP32(gate_lora_bf16[512]) : 0;
+    //         float val_at_768 = (m > 1) ? GGML_BF16_TO_FP32(gate_lora_bf16[768]) : 0;
+    //         printf("[DEBUG] after ith=%d: buf[0]=%.6f, buf[256]=%.6f, buf[512]=%.6f, buf[768]=%.6f\n", ith, val_at_0,
+    //                val_at_256, val_at_512, val_at_768);
+    //       }
+    //       for (int j = 0; j < m * config_.intermediate_size; j++) {
+    //         gate_lora_fp32[j] = GGML_BF16_TO_FP32(gate_lora_bf16[j]);
+    //       }
+    //       dump_fp32_matrix(gate_lora_fp32.data(), m, config_.intermediate_size, "gate_lora_gemm_output", tp_part_idx,
+    //                        expert_idx);
+    //
+    //       // Convert BufferC to FP32 and dump for up
+    //       std::vector<float> up_lora_fp32(m * config_.intermediate_size);
+    //       std::vector<ggml_bf16_t> up_lora_bf16(m * config_.intermediate_size);
+    //       for (int ith = 0; ith < dump_nth; ith++) {
+    //         lora_up_out_bc_[expert_idx]->to_mat(m, up_lora_bf16.data(), ith, dump_nth);
+    //       }
+    //       for (int j = 0; j < m * config_.intermediate_size; j++) {
+    //         up_lora_fp32[j] = GGML_BF16_TO_FP32(up_lora_bf16[j]);
+    //       }
+    //       dump_fp32_matrix(up_lora_fp32.data(), m, config_.intermediate_size, "up_lora_gemm_output", tp_part_idx,
+    //                        expert_idx);
+    //     }
+    //   }
+    // }
 
     // =====================================================
     // Step 3b: Add LoRA output to main output with scaling
@@ -2005,17 +1814,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // DUMP: LoRA intermediate (intermediate @ down_lora_A^T) for down
     // Note: Use padded_lora_rank_ as stride since to_mat writes with this stride
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          // Down reuses lora_gate_intermediate_ptr_
-          dump_bf16_matrix(lora_gate_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "down_lora_intermediate",
-                           tp_part_idx, expert_idx);
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       // Down reuses lora_gate_intermediate_ptr_
+    //       dump_bf16_matrix(lora_gate_intermediate_ptr_[expert_idx], m, padded_lora_rank_, "down_lora_intermediate",
+    //                        tp_part_idx, expert_idx);
+    //     }
+    //   }
+    // }
 
     // =====================================================
     // Step 2: Quantize lora_intermediate to BufferA
@@ -2056,29 +1865,29 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // DUMP: Pure down LoRA GEMM output (before scaling and add)
     // Note: to_mat with (ith, nth) only reads one N_BLOCK chunk, so we need to loop
-    if (is_dump_enabled()) {
-      int dump_nth = T::recommended_nth(config_.hidden_size);
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          // Convert BufferC to FP32 matrix and dump
-          std::vector<float> lora_out_fp32(m * config_.hidden_size);
-          auto& bc = lora_down_out_bc_[expert_idx];
-          // Use to_mat to convert, but we need BF16 temp buffer
-          std::vector<ggml_bf16_t> lora_out_bf16(m * config_.hidden_size);
-          // Loop over all N_BLOCK chunks
-          for (int ith = 0; ith < dump_nth; ith++) {
-            bc->to_mat(m, lora_out_bf16.data(), ith, dump_nth);
-          }
-          for (int j = 0; j < m * config_.hidden_size; j++) {
-            lora_out_fp32[j] = GGML_BF16_TO_FP32(lora_out_bf16[j]);
-          }
-          dump_fp32_matrix(lora_out_fp32.data(), m, config_.hidden_size, "down_lora_gemm_output", tp_part_idx,
-                           expert_idx);
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   int dump_nth = T::recommended_nth(config_.hidden_size);
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       // Convert BufferC to FP32 matrix and dump
+    //       std::vector<float> lora_out_fp32(m * config_.hidden_size);
+    //       auto& bc = lora_down_out_bc_[expert_idx];
+    //       // Use to_mat to convert, but we need BF16 temp buffer
+    //       std::vector<ggml_bf16_t> lora_out_bf16(m * config_.hidden_size);
+    //       // Loop over all N_BLOCK chunks
+    //       for (int ith = 0; ith < dump_nth; ith++) {
+    //         bc->to_mat(m, lora_out_bf16.data(), ith, dump_nth);
+    //       }
+    //       for (int j = 0; j < m * config_.hidden_size; j++) {
+    //         lora_out_fp32[j] = GGML_BF16_TO_FP32(lora_out_bf16[j]);
+    //       }
+    //       dump_fp32_matrix(lora_out_fp32.data(), m, config_.hidden_size, "down_lora_gemm_output", tp_part_idx,
+    //                        expert_idx);
+    //     }
+    //   }
+    // }
 
     // =====================================================
     // Step 3b: Add LoRA output to main output with scaling
@@ -2810,22 +2619,23 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     DOWN_CHECKPOINT("D3_gemm");
 
     // DUMP: backward grad_output and grad_intermediate (base) after GEMM
-    if (is_dump_enabled()) {
-      size_t offset = 0;
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          // Dump scattered grad_output
-          dump_bf16_matrix(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, "backward_grad_output",
-                           tp_part_idx, expert_idx);
-          // Dump grad_intermediate (base, before LoRA)
-          dump_bf16_matrix(grad_intermediate_ + offset, m, config_.intermediate_size, "backward_down_base", tp_part_idx,
-                           expert_idx);
-        }
-        offset += m * config_.intermediate_size;
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   size_t offset = 0;
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       // Dump scattered grad_output
+    //       dump_bf16_matrix(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, "backward_grad_output",
+    //                        tp_part_idx, expert_idx);
+    //       // Dump grad_intermediate (base, before LoRA)
+    //       dump_bf16_matrix(grad_intermediate_ + offset, m, config_.intermediate_size, "backward_down_base",
+    //       tp_part_idx,
+    //                        expert_idx);
+    //     }
+    //     offset += m * config_.intermediate_size;
+    //   }
+    // }
 
     // =====================================================
     // Step 5: LoRA gradient computation (kept as for-loop due to small matrices)
@@ -3003,25 +2813,26 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         nullptr);
 
     // DUMP: backward activation outputs (grad_gate_out and grad_up_out)
-    if (is_dump_enabled()) {
-      size_t offset = 0;
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          // Dump grad_intermediate (input to activation backward)
-          dump_bf16_matrix(grad_intermediate_ + offset, m, config_.intermediate_size, "backward_grad_intermediate",
-                           tp_part_idx, expert_idx);
-          // Dump grad_gate_out
-          dump_bf16_matrix(grad_gate_output_ + offset, m, config_.intermediate_size, "backward_grad_gate_out",
-                           tp_part_idx, expert_idx);
-          // Dump grad_up_out
-          dump_bf16_matrix(grad_up_output_ + offset, m, config_.intermediate_size, "backward_grad_up_out", tp_part_idx,
-                           expert_idx);
-        }
-        offset += m * config_.intermediate_size;
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   size_t offset = 0;
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       // Dump grad_intermediate (input to activation backward)
+    //       dump_bf16_matrix(grad_intermediate_ + offset, m, config_.intermediate_size, "backward_grad_intermediate",
+    //                        tp_part_idx, expert_idx);
+    //       // Dump grad_gate_out
+    //       dump_bf16_matrix(grad_gate_output_ + offset, m, config_.intermediate_size, "backward_grad_gate_out",
+    //                        tp_part_idx, expert_idx);
+    //       // Dump grad_up_out
+    //       dump_bf16_matrix(grad_up_output_ + offset, m, config_.intermediate_size, "backward_grad_up_out",
+    //       tp_part_idx,
+    //                        expert_idx);
+    //     }
+    //     offset += m * config_.intermediate_size;
+    //   }
+    // }
 
     if (_act_should_print) {
       auto _act_end = std::chrono::high_resolution_clock::now();
@@ -3342,15 +3153,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Accumulation buffers for per-expert grad_input dump (only when dump is enabled)
     // Maps expert_idx -> FP32 accumulation buffer [m_local_num x hidden_size]
     std::unordered_map<int, std::vector<float>> expert_grad_accum;
-    if (is_dump_enabled()) {
-      for (int task_id = 0; task_id < activated_expert; task_id++) {
-        int expert_idx = m_expert_id_map_[task_id];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          expert_grad_accum[expert_idx].resize(m * config_.hidden_size, 0.0f);
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   for (int task_id = 0; task_id < activated_expert; task_id++) {
+    //     int expert_idx = m_expert_id_map_[task_id];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       expert_grad_accum[expert_idx].resize(m * config_.hidden_size, 0.0f);
+    //     }
+    //   }
+    // }
 
     auto scatter_to_grad_input = [&](float scale) {
       ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
@@ -3364,18 +3175,18 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             ggml_bf16_t* contrib = grad_output_bf16_ptr_[expert_idx];
 
             // Also accumulate to per-expert buffer for dump (without routing weights)
-            if (is_dump_enabled()) {
-              auto it = expert_grad_accum.find(expert_idx);
-              if (it != expert_grad_accum.end()) {
-                float* accum = it->second.data();
-                for (int pos = 0; pos < num_tokens; pos++) {
-                  for (int h = 0; h < config_.hidden_size; h++) {
-                    float val = GGML_BF16_TO_FP32(contrib[pos * config_.hidden_size + h]) * scale;
-                    accum[pos * config_.hidden_size + h] += val;
-                  }
-                }
-              }
-            }
+            // if (is_dump_enabled()) {
+            //   auto it = expert_grad_accum.find(expert_idx);
+            //   if (it != expert_grad_accum.end()) {
+            //     float* accum = it->second.data();
+            //     for (int pos = 0; pos < num_tokens; pos++) {
+            //       for (int h = 0; h < config_.hidden_size; h++) {
+            //         float val = GGML_BF16_TO_FP32(contrib[pos * config_.hidden_size + h]) * scale;
+            //         accum[pos * config_.hidden_size + h] += val;
+            //       }
+            //     }
+            //   }
+            // }
 
             for (int i = 0; i < qlen; i++) {
               for (int j = 0; j < k; j++) {
@@ -3431,16 +3242,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           nullptr);
 
       // DUMP: base backward output before scatter
-      if (is_dump_enabled()) {
-        for (int i = 0; i < activated_expert; i++) {
-          int expert_idx = m_expert_id_map_[i];
-          int m = m_local_num_[expert_idx];
-          if (m > 0) {
-            const char* name = do_up ? "backward_up_base" : "backward_gate_base";
-            dump_bf16_matrix(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, name, tp_part_idx, expert_idx);
-          }
-        }
-      }
+      // if (is_dump_enabled()) {
+      //   for (int i = 0; i < activated_expert; i++) {
+      //     int expert_idx = m_expert_id_map_[i];
+      //     int m = m_local_num_[expert_idx];
+      //     if (m > 0) {
+      //       const char* name = do_up ? "backward_up_base" : "backward_gate_base";
+      //       dump_bf16_matrix(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, name, tp_part_idx,
+      //       expert_idx);
+      //     }
+      //   }
+      // }
 
       scatter_to_grad_input(1.0f);
 
@@ -3610,24 +3422,25 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           nullptr);
 
       // DUMP: LoRA contribution before scatter (will be scaled by lora_scaling_)
-      if (is_dump_enabled()) {
-        for (int i = 0; i < activated_expert; i++) {
-          int expert_idx = m_expert_id_map_[i];
-          int m = m_local_num_[expert_idx];
-          if (m > 0) {
-            // Dump LoRA intermediate (grad @ lora_B result)
-            ggml_bf16_t* inter_ptr =
-                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
-            const char* inter_name = do_up ? "backward_up_lora_inter" : "backward_gate_lora_inter";
-            dump_bf16_matrix(inter_ptr, m, padded_lora_rank_, inter_name, tp_part_idx, expert_idx);
+      // if (is_dump_enabled()) {
+      //   for (int i = 0; i < activated_expert; i++) {
+      //     int expert_idx = m_expert_id_map_[i];
+      //     int m = m_local_num_[expert_idx];
+      //     if (m > 0) {
+      //       // Dump LoRA intermediate (grad @ lora_B result)
+      //       ggml_bf16_t* inter_ptr =
+      //           do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+      //       const char* inter_name = do_up ? "backward_up_lora_inter" : "backward_gate_lora_inter";
+      //       dump_bf16_matrix(inter_ptr, m, padded_lora_rank_, inter_name, tp_part_idx, expert_idx);
 
-            // Dump LoRA output (G_B @ lora_A result, WITH lora_scaling applied for comparison)
-            const char* lora_name = do_up ? "backward_up_lora" : "backward_gate_lora";
-            dump_bf16_matrix_scaled(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, lora_scaling_, lora_name,
-                                    tp_part_idx, expert_idx);
-          }
-        }
-      }
+      //       // Dump LoRA output (G_B @ lora_A result, WITH lora_scaling applied for comparison)
+      //       const char* lora_name = do_up ? "backward_up_lora" : "backward_gate_lora";
+      //       dump_bf16_matrix_scaled(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, lora_scaling_,
+      //       lora_name,
+      //                               tp_part_idx, expert_idx);
+      //     }
+      //   }
+      // }
 
       scatter_to_grad_input(lora_scaling_);
 
@@ -3673,20 +3486,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     GU_CHECKPOINT("GU3_lora_passes_total");
 
     // DUMP: backward grad_input per expert (accumulated sum of gate_base + gate_lora + up_base + up_lora)
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          auto it = expert_grad_accum.find(expert_idx);
-          if (it != expert_grad_accum.end()) {
-            // Dump accumulated per-expert grad_input (sum of all 4 contributions)
-            dump_fp32_matrix(it->second.data(), m, config_.hidden_size, "backward_grad_input_expert", tp_part_idx,
-                             expert_idx);
-          }
-        }
-      }
-    }
+    // if (is_dump_enabled()) {
+    //   for (int i = 0; i < activated_expert; i++) {
+    //     int expert_idx = m_expert_id_map_[i];
+    //     int m = m_local_num_[expert_idx];
+    //     if (m > 0) {
+    //       auto it = expert_grad_accum.find(expert_idx);
+    //       if (it != expert_grad_accum.end()) {
+    //         // Dump accumulated per-expert grad_input (sum of all 4 contributions)
+    //         dump_fp32_matrix(it->second.data(), m, config_.hidden_size, "backward_grad_input_expert", tp_part_idx,
+    //                          expert_idx);
+    //       }
+    //     }
+    //   }
+    // }
 
 #undef GU_CHECKPOINT
   }

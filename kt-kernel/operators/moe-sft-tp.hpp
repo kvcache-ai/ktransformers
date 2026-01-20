@@ -17,54 +17,29 @@
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
 
-// Dump utilities for TP backward debugging
-namespace tp_dump {
-inline bool is_dump_enabled() {
-  static int enabled = -1;
-  if (enabled < 0) {
-    const char* env = getenv("SFT_MOE_DUMP");
-    enabled = (env != nullptr && env[0] == '1') ? 1 : 0;
-  }
-  return enabled == 1;
-}
+// Dump utilities for TP backward debugging (DISABLED FOR PERFORMANCE)
+// namespace tp_dump {
+// // Stub function - always returns false for performance
+// inline bool is_dump_enabled() { return false; }
 
-inline const char* get_dump_dir() {
-  static const char* dir = nullptr;
-  if (dir == nullptr) {
-    dir = getenv("SFT_MOE_DUMP_DIR");
-    if (dir == nullptr) dir = "./cpp_dump";
-  }
-  return dir;
-}
+// /*
+// // Original dump functions (commented out for performance)
+// // Uncomment if you need to debug
 
-inline void dump_bf16_matrix(const ggml_bf16_t* data, int rows, int cols, const char* name, int tp_idx) {
-  if (!is_dump_enabled()) return;
-  char filename[256];
-  snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
-  std::ofstream file(filename, std::ios::binary);
-  if (!file.is_open()) return;
-  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
-  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
-  for (int i = 0; i < rows * cols; i++) {
-    float val = GGML_BF16_TO_FP32(data[i]);
-    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
-  }
-}
+// inline const char* get_dump_dir() {
+//   static const char* dir = nullptr;
+//   if (dir == nullptr) {
+//     dir = getenv("SFT_MOE_DUMP_DIR");
+//     if (dir == nullptr) dir = "./cpp_dump";
+//   }
+//   return dir;
+// }
 
-inline void dump_bf16_matrix_final(const ggml_bf16_t* data, int rows, int cols, const char* name) {
-  if (!is_dump_enabled()) return;
-  char filename[256];
-  snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
-  std::ofstream file(filename, std::ios::binary);
-  if (!file.is_open()) return;
-  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
-  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
-  for (int i = 0; i < rows * cols; i++) {
-    float val = GGML_BF16_TO_FP32(data[i]);
-    file.write(reinterpret_cast<const char*>(&val), sizeof(float));
-  }
-}
-}  // namespace tp_dump
+// inline void dump_bf16_matrix(const ggml_bf16_t* data, int rows, int cols, const char* name, int tp_idx) { ... }
+
+// inline void dump_bf16_matrix_final(const ggml_bf16_t* data, int rows, int cols, const char* name) { ... }
+// */
+// }  // namespace tp_dump
 
 // Forward declaration
 template <class T, template <class> class BaseMOE>
@@ -366,9 +341,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     });
 
     // DUMP: per-TP grad_input before merge
-    for (int i = 0; i < tp_count; i++) {
-      tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
-    }
+    // for (int i = 0; i < tp_count; i++) {
+    //   tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
+    // }
 
     // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
     {
@@ -383,7 +358,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     // DUMP: final merged grad_input
-    tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
+    // tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
 
     // Merge partitioned gradients to full gradients
     for (int i = 0; i < tp_count; i++) {

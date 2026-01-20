@@ -440,45 +440,4 @@ void convert_or_copy(A* dst, void* src, ggml_type type, size_t count) {
   }
 }
 
-template <typename A>
-void check_numerics(A* data, size_t count) {
-  for (size_t i = 0; i < count; i++) {
-    if (std::isnan(data[i]) || std::isinf(data[i])) {
-      printf("Numerics check failed at index %zu: value = %f\n", i, data[i]);
-      throw std::runtime_error("Numerics check failed");
-    }
-  }
-  printf("Numerics check passed for %zu elements.\n", count);
-}
-
-inline void debug_bf16(ggml_bf16_t* x) {
-  for (int i = 0; i < 10; i++) {
-    printf("%f ", ggml_bf16_to_fp32(x[i]));
-  }
-  printf("\n");
-}
-inline void debug_f32(float* x) {
-  for (int i = 0; i < 10; i++) {
-    printf("%f ", x[i]);
-  }
-  printf("\n");
-}
-
-inline void debug_f32(float* x, size_t count) {
-  if (count < 10) {
-    for (size_t i = 0; i < count; i++) {
-      printf("%f ", x[i]);
-    }
-  } else {
-    for (size_t i = 0; i < 3; i++) {
-      printf("%f ", x[i]);
-    }
-    printf("...");
-    for (size_t i = count - 3; i < count; i++) {
-      printf("%f ", x[i]);
-    }
-    printf("\n");
-  }
-}
-
 #endif
