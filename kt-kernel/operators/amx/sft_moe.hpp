@@ -360,8 +360,10 @@ struct ForwardCache {
  *
  * @tparam T The GEMM kernel type (e.g., GemmKernel224BF, GemmKernel224Int8)
  * @tparam BaseMOE The base MOE class template (default: AMX_MOE_TP, can be AMX_AWQ_MOE_TP or AMX_K2_MOE_TP)
+ * @tparam SkipLoRA If true, skip all LoRA computation in backward pass,
+ *                  only compute base weight contribution to grad_input. (default: false)
  */
-template <class T, template <class> class BaseMOE = AMX_MOE_TP>
+template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = false>
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
  protected:
   using Base = BaseMOE<T>;
@@ -894,15 +896,18 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @brief Backward pass for SFT.
    *
    * Computes gradients for LoRA weights using cached intermediate values.
+   * When SkipLoRA template parameter is true, skips all LoRA computation
+   * and only computes base weight contribution to grad_input.
    *
    * @param grad_output Gradient of loss w.r.t. output [qlen, hidden_size]
    * @param grad_input Gradient of loss w.r.t. input [qlen, hidden_size] (output)
-   * @param grad_gate_lora_a Gradient for gate LoRA A [expert_num, lora_rank, hidden_size]
-   * @param grad_gate_lora_b Gradient for gate LoRA B [expert_num, intermediate_size, lora_rank]
-   * @param grad_up_lora_a Gradient for up LoRA A
-   * @param grad_up_lora_b Gradient for up LoRA B
-   * @param grad_down_lora_a Gradient for down LoRA A
-   * @param grad_down_lora_b Gradient for down LoRA B
+   * @param grad_gate_lora_a Gradient for gate LoRA A [expert_num, lora_rank, hidden_size] (ignored if SkipLoRA=true)
+   * @param grad_gate_lora_b Gradient for gate LoRA B [expert_num, intermediate_size, lora_rank] (ignored if
+   * SkipLoRA=true)
+   * @param grad_up_lora_a Gradient for up LoRA A (ignored if SkipLoRA=true)
+   * @param grad_up_lora_b Gradient for up LoRA B (ignored if SkipLoRA=true)
+   * @param grad_down_lora_a Gradient for down LoRA A (ignored if SkipLoRA=true)
+   * @param grad_down_lora_b Gradient for down LoRA B (ignored if SkipLoRA=true)
    */
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b) {
@@ -2604,7 +2609,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           }
 
-          if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
+          // Skip LoRA gradient computation when SkipLoRA is true
+          if (!SkipLoRA && down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
             // Get expert's LoRA weights
             size_t lora_a_offset = expert_idx * lora_rank_ * config_.intermediate_size;
             size_t lora_b_offset = expert_idx * config_.hidden_size * lora_rank_;
@@ -2889,8 +2895,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // =====================================================
     // Step 5: LoRA gradient computation (kept as for-loop due to small matrices)
+    // Skip when SkipLoRA is true (only compute grad_input, not LoRA weight gradients)
     // =====================================================
-    if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
+    if (!SkipLoRA && down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
       pool->do_work_stealing_job(
           activated_expert, nullptr,
           [this, &cache, grad_down_a, grad_down_b](int task_id) {
@@ -3167,8 +3174,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           }
 
-          // LoRA gradients and contribution - only if LoRA is enabled
-          if (lora_a == nullptr || lora_b == nullptr) return;
+          // Skip all LoRA computation when SkipLoRA is true
+          // (only base weight contribution to grad_input is computed above)
+          if (SkipLoRA || lora_a == nullptr || lora_b == nullptr) return;
 
           // Get cached input
           ggml_bf16_t* input = cache.input_cache;
@@ -3515,7 +3523,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     base_pass(true);   // up
     GU_CHECKPOINT("GU1_base_passes_total");
 
-    if (gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
+    // Skip all LoRA computation when SkipLoRA is true
+    if (SkipLoRA || gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
 #undef GU_CHECKPOINT
       return;
     }

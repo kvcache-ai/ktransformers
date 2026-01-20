@@ -56,6 +56,13 @@ SFT_METHODS = frozenset(
         "AMXINT4_1_SFT",  # AMX INT4_1 training
         "AMXINT4_KGroup_SFT",  # AMX INT4 K-Group training
         "AMXINT4_1KGroup_SFT",  # AMX INT4_1 K-Group training
+        # SkipLoRA variants (skip all LoRA computation in backward, only compute base weight grad_input)
+        "AMXBF16_SFT_SkipLoRA",
+        "AMXINT8_SFT_SkipLoRA",
+        "AMXINT4_SFT_SkipLoRA",
+        "AMXINT4_1_SFT_SkipLoRA",
+        "AMXINT4_KGroup_SFT_SkipLoRA",
+        "AMXINT4_1KGroup_SFT_SkipLoRA",
     ]
 )
 

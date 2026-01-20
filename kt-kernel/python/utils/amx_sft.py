@@ -26,6 +26,13 @@ try:
         AMXInt4_1_SFT_MOE,
         AMXInt4_1KGroup_SFT_MOE,
         AMXInt4_KGroup_SFT_MOE,
+        # SkipLoRA variants (skip all LoRA computation in backward)
+        AMXBF16_SFT_MOE_SkipLoRA,
+        AMXInt8_SFT_MOE_SkipLoRA,
+        AMXInt4_SFT_MOE_SkipLoRA,
+        AMXInt4_1_SFT_MOE_SkipLoRA,
+        AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
+        AMXInt4_KGroup_SFT_MOE_SkipLoRA,
     )
 
     _HAS_AMX_SFT_SUPPORT = True
@@ -37,6 +44,13 @@ except (ImportError, AttributeError):
     AMXInt4_1_SFT_MOE = None
     AMXInt4_1KGroup_SFT_MOE = None
     AMXInt4_KGroup_SFT_MOE = None
+    # SkipLoRA variants
+    AMXBF16_SFT_MOE_SkipLoRA = None
+    AMXInt8_SFT_MOE_SkipLoRA = None
+    AMXInt4_SFT_MOE_SkipLoRA = None
+    AMXInt4_1_SFT_MOE_SkipLoRA = None
+    AMXInt4_1KGroup_SFT_MOE_SkipLoRA = None
+    AMXInt4_KGroup_SFT_MOE_SkipLoRA = None
 
 from ..experts_sft import BaseSFTMoEWrapper, KExpertsSFTBuffer
 
@@ -49,6 +63,13 @@ _SFT_METHOD_TO_CLASS = {
     "AMXINT4_1_SFT": AMXInt4_1_SFT_MOE,
     "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
     "AMXINT4_1KGroup_SFT": AMXInt4_1KGroup_SFT_MOE,
+    # SkipLoRA variants (skip all LoRA computation in backward, only compute base weight grad_input)
+    "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
+    "AMXINT8_SFT_SkipLoRA": AMXInt8_SFT_MOE_SkipLoRA,
+    "AMXINT4_SFT_SkipLoRA": AMXInt4_SFT_MOE_SkipLoRA,
+    "AMXINT4_1_SFT_SkipLoRA": AMXInt4_1_SFT_MOE_SkipLoRA,
+    "AMXINT4_KGroup_SFT_SkipLoRA": AMXInt4_KGroup_SFT_MOE_SkipLoRA,
+    "AMXINT4_1KGroup_SFT_SkipLoRA": AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
 }
 
 

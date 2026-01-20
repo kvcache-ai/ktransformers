@@ -67,7 +67,7 @@ inline void dump_bf16_matrix_final(const ggml_bf16_t* data, int rows, int cols, 
 }  // namespace tp_dump
 
 // Forward declaration
-template <class T, template <class> class BaseMOE>
+template <class T, template <class> class BaseMOE, bool SkipLoRA>
 class AMX_SFT_MOE_TP;
 
 /**
