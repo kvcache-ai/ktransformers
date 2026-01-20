@@ -118,6 +118,7 @@ inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, cons
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
 inline bool is_dump_enabled() {
+  return false;
   static int enabled = -1;
   if (enabled < 0) {
     const char* env = getenv("SFT_MOE_DUMP");
