@@ -55,65 +55,6 @@ inline int get_print_at_call() {
 #define BACKWARD_TIMER_END() (void)0
 
 // =====================================================
-// BUG-010: NaN Diagnostic Helper Functions
-// =====================================================
-struct NaNCheckResult {
-  int nan_count = 0;
-  int inf_count = 0;
-  int first_nan_idx = -1;
-  float first_nan_input_val = 0.0f;
-};
-
-// Check BF16 buffer for NaN/Inf
-inline NaNCheckResult check_bf16_buffer_for_nan(const ggml_bf16_t* buf, int size, const char* label = nullptr) {
-  NaNCheckResult result;
-  for (int i = 0; i < size; i++) {
-    float val = GGML_BF16_TO_FP32(buf[i]);
-    if (std::isnan(val)) {
-      result.nan_count++;
-      if (result.first_nan_idx < 0) {
-        result.first_nan_idx = i;
-      }
-    }
-    if (std::isinf(val)) {
-      result.inf_count++;
-      if (result.first_nan_idx < 0) {
-        result.first_nan_idx = i;
-      }
-    }
-  }
-  if (label && (result.nan_count > 0 || result.inf_count > 0)) {
-    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
-           result.first_nan_idx);
-  }
-  return result;
-}
-
-// Check FP32 buffer for NaN/Inf
-inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, const char* label = nullptr) {
-  NaNCheckResult result;
-  for (int i = 0; i < size; i++) {
-    if (std::isnan(buf[i])) {
-      result.nan_count++;
-      if (result.first_nan_idx < 0) {
-        result.first_nan_idx = i;
-      }
-    }
-    if (std::isinf(buf[i])) {
-      result.inf_count++;
-      if (result.first_nan_idx < 0) {
-        result.first_nan_idx = i;
-      }
-    }
-  }
-  if (label && (result.nan_count > 0 || result.inf_count > 0)) {
-    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
-           result.first_nan_idx);
-  }
-  return result;
-}
-
-// =====================================================
 // Dump Utility Functions for debugging
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
@@ -933,17 +874,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       offset += m_local_num_[i];
     }
 
-    // // Compute total tokens for debug
-    // size_t total_tokens = 0;
-    // for (int i = 0; i < activated_expert; i++) {
-    //   total_tokens += m_local_num_[m_expert_id_map_[i]];
-    // }
-
-    // printf("[BACKWARD DEBUG] qlen=%d, k=%d, activated_expert=%d, total_tokens=%zu\n", qlen, k, activated_expert,
-    //        total_tokens);
-    // printf("[BACKWARD DEBUG] grad_output norm: %f\n",
-    //        compute_bf16_norm((const ggml_bf16_t*)grad_output, qlen * config_.hidden_size));
-
     // Step 1: Down projection backward
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_down_amx(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
@@ -964,8 +894,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
     BACKWARD_TIMER_CHECKPOINT("backward_gate_up");
     BACKWARD_TIMER_END();
-    // printf("[BACKWARD DEBUG] After backward_gate_up - grad_input norm: %f\n",
-    //        compute_bf16_norm((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size));
 
     // Mark cache as invalid
     cache.valid = false;
@@ -1295,43 +1223,55 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       // (each of max_len tokens selects num_experts_per_tok experts)
       size_t max_total_tokens = ((config_.max_len * config_.num_experts_per_tok + M_STEP - 1) / M_STEP) * M_STEP;
 
+      // Bug-D Fix: Account for per-expert M_STEP rounding overhead
+      // When allocating from shared pool, each expert's allocation is rounded up to M_STEP.
+      // This can cause total allocation to exceed max_total_tokens when tokens are unevenly
+      // distributed across experts (e.g., 128 experts with Qwen3).
+      // Worst case: all expert_num experts activated, each wastes up to (M_STEP-1) slots.
+      size_t rounding_overhead = config_.expert_num * (M_STEP - 1);
+      size_t max_total_tokens_with_overhead = max_total_tokens + rounding_overhead;
+
       // BufferA for LoRA intermediate: shared pool for all activated experts
       // Need 2x for gate and up separate buffers (to avoid race condition)
       lora_intermediate_ba_size = T::BufferA::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
-      lora_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
+      lora_ba_pool_bytes_ =
+          T::BufferA::required_size(max_total_tokens_with_overhead, padded_lora_rank_) * 2;  // gate + up
 
       // BufferC for LoRA step 1 output: shared pool for all activated experts
       // Need 2x for gate and up separate buffers (to avoid race condition)
       lora_intermediate_bc_size = T::BufferC::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
-      lora_bc_inter_pool_bytes_ = T::BufferC::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
+      lora_bc_inter_pool_bytes_ =
+          T::BufferC::required_size(max_total_tokens_with_overhead, padded_lora_rank_) * 2;  // gate + up
 
       // BufferC for LoRA step 2 output (gate, up, down): shared pool for all activated experts
       lora_gate_up_out_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
       lora_down_out_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);           // per-expert size
-      lora_bc_out_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) * 2 +
-                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
+      lora_bc_out_pool_bytes_ =
+          T::BufferC::required_size(max_total_tokens_with_overhead, config_.intermediate_size) * 2 +
+          T::BufferC::required_size(max_total_tokens_with_overhead, config_.hidden_size);
 
       // BF16 intermediate buffer for step 1 -> step 2 conversion
       // Need 2x for gate and up separate buffers (to avoid race condition)
-      lora_intermediate_bf16_pool_bytes_ = max_total_tokens * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2;  // gate + up
+      lora_intermediate_bf16_pool_bytes_ =
+          max_total_tokens_with_overhead * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2;  // gate + up
 
       // =====================================================
       // Calculate Backward pass AMX buffer sizes
       // =====================================================
       // BufferA for scattered grad_output: shared pool for all activated experts
       grad_output_ba_size = T::BufferA::required_size(max_m, config_.hidden_size);  // per-expert size
-      backward_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, config_.hidden_size);
+      backward_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens_with_overhead, config_.hidden_size);
 
       // BufferC for backward GEMM outputs: shared pool for all activated experts
-      // grad_intermediate: [max_total_tokens, intermediate_size]
+      // grad_intermediate: [max_total_tokens_with_overhead, intermediate_size]
       grad_intermediate_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
-      // grad_gate_up: [max_total_tokens, hidden_size]
+      // grad_gate_up: [max_total_tokens_with_overhead, hidden_size]
       grad_gate_up_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);  // per-expert size
-      backward_bc_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) +
-                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
+      backward_bc_pool_bytes_ = T::BufferC::required_size(max_total_tokens_with_overhead, config_.intermediate_size) +
+                                T::BufferC::required_size(max_total_tokens_with_overhead, config_.hidden_size);
 
       // BF16 buffer for scattered grad_output
-      grad_output_bf16_pool_bytes_ = max_total_tokens * config_.hidden_size * sizeof(ggml_bf16_t);
+      grad_output_bf16_pool_bytes_ = max_total_tokens_with_overhead * config_.hidden_size * sizeof(ggml_bf16_t);
 
       // =====================================================
       // Calculate Backward pass BufferB sizes (transposed base weights)
