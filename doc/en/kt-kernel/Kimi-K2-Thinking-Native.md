@@ -37,7 +37,6 @@ Note: Currently, please clone our custom SGLang repository:
 ```
 git clone https://github.com/kvcache-ai/sglang.git
 cd sglang
-git checkout kimi_k2
 pip install -e "python[all]"
 ```
 
