@@ -10,9 +10,11 @@
 
 #include <immintrin.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <numeric>
 
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
@@ -63,6 +65,28 @@ inline void dump_bf16_matrix_final(const ggml_bf16_t* data, int rows, int cols, 
     float val = GGML_BF16_TO_FP32(data[i]);
     file.write(reinterpret_cast<const char*>(&val), sizeof(float));
   }
+}
+
+inline void dump_fp32_matrix(const float* data, int rows, int cols, const char* name, int tp_idx) {
+  if (!is_dump_enabled()) return;
+  char filename[256];
+  snprintf(filename, sizeof(filename), "%s/%s_tp%d.bin", get_dump_dir(), name, tp_idx);
+  std::ofstream file(filename, std::ios::binary);
+  if (!file.is_open()) return;
+  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+  file.write(reinterpret_cast<const char*>(data), sizeof(float) * rows * cols);
+}
+
+inline void dump_fp32_matrix_final(const float* data, int rows, int cols, const char* name) {
+  if (!is_dump_enabled()) return;
+  char filename[256];
+  snprintf(filename, sizeof(filename), "%s/%s.bin", get_dump_dir(), name);
+  std::ofstream file(filename, std::ios::binary);
+  if (!file.is_open()) return;
+  file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+  file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+  file.write(reinterpret_cast<const char*>(data), sizeof(float) * rows * cols);
 }
 }  // namespace tp_dump
 
@@ -289,11 +313,26 @@ class TP_MOE_SFT : public TP_MOE<T> {
     int qlen = *qlen_ptr;
     auto pool = config.pool;
 
+    // Reset forward timing before computation
+    sft_timer::reset_forward();
+    // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
+    for (int i = 0; i < tp_count; i++) {
+      pool->get_subpool(i)->reset_counters();
+    }
+
     // Run forward on each NUMA node
     pool->dispense_backend()->do_numa_job([this, qlen, k, expert_ids, input, weights, save_for_backward](int numa_id) {
       tps[numa_id]->forward_sft(qlen, k, expert_ids, weights, input, this->local_output_numa[numa_id],
                                 save_for_backward);
     });
+
+    // Collect per-thread timing from all NUMA subpools
+    for (int i = 0; i < tp_count; i++) {
+      sft_timer::collect_forward(pool->get_subpool(i));
+    }
+
+    // Print per-thread forward timing
+    sft_timer::print_forward();
 
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
@@ -338,22 +377,29 @@ class TP_MOE_SFT : public TP_MOE<T> {
     int qlen = tps[0]->get_cache_qlen();  // Get qlen from cache
 
     // Allocate partitioned gradient buffers for each NUMA
-    std::vector<ggml_bf16_t*> part_grad_gate_lora_b(tp_count);
-    std::vector<ggml_bf16_t*> part_grad_up_lora_b(tp_count);
-    std::vector<ggml_bf16_t*> part_grad_down_lora_a(tp_count);
+    std::vector<float*> part_grad_gate_lora_b(tp_count);
+    std::vector<float*> part_grad_up_lora_b(tp_count);
+    std::vector<float*> part_grad_down_lora_a(tp_count);
 
     // Bug #22 fix: Allocate separate grad_input buffers for each NUMA
     // Each NUMA's backward_gate_up does memset(grad_input, 0) first, which would
     // overwrite the other NUMA's results if they share the same buffer.
-    std::vector<ggml_bf16_t*> part_grad_input(tp_count);
+    std::vector<float*> part_grad_input(tp_count);
 
     for (int i = 0; i < tp_count; i++) {
       int tp_intermediate = tp_configs[i].intermediate_size;
       // Zero-initialize with ()
-      part_grad_gate_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
-      part_grad_up_lora_b[i] = new ggml_bf16_t[expert_num * tp_intermediate * lora_rank]();
-      part_grad_down_lora_a[i] = new ggml_bf16_t[expert_num * lora_rank * tp_intermediate]();
-      part_grad_input[i] = new ggml_bf16_t[qlen * hidden_size]();
+      part_grad_gate_lora_b[i] = new float[expert_num * tp_intermediate * lora_rank]();
+      part_grad_up_lora_b[i] = new float[expert_num * tp_intermediate * lora_rank]();
+      part_grad_down_lora_a[i] = new float[expert_num * lora_rank * tp_intermediate]();
+      part_grad_input[i] = new float[qlen * hidden_size]();
+    }
+
+    // Reset backward timing before computation
+    sft_timer::reset_backward();
+    // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
+    for (int i = 0; i < tp_count; i++) {
+      pool->get_subpool(i)->reset_counters();
     }
 
     // Run backward on each NUMA node with separate grad_input buffers
@@ -365,25 +411,50 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              grad_down_lora_b);
     });
 
+    // Collect per-thread timing from all NUMA subpools
+    for (int i = 0; i < tp_count; i++) {
+      sft_timer::collect_backward(pool->get_subpool(i));
+    }
+
+    // Print per-thread backward timing
+    sft_timer::print_backward();
+
+    // Print expert token distribution for load balancing analysis
+    {
+      std::vector<int> all_tokens;
+      for (int i = 0; i < tp_count; i++) {
+        const auto& tokens = tps[i]->get_expert_token_distribution();
+        all_tokens.insert(all_tokens.end(), tokens.begin(), tokens.end());
+      }
+      if (!all_tokens.empty()) {
+        int max_t = *std::max_element(all_tokens.begin(), all_tokens.end());
+        int min_t = *std::min_element(all_tokens.begin(), all_tokens.end());
+        int sum_t = std::accumulate(all_tokens.begin(), all_tokens.end(), 0);
+        fprintf(stderr, "  expert tokens (%zu): ", all_tokens.size());
+        for (int t : all_tokens) fprintf(stderr, "%d ", t);
+        fprintf(stderr, "(max=%d min=%d avg=%.1f)\n", max_t, min_t, (float)sum_t / all_tokens.size());
+      }
+    }
+
     // DUMP: per-TP grad_input before merge
     for (int i = 0; i < tp_count; i++) {
-      tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
+      tp_dump::dump_fp32_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
     }
 
     // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
     {
-      ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
+      float* grad_input_f32 = (float*)grad_input;
       for (int i = 0; i < qlen * hidden_size; i++) {
         float sum = 0.0f;
         for (int numa_id = 0; numa_id < tp_count; numa_id++) {
-          sum += GGML_BF16_TO_FP32(part_grad_input[numa_id][i]);
+          sum += part_grad_input[numa_id][i];
         }
-        grad_input_bf16[i] = GGML_FP32_TO_BF16(sum);
+        grad_input_f32[i] = sum;
       }
     }
 
     // DUMP: final merged grad_input
-    tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
+    tp_dump::dump_fp32_matrix_final((float*)grad_input, qlen, hidden_size, "backward_grad_input_final");
 
     // Merge partitioned gradients to full gradients
     for (int i = 0; i < tp_count; i++) {
@@ -395,10 +466,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
         size_t src_offset = (size_t)expert_id * tp_intermediate * lora_rank;
         size_t dst_offset =
             (size_t)expert_id * full_intermediate_size * lora_rank + (size_t)i * tp_intermediate * lora_rank;
-        memcpy((ggml_bf16_t*)grad_gate_lora_b + dst_offset, part_grad_gate_lora_b[i] + src_offset,
-               tp_intermediate * lora_rank * sizeof(ggml_bf16_t));
-        memcpy((ggml_bf16_t*)grad_up_lora_b + dst_offset, part_grad_up_lora_b[i] + src_offset,
-               tp_intermediate * lora_rank * sizeof(ggml_bf16_t));
+        memcpy((float*)grad_gate_lora_b + dst_offset, part_grad_gate_lora_b[i] + src_offset,
+               tp_intermediate * lora_rank * sizeof(float));
+        memcpy((float*)grad_up_lora_b + dst_offset, part_grad_up_lora_b[i] + src_offset,
+               tp_intermediate * lora_rank * sizeof(float));
       }
 
       // grad_down_lora_a: [expert_num, lora_rank, intermediate_size]
@@ -408,8 +479,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
           size_t src_offset = (size_t)expert_id * lora_rank * tp_intermediate + (size_t)r * tp_intermediate;
           size_t dst_offset = (size_t)expert_id * lora_rank * full_intermediate_size +
                               (size_t)r * full_intermediate_size + (size_t)i * tp_intermediate;
-          memcpy((ggml_bf16_t*)grad_down_lora_a + dst_offset, part_grad_down_lora_a[i] + src_offset,
-                 tp_intermediate * sizeof(ggml_bf16_t));
+          memcpy((float*)grad_down_lora_a + dst_offset, part_grad_down_lora_a[i] + src_offset,
+                 tp_intermediate * sizeof(float));
         }
       }
     }

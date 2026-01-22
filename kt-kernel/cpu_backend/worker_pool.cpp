@@ -13,20 +13,216 @@
 #include <hwloc/bitmap.h>
 #include <numa.h>
 #include <numaif.h>
+#include <x86intrin.h>
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <numeric>
 #include <stdexcept>
 
 #include "hwloc.h"
+
+// RDTSC-based timer for lightweight timing
+// Uses CPU timestamp counter instead of system clock for lower overhead
+namespace {
+
+// Read CPU timestamp counter (RDTSC)
+inline uint64_t rdtsc_now() { return __rdtsc(); }
+
+// Estimate RDTSC cycles for given milliseconds
+// This is calculated once at startup
+static uint64_t g_rdtsc_cycles_per_ms = 0;
+
+// Initialize RDTSC frequency by measuring against chrono
+static uint64_t init_rdtsc_frequency() {
+  auto start_chrono = std::chrono::high_resolution_clock::now();
+  uint64_t start_rdtsc = rdtsc_now();
+
+  // Busy wait for ~10ms to calibrate
+  while (true) {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_chrono).count();
+    if (elapsed >= 10) break;
+  }
+
+  uint64_t end_rdtsc = rdtsc_now();
+  auto end_chrono = std::chrono::high_resolution_clock::now();
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_chrono - start_chrono).count();
+
+  if (elapsed_ms > 0) {
+    return (end_rdtsc - start_rdtsc) / elapsed_ms;
+  }
+  // Fallback: assume 2.5 GHz CPU
+  return 2500000;
+}
+
+// Get cycles per millisecond (lazy initialization)
+inline uint64_t get_rdtsc_cycles_per_ms() {
+  if (g_rdtsc_cycles_per_ms == 0) {
+    g_rdtsc_cycles_per_ms = init_rdtsc_frequency();
+  }
+  return g_rdtsc_cycles_per_ms;
+}
+
+}  // namespace
+
+// =====================================================
+// Global per-thread timing for SFT MOE forward/backward
+// Collects timing from InNumaPool worker threads
+// =====================================================
+namespace sft_timer {
+
+constexpr int MAX_THREADS = 256;
+static uint64_t forward_rt[MAX_THREADS] = {0};
+static uint64_t backward_rt[MAX_THREADS] = {0};
+static int forward_tasks[MAX_THREADS] = {0};
+static int backward_tasks[MAX_THREADS] = {0};
+static int forward_threads = 0;
+static int backward_threads = 0;
+
+inline double ticks_to_ms(uint64_t cycles) { return (double)cycles / get_rdtsc_cycles_per_ms(); }
+
+void print_rt(FILE* out, const char* name, uint64_t* rt, int* tasks, int rt_threads) {
+  if (rt_threads <= 0) return;
+  FILE* output = out ? out : stderr;
+  auto max_val = *std::max_element(rt, rt + rt_threads);
+  auto min_val = *std::min_element(rt, rt + rt_threads);
+  uint64_t sum = std::accumulate(rt, rt + rt_threads, (uint64_t)0);
+  int total_tasks = std::accumulate(tasks, tasks + rt_threads, 0);
+
+  // Sort to find 20% and 80% percentile thresholds
+  std::vector<uint64_t> sorted(rt, rt + rt_threads);
+  std::sort(sorted.begin(), sorted.end());
+  int p20_idx = rt_threads * 20 / 100;
+  int p80_idx = rt_threads * 80 / 100;
+  uint64_t p20_threshold = sorted[p20_idx];  // Fast threshold (top 20%)
+  uint64_t p80_threshold = sorted[p80_idx];  // Slow threshold (bottom 20%)
+
+  // ANSI color codes
+  const char* GREEN = "\033[32m";
+  const char* RED = "\033[31m";
+  const char* RESET = "\033[0m";
+
+  // Line 1: time
+  fprintf(output, "%30s max %.3f min %.3f avg %.3f : ", name, ticks_to_ms(max_val), ticks_to_ms(min_val),
+          ticks_to_ms(sum / rt_threads));
+  for (int i = 0; i < rt_threads; i++) {
+    if (rt[i] <= p20_threshold) {
+      fprintf(output, "%s%.3f%s ", GREEN, ticks_to_ms(rt[i]), RESET);
+    } else if (rt[i] >= p80_threshold) {
+      fprintf(output, "%s%.3f%s ", RED, ticks_to_ms(rt[i]), RESET);
+    } else {
+      fprintf(output, "%.3f ", ticks_to_ms(rt[i]));
+    }
+  }
+  fprintf(output, "\n");
+
+  // Line 2: task count
+  fprintf(output, "%30s total %d : ", "tasks", total_tasks);
+  for (int i = 0; i < rt_threads; i++) {
+    if (rt[i] <= p20_threshold) {
+      fprintf(output, "%s%d%s ", GREEN, tasks[i], RESET);
+    } else if (rt[i] >= p80_threshold) {
+      fprintf(output, "%s%d%s ", RED, tasks[i], RESET);
+    } else {
+      fprintf(output, "%d ", tasks[i]);
+    }
+  }
+  fprintf(output, "\n");
+}
+
+void reset_forward() {
+  std::fill(forward_rt, forward_rt + MAX_THREADS, 0);
+  std::fill(forward_tasks, forward_tasks + MAX_THREADS, 0);
+  forward_threads = 0;
+}
+
+void reset_backward() {
+  std::fill(backward_rt, backward_rt + MAX_THREADS, 0);
+  std::fill(backward_tasks, backward_tasks + MAX_THREADS, 0);
+  backward_threads = 0;
+}
+
+void collect_forward(InNumaPool* pool) {
+  int n = pool->get_worker_count();
+  for (int i = 0; i < n && forward_threads < MAX_THREADS; i++) {
+    forward_rt[forward_threads] = pool->get_thread_cycles(i);
+    forward_tasks[forward_threads] = pool->get_thread_task_count(i);
+    forward_threads++;
+  }
+}
+
+void collect_backward(InNumaPool* pool) {
+  int n = pool->get_worker_count();
+  for (int i = 0; i < n && backward_threads < MAX_THREADS; i++) {
+    backward_rt[backward_threads] = pool->get_thread_cycles(i);
+    backward_tasks[backward_threads] = pool->get_thread_task_count(i);
+    backward_threads++;
+  }
+}
+
+void print_forward() { print_rt(stderr, "forward", forward_rt, forward_tasks, forward_threads); }
+void print_backward(const char* name) { print_rt(stderr, name, backward_rt, backward_tasks, backward_threads); }
+
+void print_op_stats(InNumaPool* pool, const char* op_name) {
+  if (pool == nullptr || op_name == nullptr || op_name[0] == '\0') {
+    return;
+  }
+  int n = pool->get_worker_count();
+  if (n <= 0) {
+    return;
+  }
+  FILE* output = stderr;
+  int numa_id = pool->get_numa_id();
+  if (numa_id == 0) {
+    output = stdout;
+  } else if (numa_id == 1) {
+    output = stderr;
+  }
+  std::vector<uint64_t> rt(n);
+  std::vector<int> tasks(n);
+  for (int i = 0; i < n; i++) {
+    rt[i] = pool->get_thread_cycles(i);
+    tasks[i] = pool->get_thread_task_count(i);
+  }
+  print_rt(output, op_name, rt.data(), tasks.data(), n);
+}
+
+}  // namespace sft_timer
+
+// Intel ITT API for profiler integration (VTune, etc.)
+// Allows profilers to identify spin-wait regions
+#ifdef USE_ITT_NOTIFY
+#include <ittnotify.h>
+static __itt_domain* g_itt_domain = nullptr;
+static __itt_string_handle* g_itt_spin_wait = nullptr;
+
+static void init_itt() {
+  if (g_itt_domain == nullptr) {
+    g_itt_domain = __itt_domain_create("WorkerPool");
+    g_itt_spin_wait = __itt_string_handle_create("SpinWait");
+  }
+}
+
+#define ITT_SYNC_PREPARE(addr) __itt_sync_prepare(addr)
+#define ITT_SYNC_CANCEL(addr) __itt_sync_cancel(addr)
+#define ITT_SYNC_ACQUIRED(addr) __itt_sync_acquired(addr)
+#else
+#define ITT_SYNC_PREPARE(addr) ((void)0)
+#define ITT_SYNC_CANCEL(addr) ((void)0)
+#define ITT_SYNC_ACQUIRED(addr) ((void)0)
+static void init_itt() {}
+#endif
 
 thread_local int WorkerPool::thread_local_id = -1;
 
 InNumaPool::InNumaPool(int max_thread_num) {
   printf("In Numa Worker Pool at NUMA %d, %d threads\n", numa_node_of_cpu(sched_getcpu()), max_thread_num);
+  numa_id_ = numa_node_of_cpu(sched_getcpu());
   total_worker_count = max_thread_num;
+  block_size_ = 0;
   set_restricted_worker_count(total_worker_count);
   thread_state_ = std::unique_ptr<ThreadState[]>(new ThreadState[max_thread_num]);
   for (int i = 0; i < total_worker_count; i++) {
@@ -46,7 +242,9 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
   hwloc_topology_init(&topology);
   hwloc_topology_load(topology);
   printf("In Numa Worker Pool at NUMA %d, %d threads\n", numa_node_of_cpu(sched_getcpu()), max_thread_num);
+  numa_id_ = numa_id;
   total_worker_count = max_thread_num;
+  block_size_ = 0;
   set_restricted_worker_count(total_worker_count);
   thread_state_ = std::unique_ptr<ThreadState[]>(new ThreadState[max_thread_num]);
   for (int i = 0; i < total_worker_count; i++) {
@@ -132,22 +330,32 @@ void InNumaPool::wait() {
 #endif
 }
 
-void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> compute_func) {
-  do_work_stealing_job(task_num, nullptr, compute_func, nullptr);
+void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> compute_func, const char* task_name,
+                                      int block_size, bool async) {
+  do_work_stealing_job(task_num, nullptr, compute_func, nullptr, task_name, block_size);
 }
 
 void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> init_func,
-                                      std::function<void(int)> compute_func, std::function<void(int)> finalize_func) {
-  do_work_stealing_job_async(task_num, init_func, compute_func, finalize_func);
-  wait();
+                                      std::function<void(int)> compute_func, std::function<void(int)> finalize_func,
+                                      const char* task_name, int block_size, bool async) {
+  bool has_name = task_name != nullptr && task_name[0] != '\0';
+  if (has_name) {
+    reset_counters();
+  }
+  do_work_stealing_job_async(task_num, init_func, compute_func, finalize_func, block_size);
+  if (!async) wait();
+  if (has_name) {
+    sft_timer::print_op_stats(this, task_name);
+  }
 }
 
 void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int)> init_func,
                                             std::function<void(int)> compute_func,
-                                            std::function<void(int)> finalize_func) {
+                                            std::function<void(int)> finalize_func, int block_size) {
   init_func_ = init_func;
   compute_func_ = compute_func;
   finalize_func_ = finalize_func;
+  block_size_ = block_size;
   worker_count = std::min(restricted_worker_count, task_num);
   curr_.store(0, std::memory_order_release);
   end_ = task_num;
@@ -159,10 +367,10 @@ void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int
 }
 
 void InNumaPool::process_tasks(int thread_id) {
-#ifdef PROFILE_BALANCE
-  auto start = std::chrono::high_resolution_clock::now();
-#endif
+  uint64_t start_cycles = rdtsc_now();
   auto& s = thread_state_[thread_id];
+  int local_task_count = 0;
+
   if (init_func_ != nullptr) {
     init_func_(thread_id);
   }
@@ -175,7 +383,12 @@ void InNumaPool::process_tasks(int thread_id) {
       break;
     }
 
-    int block = (rem + worker_count - 1) / worker_count;
+    int block = 0;
+    if (block_size_ > 0) {
+      block = std::min(block_size_, rem);
+    } else {
+      block = (rem + worker_count - 1) / worker_count;
+    }
     int task_id = curr_.fetch_add(block, std::memory_order_acq_rel);
     if (task_id >= end_) {
       break;
@@ -186,6 +399,7 @@ void InNumaPool::process_tasks(int thread_id) {
         break;
       }
       compute_func_(task_id + i);
+      local_task_count++;
     }
   }
 
@@ -194,30 +408,38 @@ void InNumaPool::process_tasks(int thread_id) {
   }
 
   s.status.store(ThreadStatus::WAITING, std::memory_order_release);
-#ifdef PROFILE_BALANCE
-  s.finish_ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - start).count();
-#endif
+  // Accumulate cycles and task count across all do_work_stealing_job calls
+  s.finish_cycles += rdtsc_now() - start_cycles;
+  s.task_count += local_task_count;
 }
 
 void InNumaPool::worker_thread(int thread_id, int numa_id) {
   if (numa_id >= 0) {
     set_memory_to_numa(numa_id);
   }
-  auto start = std::chrono::high_resolution_clock::now();
+  init_itt();  // Initialize ITT if enabled
+  // Use RDTSC for lightweight timing instead of std::chrono
+  const uint64_t sleep_threshold_cycles = get_rdtsc_cycles_per_ms() * 50;  // 50ms in cycles
+  uint64_t start = rdtsc_now();
   WorkerPool::thread_local_id = thread_id;  // 设置线程本地变量
   while (true) {
+    ITT_SYNC_PREPARE(&thread_state_[thread_id].status);  // Signal profiler: about to spin-wait
     ThreadStatus status = thread_state_[thread_id].status.load(std::memory_order_acquire);
     if (status == ThreadStatus::WORKING) {
+      ITT_SYNC_ACQUIRED(&thread_state_[thread_id].status);  // Signal profiler: acquired work
       process_tasks(thread_id);
-      start = std::chrono::high_resolution_clock::now();
+      start = rdtsc_now();
     } else if (status == ThreadStatus::WAITING) {
-      auto now = std::chrono::high_resolution_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-      if (duration > 50) {
+      // PAUSE instruction hints to CPU this is a spin-wait loop
+      _mm_pause();
+      uint64_t now = rdtsc_now();
+      uint64_t elapsed_cycles = now - start;
+      if (elapsed_cycles > sleep_threshold_cycles) {
+        ITT_SYNC_CANCEL(&thread_state_[thread_id].status);  // Signal profiler: going to sleep
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     } else if (status == ThreadStatus::EXIT) {
+      ITT_SYNC_CANCEL(&thread_state_[thread_id].status);  // Signal profiler: exiting
       return;
     }
   }
@@ -355,26 +577,35 @@ void NumaJobDistributor::do_numa_job(std::function<void(int)> compute_func) {
 #endif
 
 void NumaJobDistributor::worker_thread(int numa_id) {
-  auto start = std::chrono::high_resolution_clock::now();
+  init_itt();  // Initialize ITT if enabled
+  // Use RDTSC for lightweight timing instead of std::chrono
+  const uint64_t sleep_threshold_cycles = get_rdtsc_cycles_per_ms() * 50;  // 50ms in cycles
+  uint64_t start = rdtsc_now();
   set_memory_to_numa(numa_id);
   status[numa_id] =
       std::move(std::unique_ptr<std::atomic<ThreadStatus>>(new std::atomic<ThreadStatus>(ThreadStatus::WAITING)));
   ready_bar->arrive_and_wait();
   while (true) {
+    ITT_SYNC_PREPARE(status[numa_id].get());  // Signal profiler: about to spin-wait
     auto stat = status[numa_id]->load(std::memory_order_acquire);
     if (stat == ThreadStatus::WORKING) {
+      ITT_SYNC_ACQUIRED(status[numa_id].get());  // Signal profiler: acquired work
       auto me_numa = numa_node_of_cpu(sched_getcpu());
       // printf("numa work on %d, me %d\n", numa_id, me_numa);
       compute_func(numa_id);
       status[numa_id]->store(ThreadStatus::WAITING, std::memory_order_release);
-      start = std::chrono::high_resolution_clock::now();
+      start = rdtsc_now();
     } else if (stat == ThreadStatus::WAITING) {
-      auto now = std::chrono::high_resolution_clock::now();
-      auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-      if (duration > 50) {
+      // PAUSE instruction hints to CPU this is a spin-wait loop
+      _mm_pause();
+      uint64_t now = rdtsc_now();
+      uint64_t elapsed_cycles = now - start;
+      if (elapsed_cycles > sleep_threshold_cycles) {
+        ITT_SYNC_CANCEL(status[numa_id].get());  // Signal profiler: going to sleep
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     } else if (stat == ThreadStatus::EXIT) {
+      ITT_SYNC_CANCEL(status[numa_id].get());  // Signal profiler: exiting
       return;
     }
   }
@@ -449,10 +680,15 @@ InNumaPool* WorkerPool::get_subpool(int numa_id) { return numa_worker_pools[numa
 NumaJobDistributor* WorkerPool::dispense_backend() { return distributor.get(); }
 
 void WorkerPool::do_work_stealing_job(int task_num, std::function<void(int)> init_func,
-                                      std::function<void(int)> compute_func, std::function<void(int)> finalize_func) {
-  numa_worker_pools[0]->do_work_stealing_job(task_num, init_func, compute_func, finalize_func);
+                                      std::function<void(int)> compute_func, std::function<void(int)> finalize_func,
+                                      const char* task_name, int block_size, bool async) {
+  numa_worker_pools[0]->do_work_stealing_job(task_num, init_func, compute_func, finalize_func, task_name, block_size,
+                                             async);
 }
 
-void WorkerPool::do_work_stealing_job(int task_num, std::function<void(int)> compute_func) {
-  do_work_stealing_job(task_num, nullptr, compute_func, nullptr);
+void WorkerPool::do_work_stealing_job(int task_num, std::function<void(int)> compute_func, const char* task_name,
+                                      int block_size, bool async) {
+  do_work_stealing_job(task_num, nullptr, compute_func, nullptr, task_name, block_size, async);
 }
+
+void WorkerPool::wait() { numa_worker_pools[0]->wait(); }
