@@ -94,6 +94,9 @@ class KExpertsSFTBuffer:
         self.grad_down_lora_a = torch.empty((num_experts, lora_rank, moe_intermediate_size), dtype=dtype, device="cpu")
         self.grad_down_lora_b = torch.empty((num_experts, hidden_size, lora_rank), dtype=dtype, device="cpu")
 
+        # Routing weights gradient [qlen, num_experts_per_tok] (FP32)
+        self.grad_weights = torch.empty((qlen, num_experts_per_tok), dtype=torch.float32, device="cpu")
+
         # Batch size tensor for C++ interface
         self.bsz_tensor = torch.tensor([qlen], dtype=torch.int32, device="cpu")
 
@@ -350,7 +353,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def backward(
         self,
         grad_output: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -368,6 +371,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 - grad_up_lora_b: [num_experts, intermediate_size, lora_rank]
                 - grad_down_lora_a: [num_experts, lora_rank, intermediate_size]
                 - grad_down_lora_b: [num_experts, hidden_size, lora_rank]
+            grad_weights: Routing weights gradient [qlen, num_experts_per_tok] (FP32)
         """
         pass
 

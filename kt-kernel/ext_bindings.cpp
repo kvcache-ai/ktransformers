@@ -303,20 +303,23 @@ class MOESFTBindings {
       intptr_t grad_up_lora_b;
       intptr_t grad_down_lora_a;
       intptr_t grad_down_lora_b;
+      intptr_t grad_weights;
     };
     static void inner(void* args) {
       Args* args_ = (Args*)args;
       args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::backward_binding, args_->moe, args_->grad_output, args_->grad_input,
                                args_->grad_gate_lora_a, args_->grad_gate_lora_b, args_->grad_up_lora_a,
-                               args_->grad_up_lora_b, args_->grad_down_lora_a, args_->grad_down_lora_b);
+                               args_->grad_up_lora_b, args_->grad_down_lora_a, args_->grad_down_lora_b,
+                               args_->grad_weights);
     }
     static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t grad_output,
                                                             intptr_t grad_input, intptr_t grad_gate_lora_a,
                                                             intptr_t grad_gate_lora_b, intptr_t grad_up_lora_a,
                                                             intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
-                                                            intptr_t grad_down_lora_b) {
-      Args* args = new Args{nullptr,          moe.get(),      grad_output,    grad_input,       grad_gate_lora_a,
-                            grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b, grad_down_lora_a, grad_down_lora_b};
+                                                            intptr_t grad_down_lora_b, intptr_t grad_weights) {
+      Args* args = new Args{nullptr,          moe.get(),        grad_output,    grad_input,
+                            grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
+                            grad_down_lora_a, grad_down_lora_b, grad_weights};
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
   };

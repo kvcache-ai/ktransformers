@@ -474,7 +474,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
     def backward(
         self,
         grad_output: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -484,14 +484,15 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_output: Gradient from upstream [qlen, hidden_size]
 
         Returns:
-            grad_input: Input gradient [qlen, hidden_size] (FP32)
+            grad_input: Input gradient [qlen, hidden_size] (BF16)
             grad_loras: Dictionary of LoRA gradients containing:
-                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size] (FP32)
-                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank] (FP32)
-                - grad_up_lora_a: [num_experts, lora_rank, hidden_size] (FP32)
-                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank] (FP32)
-                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size] (FP32)
-                - grad_down_lora_b: [num_experts, hidden_size, lora_rank] (FP32)
+                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size] (BF16)
+                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank] (BF16)
+                - grad_up_lora_a: [num_experts, lora_rank, hidden_size] (BF16)
+                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank] (BF16)
+                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size] (BF16)
+                - grad_down_lora_b: [num_experts, hidden_size, lora_rank] (BF16)
+            grad_weights: Routing weights gradient [qlen, num_experts_per_tok] (FP32)
         """
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward_sft(save_for_backward=True) first.")
@@ -499,7 +500,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         qlen = grad_output.shape[0]
 
         # Get buffer (should exist from forward pass)
-        # Gradients are stored in FP32 for better numerical stability.
         buffer = KExpertsSFTBuffer.get_buffer(
             qlen=qlen,
             hidden_size=self.hidden_size,
@@ -507,7 +507,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             lora_rank=self.lora_rank,
-            dtype=torch.float32,
+            dtype=grad_output.dtype,
         )
 
         # Copy gradient to CPU buffer
@@ -521,6 +521,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         buffer.grad_up_lora_b.zero_()
         buffer.grad_down_lora_a.zero_()
         buffer.grad_down_lora_b.zero_()
+        buffer.grad_weights.zero_()
 
         # Submit backward task
         self.cpu_infer.submit(
@@ -533,6 +534,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 buffer.grad_up_lora_b.data_ptr(),
                 buffer.grad_down_lora_a.data_ptr(),
                 buffer.grad_down_lora_b.data_ptr(),
+                buffer.grad_weights.data_ptr(),
             )
         )
         self.cpu_infer.sync()
@@ -550,8 +552,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             "grad_down_lora_a": buffer.grad_down_lora_a.clone(),
             "grad_down_lora_b": buffer.grad_down_lora_b.clone(),
         }
+        grad_weights = buffer.grad_weights.clone()
 
-        return grad_input, grad_loras
+        return grad_input, grad_loras, grad_weights
 
     def update_lora_weights(self) -> None:
         """
