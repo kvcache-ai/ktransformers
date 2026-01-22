@@ -995,29 +995,30 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int k = cache.k_cache;
     int activated_expert = cache.activated_expert_cache;
 
-    auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
-      if (ptr == nullptr) {
-        printf("KT MoE param stats (layer %d, %s): null\n", config_.layer_idx, name);
-        return;
-      }
-      Bf16Stats stats = compute_bf16_stats(ptr, elems);
-      printf("cpp KT MoE param stats (layer %d, %s): abs_mean=%.6e abs_max=%.6e norm=%.6e\n", config_.layer_idx, name,
-             stats.abs_mean, stats.abs_max, stats.norm);
-    };
+    // auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+    //   if (ptr == nullptr) {
+    //     printf("KT MoE param stats (layer %d, %s): null\n", config_.layer_idx, name);
+    //     return;
+    //   }
+    //   Bf16Stats stats = compute_bf16_stats(ptr, elems);
+    //   printf("cpp KT MoE param stats (layer %d, %s): abs_mean=%.6e abs_max=%.6e norm=%.6e\n", config_.layer_idx,
+    //   name,
+    //          stats.abs_mean, stats.abs_max, stats.norm);
+    // };
 
-    size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
-    size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
+    // size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+    // size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+    // size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+    // size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+    // size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
+    // size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
 
-    print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
-    print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
-    print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
-    print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
-    print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
-    print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
+    // print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
+    // print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
+    // print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
+    // print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
+    // print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
+    // print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
 
     // Restore routing information
     m_local_num_ = cache.m_local_num_cache;
@@ -1248,29 +1249,29 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     down_lora_a_ = (ggml_bf16_t*)down_lora_a;
     down_lora_b_ = (ggml_bf16_t*)down_lora_b;
 
-    auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
-      if (ptr == nullptr) {
-        printf("KT MoE update stats (layer %d, %s): null\n", config_.layer_idx, name);
-        return;
-      }
-      Bf16Stats stats = compute_bf16_stats(ptr, elems);
-      printf("KT MoE update stats (layer %d, %s): abs_mean=%.6e abs_max=%.6e norm=%.6e\n", config_.layer_idx, name,
-             stats.abs_mean, stats.abs_max, stats.norm);
-    };
+    // auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+    //   if (ptr == nullptr) {
+    //     printf("KT MoE update stats (layer %d, %s): null\n", config_.layer_idx, name);
+    //     return;
+    //   }
+    //   Bf16Stats stats = compute_bf16_stats(ptr, elems);
+    //   printf("KT MoE update stats (layer %d, %s): abs_mean=%.6e abs_max=%.6e norm=%.6e\n", config_.layer_idx, name,
+    //          stats.abs_mean, stats.abs_max, stats.norm);
+    // };
 
-    size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
-    size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
+    // size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+    // size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+    // size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+    // size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+    // size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
+    // size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
 
-    print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
-    print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
-    print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
-    print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
-    print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
-    print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
+    // print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
+    // print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
+    // print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
+    // print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
+    // print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
+    // print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
 
     // Mark weights as needing re-conversion to BufferB format
     lora_weights_prepared_ = false;
