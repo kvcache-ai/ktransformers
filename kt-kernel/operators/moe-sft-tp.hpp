@@ -314,7 +314,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     auto pool = config.pool;
 
     // Reset forward timing before computation
-    sft_timer::reset_forward();
+    // sft_timer::reset_forward();
     // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
     for (int i = 0; i < tp_count; i++) {
       pool->get_subpool(i)->reset_counters();
@@ -326,13 +326,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
-    // Collect per-thread timing from all NUMA subpools
-    for (int i = 0; i < tp_count; i++) {
-      sft_timer::collect_forward(pool->get_subpool(i));
-    }
+    // // Collect per-thread timing from all NUMA subpools
+    // for (int i = 0; i < tp_count; i++) {
+    //   sft_timer::collect_forward(pool->get_subpool(i));
+    // }
 
-    // Print per-thread forward timing
-    sft_timer::print_forward();
+    // // Print per-thread forward timing
+    // sft_timer::print_forward();
 
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
@@ -395,12 +395,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       part_grad_input[i] = new float[qlen * hidden_size]();
     }
 
-    // Reset backward timing before computation
-    sft_timer::reset_backward();
-    // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
-    for (int i = 0; i < tp_count; i++) {
-      pool->get_subpool(i)->reset_counters();
-    }
+    // // Reset backward timing before computation
+    // sft_timer::reset_backward();
+    // // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
+    // for (int i = 0; i < tp_count; i++) {
+    //   pool->get_subpool(i)->reset_counters();
+    // }
 
     // Run backward on each NUMA node with separate grad_input buffers
     pool->dispense_backend()->do_numa_job([this, grad_output, &part_grad_input, grad_gate_lora_a, grad_up_lora_a,
@@ -411,30 +411,30 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              grad_down_lora_b);
     });
 
-    // Collect per-thread timing from all NUMA subpools
-    for (int i = 0; i < tp_count; i++) {
-      sft_timer::collect_backward(pool->get_subpool(i));
-    }
+    // // Collect per-thread timing from all NUMA subpools
+    // for (int i = 0; i < tp_count; i++) {
+    //   sft_timer::collect_backward(pool->get_subpool(i));
+    // }
 
-    // Print per-thread backward timing
-    sft_timer::print_backward();
+    // // Print per-thread backward timing
+    // sft_timer::print_backward();
 
-    // Print expert token distribution for load balancing analysis
-    {
-      std::vector<int> all_tokens;
-      for (int i = 0; i < tp_count; i++) {
-        const auto& tokens = tps[i]->get_expert_token_distribution();
-        all_tokens.insert(all_tokens.end(), tokens.begin(), tokens.end());
-      }
-      if (!all_tokens.empty()) {
-        int max_t = *std::max_element(all_tokens.begin(), all_tokens.end());
-        int min_t = *std::min_element(all_tokens.begin(), all_tokens.end());
-        int sum_t = std::accumulate(all_tokens.begin(), all_tokens.end(), 0);
-        fprintf(stderr, "  expert tokens (%zu): ", all_tokens.size());
-        for (int t : all_tokens) fprintf(stderr, "%d ", t);
-        fprintf(stderr, "(max=%d min=%d avg=%.1f)\n", max_t, min_t, (float)sum_t / all_tokens.size());
-      }
-    }
+    // // Print expert token distribution for load balancing analysis
+    // {
+    //   std::vector<int> all_tokens;
+    //   for (int i = 0; i < tp_count; i++) {
+    //     const auto& tokens = tps[i]->get_expert_token_distribution();
+    //     all_tokens.insert(all_tokens.end(), tokens.begin(), tokens.end());
+    //   }
+    //   if (!all_tokens.empty()) {
+    //     int max_t = *std::max_element(all_tokens.begin(), all_tokens.end());
+    //     int min_t = *std::min_element(all_tokens.begin(), all_tokens.end());
+    //     int sum_t = std::accumulate(all_tokens.begin(), all_tokens.end(), 0);
+    //     fprintf(stderr, "  expert tokens (%zu): ", all_tokens.size());
+    //     for (int t : all_tokens) fprintf(stderr, "%d ", t);
+    //     fprintf(stderr, "(max=%d min=%d avg=%.1f)\n", max_t, min_t, (float)sum_t / all_tokens.size());
+    //   }
+    // }
 
     // DUMP: per-TP grad_input before merge
     for (int i = 0; i < tp_count; i++) {

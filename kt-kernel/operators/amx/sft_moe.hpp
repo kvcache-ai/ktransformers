@@ -121,7 +121,7 @@ inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, cons
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
 inline bool is_dump_enabled() {
-  // return false;
+  return false;
   static int enabled = -1;
   if (enabled < 0) {
     const char* env = getenv("SFT_MOE_DUMP");
@@ -739,7 +739,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
           }
         },
-        nullptr, "fwd_gate_up_gemm");
+        nullptr, "fwd_gate_up_gemm", 1);
 
     // DUMP: Gate/Up base output (before LoRA)
     if (is_dump_enabled()) {
@@ -837,7 +837,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           this->do_down_gemm(expert_idx, ith, nth, qlen);
           down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
-        nullptr, "fwd_down_gemm");
+        nullptr, "fwd_down_gemm", 1);
 
     // DUMP: Down base output (before LoRA)
     if (is_dump_enabled()) {
@@ -2139,7 +2139,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // GEMM: [m, padded_lora_rank] @ [hidden_size, padded_lora_rank]^T -> [m, hidden_size]
           amx::mat_mul(m, config_.hidden_size, padded_lora_rank_, ba, bb, bc, ith, nth);
         },
-        nullptr, "fwd_lora_down_gemm");
+        nullptr, "fwd_lora_down_gemm", 1);
 
     // DUMP: Pure down LoRA GEMM output (before scaling and add)
     // Note: to_mat with (ith, nth) only reads one N_BLOCK chunk, so we need to loop
@@ -3691,7 +3691,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
             bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
           },
-          nullptr, gemm_name);
+          nullptr, gemm_name, 1);
 
       // DUMP: base backward output before scatter
       if (is_dump_enabled()) {

@@ -484,14 +484,14 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_output: Gradient from upstream [qlen, hidden_size]
 
         Returns:
-            grad_input: Input gradient [qlen, hidden_size]
+            grad_input: Input gradient [qlen, hidden_size] (FP32)
             grad_loras: Dictionary of LoRA gradients containing:
-                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size]
-                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank]
-                - grad_up_lora_a: [num_experts, lora_rank, hidden_size]
-                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank]
-                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size]
-                - grad_down_lora_b: [num_experts, hidden_size, lora_rank]
+                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size] (FP32)
+                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank] (FP32)
+                - grad_up_lora_a: [num_experts, lora_rank, hidden_size] (FP32)
+                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank] (FP32)
+                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size] (FP32)
+                - grad_down_lora_b: [num_experts, hidden_size, lora_rank] (FP32)
         """
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward_sft(save_for_backward=True) first.")
@@ -499,6 +499,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         qlen = grad_output.shape[0]
 
         # Get buffer (should exist from forward pass)
+        # Gradients are stored in FP32 for better numerical stability.
         buffer = KExpertsSFTBuffer.get_buffer(
             qlen=qlen,
             hidden_size=self.hidden_size,
@@ -506,7 +507,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             lora_rank=self.lora_rank,
-            dtype=grad_output.dtype,
+            dtype=torch.float32,
         )
 
         # Copy gradient to CPU buffer
