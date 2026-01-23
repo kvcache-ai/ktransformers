@@ -424,6 +424,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
             if self.method == "RAWINT4":
                 assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
             elif self.method == "FP8":
+                if self.gate_scales[0].dtype != torch.float32:
+                    self.gate_scales = [t.to(torch.float32).contiguous() for t in weights["gate_scale"]]
+                    self.up_scales = [t.to(torch.float32).contiguous() for t in weights["up_scale"]]
+                    self.down_scales = [t.to(torch.float32).contiguous() for t in weights["down_scale"]]
                 assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
             elif self.method == "FP8_PERCHANNEL":
                 assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8_PERCHANNEL"
