@@ -290,6 +290,5 @@ Layerwise prefill requires extra VRAM. If you encounter OOM, adjust these parame
 
 - [KT-Kernel Documentation](../../../kt-kernel/README.md)
 - [SGLang GitHub](https://github.com/sgl-project/sglang)
-- [GLM-4.7 Tutorial](./GLM-4.7-Tutorial.md) - Detailed guide for GLM-4.7 BF16 and FP8 variants
 - [MiniMax-M2.1 Tutorial](./MiniMax-M2.1-Tutorial.md) - Detailed guide for MiniMax-M2.1 and other FP8 models
 - [Kimi-K2-Thinking Tutorial](./Kimi-K2-Thinking-Native.md) - Detailed guide for Kimi-K2-Thinking
