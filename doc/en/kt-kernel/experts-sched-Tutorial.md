@@ -45,7 +45,6 @@ Before starting, ensure you have:
     ```bash
     git clone https://github.com/kvcache-ai/sglang.git
     cd sglang
-    git checkout experts_sched
     pip install -e "python[all]"
     ```
 
@@ -53,9 +52,8 @@ Before starting, ensure you have:
 
     ```bash
     git clone https://github.com/kvcache-ai/ktransformers.git
-    cd ktransformers
-    git checkout experts_sched
-    pip install -e .
+    cd ktransformers/kt-kernel
+    bash ./install.sh
     ```
 
     After installation, verify the CLI is working:
