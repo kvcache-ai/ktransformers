@@ -1643,6 +1643,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Cache buffers (5 pools × max_cache_depth) - use aligned_alloc for independent memory
     size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
     size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
+    size_t cache_down_output_bytes =
+        max_cache_depth_ * config_.max_len * config_.num_experts_per_tok * config_.hidden_size * sizeof(ggml_bf16_t);
 
     if (cache_input_bytes > 0) {
       cache_input_pool_ = aligned_alloc(64, cache_input_bytes);
@@ -1657,9 +1659,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       memset(cache_up_output_pool_, 0, cache_intermediate_bytes);
       memset(cache_intermediate_pool_, 0, cache_intermediate_bytes);
     }
-    if (cache_input_bytes > 0) {
-      cache_down_output_pool_ = aligned_alloc(64, cache_input_bytes);  // [tokens, hidden_size]
-      memset(cache_down_output_pool_, 0, cache_input_bytes);
+    if (cache_down_output_bytes > 0) {
+      cache_down_output_pool_ = aligned_alloc(64, cache_down_output_bytes);  // [tokens_total, hidden_size]
+      memset(cache_down_output_pool_, 0, cache_down_output_bytes);
     }
 
     // Gradient buffers (3 pools) - Bug #18c fix: also use aligned_alloc to avoid overlap
@@ -2847,7 +2849,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     for (int i = 0; i < activated_expert; i++) {
       int expert_idx = m_expert_id_map_[i];
       int num_tokens = m_local_num_[expert_idx];
-      memcpy(cache.down_output_cache + offset * config_.hidden_size, m_local_down_output_ptr_[expert_idx],
+      ggml_bf16_t* src_ptr = m_local_down_output_ptr_[expert_idx];
+
+      // Calculate offset from base
+      ptrdiff_t src_offset_elems = src_ptr - m_local_down_output_;
+      size_t copy_elems = (size_t)num_tokens * config_.hidden_size;
+
+      memcpy(cache.down_output_cache + offset * config_.hidden_size, src_ptr,
              num_tokens * config_.hidden_size * sizeof(ggml_bf16_t));
       offset += num_tokens;
     }
