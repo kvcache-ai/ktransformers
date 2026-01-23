@@ -678,22 +678,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void alloc_forward_buffers(bool alloc_cache) {
     // LoRA working buffers (always needed for forward, even for inference)
     // ★ AMX requires 64-byte alignment for all buffers ★
-    // ★ CRITICAL: Must zero the buffers to avoid garbage values in M_STEP padding ★
     if (lora_ba_pool_bytes_ > 0 && lora_ba_pool_ == nullptr) {
       lora_ba_pool_ = aligned_alloc(64, lora_ba_pool_bytes_);
-      memset(lora_ba_pool_, 0, lora_ba_pool_bytes_);
     }
     if (lora_bc_inter_pool_bytes_ > 0 && lora_bc_inter_pool_ == nullptr) {
       lora_bc_inter_pool_ = aligned_alloc(64, lora_bc_inter_pool_bytes_);
-      memset(lora_bc_inter_pool_, 0, lora_bc_inter_pool_bytes_);
     }
     if (lora_bc_out_pool_bytes_ > 0 && lora_bc_out_pool_ == nullptr) {
       lora_bc_out_pool_ = aligned_alloc(64, lora_bc_out_pool_bytes_);
-      memset(lora_bc_out_pool_, 0, lora_bc_out_pool_bytes_);
     }
     if (lora_intermediate_bf16_pool_bytes_ > 0 && lora_intermediate_bf16_pool_ == nullptr) {
       lora_intermediate_bf16_pool_ = aligned_alloc(64, lora_intermediate_bf16_pool_bytes_);
-      memset(lora_intermediate_bf16_pool_, 0, lora_intermediate_bf16_pool_bytes_);
     }
 
     // Cache buffers (only for training with backward pass)
@@ -702,22 +697,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
       size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
 
-      // ★ CRITICAL: Must zero the cache buffers to avoid garbage values ★
       if (cache_input_bytes > 0 && cache_input_pool_ == nullptr) {
         cache_input_pool_ = aligned_alloc(64, cache_input_bytes);
-        memset(cache_input_pool_, 0, cache_input_bytes);
       }
       if (cache_intermediate_bytes > 0 && cache_gate_output_pool_ == nullptr) {
         cache_gate_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
         cache_up_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
         cache_intermediate_pool_ = aligned_alloc(64, cache_intermediate_bytes);
-        memset(cache_gate_output_pool_, 0, cache_intermediate_bytes);
-        memset(cache_up_output_pool_, 0, cache_intermediate_bytes);
-        memset(cache_intermediate_pool_, 0, cache_intermediate_bytes);
       }
       if (cache_down_output_bytes_ > 0 && cache_down_output_pool_ == nullptr) {
         cache_down_output_pool_ = aligned_alloc(64, cache_down_output_bytes_);
-        memset(cache_down_output_pool_, 0, cache_down_output_bytes_);
       }
 
       // Initialize cache stack pointers
@@ -772,9 +761,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       grad_intermediate_pool_ = aligned_alloc(64, grad_buffer_bytes_);
       grad_gate_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
       grad_up_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
-      memset(grad_intermediate_pool_, 0, grad_buffer_bytes_);
-      memset(grad_gate_output_pool_, 0, grad_buffer_bytes_);
-      memset(grad_up_output_pool_, 0, grad_buffer_bytes_);
       grad_intermediate_ = (ggml_bf16_t*)grad_intermediate_pool_;
       grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
       grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
@@ -782,18 +768,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Backward working buffers
     // ★ AMX requires 64-byte alignment for all buffers ★
-    // ★ CRITICAL: Must zero the buffers to avoid garbage values in M_STEP padding ★
     if (backward_ba_pool_bytes_ > 0 && backward_ba_pool_ == nullptr) {
       backward_ba_pool_ = aligned_alloc(64, backward_ba_pool_bytes_);
-      memset(backward_ba_pool_, 0, backward_ba_pool_bytes_);
     }
     if (backward_bc_pool_bytes_ > 0 && backward_bc_pool_ == nullptr) {
       backward_bc_pool_ = aligned_alloc(64, backward_bc_pool_bytes_);
-      memset(backward_bc_pool_, 0, backward_bc_pool_bytes_);
     }
     if (grad_output_bf16_pool_bytes_ > 0 && grad_output_bf16_pool_ == nullptr) {
       grad_output_bf16_pool_ = aligned_alloc(64, grad_output_bf16_pool_bytes_);
-      memset(grad_output_bf16_pool_, 0, grad_output_bf16_pool_bytes_);
     }
   }
 
@@ -2417,7 +2399,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // LoRA BB pool (persistent - stores converted LoRA weights, not seqlen-dependent)
     if (lora_bb_pool_bytes_ > 0) {
       lora_bb_pool_ = aligned_alloc(64, lora_bb_pool_bytes_);
-      memset(lora_bb_pool_, 0, lora_bb_pool_bytes_);
     }
 
     // ★ Backward pass working buffers are allocated on-demand in backward() and freed after use ★
@@ -2429,7 +2410,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // initialized once and persist. So it's allocated here in the constructor.
     if (backward_bb_pool_bytes_ > 0) {
       backward_bb_pool_ = aligned_alloc(64, backward_bb_pool_bytes_);
-      memset(backward_bb_pool_, 0, backward_bb_pool_bytes_);
     }
 
     // Single allocation for remaining buffers (only lora_intermediate_pool_ uses SharedMemBuffer now)
@@ -2677,7 +2657,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Convert to BufferB format using from_mat
-    dst_bb->from_mat(padded.data(), 0, 1);
+    // NOTE: from_mat with (ith, nth) only processes one N_BLOCK chunk.
+    // For dst_n > N_BLOCK, we need to loop over all N_BLOCKs.
+    int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
+    for (int ith = 0; ith < num_n_blocks; ith++) {
+      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+    }
   }
 
   /**
@@ -2754,7 +2739,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
-    dst_bb->from_mat(padded.data(), 0, 1);
+    // NOTE: from_mat with (ith, nth) only processes one N_BLOCK chunk.
+    // For dst_n > N_BLOCK, we need to loop over all N_BLOCKs.
+    int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
+    for (int ith = 0; ith < num_n_blocks; ith++) {
+      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+    }
   }
 
   /**
