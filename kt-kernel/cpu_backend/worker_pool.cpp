@@ -339,14 +339,14 @@ void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> ini
                                       std::function<void(int)> compute_func, std::function<void(int)> finalize_func,
                                       const char* task_name, int block_size, bool async) {
   bool has_name = task_name != nullptr && task_name[0] != '\0';
-  // if (has_name) {
-  //   reset_counters();
-  // }
+  if (has_name) {
+    reset_counters();
+  }
   do_work_stealing_job_async(task_num, init_func, compute_func, finalize_func, block_size);
   if (!async) wait();
-  // if (has_name) {
-  //   sft_timer::print_op_stats(this, task_name);
-  // }
+  if (has_name) {
+    sft_timer::print_op_stats(this, task_name);
+  }
 }
 
 void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int)> init_func,
@@ -359,6 +359,7 @@ void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int
   worker_count = std::min(restricted_worker_count, task_num);
   curr_.store(0, std::memory_order_release);
   end_ = task_num;
+
   for (int i = 0; i < worker_count; i++) {
     thread_state_[i].status.store(ThreadStatus::WORKING, std::memory_order_release);
   }
@@ -408,10 +409,15 @@ void InNumaPool::process_tasks(int thread_id) {
     finalize_func_(thread_id);
   }
 
-  s.status.store(ThreadStatus::WAITING, std::memory_order_release);
-  // Accumulate cycles and task count across all do_work_stealing_job calls
-  s.finish_cycles += rdtsc_now() - start_cycles;
+  // IMPORTANT: Update timing BEFORE setting status to WAITING
+  // Otherwise there's a race: wait() may see WAITING and return,
+  // then reset_counters() runs, then this += executes, causing accumulation
+  uint64_t elapsed = rdtsc_now() - start_cycles;
+  s.finish_cycles += elapsed;
   s.task_count += local_task_count;
+
+  // Now it's safe to signal completion
+  s.status.store(ThreadStatus::WAITING, std::memory_order_release);
 }
 
 void InNumaPool::worker_thread(int thread_id, int numa_id) {
