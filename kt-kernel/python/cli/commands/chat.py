@@ -270,6 +270,7 @@ def _stream_response(
 ) -> str:
     """Generate streaming response and display in real-time."""
     response_content = ""
+    reasoning_content = ""
 
     try:
         stream = client.chat.completions.create(
@@ -281,8 +282,13 @@ def _stream_response(
         )
 
         for chunk in stream:
-            if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            reasoning_delta = getattr(delta, "reasoning_content", None)
+            if reasoning_delta:
+                reasoning_content += reasoning_delta
+                console.print(reasoning_delta, end="", style="dim")
+            if delta.content:
+                content = delta.content
                 response_content += content
                 console.print(content, end="")
 
