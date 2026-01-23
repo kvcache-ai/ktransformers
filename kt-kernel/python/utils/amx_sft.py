@@ -428,6 +428,17 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         qlen = hidden_states.shape[0]
+        if qlen > self.chunked_prefill_size:
+            raise ValueError(
+                f"qlen ({qlen}) exceeds chunked_prefill_size ({self.chunked_prefill_size}). "
+                "Increase chunked_prefill_size or reduce qlen to avoid buffer overrun."
+            )
+        if expert_ids.shape[0] != qlen or expert_ids.shape[1] != self.num_experts_per_tok:
+            raise ValueError(
+                f"expert_ids shape {tuple(expert_ids.shape)} must be " f"({qlen}, {self.num_experts_per_tok})."
+            )
+        if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
+            raise ValueError(f"weights shape {tuple(weights.shape)} must be " f"({qlen}, {self.num_experts_per_tok}).")
 
         # Get or create buffer
         buffer = KExpertsSFTBuffer.get_buffer(

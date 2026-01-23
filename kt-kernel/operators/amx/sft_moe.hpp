@@ -85,10 +85,11 @@ inline Bf16Stats compute_bf16_stats(const ggml_bf16_t* buf, size_t size) {
   double max_abs = 0.0;
   for (size_t i = 0; i < size; i++) {
     float v = GGML_BF16_TO_FP32(buf[i]);
-    double a = std::fabs(static_cast<double>(v));
+    double dv = static_cast<double>(v);
+    double a = std::fabs(dv);
     sum_abs += a;
-    sum_sq += static_cast<double>(v) * static_cast<double>(v);
-    if (a > max_abs) {
+    sum_sq += dv * dv;
+    if (a > max_abs || std::isnan(a)) {
       max_abs = a;
     }
   }
@@ -98,18 +99,39 @@ inline Bf16Stats compute_bf16_stats(const ggml_bf16_t* buf, size_t size) {
   return stats;
 }
 
-// Check BF16 buffer for NaN/Inf
+// ANSI color codes for terminal output
+#define ANSI_COLOR_RED "\033[1;31m"
+#define ANSI_COLOR_YELLOW "\033[1;33m"
+#define ANSI_COLOR_GREEN "\033[1;32m"
+#define ANSI_COLOR_RESET "\033[0m"
+#define ANSI_BG_YELLOW "\033[43m"
+#define ANSI_BG_RED "\033[41m"
+#define ANSI_BG_BLUE "\033[44m"
+
+// Robust NaN/Inf check (v != v is true only for NaN)
+inline bool is_nan_value(float v) { return v != v; }
+inline bool is_inf_value(float v) {
+  return !is_nan_value(v) &&
+         (v == std::numeric_limits<float>::infinity() || v == -std::numeric_limits<float>::infinity());
+}
+
+// Threshold for "large value" warning (yellow)
+constexpr double NAN_CHECK_LARGE_THRESHOLD = 1e4;
+
+// Check BF16 buffer for NaN/Inf (using robust v != v check)
 inline NaNCheckResult check_bf16_buffer_for_nan(const ggml_bf16_t* buf, int size, const char* label = nullptr) {
   NaNCheckResult result;
   for (int i = 0; i < size; i++) {
     float val = GGML_BF16_TO_FP32(buf[i]);
-    if (std::isnan(val)) {
+    // Use val != val for robust NaN detection
+    if (val != val) {
       result.nan_count++;
       if (result.first_nan_idx < 0) {
         result.first_nan_idx = i;
+        result.first_nan_input_val = val;
       }
     }
-    if (std::isinf(val)) {
+    if (!(val != val) && is_inf_value(val)) {
       result.inf_count++;
       if (result.first_nan_idx < 0) {
         result.first_nan_idx = i;
@@ -117,23 +139,26 @@ inline NaNCheckResult check_bf16_buffer_for_nan(const ggml_bf16_t* buf, int size
     }
   }
   if (label && (result.nan_count > 0 || result.inf_count > 0)) {
-    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
-           result.first_nan_idx);
+    printf(ANSI_COLOR_RED "[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d" ANSI_COLOR_RESET "\n", label,
+           result.nan_count, result.inf_count, result.first_nan_idx);
   }
   return result;
 }
 
-// Check FP32 buffer for NaN/Inf
+// Check FP32 buffer for NaN/Inf (using robust v != v check)
 inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, const char* label = nullptr) {
   NaNCheckResult result;
   for (int i = 0; i < size; i++) {
-    if (std::isnan(buf[i])) {
+    float val = buf[i];
+    // Use val != val for robust NaN detection
+    if (val != val) {
       result.nan_count++;
       if (result.first_nan_idx < 0) {
         result.first_nan_idx = i;
+        result.first_nan_input_val = val;
       }
     }
-    if (std::isinf(buf[i])) {
+    if (!(val != val) && is_inf_value(val)) {
       result.inf_count++;
       if (result.first_nan_idx < 0) {
         result.first_nan_idx = i;
@@ -141,10 +166,21 @@ inline NaNCheckResult check_fp32_buffer_for_nan(const float* buf, int size, cons
     }
   }
   if (label && (result.nan_count > 0 || result.inf_count > 0)) {
-    printf("[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d\n", label, result.nan_count, result.inf_count,
-           result.first_nan_idx);
+    printf(ANSI_COLOR_RED "[NaN TRACE] %s: nan_count=%d, inf_count=%d, first_idx=%d" ANSI_COLOR_RESET "\n", label,
+           result.nan_count, result.inf_count, result.first_nan_idx);
   }
   return result;
+}
+
+// Check if NaN checking is enabled via environment variable
+inline bool is_nan_check_enabled() {
+  return false;
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char* env = getenv("SFT_MOE_NAN_CHECK");
+    enabled = (env && env[0] != '0') ? 1 : 0;
+  }
+  return enabled == 1;
 }
 
 // =====================================================
@@ -632,53 +668,95 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   }
 
   /**
-   * @brief Allocate forward-phase buffers for training.
-   * Called at the start of forward_sft when save_for_backward=true.
-   * Includes: cache buffers + LoRA working buffers
+   * @brief Allocate forward-phase buffers.
+   * Called at the start of forward_sft.
+   * - LoRA working buffers: always allocated (needed for forward LoRA computation)
+   * - Cache buffers: only allocated when save_for_backward=true
+   *
+   * @param alloc_cache Whether to allocate cache buffers (for backward pass)
    */
-  void alloc_forward_buffers() {
-    size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
-    size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
-
-    // Cache buffers
-    if (cache_input_bytes > 0 && cache_input_pool_ == nullptr) {
-      cache_input_pool_ = malloc(cache_input_bytes);
-    }
-    if (cache_intermediate_bytes > 0 && cache_gate_output_pool_ == nullptr) {
-      cache_gate_output_pool_ = malloc(cache_intermediate_bytes);
-      cache_up_output_pool_ = malloc(cache_intermediate_bytes);
-      cache_intermediate_pool_ = malloc(cache_intermediate_bytes);
-    }
-    if (cache_down_output_bytes_ > 0 && cache_down_output_pool_ == nullptr) {
-      cache_down_output_pool_ = malloc(cache_down_output_bytes_);
-    }
-
-    // LoRA working buffers (needed for both forward and backward)
+  void alloc_forward_buffers(bool alloc_cache) {
+    // LoRA working buffers (always needed for forward, even for inference)
+    // ★ AMX requires 64-byte alignment for all buffers ★
+    // ★ CRITICAL: Must zero the buffers to avoid garbage values in M_STEP padding ★
     if (lora_ba_pool_bytes_ > 0 && lora_ba_pool_ == nullptr) {
-      lora_ba_pool_ = malloc(lora_ba_pool_bytes_);
+      lora_ba_pool_ = aligned_alloc(64, lora_ba_pool_bytes_);
+      memset(lora_ba_pool_, 0, lora_ba_pool_bytes_);
     }
     if (lora_bc_inter_pool_bytes_ > 0 && lora_bc_inter_pool_ == nullptr) {
-      lora_bc_inter_pool_ = malloc(lora_bc_inter_pool_bytes_);
+      lora_bc_inter_pool_ = aligned_alloc(64, lora_bc_inter_pool_bytes_);
+      memset(lora_bc_inter_pool_, 0, lora_bc_inter_pool_bytes_);
     }
     if (lora_bc_out_pool_bytes_ > 0 && lora_bc_out_pool_ == nullptr) {
-      lora_bc_out_pool_ = malloc(lora_bc_out_pool_bytes_);
+      lora_bc_out_pool_ = aligned_alloc(64, lora_bc_out_pool_bytes_);
+      memset(lora_bc_out_pool_, 0, lora_bc_out_pool_bytes_);
     }
     if (lora_intermediate_bf16_pool_bytes_ > 0 && lora_intermediate_bf16_pool_ == nullptr) {
-      lora_intermediate_bf16_pool_ = malloc(lora_intermediate_bf16_pool_bytes_);
+      lora_intermediate_bf16_pool_ = aligned_alloc(64, lora_intermediate_bf16_pool_bytes_);
+      memset(lora_intermediate_bf16_pool_, 0, lora_intermediate_bf16_pool_bytes_);
     }
 
-    // Initialize cache stack pointers
-    for (int i = 0; i < max_cache_depth_; i++) {
-      cache_stack_[i].input_cache = (ggml_bf16_t*)cache_input_pool_ + i * config_.max_len * config_.hidden_size;
-      cache_stack_[i].gate_output_cache = (ggml_bf16_t*)cache_gate_output_pool_ +
-                                          i * config_.max_len * config_.num_experts_per_tok * config_.intermediate_size;
-      cache_stack_[i].up_output_cache = (ggml_bf16_t*)cache_up_output_pool_ +
-                                        i * config_.max_len * config_.num_experts_per_tok * config_.intermediate_size;
-      cache_stack_[i].intermediate_cache = (ggml_bf16_t*)cache_intermediate_pool_ + i * config_.max_len *
+    // Cache buffers (only for training with backward pass)
+    // ★ AMX requires 64-byte alignment for all buffers ★
+    if (alloc_cache) {
+      size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
+      size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
+
+      // ★ CRITICAL: Must zero the cache buffers to avoid garbage values ★
+      if (cache_input_bytes > 0 && cache_input_pool_ == nullptr) {
+        cache_input_pool_ = aligned_alloc(64, cache_input_bytes);
+        memset(cache_input_pool_, 0, cache_input_bytes);
+      }
+      if (cache_intermediate_bytes > 0 && cache_gate_output_pool_ == nullptr) {
+        cache_gate_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
+        cache_up_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
+        cache_intermediate_pool_ = aligned_alloc(64, cache_intermediate_bytes);
+        memset(cache_gate_output_pool_, 0, cache_intermediate_bytes);
+        memset(cache_up_output_pool_, 0, cache_intermediate_bytes);
+        memset(cache_intermediate_pool_, 0, cache_intermediate_bytes);
+      }
+      if (cache_down_output_bytes_ > 0 && cache_down_output_pool_ == nullptr) {
+        cache_down_output_pool_ = aligned_alloc(64, cache_down_output_bytes_);
+        memset(cache_down_output_pool_, 0, cache_down_output_bytes_);
+      }
+
+      // Initialize cache stack pointers
+      for (int i = 0; i < max_cache_depth_; i++) {
+        cache_stack_[i].input_cache = (ggml_bf16_t*)cache_input_pool_ + i * config_.max_len * config_.hidden_size;
+        cache_stack_[i].gate_output_cache = (ggml_bf16_t*)cache_gate_output_pool_ + i * config_.max_len *
                                                                                         config_.num_experts_per_tok *
                                                                                         config_.intermediate_size;
-      cache_stack_[i].down_output_cache = (ggml_bf16_t*)cache_down_output_pool_ +
-                                          i * config_.max_len * config_.num_experts_per_tok * config_.hidden_size;
+        cache_stack_[i].up_output_cache = (ggml_bf16_t*)cache_up_output_pool_ +
+                                          i * config_.max_len * config_.num_experts_per_tok * config_.intermediate_size;
+        cache_stack_[i].intermediate_cache = (ggml_bf16_t*)cache_intermediate_pool_ + i * config_.max_len *
+                                                                                          config_.num_experts_per_tok *
+                                                                                          config_.intermediate_size;
+        cache_stack_[i].down_output_cache = (ggml_bf16_t*)cache_down_output_pool_ +
+                                            i * config_.max_len * config_.num_experts_per_tok * config_.hidden_size;
+      }
+    }
+  }
+
+  /**
+   * @brief Free LoRA working buffers (for inference mode).
+   * Called at the end of forward_sft when save_for_backward=false.
+   */
+  void free_lora_working_buffers() {
+    if (lora_ba_pool_) {
+      free(lora_ba_pool_);
+      lora_ba_pool_ = nullptr;
+    }
+    if (lora_bc_inter_pool_) {
+      free(lora_bc_inter_pool_);
+      lora_bc_inter_pool_ = nullptr;
+    }
+    if (lora_bc_out_pool_) {
+      free(lora_bc_out_pool_);
+      lora_bc_out_pool_ = nullptr;
+    }
+    if (lora_intermediate_bf16_pool_) {
+      free(lora_intermediate_bf16_pool_);
+      lora_intermediate_bf16_pool_ = nullptr;
     }
   }
 
@@ -689,24 +767,33 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void alloc_backward_buffers() {
     // Gradient buffers
+    // ★ AMX requires 64-byte alignment for all buffers ★
     if (grad_buffer_bytes_ > 0 && grad_intermediate_pool_ == nullptr) {
-      grad_intermediate_pool_ = malloc(grad_buffer_bytes_);
-      grad_gate_output_pool_ = malloc(grad_buffer_bytes_);
-      grad_up_output_pool_ = malloc(grad_buffer_bytes_);
+      grad_intermediate_pool_ = aligned_alloc(64, grad_buffer_bytes_);
+      grad_gate_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
+      grad_up_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
+      memset(grad_intermediate_pool_, 0, grad_buffer_bytes_);
+      memset(grad_gate_output_pool_, 0, grad_buffer_bytes_);
+      memset(grad_up_output_pool_, 0, grad_buffer_bytes_);
       grad_intermediate_ = (ggml_bf16_t*)grad_intermediate_pool_;
       grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
       grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
     }
 
     // Backward working buffers
+    // ★ AMX requires 64-byte alignment for all buffers ★
+    // ★ CRITICAL: Must zero the buffers to avoid garbage values in M_STEP padding ★
     if (backward_ba_pool_bytes_ > 0 && backward_ba_pool_ == nullptr) {
-      backward_ba_pool_ = malloc(backward_ba_pool_bytes_);
+      backward_ba_pool_ = aligned_alloc(64, backward_ba_pool_bytes_);
+      memset(backward_ba_pool_, 0, backward_ba_pool_bytes_);
     }
     if (backward_bc_pool_bytes_ > 0 && backward_bc_pool_ == nullptr) {
-      backward_bc_pool_ = malloc(backward_bc_pool_bytes_);
+      backward_bc_pool_ = aligned_alloc(64, backward_bc_pool_bytes_);
+      memset(backward_bc_pool_, 0, backward_bc_pool_bytes_);
     }
     if (grad_output_bf16_pool_bytes_ > 0 && grad_output_bf16_pool_ == nullptr) {
-      grad_output_bf16_pool_ = malloc(grad_output_bf16_pool_bytes_);
+      grad_output_bf16_pool_ = aligned_alloc(64, grad_output_bf16_pool_bytes_);
+      memset(grad_output_bf16_pool_, 0, grad_output_bf16_pool_bytes_);
     }
   }
 
@@ -820,10 +907,25 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                    bool save_for_backward) {
     uint64_t _fwd_start_cycles = __rdtsc();
 
-    // ★ Allocate forward-phase buffers for training ★
-    if (save_for_backward) {
-      alloc_forward_buffers();
+    // =====================================================
+    // Bounds Check: Verify qlen doesn't exceed max_len
+    // =====================================================
+    if (is_nan_check_enabled() && qlen > config_.max_len) {
+      printf(ANSI_BG_RED "[OVERFLOW L%d] qlen=%d EXCEEDS max_len=%d! Buffer overflow will occur!" ANSI_COLOR_RESET "\n",
+             config_.layer_idx, qlen, config_.max_len);
     }
+
+    // NaN Check: Input
+    if (is_nan_check_enabled()) {
+      char label[128];
+      snprintf(label, sizeof(label), "[FWD L%d] Input", config_.layer_idx);
+      check_bf16_buffer_for_nan((const ggml_bf16_t*)input, qlen * config_.hidden_size, label);
+    }
+
+    // ★ Allocate forward-phase buffers ★
+    // LoRA working buffers are always needed for forward (even for inference)
+    // Cache buffers are only needed when save_for_backward=true
+    alloc_forward_buffers(save_for_backward);
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -894,6 +996,60 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           (void*)((uintptr_t)down_bc_pool_ptr + align64(Base::buffer_c_required_size(max_m, config_.hidden_size)));
     }
 
+    // =====================================================
+    // Bounds Check: Verify base class pool allocation didn't overflow
+    // =====================================================
+    if (is_nan_check_enabled()) {
+      char* gate_up_ba_pool_end = (char*)Base::gate_up_ba_pool_ + Base::gate_up_ba_pool_bytes_;
+      char* gate_bc_pool_end = (char*)Base::gate_bc_pool_ + Base::gate_bc_pool_bytes_;
+      char* up_bc_pool_end = (char*)Base::up_bc_pool_ + Base::up_bc_pool_bytes_;
+      char* down_ba_pool_end = (char*)Base::down_ba_pool_ + Base::down_ba_pool_bytes_;
+      char* down_bc_pool_end = (char*)Base::down_bc_pool_ + Base::down_bc_pool_bytes_;
+
+      bool overflow = false;
+      if ((char*)gate_up_ba_pool_ptr > gate_up_ba_pool_end) {
+        size_t used = (char*)gate_up_ba_pool_ptr - (char*)Base::gate_up_ba_pool_;
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] gate_up_ba_pool: used=%zu, allocated=%zu, OVERFLOW by %zu bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, used, Base::gate_up_ba_pool_bytes_, used - Base::gate_up_ba_pool_bytes_);
+        overflow = true;
+      }
+      if ((char*)gate_bc_pool_ptr > gate_bc_pool_end) {
+        size_t used = (char*)gate_bc_pool_ptr - (char*)Base::gate_bc_pool_;
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] gate_bc_pool: used=%zu, allocated=%zu, OVERFLOW by %zu bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, used, Base::gate_bc_pool_bytes_, used - Base::gate_bc_pool_bytes_);
+        overflow = true;
+      }
+      if ((char*)up_bc_pool_ptr > up_bc_pool_end) {
+        size_t used = (char*)up_bc_pool_ptr - (char*)Base::up_bc_pool_;
+        printf(ANSI_BG_RED "[OVERFLOW L%d] up_bc_pool: used=%zu, allocated=%zu, OVERFLOW by %zu bytes" ANSI_COLOR_RESET
+                           "\n",
+               config_.layer_idx, used, Base::up_bc_pool_bytes_, used - Base::up_bc_pool_bytes_);
+        overflow = true;
+      }
+      if ((char*)down_ba_pool_ptr > down_ba_pool_end) {
+        size_t used = (char*)down_ba_pool_ptr - (char*)Base::down_ba_pool_;
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] down_ba_pool: used=%zu, allocated=%zu, OVERFLOW by %zu bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, used, Base::down_ba_pool_bytes_, used - Base::down_ba_pool_bytes_);
+        overflow = true;
+      }
+      if ((char*)down_bc_pool_ptr > down_bc_pool_end) {
+        size_t used = (char*)down_bc_pool_ptr - (char*)Base::down_bc_pool_;
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] down_bc_pool: used=%zu, allocated=%zu, OVERFLOW by %zu bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, used, Base::down_bc_pool_bytes_, used - Base::down_bc_pool_bytes_);
+        overflow = true;
+      }
+
+      if (overflow) {
+        printf("[OVERFLOW DEBUG L%d] qlen=%d, k=%d, max_len=%d, pool_count=%zu, activated_expert=%d\n",
+               config_.layer_idx, qlen, k, config_.max_len, Base::pool_count_, activated_expert);
+        printf("[OVERFLOW DEBUG L%d] Total tokens processed: %zu (offset after loop)\n", config_.layer_idx, offset);
+      }
+    }
+
     // Step 3: Copy input to expert buffers
     auto direct_or_pool = [&](int count, auto&& fn, const char* task_name, int block_size) {
       if (qlen < 10) {
@@ -926,6 +1082,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         if (m_local_num_[expert_idx] > 0) {
           dump_bf16_matrix(m_local_input_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
                            "packed_input", tp_part_idx, expert_idx);
+        }
+      }
+    }
+
+    // NaN Check: Step 3 - Packed input
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step3 packed_input expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_input_ptr_[expert_idx], m_local_num_[expert_idx] * config_.hidden_size,
+                                    label);
         }
       }
     }
@@ -970,6 +1140,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
+    // NaN Check: Step 5 - Gate/Up GEMM output (before LoRA)
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step5 gate_base_output expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_gate_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.intermediate_size, label);
+          snprintf(label, sizeof(label), "[FWD L%d] Step5 up_base_output expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_up_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.intermediate_size, label);
+        }
+      }
+    }
+
     // Step 5.5: Gate + Up LoRA
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
       if constexpr (supports_standard_mat_mul_v<T>) {
@@ -994,10 +1182,64 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
+    // NaN Check: Step 5.5 - Gate/Up output (after LoRA)
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step5.5 gate_after_lora expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_gate_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.intermediate_size, label);
+          snprintf(label, sizeof(label), "[FWD L%d] Step5.5 up_after_lora expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_up_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.intermediate_size, label);
+        }
+      }
+    }
+
     // Save gate/up outputs before activation (for backward)
     if (save_for_backward) {
       ForwardCache& cache = push_cache();
       save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
+
+      // NaN Check: Forward Cache - input, gate_output, up_output
+      if (is_nan_check_enabled()) {
+        auto check_cache_bf16 = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+          if (ptr == nullptr || elems == 0) return;
+          double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+          int nan_count = 0, inf_count = 0;
+          for (size_t i = 0; i < elems; i++) {
+            float v = GGML_BF16_TO_FP32(ptr[i]);
+            if (v != v) nan_count++;
+            if (!(v != v) && is_inf_value(v)) inf_count++;
+            double dv = static_cast<double>(v);
+            double a = std::fabs(dv);
+            sum_sq += dv * dv;
+            sum_abs += a;
+            if (a > max_abs || a != a) max_abs = a;
+          }
+          double norm = std::sqrt(sum_sq);
+          double abs_mean = sum_abs / static_cast<double>(elems);
+          bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+          bool computed_nan = (norm != norm) || (abs_mean != abs_mean);
+          const char* bg = (has_nan_inf || computed_nan) ? ANSI_BG_RED : ANSI_BG_BLUE;
+          printf(
+              "%s[CACHE SAVE L%d] %s: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d (total=%zu)" ANSI_COLOR_RESET
+              "\n",
+              bg, config_.layer_idx, name, norm, abs_mean, max_abs, nan_count, inf_count, elems);
+        };
+
+        size_t total_tokens = 0;
+        for (int i = 0; i < activated_expert; i++) {
+          total_tokens += m_local_num_[m_expert_id_map_[i]];
+        }
+        check_cache_bf16("input_cache", cache.input_cache, qlen * config_.hidden_size);
+        check_cache_bf16("gate_output_cache", cache.gate_output_cache, total_tokens * config_.intermediate_size);
+        check_cache_bf16("up_output_cache", cache.up_output_cache, total_tokens * config_.intermediate_size);
+      }
     }
 
     // DUMP: Activation input (gate_out and up_out before activation)
@@ -1028,10 +1270,56 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
+    // NaN Check: Step 6 - Activation output (silu(gate) * up)
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step6 activation_output expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_gate_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.intermediate_size, label);
+        }
+      }
+    }
+
     // Save intermediate AFTER activation for backward_down (Bug #17c fix)
     if (save_for_backward) {
       ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
       save_intermediate_to_cache(cache, activated_expert);
+
+      // NaN Check: Forward Cache - intermediate_cache
+      if (is_nan_check_enabled()) {
+        size_t total_tokens = 0;
+        for (int i = 0; i < activated_expert; i++) {
+          total_tokens += m_local_num_[m_expert_id_map_[i]];
+        }
+        size_t elems = total_tokens * config_.intermediate_size;
+        if (cache.intermediate_cache != nullptr && elems > 0) {
+          double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+          int nan_count = 0, inf_count = 0;
+          for (size_t i = 0; i < elems; i++) {
+            float v = GGML_BF16_TO_FP32(cache.intermediate_cache[i]);
+            if (v != v) nan_count++;
+            if (!(v != v) && is_inf_value(v)) inf_count++;
+            double dv = static_cast<double>(v);
+            double a = std::fabs(dv);
+            sum_sq += dv * dv;
+            sum_abs += a;
+            if (a > max_abs || a != a) max_abs = a;
+          }
+          double norm = std::sqrt(sum_sq);
+          double abs_mean = sum_abs / static_cast<double>(elems);
+          bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+          bool computed_nan = (norm != norm) || (abs_mean != abs_mean);
+          const char* bg = (has_nan_inf || computed_nan) ? ANSI_BG_RED : ANSI_BG_BLUE;
+          printf(
+              "%s[CACHE SAVE L%d] intermediate_cache: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d "
+              "(total=%zu)" ANSI_COLOR_RESET "\n",
+              bg, config_.layer_idx, norm, abs_mean, max_abs, nan_count, inf_count, elems);
+        }
+      }
     }
 
     // Step 7: Quantize intermediate for down projection
@@ -1066,6 +1354,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
+    // NaN Check: Step 8 - Down GEMM output (before LoRA)
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step8 down_base_output expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_down_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.hidden_size, label);
+        }
+      }
+    }
+
     // Step 8.5: Down LoRA
     if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
       if constexpr (supports_standard_mat_mul_v<T>) {
@@ -1085,6 +1387,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // down_total_output is same as down_lora_output (lora is added in-place)
           dump_bf16_matrix(m_local_down_output_ptr_[expert_idx], m_local_num_[expert_idx], config_.hidden_size,
                            "down_total_output", tp_part_idx, expert_idx);
+        }
+      }
+    }
+
+    // NaN Check: Step 8.5 - Down output (after LoRA)
+    if (is_nan_check_enabled()) {
+      for (int i = 0; i < activated_expert; i++) {
+        int expert_idx = m_expert_id_map_[i];
+        if (m_local_num_[expert_idx] > 0) {
+          char label[128];
+          snprintf(label, sizeof(label), "[FWD L%d] Step8.5 down_after_lora expert=%d tokens=%d", config_.layer_idx,
+                   expert_idx, m_local_num_[expert_idx]);
+          check_bf16_buffer_for_nan(m_local_down_output_ptr_[expert_idx],
+                                    m_local_num_[expert_idx] * config_.hidden_size, label);
         }
       }
     }
@@ -1126,6 +1442,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (is_dump_enabled()) {
       dump_fp32_matrix((const float*)output, qlen, config_.hidden_size, "final_output", tp_part_idx);
     }
+
+    // NaN Check: Step 9 - Final output (after weighted merge)
+    if (is_nan_check_enabled()) {
+      char label[128];
+      snprintf(label, sizeof(label), "[FWD L%d] Step9 final_output", config_.layer_idx);
+      check_fp32_buffer_for_nan((const float*)output, qlen * config_.hidden_size, label);
+    }
+
+    // ★ Free LoRA working buffers for inference mode ★
+    // In training mode, these buffers are kept for backward pass and freed in free_seqlen_buffers()
+    if (!save_for_backward) {
+      free_lora_working_buffers();
+    }
   }
 
   /**
@@ -1162,6 +1491,62 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int qlen = cache.qlen_cache;
     int k = cache.k_cache;
     int activated_expert = cache.activated_expert_cache;
+
+    // NaN Check: grad_output input
+    if (is_nan_check_enabled()) {
+      char label[128];
+      snprintf(label, sizeof(label), "[BWD L%d] Input grad_output", config_.layer_idx);
+      check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_output, qlen * config_.hidden_size, label);
+    }
+
+    // NaN Check: Forward Cache (read from cache)
+    if (is_nan_check_enabled()) {
+      auto check_cache_bf16 = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+        if (ptr == nullptr) {
+          printf(ANSI_BG_RED "[CACHE READ L%d] %s: NULL pointer!" ANSI_COLOR_RESET "\n", config_.layer_idx, name);
+          return;
+        }
+        if (elems == 0) {
+          printf(ANSI_BG_BLUE "[CACHE READ L%d] %s: empty (elems=0)" ANSI_COLOR_RESET "\n", config_.layer_idx, name);
+          return;
+        }
+        double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+        int nan_count = 0, inf_count = 0;
+        for (size_t i = 0; i < elems; i++) {
+          float v = GGML_BF16_TO_FP32(ptr[i]);
+          // Use v != v for robust NaN detection
+          if (v != v) nan_count++;
+          if (!is_nan_value(v) && is_inf_value(v)) inf_count++;
+          double dv = static_cast<double>(v);
+          double a = std::fabs(dv);
+          sum_sq += dv * dv;
+          sum_abs += a;
+          if (a > max_abs || a != a) max_abs = a;
+        }
+        double norm = std::sqrt(sum_sq);
+        double abs_mean = sum_abs / static_cast<double>(elems);
+        bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+        // Also check if computed values are NaN/Inf
+        bool computed_nan = (norm != norm) || (abs_mean != abs_mean) || (max_abs != max_abs);
+        bool has_large = (!is_nan_value(max_abs) && !is_inf_value(max_abs) && max_abs > NAN_CHECK_LARGE_THRESHOLD);
+        const char* bg = (has_nan_inf || computed_nan) ? ANSI_BG_RED : ANSI_BG_BLUE;
+        printf("%s[CACHE READ L%d] %s: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d (total=%zu)" ANSI_COLOR_RESET
+               "\n",
+               bg, config_.layer_idx, name, norm, abs_mean, max_abs, nan_count, inf_count, elems);
+      };
+
+      // Compute total tokens
+      size_t total_tokens = 0;
+      for (int i = 0; i < activated_expert; i++) {
+        total_tokens += cache.m_local_num_cache[cache.m_expert_id_map_cache[i]];
+      }
+
+      check_cache_bf16("input_cache", cache.input_cache, qlen * config_.hidden_size);
+      check_cache_bf16("gate_output_cache", cache.gate_output_cache, total_tokens * config_.intermediate_size);
+      check_cache_bf16("up_output_cache", cache.up_output_cache, total_tokens * config_.intermediate_size);
+      check_cache_bf16("intermediate_cache", cache.intermediate_cache, total_tokens * config_.intermediate_size);
+      check_cache_bf16("down_output_cache", cache.down_output_cache, total_tokens * config_.hidden_size);
+    }
 
     // ★ Allocate backward-phase buffers ★
     alloc_backward_buffers();
@@ -1225,6 +1610,32 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
     BACKWARD_TIMER_CHECKPOINT("backward_down");
 
+    // NaN Check: Step 1 - After backward_down
+    if (is_nan_check_enabled()) {
+      char label[128];
+      // Check grad_intermediate
+      size_t grad_inter_size = 0;
+      for (int i = 0; i < activated_expert; i++) {
+        grad_inter_size += m_local_num_[m_expert_id_map_[i]];
+      }
+      grad_inter_size *= config_.intermediate_size;
+      snprintf(label, sizeof(label), "[BWD L%d] Step1 grad_intermediate", config_.layer_idx);
+      check_bf16_buffer_for_nan(grad_intermediate_, grad_inter_size, label);
+
+      // Check grad_down_lora_a
+      if (grad_down_lora_a != nullptr) {
+        size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
+        snprintf(label, sizeof(label), "[BWD L%d] Step1 grad_down_lora_a", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_down_lora_a, down_a_elems, label);
+      }
+      // Check grad_down_lora_b
+      if (grad_down_lora_b != nullptr) {
+        size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
+        snprintf(label, sizeof(label), "[BWD L%d] Step1 grad_down_lora_b", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_down_lora_b, down_b_elems, label);
+      }
+    }
+
     // // DEBUG: Check m_local_input_ptr_ after backward_down (should be populated from cache)
     // {
     //   bool has_nan = false, has_large = false;
@@ -1266,21 +1677,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     backward_activation(cache);
     BACKWARD_TIMER_CHECKPOINT("backward_activation");
 
-    // DEBUG: Check for NaN after backward_activation
-    // {
-    //   size_t grad_size = qlen * k * config_.intermediate_size;
-    //   bool gate_nan = false, up_nan = false;
-    //   for (size_t i = 0; i < grad_size && (!gate_nan || !up_nan); i++) {
-    //     float g = GGML_BF16_TO_FP32(grad_gate_output_[i]);
-    //     float u = GGML_BF16_TO_FP32(grad_up_output_[i]);
-    //     if (std::isnan(g) || std::isinf(g)) gate_nan = true;
-    //     if (std::isnan(u) || std::isinf(u)) up_nan = true;
-    //   }
-    //   if (gate_nan || up_nan) {
-    //     printf("[NaN DEBUG L%d] NaN after backward_activation: grad_gate=%s, grad_up=%s\n",
-    //            config_.layer_idx, gate_nan ? "NaN" : "OK", up_nan ? "NaN" : "OK");
-    //   }
-    // }
+    // NaN Check: Step 2 - After backward_activation
+    if (is_nan_check_enabled()) {
+      char label[128];
+      size_t grad_size = 0;
+      for (int i = 0; i < activated_expert; i++) {
+        grad_size += m_local_num_[m_expert_id_map_[i]];
+      }
+      grad_size *= config_.intermediate_size;
+      snprintf(label, sizeof(label), "[BWD L%d] Step2 grad_gate_output", config_.layer_idx);
+      check_bf16_buffer_for_nan(grad_gate_output_, grad_size, label);
+      snprintf(label, sizeof(label), "[BWD L%d] Step2 grad_up_output", config_.layer_idx);
+      check_bf16_buffer_for_nan(grad_up_output_, grad_size, label);
+    }
 
     // // DEBUG: Check m_local_input_ptr_ BEFORE backward_gate_up (after backward_activation)
     // {
@@ -1314,19 +1723,38 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
     BACKWARD_TIMER_CHECKPOINT("backward_gate_up");
 
-    // DEBUG: Check for NaN after backward_gate_up
-    // {
-    //   size_t grad_input_size = qlen * config_.hidden_size;
-    //   bool has_nan = false;
-    //   const ggml_bf16_t* gi = (const ggml_bf16_t*)grad_input;
-    //   for (size_t i = 0; i < grad_input_size && !has_nan; i++) {
-    //     float val = GGML_BF16_TO_FP32(gi[i]);
-    //     if (std::isnan(val) || std::isinf(val)) has_nan = true;
-    //   }
-    //   if (has_nan) {
-    //     printf("[NaN DEBUG L%d] NaN detected in grad_input after backward_gate_up!\n", config_.layer_idx);
-    //   }
-    // }
+    // NaN Check: Step 3 - After backward_gate_up
+    if (is_nan_check_enabled()) {
+      char label[128];
+      // Check grad_input
+      snprintf(label, sizeof(label), "[BWD L%d] Step3 grad_input", config_.layer_idx);
+      check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size, label);
+
+      // Check grad_gate_lora_a
+      if (grad_gate_lora_a != nullptr) {
+        size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+        snprintf(label, sizeof(label), "[BWD L%d] Step3 grad_gate_lora_a", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_gate_lora_a, gate_a_elems, label);
+      }
+      // Check grad_gate_lora_b
+      if (grad_gate_lora_b != nullptr) {
+        size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+        snprintf(label, sizeof(label), "[BWD L%d] Step3 grad_gate_lora_b", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_gate_lora_b, gate_b_elems, label);
+      }
+      // Check grad_up_lora_a
+      if (grad_up_lora_a != nullptr) {
+        size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+        snprintf(label, sizeof(label), "[BWD L%d] Step3 grad_up_lora_a", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_up_lora_a, up_a_elems, label);
+      }
+      // Check grad_up_lora_b
+      if (grad_up_lora_b != nullptr) {
+        size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+        snprintf(label, sizeof(label), "[BWD L%d] Step3 grad_up_lora_b", config_.layer_idx);
+        check_bf16_buffer_for_nan((const ggml_bf16_t*)grad_up_lora_b, up_b_elems, label);
+      }
+    }
 
     // Step 4: Compute grad_weights (gradient for routing weights)
     // grad_weights[token_idx, expert_pos] = dot(grad_output[token_idx], down_output[token, expert])
@@ -1381,9 +1809,124 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           nullptr, "bwd_grad_weights");
     }
     BACKWARD_TIMER_CHECKPOINT("backward_grad_weights");
+
+    // NaN Check: Step 4 - After grad_weights computation
+    if (is_nan_check_enabled() && grad_weights != nullptr) {
+      char label[128];
+      snprintf(label, sizeof(label), "[BWD L%d] Step4 grad_weights", config_.layer_idx);
+      check_fp32_buffer_for_nan((const float*)grad_weights, qlen * k, label);
+    }
+
+    // NaN Check & Norm: Final output gradients summary
+    if (is_nan_check_enabled()) {
+      auto print_grad_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+        if (ptr == nullptr) {
+          printf(ANSI_COLOR_RED "[BWD L%d OUTPUT] %s: NULL pointer!" ANSI_COLOR_RESET "\n", config_.layer_idx, name);
+          return;
+        }
+        if (elems == 0) {
+          printf(ANSI_COLOR_YELLOW "[BWD L%d OUTPUT] %s: empty (elems=0)" ANSI_COLOR_RESET "\n", config_.layer_idx,
+                 name);
+          return;
+        }
+        // Compute stats and NaN check in one pass - DO NOT skip NaN/Inf
+        double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+        int nan_count = 0, inf_count = 0;
+        for (size_t i = 0; i < elems; i++) {
+          float v = GGML_BF16_TO_FP32(ptr[i]);
+          // Use v != v for robust NaN detection
+          if (v != v) {
+            nan_count++;
+          }
+          if (!(v != v) && is_inf_value(v)) {
+            inf_count++;
+          }
+          double dv = static_cast<double>(v);
+          double a = std::fabs(dv);
+          sum_sq += dv * dv;
+          sum_abs += a;
+          if (a > max_abs || a != a) max_abs = a;
+        }
+        double norm = std::sqrt(sum_sq);
+        double abs_mean = sum_abs / static_cast<double>(elems);
+        bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+        // Also check if computed values are NaN
+        bool computed_nan = (norm != norm) || (abs_mean != abs_mean);
+        bool has_large = (!(max_abs != max_abs) && !is_inf_value(max_abs) && max_abs > NAN_CHECK_LARGE_THRESHOLD);
+        const char* color = (has_nan_inf || computed_nan) ? ANSI_COLOR_RED : (has_large ? ANSI_COLOR_YELLOW : "");
+        const char* reset = (has_nan_inf || computed_nan || has_large) ? ANSI_COLOR_RESET : "";
+        printf("%s[BWD L%d OUTPUT] %s: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d (total=%zu)%s\n", color,
+               config_.layer_idx, name, norm, abs_mean, max_abs, nan_count, inf_count, elems, reset);
+      };
+
+      auto print_grad_stats_fp32 = [&](const char* name, const float* ptr, size_t elems) {
+        if (ptr == nullptr) {
+          printf(ANSI_COLOR_RED "[BWD L%d OUTPUT] %s: NULL pointer!" ANSI_COLOR_RESET "\n", config_.layer_idx, name);
+          return;
+        }
+        if (elems == 0) {
+          printf(ANSI_COLOR_YELLOW "[BWD L%d OUTPUT] %s: empty (elems=0)" ANSI_COLOR_RESET "\n", config_.layer_idx,
+                 name);
+          return;
+        }
+        // DO NOT skip NaN/Inf - include them in computation
+        double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+        int nan_count = 0, inf_count = 0;
+        for (size_t i = 0; i < elems; i++) {
+          float fv = ptr[i];
+          // Use fv != fv for robust NaN detection
+          if (fv != fv) {
+            nan_count++;
+          }
+          if (!(fv != fv) && is_inf_value(fv)) {
+            inf_count++;
+          }
+          double v = static_cast<double>(fv);
+          double a = std::fabs(v);
+          sum_sq += v * v;
+          sum_abs += a;
+          if (a > max_abs || a != a) max_abs = a;
+        }
+        double norm = std::sqrt(sum_sq);
+        double abs_mean = sum_abs / static_cast<double>(elems);
+        bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+        // Also check if computed values are NaN
+        bool computed_nan = (norm != norm) || (abs_mean != abs_mean);
+        bool has_large = (!(max_abs != max_abs) && !is_inf_value(max_abs) && max_abs > NAN_CHECK_LARGE_THRESHOLD);
+        const char* color = (has_nan_inf || computed_nan) ? ANSI_COLOR_RED : (has_large ? ANSI_COLOR_YELLOW : "");
+        const char* reset = (has_nan_inf || computed_nan || has_large) ? ANSI_COLOR_RESET : "";
+        printf("%s[BWD L%d OUTPUT] %s: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d (total=%zu)%s\n", color,
+               config_.layer_idx, name, norm, abs_mean, max_abs, nan_count, inf_count, elems, reset);
+      };
+
+      // grad_input
+      print_grad_stats("grad_input", (const ggml_bf16_t*)grad_input, qlen * config_.hidden_size);
+
+      // LoRA gradient sizes
+      size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+      size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+      size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+      size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+      size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
+      size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
+
+      // Gate LoRA gradients
+      print_grad_stats("grad_gate_lora_a", (const ggml_bf16_t*)grad_gate_lora_a, gate_a_elems);
+      print_grad_stats("grad_gate_lora_b", (const ggml_bf16_t*)grad_gate_lora_b, gate_b_elems);
+
+      // Up LoRA gradients
+      print_grad_stats("grad_up_lora_a", (const ggml_bf16_t*)grad_up_lora_a, up_a_elems);
+      print_grad_stats("grad_up_lora_b", (const ggml_bf16_t*)grad_up_lora_b, up_b_elems);
+
+      // Down LoRA gradients
+      print_grad_stats("grad_down_lora_a", (const ggml_bf16_t*)grad_down_lora_a, down_a_elems);
+      print_grad_stats("grad_down_lora_b", (const ggml_bf16_t*)grad_down_lora_b, down_b_elems);
+
+      // Routing weights gradient
+      print_grad_stats_fp32("grad_weights", (const float*)grad_weights, qlen * k);
+    }
+
     BACKWARD_TIMER_END();
-    // printf("[BACKWARD DEBUG] After backward_gate_up - grad_input norm: %f\n",
-    //        compute_bf16_norm((const ggml_bf16_t*)grad_input, qlen * config_.hidden_size));
 
     // ★ Free all seqlen-dependent buffers ★
     // Note: backward_bb_pool_ and lora_bb_pool_ are NOT freed (persistent)
@@ -1424,29 +1967,61 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     down_lora_a_ = (ggml_bf16_t*)down_lora_a;
     down_lora_b_ = (ggml_bf16_t*)down_lora_b;
 
-    // auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
-    //   if (ptr == nullptr) {
-    //     printf("KT MoE update stats (layer %d, %s): null\n", config_.layer_idx, name);
-    //     return;
-    //   }
-    //   Bf16Stats stats = compute_bf16_stats(ptr, elems);
-    //   printf("KT MoE update stats (layer %d, %s): abs_mean=%.6e abs_max=%.6e norm=%.6e\n", config_.layer_idx, name,
-    //          stats.abs_mean, stats.abs_max, stats.norm);
-    // };
+    // NaN Check and Norm printing for LoRA weights
+    if (is_nan_check_enabled()) {
+      auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
+        if (ptr == nullptr) {
+          printf("[LoRA L%d] %s: null\n", config_.layer_idx, name);
+          return;
+        }
+        if (elems == 0) {
+          printf(ANSI_COLOR_YELLOW "[LoRA L%d] %s: empty (elems=0)" ANSI_COLOR_RESET "\n", config_.layer_idx, name);
+          return;
+        }
+        // DO NOT skip NaN/Inf - include them in computation
+        double sum_sq = 0.0, sum_abs = 0.0, max_abs = 0.0;
+        int nan_count = 0, inf_count = 0;
+        for (size_t i = 0; i < elems; i++) {
+          float v = GGML_BF16_TO_FP32(ptr[i]);
+          // Use v != v for robust NaN detection
+          if (v != v) {
+            nan_count++;
+          }
+          if (!(v != v) && is_inf_value(v)) {
+            inf_count++;
+          }
+          double dv = static_cast<double>(v);
+          double a = std::fabs(dv);
+          sum_sq += dv * dv;
+          sum_abs += a;
+          if (a > max_abs || a != a) max_abs = a;
+        }
+        double norm = std::sqrt(sum_sq);
+        double abs_mean = sum_abs / static_cast<double>(elems);
+        bool has_nan_inf = (nan_count > 0 || inf_count > 0);
+        // Also check if computed values are NaN
+        bool computed_nan = (norm != norm) || (abs_mean != abs_mean);
+        bool has_large = (!(max_abs != max_abs) && !is_inf_value(max_abs) && max_abs > NAN_CHECK_LARGE_THRESHOLD);
+        const char* color = (has_nan_inf || computed_nan) ? ANSI_COLOR_RED : (has_large ? ANSI_COLOR_YELLOW : "");
+        const char* reset = (has_nan_inf || computed_nan || has_large) ? ANSI_COLOR_RESET : "";
+        printf("%s[LoRA L%d] %s: norm=%.6e abs_mean=%.6e abs_max=%.6e nan=%d inf=%d (total=%zu)%s\n", color,
+               config_.layer_idx, name, norm, abs_mean, max_abs, nan_count, inf_count, elems, reset);
+      };
 
-    // size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    // size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    // size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
-    // size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
-    // size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
-    // size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
+      size_t gate_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+      size_t gate_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+      size_t up_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.hidden_size;
+      size_t up_b_elems = static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_;
+      size_t down_a_elems = static_cast<size_t>(config_.expert_num) * lora_rank_ * config_.intermediate_size;
+      size_t down_b_elems = static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_;
 
-    // print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
-    // print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
-    // print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
-    // print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
-    // print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
-    // print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
+      print_lora_stats("gate_lora_a", gate_lora_a_, gate_a_elems);
+      print_lora_stats("gate_lora_b", gate_lora_b_, gate_b_elems);
+      print_lora_stats("up_lora_a", up_lora_a_, up_a_elems);
+      print_lora_stats("up_lora_b", up_lora_b_, up_b_elems);
+      print_lora_stats("down_lora_a", down_lora_a_, down_a_elems);
+      print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
+    }
 
     // Mark weights as needing re-conversion to BufferB format
     lora_weights_prepared_ = false;
@@ -1744,48 +2319,55 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                                   lora_a_down_bb_size +           // down_a
                                                   lora_b_down_bb_size);           // down_b
 
-      // Bug-C Fix Step 2: Use shared buffer pool instead of per-expert allocation
-      // Max total tokens across all activated experts per forward pass
-      // (each of max_len tokens selects num_experts_per_tok experts)
-      size_t max_total_tokens = ((config_.max_len * config_.num_experts_per_tok + M_STEP - 1) / M_STEP) * M_STEP;
+      size_t raw_total_tokens = config_.max_len * config_.num_experts_per_tok;
+      size_t safe_alloc_tokens = raw_total_tokens + (config_.expert_num * M_STEP);
+
+      // Ensure global alignment too
+      safe_alloc_tokens = ((safe_alloc_tokens + M_STEP - 1) / M_STEP) * M_STEP;
+
+      // Add extra bytes for "align64" calls inside the loops (64 bytes per expert per buffer)
+      size_t align_overhead = config_.expert_num * 64;
 
       // BufferA for LoRA intermediate: shared pool for all activated experts
       // Need 2x for gate and up separate buffers (to avoid race condition)
       lora_intermediate_ba_size = T::BufferA::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
-      lora_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
+      lora_ba_pool_bytes_ = T::BufferA::required_size(safe_alloc_tokens, padded_lora_rank_) * 2 + align_overhead * 2;
 
       // BufferC for LoRA step 1 output: shared pool for all activated experts
       // Need 2x for gate and up separate buffers (to avoid race condition)
       lora_intermediate_bc_size = T::BufferC::required_size(max_m, padded_lora_rank_);  // per-expert size for set_data
-      lora_bc_inter_pool_bytes_ = T::BufferC::required_size(max_total_tokens, padded_lora_rank_) * 2;  // gate + up
+      lora_bc_inter_pool_bytes_ =
+          T::BufferC::required_size(safe_alloc_tokens, padded_lora_rank_) * 2 + align_overhead * 2;
 
       // BufferC for LoRA step 2 output (gate, up, down): shared pool for all activated experts
       lora_gate_up_out_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
       lora_down_out_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);           // per-expert size
-      lora_bc_out_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) * 2 +
-                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
+      // Note: bc_out needs space for Gate, Up AND Down
+      lora_bc_out_pool_bytes_ = T::BufferC::required_size(safe_alloc_tokens, config_.intermediate_size) * 2 +
+                                T::BufferC::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead * 3;
 
       // BF16 intermediate buffer for step 1 -> step 2 conversion
       // Need 2x for gate and up separate buffers (to avoid race condition)
-      lora_intermediate_bf16_pool_bytes_ = max_total_tokens * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2;  // gate + up
+      lora_intermediate_bf16_pool_bytes_ =
+          safe_alloc_tokens * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2 + align_overhead * 2;
 
       // =====================================================
       // Calculate Backward pass AMX buffer sizes
       // =====================================================
       // BufferA for scattered grad_output: shared pool for all activated experts
       grad_output_ba_size = T::BufferA::required_size(max_m, config_.hidden_size);  // per-expert size
-      backward_ba_pool_bytes_ = T::BufferA::required_size(max_total_tokens, config_.hidden_size);
+      backward_ba_pool_bytes_ = T::BufferA::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead;
 
       // BufferC for backward GEMM outputs: shared pool for all activated experts
-      // grad_intermediate: [max_total_tokens, intermediate_size]
+      // grad_intermediate: [safe_alloc_tokens, intermediate_size]
       grad_intermediate_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);  // per-expert size
-      // grad_gate_up: [max_total_tokens, hidden_size]
+      // grad_gate_up: [safe_alloc_tokens, hidden_size]
       grad_gate_up_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);  // per-expert size
-      backward_bc_pool_bytes_ = T::BufferC::required_size(max_total_tokens, config_.intermediate_size) +
-                                T::BufferC::required_size(max_total_tokens, config_.hidden_size);
+      backward_bc_pool_bytes_ = T::BufferC::required_size(safe_alloc_tokens, config_.intermediate_size) +
+                                T::BufferC::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead * 2;
 
       // BF16 buffer for scattered grad_output
-      grad_output_bf16_pool_bytes_ = max_total_tokens * config_.hidden_size * sizeof(ggml_bf16_t);
+      grad_output_bf16_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(ggml_bf16_t) + align_overhead;
 
       // =====================================================
       // Calculate Backward pass BufferB sizes (transposed base weights)
@@ -1853,25 +2435,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Single allocation for remaining buffers (only lora_intermediate_pool_ uses SharedMemBuffer now)
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
 
-    // Initialize LoRA and gradient pointers
+    // Initialize LoRA pointer (only lora_intermediate_pool_ is allocated via SharedMemBuffer)
     lora_intermediate_ = (ggml_bf16_t*)lora_intermediate_pool_;
-    grad_intermediate_ = (ggml_bf16_t*)grad_intermediate_pool_;
-    grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
-    grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
+    // Note: grad_intermediate_, grad_gate_output_, grad_up_output_ are set in alloc_backward_buffers()
 
-    // Initialize cache stack
+    // Initialize cache stack (only vectors, pointers are set in alloc_forward_buffers())
     cache_stack_.resize(max_cache_depth_);
     for (int i = 0; i < max_cache_depth_; i++) {
-      cache_stack_[i].input_cache = (ggml_bf16_t*)cache_input_pool_ + i * config_.max_len * config_.hidden_size;
-      cache_stack_[i].gate_output_cache = (ggml_bf16_t*)cache_gate_output_pool_ +
-                                          i * config_.max_len * config_.num_experts_per_tok * config_.intermediate_size;
-      cache_stack_[i].up_output_cache = (ggml_bf16_t*)cache_up_output_pool_ +
-                                        i * config_.max_len * config_.num_experts_per_tok * config_.intermediate_size;
-      cache_stack_[i].intermediate_cache = (ggml_bf16_t*)cache_intermediate_pool_ + i * config_.max_len *
-                                                                                        config_.num_experts_per_tok *
-                                                                                        config_.intermediate_size;
-      cache_stack_[i].down_output_cache = (ggml_bf16_t*)cache_down_output_pool_ +
-                                          i * config_.max_len * config_.num_experts_per_tok * config_.hidden_size;
+      // Note: cache pointers (input_cache, gate_output_cache, etc.) are set in alloc_forward_buffers()
+      cache_stack_[i].input_cache = nullptr;
+      cache_stack_[i].gate_output_cache = nullptr;
+      cache_stack_[i].up_output_cache = nullptr;
+      cache_stack_[i].intermediate_cache = nullptr;
+      cache_stack_[i].down_output_cache = nullptr;
       cache_stack_[i].m_local_num_cache.resize(config_.expert_num);
       cache_stack_[i].m_local_pos_cache.resize(config_.max_len);
       for (int j = 0; j < config_.max_len; j++) {
@@ -2255,6 +2831,100 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // =====================================================
+    // Bounds Check: Verify pool allocation didn't overflow
+    // =====================================================
+    if (is_nan_check_enabled()) {
+      char* lora_ba_pool_end = (char*)lora_ba_pool_ + lora_ba_pool_bytes_;
+      char* lora_bc_inter_pool_end = (char*)lora_bc_inter_pool_ + lora_bc_inter_pool_bytes_;
+      char* lora_bc_out_pool_end = (char*)lora_bc_out_pool_ + lora_bc_out_pool_bytes_;
+      char* lora_bf16_pool_end = (char*)lora_intermediate_bf16_pool_ + lora_intermediate_bf16_pool_bytes_;
+
+      size_t ba_used = lora_ba_ptr - (char*)lora_ba_pool_;
+      size_t bc_inter_used = lora_bc_inter_ptr - (char*)lora_bc_inter_pool_;
+      size_t bc_out_used = lora_bc_out_ptr - (char*)lora_bc_out_pool_;
+      size_t bf16_used = bf16_inter_ptr - (char*)lora_intermediate_bf16_pool_;
+
+      bool overflow = false;
+      if (lora_ba_ptr > lora_ba_pool_end) {
+        printf(
+            ANSI_BG_RED
+            "[OVERFLOW L%d] lora_ba_pool: used=%zu bytes, allocated=%zu bytes, OVERFLOW by %zu bytes" ANSI_COLOR_RESET
+            "\n",
+            config_.layer_idx, ba_used, lora_ba_pool_bytes_, ba_used - lora_ba_pool_bytes_);
+        overflow = true;
+      }
+      if (lora_bc_inter_ptr > lora_bc_inter_pool_end) {
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] lora_bc_inter_pool: used=%zu bytes, allocated=%zu bytes, OVERFLOW by %zu "
+               "bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, bc_inter_used, lora_bc_inter_pool_bytes_, bc_inter_used - lora_bc_inter_pool_bytes_);
+        overflow = true;
+      }
+      if (lora_bc_out_ptr > lora_bc_out_pool_end) {
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] lora_bc_out_pool: used=%zu bytes, allocated=%zu bytes, OVERFLOW by %zu "
+               "bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, bc_out_used, lora_bc_out_pool_bytes_, bc_out_used - lora_bc_out_pool_bytes_);
+        overflow = true;
+      }
+      if (bf16_inter_ptr > lora_bf16_pool_end) {
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] lora_intermediate_bf16_pool: used=%zu bytes, allocated=%zu bytes, OVERFLOW by %zu "
+               "bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, bf16_used, lora_intermediate_bf16_pool_bytes_,
+               bf16_used - lora_intermediate_bf16_pool_bytes_);
+        overflow = true;
+      }
+
+      if (overflow) {
+        // Print detailed per-expert allocation info
+        printf("[OVERFLOW DEBUG L%d] activated_expert=%d, M_STEP=%zu, padded_lora_rank=%d\n", config_.layer_idx,
+               activated_expert, M_STEP, padded_lora_rank_);
+        size_t sum_tokens = 0, sum_padded_tokens = 0;
+        for (int task_id = 0; task_id < activated_expert; task_id++) {
+          int expert_idx = m_expert_id_map_[task_id];
+          int m = m_local_num_[expert_idx];
+          if (m > 0) {
+            size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
+            sum_tokens += m;
+            sum_padded_tokens += local_max_m;
+            printf("  expert=%d tokens=%d padded=%zu\n", expert_idx, m, local_max_m);
+          }
+        }
+        printf("[OVERFLOW DEBUG L%d] sum_tokens=%zu, sum_padded_tokens=%zu, padding_overhead=%zu\n", config_.layer_idx,
+               sum_tokens, sum_padded_tokens, sum_padded_tokens - sum_tokens);
+        printf("[OVERFLOW DEBUG L%d] config: max_len=%d, num_experts_per_tok=%d, expert_num=%d\n", config_.layer_idx,
+               config_.max_len, config_.num_experts_per_tok, config_.expert_num);
+        printf("[OVERFLOW DEBUG L%d] expected raw_total_tokens=%d, safe_alloc_tokens estimate=%d\n", config_.layer_idx,
+               config_.max_len * config_.num_experts_per_tok,
+               config_.max_len * config_.num_experts_per_tok + config_.expert_num * (int)M_STEP);
+      }
+
+      // Always print summary for debugging token distribution
+      size_t sum_tokens = 0, max_expert_tokens = 0;
+      int max_expert_idx = -1;
+      for (int task_id = 0; task_id < activated_expert; task_id++) {
+        int expert_idx = m_expert_id_map_[task_id];
+        int m = m_local_num_[expert_idx];
+        sum_tokens += m;
+        if ((size_t)m > max_expert_tokens) {
+          max_expert_tokens = m;
+          max_expert_idx = expert_idx;
+        }
+      }
+      // Check if any single expert has extremely high token count
+      size_t expected_per_expert = sum_tokens / (activated_expert > 0 ? activated_expert : 1);
+      if (max_expert_tokens > expected_per_expert * 10 && max_expert_tokens > 1000) {
+        printf(ANSI_COLOR_YELLOW
+               "[WARN L%d] Expert %d has %zu tokens (%.1fx average), activated_expert=%d, total=%zu" ANSI_COLOR_RESET
+               "\n",
+               config_.layer_idx, max_expert_idx, max_expert_tokens,
+               (double)max_expert_tokens / (expected_per_expert > 0 ? expected_per_expert : 1), activated_expert,
+               sum_tokens);
+      }
+    }
+
+    // =====================================================
     // Step 1: input @ lora_A^T -> lora_intermediate
     // Uses gate_up_ba_ (already quantized input)
     // Gate and Up use SEPARATE intermediate buffers to avoid race condition
@@ -2482,6 +3152,22 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       lora_down_out_bc_[expert_idx]->max_m = local_max_m;
       lora_down_out_bc_[expert_idx]->set_data(lora_down_bc_ptr);
       lora_down_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
+    }
+
+    // =====================================================
+    // Bounds Check: Verify pool allocation didn't overflow (gate+up+down)
+    // =====================================================
+    if (is_nan_check_enabled()) {
+      char* lora_bc_out_pool_end = (char*)lora_bc_out_pool_ + lora_bc_out_pool_bytes_;
+      size_t bc_out_used = lora_down_bc_ptr - (char*)lora_bc_out_pool_;
+
+      if (lora_down_bc_ptr > lora_bc_out_pool_end) {
+        printf(ANSI_BG_RED
+               "[OVERFLOW L%d] lora_bc_out_pool (gate+up+down): used=%zu bytes, allocated=%zu bytes, OVERFLOW by %zu "
+               "bytes" ANSI_COLOR_RESET "\n",
+               config_.layer_idx, bc_out_used, lora_bc_out_pool_bytes_, bc_out_used - lora_bc_out_pool_bytes_);
+        printf("[OVERFLOW DEBUG L%d] gate_up_total=%zu bytes\n", config_.layer_idx, gate_up_total);
+      }
     }
 
     // =====================================================
