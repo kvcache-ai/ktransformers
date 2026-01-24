@@ -339,14 +339,14 @@ void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> ini
                                       std::function<void(int)> compute_func, std::function<void(int)> finalize_func,
                                       const char* task_name, int block_size, bool async) {
   bool has_name = task_name != nullptr && task_name[0] != '\0';
-  if (has_name) {
-    reset_counters();
-  }
+  // if (has_name) {
+  //   reset_counters();
+  // }
   do_work_stealing_job_async(task_num, init_func, compute_func, finalize_func, block_size);
   if (!async) wait();
-  if (has_name) {
-    sft_timer::print_op_stats(this, task_name);
-  }
+  // if (has_name) {
+  //   sft_timer::print_op_stats(this, task_name);
+  // }
 }
 
 void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int)> init_func,
