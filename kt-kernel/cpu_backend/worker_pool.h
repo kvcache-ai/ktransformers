@@ -64,6 +64,8 @@ struct alignas(64) ThreadState {
   std::atomic<ThreadStatus> status;
   uint64_t finish_cycles;  // Per-thread timing (always enabled)
   int task_count;          // Per-thread task count
+  uint64_t start_ts;       // Absolute start timestamp (RDTSC)
+  uint64_t end_ts;         // Absolute end timestamp (RDTSC)
 };
 
 class InNumaPool {
@@ -88,12 +90,16 @@ class InNumaPool {
   int get_numa_id() const { return numa_id_; }
   uint64_t get_thread_cycles(int tid) const { return thread_state_[tid].finish_cycles; }
   int get_thread_task_count(int tid) const { return thread_state_[tid].task_count; }
+  uint64_t get_thread_start_ts(int tid) const { return thread_state_[tid].start_ts; }
+  uint64_t get_thread_end_ts(int tid) const { return thread_state_[tid].end_ts; }
 
   // Reset per-thread timing/task counters (call before timing a sequence of operations)
   void reset_counters() {
     for (int i = 0; i < total_worker_count; i++) {
       thread_state_[i].finish_cycles = 0;
       thread_state_[i].task_count = 0;
+      thread_state_[i].start_ts = 0;
+      thread_state_[i].end_ts = 0;
     }
   }
 

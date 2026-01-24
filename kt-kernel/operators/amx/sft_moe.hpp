@@ -578,6 +578,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   // Flag to track if LoRA weights have been converted to BufferB format
   bool lora_weights_prepared_ = false;
+  bool lora_backward_weights_prepared_ = false;
 
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
@@ -1960,6 +1961,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Mark weights as needing re-conversion to BufferB format
     lora_weights_prepared_ = false;
+    lora_backward_weights_prepared_ = false;
   }
 
   /**
@@ -1984,13 +1986,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
-    // Parallel conversion of all LoRA weights to BufferB format
-    // 10 matrices per expert: gate/up (A, B, A^T, B^T) + down (A, B)
+    // Parallel conversion of forward LoRA weights to BufferB format
+    // 6 matrices per expert: gate/up/down (A, B) - only for forward pass
     pool->do_work_stealing_job(
-        config_.expert_num * 10, nullptr,
+        config_.expert_num * 6, nullptr,
         [this](int task_id) {
-          int expert_idx = task_id / 10;
-          int lora_type = task_id % 10;
+          int expert_idx = task_id / 6;
+          int lora_type = task_id % 6;
 
           switch (lora_type) {
             case 0:  // gate_lora_a [lora_rank, hidden_size] -> [padded_lora_rank, hidden_size]
@@ -2018,29 +2020,65 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               convert_lora_b_to_buffer_b(down_lora_b_, down_lora_b_bb_[expert_idx], expert_idx, config_.hidden_size,
                                          lora_rank_, config_.hidden_size, padded_lora_rank_);
               break;
-            case 6:  // gate_lora_a^T [hidden_size, lora_rank] -> [hidden_size, padded_lora_rank]
+          }
+        },
+        nullptr, "fwd_lora_prep");
+
+    lora_weights_prepared_ = true;
+  }
+
+  /**
+   * @brief Prepare transposed LoRA weights for backward pass.
+   *
+   * Only prepares gate/up transposed matrices (A^T, B^T) needed for backward.
+   * Must be called before backward_gate_up_amx if lora_backward_weights_prepared_ is false.
+   */
+  void prepare_lora_backward_weights() {
+    if constexpr (!supports_standard_mat_mul_v<T>) {
+      return;
+    }
+
+    if (lora_backward_weights_prepared_) {
+      return;
+    }
+    if (gate_lora_a_ == nullptr) {
+      return;
+    }
+
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    // Parallel conversion of backward LoRA weights (transposed matrices)
+    // 4 matrices per expert: gate/up (A^T, B^T)
+    pool->do_work_stealing_job(
+        config_.expert_num * 4, nullptr,
+        [this](int task_id) {
+          int expert_idx = task_id / 4;
+          int lora_type = task_id % 4;
+
+          switch (lora_type) {
+            case 0:  // gate_lora_a^T [hidden_size, lora_rank] -> [hidden_size, padded_lora_rank]
               convert_lora_a_transposed_to_buffer_b(gate_lora_a_, gate_lora_a_t_bb_[expert_idx], expert_idx, lora_rank_,
                                                     config_.hidden_size, config_.hidden_size, padded_lora_rank_);
               break;
-            case 7:  // up_lora_a^T
+            case 1:  // up_lora_a^T
               convert_lora_a_transposed_to_buffer_b(up_lora_a_, up_lora_a_t_bb_[expert_idx], expert_idx, lora_rank_,
                                                     config_.hidden_size, config_.hidden_size, padded_lora_rank_);
               break;
-            case 8:  // gate_lora_b^T [lora_rank, intermediate_size] -> [padded_lora_rank, intermediate_size]
+            case 2:  // gate_lora_b^T [lora_rank, intermediate_size] -> [padded_lora_rank, intermediate_size]
               convert_lora_b_transposed_to_buffer_b(gate_lora_b_, gate_lora_b_t_bb_[expert_idx], expert_idx,
                                                     config_.intermediate_size, lora_rank_, padded_lora_rank_,
                                                     config_.intermediate_size);
               break;
-            case 9:  // up_lora_b^T
+            case 3:  // up_lora_b^T
               convert_lora_b_transposed_to_buffer_b(up_lora_b_, up_lora_b_t_bb_[expert_idx], expert_idx,
                                                     config_.intermediate_size, lora_rank_, padded_lora_rank_,
                                                     config_.intermediate_size);
               break;
           }
         },
-        nullptr, "fwd_lora_prep");
+        nullptr, "bwd_lora_prep");
 
-    lora_weights_prepared_ = true;
+    lora_backward_weights_prepared_ = true;
   }
 
   // Debug getter for LoRA pointer verification
@@ -2584,7 +2622,22 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     lora_weights_prepared_ = false;
+    lora_backward_weights_prepared_ = false;
     backward_weights_prepared_ = false;
+  }
+
+  /**
+   * @brief Get thread-local buffer for LoRA weight conversion.
+   *
+   * Uses thread_local storage to avoid repeated memory allocation.
+   * The buffer is resized only when a larger size is needed.
+   */
+  static ggml_bf16_t* get_lora_convert_buffer(size_t required_size) {
+    thread_local std::vector<ggml_bf16_t> tl_buffer;
+    if (tl_buffer.size() < required_size) {
+      tl_buffer.resize(required_size);
+    }
+    return tl_buffer.data();
   }
 
   /**
@@ -2598,8 +2651,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void convert_lora_a_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb, int expert_idx,
                                   int src_n, int src_k, int dst_n, int dst_k) {
-    // Create temporary padded matrix
-    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    // Use thread-local buffer to avoid allocation
+    size_t buf_size = static_cast<size_t>(dst_n) * dst_k;
+    ggml_bf16_t* padded = get_lora_convert_buffer(buf_size);
+
+    // Zero-initialize the buffer
+    const ggml_bf16_t zero = GGML_FP32_TO_BF16(0.0f);
+    std::fill(padded, padded + buf_size, zero);
 
     // Copy source data (with potential padding)
     const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
@@ -2614,7 +2672,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // For dst_n > N_BLOCK, we need to loop over all N_BLOCKs.
     int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
     for (int ith = 0; ith < num_n_blocks; ith++) {
-      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+      dst_bb->from_mat(padded, ith, num_n_blocks);
     }
   }
 
@@ -2629,8 +2687,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void convert_lora_b_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb, int expert_idx,
                                   int src_n, int src_k, int dst_n, int dst_k) {
-    // Create temporary padded matrix
-    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    // Use thread-local buffer to avoid allocation
+    size_t buf_size = static_cast<size_t>(dst_n) * dst_k;
+    ggml_bf16_t* padded = get_lora_convert_buffer(buf_size);
+
+    // Zero-initialize the buffer
+    const ggml_bf16_t zero = GGML_FP32_TO_BF16(0.0f);
+    std::fill(padded, padded + buf_size, zero);
 
     // Copy source data (with potential padding on K dimension)
     const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
@@ -2646,7 +2709,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // For dst_n > N_BLOCK, we need to loop over all N_BLOCKs.
     int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
     for (int ith = 0; ith < num_n_blocks; ith++) {
-      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+      dst_bb->from_mat(padded, ith, num_n_blocks);
     }
   }
 
@@ -2658,7 +2721,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void convert_lora_a_transposed_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb,
                                              int expert_idx, int src_n, int src_k, int dst_n, int dst_k) {
-    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    // Use thread-local buffer to avoid allocation
+    size_t buf_size = static_cast<size_t>(dst_n) * dst_k;
+    ggml_bf16_t* padded = get_lora_convert_buffer(buf_size);
+
+    // Zero-initialize the buffer
+    const ggml_bf16_t zero = GGML_FP32_TO_BF16(0.0f);
+    std::fill(padded, padded + buf_size, zero);
+
     const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
 
     for (int h = 0; h < src_k && h < dst_n; h++) {
@@ -2671,7 +2741,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // For dst_n > N_BLOCK (hidden_size is typically 7168), we need to loop over all N_BLOCKs.
     int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
     for (int ith = 0; ith < num_n_blocks; ith++) {
-      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+      dst_bb->from_mat(padded, ith, num_n_blocks);
     }
   }
 
@@ -2683,7 +2753,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void convert_lora_b_transposed_to_buffer_b(const ggml_bf16_t* src, std::shared_ptr<typename T::BufferB>& dst_bb,
                                              int expert_idx, int src_n, int src_k, int dst_n, int dst_k) {
-    std::vector<ggml_bf16_t> padded(dst_n * dst_k, GGML_FP32_TO_BF16(0.0f));
+    // Use thread-local buffer to avoid allocation
+    size_t buf_size = static_cast<size_t>(dst_n) * dst_k;
+    ggml_bf16_t* padded = get_lora_convert_buffer(buf_size);
+
+    // Zero-initialize the buffer
+    const ggml_bf16_t zero = GGML_FP32_TO_BF16(0.0f);
+    std::fill(padded, padded + buf_size, zero);
+
     const ggml_bf16_t* expert_src = src + expert_idx * src_n * src_k;
 
     for (int r = 0; r < src_k && r < dst_n; r++) {
@@ -2696,7 +2773,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // For dst_n > N_BLOCK, we need to loop over all N_BLOCKs.
     int num_n_blocks = (dst_n + T::N_BLOCK - 1) / T::N_BLOCK;
     for (int ith = 0; ith < num_n_blocks; ith++) {
-      dst_bb->from_mat(padded.data(), ith, num_n_blocks);
+      dst_bb->from_mat(padded, ith, num_n_blocks);
     }
   }
 
@@ -4671,7 +4748,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     prepare_backward_weights();
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
-      prepare_lora_weights();
+      prepare_lora_backward_weights();
     }
 
     // =====================================================

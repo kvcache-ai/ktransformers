@@ -13,14 +13,22 @@
 #include <hwloc/bitmap.h>
 #include <numa.h>
 #include <numaif.h>
+#include <signal.h>
 #include <x86intrin.h>
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "hwloc.h"
 
@@ -83,6 +91,145 @@ static int forward_threads = 0;
 static int backward_threads = 0;
 
 inline double ticks_to_ms(uint64_t cycles) { return (double)cycles / get_rdtsc_cycles_per_ms(); }
+
+// =====================================================
+// Chrome Trace Event Format support
+// =====================================================
+struct TraceEvent {
+  std::string name;  // event name (op_name)
+  std::string cat;   // category
+  char ph;           // phase: 'X' for complete event, 'B' for begin, 'E' for end
+  double ts;         // timestamp in microseconds (with ns precision via decimals)
+  double dur;        // duration in microseconds (with ns precision via decimals)
+  int pid;           // process id (numa_id)
+  int tid;           // thread id
+  int task_count;    // number of tasks processed
+};
+
+static std::vector<TraceEvent> g_trace_events;
+static std::mutex g_trace_mutex;
+static uint64_t g_trace_start_time = 0;  // baseline timestamp
+static bool g_trace_initialized = false;
+static std::string g_trace_output_path = "sft_trace.json";
+
+// Initialize trace start time
+static void init_trace() {
+  if (!g_trace_initialized) {
+    g_trace_start_time = rdtsc_now();
+    g_trace_initialized = true;
+    // Check for custom output path from environment
+    const char* env_path = std::getenv("SFT_TRACE_PATH");
+    if (env_path && env_path[0] != '\0') {
+      g_trace_output_path = env_path;
+    }
+  }
+}
+
+// Convert RDTSC cycles to microseconds with nanosecond precision (as double)
+// Chrome tracing uses microseconds but supports fractional values for sub-us precision
+static double cycles_to_us(uint64_t cycles) {
+  // cycles_per_ms * 1000 = cycles_per_us
+  // cycles / cycles_per_us = microseconds
+  // Using 1e6 for cycles_per_ms -> cycles_per_s, then divide to get us with ns precision
+  double cycles_per_us = get_rdtsc_cycles_per_ms() / 1000.0;
+  return static_cast<double>(cycles) / cycles_per_us;
+}
+
+// Add trace events for an operation using absolute timestamps
+static void add_trace_events(const char* op_name, int numa_id, int thread_count, const uint64_t* start_ts_arr,
+                             const uint64_t* end_ts_arr, const int* tasks) {
+  init_trace();
+
+  std::lock_guard<std::mutex> lock(g_trace_mutex);
+
+  for (int i = 0; i < thread_count; i++) {
+    // Convert absolute RDTSC timestamps to relative microseconds from trace start
+    double start_us = (start_ts_arr[i] > g_trace_start_time) ? cycles_to_us(start_ts_arr[i] - g_trace_start_time) : 0.0;
+    double end_us = (end_ts_arr[i] > g_trace_start_time) ? cycles_to_us(end_ts_arr[i] - g_trace_start_time) : 0.0;
+    double dur_us = end_us - start_us;
+    if (dur_us < 0) dur_us = 0;
+
+    TraceEvent ev;
+    ev.name = op_name;
+    ev.cat = "sft_op";
+    ev.ph = 'X';  // Complete event
+    ev.ts = start_us;
+    ev.dur = dur_us;
+    ev.pid = numa_id;
+    ev.tid = i;
+    ev.task_count = tasks[i];
+
+    g_trace_events.push_back(ev);
+  }
+}
+
+// Write trace events to JSON file (Chrome Trace Event Format)
+static void write_trace_to_file() {
+  std::lock_guard<std::mutex> lock(g_trace_mutex);
+
+  if (g_trace_events.empty()) {
+    return;
+  }
+
+  std::ofstream ofs(g_trace_output_path);
+  if (!ofs.is_open()) {
+    fprintf(stderr, "sft_timer: Failed to open trace file: %s\n", g_trace_output_path.c_str());
+    return;
+  }
+
+  // Use fixed precision for nanosecond accuracy (3 decimal places in microseconds = nanoseconds)
+  ofs << std::fixed << std::setprecision(3);
+
+  ofs << "{\n";
+  ofs << "  \"traceEvents\": [\n";
+
+  for (size_t i = 0; i < g_trace_events.size(); i++) {
+    const auto& ev = g_trace_events[i];
+    ofs << "    {";
+    ofs << "\"name\":\"" << ev.name << "\",";
+    ofs << "\"cat\":\"" << ev.cat << "\",";
+    ofs << "\"ph\":\"" << ev.ph << "\",";
+    ofs << "\"ts\":" << ev.ts << ",";
+    ofs << "\"dur\":" << ev.dur << ",";
+    ofs << "\"pid\":" << ev.pid << ",";
+    ofs << "\"tid\":" << ev.tid << ",";
+    ofs << "\"args\":{\"task_count\":" << ev.task_count << "}";
+    ofs << "}";
+    if (i < g_trace_events.size() - 1) {
+      ofs << ",";
+    }
+    ofs << "\n";
+  }
+
+  ofs << "  ],\n";
+  ofs << "  \"displayTimeUnit\": \"ns\"\n";
+  ofs << "}\n";
+
+  ofs.close();
+  fprintf(stderr, "sft_timer: Trace written to %s (%zu events)\n", g_trace_output_path.c_str(), g_trace_events.size());
+}
+
+// Signal handler for SIGTERM
+static void sigterm_handler(int sig) {
+  fprintf(stderr, "sft_timer: Received signal %d, writing trace...\n", sig);
+  write_trace_to_file();
+  // Re-raise the signal with default handler to allow normal termination
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+// Register signal handlers
+static void register_signal_handlers() {
+  static bool registered = false;
+  if (!registered) {
+    signal(SIGTERM, sigterm_handler);
+    signal(SIGINT, sigterm_handler);
+    registered = true;
+  }
+}
+
+// Destructor function - called at program exit
+__attribute__((destructor)) static void trace_destructor() { write_trace_to_file(); }
 
 void print_rt(FILE* out, const char* name, uint64_t* rt, int* tasks, int rt_threads) {
   if (rt_threads <= 0) return;
@@ -174,20 +321,35 @@ void print_op_stats(InNumaPool* pool, const char* op_name) {
   if (n <= 0) {
     return;
   }
+
+  // Ensure signal handlers are registered on first call
+  static bool handlers_registered = false;
+  if (!handlers_registered) {
+    register_signal_handlers();
+    handlers_registered = true;
+  }
+
   FILE* output = stderr;
   int numa_id = pool->get_numa_id();
-  if (numa_id == 0) {
-    output = stdout;
-  } else if (numa_id == 1) {
-    output = stderr;
-  }
+  // if (numa_id == 0) {
+  //   output = stdout;
+  // } else if (numa_id == 1) {
+  //   output = stderr;
+  // }
   std::vector<uint64_t> rt(n);
+  std::vector<uint64_t> start_ts(n);
+  std::vector<uint64_t> end_ts(n);
   std::vector<int> tasks(n);
   for (int i = 0; i < n; i++) {
     rt[i] = pool->get_thread_cycles(i);
     tasks[i] = pool->get_thread_task_count(i);
+    start_ts[i] = pool->get_thread_start_ts(i);
+    end_ts[i] = pool->get_thread_end_ts(i);
   }
-  print_rt(output, op_name, rt.data(), tasks.data(), n);
+  // print_rt(output, op_name, rt.data(), tasks.data(), n);
+
+  // Save trace data to memory for later export
+  add_trace_events(op_name, numa_id, n, start_ts.data(), end_ts.data(), tasks.data());
 }
 
 }  // namespace sft_timer
@@ -339,14 +501,14 @@ void InNumaPool::do_work_stealing_job(int task_num, std::function<void(int)> ini
                                       std::function<void(int)> compute_func, std::function<void(int)> finalize_func,
                                       const char* task_name, int block_size, bool async) {
   bool has_name = task_name != nullptr && task_name[0] != '\0';
-  // if (has_name) {
-  //   reset_counters();
-  // }
+  if (has_name) {
+    reset_counters();
+  }
   do_work_stealing_job_async(task_num, init_func, compute_func, finalize_func, block_size);
   if (!async) wait();
-  // if (has_name) {
-  //   sft_timer::print_op_stats(this, task_name);
-  // }
+  if (has_name) {
+    sft_timer::print_op_stats(this, task_name);
+  }
 }
 
 void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int)> init_func,
@@ -371,6 +533,9 @@ void InNumaPool::process_tasks(int thread_id) {
   uint64_t start_cycles = rdtsc_now();
   auto& s = thread_state_[thread_id];
   int local_task_count = 0;
+
+  // Record absolute start timestamp
+  s.start_ts = start_cycles;
 
   if (init_func_ != nullptr) {
     init_func_(thread_id);
@@ -412,9 +577,10 @@ void InNumaPool::process_tasks(int thread_id) {
   // IMPORTANT: Update timing BEFORE setting status to WAITING
   // Otherwise there's a race: wait() may see WAITING and return,
   // then reset_counters() runs, then this += executes, causing accumulation
-  uint64_t elapsed = rdtsc_now() - start_cycles;
-  s.finish_cycles += elapsed;
+  uint64_t end_cycles = rdtsc_now();
+  s.finish_cycles += end_cycles - start_cycles;
   s.task_count += local_task_count;
+  s.end_ts = end_cycles;  // Record absolute end timestamp
 
   // Now it's safe to signal completion
   s.status.store(ThreadStatus::WAITING, std::memory_order_release);
@@ -443,7 +609,7 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
       uint64_t elapsed_cycles = now - start;
       if (elapsed_cycles > sleep_threshold_cycles) {
         ITT_SYNC_CANCEL(&thread_state_[thread_id].status);  // Signal profiler: going to sleep
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
     } else if (status == ThreadStatus::EXIT) {
       ITT_SYNC_CANCEL(&thread_state_[thread_id].status);  // Signal profiler: exiting
