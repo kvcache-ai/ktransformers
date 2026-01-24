@@ -603,3 +603,113 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             )
         )
         self.cpu_infer.sync()
+
+    def submit_forward_sft(
+        self,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        save_for_backward: bool = True,
+    ) -> None:
+        """
+        Submit SFT forward pass asynchronously (non-blocking).
+
+        This method submits the CPU MoE computation without waiting for completion,
+        allowing GPU computation (shared_experts, lora_experts) to proceed in parallel.
+
+        Must be followed by sync_forward_sft() to retrieve results.
+
+        Args:
+            hidden_states: Input hidden states [qlen, hidden_size]
+            expert_ids: Expert IDs [qlen, num_experts_per_tok]
+            weights: Expert weights [qlen, num_experts_per_tok]
+            save_for_backward: Whether to save activations for backward pass
+        """
+        if not self._weights_loaded:
+            raise RuntimeError("Weights not loaded. Call load_weights() or load_weights_from_tensors() first.")
+
+        if not self._lora_initialized:
+            raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
+
+        qlen = hidden_states.shape[0]
+        if qlen > self.chunked_prefill_size:
+            raise ValueError(
+                f"qlen ({qlen}) exceeds chunked_prefill_size ({self.chunked_prefill_size}). "
+                "Increase chunked_prefill_size or reduce qlen to avoid buffer overrun."
+            )
+        if expert_ids.shape[0] != qlen or expert_ids.shape[1] != self.num_experts_per_tok:
+            raise ValueError(
+                f"expert_ids shape {tuple(expert_ids.shape)} must be " f"({qlen}, {self.num_experts_per_tok})."
+            )
+        if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
+            raise ValueError(f"weights shape {tuple(weights.shape)} must be " f"({qlen}, {self.num_experts_per_tok}).")
+
+        # Get or create buffer
+        buffer = KExpertsSFTBuffer.get_buffer(
+            qlen=qlen,
+            hidden_size=self.hidden_size,
+            moe_intermediate_size=self.moe_intermediate_size,
+            num_experts=self.num_experts,
+            num_experts_per_tok=self.num_experts_per_tok,
+            lora_rank=self.lora_rank,
+            dtype=hidden_states.dtype,
+        )
+
+        # Copy input data to CPU buffers
+        buffer.input_cpu.copy_(hidden_states, non_blocking=True)
+        buffer.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
+        buffer.weights_cpu.copy_(weights, non_blocking=True)
+        buffer.bsz_tensor[0] = qlen
+
+        # Store buffer reference and save_for_backward flag for sync_forward_sft
+        self._pending_buffer = buffer
+        self._pending_save_for_backward = save_for_backward
+        self._pending_qlen = qlen
+
+        # Submit forward task (non-blocking)
+        self.cpu_infer.submit(
+            self.moe.forward_sft_task(
+                buffer.bsz_tensor.data_ptr(),
+                self.num_experts_per_tok,
+                buffer.expert_ids_cpu.data_ptr(),
+                buffer.weights_cpu.data_ptr(),
+                buffer.input_cpu.data_ptr(),
+                buffer.output_cpu.data_ptr(),
+                save_for_backward,
+            )
+        )
+
+    def sync_forward_sft(self) -> torch.Tensor:
+        """
+        Synchronize and retrieve SFT forward results.
+
+        Must be called after submit_forward_sft().
+
+        Returns:
+            Output hidden states [qlen, hidden_size]
+        """
+        if not hasattr(self, "_pending_buffer") or self._pending_buffer is None:
+            raise RuntimeError("No pending forward. Call submit_forward_sft() first.")
+
+        # Wait for completion
+        self.cpu_infer.sync()
+
+        buffer = self._pending_buffer
+        save_for_backward = self._pending_save_for_backward
+
+        # Track cache depth
+        if save_for_backward:
+            self._cache_depth += 1
+            if self._cache_depth > self.max_cache_depth:
+                raise RuntimeError(
+                    f"Forward cache full (depth={self._cache_depth}, max={self.max_cache_depth}). "
+                    "Call backward() to release cache entries."
+                )
+
+        # Clear pending state
+        result = buffer.output_cpu.clone()
+        self._pending_buffer = None
+        self._pending_save_for_backward = None
+        self._pending_qlen = None
+
+        return result

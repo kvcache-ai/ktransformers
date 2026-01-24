@@ -396,6 +396,42 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         """
         pass
 
+    @abstractmethod
+    def submit_forward_sft(
+        self,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        save_for_backward: bool = True,
+    ) -> None:
+        """
+        Submit SFT forward pass asynchronously (non-blocking).
+
+        This method submits the CPU MoE computation without waiting for completion,
+        allowing GPU computation (shared_experts, lora_experts) to proceed in parallel.
+
+        Must be followed by sync_forward_sft() to retrieve results.
+
+        Args:
+            hidden_states: Input hidden states [qlen, hidden_size]
+            expert_ids: Expert IDs [qlen, num_experts_per_tok]
+            weights: Expert weights [qlen, num_experts_per_tok]
+            save_for_backward: Whether to save activations for backward pass
+        """
+        pass
+
+    @abstractmethod
+    def sync_forward_sft(self) -> torch.Tensor:
+        """
+        Synchronize and retrieve SFT forward results.
+
+        Must be called after submit_forward_sft().
+
+        Returns:
+            Output hidden states [qlen, hidden_size]
+        """
+        pass
+
     # ========== Inference methods (not available in SFT mode) ==========
 
     def forward(self, *args, **kwargs):
@@ -404,11 +440,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     def submit_forward(self, *args, **kwargs):
         """Async submit is not available in SFT mode."""
-        raise RuntimeError("submit_forward() is not available in SFT mode. " "SFT mode uses synchronous forward_sft().")
+        raise RuntimeError("submit_forward() is not available in SFT mode. " "Use submit_forward_sft() instead.")
 
     def sync_forward(self, *args, **kwargs):
         """Async sync is not available in SFT mode."""
-        raise RuntimeError("sync_forward() is not available in SFT mode.")
+        raise RuntimeError("sync_forward() is not available in SFT mode. " "Use sync_forward_sft() instead.")
 
     def select_deferred_experts(self, *args, **kwargs):
         """Deferred experts is not available in SFT mode."""

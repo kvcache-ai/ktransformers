@@ -1713,9 +1713,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         offset += cache.m_local_num_cache[expert_idx];
       }
 
-      // Zero out grad_weights first
-      memset(grad_w, 0, qlen * k * sizeof(float));
-
       // Compute grad_weights for each token-expert pair
       pool->do_work_stealing_job(
           qlen, nullptr,
@@ -4479,9 +4476,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     ggml_bf16_t* grad_up_a = (ggml_bf16_t*)grad_up_lora_a;
     ggml_bf16_t* grad_up_b = (ggml_bf16_t*)grad_up_lora_b;
 
-    // Initialize grad_input to zero (bf16)
-    memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
-
     pool->do_work_stealing_job(
         activated_expert * 2, nullptr,
         [this, &cache, grad_input, grad_gate_a, grad_gate_b, grad_up_a, grad_up_b, qlen, k](int task_id) {
@@ -4751,8 +4745,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       lora_up_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
       bf16_inter_ptr += align64(local_max_m * padded_lora_rank_ * sizeof(ggml_bf16_t));
     }
-
-    memset(grad_input, 0, qlen * config_.hidden_size * sizeof(ggml_bf16_t));
 
     // Offsets into contiguous grad_gate/up buffers
     std::vector<size_t> expert_offsets(activated_expert);
