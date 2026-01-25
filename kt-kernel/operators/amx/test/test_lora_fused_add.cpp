@@ -2183,6 +2183,452 @@ void lora_fused_add_opt9(const float* __restrict intermediate, const ggml_bf16_t
 }
 
 // ============================================================================
+// Optimized v10: Pre-transposed weight layout [rank][output_dim]
+// This allows contiguous memory access for output dimension in inner loop
+// Benefits: Better cache locality, vectorized output accumulation
+// T_BLOCK=4, O_BLOCK=16, with 4 accumulators per output (total 64 -> use 2 passes)
+// ============================================================================
+
+// Transpose weight from [output_dim][rank] to [rank][output_dim]
+void transpose_weight_bf16(const ggml_bf16_t* __restrict weight, ggml_bf16_t* __restrict weight_t, int output_dim,
+                           int rank) {
+  // Simple transpose: weight[i][r] -> weight_t[r][i]
+  for (int r = 0; r < rank; r++) {
+    for (int i = 0; i < output_dim; i++) {
+      weight_t[r * output_dim + i] = weight[i * rank + r];
+    }
+  }
+}
+
+// Optimized transpose using AVX-512
+void transpose_weight_bf16_fast(const ggml_bf16_t* __restrict weight, ggml_bf16_t* __restrict weight_t, int output_dim,
+                                int rank) {
+  // Process 16x16 blocks for efficient transpose
+  constexpr int BLOCK = 16;
+
+  int r = 0;
+  for (; r + BLOCK <= rank; r += BLOCK) {
+    int i = 0;
+    for (; i + BLOCK <= output_dim; i += BLOCK) {
+      // Load 16x16 block from weight[i:i+16][r:r+16]
+      // and store as weight_t[r:r+16][i:i+16]
+      for (int rr = 0; rr < BLOCK; rr++) {
+        for (int ii = 0; ii < BLOCK; ii++) {
+          weight_t[(r + rr) * output_dim + (i + ii)] = weight[(i + ii) * rank + (r + rr)];
+        }
+      }
+    }
+    // Remainder columns
+    for (; i < output_dim; i++) {
+      for (int rr = 0; rr < BLOCK; rr++) {
+        weight_t[(r + rr) * output_dim + i] = weight[i * rank + (r + rr)];
+      }
+    }
+  }
+  // Remainder rows
+  for (; r < rank; r++) {
+    for (int i = 0; i < output_dim; i++) {
+      weight_t[r * output_dim + i] = weight[i * rank + r];
+    }
+  }
+}
+
+// Kernel using pre-transposed weights: weight_t[rank][output_dim]
+// For each rank position, weights for all outputs are contiguous
+void lora_fused_add_opt10(const float* __restrict intermediate,
+                          const ggml_bf16_t* __restrict weight_t,  // Transposed: [rank][output_dim]
+                          ggml_bf16_t* __restrict output, int num_tokens, int rank, int output_dim, float scale) {
+  constexpr int T_BLOCK = 4;
+  constexpr int O_BLOCK = 16;  // Process 16 outputs at a time (fits in one AVX-512 register)
+
+  const __m512 scale_vec = _mm512_set1_ps(scale);
+  const int output_tail = output_dim & 15;
+  const __mmask16 output_tail_mask = output_tail ? ((__mmask16)1 << output_tail) - 1 : 0;
+
+  int t = 0;
+  for (; t + T_BLOCK <= num_tokens; t += T_BLOCK) {
+    const float* inter0 = intermediate + (t + 0) * rank;
+    const float* inter1 = intermediate + (t + 1) * rank;
+    const float* inter2 = intermediate + (t + 2) * rank;
+    const float* inter3 = intermediate + (t + 3) * rank;
+    ggml_bf16_t* out0 = output + (t + 0) * output_dim;
+    ggml_bf16_t* out1 = output + (t + 1) * output_dim;
+    ggml_bf16_t* out2 = output + (t + 2) * output_dim;
+    ggml_bf16_t* out3 = output + (t + 3) * output_dim;
+
+    int i = 0;
+    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
+      // 4 accumulators per token for 16 outputs
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+      __m512 acc2 = _mm512_setzero_ps();
+      __m512 acc3 = _mm512_setzero_ps();
+
+      // Inner loop over rank - weights are now contiguous for each rank position
+      for (int r = 0; r < rank; r++) {
+        // Load 16 consecutive weights for this rank position
+        // weight_t[r][i:i+16] - contiguous!
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+
+        // Broadcast intermediate values
+        __m512 iv0 = _mm512_set1_ps(inter0[r]);
+        __m512 iv1 = _mm512_set1_ps(inter1[r]);
+        __m512 iv2 = _mm512_set1_ps(inter2[r]);
+        __m512 iv3 = _mm512_set1_ps(inter3[r]);
+
+        // FMA: accumulate weighted contributions
+        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
+        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
+        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
+        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+      }
+
+      // Scale
+      acc0 = _mm512_mul_ps(acc0, scale_vec);
+      acc1 = _mm512_mul_ps(acc1, scale_vec);
+      acc2 = _mm512_mul_ps(acc2, scale_vec);
+      acc3 = _mm512_mul_ps(acc3, scale_vec);
+
+      // Load output, add, convert, store
+      __m512 out_v0 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out0 + i))), 16));
+      __m512 out_v1 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out1 + i))), 16));
+      __m512 out_v2 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out2 + i))), 16));
+      __m512 out_v3 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out3 + i))), 16));
+
+      out_v0 = _mm512_add_ps(out_v0, acc0);
+      out_v1 = _mm512_add_ps(out_v1, acc1);
+      out_v2 = _mm512_add_ps(out_v2, acc2);
+      out_v3 = _mm512_add_ps(out_v3, acc3);
+
+      __m256bh bf16_0 = _mm512_cvtneps_pbh(out_v0);
+      __m256bh bf16_1 = _mm512_cvtneps_pbh(out_v1);
+      __m256bh bf16_2 = _mm512_cvtneps_pbh(out_v2);
+      __m256bh bf16_3 = _mm512_cvtneps_pbh(out_v3);
+
+      _mm256_storeu_si256((__m256i*)(out0 + i), (__m256i)bf16_0);
+      _mm256_storeu_si256((__m256i*)(out1 + i), (__m256i)bf16_1);
+      _mm256_storeu_si256((__m256i*)(out2 + i), (__m256i)bf16_2);
+      _mm256_storeu_si256((__m256i*)(out3 + i), (__m256i)bf16_3);
+    }
+
+    // Handle remaining outputs (< 16)
+    if (output_tail_mask) {
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+      __m512 acc2 = _mm512_setzero_ps();
+      __m512 acc3 = _mm512_setzero_ps();
+
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, weight_t + r * output_dim + i)), 16));
+
+        __m512 iv0 = _mm512_set1_ps(inter0[r]);
+        __m512 iv1 = _mm512_set1_ps(inter1[r]);
+        __m512 iv2 = _mm512_set1_ps(inter2[r]);
+        __m512 iv3 = _mm512_set1_ps(inter3[r]);
+
+        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
+        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
+        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
+        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+      }
+
+      acc0 = _mm512_mul_ps(acc0, scale_vec);
+      acc1 = _mm512_mul_ps(acc1, scale_vec);
+      acc2 = _mm512_mul_ps(acc2, scale_vec);
+      acc3 = _mm512_mul_ps(acc3, scale_vec);
+
+      __m512 out_v0 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out0 + i)), 16));
+      __m512 out_v1 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out1 + i)), 16));
+      __m512 out_v2 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out2 + i)), 16));
+      __m512 out_v3 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out3 + i)), 16));
+
+      out_v0 = _mm512_add_ps(out_v0, acc0);
+      out_v1 = _mm512_add_ps(out_v1, acc1);
+      out_v2 = _mm512_add_ps(out_v2, acc2);
+      out_v3 = _mm512_add_ps(out_v3, acc3);
+
+      __m256bh bf16_0 = _mm512_cvtneps_pbh(out_v0);
+      __m256bh bf16_1 = _mm512_cvtneps_pbh(out_v1);
+      __m256bh bf16_2 = _mm512_cvtneps_pbh(out_v2);
+      __m256bh bf16_3 = _mm512_cvtneps_pbh(out_v3);
+
+      _mm256_mask_storeu_epi16(out0 + i, output_tail_mask, (__m256i)bf16_0);
+      _mm256_mask_storeu_epi16(out1 + i, output_tail_mask, (__m256i)bf16_1);
+      _mm256_mask_storeu_epi16(out2 + i, output_tail_mask, (__m256i)bf16_2);
+      _mm256_mask_storeu_epi16(out3 + i, output_tail_mask, (__m256i)bf16_3);
+    }
+  }
+
+  // Remaining tokens
+  for (; t < num_tokens; t++) {
+    const float* inter_row = intermediate + t * rank;
+    ggml_bf16_t* out_row = output + t * output_dim;
+
+    int i = 0;
+    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
+      __m512 acc = _mm512_setzero_ps();
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+        __m512 iv = _mm512_set1_ps(inter_row[r]);
+        acc = _mm512_fmadd_ps(iv, wv, acc);
+      }
+      acc = _mm512_mul_ps(acc, scale_vec);
+      __m512 out_v = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out_row + i))), 16));
+      out_v = _mm512_add_ps(out_v, acc);
+      _mm256_storeu_si256((__m256i*)(out_row + i), (__m256i)_mm512_cvtneps_pbh(out_v));
+    }
+
+    if (output_tail_mask) {
+      __m512 acc = _mm512_setzero_ps();
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, weight_t + r * output_dim + i)), 16));
+        __m512 iv = _mm512_set1_ps(inter_row[r]);
+        acc = _mm512_fmadd_ps(iv, wv, acc);
+      }
+      acc = _mm512_mul_ps(acc, scale_vec);
+      __m512 out_v = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out_row + i)), 16));
+      out_v = _mm512_add_ps(out_v, acc);
+      _mm256_mask_storeu_epi16(out_row + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v));
+    }
+  }
+}
+
+// ============================================================================
+// AMX support detection and initialization
+// ============================================================================
+#if defined(__AMX_TILE__) && defined(__AMX_BF16__)
+#define AMX_AVAILABLE_LORA 1
+#include <asm/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#define XFEATURE_XTILEDATA 18
+#define ARCH_GET_XCOMP_PERM 0x1022
+#define ARCH_REQ_XCOMP_PERM 0x1023
+
+static bool amx_init_lora = false;
+
+bool init_amx_lora() {
+  if (amx_init_lora) return true;
+
+  unsigned long bitmask = 0;
+  if (syscall(SYS_arch_prctl, ARCH_GET_XCOMP_PERM, &bitmask) != 0) {
+    return false;
+  }
+
+  if (!(bitmask & (1UL << XFEATURE_XTILEDATA))) {
+    if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA) != 0) {
+      return false;
+    }
+  }
+
+  amx_init_lora = true;
+  return true;
+}
+
+// AMX tile configuration structure
+struct TileConfigLora {
+  uint8_t palette_id = 1;
+  uint8_t start_row = 0;
+  uint8_t reserved[14] = {0};
+  uint16_t colsb[16] = {0};
+  uint8_t rows[16] = {0};
+
+  void set_row_col(int tile, int rows_, int colsb_) {
+    rows[tile] = rows_;
+    colsb[tile] = colsb_;
+  }
+
+  void set_config() { _tile_loadconfig(this); }
+};
+
+// Configure AMX for BF16 matmul
+// A tile: [16 rows, 32 BF16] = [16, 64 bytes]
+// B tile (VNNI): [16 rows, 32 BF16] = [16, 64 bytes]
+// C tile: [16 rows, 16 FP32] = [16, 64 bytes]
+void configure_amx_lora() {
+  TileConfigLora cfg;
+  cfg.set_row_col(0, 16, 64);  // A: 16 rows x 64 bytes
+  cfg.set_row_col(1, 16, 64);  // B: 16 rows x 64 bytes (VNNI)
+  cfg.set_row_col(2, 16, 64);  // C: 16 rows x 64 bytes
+  cfg.set_config();
+}
+
+#else
+#define AMX_AVAILABLE_LORA 0
+bool init_amx_lora() { return false; }
+void configure_amx_lora() {}
+#endif
+
+// ============================================================================
+// Pre-pack weight into VNNI format for AMX
+// Input: weight_t[rank][output_dim] (transposed BF16)
+// Output: weight_vnni - VNNI packed format for direct AMX tile load
+//
+// VNNI format for AMX BF16:
+//   For each output tile (16 outputs), for each rank pair (2 ranks):
+//   store [out0_r0, out0_r1, out1_r0, out1_r1, ..., out15_r0, out15_r1]
+//
+// Layout: [num_output_tiles][padded_rank/2][32] where 32 = 16 outputs * 2 ranks
+// ============================================================================
+constexpr int AMX_TILE_N = 16;  // outputs per tile
+constexpr int AMX_TILE_K = 32;  // rank per tile (padded)
+
+size_t get_vnni_weight_size(int rank, int output_dim) {
+  int padded_rank = ((rank + AMX_TILE_K - 1) / AMX_TILE_K) * AMX_TILE_K;
+  int num_output_tiles = (output_dim + AMX_TILE_N - 1) / AMX_TILE_N;
+  return (size_t)num_output_tiles * (padded_rank / 2) * (AMX_TILE_N * 2);
+}
+
+void pack_weight_vnni(const ggml_bf16_t* __restrict weight_t,  // [rank][output_dim]
+                      ggml_bf16_t* __restrict weight_vnni, int rank, int output_dim) {
+  int padded_rank = ((rank + AMX_TILE_K - 1) / AMX_TILE_K) * AMX_TILE_K;
+  int num_output_tiles = (output_dim + AMX_TILE_N - 1) / AMX_TILE_N;
+
+  // Zero initialize for padding
+  memset(weight_vnni, 0, get_vnni_weight_size(rank, output_dim) * sizeof(ggml_bf16_t));
+
+  // Pack into VNNI format
+  // For each output tile
+  for (int ot = 0; ot < num_output_tiles; ot++) {
+    int o_begin = ot * AMX_TILE_N;
+    int o_end = std::min(o_begin + AMX_TILE_N, output_dim);
+
+    // For each rank pair
+    for (int rp = 0; rp < padded_rank / 2; rp++) {
+      int r0 = rp * 2;
+      int r1 = rp * 2 + 1;
+
+      // Destination: weight_vnni[ot][rp][0..31]
+      ggml_bf16_t* dst = weight_vnni + (size_t)ot * (padded_rank / 2) * (AMX_TILE_N * 2) + rp * (AMX_TILE_N * 2);
+
+      // Pack 16 outputs, 2 ranks each
+      for (int oi = 0; oi < AMX_TILE_N; oi++) {
+        int o = o_begin + oi;
+        if (o < output_dim) {
+          // weight_t is [rank][output_dim]
+          dst[oi * 2 + 0] = (r0 < rank) ? weight_t[r0 * output_dim + o] : ggml_bf16_t{0};
+          dst[oi * 2 + 1] = (r1 < rank) ? weight_t[r1 * output_dim + o] : ggml_bf16_t{0};
+        } else {
+          dst[oi * 2 + 0] = ggml_bf16_t{0};
+          dst[oi * 2 + 1] = ggml_bf16_t{0};
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Optimized v11: AMX BF16 with pre-packed VNNI weights
+// weight_vnni: pre-packed in VNNI format
+// ============================================================================
+#if AMX_AVAILABLE_LORA
+void lora_fused_add_opt11_amx(const float* __restrict intermediate,
+                              const ggml_bf16_t* __restrict weight_vnni,  // Pre-packed VNNI format
+                              ggml_bf16_t* __restrict output, int num_tokens, int rank, int output_dim, float scale) {
+  constexpr int TILE_M = 16;  // tokens per tile
+  constexpr int TILE_K = 32;  // rank per tile
+  constexpr int TILE_N = 16;  // outputs per tile
+
+  int padded_rank = ((rank + TILE_K - 1) / TILE_K) * TILE_K;
+  int num_output_tiles = (output_dim + TILE_N - 1) / TILE_N;
+  size_t vnni_tile_stride = (size_t)(padded_rank / 2) * (TILE_N * 2);
+
+  // Temporary buffers (aligned)
+  alignas(64) ggml_bf16_t tile_a[TILE_M * TILE_K];
+  alignas(64) float tile_c[TILE_M * TILE_N];
+
+  const __m512 scale_vec = _mm512_set1_ps(scale);
+
+  // Process tokens in blocks of TILE_M
+  for (int t_begin = 0; t_begin < num_tokens; t_begin += TILE_M) {
+    int t_end = std::min(t_begin + TILE_M, num_tokens);
+    int t_count = t_end - t_begin;
+
+    // Process output tiles
+    for (int ot = 0; ot < num_output_tiles; ot++) {
+      int o_begin = ot * TILE_N;
+      int o_end = std::min(o_begin + TILE_N, output_dim);
+      int o_count = o_end - o_begin;
+
+      // Zero the C tile
+      _tile_zero(2);
+
+      // Pointer to VNNI weight for this output tile
+      const ggml_bf16_t* weight_tile = weight_vnni + ot * vnni_tile_stride;
+
+      // Accumulate over rank dimension
+      for (int r_begin = 0; r_begin < padded_rank; r_begin += TILE_K) {
+        int r_end = std::min(r_begin + TILE_K, padded_rank);
+        int actual_r_end = std::min(r_end, rank);
+
+        // Pack A tile: convert intermediate from FP32 to BF16
+        memset(tile_a, 0, sizeof(tile_a));
+        for (int ti = 0; ti < t_count; ti++) {
+          for (int ri = 0; ri < actual_r_end - r_begin; ri++) {
+            tile_a[ti * TILE_K + ri] = GGML_FP32_TO_BF16(intermediate[(t_begin + ti) * rank + r_begin + ri]);
+          }
+        }
+
+        // B tile is already in VNNI format - load directly
+        // weight_tile[r_begin/2 * 32 ... ]
+        const ggml_bf16_t* b_ptr = weight_tile + (r_begin / 2) * (TILE_N * 2);
+
+        _tile_loadd(0, tile_a, TILE_K * sizeof(ggml_bf16_t));
+        _tile_loadd(1, b_ptr, TILE_N * 2 * sizeof(ggml_bf16_t));
+        _tile_dpbf16ps(2, 0, 1);
+      }
+
+      // Store C tile
+      _tile_stored(2, tile_c, TILE_N * sizeof(float));
+
+      // Apply scale and accumulate to output
+      for (int ti = 0; ti < t_count; ti++) {
+        int t_idx = t_begin + ti;
+
+        if (o_count == TILE_N) {
+          __m512 result = _mm512_loadu_ps(&tile_c[ti * TILE_N]);
+          result = _mm512_mul_ps(result, scale_vec);
+
+          __m512 out_fp32 = _mm512_castsi512_ps(_mm512_slli_epi32(
+              _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(output + t_idx * output_dim + o_begin))), 16));
+          out_fp32 = _mm512_add_ps(out_fp32, result);
+          __m256bh out_bf16 = _mm512_cvtneps_pbh(out_fp32);
+          _mm256_storeu_si256((__m256i*)(output + t_idx * output_dim + o_begin), (__m256i)out_bf16);
+        } else {
+          for (int oi = 0; oi < o_count; oi++) {
+            float result = tile_c[ti * TILE_N + oi] * scale;
+            float out_val = GGML_BF16_TO_FP32(output[t_idx * output_dim + o_begin + oi]);
+            output[t_idx * output_dim + o_begin + oi] = GGML_FP32_TO_BF16(out_val + result);
+          }
+        }
+      }
+    }
+  }
+}
+#else
+void lora_fused_add_opt11_amx(const float* __restrict intermediate, const ggml_bf16_t* __restrict weight_t,
+                              ggml_bf16_t* __restrict output, int num_tokens, int rank, int output_dim, float scale) {
+  // Fallback to opt10 when AMX not available
+  lora_fused_add_opt10(intermediate, weight_t, output, num_tokens, rank, output_dim, scale);
+}
+#endif
+
+// ============================================================================
 // FP32 weight version for comparison (no BF16 conversion overhead)
 // ============================================================================
 void lora_fused_add_fp32_weight(const float* __restrict intermediate,
@@ -2994,6 +3440,11 @@ int main(int argc, char** argv) {
     ggml_bf16_t* output_opt7 = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
     ggml_bf16_t* output_opt8 = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
     ggml_bf16_t* output_opt9 = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
+    ggml_bf16_t* output_opt10 = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
+    ggml_bf16_t* output_opt11 = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
+    ggml_bf16_t* weight_t = (ggml_bf16_t*)aligned_alloc(64, weight_size * sizeof(ggml_bf16_t));  // Transposed weight
+    size_t vnni_size = get_vnni_weight_size(cfg.rank, cfg.output_dim);
+    ggml_bf16_t* weight_vnni = (ggml_bf16_t*)aligned_alloc(64, vnni_size * sizeof(ggml_bf16_t));  // VNNI packed weight
     ggml_bf16_t* output_fp32w =
         (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));  // For FP32 weight test
     ggml_bf16_t* output_init = (ggml_bf16_t*)aligned_alloc(64, output_size * sizeof(ggml_bf16_t));
@@ -3002,6 +3453,12 @@ int main(int argc, char** argv) {
     init_random_fp32(intermediate, inter_size, gen);
     init_random_bf16(weight, weight_size, gen);
     init_random_bf16(output_init, output_size, gen);
+
+    // Transpose weight for opt10: [output_dim][rank] -> [rank][output_dim]
+    transpose_weight_bf16_fast(weight, weight_t, cfg.output_dim, cfg.rank);
+
+    // Pack weight into VNNI format for AMX opt11
+    pack_weight_vnni(weight_t, weight_vnni, cfg.rank, cfg.output_dim);
 
     // Convert BF16 weights to FP32 for comparison test
     for (size_t i = 0; i < weight_size; i++) {
@@ -3020,6 +3477,8 @@ int main(int argc, char** argv) {
     memcpy(output_opt7, output_init, output_size * sizeof(ggml_bf16_t));
     memcpy(output_opt8, output_init, output_size * sizeof(ggml_bf16_t));
     memcpy(output_opt9, output_init, output_size * sizeof(ggml_bf16_t));
+    memcpy(output_opt10, output_init, output_size * sizeof(ggml_bf16_t));
+    memcpy(output_opt11, output_init, output_size * sizeof(ggml_bf16_t));
     memcpy(output_fp32w, output_init, output_size * sizeof(ggml_bf16_t));
 
     // Run reference
@@ -3075,6 +3534,30 @@ int main(int argc, char** argv) {
     bool opt9_ok = compare_bf16_buffers(output_opt9, output_ref, output_size);
     printf("  opt9:    %s\n", opt9_ok ? "PASS" : "FAIL");
 
+    // Test opt10 (pre-transposed weight)
+    lora_fused_add_opt10(intermediate, weight_t, output_opt10, cfg.num_tokens, cfg.rank, cfg.output_dim, scale);
+    bool opt10_ok = compare_bf16_buffers(output_opt10, output_ref, output_size);
+    printf("  opt10:   %s\n", opt10_ok ? "PASS" : "FAIL");
+
+    // Test opt11 (AMX with pre-transposed weight)
+#if AMX_AVAILABLE_LORA
+    static bool amx_configured = false;
+    if (!amx_configured && init_amx_lora()) {
+      configure_amx_lora();
+      amx_configured = true;
+    }
+    if (amx_configured) {
+      lora_fused_add_opt11_amx(intermediate, weight_vnni, output_opt11, cfg.num_tokens, cfg.rank, cfg.output_dim,
+                               scale);
+      bool opt11_ok = compare_bf16_buffers(output_opt11, output_ref, output_size);
+      printf("  opt11:   %s  (AMX)\n", opt11_ok ? "PASS" : "FAIL");
+    } else {
+      printf("  opt11:   SKIP (AMX not available)\n");
+    }
+#else
+    printf("  opt11:   SKIP (AMX not compiled)\n");
+#endif
+
     // Test FP32 weight version
     lora_fused_add_fp32_weight(intermediate, weight_fp32, output_fp32w, cfg.num_tokens, cfg.rank, cfg.output_dim,
                                scale);
@@ -3124,6 +3607,58 @@ int main(int argc, char** argv) {
     benchmark(lora_fused_add_opt8, "opt8");
     benchmark(lora_fused_add_opt9, "opt9");
 
+    // Benchmark opt10 separately (uses transposed weight)
+    {
+      // Warmup
+      for (int i = 0; i < warmup; i++) {
+        memcpy(output_opt10, output_init, output_size * sizeof(ggml_bf16_t));
+        lora_fused_add_opt10(intermediate, weight_t, output_opt10, cfg.num_tokens, cfg.rank, cfg.output_dim, scale);
+      }
+
+      // Benchmark
+      auto start = std::chrono::high_resolution_clock::now();
+      for (int i = 0; i < iters; i++) {
+        memcpy(output_opt10, output_init, output_size * sizeof(ggml_bf16_t));
+        lora_fused_add_opt10(intermediate, weight_t, output_opt10, cfg.num_tokens, cfg.rank, cfg.output_dim, scale);
+      }
+      auto end = std::chrono::high_resolution_clock::now();
+
+      double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      double avg_ms = elapsed_ms / iters;
+      double flops = 2.0 * cfg.num_tokens * cfg.rank * cfg.output_dim;
+      double gflops = (flops / 1e9) / (avg_ms / 1000.0);
+
+      printf("  %8s: %.3f ms, %.1f GFLOPS  (pre-transposed weight)\n", "opt10", avg_ms, gflops);
+    }
+
+    // Benchmark opt11 (AMX) separately
+#if AMX_AVAILABLE_LORA
+    if (amx_configured) {
+      // Warmup
+      for (int i = 0; i < warmup; i++) {
+        memcpy(output_opt11, output_init, output_size * sizeof(ggml_bf16_t));
+        lora_fused_add_opt11_amx(intermediate, weight_vnni, output_opt11, cfg.num_tokens, cfg.rank, cfg.output_dim,
+                                 scale);
+      }
+
+      // Benchmark
+      auto start = std::chrono::high_resolution_clock::now();
+      for (int i = 0; i < iters; i++) {
+        memcpy(output_opt11, output_init, output_size * sizeof(ggml_bf16_t));
+        lora_fused_add_opt11_amx(intermediate, weight_vnni, output_opt11, cfg.num_tokens, cfg.rank, cfg.output_dim,
+                                 scale);
+      }
+      auto end = std::chrono::high_resolution_clock::now();
+
+      double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+      double avg_ms = elapsed_ms / iters;
+      double flops = 2.0 * cfg.num_tokens * cfg.rank * cfg.output_dim;
+      double gflops = (flops / 1e9) / (avg_ms / 1000.0);
+
+      printf("  %8s: %.3f ms, %.1f GFLOPS  (AMX BF16)\n", "opt11", avg_ms, gflops);
+    }
+#endif
+
     // Benchmark FP32 weight version separately (different weight type)
     {
       // Warmup
@@ -3168,6 +3703,10 @@ int main(int argc, char** argv) {
     free(output_opt7);
     free(output_opt8);
     free(output_opt9);
+    free(output_opt10);
+    free(output_opt11);
+    free(weight_t);
+    free(weight_vnni);
     free(output_fp32w);
     free(output_init);
   }

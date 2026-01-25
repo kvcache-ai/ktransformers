@@ -9,12 +9,13 @@
 
 #include "../../../cpu_backend/worker_pool.h"
 #include "llama.cpp/ggml-impl.h"
+#include "utils.hpp"
 
 namespace avx {
 
 // Enable/disable kernel tracing (can be controlled at compile time)
 #ifndef AVX_KERNEL_TRACE_ENABLED
-#define AVX_KERNEL_TRACE_ENABLED 1
+#define AVX_KERNEL_TRACE_ENABLED 0
 #endif
 
 // ============================================================================
@@ -47,9 +48,9 @@ namespace avx {
  */
 inline void lora_bf16_matmul_t4r4(const ggml_bf16_t* __restrict input, const ggml_bf16_t* __restrict weight,
                                   float* __restrict output, int num_tokens, int k_dim, int rank) {
-#if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_start = sft_timer::get_trace_timestamp();
-#endif
+  // #if AVX_KERNEL_TRACE_ENABLED
+  //   uint64_t trace_start = sft_timer::get_trace_timestamp();
+  // #endif
 
   constexpr int T_BLOCK = 4;
   constexpr int R_BLOCK = 4;
@@ -239,13 +240,13 @@ inline void lora_bf16_matmul_t4r4(const ggml_bf16_t* __restrict input, const ggm
     }
   }
 
-#if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_end = sft_timer::get_trace_timestamp();
-  char args_buf[128];
-  snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"K\":%d,\"R\":%d}", num_tokens, k_dim, rank);
-  sft_timer::add_kernel_trace("lora_bf16_matmul_t4r4", trace_start, trace_end, 0, WorkerPool::thread_local_id,
-                              args_buf);
-#endif
+  // #if AVX_KERNEL_TRACE_ENABLED
+  //   uint64_t trace_end = sft_timer::get_trace_timestamp();
+  //   char args_buf[128];
+  //   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"K\":%d,\"R\":%d}", num_tokens, k_dim, rank);
+  //   sft_timer::add_kernel_trace("lora_bf16_matmul_t4r4", trace_start, trace_end, 0, WorkerPool::thread_local_id,
+  //                               args_buf);
+  // #endif
 }
 
 /**
@@ -889,6 +890,289 @@ inline void lora_fp32_bf16_fused_add_wt(const float* __restrict intermediate, co
   char args_buf[128];
   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"R\":%d,\"O\":%d}", num_tokens, rank, output_dim);
   sft_timer::add_kernel_trace("lora_fp32_bf16_fused_add_wt", trace_start, trace_end, 0, WorkerPool::thread_local_id,
+                              args_buf);
+#endif
+}
+
+// ============================================================================
+// Pre-transposed weight utilities and optimized kernel
+//
+// Transpose weight from [output_dim][rank] to [rank][output_dim]
+// This enables contiguous memory access in the inner loop for better cache efficiency.
+// ============================================================================
+
+/**
+ * @brief Transpose LoRA B weight from [output_dim][rank] to [rank][output_dim]
+ *
+ * @param src     Source weight [output_dim][rank]
+ * @param dst     Destination weight [rank][output_dim]
+ * @param output_dim Output dimension
+ * @param rank    LoRA rank
+ */
+inline void transpose_lora_weight(const ggml_bf16_t* __restrict src, ggml_bf16_t* __restrict dst, int output_dim,
+                                  int rank) {
+  // Simple transpose: src[i][r] -> dst[r][i]
+  for (int r = 0; r < rank; r++) {
+    for (int i = 0; i < output_dim; i++) {
+      dst[r * output_dim + i] = src[i * rank + r];
+    }
+  }
+}
+
+/**
+ * @brief Fused LoRA add with pre-transposed weight (optimized version)
+ *
+ * Computes: output[t, i] += scale * sum_r(intermediate[t, r] * weight_t[r, i])
+ *
+ * Key optimization: weight_t is pre-transposed to [rank][output_dim], allowing
+ * contiguous memory access for 16 outputs at a time in the inner loop.
+ * This eliminates the horizontal reduction overhead and maximizes cache efficiency.
+ *
+ * @param intermediate FP32 input [num_tokens, rank]
+ * @param weight_t     Pre-transposed BF16 weight [rank][output_dim]
+ * @param output       BF16 output [num_tokens, output_dim] (accumulated)
+ * @param num_tokens   Number of tokens
+ * @param rank         LoRA rank
+ * @param output_dim   Output dimension
+ * @param scale        LoRA scaling factor
+ */
+inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermediate,
+                                                const ggml_bf16_t* __restrict weight_t, ggml_bf16_t* __restrict output,
+                                                int num_tokens, int rank, int output_dim, float scale) {
+#if AVX_KERNEL_TRACE_ENABLED
+  uint64_t trace_start = sft_timer::get_trace_timestamp();
+#endif
+
+  constexpr int T_BLOCK = 4;
+  constexpr int O_BLOCK = 16;  // Process 16 outputs at a time (one AVX-512 vector)
+
+  const __m512 scale_vec = _mm512_set1_ps(scale);
+  const int output_tail = output_dim & 15;
+  const __mmask16 output_tail_mask = output_tail ? ((__mmask16)1 << output_tail) - 1 : 0;
+
+  int t = 0;
+  for (; t + T_BLOCK <= num_tokens; t += T_BLOCK) {
+    const float* inter0 = intermediate + (t + 0) * rank;
+    const float* inter1 = intermediate + (t + 1) * rank;
+    const float* inter2 = intermediate + (t + 2) * rank;
+    const float* inter3 = intermediate + (t + 3) * rank;
+    ggml_bf16_t* out0 = output + (t + 0) * output_dim;
+    ggml_bf16_t* out1 = output + (t + 1) * output_dim;
+    ggml_bf16_t* out2 = output + (t + 2) * output_dim;
+    ggml_bf16_t* out3 = output + (t + 3) * output_dim;
+
+    int i = 0;
+    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
+      // 4 accumulators for 4 tokens, each accumulating 16 outputs
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+      __m512 acc2 = _mm512_setzero_ps();
+      __m512 acc3 = _mm512_setzero_ps();
+
+      // Inner loop over rank - weights are contiguous for each rank position
+      for (int r = 0; r < rank; r++) {
+        // Load 16 consecutive weights: weight_t[r][i:i+16]
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+
+        // Broadcast intermediate values and FMA
+        __m512 iv0 = _mm512_set1_ps(inter0[r]);
+        __m512 iv1 = _mm512_set1_ps(inter1[r]);
+        __m512 iv2 = _mm512_set1_ps(inter2[r]);
+        __m512 iv3 = _mm512_set1_ps(inter3[r]);
+
+        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
+        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
+        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
+        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+      }
+
+      // Scale
+      acc0 = _mm512_mul_ps(acc0, scale_vec);
+      acc1 = _mm512_mul_ps(acc1, scale_vec);
+      acc2 = _mm512_mul_ps(acc2, scale_vec);
+      acc3 = _mm512_mul_ps(acc3, scale_vec);
+
+      // Load output, add, convert, store
+      __m512 out_v0 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out0 + i))), 16));
+      __m512 out_v1 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out1 + i))), 16));
+      __m512 out_v2 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out2 + i))), 16));
+      __m512 out_v3 =
+          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out3 + i))), 16));
+
+      out_v0 = _mm512_add_ps(out_v0, acc0);
+      out_v1 = _mm512_add_ps(out_v1, acc1);
+      out_v2 = _mm512_add_ps(out_v2, acc2);
+      out_v3 = _mm512_add_ps(out_v3, acc3);
+
+      __m256bh bf16_0 = _mm512_cvtneps_pbh(out_v0);
+      __m256bh bf16_1 = _mm512_cvtneps_pbh(out_v1);
+      __m256bh bf16_2 = _mm512_cvtneps_pbh(out_v2);
+      __m256bh bf16_3 = _mm512_cvtneps_pbh(out_v3);
+
+      _mm256_storeu_si256((__m256i*)(out0 + i), (__m256i)bf16_0);
+      _mm256_storeu_si256((__m256i*)(out1 + i), (__m256i)bf16_1);
+      _mm256_storeu_si256((__m256i*)(out2 + i), (__m256i)bf16_2);
+      _mm256_storeu_si256((__m256i*)(out3 + i), (__m256i)bf16_3);
+    }
+
+    // Handle remaining outputs (< 16)
+    if (output_tail_mask) {
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+      __m512 acc2 = _mm512_setzero_ps();
+      __m512 acc3 = _mm512_setzero_ps();
+
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, weight_t + r * output_dim + i)), 16));
+
+        __m512 iv0 = _mm512_set1_ps(inter0[r]);
+        __m512 iv1 = _mm512_set1_ps(inter1[r]);
+        __m512 iv2 = _mm512_set1_ps(inter2[r]);
+        __m512 iv3 = _mm512_set1_ps(inter3[r]);
+
+        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
+        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
+        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
+        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+      }
+
+      acc0 = _mm512_mul_ps(acc0, scale_vec);
+      acc1 = _mm512_mul_ps(acc1, scale_vec);
+      acc2 = _mm512_mul_ps(acc2, scale_vec);
+      acc3 = _mm512_mul_ps(acc3, scale_vec);
+
+      __m512 out_v0 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out0 + i)), 16));
+      __m512 out_v1 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out1 + i)), 16));
+      __m512 out_v2 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out2 + i)), 16));
+      __m512 out_v3 = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out3 + i)), 16));
+
+      out_v0 = _mm512_add_ps(out_v0, acc0);
+      out_v1 = _mm512_add_ps(out_v1, acc1);
+      out_v2 = _mm512_add_ps(out_v2, acc2);
+      out_v3 = _mm512_add_ps(out_v3, acc3);
+
+      _mm256_mask_storeu_epi16(out0 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v0));
+      _mm256_mask_storeu_epi16(out1 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v1));
+      _mm256_mask_storeu_epi16(out2 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v2));
+      _mm256_mask_storeu_epi16(out3 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v3));
+    }
+  }
+
+  // Remaining tokens (< T_BLOCK)
+  for (; t < num_tokens; t++) {
+    const float* inter_row = intermediate + t * rank;
+    ggml_bf16_t* out_row = output + t * output_dim;
+
+    int i = 0;
+    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
+      __m512 acc = _mm512_setzero_ps();
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+        __m512 iv = _mm512_set1_ps(inter_row[r]);
+        acc = _mm512_fmadd_ps(iv, wv, acc);
+      }
+      acc = _mm512_mul_ps(acc, scale_vec);
+      __m512 out_v = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out_row + i))), 16));
+      out_v = _mm512_add_ps(out_v, acc);
+      _mm256_storeu_si256((__m256i*)(out_row + i), (__m256i)_mm512_cvtneps_pbh(out_v));
+    }
+
+    if (output_tail_mask) {
+      __m512 acc = _mm512_setzero_ps();
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, weight_t + r * output_dim + i)), 16));
+        __m512 iv = _mm512_set1_ps(inter_row[r]);
+        acc = _mm512_fmadd_ps(iv, wv, acc);
+      }
+      acc = _mm512_mul_ps(acc, scale_vec);
+      __m512 out_v = _mm512_castsi512_ps(
+          _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out_row + i)), 16));
+      out_v = _mm512_add_ps(out_v, acc);
+      _mm256_mask_storeu_epi16(out_row + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v));
+    }
+  }
+
+#if AVX_KERNEL_TRACE_ENABLED
+  uint64_t trace_end = sft_timer::get_trace_timestamp();
+  char args_buf[128];
+  snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"R\":%d,\"O\":%d}", num_tokens, rank, output_dim);
+  sft_timer::add_kernel_trace("lora_fp32_bf16_fused_add_transposed", trace_start, trace_end, 0,
+                              WorkerPool::thread_local_id, args_buf);
+#endif
+}
+
+/**
+ * @brief Optimized matmul for backward: grad @ lora_B_transposed -> result
+ *
+ * Computes result[t, r] = Σ_h grad[t, h] * lora_B_t[r, h]
+ * Using pre-transposed lora_B with layout [rank, hidden] for contiguous access.
+ *
+ * @param grad Input gradient [num_tokens, hidden] BF16
+ * @param lora_b_t Pre-transposed lora_B [rank, hidden] BF16
+ * @param result Output [num_tokens, rank] FP32
+ * @param num_tokens Number of tokens
+ * @param hidden Hidden dimension (input dim)
+ * @param rank LoRA rank (output dim)
+ */
+inline void lora_backward_matmul_transposed(const ggml_bf16_t* __restrict grad, const ggml_bf16_t* __restrict lora_b_t,
+                                            float* __restrict result, int num_tokens, int hidden, int rank) {
+#if AVX_KERNEL_TRACE_ENABLED
+  uint64_t trace_start = sft_timer::get_trace_timestamp();
+#endif
+
+  constexpr int H_BLOCK = 32;
+
+  for (int t = 0; t < num_tokens; t++) {
+    const ggml_bf16_t* g_row = grad + t * hidden;
+
+    for (int r = 0; r < rank; r++) {
+      const ggml_bf16_t* b_row = lora_b_t + r * hidden;
+
+      __m512 acc0 = _mm512_setzero_ps();
+      __m512 acc1 = _mm512_setzero_ps();
+
+      int h = 0;
+      for (; h + H_BLOCK <= hidden; h += H_BLOCK) {
+        // Load 32 weights (contiguous access from transposed layout)
+        __m512 b0, b1;
+        avx512_32xbf16_to_32xfp32((__m512i*)(b_row + h), &b0, &b1);
+
+        // Load 32 gradient values
+        __m512 g0, g1;
+        avx512_32xbf16_to_32xfp32((__m512i*)(g_row + h), &g0, &g1);
+
+        acc0 = _mm512_fmadd_ps(g0, b0, acc0);
+        acc1 = _mm512_fmadd_ps(g1, b1, acc1);
+      }
+
+      float sum = _mm512_reduce_add_ps(acc0) + _mm512_reduce_add_ps(acc1);
+
+      // Handle remaining elements
+      for (; h < hidden; h++) {
+        sum += GGML_BF16_TO_FP32(g_row[h]) * GGML_BF16_TO_FP32(b_row[h]);
+      }
+
+      result[t * rank + r] = sum;
+    }
+  }
+
+#if AVX_KERNEL_TRACE_ENABLED
+  uint64_t trace_end = sft_timer::get_trace_timestamp();
+  char args_buf[128];
+  snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"H\":%d,\"R\":%d}", num_tokens, hidden, rank);
+  sft_timer::add_kernel_trace("lora_backward_matmul_transposed", trace_start, trace_end, 0, WorkerPool::thread_local_id,
                               args_buf);
 #endif
 }
