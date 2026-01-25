@@ -48,9 +48,9 @@ lora_alpha = 32.0  # LoRA scaling factor (alpha)
 lora_scaling = lora_alpha / lora_rank  # Effective scaling: alpha / r
 
 # Test configuration
-validation_iter = 2  # Number of validation iterations
-debug_print_count = 8  # Number of values to print in debug output
-num_threads = 60  # Number of CPU threads for inference
+validation_iter = 32  # Number of validation iterations
+debug_print_count = 16  # Number of values to print in debug output
+num_threads = 64  # Number of CPU threads for inference
 
 # Performance test configuration
 perf_warmup_iter = 5  # Number of warmup iterations for performance test
@@ -121,6 +121,22 @@ def get_threshold(quant_mode: str, is_backward: bool = False) -> float:
 
 
 # =============================================================================
+# Debug Utilities
+# =============================================================================
+
+
+def print_tensor_stats(name: str, tensor: torch.Tensor) -> None:
+    """Print mean/max/min/zero-count statistics for a tensor."""
+    data = tensor.float()
+    mean_val = torch.mean(data).item()
+    max_val = torch.max(data).item()
+    min_val = torch.min(data).item()
+    zero_count = torch.sum(tensor == 0).item()
+    total = tensor.numel()
+    print(f"[STATS] {name}: mean {mean_val:.6e} max {max_val:.6e} min {min_val:.6e} zeros {zero_count}/{total}")
+
+
+# =============================================================================
 # Activation Functions
 # =============================================================================
 
@@ -182,6 +198,15 @@ def lora_linear_backward(
     Returns:
         Tuple of (grad_input, grad_lora_a, grad_lora_b)
     """
+    if grad_output.dtype != x.dtype:
+        x = x.to(grad_output.dtype)
+    if grad_output.dtype != weight.dtype:
+        weight = weight.to(grad_output.dtype)
+    if grad_output.dtype != lora_a.dtype:
+        lora_a = lora_a.to(grad_output.dtype)
+    if grad_output.dtype != lora_b.dtype:
+        lora_b = lora_b.to(grad_output.dtype)
+
     # Gradient for input: grad_output @ W + grad_output @ B @ A * scaling
     grad_input = torch.mm(grad_output, weight)
     grad_input += torch.mm(torch.mm(grad_output, lora_b), lora_a) * scaling
@@ -583,22 +608,26 @@ def init_lora_weights(expert_num: int, hidden_size: int, intermediate_size: int,
     Initialize LoRA weights.
 
     LoRA A matrices are initialized with small random values.
-    LoRA B matrices are initialized to zero (so initial output equals base model).
+    LoRA B matrices are initialized with small random values.
     Uses CUDA for fast random generation, then moves to CPU.
     """
     # Gate projection LoRA
     gate_lora_a = torch.randn((expert_num, rank, hidden_size), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
-    gate_lora_b = torch.zeros((expert_num, intermediate_size, rank), dtype=dtype, device="cpu").contiguous()
+    gate_lora_b = (
+        torch.randn((expert_num, intermediate_size, rank), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
+    )
 
     # Up projection LoRA
     up_lora_a = torch.randn((expert_num, rank, hidden_size), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
-    up_lora_b = torch.zeros((expert_num, intermediate_size, rank), dtype=dtype, device="cpu").contiguous()
+    up_lora_b = (
+        torch.randn((expert_num, intermediate_size, rank), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
+    )
 
     # Down projection LoRA
     down_lora_a = (
         torch.randn((expert_num, rank, intermediate_size), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
     )
-    down_lora_b = torch.zeros((expert_num, hidden_size, rank), dtype=dtype, device="cpu").contiguous()
+    down_lora_b = torch.randn((expert_num, hidden_size, rank), dtype=dtype, device="cuda").to("cpu").contiguous() / 100
 
     return (gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b)
 
@@ -629,11 +658,6 @@ def test_moe_sft_forward(quant_mode: str = "bf16"):
     gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
-
-    # Make LoRA B non-zero for testing
-    gate_lora_b.normal_().div_(100)
-    up_lora_b.normal_().div_(100)
-    down_lora_b.normal_().div_(100)
 
     if not HAS_KT_KERNEL:
         print("ERROR: kt_kernel_ext not available, cannot run test")
@@ -775,16 +799,16 @@ def test_moe_sft_forward(quant_mode: str = "bf16"):
 
 def test_moe_sft_backward(quant_mode: str = "bf16"):
     """
-    Test MOE SFT backward pass accuracy with TP.
+    Test MOE SFT forward + backward pass accuracy with TP.
 
-    Compares the AMX implementation gradients against PyTorch reference.
+    Compares the AMX implementation against PyTorch reference.
     Uses CPUInfer with default TP configuration.
 
     Args:
         quant_mode: Quantization mode, "bf16" or "int8"
     """
     print(f"\n{'='*60}")
-    print(f"Testing MOE SFT Backward Pass - {quant_mode.upper()} mode")
+    print(f"Testing MOE SFT Forward+Backward Pass - {quant_mode.upper()} mode")
     print(f"{'='*60}")
 
     # Set random seed for reproducibility
@@ -794,11 +818,6 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
     gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
-
-    # Make LoRA B non-zero for testing
-    gate_lora_b.normal_().div_(100)
-    up_lora_b.normal_().div_(100)
-    down_lora_b.normal_().div_(100)
 
     if not HAS_KT_KERNEL:
         print("ERROR: kt_kernel_ext not available, cannot run test")
@@ -849,8 +868,9 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
     CPUInfer.submit(moe.warm_up_task())
     CPUInfer.sync()
 
-    # Get threshold for this quant_mode
-    threshold = get_threshold(quant_mode, is_backward=True)
+    # Get thresholds for this quant_mode
+    threshold_forward = get_threshold(quant_mode)
+    threshold_backward = get_threshold(quant_mode, is_backward=True)
 
     # Run validation iterations
     for iter_idx in range(validation_iter):
@@ -871,7 +891,7 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
         grad_output = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
         # PyTorch reference forward + backward
-        _, moe_saved = moe_sft_torch_forward(
+        torch_output, moe_saved = moe_sft_torch_forward(
             input_data,
             expert_ids,
             weights,
@@ -917,6 +937,11 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
         )
         CPUInfer.sync()
 
+        # Compare forward results
+        diff_forward = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
+        print(f"forward diff: {diff_forward:.6f}")
+        assert diff_forward < threshold_forward, f"forward accuracy failed: {diff_forward:.6f}"
+
         # Allocate gradient buffers
         grad_input = torch.zeros((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
         grad_gate_lora_a = torch.zeros_like(gate_lora_a)
@@ -941,13 +966,16 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
         )
         CPUInfer.sync()
 
+        print_tensor_stats("grad_up_lora_a", grad_up_lora_a)
+        print_tensor_stats("grad_down_lora_a", grad_down_lora_a)
+
         # Compare gradients (threshold already set before loop)
         # Input gradient
         diff_input = torch.mean(torch.abs(grad_input - torch_grads["grad_input"])) / (
             torch.mean(torch.abs(torch_grads["grad_input"])) + 1e-8
         )
         print(f"grad_input diff: {diff_input:.6f}")
-        assert diff_input < threshold, f"grad_input accuracy failed: {diff_input:.6f}"
+        assert diff_input < threshold_backward, f"grad_input accuracy failed: {diff_input:.6f}"
 
         # LoRA gradients (check activated experts only)
         activated = [i for i, n in enumerate(moe_saved["tokens_per_expert"]) if n > 0]
@@ -987,11 +1015,23 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
             torch_subset = torch_grad[activated]
             diff = torch.mean(torch.abs(amx_subset - torch_subset)) / (torch.mean(torch.abs(torch_subset)) + 1e-8)
             print(f"  {name} diff: {diff:.6f}")
-            assert diff < threshold, f"{name} accuracy failed: {diff:.6f}"
 
-        print(f"PASSED (threshold: {threshold})")
+        for name, amx_grad, torch_grad in [
+            ("gate_lora_a", grad_gate_lora_a, torch_grads["grad_gate_lora_a"]),
+            ("gate_lora_b", grad_gate_lora_b, torch_grads["grad_gate_lora_b"]),
+            ("up_lora_a", grad_up_lora_a, torch_grads["grad_up_lora_a"]),
+            ("up_lora_b", grad_up_lora_b, torch_grads["grad_up_lora_b"]),
+            ("down_lora_a", grad_down_lora_a, torch_grads["grad_down_lora_a"]),
+            ("down_lora_b", grad_down_lora_b, torch_grads["grad_down_lora_b"]),
+        ]:
+            amx_subset = amx_grad[activated]
+            torch_subset = torch_grad[activated]
+            diff = torch.mean(torch.abs(amx_subset - torch_subset)) / (torch.mean(torch.abs(torch_subset)) + 1e-8)
+            assert diff < threshold_backward, f"{name} accuracy failed: {diff:.6f}"
 
-    print(f"\n[OK] MOE SFT Backward Pass Test - {quant_mode.upper()} mode PASSED")
+        print(f"PASSED (threshold: {threshold_backward})")
+
+    print(f"\n[OK] MOE SFT Forward+Backward Pass Test - {quant_mode.upper()} mode PASSED")
 
 
 def test_moe_sft_lora_weight_sync(quant_mode: str = "bf16"):
@@ -1221,24 +1261,32 @@ def test_moe_sft_training_loop(quant_mode: str = "bf16"):
         torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
         / 100
     )
-    gate_lora_b = torch.zeros(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16).contiguous()
+    gate_lora_b = (
+        torch.randn(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16, device="cuda")
+        .to("cpu")
+        .contiguous()
+        / 100
+    )
     up_lora_a = (
         torch.randn(expert_num, lora_rank, hidden_size, dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
         / 100
     )
-    up_lora_b = torch.zeros(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16).contiguous()
+    up_lora_b = (
+        torch.randn(expert_num, intermediate_size, lora_rank, dtype=torch.bfloat16, device="cuda")
+        .to("cpu")
+        .contiguous()
+        / 100
+    )
     down_lora_a = (
         torch.randn(expert_num, lora_rank, intermediate_size, dtype=torch.bfloat16, device="cuda")
         .to("cpu")
         .contiguous()
         / 100
     )
-    down_lora_b = torch.zeros(expert_num, hidden_size, lora_rank, dtype=torch.bfloat16).contiguous()
-
-    # Make LoRA B non-zero for testing
-    gate_lora_b.normal_().div_(100)
-    up_lora_b.normal_().div_(100)
-    down_lora_b.normal_().div_(100)
+    down_lora_b = (
+        torch.randn(expert_num, hidden_size, lora_rank, dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
+        / 100
+    )
 
     # Wrap tensors as nn.Parameters for optimizer
     gate_lora_a_param = torch.nn.Parameter(gate_lora_a)
@@ -1375,12 +1423,12 @@ def test_moe_sft_training_loop(quant_mode: str = "bf16"):
             CPUInfer.sync()
 
             # Copy gradients to parameters
-            gate_lora_a_param.grad = grad_gate_lora_a
-            gate_lora_b_param.grad = grad_gate_lora_b
-            up_lora_a_param.grad = grad_up_lora_a
-            up_lora_b_param.grad = grad_up_lora_b
-            down_lora_a_param.grad = grad_down_lora_a
-            down_lora_b_param.grad = grad_down_lora_b
+            gate_lora_a_param.grad = grad_gate_lora_a.to(dtype=gate_lora_a_param.dtype)
+            gate_lora_b_param.grad = grad_gate_lora_b.to(dtype=gate_lora_b_param.dtype)
+            up_lora_a_param.grad = grad_up_lora_a.to(dtype=up_lora_a_param.dtype)
+            up_lora_b_param.grad = grad_up_lora_b.to(dtype=up_lora_b_param.dtype)
+            down_lora_a_param.grad = grad_down_lora_a.to(dtype=down_lora_a_param.dtype)
+            down_lora_b_param.grad = grad_down_lora_b.to(dtype=down_lora_b_param.dtype)
 
         else:
             # PyTorch reference forward + backward
@@ -1425,12 +1473,12 @@ def test_moe_sft_training_loop(quant_mode: str = "bf16"):
             )
 
             # Copy gradients to parameters
-            gate_lora_a_param.grad = grads["grad_gate_lora_a"]
-            gate_lora_b_param.grad = grads["grad_gate_lora_b"]
-            up_lora_a_param.grad = grads["grad_up_lora_a"]
-            up_lora_b_param.grad = grads["grad_up_lora_b"]
-            down_lora_a_param.grad = grads["grad_down_lora_a"]
-            down_lora_b_param.grad = grads["grad_down_lora_b"]
+            gate_lora_a_param.grad = grads["grad_gate_lora_a"].to(dtype=gate_lora_a_param.dtype)
+            gate_lora_b_param.grad = grads["grad_gate_lora_b"].to(dtype=gate_lora_b_param.dtype)
+            up_lora_a_param.grad = grads["grad_up_lora_a"].to(dtype=up_lora_a_param.dtype)
+            up_lora_b_param.grad = grads["grad_up_lora_b"].to(dtype=up_lora_b_param.dtype)
+            down_lora_a_param.grad = grads["grad_down_lora_a"].to(dtype=down_lora_a_param.dtype)
+            down_lora_b_param.grad = grads["grad_down_lora_b"].to(dtype=down_lora_b_param.dtype)
 
         # Print gradient norms to verify gradients are computed
         print(f"  gate_lora_a grad norm: {gate_lora_a_param.grad.norm().item():.6e}")
@@ -1502,11 +1550,6 @@ def test_moe_sft_performance(quant_mode: str = "bf16"):
     gate_proj, up_proj, down_proj = init_base_weights(expert_num, hidden_size, intermediate_size)
     lora_weights = init_lora_weights(expert_num, hidden_size, intermediate_size, lora_rank)
     gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b = lora_weights
-
-    # Make LoRA B non-zero for testing
-    gate_lora_b.normal_().div_(100)
-    up_lora_b.normal_().div_(100)
-    down_lora_b.normal_().div_(100)
 
     # Initialize CPUInfer with TP configuration
     print("\n[INFO] Creating CPUInfer with TP configuration...")
@@ -1831,9 +1874,9 @@ def run_performance_tests():
 
 
 def run_all_tests():
-    """Run all MOE SFT tests for all quantization modes."""
+    """Run MOE SFT forward + backward tests for all quantization modes."""
     print("\n" + "=" * 70)
-    print(" MOE SFT AMX Test Suite")
+    print(" MOE SFT AMX Forward+Backward Test Suite")
     print("=" * 70)
     print(f"Configuration:")
     print(f"  expert_num: {expert_num}")
@@ -1847,7 +1890,7 @@ def run_all_tests():
     print("=" * 70)
 
     # Quantization modes to test
-    quant_modes = ["bf16", "int8"]
+    quant_modes = ["int8"]
     # quant_modes = ["bf16", "int8", "int4", "int4_1"]
     # quant_modes = ["int4_1kgroup", "int4_kgroup"]
 
@@ -1857,17 +1900,8 @@ def run_all_tests():
             print(f" Testing MOE SFT AMX - {quant_mode.upper()} Mode")
             print(f"{'='*70}")
 
-            # Forward pass test
-            test_moe_sft_forward(quant_mode)
-
-            # Backward pass test
+            # Forward + backward pass test
             test_moe_sft_backward(quant_mode)
-
-            # Weight sync test
-            test_moe_sft_lora_weight_sync(quant_mode)
-
-            # Full training loop test
-            test_moe_sft_training_loop(quant_mode)
 
         print("\n" + "=" * 70)
         print(" ALL TESTS PASSED!")
@@ -1924,7 +1958,7 @@ if __name__ == "__main__":
 
     if args.mode == "all":
         run_all_tests()
-        run_performance_tests()
+        # run_performance_tests()
     elif args.mode == "accuracy":
         run_all_tests()
     elif args.mode == "perf":

@@ -61,7 +61,7 @@ lora_scaling = lora_alpha / lora_rank  # Effective scaling: alpha / r
 # Test configuration
 validation_iter = 2  # Number of validation iterations
 debug_print_count = 8  # Number of values to print in debug output
-num_threads = 60  # Number of CPU threads for inference
+num_threads = 32  # Number of CPU threads for inference
 
 # TP configuration
 TP_COUNT = 4  # TP mode: multiple NUMA subpools
@@ -808,12 +808,12 @@ def test_wrapper_training_loop(quant_mode: str = "AMXBF16_SFT", tp_count: int = 
         grad_input, grad_loras = wrapper.backward(grad_output)
 
         # Copy gradients to parameters
-        gate_lora_a_param.grad = grad_loras["grad_gate_lora_a"]
-        gate_lora_b_param.grad = grad_loras["grad_gate_lora_b"]
-        up_lora_a_param.grad = grad_loras["grad_up_lora_a"]
-        up_lora_b_param.grad = grad_loras["grad_up_lora_b"]
-        down_lora_a_param.grad = grad_loras["grad_down_lora_a"]
-        down_lora_b_param.grad = grad_loras["grad_down_lora_b"]
+        gate_lora_a_param.grad = grad_loras["grad_gate_lora_a"].to(dtype=gate_lora_a_param.dtype)
+        gate_lora_b_param.grad = grad_loras["grad_gate_lora_b"].to(dtype=gate_lora_b_param.dtype)
+        up_lora_a_param.grad = grad_loras["grad_up_lora_a"].to(dtype=up_lora_a_param.dtype)
+        up_lora_b_param.grad = grad_loras["grad_up_lora_b"].to(dtype=up_lora_b_param.dtype)
+        down_lora_a_param.grad = grad_loras["grad_down_lora_a"].to(dtype=down_lora_a_param.dtype)
+        down_lora_b_param.grad = grad_loras["grad_down_lora_b"].to(dtype=down_lora_b_param.dtype)
 
         # Print gradient norms
         print(f"  gate_lora_a grad norm: {gate_lora_a_param.grad.norm().item():.6e}")

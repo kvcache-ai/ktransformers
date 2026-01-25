@@ -320,6 +320,15 @@ def lora_linear_backward(
     Returns:
         Tuple of (grad_input, grad_lora_a, grad_lora_b)
     """
+    if grad_output.dtype != x.dtype:
+        x = x.to(grad_output.dtype)
+    if grad_output.dtype != weight.dtype:
+        weight = weight.to(grad_output.dtype)
+    if grad_output.dtype != lora_a.dtype:
+        lora_a = lora_a.to(grad_output.dtype)
+    if grad_output.dtype != lora_b.dtype:
+        lora_b = lora_b.to(grad_output.dtype)
+
     # Gradient for input: grad_output @ W + grad_output @ B @ A * scaling
     grad_input = torch.mm(grad_output, weight)
     grad_input += torch.mm(torch.mm(grad_output, lora_b), lora_a) * scaling
@@ -1595,12 +1604,12 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
             CPUInfer.sync()
 
             # Copy gradients to parameters
-            gate_lora_a_param.grad = grad_gate_lora_a
-            gate_lora_b_param.grad = grad_gate_lora_b
-            up_lora_a_param.grad = grad_up_lora_a
-            up_lora_b_param.grad = grad_up_lora_b
-            down_lora_a_param.grad = grad_down_lora_a
-            down_lora_b_param.grad = grad_down_lora_b
+            gate_lora_a_param.grad = grad_gate_lora_a.to(dtype=gate_lora_a_param.dtype)
+            gate_lora_b_param.grad = grad_gate_lora_b.to(dtype=gate_lora_b_param.dtype)
+            up_lora_a_param.grad = grad_up_lora_a.to(dtype=up_lora_a_param.dtype)
+            up_lora_b_param.grad = grad_up_lora_b.to(dtype=up_lora_b_param.dtype)
+            down_lora_a_param.grad = grad_down_lora_a.to(dtype=down_lora_a_param.dtype)
+            down_lora_b_param.grad = grad_down_lora_b.to(dtype=down_lora_b_param.dtype)
 
         else:
             # PyTorch reference forward + backward
@@ -1645,12 +1654,12 @@ def test_moe_sft_training_loop_no_tp(quant_mode: str = "bf16"):
             )
 
             # Copy gradients to parameters
-            gate_lora_a_param.grad = grads["grad_gate_lora_a"]
-            gate_lora_b_param.grad = grads["grad_gate_lora_b"]
-            up_lora_a_param.grad = grads["grad_up_lora_a"]
-            up_lora_b_param.grad = grads["grad_up_lora_b"]
-            down_lora_a_param.grad = grads["grad_down_lora_a"]
-            down_lora_b_param.grad = grads["grad_down_lora_b"]
+            gate_lora_a_param.grad = grads["grad_gate_lora_a"].to(dtype=gate_lora_a_param.dtype)
+            gate_lora_b_param.grad = grads["grad_gate_lora_b"].to(dtype=gate_lora_b_param.dtype)
+            up_lora_a_param.grad = grads["grad_up_lora_a"].to(dtype=up_lora_a_param.dtype)
+            up_lora_b_param.grad = grads["grad_up_lora_b"].to(dtype=up_lora_b_param.dtype)
+            down_lora_a_param.grad = grads["grad_down_lora_a"].to(dtype=down_lora_a_param.dtype)
+            down_lora_b_param.grad = grads["grad_down_lora_b"].to(dtype=down_lora_b_param.dtype)
 
         # Print gradient norms to verify gradients are computed
         print(f"  gate_lora_a grad norm: {gate_lora_a_param.grad.norm().item():.6e}")

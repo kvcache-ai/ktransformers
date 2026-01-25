@@ -695,3 +695,14 @@ else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
 
+
+
+include(FetchContent)
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG        v1.0.4
+)
+FetchContent_MakeAvailable(cpptrace)
+target_link_libraries(${PROJECT_NAME} PRIVATE cpptrace::cpptrace)
+

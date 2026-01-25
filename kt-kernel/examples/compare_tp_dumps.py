@@ -739,7 +739,7 @@ def create_kt_wrapper(
         threadpool_count=tp_count,
         weight_path="",
         chunked_prefill_size=config["max_len"],
-        method="AMXBF16_SFT",
+        method="AMXINT8_SFT",
         mode="sft",
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,

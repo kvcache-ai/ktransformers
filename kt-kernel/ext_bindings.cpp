@@ -9,8 +9,13 @@
  **/
 // Python bindings
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#include <cpptrace/cpptrace.hpp>
+#include <csignal>
 #include <cstddef>
+#include <cstring>
 
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
@@ -970,3 +975,31 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   utils.def("from_float", &from_float_ptr, "Convert tensor from float32 to any GGML type", py::arg("input"),
             py::arg("size"), py::arg("type"));
 }
+
+static void warmup_cpptrace() {
+  // 避免第一次调用触发 lazy-loading（malloc 等） :contentReference[oaicite:7]{index=7}
+  cpptrace::frame_ptr buffer[10];
+  (void)cpptrace::safe_generate_raw_trace(buffer, 10);
+  cpptrace::safe_object_frame frame{};
+  cpptrace::get_safe_object_frame(buffer[0], &frame);
+}
+
+static void crash_handler(int signo, siginfo_t* /*info*/, void* /*ucontext*/) {
+  const char* head = "=== crash: signal received ===\n";
+  write(STDERR_FILENO, head, std::strlen(head));
+  cpptrace::generate_trace().print();
+  _exit(128 + signo);
+}
+
+__attribute__((constructor)) static void install_handlers() {
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.sa_sigaction = &crash_handler;
+  sa.sa_flags = SA_SIGINFO;
+  sigemptyset(&sa.sa_mask);
+
+  sigaction(SIGSEGV, &sa, nullptr);
+  sigaction(SIGABRT, &sa, nullptr);
+}
+
+__attribute__((constructor)) void print_pid() { std::cout << "[kt-kernel] PID: " << getpid() << std::endl; }
