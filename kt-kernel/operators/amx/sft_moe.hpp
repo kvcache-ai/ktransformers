@@ -2015,6 +2015,31 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       uint64_t act_end = sft_timer::get_trace_timestamp();
       sft_timer::add_kernel_trace("transpose_lora_b_weights", act_start, act_end, tp_part_idx, 0);
     }
+
+    // Prepare gate_lora_a_bb_ and up_lora_a_bb_ for backward Step 1 AMX GEMM
+    // (Forward AVX512 path doesn't need BufferB, but backward still uses AMX)
+    if constexpr (supports_standard_mat_mul_v<T>) {
+      auto pool = config_.pool->get_subpool(tp_part_idx);
+      uint64_t bb_start = sft_timer::get_trace_timestamp();
+      pool->do_work_stealing_job(
+          config_.expert_num * 2, nullptr,
+          [this](int task_id) {
+            int expert_idx = task_id / 2;
+            int lora_type = task_id % 2;
+            if (lora_type == 0) {
+              // gate_lora_a [lora_rank, hidden_size] -> BufferB [padded_lora_rank, hidden_size]
+              convert_lora_a_to_buffer_b(gate_lora_a_, gate_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
+                                         config_.hidden_size, padded_lora_rank_, config_.hidden_size);
+            } else {
+              // up_lora_a [lora_rank, hidden_size] -> BufferB [padded_lora_rank, hidden_size]
+              convert_lora_a_to_buffer_b(up_lora_a_, up_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
+                                         config_.hidden_size, padded_lora_rank_, config_.hidden_size);
+            }
+          },
+          nullptr, "update_lora_a_bb");
+      uint64_t bb_end = sft_timer::get_trace_timestamp();
+      sft_timer::add_kernel_trace("update_lora_a_bb", bb_start, bb_end, tp_part_idx, 0);
+    }
   }
 
   /**
