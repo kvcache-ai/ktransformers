@@ -568,6 +568,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   size_t backward_bc_pool_bytes_ = 0;
   size_t grad_output_bf16_pool_bytes_ = 0;
 
+  // LoRA gradient computation pools (FP32, used in bwd_down_lora_precompute and grad computation)
+  float* lora_grad_out_pool_ = nullptr;      // [max_len * num_experts_per_tok * hidden_size]
+  float* lora_inter_proj_pool_ = nullptr;    // [max_len * num_experts_per_tok * lora_rank]
+  float* lora_grad_times_b_pool_ = nullptr;  // [max_len * num_experts_per_tok * lora_rank]
+  size_t lora_grad_out_pool_bytes_ = 0;
+  size_t lora_inter_proj_pool_bytes_ = 0;
+  size_t lora_grad_times_b_pool_bytes_ = 0;
+
   // =====================================================
   // Backward pass BufferB for transposed base weights
   // =====================================================
@@ -759,6 +767,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (grad_output_bf16_pool_bytes_ > 0 && grad_output_bf16_pool_ == nullptr) {
       grad_output_bf16_pool_ = aligned_alloc(64, grad_output_bf16_pool_bytes_);
     }
+    // LoRA gradient computation FP32 pools
+    if (lora_grad_out_pool_bytes_ > 0 && lora_grad_out_pool_ == nullptr) {
+      lora_grad_out_pool_ = (float*)aligned_alloc(64, lora_grad_out_pool_bytes_);
+    }
+    if (lora_inter_proj_pool_bytes_ > 0 && lora_inter_proj_pool_ == nullptr) {
+      lora_inter_proj_pool_ = (float*)aligned_alloc(64, lora_inter_proj_pool_bytes_);
+    }
+    if (lora_grad_times_b_pool_bytes_ > 0 && lora_grad_times_b_pool_ == nullptr) {
+      lora_grad_times_b_pool_ = (float*)aligned_alloc(64, lora_grad_times_b_pool_bytes_);
+    }
   }
 
   /**
@@ -835,6 +853,19 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (grad_output_bf16_pool_) {
       free(grad_output_bf16_pool_);
       grad_output_bf16_pool_ = nullptr;
+    }
+    // LoRA gradient computation FP32 pools
+    if (lora_grad_out_pool_) {
+      free(lora_grad_out_pool_);
+      lora_grad_out_pool_ = nullptr;
+    }
+    if (lora_inter_proj_pool_) {
+      free(lora_inter_proj_pool_);
+      lora_inter_proj_pool_ = nullptr;
+    }
+    if (lora_grad_times_b_pool_) {
+      free(lora_grad_times_b_pool_);
+      lora_grad_times_b_pool_ = nullptr;
     }
   }
 
@@ -2449,6 +2480,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       // BF16 buffer for scattered grad_output
       grad_output_bf16_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(ggml_bf16_t) + align_overhead;
 
+      // LoRA gradient computation FP32 pools (used in bwd_down_lora_precompute and grad computation)
+      // Total tokens across all activated experts = safe_alloc_tokens
+      lora_grad_out_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(float) + align_overhead;
+      lora_inter_proj_pool_bytes_ = safe_alloc_tokens * lora_rank_ * sizeof(float) + align_overhead;
+      lora_grad_times_b_pool_bytes_ = safe_alloc_tokens * lora_rank_ * sizeof(float) + align_overhead;
+
       // =====================================================
       // Calculate Backward pass BufferB sizes (transposed base weights)
       // =====================================================
@@ -2470,6 +2507,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       backward_bc_pool_bytes_ = 0;
       grad_output_bf16_pool_bytes_ = 0;
       backward_bb_pool_bytes_ = 0;
+      lora_grad_out_pool_bytes_ = 0;
+      lora_inter_proj_pool_bytes_ = 0;
+      lora_grad_times_b_pool_bytes_ = 0;
     }
 
     // ★ Bug #18 fix: Cache buffers use aligned_alloc instead of shared_mem_buffer_numa ★
@@ -4208,9 +4248,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         const ggml_bf16_t* expert_lora_b = nullptr;
         const ggml_bf16_t* expert_lora_b_t = nullptr;  // Transposed [rank, hidden]
         const ggml_bf16_t* expert_grad_bf16 = nullptr;
-        std::vector<float> grad_out;
-        std::vector<float> inter_proj;
-        std::vector<float> grad_times_b;
+        // Use pre-allocated pool slices instead of std::vector
+        float* grad_out = nullptr;
+        float* inter_proj = nullptr;
+        float* grad_times_b = nullptr;
       };
 
       const int hidden = config_.hidden_size;
@@ -4233,6 +4274,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       };
 
       // Initialize per-expert buffers (sequential - cheaper than parallel job dispatch)
+      // Use bump allocation from pre-allocated pools
+      size_t grad_out_offset = 0;
+      size_t inter_proj_offset = 0;
+      size_t grad_times_b_offset = 0;
+
       for (int task_id = 0; task_id < activated_expert; task_id++) {
         LoraGradBuf& buf = lora_grad_bufs[task_id];
         int expert_idx = m_expert_id_map_[task_id];
@@ -4253,9 +4299,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         size_t token_offset = expert_offsets[task_id] / inter_size;
         buf.cached_intermediate = cache.intermediate_cache + token_offset * inter_size;
 
-        buf.grad_out.resize(num_tokens * hidden);
-        buf.inter_proj.resize(num_tokens * rank);
-        buf.grad_times_b.assign(num_tokens * rank, 0.0f);
+        // Assign pool slices (bump allocation)
+        buf.grad_out = lora_grad_out_pool_ + grad_out_offset;
+        buf.inter_proj = lora_inter_proj_pool_ + inter_proj_offset;
+        buf.grad_times_b = lora_grad_times_b_pool_ + grad_times_b_offset;
+
+        // Advance pool offsets
+        grad_out_offset += num_tokens * hidden;
+        inter_proj_offset += num_tokens * rank;
+        grad_times_b_offset += num_tokens * rank;
       }
 
       // Precompute grad_out, inter_proj, grad_times_b per token block
@@ -4290,7 +4342,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               for (int t = t_begin; t < t_end; t++) {
                 // Convert grad_output to fp32
                 const ggml_bf16_t* grad_row = buf.expert_grad_bf16 + t * hidden;
-                float* grad_out_row = buf.grad_out.data() + t * hidden;
+                float* grad_out_row = buf.grad_out + t * hidden;
                 int h = 0;
                 for (; h < hidden_vec_end; h += 32) {
                   __m512 g0, g1;
@@ -4326,7 +4378,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
                 // grad_output @ lora_B_transposed -> grad_times_b
                 // Using transposed layout [rank, hidden] for contiguous access
-                float* out_row = buf.grad_times_b.data() + t * rank;
+                float* out_row = buf.grad_times_b + t * rank;
                 for (int r = 0; r < rank; r++) {
                   const ggml_bf16_t* b_t_row = buf.expert_lora_b_t + r * hidden;
                   __m512 acc0 = _mm512_setzero_ps();
@@ -4388,7 +4440,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                       continue;
                     }
                     __m512 g_vec = _mm512_set1_ps(g);
-                    const float* u_row = buf.inter_proj.data() + t * rank + r;
+                    const float* u_row = buf.inter_proj + t * rank + r;
                     __m512 u0 = _mm512_loadu_ps(u_row);
                     __m512 u1 = _mm512_loadu_ps(u_row + 16);
                     acc0 = _mm512_fmadd_ps(u0, g_vec, acc0);
@@ -4409,7 +4461,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                       continue;
                     }
                     __m512 g_vec = _mm512_set1_ps(g);
-                    const float* u_row = buf.inter_proj.data() + t * rank + r;
+                    const float* u_row = buf.inter_proj + t * rank + r;
                     __m512 u = _mm512_loadu_ps(u_row);
                     acc = _mm512_fmadd_ps(u, g_vec, acc);
                   }
@@ -4427,7 +4479,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                       continue;
                     }
                     __m512 g_vec = _mm512_set1_ps(g);
-                    const float* u_row = buf.inter_proj.data() + t * rank + r;
+                    const float* u_row = buf.inter_proj + t * rank + r;
                     __m512 u = _mm512_maskz_loadu_ps(mask, u_row);
                     acc = _mm512_fmadd_ps(u, g_vec, acc);
                   }
