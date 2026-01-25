@@ -194,7 +194,23 @@ class WorkerPool {
 // =====================================================
 // Global per-thread timing for SFT MOE forward/backward
 // =====================================================
+// Define SFT_TIMER_DISABLED to disable all timing (functions become no-ops)
+#define SFT_TIMER_DISABLED
 namespace sft_timer {
+
+#ifdef SFT_TIMER_DISABLED
+// Disabled: all functions are no-ops
+inline void reset_forward() {}
+inline void reset_backward() {}
+inline void collect_forward(InNumaPool*) {}
+inline void collect_backward(InNumaPool*) {}
+inline void print_forward() {}
+inline void print_backward(const char* = "backward") {}
+inline void print_op_stats(InNumaPool*, const char*) {}
+inline uint64_t get_trace_timestamp() { return 0; }
+inline void add_kernel_trace(const char*, uint64_t, uint64_t, int, int, const char* = nullptr) {}
+#else
+// Enabled: declarations only, implementation in worker_pool.cpp
 void reset_forward();
 void reset_backward();
 void collect_forward(InNumaPool* pool);
@@ -223,6 +239,7 @@ uint64_t get_trace_timestamp();
 // @param args      Optional JSON args string (e.g., "{\"tokens\":128,\"rank\":8}")
 void add_kernel_trace(const char* name, uint64_t start_ts, uint64_t end_ts, int numa_id, int thread_id,
                       const char* args = nullptr);
+#endif
 
 }  // namespace sft_timer
 

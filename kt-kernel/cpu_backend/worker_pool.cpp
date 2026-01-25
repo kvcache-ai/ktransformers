@@ -80,6 +80,7 @@ inline uint64_t get_rdtsc_cycles_per_ms() {
 // Global per-thread timing for SFT MOE forward/backward
 // Collects timing from InNumaPool worker threads
 // =====================================================
+#ifndef SFT_TIMER_DISABLED
 namespace sft_timer {
 
 constexpr int MAX_THREADS = 256;
@@ -401,6 +402,7 @@ void add_kernel_trace(const char* name, uint64_t start_ts, uint64_t end_ts, int 
 }
 
 }  // namespace sft_timer
+#endif  // SFT_TIMER_DISABLED
 
 // Intel ITT API for profiler integration (VTune, etc.)
 // Allows profilers to identify spin-wait regions
