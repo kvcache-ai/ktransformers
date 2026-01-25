@@ -94,6 +94,7 @@ class InNumaPool {
   uint64_t get_thread_end_ts(int tid) const { return thread_state_[tid].end_ts; }
 
   // Reset per-thread timing/task counters (call before timing a sequence of operations)
+  // NOTE: Only call when all workers are in WAITING state (after wait() returns)
   void reset_counters() {
     for (int i = 0; i < total_worker_count; i++) {
       thread_state_[i].finish_cycles = 0;
@@ -204,6 +205,25 @@ void print_backward(const char* name = "backward");
 // Print per-thread timing for a single operation
 // Call pool->reset_counters() BEFORE the operation, then call this AFTER
 void print_op_stats(InNumaPool* pool, const char* op_name);
+
+// =====================================================
+// Kernel-level tracing API
+// For tracing individual kernels (e.g., AVX matmul) within worker threads
+// =====================================================
+
+// Get current RDTSC timestamp (lightweight, ~20 cycles overhead)
+uint64_t get_trace_timestamp();
+
+// Add a kernel trace event
+// @param name      Kernel name (e.g., "lora_bf16_matmul_t4r4")
+// @param start_ts  Start timestamp from get_trace_timestamp()
+// @param end_ts    End timestamp from get_trace_timestamp()
+// @param numa_id   NUMA node ID (use -1 for auto-detect or 0 if unknown)
+// @param thread_id Thread ID within the pool (use WorkerPool::thread_local_id)
+// @param args      Optional JSON args string (e.g., "{\"tokens\":128,\"rank\":8}")
+void add_kernel_trace(const char* name, uint64_t start_ts, uint64_t end_ts, int numa_id, int thread_id,
+                      const char* args = nullptr);
+
 }  // namespace sft_timer
 
 #endif

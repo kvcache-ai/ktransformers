@@ -96,33 +96,35 @@ inline double ticks_to_ms(uint64_t cycles) { return (double)cycles / get_rdtsc_c
 // Chrome Trace Event Format support
 // =====================================================
 struct TraceEvent {
-  std::string name;  // event name (op_name)
-  std::string cat;   // category
-  char ph;           // phase: 'X' for complete event, 'B' for begin, 'E' for end
-  double ts;         // timestamp in microseconds (with ns precision via decimals)
-  double dur;        // duration in microseconds (with ns precision via decimals)
-  int pid;           // process id (numa_id)
-  int tid;           // thread id
-  int task_count;    // number of tasks processed
+  std::string name;       // event name (op_name)
+  std::string cat;        // category
+  char ph;                // phase: 'X' for complete event, 'B' for begin, 'E' for end
+  double ts;              // timestamp in microseconds (with ns precision via decimals)
+  double dur;             // duration in microseconds (with ns precision via decimals)
+  int pid;                // process id (numa_id)
+  int tid;                // thread id
+  int task_count;         // number of tasks processed
+  std::string args_json;  // optional custom args JSON (for kernel traces)
 };
 
 static std::vector<TraceEvent> g_trace_events;
 static std::mutex g_trace_mutex;
 static uint64_t g_trace_start_time = 0;  // baseline timestamp
-static bool g_trace_initialized = false;
 static std::string g_trace_output_path = "sft_trace.json";
 
-// Initialize trace start time
+// Thread-safe initialization using std::call_once
+static std::once_flag g_trace_init_flag;
+
+// Initialize trace start time (thread-safe)
 static void init_trace() {
-  if (!g_trace_initialized) {
+  std::call_once(g_trace_init_flag, []() {
     g_trace_start_time = rdtsc_now();
-    g_trace_initialized = true;
     // Check for custom output path from environment
     const char* env_path = std::getenv("SFT_TRACE_PATH");
     if (env_path && env_path[0] != '\0') {
       g_trace_output_path = env_path;
     }
-  }
+  });
 }
 
 // Convert RDTSC cycles to microseconds with nanosecond precision (as double)
@@ -171,6 +173,14 @@ static void write_trace_to_file() {
     return;
   }
 
+  // Sort events by (pid, tid, ts) to fix overlap issues in Chrome trace viewer
+  // Events from same thread should be ordered by start time
+  std::sort(g_trace_events.begin(), g_trace_events.end(), [](const TraceEvent& a, const TraceEvent& b) {
+    if (a.pid != b.pid) return a.pid < b.pid;
+    if (a.tid != b.tid) return a.tid < b.tid;
+    return a.ts < b.ts;
+  });
+
   std::ofstream ofs(g_trace_output_path);
   if (!ofs.is_open()) {
     fprintf(stderr, "sft_timer: Failed to open trace file: %s\n", g_trace_output_path.c_str());
@@ -193,7 +203,11 @@ static void write_trace_to_file() {
     ofs << "\"dur\":" << ev.dur << ",";
     ofs << "\"pid\":" << ev.pid << ",";
     ofs << "\"tid\":" << ev.tid << ",";
-    ofs << "\"args\":{\"task_count\":" << ev.task_count << "}";
+    if (!ev.args_json.empty()) {
+      ofs << "\"args\":" << ev.args_json;
+    } else {
+      ofs << "\"args\":{\"task_count\":" << ev.task_count << "}";
+    }
     ofs << "}";
     if (i < g_trace_events.size() - 1) {
       ofs << ",";
@@ -350,6 +364,40 @@ void print_op_stats(InNumaPool* pool, const char* op_name) {
 
   // Save trace data to memory for later export
   add_trace_events(op_name, numa_id, n, start_ts.data(), end_ts.data(), tasks.data());
+}
+
+// =====================================================
+// Kernel-level tracing API implementation
+// =====================================================
+
+uint64_t get_trace_timestamp() { return rdtsc_now(); }
+
+void add_kernel_trace(const char* name, uint64_t start_ts, uint64_t end_ts, int numa_id, int thread_id,
+                      const char* args) {
+  init_trace();
+
+  // Convert absolute RDTSC timestamps to relative microseconds from trace start
+  double start_us = (start_ts > g_trace_start_time) ? cycles_to_us(start_ts - g_trace_start_time) : 0.0;
+  double end_us = (end_ts > g_trace_start_time) ? cycles_to_us(end_ts - g_trace_start_time) : 0.0;
+  double dur_us = end_us - start_us;
+  if (dur_us < 0) dur_us = 0;
+
+  std::lock_guard<std::mutex> lock(g_trace_mutex);
+
+  TraceEvent ev;
+  ev.name = name;
+  ev.cat = "kernel";
+  ev.ph = 'X';  // Complete event
+  ev.ts = start_us;
+  ev.dur = dur_us;
+  ev.pid = numa_id;
+  ev.tid = thread_id;
+  ev.task_count = 0;  // Not applicable for kernel traces
+  if (args != nullptr && args[0] != '\0') {
+    ev.args_json = args;
+  }
+
+  g_trace_events.push_back(ev);
 }
 
 }  // namespace sft_timer
@@ -575,14 +623,13 @@ void InNumaPool::process_tasks(int thread_id) {
   }
 
   // IMPORTANT: Update timing BEFORE setting status to WAITING
-  // Otherwise there's a race: wait() may see WAITING and return,
-  // then reset_counters() runs, then this += executes, causing accumulation
+  // The release semantics of status.store() ensures all prior writes are visible
   uint64_t end_cycles = rdtsc_now();
-  s.finish_cycles += end_cycles - start_cycles;
-  s.task_count += local_task_count;
-  s.end_ts = end_cycles;  // Record absolute end timestamp
+  s.finish_cycles = end_cycles - start_cycles;
+  s.task_count = local_task_count;
+  s.end_ts = end_cycles;
 
-  // Now it's safe to signal completion
+  // Signal completion - release ensures timing writes are visible to wait()
   s.status.store(ThreadStatus::WAITING, std::memory_order_release);
 }
 
