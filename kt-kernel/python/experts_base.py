@@ -36,33 +36,35 @@ class KExpertsCPUBuffer:
         hidden_size = hidden_states.shape[-1]
         batch_size = hidden_states.shape[0]
 
+        pin_memory = False
+
         if batch_size in cls.capture_buffers:
             return cls.capture_buffers[batch_size]
         if batch_size == cls.temp_bs:
             return cls.temp_buffer
 
         input_tensor_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         immediate_experts_ids_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         deferred_experts_ids_cpu = [
-            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=True)
+            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         weights_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         bsz_tensor_cpu = [
-            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=True)
+            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_gpu = [

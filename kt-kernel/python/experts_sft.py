@@ -71,15 +71,21 @@ class KExpertsSFTBuffer:
         self.lora_rank = lora_rank
         self.dtype = dtype
 
+        pin_memory = False
+
         # ========== Forward buffers ==========
-        self.input_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=True)
-        self.expert_ids_cpu = torch.empty((qlen, num_experts_per_tok), dtype=torch.int64, device="cpu", pin_memory=True)
-        self.weights_cpu = torch.empty((qlen, num_experts_per_tok), dtype=torch.float32, device="cpu", pin_memory=True)
-        self.output_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=True)
+        self.input_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
+        self.expert_ids_cpu = torch.empty(
+            (qlen, num_experts_per_tok), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+        )
+        self.weights_cpu = torch.empty(
+            (qlen, num_experts_per_tok), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+        )
+        self.output_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
 
         # ========== Backward buffers ==========
-        self.grad_output_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=True)
-        self.grad_input_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=True)
+        self.grad_output_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
+        self.grad_input_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
 
         # ========== LoRA gradient buffers (6 total) ==========
         # Gate LoRA gradients
@@ -359,8 +365,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def backward(
         self,
         grad_output: torch.Tensor,
+        lora_params: Optional[Dict[str, "torch.nn.Parameter"]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -369,21 +376,18 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         Optimized for minimal data copying:
         - Accepts GPU tensors directly
         - Returns grad_input directly to output_device without intermediate clone
+        - LoRA gradients are accumulated directly to param.grad (no clone needed)
 
         Args:
             grad_output: Gradient from upstream [qlen, hidden_size] (any device)
+            lora_params: Optional dict of LoRA parameters to accumulate gradients to.
+                         If provided, gradients are accumulated directly to param.grad.
+                         Keys: gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b
             output_device: Target device for grad_input (None = clone CPU tensor)
 
         Returns:
             grad_input: Input gradient [qlen, hidden_size]
-            grad_loras: Dictionary of LoRA gradients containing:
-                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size]
-                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank]
-                - grad_up_lora_a: [num_experts, lora_rank, hidden_size]
-                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank]
-                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size]
-                - grad_down_lora_b: [num_experts, hidden_size, lora_rank]
-            grad_weights: Routing weights gradient [qlen, num_experts_per_tok] (FP32)
+            grad_weights: Routing weights gradient [qlen, num_experts_per_tok]
         """
         pass
 

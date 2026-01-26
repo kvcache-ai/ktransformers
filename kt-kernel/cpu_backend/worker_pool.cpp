@@ -116,6 +116,9 @@ static std::string g_trace_output_path = "sft_trace.json";
 // Thread-safe initialization using std::call_once
 static std::once_flag g_trace_init_flag;
 
+// Forward declaration for atexit registration.
+static void write_trace_to_file();
+
 // Initialize trace start time (thread-safe)
 static void init_trace() {
   std::call_once(g_trace_init_flag, []() {
@@ -125,6 +128,8 @@ static void init_trace() {
     if (env_path && env_path[0] != '\0') {
       g_trace_output_path = env_path;
     }
+    // Flush trace on normal exit before static destructors run.
+    std::atexit(write_trace_to_file);
   });
 }
 
@@ -242,9 +247,6 @@ static void register_signal_handlers() {
     registered = true;
   }
 }
-
-// Destructor function - called at program exit
-__attribute__((destructor)) static void trace_destructor() { write_trace_to_file(); }
 
 void print_rt(FILE* out, const char* name, uint64_t* rt, int* tasks, int rt_threads) {
   if (rt_threads <= 0) return;

@@ -504,8 +504,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
     def backward(
         self,
         grad_output: torch.Tensor,
+        lora_params: Optional[Dict[str, torch.nn.Parameter]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -514,21 +515,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         Optimized for minimal data copying:
         - Accepts GPU tensors directly
         - Returns directly to output_device without intermediate clone
+        - LoRA gradients are accumulated directly to param.grad (no clone needed)
 
         Args:
             grad_output: Gradient from upstream [qlen, hidden_size] (any device, will be converted to bf16)
+            lora_params: Optional dict of LoRA parameters to accumulate gradients to.
+                         If provided, gradients are accumulated directly to param.grad.
+                         Keys: gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b
             output_device: Target device for grad_input output (None = clone CPU tensors for safety)
 
         Returns:
-            grad_input: Input gradient [qlen, hidden_size] (BF16)
-            grad_loras: Dictionary of LoRA gradients containing:
-                - grad_gate_lora_a: [num_experts, lora_rank, hidden_size] (BF16)
-                - grad_gate_lora_b: [num_experts, intermediate_size, lora_rank] (BF16)
-                - grad_up_lora_a: [num_experts, lora_rank, hidden_size] (BF16)
-                - grad_up_lora_b: [num_experts, intermediate_size, lora_rank] (BF16)
-                - grad_down_lora_a: [num_experts, lora_rank, intermediate_size] (BF16)
-                - grad_down_lora_b: [num_experts, hidden_size, lora_rank] (BF16)
-            grad_weights: Routing weights gradient [qlen, num_experts_per_tok] (FP32)
+            grad_input: Input gradient [qlen, hidden_size]
+            grad_weights: Routing weights gradient [qlen, num_experts_per_tok]
         """
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward_sft(save_for_backward=True) first.")
@@ -583,8 +581,31 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         # Decrease cache depth
         self._cache_depth -= 1
 
+        # Accumulate LoRA gradients directly to param.grad if lora_params provided
+        # This avoids clone() by accumulating immediately before buffer is reused
+        # - First accumulation: param.grad is None, so we clone the buffer
+        # - Subsequent accumulations: param.grad exists, so we add_ directly (no clone)
+        if lora_params is not None:
+            lora_grad_mapping = [
+                ("gate_lora_a", buffer.grad_gate_lora_a),
+                ("gate_lora_b", buffer.grad_gate_lora_b),
+                ("up_lora_a", buffer.grad_up_lora_a),
+                ("up_lora_b", buffer.grad_up_lora_b),
+                ("down_lora_a", buffer.grad_down_lora_a),
+                ("down_lora_b", buffer.grad_down_lora_b),
+            ]
+            for param_name, grad_buffer in lora_grad_mapping:
+                param = lora_params[param_name]
+                # Convert to param's device and dtype
+                grad_converted = grad_buffer.to(device=param.device, dtype=param.dtype)
+                if param.grad is None:
+                    # First accumulation: must clone since buffer will be reused
+                    param.grad = grad_converted.clone()
+                else:
+                    # Subsequent accumulations: add directly (param.grad is independent)
+                    param.grad.add_(grad_converted)
+
         # Return gradients: if output_device specified, transfer grad_input directly
-        # LoRA gradients stay on CPU (they'll be accumulated to CPU params)
         if output_device is not None:
             grad_input = buffer.grad_input_cpu.to(device=output_device, non_blocking=True)
             grad_weights = buffer.grad_weights.to(device=output_device, non_blocking=True)
@@ -593,18 +614,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_input = buffer.grad_input_cpu.clone()
             grad_weights = buffer.grad_weights.clone()
 
-        # LoRA gradients: these are accumulated on CPU, so we still need to clone
-        # (unless we implement a separate accumulation buffer)
-        grad_loras = {
-            "grad_gate_lora_a": buffer.grad_gate_lora_a.clone(),
-            "grad_gate_lora_b": buffer.grad_gate_lora_b.clone(),
-            "grad_up_lora_a": buffer.grad_up_lora_a.clone(),
-            "grad_up_lora_b": buffer.grad_up_lora_b.clone(),
-            "grad_down_lora_a": buffer.grad_down_lora_a.clone(),
-            "grad_down_lora_b": buffer.grad_down_lora_b.clone(),
-        }
-
-        return grad_input, grad_loras, grad_weights
+        return grad_input, grad_weights
 
     def update_lora_weights(self) -> None:
         """

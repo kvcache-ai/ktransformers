@@ -599,6 +599,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   bool lora_weights_prepared_ = false;
   bool lora_backward_weights_prepared_ = false;
 
+  bool lora_b_transposed_ = false;   // For transpose_lora_b_weights (used in forward)
+  bool lora_a_bb_prepared_ = false;  // For gate_lora_a_bb_ and up_lora_a_bb_ (used in backward)
+
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
@@ -923,6 +926,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     alloc_forward_buffers(save_for_backward);
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    // Lazy preparation: transpose LoRA B weights for AVX512 fused_add kernel
+    if (!lora_b_transposed_ && gate_lora_b_ != nullptr) {
+      transpose_lora_b_weights();
+      lora_b_transposed_ = true;
+    }
 
     // Step 1: Expert routing (reuse base class logic)
     int activated_expert = 0;
@@ -2003,43 +2012,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       print_lora_stats("down_lora_b", down_lora_b_, down_b_elems);
     }
 
-    // Mark weights as needing re-conversion to BufferB format
+    // Mark weights as needing re-conversion (lazy preparation in forward/backward)
     lora_weights_prepared_ = false;
     lora_backward_weights_prepared_ = false;
-
-    // Transpose LoRA B weights for optimized AVX512 fused_add kernel
-    // Note: alloc is done once in constructor
-    {
-      uint64_t act_start = sft_timer::get_trace_timestamp();
-      transpose_lora_b_weights();
-      uint64_t act_end = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace("transpose_lora_b_weights", act_start, act_end, tp_part_idx, 0);
-    }
-
-    // Prepare gate_lora_a_bb_ and up_lora_a_bb_ for backward Step 1 AMX GEMM
-    // (Forward AVX512 path doesn't need BufferB, but backward still uses AMX)
-    if constexpr (supports_standard_mat_mul_v<T>) {
-      auto pool = config_.pool->get_subpool(tp_part_idx);
-      uint64_t bb_start = sft_timer::get_trace_timestamp();
-      pool->do_work_stealing_job(
-          config_.expert_num * 2, nullptr,
-          [this](int task_id) {
-            int expert_idx = task_id / 2;
-            int lora_type = task_id % 2;
-            if (lora_type == 0) {
-              // gate_lora_a [lora_rank, hidden_size] -> BufferB [padded_lora_rank, hidden_size]
-              convert_lora_a_to_buffer_b(gate_lora_a_, gate_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
-                                         config_.hidden_size, padded_lora_rank_, config_.hidden_size);
-            } else {
-              // up_lora_a [lora_rank, hidden_size] -> BufferB [padded_lora_rank, hidden_size]
-              convert_lora_a_to_buffer_b(up_lora_a_, up_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
-                                         config_.hidden_size, padded_lora_rank_, config_.hidden_size);
-            }
-          },
-          nullptr, "update_lora_a_bb");
-      uint64_t bb_end = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace("update_lora_a_bb", bb_start, bb_end, tp_part_idx, 0);
-    }
+    lora_b_transposed_ = false;   // Will be prepared lazily in forward_sft
+    lora_a_bb_prepared_ = false;  // Will be prepared lazily in backward_gate_up_amx
   }
 
   /**
@@ -2124,7 +2101,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               break;
           }
         },
-        nullptr);
+        nullptr, "transpose_lora_b_weights");
   }
 
   /**
@@ -4915,6 +4892,26 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     prepare_backward_weights();
     if (gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
       prepare_lora_backward_weights();
+      // Lazy preparation: gate_lora_a_bb_ and up_lora_a_bb_ for backward AMX GEMM
+      if (!lora_a_bb_prepared_) {
+        if constexpr (supports_standard_mat_mul_v<T>) {
+          pool->do_work_stealing_job(
+              config_.expert_num * 2, nullptr,
+              [this](int task_id) {
+                int expert_idx = task_id / 2;
+                int lora_type = task_id % 2;
+                if (lora_type == 0) {
+                  convert_lora_a_to_buffer_b(gate_lora_a_, gate_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
+                                             config_.hidden_size, padded_lora_rank_, config_.hidden_size);
+                } else {
+                  convert_lora_a_to_buffer_b(up_lora_a_, up_lora_a_bb_[expert_idx], expert_idx, lora_rank_,
+                                             config_.hidden_size, padded_lora_rank_, config_.hidden_size);
+                }
+              },
+              nullptr, "prep_lora_bwd");  // No task_name to avoid trace overhead
+        }
+        lora_a_bb_prepared_ = true;
+      }
     }
 
     // =====================================================
