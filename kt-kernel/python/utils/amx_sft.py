@@ -408,15 +408,21 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         expert_ids: torch.Tensor,
         weights: torch.Tensor,
         save_for_backward: bool = True,
+        output_device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
         SFT forward pass with optional gradient caching.
 
+        Optimized for minimal data copying:
+        - Accepts GPU tensors directly, copies to pinned buffer in one step
+        - Returns directly to output_device without intermediate clone
+
         Args:
-            hidden_states: Input hidden states [qlen, hidden_size]
-            expert_ids: Expert IDs [qlen, num_experts_per_tok]
-            weights: Expert weights [qlen, num_experts_per_tok]
+            hidden_states: Input hidden states [qlen, hidden_size] (any device, will be converted to bf16)
+            expert_ids: Expert IDs [qlen, num_experts_per_tok] (any device, will be converted to int64)
+            weights: Expert weights [qlen, num_experts_per_tok] (any device, will be converted to float32)
             save_for_backward: Whether to save activations for backward pass
+            output_device: Target device for output (None = return CPU tensor without clone, caller must copy immediately)
 
         Returns:
             Output hidden states [qlen, hidden_size]
@@ -440,7 +446,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
             raise ValueError(f"weights shape {tuple(weights.shape)} must be " f"({qlen}, {self.num_experts_per_tok}).")
 
-        # Get or create buffer
+        # Get or create buffer (always bf16 for computation)
         buffer = KExpertsSFTBuffer.get_buffer(
             qlen=qlen,
             hidden_size=self.hidden_size,
@@ -448,14 +454,21 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             lora_rank=self.lora_rank,
-            dtype=hidden_states.dtype,
+            dtype=torch.bfloat16,
         )
 
-        # Copy input data to CPU buffers
-        buffer.input_cpu.copy_(hidden_states, non_blocking=True)
-        buffer.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
-        buffer.weights_cpu.copy_(weights, non_blocking=True)
+        # Copy input data directly to pinned CPU buffers (works for both CPU and GPU tensors)
+        # For GPU tensors: this is a single GPU->pinned copy (faster than GPU->CPU->pinned)
+        # For CPU tensors: this is a CPU->pinned copy
+        input_device = hidden_states.device
+        buffer.input_cpu.copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
+        buffer.expert_ids_cpu.copy_(expert_ids.to(torch.int64), non_blocking=True)
+        buffer.weights_cpu.copy_(weights.to(torch.float32), non_blocking=True)
         buffer.bsz_tensor[0] = qlen
+
+        # Synchronize CUDA stream if input was on GPU to ensure data has arrived
+        if input_device.type == "cuda":
+            torch.cuda.synchronize(input_device)
 
         # Submit forward task
         self.cpu_infer.submit(
@@ -480,19 +493,31 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                     "Call backward() to release cache entries."
                 )
 
-        return buffer.output_cpu.clone()
+        # Return output: if output_device specified, copy directly to that device
+        # This avoids clone() when transferring to GPU (pinned->GPU is fast)
+        if output_device is not None:
+            return buffer.output_cpu.to(device=output_device, non_blocking=True)
+        else:
+            # No output device specified: clone for safety (legacy behavior)
+            return buffer.output_cpu.clone()
 
     def backward(
         self,
         grad_output: torch.Tensor,
+        output_device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
         Must be called after forward_sft(save_for_backward=True).
 
+        Optimized for minimal data copying:
+        - Accepts GPU tensors directly
+        - Returns directly to output_device without intermediate clone
+
         Args:
-            grad_output: Gradient from upstream [qlen, hidden_size]
+            grad_output: Gradient from upstream [qlen, hidden_size] (any device, will be converted to bf16)
+            output_device: Target device for grad_input output (None = clone CPU tensors for safety)
 
         Returns:
             grad_input: Input gradient [qlen, hidden_size] (BF16)
@@ -510,7 +535,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         qlen = grad_output.shape[0]
 
-        # Get buffer (should exist from forward pass)
+        # Get buffer (should exist from forward pass, always bf16)
         buffer = KExpertsSFTBuffer.get_buffer(
             qlen=qlen,
             hidden_size=self.hidden_size,
@@ -518,11 +543,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             lora_rank=self.lora_rank,
-            dtype=grad_output.dtype,
+            dtype=torch.bfloat16,
         )
 
-        # Copy gradient to CPU buffer
-        buffer.grad_output_cpu.copy_(grad_output, non_blocking=True)
+        # Copy gradient directly to pinned CPU buffer (works for both CPU and GPU tensors)
+        input_device = grad_output.device
+        buffer.grad_output_cpu.copy_(grad_output.to(torch.bfloat16), non_blocking=True)
 
         # Zero out gradient buffers
         buffer.grad_input_cpu.zero_()
@@ -533,6 +559,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         buffer.grad_down_lora_a.zero_()
         buffer.grad_down_lora_b.zero_()
         buffer.grad_weights.zero_()
+
+        # Synchronize CUDA stream if input was on GPU to ensure data has arrived
+        if input_device.type == "cuda":
+            torch.cuda.synchronize(input_device)
 
         # Submit backward task
         self.cpu_infer.submit(
@@ -553,8 +583,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         # Decrease cache depth
         self._cache_depth -= 1
 
-        # Return cloned gradients
-        grad_input = buffer.grad_input_cpu.clone()
+        # Return gradients: if output_device specified, transfer grad_input directly
+        # LoRA gradients stay on CPU (they'll be accumulated to CPU params)
+        if output_device is not None:
+            grad_input = buffer.grad_input_cpu.to(device=output_device, non_blocking=True)
+            grad_weights = buffer.grad_weights.to(device=output_device, non_blocking=True)
+        else:
+            # No output device: clone for safety (legacy behavior)
+            grad_input = buffer.grad_input_cpu.clone()
+            grad_weights = buffer.grad_weights.clone()
+
+        # LoRA gradients: these are accumulated on CPU, so we still need to clone
+        # (unless we implement a separate accumulation buffer)
         grad_loras = {
             "grad_gate_lora_a": buffer.grad_gate_lora_a.clone(),
             "grad_gate_lora_b": buffer.grad_gate_lora_b.clone(),
@@ -563,7 +603,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             "grad_down_lora_a": buffer.grad_down_lora_a.clone(),
             "grad_down_lora_b": buffer.grad_down_lora_b.clone(),
         }
-        grad_weights = buffer.grad_weights.clone()
 
         return grad_input, grad_loras, grad_weights
 
@@ -619,10 +658,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         Must be followed by sync_forward_sft() to retrieve results.
 
+        Optimized: accepts GPU tensors directly, copies to pinned buffer in one step.
+
         Args:
-            hidden_states: Input hidden states [qlen, hidden_size]
-            expert_ids: Expert IDs [qlen, num_experts_per_tok]
-            weights: Expert weights [qlen, num_experts_per_tok]
+            hidden_states: Input hidden states [qlen, hidden_size] (any device, will be converted to bf16)
+            expert_ids: Expert IDs [qlen, num_experts_per_tok] (any device, will be converted to int64)
+            weights: Expert weights [qlen, num_experts_per_tok] (any device, will be converted to float32)
             save_for_backward: Whether to save activations for backward pass
         """
         if not self._weights_loaded:
@@ -644,7 +685,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
             raise ValueError(f"weights shape {tuple(weights.shape)} must be " f"({qlen}, {self.num_experts_per_tok}).")
 
-        # Get or create buffer
+        # Get or create buffer (always bf16)
         buffer = KExpertsSFTBuffer.get_buffer(
             qlen=qlen,
             hidden_size=self.hidden_size,
@@ -652,14 +693,19 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             num_experts=self.num_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             lora_rank=self.lora_rank,
-            dtype=hidden_states.dtype,
+            dtype=torch.bfloat16,
         )
 
-        # Copy input data to CPU buffers
-        buffer.input_cpu.copy_(hidden_states, non_blocking=True)
-        buffer.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
-        buffer.weights_cpu.copy_(weights, non_blocking=True)
+        # Copy input data directly to pinned CPU buffers (works for both CPU and GPU tensors)
+        input_device = hidden_states.device
+        buffer.input_cpu.copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
+        buffer.expert_ids_cpu.copy_(expert_ids.to(torch.int64), non_blocking=True)
+        buffer.weights_cpu.copy_(weights.to(torch.float32), non_blocking=True)
         buffer.bsz_tensor[0] = qlen
+
+        # Synchronize CUDA stream if input was on GPU to ensure data has arrived
+        if input_device.type == "cuda":
+            torch.cuda.synchronize(input_device)
 
         # Store buffer reference and save_for_backward flag for sync_forward_sft
         self._pending_buffer = buffer
@@ -679,11 +725,14 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             )
         )
 
-    def sync_forward_sft(self) -> torch.Tensor:
+    def sync_forward_sft(self, output_device: Optional[torch.device] = None) -> torch.Tensor:
         """
         Synchronize and retrieve SFT forward results.
 
         Must be called after submit_forward_sft().
+
+        Args:
+            output_device: Target device for output (None = clone CPU tensor for safety)
 
         Returns:
             Output hidden states [qlen, hidden_size]
@@ -707,9 +756,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 )
 
         # Clear pending state
-        result = buffer.output_cpu.clone()
         self._pending_buffer = None
         self._pending_save_for_backward = None
         self._pending_qlen = None
 
-        return result
+        # Return output: if output_device specified, transfer directly
+        if output_device is not None:
+            return buffer.output_cpu.to(device=output_device, non_blocking=True)
+        else:
+            return buffer.output_cpu.clone()

@@ -334,15 +334,21 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         expert_ids: torch.Tensor,
         weights: torch.Tensor,
         save_for_backward: bool = True,
+        output_device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
         SFT forward pass with optional gradient caching.
 
+        Optimized for minimal data copying:
+        - Accepts GPU tensors directly, copies to pinned buffer in one step
+        - Returns directly to output_device without intermediate clone
+
         Args:
-            hidden_states: Input hidden states [qlen, hidden_size]
-            expert_ids: Expert IDs [qlen, num_experts_per_tok]
-            weights: Expert weights [qlen, num_experts_per_tok]
+            hidden_states: Input hidden states [qlen, hidden_size] (any device)
+            expert_ids: Expert IDs [qlen, num_experts_per_tok] (any device)
+            weights: Expert weights [qlen, num_experts_per_tok] (any device)
             save_for_backward: Whether to save activations for backward pass
+            output_device: Target device for output (None = clone CPU tensor)
 
         Returns:
             Output hidden states [qlen, hidden_size]
@@ -353,14 +359,20 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def backward(
         self,
         grad_output: torch.Tensor,
+        output_device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
         Must be called after forward_sft(save_for_backward=True).
 
+        Optimized for minimal data copying:
+        - Accepts GPU tensors directly
+        - Returns grad_input directly to output_device without intermediate clone
+
         Args:
-            grad_output: Gradient from upstream [qlen, hidden_size]
+            grad_output: Gradient from upstream [qlen, hidden_size] (any device)
+            output_device: Target device for grad_input (None = clone CPU tensor)
 
         Returns:
             grad_input: Input gradient [qlen, hidden_size]
@@ -421,11 +433,14 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         pass
 
     @abstractmethod
-    def sync_forward_sft(self) -> torch.Tensor:
+    def sync_forward_sft(self, output_device: Optional[torch.device] = None) -> torch.Tensor:
         """
         Synchronize and retrieve SFT forward results.
 
         Must be called after submit_forward_sft().
+
+        Args:
+            output_device: Target device for output (None = clone CPU tensor)
 
         Returns:
             Output hidden states [qlen, hidden_size]
