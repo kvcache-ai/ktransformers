@@ -6,22 +6,22 @@ import ctypes
 from ..experts_base import BaseMoEWrapper
 from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
+import kt_kernel_ext.moe as _moe_mod
 
-try:
-    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE, AMXBF16_MOE
+# Optional backends: expose what was actually compiled in kt_kernel_ext.moe
+AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
+AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
+AMXInt4_KGroup_MOE = getattr(_moe_mod, "AMXInt4_KGroup_MOE", None)
+AMXFP8_MOE = getattr(_moe_mod, "AMXFP8_MOE", None)
+AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
+AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 
-    _HAS_AMX_SUPPORT = True
-except (ImportError, AttributeError):
-    _HAS_AMX_SUPPORT = False
-    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE, AMXBF16_MOE = None, None, None, None, None
-
-try:
-    from kt_kernel_ext.moe import AMXFP8PerChannel_MOE
-
-    _HAS_FP8_PERCHANNEL_SUPPORT = True
-except (ImportError, AttributeError):
-    _HAS_FP8_PERCHANNEL_SUPPORT = False
-    AMXFP8PerChannel_MOE = None
+_HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
+_HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
+_HAS_RAWINT4_SUPPORT = AMXInt4_KGroup_MOE is not None
+_HAS_FP8_SUPPORT = AMXFP8_MOE is not None
+_HAS_BF16_SUPPORT = AMXBF16_MOE is not None
+_HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
 
 from typing import Optional
 
@@ -68,10 +68,15 @@ class AMXMoEWrapper(BaseMoEWrapper):
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
             method: AMX quantization method ("AMXINT4" or "AMXINT8")
         """
-        if not _HAS_AMX_SUPPORT:
+        if method == "AMXINT4" and not _HAS_AMXINT4_SUPPORT:
             raise RuntimeError(
-                "AMX backend not available. kt_kernel_ext was not compiled with AMX support.\n"
-                "Please recompile with AMX enabled."
+                "AMXINT4 backend not available. kt_kernel_ext was not compiled with AMX/AVX512 support.\n"
+                "Please recompile with AMX/AVX512 enabled."
+            )
+        if method == "AMXINT8" and not _HAS_AMXINT8_SUPPORT:
+            raise RuntimeError(
+                "AMXINT8 backend not available. kt_kernel_ext was not compiled with AMX/AVX512 support.\n"
+                "Please recompile with AMX/AVX512 enabled."
             )
 
         # Initialize base class
@@ -332,16 +337,22 @@ class NativeMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
     ):
-        if not _HAS_AMX_SUPPORT:
-            raise RuntimeError("AMX backend is not available.")
-        if method == "RAWINT4" and AMXInt4_KGroup_MOE is None:
-            raise RuntimeError("AMX backend with RAWINT4 support is not available.")
-        if method == "FP8" and AMXFP8_MOE is None:
-            raise RuntimeError("AMX backend with FP8 support is not available.")
+        if method == "RAWINT4" and not _HAS_RAWINT4_SUPPORT:
+            raise RuntimeError(
+                "RAWINT4 backend is not available. kt_kernel_ext was not compiled with AMX/AVX512 support."
+            )
+        if method == "FP8" and not _HAS_FP8_SUPPORT:
+            raise RuntimeError(
+                "FP8 backend is not available. kt_kernel_ext was not compiled with AMX/AVX512 + BF16 support."
+            )
         if method == "FP8_PERCHANNEL" and not _HAS_FP8_PERCHANNEL_SUPPORT:
-            raise RuntimeError("AMX backend with FP8 per-channel support is not available.")
-        if method == "BF16" and AMXBF16_MOE is None:
-            raise RuntimeError("AMX backend with BF16 support is not available.")
+            raise RuntimeError(
+                "FP8 per-channel backend is not available. kt_kernel_ext was not compiled with AMX/AVX512 + BF16 support."
+            )
+        if method == "BF16" and not _HAS_BF16_SUPPORT:
+            raise RuntimeError(
+                "BF16 backend is not available. kt_kernel_ext was not compiled with AMX/AVX512 + BF16 support."
+            )
 
         super().__init__(
             layer_idx=layer_idx,
