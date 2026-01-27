@@ -560,3 +560,62 @@ class NativeMoEWrapper(BaseMoEWrapper):
         """
         # The CPUInfer.sync() call blocks until pending tasks complete.
         self.cpu_infer.sync()
+
+    def submit_write_weight_scale_to_buffer_async(
+        self,
+        cuda_stream: int,
+        gpu_tp_count: int,
+        expert_id: int,
+        w13_weight_ptrs,
+        w13_scale_ptrs,
+        w2_weight_ptrs,
+        w2_scale_ptrs,
+    ):
+        """
+        Submit the write_weight_scale_to_buffer task asynchronously using CUDA stream.
+
+        Unlike submit_write_weight_scale_to_buffer, this uses cudaLaunchHostFunc to
+        queue the CPU task when the GPU stream reaches this point, allowing non-blocking
+        Python execution.
+
+        Args:
+            cuda_stream: CUDA stream handle (from torch.cuda.Stream.cuda_stream)
+            gpu_tp_count: Number of GPU tensor parallel instances
+            expert_id: Expert ID to write
+            w13_weight_ptrs: Pointer list for w13 (gate/up) weights
+            w13_scale_ptrs: Pointer list for w13 scales
+            w2_weight_ptrs: Pointer list for w2 (down) weights
+            w2_scale_ptrs: Pointer list for w2 scales
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot submit write_weight_scale_to_buffer task.")
+
+        if not hasattr(self.moe, "write_weight_scale_to_buffer_task"):
+            raise NotImplementedError(
+                "write_weight_scale_to_buffer_task is not available for this backend implementation."
+            )
+
+        self.cpu_infer.submit_with_cuda_stream(
+            cuda_stream,
+            self.moe.write_weight_scale_to_buffer_task(
+                gpu_tp_count,
+                expert_id,
+                w13_weight_ptrs,
+                w13_scale_ptrs,
+                w2_weight_ptrs,
+                w2_scale_ptrs,
+            ),
+        )
+
+    def sync_write_weight_scale_to_buffer_async(self, cuda_stream: int, allow_pending: int = 0):
+        """
+        Synchronize write_weight_scale_to_buffer tasks on a CUDA stream (non-blocking to Python).
+
+        This uses cudaLaunchHostFunc to queue a synchronization callback on the GPU stream.
+        Python execution continues immediately; the GPU stream will wait for CPU tasks to complete.
+
+        Args:
+            cuda_stream: CUDA stream handle (from torch.cuda.Stream.cuda_stream)
+            allow_pending: Number of pending tasks to allow (default 0)
+        """
+        self.cpu_infer.sync_with_cuda_stream(cuda_stream, allow_pending)
