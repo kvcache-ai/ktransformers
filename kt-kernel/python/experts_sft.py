@@ -87,19 +87,6 @@ class KExpertsSFTBuffer:
         self.grad_output_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
         self.grad_input_cpu = torch.empty((qlen, hidden_size), dtype=dtype, device="cpu", pin_memory=pin_memory)
 
-        # ========== LoRA gradient buffers (6 total) ==========
-        # Gate LoRA gradients
-        self.grad_gate_lora_a = torch.empty((num_experts, lora_rank, hidden_size), dtype=dtype, device="cpu")
-        self.grad_gate_lora_b = torch.empty((num_experts, moe_intermediate_size, lora_rank), dtype=dtype, device="cpu")
-
-        # Up LoRA gradients
-        self.grad_up_lora_a = torch.empty((num_experts, lora_rank, hidden_size), dtype=dtype, device="cpu")
-        self.grad_up_lora_b = torch.empty((num_experts, moe_intermediate_size, lora_rank), dtype=dtype, device="cpu")
-
-        # Down LoRA gradients
-        self.grad_down_lora_a = torch.empty((num_experts, lora_rank, moe_intermediate_size), dtype=dtype, device="cpu")
-        self.grad_down_lora_b = torch.empty((num_experts, hidden_size, lora_rank), dtype=dtype, device="cpu")
-
         # Routing weights gradient [qlen, num_experts_per_tok] (FP32)
         self.grad_weights = torch.empty((qlen, num_experts_per_tok), dtype=torch.float32, device="cpu")
 
@@ -153,22 +140,6 @@ class KExpertsSFTBuffer:
     def clear_cache(cls) -> None:
         """Clear all cached buffers."""
         cls.capture_buffers.clear()
-
-    def get_lora_grads(self) -> Dict[str, torch.Tensor]:
-        """
-        Get all LoRA gradients as a dictionary.
-
-        Returns:
-            Dictionary containing 6 LoRA gradient tensors
-        """
-        return {
-            "grad_gate_lora_a": self.grad_gate_lora_a,
-            "grad_gate_lora_b": self.grad_gate_lora_b,
-            "grad_up_lora_a": self.grad_up_lora_a,
-            "grad_up_lora_b": self.grad_up_lora_b,
-            "grad_down_lora_a": self.grad_down_lora_a,
-            "grad_down_lora_b": self.grad_down_lora_b,
-        }
 
 
 class BaseSFTMoEWrapper(_MoEBase, ABC):
