@@ -91,19 +91,60 @@ def select_model() -> Optional[Any]:
     console.print(Panel(f"[bold cyan]{t('run_int_step1_title')}[/bold cyan]", expand=False))
     console.print()
 
-    # Display models
+    # Display models using same format as kt model list
+    from kt_kernel.cli.utils.model_scanner import format_size
+    from kt_kernel.cli.commands.model import SHA256_STATUS_MAP
+
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
-    table.add_column("#", justify="right", style="cyan")
-    table.add_column("Name", style="white")
-    table.add_column("Experts", justify="right", style="yellow")
-    table.add_column("Active", justify="right", style="green")
-    table.add_column("Path", style="dim")
+    table.add_column("#", justify="right", style="cyan", no_wrap=True)
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Path", style="dim", overflow="fold")
+    table.add_column("Total", justify="right")
+    table.add_column("Exps", justify="center", style="yellow")
+    table.add_column("Act", justify="center", style="green")
+    table.add_column("MoE Size", justify="right", style="cyan")
+    table.add_column("Repo", style="dim", overflow="fold")
+    table.add_column("SHA256", justify="center")
 
     for i, model in enumerate(moe_models, 1):
-        # Display MoE info if available
-        experts = str(model.moe_num_experts) if model.moe_num_experts else "-"
-        active = str(model.moe_num_experts_per_tok) if model.moe_num_experts_per_tok else "-"
-        table.add_row(str(i), model.name, experts, active, str(model.path))
+        # Calculate size
+        if model.path_exists():
+            path_obj = Path(model.path)
+            try:
+                files = list(path_obj.glob("*.safetensors"))
+                total_size = sum(f.stat().st_size for f in files if f.exists())
+                size_display = format_size(total_size)
+            except:
+                size_display = "[dim]-[/dim]"
+        else:
+            size_display = "[dim]-[/dim]"
+
+        # Format MoE info
+        experts = f"[yellow]{model.moe_num_experts}[/yellow]" if model.moe_num_experts else "[dim]-[/dim]"
+        active = f"[green]{model.moe_num_experts_per_tok}[/green]" if model.moe_num_experts_per_tok else "[dim]-[/dim]"
+        moe_size = f"[cyan]{size_display}[/cyan]" if model.moe_num_experts else "[dim]-[/dim]"
+
+        # Format repo info
+        if model.repo_id:
+            repo_abbr = "hf" if model.repo_type == "huggingface" else "ms"
+            repo_display = f"{repo_abbr}:{model.repo_id}"
+        else:
+            repo_display = "[dim]-[/dim]"
+
+        # Format SHA256 status
+        sha256_display = SHA256_STATUS_MAP.get(model.sha256_status, model.sha256_status)
+
+        table.add_row(
+            str(i),
+            model.name,
+            str(model.path),
+            size_display,
+            experts,
+            active,
+            moe_size,
+            repo_display,
+            sha256_display,
+        )
 
     console.print(table)
     console.print()

@@ -439,7 +439,7 @@ def _run_impl(
 
     # Performance flags
     final_disable_shared_experts_fusion = resolve(
-        disable_shared_experts_fusion, "inference.disable_shared_experts_fusion", False
+        disable_shared_experts_fusion, "inference.disable_shared_experts_fusion", True
     )
 
     # Pass extra CLI parameters
