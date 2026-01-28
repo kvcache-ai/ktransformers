@@ -11,6 +11,7 @@ selects the appropriate backend implementation based on the method parameter.
 
 from __future__ import annotations
 
+import torch
 from typing import List, Optional
 
 # Import base infrastructure
@@ -30,13 +31,17 @@ class KTMoEWrapper:
     selects the appropriate backend implementation based on the `method` parameter.
 
     Usage:
+        # Create a mask where experts 0, 2, 5 are on GPU
+        gpu_mask = torch.zeros(8, dtype=torch.bool)
+        gpu_mask[[0, 2, 5]] = True
+
         wrapper = KTMoEWrapper(
             layer_idx=0,
             num_experts=8,
             num_experts_per_tok=2,
             hidden_size=4096,
             moe_intermediate_size=14336,
-            num_gpu_experts=2,
+            gpu_experts_mask=gpu_mask,  # or None for all experts on CPU
             cpuinfer_threads=32,
             threadpool_count=2,
             weight_path="/path/to/weights",
@@ -52,7 +57,7 @@ class KTMoEWrapper:
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -70,14 +75,17 @@ class KTMoEWrapper:
             num_experts_per_tok: Number of experts per token (top-k)
             hidden_size: Hidden dimension size
             moe_intermediate_size: MoE intermediate size
-            num_gpu_experts: Number of experts to run on GPU
+            gpu_experts_mask: Boolean mask indicating which experts are on GPU.
+                              Shape: [num_experts], dtype: torch.bool.
+                              mask[i] = True means expert i is on GPU.
+                              If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
             weight_path: Path to weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
-            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "FP8", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
+            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "FP8", "BF16", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
 
         Returns:
             An instance of the appropriate backend implementation (e.g., AMXMoEWrapper)
@@ -85,7 +93,7 @@ class KTMoEWrapper:
         # Select backend based on method
         if method in ["AMXINT4", "AMXINT8"]:
             backend_cls = AMXMoEWrapper
-        elif method in ["RAWINT4", "FP8"]:
+        elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL"]:
             backend_cls = NativeMoEWrapper
         elif method == "LLAMAFILE":
             backend_cls = LlamafileMoEWrapper
@@ -101,7 +109,7 @@ class KTMoEWrapper:
             num_experts_per_tok=num_experts_per_tok,
             hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
-            num_gpu_experts=num_gpu_experts,
+            gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
             weight_path=weight_path,

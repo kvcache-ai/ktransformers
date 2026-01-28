@@ -37,7 +37,9 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
 #if defined(__AVX512BF16__)
-#include "operators/amx/fp8-moe.hpp"  // FP8 MoE requires AVX512 BF16 support
+#include "operators/amx/bf16-moe.hpp"            // Native BF16 MoE using CRTP pattern
+#include "operators/amx/fp8-moe.hpp"             // FP8 MoE requires AVX512 BF16 support
+#include "operators/amx/fp8-perchannel-moe.hpp"  // FP8 Per-Channel MoE for GLM-4.7-FP8
 #endif
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
@@ -251,8 +253,9 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding);
 
-#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
-  if constexpr (std::is_same_v<MoeTP, AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>) {
+  // Bind write_weight_scale_to_buffer_task for MoE types that support it
+  // Uses SFINAE to detect if MoeClass has write_weight_scale_to_buffer method
+  if constexpr (requires { &MoeClass::write_weight_scale_to_buffer; }) {
     struct WriteWeightScaleToBufferBindings {
       struct Args {
         CPUInfer* cpuinfer;
@@ -294,54 +297,6 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
-
-#if defined(__AVX512BF16__)
-  // FP8 MoE: processes one expert at a time (expert_id instead of gpu_experts_num)
-  // Only available on CPUs with AVX512 BF16 support
-  if constexpr (std::is_same_v<MoeTP, AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>) {
-    struct WriteWeightScaleToBufferBindings {
-      struct Args {
-        CPUInfer* cpuinfer;
-        MoeClass* moe;
-        int gpu_tp_count;
-        int expert_id;
-        std::vector<uintptr_t> w13_weight_ptrs;
-        std::vector<uintptr_t> w13_scale_ptrs;
-        std::vector<uintptr_t> w2_weight_ptrs;
-        std::vector<uintptr_t> w2_scale_ptrs;
-      };
-
-      static void inner(void* args) {
-        Args* args_ = (Args*)args;
-        args_->cpuinfer->enqueue(&MoeClass::write_weight_scale_to_buffer, args_->moe, args_->gpu_tp_count,
-                                 args_->expert_id, args_->w13_weight_ptrs, args_->w13_scale_ptrs, args_->w2_weight_ptrs,
-                                 args_->w2_scale_ptrs);
-      }
-
-      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, int gpu_tp_count,
-                                                              int expert_id, py::list w13_weight_ptrs,
-                                                              py::list w13_scale_ptrs, py::list w2_weight_ptrs,
-                                                              py::list w2_scale_ptrs) {
-        // Convert Python lists to std::vector<uintptr_t>
-        std::vector<uintptr_t> w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec;
-
-        for (auto item : w13_weight_ptrs) w13_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w13_scale_ptrs) w13_scale_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_weight_ptrs) w2_weight_vec.push_back(py::cast<uintptr_t>(item));
-        for (auto item : w2_scale_ptrs) w2_scale_vec.push_back(py::cast<uintptr_t>(item));
-
-        Args* args = new Args{nullptr,        moe.get(),     gpu_tp_count,  expert_id,
-                              w13_weight_vec, w13_scale_vec, w2_weight_vec, w2_scale_vec};
-        return std::make_pair((intptr_t)&inner, (intptr_t)args);
-      }
-    };
-
-    moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
-                py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
-                py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
-  }
-#endif  // __AVX512BF16__
-#endif
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
@@ -539,7 +494,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("quant_method", &QuantConfig::quant_method)
       .def_readwrite("bits", &QuantConfig::bits)
       .def_readwrite("group_size", &QuantConfig::group_size)
-      .def_readwrite("zero_point", &QuantConfig::zero_point);
+      .def_readwrite("zero_point", &QuantConfig::zero_point)
+      .def_readwrite("per_channel", &QuantConfig::per_channel);
 
   auto moe_module = m.def_submodule("moe");
 
@@ -547,16 +503,21 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
         return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
       }))
-      .def(py::init(
-          [](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int num_gpu_experts) {
-            GeneralMOEConfig cfg(expert_num, routed_expert_num, hidden_size, intermediate_size);
-            cfg.num_gpu_experts = num_gpu_experts;
-            return cfg;
-          }))
+      .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size,
+                       uintptr_t gpu_experts_mask_ptr) {
+        GeneralMOEConfig cfg(expert_num, routed_expert_num, hidden_size, intermediate_size);
+        cfg.gpu_experts_mask = reinterpret_cast<uint8_t*>(gpu_experts_mask_ptr);
+        cfg.compute_num_gpu_experts();
+        return cfg;
+      }))
       .def_readwrite("layer_idx", &GeneralMOEConfig::layer_idx)
       .def_readwrite("pool", &GeneralMOEConfig::pool)
 
-      .def_readwrite("num_gpu_experts", &GeneralMOEConfig::num_gpu_experts)
+      .def_readonly("num_gpu_experts", &GeneralMOEConfig::num_gpu_experts)
+      .def_property(
+          "gpu_experts_mask",
+          [](const GeneralMOEConfig& self) { return reinterpret_cast<uintptr_t>(self.gpu_experts_mask); },
+          [](GeneralMOEConfig& self, uintptr_t val) { self.gpu_experts_mask = reinterpret_cast<uint8_t*>(val); })
       .DEF_PTR_PROPERTY(GeneralMOEConfig, physical_to_logical_map)
 
       .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_proj)
@@ -606,14 +567,15 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<LLAMA_MOE_TP>(moe_module, "MOE");
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
-  bind_moe_module<AMX_MOE_TP<amx::GemmKernel224BF>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_MOE");
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4>>(moe_module, "AMXInt4_MOE");
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
 #if defined(__AVX512BF16__)
+  bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
+  bind_moe_module<AMX_FP8_PERCHANNEL_MOE_TP<amx::GemmKernel224FP8PerChannel>>(moe_module, "AMXFP8PerChannel_MOE");
 #endif
 #endif
 #if defined(USE_MOE_KERNEL)

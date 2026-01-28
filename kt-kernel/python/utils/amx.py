@@ -1,21 +1,27 @@
 import os
 import torch
 import ctypes
+from typing import Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader
+from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
+import kt_kernel_ext.moe as _moe_mod
 
-try:
-    from kt_kernel_ext.moe import AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE
+AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
+AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
+AMXInt4_KGroup_MOE = getattr(_moe_mod, "AMXInt4_KGroup_MOE", None)
+AMXFP8_MOE = getattr(_moe_mod, "AMXFP8_MOE", None)
+AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
+AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 
-    _HAS_AMX_SUPPORT = True
-except (ImportError, AttributeError):
-    _HAS_AMX_SUPPORT = False
-    AMXInt4_MOE, AMXInt8_MOE, AMXInt4_KGroup_MOE, AMXFP8_MOE = None, None, None, None
-
-from typing import Optional
+_HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
+_HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
+_HAS_RAWINT4_SUPPORT = AMXInt4_KGroup_MOE is not None
+_HAS_FP8_SUPPORT = AMXFP8_MOE is not None
+_HAS_BF16_SUPPORT = AMXBF16_MOE is not None
+_HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
 
 
 class AMXMoEWrapper(BaseMoEWrapper):
@@ -33,7 +39,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -51,7 +57,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
             num_experts_per_tok: Number of experts per token (top-k)
             hidden_size: Hidden dimension size
             moe_intermediate_size: MoE intermediate size
-            num_gpu_experts: Number of experts to run on GPU
+            gpu_experts_mask: Boolean mask indicating which experts are on GPU.
+                              Shape: [num_experts], dtype: torch.bool.
+                              mask[i] = True means expert i is on GPU.
+                              If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
             weight_path: Path to AMX weights (SafeTensor format)
@@ -60,10 +69,17 @@ class AMXMoEWrapper(BaseMoEWrapper):
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
             method: AMX quantization method ("AMXINT4" or "AMXINT8")
         """
-        if not _HAS_AMX_SUPPORT:
+        if method == "AMXINT4" and not _HAS_AMXINT4_SUPPORT:
             raise RuntimeError(
-                "AMX backend not available. kt_kernel_ext was not compiled with AMX support.\n"
-                "Please recompile with AMX enabled."
+                "AMXINT4 backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW (VNNI optional)\n"
+                "Please recompile kt_kernel_ext with AVX512 enabled."
+            )
+        if method == "AMXINT8" and not _HAS_AMXINT8_SUPPORT:
+            raise RuntimeError(
+                "AMXINT8 backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW (VNNI optional)\n"
+                "Please recompile kt_kernel_ext with AVX512 enabled."
             )
 
         # Initialize base class
@@ -73,7 +89,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             num_experts_per_tok=num_experts_per_tok,
             hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
-            num_gpu_experts=num_gpu_experts,
+            gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
             weight_path=weight_path,
@@ -131,7 +147,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             self.num_experts_per_tok,
             self.hidden_size,
             self.moe_intermediate_size,
-            self.num_gpu_experts,
+            self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
@@ -246,7 +262,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             self.num_experts_per_tok,
             self.hidden_size,
             self.moe_intermediate_size,
-            self.num_gpu_experts,
+            self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
@@ -304,7 +320,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
 
 class NativeMoEWrapper(BaseMoEWrapper):
-    """Wrapper for RAWINT4/FP8 experts stored in compressed SafeTensor format."""
+    """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
 
@@ -315,7 +331,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -324,12 +340,30 @@ class NativeMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
     ):
-        if not _HAS_AMX_SUPPORT:
-            raise RuntimeError("AMX backend is not available.")
-        if method == "RAWINT4" and AMXInt4_KGroup_MOE is None:
-            raise RuntimeError("AMX backend with RAWINT4 support is not available.")
-        if method == "FP8" and AMXFP8_MOE is None:
-            raise RuntimeError("AMX backend with FP8 support is not available.")
+        if method == "RAWINT4" and not _HAS_RAWINT4_SUPPORT:
+            raise RuntimeError(
+                "RAWINT4 backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW (VNNI optional)\n"
+                "Please recompile kt_kernel_ext with AVX512 enabled."
+            )
+        if method == "FP8" and not _HAS_FP8_SUPPORT:
+            raise RuntimeError(
+                "FP8 backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI\n"
+                "Please recompile kt_kernel_ext with AVX512 + BF16 + VBMI enabled."
+            )
+        if method == "FP8_PERCHANNEL" and not _HAS_FP8_PERCHANNEL_SUPPORT:
+            raise RuntimeError(
+                "FP8_PERCHANNEL backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI\n"
+                "Please recompile kt_kernel_ext with AVX512 + BF16 + VBMI enabled."
+            )
+        if method == "BF16" and not _HAS_BF16_SUPPORT:
+            raise RuntimeError(
+                "BF16 backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW + AVX512_BF16\n"
+                "Please recompile kt_kernel_ext with AVX512 + BF16 enabled."
+            )
 
         super().__init__(
             layer_idx=layer_idx,
@@ -337,7 +371,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             num_experts_per_tok=num_experts_per_tok,
             hidden_size=hidden_size,
             moe_intermediate_size=moe_intermediate_size,
-            num_gpu_experts=num_gpu_experts,
+            gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
             weight_path=weight_path,
@@ -352,6 +386,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 NativeMoEWrapper._native_loader_instance = CompressedSafeTensorLoader(weight_path)
             elif method == "FP8":
                 NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path)
+            elif method == "FP8_PERCHANNEL":
+                # Use FP8SafeTensorLoader with per-channel scale format
+                NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
+            elif method == "BF16":
+                NativeMoEWrapper._native_loader_instance = BF16SafeTensorLoader(weight_path)
             else:
                 raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
         self.loader = NativeMoEWrapper._native_loader_instance
@@ -386,28 +425,48 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.up_weights = weights["up"]
         self.down_weights = weights["down"]
 
-        # Convert scales to bf16 individually
-        # self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
-        # self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
-        # self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
-        self.gate_scales = weights["gate_scale"]
-        self.up_scales = weights["up_scale"]
-        self.down_scales = weights["down_scale"]
-        if self.method == "RAWINT4":
-            assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
-        elif self.method == "FP8":
-            assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
+        # BF16 has no scales, others have scales
+        if self.method == "BF16":
+            # BF16 doesn't have scales
+            self.gate_scales = None
+            self.up_scales = None
+            self.down_scales = None
+        else:
+            # Convert scales to bf16 individually
+            # self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
+            # self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
+            # self.down_scales = [t.to(torch.bfloat16).contiguous() for t in weights["down_scale"]]
+            self.gate_scales = weights["gate_scale"]
+            self.up_scales = weights["up_scale"]
+            self.down_scales = weights["down_scale"]
+            if self.method == "RAWINT4":
+                assert self.gate_scales[0].dtype == torch.bfloat16, "Expected bf16 scales for RAWINT4"
+            elif self.method == "FP8":
+                if self.gate_scales[0].dtype != torch.float32:
+                    self.gate_scales = [t.to(torch.float32).contiguous() for t in weights["gate_scale"]]
+                    self.up_scales = [t.to(torch.float32).contiguous() for t in weights["up_scale"]]
+                    self.down_scales = [t.to(torch.float32).contiguous() for t in weights["down_scale"]]
+                assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
+            elif self.method == "FP8_PERCHANNEL":
+                assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8_PERCHANNEL"
 
         t2 = time.time()
 
         # Build pointer lists: [numa_id][expert_id] -> pointer
-        # Since RAWINT4 has no numa sharding, numa dimension is 1
+        # Since RAWINT4/FP8/BF16 has no numa sharding, numa dimension is 1
         gate_ptrs = [[t.data_ptr() for t in self.gate_weights]]
         up_ptrs = [[t.data_ptr() for t in self.up_weights]]
         down_ptrs = [[t.data_ptr() for t in self.down_weights]]
-        gate_scale_ptrs = [[t.data_ptr() for t in self.gate_scales]]
-        up_scale_ptrs = [[t.data_ptr() for t in self.up_scales]]
-        down_scale_ptrs = [[t.data_ptr() for t in self.down_scales]]
+
+        # BF16 has no scales, pass empty lists (will use 0/nullptr for consistency)
+        if self.method == "BF16":
+            gate_scale_ptrs = [[0 for _ in self.gate_weights]]
+            up_scale_ptrs = [[0 for _ in self.up_weights]]
+            down_scale_ptrs = [[0 for _ in self.down_weights]]
+        else:
+            gate_scale_ptrs = [[t.data_ptr() for t in self.gate_scales]]
+            up_scale_ptrs = [[t.data_ptr() for t in self.up_scales]]
+            down_scale_ptrs = [[t.data_ptr() for t in self.down_scales]]
         t3 = time.time()
 
         moe_config = MOEConfig(
@@ -415,7 +474,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.num_experts_per_tok,
             self.hidden_size,
             self.moe_intermediate_size,
-            self.num_gpu_experts,
+            self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
@@ -444,6 +503,14 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.group_size = 128
             moe_config.quant_config.zero_point = False
             self.moe = AMXFP8_MOE(moe_config)
+        elif self.method == "FP8_PERCHANNEL":
+            moe_config.quant_config.bits = 8
+            moe_config.quant_config.per_channel = True
+            moe_config.quant_config.zero_point = False
+            self.moe = AMXFP8PerChannel_MOE(moe_config)
+        elif self.method == "BF16":
+            # BF16 has no quantization config needed
+            self.moe = AMXBF16_MOE(moe_config)
         t4 = time.time()
 
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
@@ -453,9 +520,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
         del self.gate_weights
         del self.up_weights
         del self.down_weights
-        del self.gate_scales
-        del self.up_scales
-        del self.down_scales
+        if self.gate_scales is not None:
+            del self.gate_scales
+            del self.up_scales
+            del self.down_scales
         t6 = time.time()
 
         print(

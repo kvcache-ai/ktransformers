@@ -176,6 +176,7 @@ void InNumaPool::process_tasks(int thread_id) {
     }
 
     int block = (rem + worker_count - 1) / worker_count;
+    block = 1;
     int task_id = curr_.fetch_add(block, std::memory_order_acq_rel);
     if (task_id >= end_) {
       break;
