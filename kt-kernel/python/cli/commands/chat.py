@@ -173,6 +173,19 @@ def chat(
         print_success(t("chat_connected", model=selected_model))
         console.print()
 
+        # Load tokenizer for accurate token counting
+        tokenizer = None
+        try:
+            from transformers import AutoTokenizer
+
+            # selected_model is the model path
+            tokenizer = AutoTokenizer.from_pretrained(selected_model, trust_remote_code=True)
+            console.print(f"[dim]Loaded tokenizer from {selected_model}[/dim]")
+            console.print()
+        except Exception as e:
+            console.print(f"[dim yellow]Warning: Could not load tokenizer, token counts will be estimated[/dim]")
+            console.print()
+
     except Exception as e:
         print_error(t("chat_connect_failed", error=str(e)))
         console.print()
@@ -201,9 +214,9 @@ def chat(
     # Main chat loop
     try:
         while True:
-            # Get user input
+            # Get user input - use console.input() for better CJK character support
             try:
-                user_input = Prompt.ask(f"[bold green]{t('chat_user_prompt')}[/bold green]")
+                user_input = console.input(f"[bold green]{t('chat_user_prompt')}[/bold green]: ")
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 print_info(t("chat_goodbye"))
@@ -229,10 +242,14 @@ def chat(
             try:
                 if stream:
                     # Streaming response
-                    response_content = _stream_response(client, selected_model, messages, temperature, max_tokens)
+                    response_content = _stream_response(
+                        client, selected_model, messages, temperature, max_tokens, tokenizer
+                    )
                 else:
                     # Non-streaming response
-                    response_content = _generate_response(client, selected_model, messages, temperature, max_tokens)
+                    response_content = _generate_response(
+                        client, selected_model, messages, temperature, max_tokens, tokenizer
+                    )
 
                 # Add assistant response to history
                 messages.append({"role": "assistant", "content": response_content})
@@ -267,10 +284,18 @@ def _stream_response(
     messages: list,
     temperature: float,
     max_tokens: int,
+    tokenizer=None,
 ) -> str:
     """Generate streaming response and display in real-time."""
+    import time
+
     response_content = ""
     reasoning_content = ""
+
+    # Performance tracking
+    start_time = None
+    first_token_time = None
+    chunk_count = 0
 
     try:
         stream = client.chat.completions.create(
@@ -282,22 +307,101 @@ def _stream_response(
         )
 
         for chunk in stream:
-            delta = chunk.choices[0].delta
-            reasoning_delta = getattr(delta, "reasoning_content", None)
-            if reasoning_delta:
-                reasoning_content += reasoning_delta
-                console.print(reasoning_delta, end="", style="dim")
-            if delta.content:
-                content = delta.content
-                response_content += content
-                console.print(content, end="")
+            if start_time is None:
+                start_time = time.time()
+
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta:
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                    reasoning_content += reasoning_delta
+                    console.print(reasoning_delta, end="", style="dim")
+                    chunk_count += 1
+
+                if delta.content:
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                    content = delta.content
+                    response_content += content
+                    console.print(content, end="")
+                    chunk_count += 1
 
         console.print()  # Newline after streaming
+
+        # Display performance metrics
+        end_time = time.time()
+        if first_token_time and start_time and chunk_count > 0:
+            ttft = first_token_time - start_time
+            total_time = end_time - start_time
+
+            # Calculate TPOT based on chunks
+            if chunk_count > 1:
+                generation_time = total_time - ttft
+                tpot = generation_time / (chunk_count - 1)
+            else:
+                tpot = 0
+
+            # Calculate accurate token counts using tokenizer
+            if tokenizer:
+                input_tokens = _count_tokens_with_tokenizer(messages, tokenizer)
+                output_tokens = _count_tokens_with_tokenizer(
+                    [{"role": "assistant", "content": response_content}], tokenizer
+                )
+                token_prefix = ""
+            else:
+                # Fallback to estimation
+                input_tokens = _estimate_tokens(messages)
+                output_tokens = _estimate_tokens([{"role": "assistant", "content": response_content}])
+                token_prefix = "~"
+
+            # Build metrics display
+            metrics = f"[dim]Total: {total_time*1000:.0f}ms | TTFT: {ttft*1000:.0f}ms"
+            if tpot > 0:
+                metrics += f" | TPOT: {tpot*1000:.1f}ms"
+            metrics += f" | In: {token_prefix}{input_tokens} | Out: {token_prefix}{output_tokens}"
+            metrics += "[/dim]"
+
+            console.print(metrics)
 
     except Exception as e:
         raise Exception(f"Streaming error: {e}")
 
     return response_content
+
+
+def _count_tokens_with_tokenizer(messages: list, tokenizer) -> int:
+    """Count tokens accurately using the model's tokenizer."""
+    try:
+        # Concatenate all message content
+        text = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            # Simple format: role + content
+            text += f"{role}: {content}\n"
+
+        # Encode and count tokens
+        tokens = tokenizer.encode(text, add_special_tokens=True)
+        return len(tokens)
+    except Exception:
+        # Fallback to estimation if tokenizer fails
+        return _estimate_tokens(messages)
+
+
+def _estimate_tokens(messages: list) -> int:
+    """Estimate token count for messages (rough approximation)."""
+    total_chars = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        total_chars += len(content)
+
+    # Rough estimation:
+    # - English: ~4 chars per token
+    # - Chinese: ~1.5 chars per token
+    # Use 2.5 as average
+    return max(1, int(total_chars / 2.5))
 
 
 def _generate_response(
@@ -306,9 +410,14 @@ def _generate_response(
     messages: list,
     temperature: float,
     max_tokens: int,
+    tokenizer=None,
 ) -> str:
     """Generate non-streaming response."""
+    import time
+
     try:
+        start_time = time.time()
+
         response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -317,11 +426,35 @@ def _generate_response(
             stream=False,
         )
 
+        end_time = time.time()
+        total_time = end_time - start_time
+
         content = response.choices[0].message.content
 
         # Display as markdown
         md = Markdown(content)
         console.print(md)
+
+        # Calculate accurate token counts using tokenizer
+        if tokenizer:
+            input_tokens = _count_tokens_with_tokenizer(messages, tokenizer)
+            output_tokens = _count_tokens_with_tokenizer([{"role": "assistant", "content": content}], tokenizer)
+            token_prefix = ""
+        else:
+            # Fallback to API usage or estimation
+            input_tokens = response.usage.prompt_tokens if response.usage else _estimate_tokens(messages)
+            output_tokens = (
+                response.usage.completion_tokens
+                if response.usage
+                else _estimate_tokens([{"role": "assistant", "content": content}])
+            )
+            token_prefix = "" if response.usage else "~"
+
+        # Display performance metrics
+        console.print(
+            f"[dim]Time: {total_time*1000:.0f}ms | "
+            f"In: {token_prefix}{input_tokens} | Out: {token_prefix}{output_tokens}[/dim]"
+        )
 
         return content
 

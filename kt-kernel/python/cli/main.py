@@ -5,6 +5,10 @@ KTransformers CLI - A unified command-line interface for KTransformers.
 """
 
 import sys
+import warnings
+
+# Suppress numpy subnormal warnings
+warnings.filterwarnings("ignore", message="The value of the smallest subnormal")
 
 import typer
 
