@@ -96,9 +96,9 @@ def chat(
         kt chat -t 0.9 --max-tokens 4096 # Adjust generation parameters
     """
     if not HAS_OPENAI:
-        print_error("OpenAI Python SDK is required for chat functionality.")
+        print_error(t("chat_openai_required"))
         console.print()
-        console.print("Install it with:")
+        console.print(t("chat_install_hint"))
         console.print("  pip install openai")
         raise typer.Exit(1)
 
@@ -114,10 +114,10 @@ def chat(
     console.print()
     console.print(
         Panel.fit(
-            f"[bold cyan]KTransformers Chat[/bold cyan]\n\n"
-            f"Server: [yellow]{final_host}:{final_port}[/yellow]\n"
-            f"Temperature: [cyan]{temperature}[/cyan] | Max tokens: [cyan]{max_tokens}[/cyan]\n\n"
-            f"[dim]Type '/help' for commands, '/quit' to exit[/dim]",
+            f"[bold cyan]{t('chat_title')}[/bold cyan]\n\n"
+            f"{t('chat_server')}: [yellow]{final_host}:{final_port}[/yellow]\n"
+            f"{t('chat_temperature')}: [cyan]{temperature}[/cyan] | {t('chat_max_tokens')}: [cyan]{max_tokens}[/cyan]\n\n"
+            f"[dim]{t('chat_help_hint')}[/dim]",
             border_style="cyan",
         )
     )
@@ -152,31 +152,31 @@ def chat(
         )
 
         # Test connection
-        print_info("Connecting to server...")
+        print_info(t("chat_connecting"))
         models = client.models.list()
         available_models = [m.id for m in models.data]
 
         if not available_models:
-            print_error("No models available on server")
+            print_error(t("chat_no_models"))
             raise typer.Exit(1)
 
         # Select model
         if model:
             if model not in available_models:
-                print_warning(f"Model '{model}' not found. Available models: {', '.join(available_models)}")
+                print_warning(t("chat_model_not_found", model=model, available=", ".join(available_models)))
                 selected_model = available_models[0]
             else:
                 selected_model = model
         else:
             selected_model = available_models[0]
 
-        print_success(f"Connected to model: {selected_model}")
+        print_success(t("chat_connected", model=selected_model))
         console.print()
 
     except Exception as e:
-        print_error(f"Failed to connect to server: {e}")
+        print_error(t("chat_connect_failed", error=str(e)))
         console.print()
-        console.print("Make sure the model server is running:")
+        console.print(t("chat_server_not_running"))
         console.print("  kt run <model>")
         raise typer.Exit(1)
 
@@ -203,10 +203,10 @@ def chat(
         while True:
             # Get user input
             try:
-                user_input = Prompt.ask("[bold green]You[/bold green]")
+                user_input = Prompt.ask(f"[bold green]{t('chat_user_prompt')}[/bold green]")
             except (EOFError, KeyboardInterrupt):
                 console.print()
-                print_info("Goodbye!")
+                print_info(t("chat_goodbye"))
                 break
 
             if not user_input.strip():
@@ -224,7 +224,7 @@ def chat(
 
             # Generate response
             console.print()
-            console.print("[bold cyan]Assistant[/bold cyan]")
+            console.print(f"[bold cyan]{t('chat_assistant_prompt')}[/bold cyan]")
 
             try:
                 if stream:
@@ -240,7 +240,7 @@ def chat(
                 console.print()
 
             except Exception as e:
-                print_error(f"Error generating response: {e}")
+                print_error(t("chat_generation_error", error=str(e)))
                 # Remove the user message that caused the error
                 messages.pop()
                 continue
@@ -252,12 +252,12 @@ def chat(
     except KeyboardInterrupt:
         console.print()
         console.print()
-        print_info("Chat interrupted. Goodbye!")
+        print_info(t("chat_interrupted"))
 
     # Final history save
     if save_history and messages:
         _save_history(history_file, messages, selected_model)
-        console.print(f"[dim]History saved to: {history_file}[/dim]")
+        console.print(f"[dim]{t('chat_history_saved', path=str(history_file))}[/dim]")
         console.print()
 
 
@@ -335,20 +335,14 @@ def _handle_command(command: str, messages: list, temperature: float, max_tokens
 
     if cmd in ["/quit", "/exit", "/q"]:
         console.print()
-        print_info("Goodbye!")
+        print_info(t("chat_goodbye"))
         return False
 
     elif cmd in ["/help", "/h"]:
         console.print()
         console.print(
             Panel(
-                "[bold]Available Commands:[/bold]\n\n"
-                "/help, /h         - Show this help message\n"
-                "/quit, /exit, /q  - Exit chat\n"
-                "/clear, /c        - Clear conversation history\n"
-                "/history, /hist   - Show conversation history\n"
-                "/info, /i         - Show current settings\n"
-                "/retry, /r        - Regenerate last response",
+                f"[bold]{t('chat_help_title')}[/bold]\n\n{t('chat_help_content')}",
                 title="Help",
                 border_style="cyan",
             )
@@ -359,19 +353,19 @@ def _handle_command(command: str, messages: list, temperature: float, max_tokens
     elif cmd in ["/clear", "/c"]:
         messages.clear()
         console.print()
-        print_success("Conversation history cleared")
+        print_success(t("chat_history_cleared"))
         console.print()
         return True
 
     elif cmd in ["/history", "/hist"]:
         console.print()
         if not messages:
-            print_info("No conversation history")
+            print_info(t("chat_no_history"))
         else:
             console.print(
                 Panel(
                     _format_history(messages),
-                    title=f"History ({len(messages)} messages)",
+                    title=t("chat_history_title", count=len(messages)),
                     border_style="cyan",
                 )
             )
@@ -382,10 +376,7 @@ def _handle_command(command: str, messages: list, temperature: float, max_tokens
         console.print()
         console.print(
             Panel(
-                f"[bold]Current Settings:[/bold]\n\n"
-                f"Temperature: [cyan]{temperature}[/cyan]\n"
-                f"Max tokens: [cyan]{max_tokens}[/cyan]\n"
-                f"Messages: [cyan]{len(messages)}[/cyan]",
+                f"[bold]{t('chat_info_title')}[/bold]\n\n{t('chat_info_content', temperature=temperature, max_tokens=max_tokens, messages=len(messages))}",
                 title="Info",
                 border_style="cyan",
             )
@@ -397,16 +388,16 @@ def _handle_command(command: str, messages: list, temperature: float, max_tokens
         if len(messages) >= 2 and messages[-1]["role"] == "assistant":
             # Remove last assistant response
             messages.pop()
-            print_info("Retrying last response...")
+            print_info(t("chat_retrying"))
             console.print()
         else:
-            print_warning("No previous response to retry")
+            print_warning(t("chat_no_retry"))
             console.print()
         return True
 
     else:
-        print_warning(f"Unknown command: {command}")
-        console.print("[dim]Type /help for available commands[/dim]")
+        print_warning(t("chat_unknown_command", command=command))
+        console.print(f"[dim]{t('chat_unknown_hint')}[/dim]")
         console.print()
         return True
 
