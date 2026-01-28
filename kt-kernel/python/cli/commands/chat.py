@@ -293,11 +293,13 @@ def _stream_response(
     reasoning_content = ""
 
     # Performance tracking
-    start_time = None
     first_token_time = None
     chunk_count = 0
 
     try:
+        # Start timing before sending request
+        start_time = time.time()
+
         stream = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -307,9 +309,6 @@ def _stream_response(
         )
 
         for chunk in stream:
-            if start_time is None:
-                start_time = time.time()
-
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta:
                 reasoning_delta = getattr(delta, "reasoning_content", None)
@@ -332,7 +331,7 @@ def _stream_response(
 
         # Display performance metrics
         end_time = time.time()
-        if first_token_time and start_time and chunk_count > 0:
+        if first_token_time and chunk_count > 0:
             ttft = first_token_time - start_time
             total_time = end_time - start_time
 
