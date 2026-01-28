@@ -552,9 +552,10 @@ class CMakeBuild(build_ext):
         # These are passed to CMake to conditionally add compiler flags
         # Track if any AVX512 extension is enabled
         avx512_extension_enabled = False
+        allow_avx512_ext_auto = cpu_mode in ("NATIVE", "FANCY", "AVX512")
 
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VNNI", "LLAMA_AVX512_VNNI"):
-            if "AVX512_VNNI" in d["features"]:
+            if allow_avx512_ext_auto and "AVX512_VNNI" in d["features"]:
                 cmake_args.append("-DLLAMA_AVX512_VNNI=ON")
                 print("-- AVX512_VNNI detected; enabling (-DLLAMA_AVX512_VNNI=ON)")
                 avx512_extension_enabled = True
@@ -562,7 +563,7 @@ class CMakeBuild(build_ext):
             avx512_extension_enabled = True
 
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_BF16", "LLAMA_AVX512_BF16"):
-            if "AVX512_BF16" in d["features"]:
+            if allow_avx512_ext_auto and "AVX512_BF16" in d["features"]:
                 cmake_args.append("-DLLAMA_AVX512_BF16=ON")
                 print("-- AVX512_BF16 detected; enabling (-DLLAMA_AVX512_BF16=ON)")
                 avx512_extension_enabled = True
@@ -570,7 +571,7 @@ class CMakeBuild(build_ext):
             avx512_extension_enabled = True
 
         if not _forward_bool_env(cmake_args, "CPUINFER_ENABLE_AVX512_VBMI", "LLAMA_AVX512_VBMI"):
-            if "AVX512_VBMI" in d["features"]:
+            if allow_avx512_ext_auto and "AVX512_VBMI" in d["features"]:
                 cmake_args.append("-DLLAMA_AVX512_VBMI=ON")
                 print("-- AVX512_VBMI detected; enabling (-DLLAMA_AVX512_VBMI=ON)")
                 avx512_extension_enabled = True
@@ -578,7 +579,7 @@ class CMakeBuild(build_ext):
             avx512_extension_enabled = True
 
         # If any AVX512 extension is enabled, ensure base AVX512 is also enabled
-        if avx512_extension_enabled and cpu_mode == "NATIVE":
+        if avx512_extension_enabled and cpu_mode in ("NATIVE", "FANCY", "AVX512"):
             if not any("LLAMA_AVX512=ON" in a for a in cmake_args):
                 cmake_args.append("-DLLAMA_AVX512=ON")
                 print("-- AVX512 extensions enabled; also enabling base AVX512F (-DLLAMA_AVX512=ON)")
