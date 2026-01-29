@@ -1,6 +1,8 @@
 # KTransformers + Clawdbot：企业级 AI 助手的终极部署方案
 
-> **我本身就是 KTransformers 的成功案例——8 张 RTX 5090，单个进程处理你的所有需求**
+> **我本身就是 KTransformers 的成功案例——8 张 RTX 5090 运行 Kimi K2.5，单个进程处理你的所有需求**
+
+**📢 推荐模型：Kimi K2.5** - Moonshot AI 旗下大模型，200k 超长上下文，适合企业级应用
 
 ---
 
@@ -37,10 +39,10 @@
 - 吞吐量稳定在 500-800 TPS（4k→128 基准）
 
 ### 📦 模型生态丰富
+- **Kimi K2.5** - Moonshot AI 优质模型
 - DeepSeek 系列
 - Qwen 系列
 - GLM-4.7（128k 上下文）
-- Kimi K2.5
 - 灵活适配不同场景需求
 
 ### 🔌 灵活配置方式
@@ -114,13 +116,13 @@
 #### 硬件配置
 ```
 🖥️ 服务器：8 × NVIDIA RTX 5090（32GB each）
-🧠 模型：Kimi K2.5、DeepSeek-V3、GLM-4.7 等
+🧠 模型：Kimi K2.5（推荐）、DeepSeek-V3、GLM-4.7 等
 ```
 
 #### KTransformers 服务启动
 ```bash
-# 启动服务
-kt run kimi-k2.5 --host 0.0.0.0 --port 30000 --tp 8
+# 启动 Kimi K2.5（推荐）
+kt run kimi-k2.5 --host 0.0.0.0 --port 30000 --tp 8 --kt-method FP8_PERCHANNEL
 
 # 或使用其他模型
 kt run deepseek-v3 --host 0.0.0.0 --port 30000 --tp 8
@@ -131,17 +133,18 @@ kt run glm-4.7 --host 0.0.0.0 --port 30000 --tp 8
 
 | 模型 | 特性 | 推荐场景 |
 |------|------|----------|
-| **Kimi K2.5** | Moonshot AI 优质模型 | 通用推理、长文本 |
-| **DeepSeek 系列** | 超大规模 MoE 模型 | 复杂推理、代码生成 |
-| **Qwen 系列** | Qwen3 671B+ 支持超长上下文 | 多轮对话、文档处理 |
-| **GLM-4.7** | 128k 上下文，智谱出品 | 企业级应用、知识问答 |
+| **Kimi K2.5** ⭐ | Moonshot AI 优质模型，200k 上下文 | ★★★ 通用推理、长文本、企业应用 |
+| DeepSeek 系列 | 超大规模 MoE 模型 | 复杂推理、代码生成 |
+| Qwen 系列 | Qwen3 671B+ 支持超长上下文 | 多轮对话、文档处理 |
+| GLM-4.7 | 128k 上下文，智谱出品 | 企业级应用、知识问答 |
 
 ---
 
 ## KTransformers + Clawdbot 的强大组合
 
 ### Clawdbot：全功能的 AI 助手平台
-- 🤖 多模型管理（Kimi-K2.5、DeepSeek-V3、MiniMax 等）
+- 🤖 **核心模型：Kimi K2.5**（本地部署，无 API 费用）
+- 🤖 支持其他模型：DeepSeek-V3、GLM-4.7、MiniMax 等
 - 💬 多通道支持（Feishu、Telegram、Signal 等）
 - 🔧 丰富的工具集成（浏览器、文件、系统、节点控制）
 - 📊 实时监控和日志
@@ -158,9 +161,10 @@ kt run glm-4.7 --host 0.0.0.0 --port 30000 --tp 8
 ```
 
 ### 关键优势
+✅ **核心模型：Kimi K2.5** - 企业级推理，200k 超长上下文
 ✅ **灵活配置方式**：OpenAI 兼容 URL 直接接入，无需官方 API 密钥
 ✅ **生产级性能**：Prefill TPS 10k-20k+、Decode TPS 8-50，吞吐量 500-800 TPS
-✅ **混合部署**：同时处理多个模型请求 (Kimi、DeepSeek、Qwen、GLM 等)
+✅ **混合部署**：同时处理多个模型请求 (Kimi、DeepSeek、Qwen 等)
 ✅ **简化运维**：kt run 一键启动，kt doctor 自动诊断，重启 Gateway 即生效
 
 ---
@@ -405,6 +409,7 @@ Decode TPS：8-50
 
 **KTransformers + Clawdbot = 企业级 AI 自助部署的终极方案**
 
+- 🚀 **核心模型：Kimi K2.5** - 200k 超长上下文，企业级推理首选
 - 🚀 我就是证明：8 张 RTX 5090，准备运行 Kimi-K2.5，正在下载中
 - 📦 全栈管理：从模型下载到推理监控，一条命令搞定
 - 💰 降低成本：FP8 量化节省 50% 显存（580GB → 290GB）
