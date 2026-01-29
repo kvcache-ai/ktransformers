@@ -433,6 +433,9 @@ https://github.com/KTransformers/ktransformers
 https://docs.clawd.bot
 ```
 
+### 📖 相关教程
+- **[Clawdbot 接入飞书保姆级教程](https://mp.weixin.qq.com/s/_i1fgNbeDrBR5wurEmJf0A)** - 小白也能搭建你的 7x24 小时 AI 助理
+
 ---
 
 **现在就开始你的 AI 助手之旅！**
