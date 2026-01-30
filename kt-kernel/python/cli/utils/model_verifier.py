@@ -68,6 +68,11 @@ def verify_model_integrity(
     """
     Verify local model integrity against remote repository SHA256 hashes.
 
+    Verifies all important files:
+    - *.safetensors (weights)
+    - *.json (config files)
+    - *.py (custom model code)
+
     Args:
         repo_type: Type of repository ("huggingface" or "modelscope")
         repo_id: Repository ID (e.g., "deepseek-ai/DeepSeek-V3")
@@ -105,20 +110,34 @@ def verify_model_integrity(
                 "files_checked": 0,
                 "files_passed": 0,
                 "files_failed": [],
-                "error_message": f"No safetensors files found in remote repository: {repo_id}",
+                "error_message": f"No verifiable files found in remote repository: {repo_id}",
             }
 
         # 2. Calculate local SHA256 hashes with progress
         report_progress(f"Calculating SHA256 for local files...")
-        local_hashes = calculate_local_sha256(local_dir, "*.safetensors", progress_callback=report_progress)
-        report_progress(f"✓ Calculated {len(local_hashes)} local file hashes")
 
-        # Also check for gguf files if any exist
-        gguf_hashes = calculate_local_sha256(local_dir, "*.gguf")
-        if gguf_hashes:
-            # For gguf, we don't verify against remote (usually converted locally)
-            # Just check they exist and are readable
-            pass
+        # Get all local files matching the patterns
+        local_files = []
+        for pattern in ["*.safetensors", "*.json", "*.py"]:
+            local_files.extend([f for f in local_dir.glob(pattern) if f.is_file()])
+
+        if not local_files:
+            return {
+                "status": "error",
+                "files_checked": 0,
+                "files_passed": 0,
+                "files_failed": [],
+                "error_message": f"No verifiable files found in local directory: {local_dir}",
+            }
+
+        # Calculate hashes for all files
+        local_hashes = calculate_local_sha256(
+            local_dir,
+            file_pattern="*.safetensors",  # Unused when files_list is provided
+            progress_callback=report_progress,
+            files_list=local_files,
+        )
+        report_progress(f"✓ Calculated {len(local_hashes)} local file hashes")
 
         # 3. Compare hashes with progress
         report_progress(f"Comparing {len(official_hashes)} files...")
@@ -272,7 +291,12 @@ def fetch_model_sha256(
     timeout: int | None = None,
 ) -> dict[str, str]:
     """
-    获取模型仓库中所有 safetensors 文件的 sha256 哈希值。
+    获取模型仓库中所有重要文件的 sha256 哈希值。
+
+    包括：
+    - *.safetensors (权重文件)
+    - *.json (配置文件：config.json, tokenizer_config.json 等)
+    - *.py (自定义模型代码：modeling.py, configuration.py 等)
 
     Args:
         repo_id: 仓库 ID，例如 "Qwen/Qwen3-30B-A3B"
@@ -282,7 +306,7 @@ def fetch_model_sha256(
         timeout: 网络请求超时时间（秒），None 表示不设置超时
 
     Returns:
-        dict: 文件名到 sha256 的映射，例如 {"model-00001-of-00016.safetensors": "abc123..."}
+        dict: 文件名到 sha256 的映射，例如 {"model-00001-of-00016.safetensors": "abc123...", "config.json": "def456..."}
     """
     if platform == "hf":
         # 先尝试直连，失败后自动使用镜像
@@ -306,7 +330,7 @@ def fetch_model_sha256(
 def _fetch_from_huggingface(
     repo_id: str, revision: str, use_mirror: bool = False, timeout: int | None = None
 ) -> dict[str, str]:
-    """从 HuggingFace 获取 safetensors 文件的 sha256
+    """从 HuggingFace 获取所有重要文件的 sha256
 
     Args:
         repo_id: 仓库 ID
@@ -332,14 +356,16 @@ def _fetch_from_huggingface(
     try:
         api = HfApi()
         all_files = list_repo_files(repo_id=repo_id, revision=revision)
-        safetensors_files = [f for f in all_files if f.endswith(".safetensors")]
 
-        if not safetensors_files:
+        # 筛选重要文件：*.safetensors, *.json, *.py
+        important_files = [f for f in all_files if f.endswith((".safetensors", ".json", ".py"))]
+
+        if not important_files:
             return {}
 
         paths_info = api.get_paths_info(
             repo_id=repo_id,
-            paths=safetensors_files,
+            paths=important_files,
             revision=revision,
         )
 
@@ -364,7 +390,7 @@ def _fetch_from_huggingface(
 
 
 def _fetch_from_modelscope(repo_id: str, revision: str, timeout: int | None = None) -> dict[str, str]:
-    """从 ModelScope 获取 safetensors 文件的 sha256
+    """从 ModelScope 获取所有重要文件的 sha256
 
     Args:
         repo_id: 仓库 ID
@@ -386,7 +412,8 @@ def _fetch_from_modelscope(repo_id: str, revision: str, timeout: int | None = No
         result = {}
         for file_info in files_info:
             filename = file_info.get("Name", file_info.get("Path", ""))
-            if filename.endswith(".safetensors"):
+            # 筛选重要文件：*.safetensors, *.json, *.py
+            if filename.endswith((".safetensors", ".json", ".py")):
                 sha256 = file_info.get("Sha256", file_info.get("sha256", None))
                 result[filename] = sha256
 

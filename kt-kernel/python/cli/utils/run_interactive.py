@@ -200,7 +200,7 @@ def select_inference_method(model: Any) -> Optional[Dict[str, Any]]:
     # Option 2: Raw precision inference
     option_idx = len(options) + 1
     console.print(f"  [cyan][{option_idx}][/cyan] [bold]Raw Precision Inference[/bold]")
-    console.print("      [dim]FP8 / FP8_PERCHANNEL / BF16 / RAW_INT4[/dim]")
+    console.print("      [dim]FP8 / FP8_PERCHANNEL / BF16 / RAWINT4[/dim]")
     options.append(str(option_idx))
     option_map[str(option_idx)] = "raw"
 
@@ -383,7 +383,7 @@ def _configure_raw_inference(model: Any) -> Dict[str, Any]:
     console.print("  [cyan][1][/cyan] FP8")
     console.print("  [cyan][2][/cyan] FP8_PERCHANNEL")
     console.print("  [cyan][3][/cyan] BF16")
-    console.print("  [cyan][4][/cyan] RAW_INT4")
+    console.print("  [cyan][4][/cyan] RAWINT4")
     console.print()
 
     choice = prompt_choice_with_retry("Select precision", choices=["1", "2", "3", "4"], default="1")
@@ -392,7 +392,7 @@ def _configure_raw_inference(model: Any) -> Dict[str, Any]:
         "1": "FP8",
         "2": "FP8_PERCHANNEL",
         "3": "BF16",
-        "4": "RAW_INT4",
+        "4": "RAWINT4",
     }
 
     raw_method = precision_map[choice]

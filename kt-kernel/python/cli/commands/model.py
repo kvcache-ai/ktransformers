@@ -2421,11 +2421,17 @@ def verify_model(
                     Path(f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()).name
                     for f in files_to_verify
                 }
-                files_to_hash = [
-                    f for f in local_dir_path.glob("*.safetensors") if f.is_file() and f.name in clean_filenames
-                ]
+                # Collect files matching *.safetensors, *.json, *.py
+                files_to_hash = []
+                for pattern in ["*.safetensors", "*.json", "*.py"]:
+                    files_to_hash.extend(
+                        [f for f in local_dir_path.glob(pattern) if f.is_file() and f.name in clean_filenames]
+                    )
             else:
-                files_to_hash = [f for f in local_dir_path.glob("*.safetensors") if f.is_file()]
+                # Collect all important files: *.safetensors, *.json, *.py
+                files_to_hash = []
+                for pattern in ["*.safetensors", "*.json", "*.py"]:
+                    files_to_hash.extend([f for f in local_dir_path.glob(pattern) if f.is_file()])
 
             total_files = len(files_to_hash)
 
@@ -2455,13 +2461,30 @@ def verify_model(
             console.print(f"  [green]✓ Calculated {len(local_hashes)} local file hashes[/green]")
 
             # Step 3: Compare hashes
-            compare_task_id = progress.add_task("[blue]Comparing hashes...", total=len(official_hashes))
+            # If re-verifying specific files, only compare those files
+            if files_to_verify:
+                # Build set of clean filenames to verify
+                clean_verify_filenames = {
+                    Path(f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()).name
+                    for f in files_to_verify
+                }
+                # Filter official_hashes to only include files we're re-verifying
+                hashes_to_compare = {
+                    filename: hash_value
+                    for filename, hash_value in official_hashes.items()
+                    if Path(filename).name in clean_verify_filenames
+                }
+            else:
+                # First-time verification: compare all files
+                hashes_to_compare = official_hashes
+
+            compare_task_id = progress.add_task("[blue]Comparing hashes...", total=len(hashes_to_compare))
 
             files_failed = []
             files_missing = []
             files_passed = 0
 
-            for filename, official_hash in official_hashes.items():
+            for filename, official_hash in hashes_to_compare.items():
                 file_basename = Path(filename).name
 
                 # Find matching local file
@@ -2489,7 +2512,7 @@ def verify_model(
             progress.remove_task(compare_task_id)
 
             # Build result
-            total_checked = len(official_hashes)
+            total_checked = len(hashes_to_compare)  # Use actual compared count
             if files_failed or files_missing:
                 all_failed = files_failed + [f"{f} (missing)" for f in files_missing]
                 result = {

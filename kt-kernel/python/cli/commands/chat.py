@@ -381,8 +381,14 @@ def _count_tokens_with_tokenizer(messages: list, tokenizer) -> int:
             # Simple format: role + content
             text += f"{role}: {content}\n"
 
-        # Encode and count tokens
-        tokens = tokenizer.encode(text, add_special_tokens=True)
+        # Encode and count tokens - suppress any debug output from custom tokenizers
+        import os
+        import sys
+        from contextlib import redirect_stdout, redirect_stderr
+
+        with open(os.devnull, "w") as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                tokens = tokenizer.encode(text, add_special_tokens=True)
         return len(tokens)
     except Exception:
         # Fallback to estimation if tokenizer fails
