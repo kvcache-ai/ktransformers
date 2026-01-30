@@ -4,36 +4,31 @@ This tutorial demonstrates how to run Kimi-K2.5 model inference using SGLang int
 
 ## Table of Contents
 
-- [Running Kimi-K2.5 with SGLang and KT-Kernel](#running-kimi-k25-with-sglang-and-kt-kernel)
-  - [Table of Contents](#table-of-contents)
-  - [Hardware Requirements](#hardware-requirements)
-  - [Prerequisites](#prerequisites)
-  - [Step 1: Download Model Weights](#step-1-download-model-weights)
-  - [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
-    - [Launch Command (4x RTX 4090 Example)](#launch-command-4x-rtx-4090-example)
-  - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
-    - [Basic Chat Completion Request](#basic-chat-completion-request)
-    - [Example Response](#example-response)
+- [Hardware Requirements](#hardware-requirements)
+- [Prerequisites](#prerequisites)
+- [Step 1: Download Model Weights](#step-1-download-model-weights)
+- [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
+- [Step 3: Send Inference Requests](#step-3-send-inference-requests)
 
 ## Hardware Requirements
 
 **Minimum Configuration:**
-- **GPU**: NVIDIA RTX 2x4090(24GB) (or equivalent with at least **total 48GB** VRAM available)
+- **GPU**: NVIDIA RTX 2x4090 48GB (or equivalent with at least total 48GB VRAM available)
 - **CPU**: x86 CPU with AVX512F support (e.g., Intel Sapphire Rapids)
 - **RAM**: At least 600GB system memory
 - **Storage**: ~600GB for model weights (native INT4 weight, same weight folder for CPU and GPU)
 
 ## Prerequisites
 
-**Update (2026-01-30): Both kimi_k2.5 branches have now been merged into main, so there’s no need to check out those branches anymore. The EPBL feature is also supported.**
 Before starting, ensure you have:
 
 1. **KT-Kernel installed**:
 
-   ~~Note: Latest KTransformers' EPLB feature for Kimi-K2.5 will be supported soon.~~
+   Note: Latest KTransformers' EPLB feature for Kimi-K2.5 will be supported soon.
 
 ```
 git clone https://github.com/kvcache-ai/ktransformers.git
+git checkout kimi_k2.5
 git submodule update --init --recursive
 cd kt-kernel && ./install.sh
 ```
@@ -44,6 +39,7 @@ Note: Currently, please clone our custom SGLang repository:
 
 ```
 git clone https://github.com/kvcache-ai/sglang.git
+git checkout kimi_k2.5
 cd sglang && pip install -e "python[all]"
 // maybe need to reinstall cudnn according to the issue when launching SGLang
 pip install nvidia-cudnn-cu12==9.16.0.29
@@ -97,8 +93,7 @@ python -m sglang.launch_server \
   --disable-shared-experts-fusion \
   --chunked-prefill-size 32658 \
   --max-total-tokens 50000 \
-  --attention-backend flashinfer \
-  --kt-enable-dynamic-expert-update
+  --attention-backend flashinfer
 ```
 
 It takes about 2~3 minutes to start the server.
