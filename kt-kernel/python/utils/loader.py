@@ -615,7 +615,12 @@ class CompressedSafeTensorLoader(SafeTensorLoader):
             expert_idx += 1
 
         if expert_idx == 0:
-            raise ValueError(f"No experts found for key {experts_prefix}")
+            experts_prefix = f"language_model.{base_key}.mlp.experts"
+            expert_idx = 0
+            while self.has_tensor(f"{experts_prefix}.{expert_idx}.up_proj.weight_packed"):
+                expert_idx += 1
+            if expert_idx == 0:
+                raise ValueError(f"No experts found for key {experts_prefix}")
 
         def load_projection(proj_name: str):
             weight_entries = []
