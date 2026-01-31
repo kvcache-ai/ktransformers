@@ -1589,6 +1589,29 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       offset += m_local_num_[i];
     }
 
+    // Restore input data from cache into m_local_input_ (shared_mem_buffer may have been
+    // overwritten by subsequent layers' forward passes). This is needed for gate/up LoRA
+    // gradient computation which reads from m_local_input_ptr_.
+    {
+      auto pool_local = config_.pool->get_subpool(tp_part_idx);
+      pool_local->do_work_stealing_job(
+          qlen, nullptr,
+          [&](int i) {
+            for (int j = 0; j < k; j++) {
+              int eid = cache.expert_ids_cache[i * k + j];
+              if (eid < config_.num_gpu_experts || eid >= config_.expert_num) {
+                continue;
+              }
+              if (m_local_num_[eid] == 0) continue;
+              int pos = cache.m_local_pos_cache[i][j];
+              memcpy(m_local_input_ptr_[eid] + pos * config_.hidden_size,
+                     (const ggml_bf16_t*)cache.input_cache + i * config_.hidden_size,
+                     sizeof(ggml_bf16_t) * config_.hidden_size);
+            }
+          },
+          nullptr, "bwd_restore_input", 1);
+    }
+
     // // Compute total tokens for debug
     // size_t total_tokens = 0;
     // for (int i = 0; i < activated_expert; i++) {

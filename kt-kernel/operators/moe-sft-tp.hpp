@@ -203,7 +203,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // AWQ also has gate_scale but has zero_point = true
     bool is_k2_prequantized = (config.gate_scale != nullptr && !config.quant_config.zero_point);
 
-    if (is_k2_prequantized) {
+    if (!config.gate_projs.empty()) {
+      // Pre-quantized per-NUMA weights (INT8/INT4 with separate scales)
+      // gate_projs[numa_id][expert_id] -> pointer to that expert's quantized weight for that NUMA
+      // tp_configs are already copies of config (including gate_projs), and
+      // intermediate_size is already divided by tp_count.
+      // Sub-MOE accesses gate_projs[tp_part_idx] where tp_part_idx == numa_id.
+      printf("TP_MOE_SFT: Pre-quantized per-NUMA mode (gate_projs path)\n");
+      pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+    } else if (is_k2_prequantized) {
       printf("TP_MOE_SFT: K2 pre-quantized mode (no BF16 partitioning)\n");
       // For K2, weights are already int4-packed with scales
       // tp_configs[i] already has all pointers from config (copied in TP_MOE constructor)

@@ -11,6 +11,7 @@ Supports quantization methods:
 - AMXINT4_KGroup_SFT: INT4 K-Group quantization training (AWQ/K2)
 """
 
+import ctypes
 import torch
 from typing import Dict, Tuple, Optional, List
 
@@ -194,7 +195,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             return
 
         # If base weights not set, try to load from file
-        if self.gate_proj is None or self.up_proj is None or self.down_proj is None:
+        if self.gate_proj is None and not getattr(self, "_use_projs_path", False):
             self._load_base_weights_from_file()
 
         # Create MOE SFT config
@@ -210,9 +211,19 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.layer_idx = self.layer_idx
 
         # Set base weight pointers
-        config.gate_proj = self.gate_proj.data_ptr()
-        config.up_proj = self.up_proj.data_ptr()
-        config.down_proj = self.down_proj.data_ptr()
+        if getattr(self, "_use_projs_path", False):
+            # Pre-quantized per-NUMA per-expert path (INT8/INT4)
+            config.gate_projs = self._gate_projs_ptrs
+            config.up_projs = self._up_projs_ptrs
+            config.down_projs = self._down_projs_ptrs
+            config.gate_scales = self._gate_scale_ptrs
+            config.up_scales = self._up_scale_ptrs
+            config.down_scales = self._down_scale_ptrs
+        else:
+            # Flat BF16 buffer path
+            config.gate_proj = self.gate_proj.data_ptr()
+            config.up_proj = self.up_proj.data_ptr()
+            config.down_proj = self.down_proj.data_ptr()
 
         # Set LoRA weight pointers (if initialized)
         if self._lora_initialized:
@@ -319,26 +330,57 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.down_proj = torch.stack(down_weights, dim=0).contiguous()
         else:
             # SafeTensorLoader returns nested lists [numa_id][expert_id] -> numpy array
-            # For SFT, we typically use numa_id=0
+            # Keep per-NUMA per-expert arrays for gate_projs/gate_scales path
             import numpy as np
 
-            numa_id = 0
-            self.gate_proj = torch.from_numpy(np.stack(gate_weights[numa_id], axis=0)).contiguous()
-            self.up_proj = torch.from_numpy(np.stack(up_weights[numa_id], axis=0)).contiguous()
-            self.down_proj = torch.from_numpy(np.stack(down_weights[numa_id], axis=0)).contiguous()
+            num_numa = len(gate_weights)
 
-            # Also store scales for INT8/INT4 methods
-            self.gate_scale = torch.from_numpy(np.stack(experts_data["gate_scale"][numa_id], axis=0)).contiguous()
-            self.up_scale = torch.from_numpy(np.stack(experts_data["up_scale"][numa_id], axis=0)).contiguous()
-            self.down_scale = torch.from_numpy(np.stack(experts_data["down_scale"][numa_id], axis=0)).contiguous()
+            # Store raw per-NUMA per-expert numpy arrays (keep references alive)
+            self._gate_weights_per_numa = gate_weights  # [numa_id][expert_id] -> np array
+            self._up_weights_per_numa = up_weights
+            self._down_weights_per_numa = down_weights
+            self._gate_scales_per_numa = experts_data["gate_scale"]
+            self._up_scales_per_numa = experts_data["up_scale"]
+            self._down_scales_per_numa = experts_data["down_scale"]
+
+            # Build pointer arrays: [[ptr_expert_0, ptr_expert_1, ...], ...] per NUMA
+            def _make_ptrs(arrays_per_numa):
+                return [
+                    [
+                        ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
+                        for et in numa_array
+                    ]
+                    for numa_array in arrays_per_numa
+                ]
+
+            self._gate_projs_ptrs = _make_ptrs(gate_weights)
+            self._up_projs_ptrs = _make_ptrs(up_weights)
+            self._down_projs_ptrs = _make_ptrs(down_weights)
+            self._gate_scale_ptrs = _make_ptrs(experts_data["gate_scale"])
+            self._up_scale_ptrs = _make_ptrs(experts_data["up_scale"])
+            self._down_scale_ptrs = _make_ptrs(experts_data["down_scale"])
+
+            # Set gate_proj to None so load_weights() uses gate_projs path
+            self.gate_proj = None
+            self.up_proj = None
+            self.down_proj = None
+            self._use_projs_path = True
 
         # Close loader handles
         loader.close_all_handles()
 
-        print(
-            f"[AMXSFTMoEWrapper] Loaded weights: gate_proj={self.gate_proj.shape}, "
-            f"up_proj={self.up_proj.shape}, down_proj={self.down_proj.shape}"
-        )
+        if getattr(self, "_use_projs_path", False):
+            num_numa = len(self._gate_weights_per_numa)
+            num_experts = len(self._gate_weights_per_numa[0])
+            print(
+                f"[AMXSFTMoEWrapper] Loaded pre-quantized weights: "
+                f"{num_numa} NUMA nodes, {num_experts} experts per NUMA"
+            )
+        else:
+            print(
+                f"[AMXSFTMoEWrapper] Loaded weights: gate_proj={self.gate_proj.shape}, "
+                f"up_proj={self.up_proj.shape}, down_proj={self.down_proj.shape}"
+            )
 
     def init_lora_weights(
         self,
@@ -545,7 +587,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         grad_output: torch.Tensor,
         lora_params: Optional[Dict[str, torch.nn.Parameter]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -554,17 +596,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         Optimized for minimal data copying:
         - Accepts GPU tensors directly
         - Returns directly to output_device without intermediate clone
-        - LoRA gradients are accumulated directly to param.grad (no clone needed)
+        - LoRA gradients are returned in grad_loras dict (no clone needed)
 
         Args:
             grad_output: Gradient from upstream [qlen, hidden_size] (any device, will be converted to bf16)
-            lora_params: Optional dict of LoRA parameters to accumulate gradients to.
-                         If provided, gradients are accumulated directly to param.grad.
+            lora_params: Optional dict of LoRA parameters (kept for compatibility).
+                         If provided, gradients are still returned in grad_loras.
                          Keys: gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b
             output_device: Target device for grad_input output (None = clone CPU tensors for safety)
 
         Returns:
             grad_input: Input gradient [qlen, hidden_size]
+            grad_loras: LoRA gradients dict (e.g., grad_gate_lora_a, grad_gate_lora_b, ...)
             grad_weights: Routing weights gradient [qlen, num_experts_per_tok]
         """
         if self._cache_depth <= 0:
@@ -611,22 +654,24 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
         self.cpu_infer.sync()
 
+        # # Debug: print LoRA weights and computed gradients
+        # print(f"\033[33m[AMX_SFT DEBUG] layer={self.layer_idx} backward "
+        #       f"lora_a weights: gate={self.gate_lora_a.float().norm().item():.6f} "
+        #       f"up={self.up_lora_a.float().norm().item():.6f} "
+        #       f"down={self.down_lora_a.float().norm().item():.6f} | "
+        #       f"lora_b weights: gate={self.gate_lora_b.float().norm().item():.6f} "
+        #       f"up={self.up_lora_b.float().norm().item():.6f} "
+        #       f"down={self.down_lora_b.float().norm().item():.6f} | "
+        #       f"grad_a: gate={self.grad_gate_lora_a.float().norm().item():.6f} "
+        #       f"up={self.grad_up_lora_a.float().norm().item():.6f} "
+        #       f"down={self.grad_down_lora_a.float().norm().item():.6f} | "
+        #       f"grad_b: gate={self.grad_gate_lora_b.float().norm().item():.6f} "
+        #       f"up={self.grad_up_lora_b.float().norm().item():.6f} "
+        #       f"down={self.grad_down_lora_b.float().norm().item():.6f}"
+        #       f"\033[0m", flush=True)
+
         # Decrease cache depth
         self._cache_depth -= 1
-
-        if lora_params is not None:
-            lora_grad_mapping = [
-                ("gate_lora_a", self.grad_gate_lora_a),
-                ("gate_lora_b", self.grad_gate_lora_b),
-                ("up_lora_a", self.grad_up_lora_a),
-                ("up_lora_b", self.grad_up_lora_b),
-                ("down_lora_a", self.grad_down_lora_a),
-                ("down_lora_b", self.grad_down_lora_b),
-            ]
-            for param_name, grad_buffer in lora_grad_mapping:
-                param = lora_params[param_name]
-                if param.grad is None:
-                    param.grad = grad_buffer
 
         # Return gradients: if output_device specified, transfer grad_input directly
         if output_device is not None:
@@ -637,7 +682,16 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_input = buffer.grad_input_cpu.clone()
             grad_weights = buffer.grad_weights.clone()
 
-        return grad_input, grad_weights
+        grad_loras = {
+            "grad_gate_lora_a": self.grad_gate_lora_a,
+            "grad_gate_lora_b": self.grad_gate_lora_b,
+            "grad_up_lora_a": self.grad_up_lora_a,
+            "grad_up_lora_b": self.grad_up_lora_b,
+            "grad_down_lora_a": self.grad_down_lora_a,
+            "grad_down_lora_b": self.grad_down_lora_b,
+        }
+
+        return grad_input, grad_loras, grad_weights
 
     def update_lora_weights(self) -> None:
         """
@@ -664,6 +718,14 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         # Submit update task
+        # print(f"\033[36m[AMX_SFT DEBUG] layer={self.layer_idx} update_lora_weights "
+        #       f"gate_lora_a: ptr={self.gate_lora_a.data_ptr()} norm={self.gate_lora_a.float().norm().item():.6f} "
+        #       f"gate_lora_b: ptr={self.gate_lora_b.data_ptr()} norm={self.gate_lora_b.float().norm().item():.6f} "
+        #       f"up_lora_a: ptr={self.up_lora_a.data_ptr()} norm={self.up_lora_a.float().norm().item():.6f} "
+        #       f"up_lora_b: ptr={self.up_lora_b.data_ptr()} norm={self.up_lora_b.float().norm().item():.6f} "
+        #       f"down_lora_a: ptr={self.down_lora_a.data_ptr()} norm={self.down_lora_a.float().norm().item():.6f} "
+        #       f"down_lora_b: ptr={self.down_lora_b.data_ptr()} norm={self.down_lora_b.float().norm().item():.6f}"
+        #       f"\033[0m", flush=True)
         self.cpu_infer.submit(
             self.moe.update_lora_weights_task(
                 self.gate_lora_a.data_ptr(),

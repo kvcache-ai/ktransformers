@@ -338,7 +338,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         grad_output: torch.Tensor,
         lora_params: Optional[Dict[str, "torch.nn.Parameter"]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -347,17 +347,18 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         Optimized for minimal data copying:
         - Accepts GPU tensors directly
         - Returns grad_input directly to output_device without intermediate clone
-        - LoRA gradients are accumulated directly to param.grad (no clone needed)
+        - LoRA gradients are returned in grad_loras dict (no clone needed)
 
         Args:
             grad_output: Gradient from upstream [qlen, hidden_size] (any device)
-            lora_params: Optional dict of LoRA parameters to accumulate gradients to.
-                         If provided, gradients are accumulated directly to param.grad.
+            lora_params: Optional dict of LoRA parameters (kept for compatibility).
+                         If provided, gradients are still returned in grad_loras.
                          Keys: gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b
             output_device: Target device for grad_input (None = clone CPU tensor)
 
         Returns:
             grad_input: Input gradient [qlen, hidden_size]
+            grad_loras: LoRA gradients dict (e.g., grad_gate_lora_a, grad_gate_lora_b, ...)
             grad_weights: Routing weights gradient [qlen, num_experts_per_tok]
         """
         pass
