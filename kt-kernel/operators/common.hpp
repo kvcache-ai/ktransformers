@@ -279,6 +279,8 @@ struct GeneralMOEConfig {
   int down_type;
   int hidden_type;
 
+  int max_cache_depth = 1;
+
   GeneralMOEConfig() {}
 
   GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
@@ -305,9 +307,6 @@ struct MOESFTConfig : public GeneralMOEConfig {
   void* up_lora_b = nullptr;    // [expert_num, intermediate_size, lora_rank]
   void* down_lora_a = nullptr;  // [expert_num, lora_rank, intermediate_size]
   void* down_lora_b = nullptr;  // [expert_num, hidden_size, lora_rank]
-
-  // Gradient checkpointing configuration
-  int max_cache_depth = 1;  // Maximum cache depth (support N forwards before backward)
 
   MOESFTConfig() : GeneralMOEConfig() {}
 

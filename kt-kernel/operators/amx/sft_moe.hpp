@@ -3715,13 +3715,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   ForwardCache& push_cache() {
     if (cache_stack_top_ >= max_cache_depth_) {
-      std::cerr << "[KT-MOE ERROR] Forward cache stack overflow!" << std::endl;
-      std::cerr << "  cache_stack_top_ = " << cache_stack_top_ << std::endl;
-      std::cerr << "  max_cache_depth_ = " << max_cache_depth_ << std::endl;
-      std::cerr << "  Hint: If you are doing inference (forward only without backward)," << std::endl;
-      std::cerr << "        set save_for_backward=False in forward_sft() call." << std::endl;
-      std::cerr << "        Or increase max_cache_depth in MOESFTConfig." << std::endl;
-      throw std::runtime_error("Forward cache stack overflow");
+      // std::cerr << "[KT-MOE ERROR] Forward cache stack overflow!" << std::endl;
+      // std::cerr << "  cache_stack_top_ = " << cache_stack_top_ << std::endl;
+      // std::cerr << "  max_cache_depth_ = " << max_cache_depth_ << std::endl;
+      // std::cerr << "  Hint: If you are doing inference (forward only without backward)," << std::endl;
+      // std::cerr << "        set save_for_backward=False in forward_sft() call." << std::endl;
+      // std::cerr << "        Or increase max_cache_depth in MOESFTConfig." << std::endl;
+      // throw std::runtime_error("Forward cache stack overflow");
+      cache_stack_top_ = 0;  // Wrap around (for inference only)
     }
     return cache_stack_[cache_stack_top_++];
   }

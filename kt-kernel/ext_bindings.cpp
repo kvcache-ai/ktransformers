@@ -763,6 +763,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("up_type", &GeneralMOEConfig::up_type)
       .def_readwrite("down_type", &GeneralMOEConfig::down_type)
       .def_readwrite("hidden_type", &GeneralMOEConfig::hidden_type)
+      .def_readwrite("max_cache_depth", &GeneralMOEConfig::max_cache_depth)
 
       ;
 
@@ -774,7 +775,6 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       }))
       .def_readwrite("lora_rank", &MOESFTConfig::lora_rank)
       .def_readwrite("lora_alpha", &MOESFTConfig::lora_alpha)
-      .def_readwrite("max_cache_depth", &MOESFTConfig::max_cache_depth)
       .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_a)
       .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_b)
       .DEF_PTR_PROPERTY(MOESFTConfig, up_lora_a)

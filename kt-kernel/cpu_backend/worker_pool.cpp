@@ -110,7 +110,8 @@ struct TraceEvent {
 
 static std::vector<TraceEvent> g_trace_events;
 static std::mutex g_trace_mutex;
-static uint64_t g_trace_start_time = 0;  // baseline timestamp
+static uint64_t g_trace_start_time = 0;      // baseline timestamp (RDTSC)
+static double g_trace_start_epoch_us = 0.0;  // wall-clock epoch time in microseconds
 static std::string g_trace_output_path = "sft_trace.json";
 
 // Thread-safe initialization using std::call_once
@@ -123,6 +124,10 @@ static void write_trace_to_file();
 static void init_trace() {
   std::call_once(g_trace_init_flag, []() {
     g_trace_start_time = rdtsc_now();
+    // Record wall-clock epoch time for cross-process trace alignment
+    auto now_wall = std::chrono::system_clock::now();
+    auto epoch_us = std::chrono::duration_cast<std::chrono::microseconds>(now_wall.time_since_epoch()).count();
+    g_trace_start_epoch_us = static_cast<double>(epoch_us);
     // Check for custom output path from environment
     const char* env_path = std::getenv("SFT_TRACE_PATH");
     if (env_path && env_path[0] != '\0') {
@@ -222,6 +227,8 @@ static void write_trace_to_file() {
   }
 
   ofs << "  ],\n";
+  ofs << "  \"metadata\": {\"start_epoch_us\": " << std::setprecision(0) << g_trace_start_epoch_us << "},\n";
+  ofs << std::setprecision(3);
   ofs << "  \"displayTimeUnit\": \"ns\"\n";
   ofs << "}\n";
 
