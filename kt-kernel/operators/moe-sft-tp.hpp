@@ -205,10 +205,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     if (!config.gate_projs.empty()) {
       // Pre-quantized per-NUMA weights (INT8/INT4 with separate scales)
-      // gate_projs[numa_id][expert_id] -> pointer to that expert's quantized weight for that NUMA
-      // tp_configs are already copies of config (including gate_projs), and
-      // intermediate_size is already divided by tp_count.
-      // Sub-MOE accesses gate_projs[tp_part_idx] where tp_part_idx == numa_id.
       printf("TP_MOE_SFT: Pre-quantized per-NUMA mode (gate_projs path)\n");
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
@@ -216,6 +212,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       // C++ backward needs BF16 base weights to compute gate/up LoRA B gradients
       // through the gated MLP chain (prepare_backward_weights checks config_.gate_proj).
       if (config.gate_proj != nullptr) {
+        printf("  [MEM] BF16 backward weights available, partitioning for TP...\n");
         std::vector<ggml_bf16_t*> temp_gate(tp_count);
         std::vector<ggml_bf16_t*> temp_up(tp_count);
         std::vector<ggml_bf16_t*> temp_down(tp_count);
@@ -233,15 +230,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
               [&, i, gate_up_elcount](int expert_id_) {
                 size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
-                memcpy(temp_gate[i] + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
-                           i * gate_up_elcount,
-                       sizeof(ggml_bf16_t) * gate_up_elcount);
+                size_t src_gate_offset = expert_id * config.intermediate_size * config.hidden_size + i * gate_up_elcount;
+                size_t dst_offset = expert_id * gate_up_elcount;
+                size_t copy_bytes = sizeof(ggml_bf16_t) * gate_up_elcount;
 
-                memcpy(temp_up[i] + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
-                           i * gate_up_elcount,
-                       sizeof(ggml_bf16_t) * gate_up_elcount);
+                memcpy(temp_gate[i] + dst_offset,
+                       (ggml_bf16_t*)config.gate_proj + src_gate_offset,
+                       copy_bytes);
+
+                memcpy(temp_up[i] + dst_offset,
+                       (ggml_bf16_t*)config.up_proj + src_gate_offset,
+                       copy_bytes);
 
                 for (size_t col = 0; col < config.hidden_size; col++) {
                   memcpy(temp_down[i] + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
@@ -250,7 +249,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                          sizeof(ggml_bf16_t) * tpc.intermediate_size);
                 }
               },
-              nullptr);
+              nullptr, "memcpy_weights_tmp");
         }
 
         // Set BF16 weight pointers on sub-MOEs for backward
@@ -258,14 +257,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
           tps[i]->set_base_weight_pointers(temp_gate[i], temp_up[i], temp_down[i]);
         }
 
-        // Save partitioned BF16 weights for backward pass lifetime
-        partitioned_gate_proj_.resize(tp_count);
-        partitioned_up_proj_.resize(tp_count);
-        partitioned_down_proj_.resize(tp_count);
+        // free the memory
         for (int i = 0; i < tp_count; i++) {
-          partitioned_gate_proj_[i] = temp_gate[i];
-          partitioned_up_proj_[i] = temp_up[i];
-          partitioned_down_proj_[i] = temp_down[i];
+          delete [] (temp_gate[i]);
+          delete [] (temp_up[i]);
+          delete [] (temp_down[i]);
         }
       }
     } else if (is_k2_prequantized) {
@@ -325,23 +321,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
             nullptr);
       }
 
-      // Step 2: Set weight pointers via public methods and call load_weights
-      for (int i = 0; i < tp_count; i++) {
-        tps[i]->set_base_weight_pointers(temp_gate[i], temp_up[i], temp_down[i]);
-        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
-      }
 
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
-      // Bug #20 fix: Save partitioned weights for backward pass (do NOT delete them!)
-      // backward_down() uses config_.down_proj to compute gradients
-      partitioned_gate_proj_.resize(tp_count);
-      partitioned_up_proj_.resize(tp_count);
-      partitioned_down_proj_.resize(tp_count);
+      // Step 2: Set weight pointers via public methods and call load_weights
       for (int i = 0; i < tp_count; i++) {
-        partitioned_gate_proj_[i] = temp_gate[i];
-        partitioned_up_proj_[i] = temp_up[i];
-        partitioned_down_proj_[i] = temp_down[i];
+        tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
+        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+      }
+
+      for (int i = 0; i < tp_count; i++) {
+        delete [] (temp_gate[i]);
+        delete [] (temp_up[i]);
+        delete [] (temp_down[i]);
       }
     } else {
       // Other loading methods (from loader or file)

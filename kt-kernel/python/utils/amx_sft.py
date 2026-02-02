@@ -24,16 +24,16 @@ try:
         AMXBF16_SFT_MOE,
         AMXInt8_SFT_MOE,
         AMXInt4_SFT_MOE,
-        AMXInt4_1_SFT_MOE,
-        AMXInt4_1KGroup_SFT_MOE,
-        AMXInt4_KGroup_SFT_MOE,
+        # AMXInt4_1_SFT_MOE,
+        # AMXInt4_1KGroup_SFT_MOE,
+        # AMXInt4_KGroup_SFT_MOE,
         # SkipLoRA variants (skip all LoRA computation in backward)
         AMXBF16_SFT_MOE_SkipLoRA,
         AMXInt8_SFT_MOE_SkipLoRA,
         AMXInt4_SFT_MOE_SkipLoRA,
-        AMXInt4_1_SFT_MOE_SkipLoRA,
-        AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
-        AMXInt4_KGroup_SFT_MOE_SkipLoRA,
+        # AMXInt4_1_SFT_MOE_SkipLoRA,
+        # AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
+        # AMXInt4_KGroup_SFT_MOE_SkipLoRA,
     )
 
     _HAS_AMX_SFT_SUPPORT = True
@@ -42,16 +42,16 @@ except (ImportError, AttributeError):
     AMXBF16_SFT_MOE = None
     AMXInt8_SFT_MOE = None
     AMXInt4_SFT_MOE = None
-    AMXInt4_1_SFT_MOE = None
-    AMXInt4_1KGroup_SFT_MOE = None
-    AMXInt4_KGroup_SFT_MOE = None
+    # AMXInt4_1_SFT_MOE = None
+    # AMXInt4_1KGroup_SFT_MOE = None
+    # AMXInt4_KGroup_SFT_MOE = None
     # SkipLoRA variants
     AMXBF16_SFT_MOE_SkipLoRA = None
     AMXInt8_SFT_MOE_SkipLoRA = None
     AMXInt4_SFT_MOE_SkipLoRA = None
-    AMXInt4_1_SFT_MOE_SkipLoRA = None
-    AMXInt4_1KGroup_SFT_MOE_SkipLoRA = None
-    AMXInt4_KGroup_SFT_MOE_SkipLoRA = None
+    # AMXInt4_1_SFT_MOE_SkipLoRA = None
+    # AMXInt4_1KGroup_SFT_MOE_SkipLoRA = None
+    # AMXInt4_KGroup_SFT_MOE_SkipLoRA = None
 
 from ..experts_sft import BaseSFTMoEWrapper, KExpertsSFTBuffer
 
@@ -61,16 +61,16 @@ _SFT_METHOD_TO_CLASS = {
     "AMXBF16_SFT": AMXBF16_SFT_MOE,
     "AMXINT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
-    "AMXINT4_1_SFT": AMXInt4_1_SFT_MOE,
-    "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
-    "AMXINT4_1KGroup_SFT": AMXInt4_1KGroup_SFT_MOE,
+    # "AMXINT4_1_SFT": AMXInt4_1_SFT_MOE,
+    # "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
+    # "AMXINT4_1KGroup_SFT": AMXInt4_1KGroup_SFT_MOE,
     # SkipLoRA variants (skip all LoRA computation in backward, only compute base weight grad_input)
     "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
     "AMXINT8_SFT_SkipLoRA": AMXInt8_SFT_MOE_SkipLoRA,
     "AMXINT4_SFT_SkipLoRA": AMXInt4_SFT_MOE_SkipLoRA,
-    "AMXINT4_1_SFT_SkipLoRA": AMXInt4_1_SFT_MOE_SkipLoRA,
-    "AMXINT4_KGroup_SFT_SkipLoRA": AMXInt4_KGroup_SFT_MOE_SkipLoRA,
-    "AMXINT4_1KGroup_SFT_SkipLoRA": AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
+    # "AMXINT4_1_SFT_SkipLoRA": AMXInt4_1_SFT_MOE_SkipLoRA,
+    # "AMXINT4_KGroup_SFT_SkipLoRA": AMXInt4_KGroup_SFT_MOE_SkipLoRA,
+    # "AMXINT4_1KGroup_SFT_SkipLoRA": AMXInt4_1KGroup_SFT_MOE_SkipLoRA,
 }
 
 
@@ -260,6 +260,34 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.cpu_infer.submit(self.moe.warm_up_task())
         self.cpu_infer.sync()
 
+        # Release Python-side base weight tensors. C++ has already copied/transformed
+        # them into internal BufferB format (backward_bb_pool_) and no longer needs
+        # the original bf16 data. Holding these wastes ~1 GB/layer.
+        self.gate_proj = None
+        self.up_proj = None
+        self.down_proj = None
+                
+        if getattr(self, "_bf16_gate_proj", None) is not None:
+            self._bf16_gate_proj = None
+            self._bf16_up_proj = None
+            self._bf16_down_proj = None
+
+        # Release pre-quantized per-NUMA numpy arrays. C++ has already copied
+        # them into internal BufferB format via memcpy in load_weights().
+        if getattr(self, "_use_projs_path", False):
+            self._gate_weights_per_numa = None
+            self._up_weights_per_numa = None
+            self._down_weights_per_numa = None
+            self._gate_scales_per_numa = None
+            self._up_scales_per_numa = None
+            self._down_scales_per_numa = None
+            self._gate_projs_ptrs = None
+            self._up_projs_ptrs = None
+            self._down_projs_ptrs = None
+            self._gate_scale_ptrs = None
+            self._up_scale_ptrs = None
+            self._down_scale_ptrs = None
+
         self._weights_loaded = True
 
     def load_weights_from_tensors(
@@ -288,6 +316,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         # Now load weights
         self.load_weights(physical_to_logical_map_cpu)
+        
+        del gate_proj
+        del up_proj
+        del down_proj
+
 
     def _load_base_weights_from_file(self) -> None:
         """
@@ -725,14 +758,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         # Submit update task
-        # print(f"\033[36m[AMX_SFT DEBUG] layer={self.layer_idx} update_lora_weights "
-        #       f"gate_lora_a: ptr={self.gate_lora_a.data_ptr()} norm={self.gate_lora_a.float().norm().item():.6f} "
-        #       f"gate_lora_b: ptr={self.gate_lora_b.data_ptr()} norm={self.gate_lora_b.float().norm().item():.6f} "
-        #       f"up_lora_a: ptr={self.up_lora_a.data_ptr()} norm={self.up_lora_a.float().norm().item():.6f} "
-        #       f"up_lora_b: ptr={self.up_lora_b.data_ptr()} norm={self.up_lora_b.float().norm().item():.6f} "
-        #       f"down_lora_a: ptr={self.down_lora_a.data_ptr()} norm={self.down_lora_a.float().norm().item():.6f} "
-        #       f"down_lora_b: ptr={self.down_lora_b.data_ptr()} norm={self.down_lora_b.float().norm().item():.6f}"
-        #       f"\033[0m", flush=True)
         self.cpu_infer.submit(
             self.moe.update_lora_weights_task(
                 self.gate_lora_a.data_ptr(),
