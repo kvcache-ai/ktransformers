@@ -297,7 +297,114 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
   }
+
+#ifndef KTRANSFORMERS_CPU_ONLY
+  // Bind setup_batch_load_buffers for MoE types that support it (V2 API)
+  if constexpr (requires { &MoeClass::setup_batch_load_buffers; }) {
+    moe_cls.def(
+        "setup_batch_load_buffers",
+        [](MoeClass& moe, int gpu_tp_count, py::list pinned_w13_weight_ptrs, py::list pinned_w13_scale_ptrs,
+           py::list pinned_w2_weight_ptrs, py::list pinned_w2_scale_ptrs, py::list gpu_w13_weight_ptrs_per_rank,
+           py::list gpu_w13_scale_ptrs_per_rank, py::list gpu_w2_weight_ptrs_per_rank,
+           py::list gpu_w2_scale_ptrs_per_rank, intptr_t cuda_stream, size_t w13_weight_expert_nbytes,
+           size_t w13_scale_expert_nbytes, size_t w2_weight_expert_nbytes, size_t w2_scale_expert_nbytes) {
+          // Convert Python lists to std::vector
+          std::vector<uintptr_t> pinned_w13_weight_vec, pinned_w13_scale_vec, pinned_w2_weight_vec, pinned_w2_scale_vec;
+          std::vector<uintptr_t> gpu_w13_weight_vec, gpu_w13_scale_vec, gpu_w2_weight_vec, gpu_w2_scale_vec;
+
+          for (auto item : pinned_w13_weight_ptrs) pinned_w13_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : pinned_w13_scale_ptrs) pinned_w13_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : pinned_w2_weight_ptrs) pinned_w2_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : pinned_w2_scale_ptrs) pinned_w2_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : gpu_w13_weight_ptrs_per_rank) gpu_w13_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : gpu_w13_scale_ptrs_per_rank) gpu_w13_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : gpu_w2_weight_ptrs_per_rank) gpu_w2_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : gpu_w2_scale_ptrs_per_rank) gpu_w2_scale_vec.push_back(py::cast<uintptr_t>(item));
+
+          moe.setup_batch_load_buffers(gpu_tp_count, pinned_w13_weight_vec, pinned_w13_scale_vec, pinned_w2_weight_vec,
+                                       pinned_w2_scale_vec, gpu_w13_weight_vec, gpu_w13_scale_vec, gpu_w2_weight_vec,
+                                       gpu_w2_scale_vec, cuda_stream, w13_weight_expert_nbytes, w13_scale_expert_nbytes,
+                                       w2_weight_expert_nbytes, w2_scale_expert_nbytes);
+        },
+        py::arg("gpu_tp_count"), py::arg("pinned_w13_weight_ptrs"), py::arg("pinned_w13_scale_ptrs"),
+        py::arg("pinned_w2_weight_ptrs"), py::arg("pinned_w2_scale_ptrs"), py::arg("gpu_w13_weight_ptrs_per_rank"),
+        py::arg("gpu_w13_scale_ptrs_per_rank"), py::arg("gpu_w2_weight_ptrs_per_rank"),
+        py::arg("gpu_w2_scale_ptrs_per_rank"), py::arg("cuda_stream"), py::arg("w13_weight_expert_nbytes"),
+        py::arg("w13_scale_expert_nbytes"), py::arg("w2_weight_expert_nbytes"), py::arg("w2_scale_expert_nbytes"),
+        "V2 API: Register fixed buffer pointers once during initialization");
+  }
+
+  // Bind batch_load_cpu_experts_to_gpu_task for MoE types that support it (V2 API - simplified)
+  if constexpr (requires { &MoeClass::batch_load_cpu_experts_to_gpu; }) {
+    struct BatchLoadCpuExpertsToGpuBindings {
+      struct Args {
+        CPUInfer* cpuinfer;
+        MoeClass* moe;
+        std::vector<int> cpu_expert_ids;
+      };
+
+      static void inner(void* args) {
+        Args* args_ = (Args*)args;
+        args_->cpuinfer->enqueue(&MoeClass::batch_load_cpu_experts_to_gpu, args_->moe, args_->cpu_expert_ids);
+      }
+
+      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, py::list cpu_expert_ids) {
+        // Convert Python list to std::vector
+        std::vector<int> expert_ids_vec;
+        for (auto item : cpu_expert_ids) expert_ids_vec.push_back(py::cast<int>(item));
+
+        Args* args = new Args{nullptr, moe.get(), expert_ids_vec};
+        return std::make_pair((intptr_t)&inner, (intptr_t)args);
+      }
+    };
+
+    moe_cls.def("batch_load_cpu_experts_to_gpu_task", &BatchLoadCpuExpertsToGpuBindings::cpuinfer_interface,
+                py::arg("cpu_expert_ids"), "V2 API: Only pass cpu_expert_ids, buffers are pre-registered");
+  }
+#endif  // KTRANSFORMERS_CPU_ONLY
 }
+
+// --- CUDA IPC helper functions ---
+#ifndef KTRANSFORMERS_CPU_ONLY
+#if defined(KTRANSFORMERS_USE_CUDA)
+py::bytes cuda_ipc_get_mem_handle(intptr_t dev_ptr) {
+  cudaIpcMemHandle_t handle;
+  cudaError_t err = cudaIpcGetMemHandle(&handle, (void*)dev_ptr);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaIpcGetMemHandle failed: ") + cudaGetErrorString(err) +
+                             " (err=" + std::to_string((int)err) + ")");
+  }
+  return py::bytes(reinterpret_cast<char*>(&handle), sizeof(handle));
+}
+
+intptr_t cuda_ipc_open_mem_handle(py::bytes handle_bytes, int device_id) {
+  cudaIpcMemHandle_t handle;
+  std::string s(handle_bytes);
+  if (s.size() != sizeof(cudaIpcMemHandle_t)) {
+    throw std::runtime_error("Invalid IPC handle size: " + std::to_string(s.size()) + ", expected " +
+                             std::to_string(sizeof(cudaIpcMemHandle_t)));
+  }
+  memcpy(&handle, s.data(), sizeof(handle));
+  int old_device;
+  cudaGetDevice(&old_device);
+  cudaSetDevice(device_id);
+  void* ptr = nullptr;
+  cudaError_t err = cudaIpcOpenMemHandle(&ptr, handle, cudaIpcMemLazyEnablePeerAccess);
+  cudaSetDevice(old_device);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaIpcOpenMemHandle failed: ") + cudaGetErrorString(err) +
+                             " (err=" + std::to_string((int)err) + ")");
+  }
+  return (intptr_t)ptr;
+}
+
+void cuda_ipc_close_mem_handle(intptr_t ptr) {
+  if (ptr != 0) {
+    cudaIpcCloseMemHandle((void*)ptr);
+  }
+}
+#endif  // KTRANSFORMERS_USE_CUDA
+#endif  // KTRANSFORMERS_CPU_ONLY
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
@@ -736,4 +843,16 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   utils.def("from_float", &from_float_ptr, "Convert tensor from float32 to any GGML type", py::arg("input"),
             py::arg("size"), py::arg("type"));
+
+#ifndef KTRANSFORMERS_CPU_ONLY
+#if defined(KTRANSFORMERS_USE_CUDA)
+  // CUDA IPC functions for cross-process GPU memory sharing
+  m.def("cuda_ipc_get_mem_handle", &cuda_ipc_get_mem_handle, "Export CUDA IPC memory handle for a device pointer",
+        py::arg("dev_ptr"));
+  m.def("cuda_ipc_open_mem_handle", &cuda_ipc_open_mem_handle, "Open CUDA IPC memory handle to get a device pointer",
+        py::arg("handle_bytes"), py::arg("device_id"));
+  m.def("cuda_ipc_close_mem_handle", &cuda_ipc_close_mem_handle, "Close an opened CUDA IPC memory handle",
+        py::arg("ptr"));
+#endif  // KTRANSFORMERS_USE_CUDA
+#endif  // KTRANSFORMERS_CPU_ONLY
 }

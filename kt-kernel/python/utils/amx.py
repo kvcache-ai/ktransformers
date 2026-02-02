@@ -619,3 +619,92 @@ class NativeMoEWrapper(BaseMoEWrapper):
             allow_pending: Number of pending tasks to allow (default 0)
         """
         self.cpu_infer.sync_with_cuda_stream(cuda_stream, allow_pending)
+
+    def setup_batch_load_buffers(
+        self,
+        gpu_tp_count: int,
+        pinned_w13_weight_ptrs,
+        pinned_w13_scale_ptrs,
+        pinned_w2_weight_ptrs,
+        pinned_w2_scale_ptrs,
+        gpu_w13_weight_ptrs_per_rank,
+        gpu_w13_scale_ptrs_per_rank,
+        gpu_w2_weight_ptrs_per_rank,
+        gpu_w2_scale_ptrs_per_rank,
+        cuda_stream: int,
+        w13_weight_expert_nbytes: int,
+        w13_scale_expert_nbytes: int,
+        w2_weight_expert_nbytes: int,
+        w2_scale_expert_nbytes: int,
+    ):
+        """
+        V2 API: Register fixed buffer pointers once during initialization.
+
+        Args:
+            gpu_tp_count: Number of GPU tensor parallel instances
+            pinned_w13_weight_ptrs: List of pinned buffer pointers for w13 weights [slot0, slot1]
+            pinned_w13_scale_ptrs: List of pinned buffer pointers for w13 scales [slot0, slot1]
+            pinned_w2_weight_ptrs: List of pinned buffer pointers for w2 weights [slot0, slot1]
+            pinned_w2_scale_ptrs: List of pinned buffer pointers for w2 scales [slot0, slot1]
+            gpu_w13_weight_ptrs_per_rank: GPU destination pointers per rank (IPC)
+            gpu_w13_scale_ptrs_per_rank: GPU destination pointers per rank (IPC)
+            gpu_w2_weight_ptrs_per_rank: GPU destination pointers per rank (IPC)
+            gpu_w2_scale_ptrs_per_rank: GPU destination pointers per rank (IPC)
+            cuda_stream: CUDA stream handle
+            w13_weight_expert_nbytes: Per-expert w13 weight size in bytes (TP-sharded)
+            w13_scale_expert_nbytes: Per-expert w13 scale size in bytes (TP-sharded)
+            w2_weight_expert_nbytes: Per-expert w2 weight size in bytes (TP-sharded)
+            w2_scale_expert_nbytes: Per-expert w2 scale size in bytes (TP-sharded)
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot setup batch load buffers.")
+
+        if not hasattr(self.moe, "setup_batch_load_buffers"):
+            raise NotImplementedError("setup_batch_load_buffers is not available for this backend implementation.")
+
+        self.moe.setup_batch_load_buffers(
+            gpu_tp_count,
+            list(pinned_w13_weight_ptrs),
+            list(pinned_w13_scale_ptrs),
+            list(pinned_w2_weight_ptrs),
+            list(pinned_w2_scale_ptrs),
+            list(gpu_w13_weight_ptrs_per_rank),
+            list(gpu_w13_scale_ptrs_per_rank),
+            list(gpu_w2_weight_ptrs_per_rank),
+            list(gpu_w2_scale_ptrs_per_rank),
+            cuda_stream,
+            w13_weight_expert_nbytes,
+            w13_scale_expert_nbytes,
+            w2_weight_expert_nbytes,
+            w2_scale_expert_nbytes,
+        )
+
+    def submit_batch_load_cpu_experts_to_gpu(self, cpu_expert_ids):
+        """
+        V2 API: Submit batch CPU expert weight loading task to cpuinfer.
+
+        This is a non-blocking call. cpuinfer will:
+        1. For each expert, call write_weights_to_buffer() to write to pinned buffer
+        2. Issue async cudaMemcpyAsync (H2D) to all ranks using pre-registered IPC pointers
+        3. Use double buffering to implement write(e+1) || copy(e) pipeline
+
+        Note: setup_batch_load_buffers() must be called once before using this method.
+
+        Args:
+            cpu_expert_ids: List of CPU expert IDs to load
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot submit batch_load_cpu_experts_to_gpu task.")
+
+        if not hasattr(self.moe, "batch_load_cpu_experts_to_gpu_task"):
+            raise NotImplementedError(
+                "batch_load_cpu_experts_to_gpu_task is not available for this backend implementation."
+            )
+
+        self.cpu_infer.submit(self.moe.batch_load_cpu_experts_to_gpu_task(list(cpu_expert_ids)))
+
+    def sync_batch_load_cpu_experts_to_gpu(self):
+        """
+        Block until previously submitted batch_load_cpu_experts_to_gpu tasks finish.
+        """
+        self.cpu_infer.sync()

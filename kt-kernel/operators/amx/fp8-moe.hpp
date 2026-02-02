@@ -17,6 +17,16 @@
 #include "la/amx_raw_kernels.hpp"
 #include "moe_base.hpp"
 
+#ifndef KTRANSFORMERS_CPU_ONLY
+#ifdef KTRANSFORMERS_USE_CUDA
+#include "../../cpu_backend/vendors/cuda.h"
+#elif KTRANSFORMERS_USE_MUSA
+#include "../../cpu_backend/vendors/musa.h"
+#elif KTRANSFORMERS_USE_ROCM
+#include "../../cpu_backend/vendors/hip.h"
+#endif
+#endif
+
 /**
  * @brief FP8 MoE operator using CRTP pattern
  * @tparam T Kernel type, defaults to GemmKernel224FP8
@@ -621,7 +631,7 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
             }
           }
         },
-        nullptr);
+        nullptr, "write_weights_to_buffer");
   }
 };
 
@@ -770,6 +780,199 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
                                             w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs);
     });
   }
+
+#ifndef KTRANSFORMERS_CPU_ONLY
+ private:
+  // Batch load buffer configuration (set once via setup_batch_load_buffers)
+  bool batch_load_configured_ = false;
+  std::vector<uintptr_t> batch_load_pinned_w13_weight_ptrs_;
+  std::vector<uintptr_t> batch_load_pinned_w13_scale_ptrs_;
+  std::vector<uintptr_t> batch_load_pinned_w2_weight_ptrs_;
+  std::vector<uintptr_t> batch_load_pinned_w2_scale_ptrs_;
+  std::vector<uintptr_t> batch_load_gpu_w13_weight_ptrs_;
+  std::vector<uintptr_t> batch_load_gpu_w13_scale_ptrs_;
+  std::vector<uintptr_t> batch_load_gpu_w2_weight_ptrs_;
+  std::vector<uintptr_t> batch_load_gpu_w2_scale_ptrs_;
+  intptr_t batch_load_cuda_stream_ = 0;
+  // Precomputed weight sizes
+  size_t batch_load_w13_weight_size_ = 0;
+  size_t batch_load_w13_scale_size_ = 0;
+  size_t batch_load_w2_weight_size_ = 0;
+  size_t batch_load_w2_scale_size_ = 0;
+
+ public:
+  /**
+   * @brief Setup batch load buffers (call once during initialization)
+   *
+   * Registers all fixed buffer pointers that don't change between calls.
+   * After this, batch_load_cpu_experts_to_gpu() only needs cpu_expert_ids.
+   *
+   * @param gpu_tp_count Number of GPU TP ranks
+   * @param pinned_w13_weight_ptrs [slot0, slot1] pinned buffer addresses
+   * @param pinned_w13_scale_ptrs
+   * @param pinned_w2_weight_ptrs
+   * @param pinned_w2_scale_ptrs
+   * @param gpu_w13_weight_ptrs_per_rank [rank0, rank1, ...] GPU destination (IPC pointers for remote ranks)
+   * @param gpu_w13_scale_ptrs_per_rank
+   * @param gpu_w2_weight_ptrs_per_rank
+   * @param gpu_w2_scale_ptrs_per_rank
+   * @param cuda_stream CUDA stream for H2D transfers
+   */
+  void setup_batch_load_buffers(int gpu_tp_count, const std::vector<uintptr_t>& pinned_w13_weight_ptrs,
+                                const std::vector<uintptr_t>& pinned_w13_scale_ptrs,
+                                const std::vector<uintptr_t>& pinned_w2_weight_ptrs,
+                                const std::vector<uintptr_t>& pinned_w2_scale_ptrs,
+                                const std::vector<uintptr_t>& gpu_w13_weight_ptrs_per_rank,
+                                const std::vector<uintptr_t>& gpu_w13_scale_ptrs_per_rank,
+                                const std::vector<uintptr_t>& gpu_w2_weight_ptrs_per_rank,
+                                const std::vector<uintptr_t>& gpu_w2_scale_ptrs_per_rank, intptr_t cuda_stream,
+                                size_t w13_weight_expert_nbytes, size_t w13_scale_expert_nbytes,
+                                size_t w2_weight_expert_nbytes, size_t w2_scale_expert_nbytes) {
+    batch_load_pinned_w13_weight_ptrs_ = pinned_w13_weight_ptrs;
+    batch_load_pinned_w13_scale_ptrs_ = pinned_w13_scale_ptrs;
+    batch_load_pinned_w2_weight_ptrs_ = pinned_w2_weight_ptrs;
+    batch_load_pinned_w2_scale_ptrs_ = pinned_w2_scale_ptrs;
+    batch_load_gpu_w13_weight_ptrs_ = gpu_w13_weight_ptrs_per_rank;
+    batch_load_gpu_w13_scale_ptrs_ = gpu_w13_scale_ptrs_per_rank;
+    batch_load_gpu_w2_weight_ptrs_ = gpu_w2_weight_ptrs_per_rank;
+    batch_load_gpu_w2_scale_ptrs_ = gpu_w2_scale_ptrs_per_rank;
+    batch_load_cuda_stream_ = cuda_stream;
+
+    // Use actual per-expert sizes from Python (accounts for TP sharding)
+    batch_load_w13_weight_size_ = w13_weight_expert_nbytes;
+    batch_load_w13_scale_size_ = w13_scale_expert_nbytes;
+    batch_load_w2_weight_size_ = w2_weight_expert_nbytes;
+    batch_load_w2_scale_size_ = w2_scale_expert_nbytes;
+
+    batch_load_configured_ = true;
+  }
+
+  /**
+   * @brief Batch load CPU expert weights to all ranks' GPUs (V2 simplified API)
+   *
+   * Uses pre-registered buffer pointers from setup_batch_load_buffers().
+   * Maintains 3-stage pipeline: write(e+1) || copy(e)
+   *
+   * @param cpu_expert_ids List of CPU expert IDs to load
+   */
+  void batch_load_cpu_experts_to_gpu(const std::vector<int>& cpu_expert_ids) {
+    if (!batch_load_configured_) {
+      throw std::runtime_error("Batch load buffers not configured. Call setup_batch_load_buffers() first.");
+    }
+    if (this->weights_loaded == false) {
+      throw std::runtime_error("Weights not loaded");
+    }
+
+    const int num_ranks = batch_load_gpu_w13_weight_ptrs_.size();
+    const int num_experts = cpu_expert_ids.size();
+    if (num_experts == 0) return;
+
+    // Use precomputed weight sizes (per-expert, sharded)
+    const size_t w13_weight_size = batch_load_w13_weight_size_;
+    const size_t w13_scale_size = batch_load_w13_scale_size_;
+    const size_t w2_weight_size = batch_load_w2_weight_size_;
+    const size_t w2_scale_size = batch_load_w2_scale_size_;
+
+    cudaStream_t stream = (cudaStream_t)batch_load_cuda_stream_;
+
+    // Helper: get pinned buffer pointers for a given slot (returns num_ranks pointers)
+    auto get_slot_ptrs = [&](const std::vector<uintptr_t>& all_ptrs, int slot) {
+      std::vector<uintptr_t> result(num_ranks);
+      for (int r = 0; r < num_ranks; ++r) {
+        result[r] = all_ptrs[slot * num_ranks + r];
+      }
+      return result;
+    };
+
+    // CUDA events to track copy completion
+    std::vector<cudaEvent_t> copy_done_events(num_experts);
+    for (int i = 0; i < num_experts; ++i) {
+      cudaEventCreateWithFlags(&copy_done_events[i], cudaEventDisableTiming);
+    }
+
+    // Pre-submit first expert's write (slot 0)
+    // write_weight_scale_to_buffer with gpu_tp_count=num_ranks writes each TP shard
+    // to a separate pinned buffer
+    const int first_expert = cpu_expert_ids[0];
+    auto slot0_w13w = get_slot_ptrs(batch_load_pinned_w13_weight_ptrs_, 0);
+    auto slot0_w13s = get_slot_ptrs(batch_load_pinned_w13_scale_ptrs_, 0);
+    auto slot0_w2w = get_slot_ptrs(batch_load_pinned_w2_weight_ptrs_, 0);
+    auto slot0_w2s = get_slot_ptrs(batch_load_pinned_w2_scale_ptrs_, 0);
+    this->write_weight_scale_to_buffer(num_ranks, first_expert, slot0_w13w, slot0_w13s, slot0_w2w, slot0_w2s);
+
+    for (int idx = 0; idx < num_experts; ++idx) {
+      const int expert_id = cpu_expert_ids[idx];
+      const int slot = idx % 2;
+
+      // 1. Wait for previous copy using same slot to complete (double buffering protection)
+      if (idx >= 2) {
+        uint64_t act_start = sft_timer::get_trace_timestamp();
+        cudaEventSynchronize(copy_done_events[idx - 2]);
+        uint64_t act_end = sft_timer::get_trace_timestamp();
+        sft_timer::add_kernel_trace("sync1", act_start, act_end, 0, 0);
+      }
+
+      // 2. Issue async H2D memcpy for current expert
+      //    Each rank's shard is in pinned buffer [slot * num_ranks + rank]
+      for (int rank = 0; rank < num_ranks; ++rank) {
+        if (batch_load_gpu_w13_weight_ptrs_[rank] == 0) continue;
+
+        const size_t expert_offset_w13_weight = (size_t)expert_id * w13_weight_size;
+        const size_t expert_offset_w13_scale = (size_t)expert_id * w13_scale_size;
+        const size_t expert_offset_w2_weight = (size_t)expert_id * w2_weight_size;
+        const size_t expert_offset_w2_scale = (size_t)expert_id * w2_scale_size;
+
+        const int pinned_idx = slot * num_ranks + rank;
+
+        uint64_t act_start = sft_timer::get_trace_timestamp();
+
+        cudaMemcpyAsync((void*)(batch_load_gpu_w13_weight_ptrs_[rank] + expert_offset_w13_weight),
+                        (void*)batch_load_pinned_w13_weight_ptrs_[pinned_idx], w13_weight_size, cudaMemcpyHostToDevice,
+                        stream);
+        cudaMemcpyAsync((void*)(batch_load_gpu_w13_scale_ptrs_[rank] + expert_offset_w13_scale),
+                        (void*)batch_load_pinned_w13_scale_ptrs_[pinned_idx], w13_scale_size, cudaMemcpyHostToDevice,
+                        stream);
+        cudaMemcpyAsync((void*)(batch_load_gpu_w2_weight_ptrs_[rank] + expert_offset_w2_weight),
+                        (void*)batch_load_pinned_w2_weight_ptrs_[pinned_idx], w2_weight_size, cudaMemcpyHostToDevice,
+                        stream);
+        cudaMemcpyAsync((void*)(batch_load_gpu_w2_scale_ptrs_[rank] + expert_offset_w2_scale),
+                        (void*)batch_load_pinned_w2_scale_ptrs_[pinned_idx], w2_scale_size, cudaMemcpyHostToDevice,
+                        stream);
+
+        uint64_t act_end = sft_timer::get_trace_timestamp();
+        sft_timer::add_kernel_trace("memcpyh2d", act_start, act_end, 0, rank);
+      }
+
+      // 3. Record copy completion event
+      uint64_t act_start = sft_timer::get_trace_timestamp();
+
+      cudaEventRecord(copy_done_events[idx], stream);
+      uint64_t act_end = sft_timer::get_trace_timestamp();
+
+      sft_timer::add_kernel_trace("record", act_start, act_end, 0, 0);
+
+      // 4. Pre-submit next expert's write (CPU blocks here, GPU does copy in parallel)
+      if (idx + 1 < num_experts) {
+        const int next_expert = cpu_expert_ids[idx + 1];
+        const int next_slot = (idx + 1) % 2;
+        auto ns_w13w = get_slot_ptrs(batch_load_pinned_w13_weight_ptrs_, next_slot);
+        auto ns_w13s = get_slot_ptrs(batch_load_pinned_w13_scale_ptrs_, next_slot);
+        auto ns_w2w = get_slot_ptrs(batch_load_pinned_w2_weight_ptrs_, next_slot);
+        auto ns_w2s = get_slot_ptrs(batch_load_pinned_w2_scale_ptrs_, next_slot);
+        this->write_weight_scale_to_buffer(num_ranks, next_expert, ns_w13w, ns_w13s, ns_w2w, ns_w2s);
+      }
+    }
+
+    // 5. Wait for all copies to complete
+    cudaEventSynchronize(copy_done_events[num_experts - 1]);
+
+    // 6. Cleanup events
+    for (auto& event : copy_done_events) {
+      cudaEventDestroy(event);
+    }
+  }
+#endif  // KTRANSFORMERS_CPU_ONLY
 };
+/
 
 #endif  // CPUINFER_OPERATOR_AMX_FP8_MOE_H
