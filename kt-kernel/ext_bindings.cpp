@@ -36,6 +36,12 @@ static const bool _is_plain_ = false;
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
+// 添加适合NUMA的AMX MoE实现
+#include "operators/amx/numa_amx/Mixtrial8x7B/amx_mix8_7b.hpp"
+#include "operators/amx/numa_amx/Qwen2-57B/amx_qwen2.hpp"
+#include "operators/amx/numa_amx/Qwen3-30B-A3B/amx_qwen3.hpp"
+#include "operators/amx/numa_amx/config.h"
+
 #if defined(__AVX512BF16__)
 #include "operators/amx/bf16-moe.hpp"            // Native BF16 MoE using CRTP pattern
 #include "operators/amx/fp8-moe.hpp"             // FP8 MoE requires AVX512 BF16 support
@@ -226,6 +232,124 @@ class MOEBindings {
     }
   };
 };
+
+template <class T>
+class AMX_NUMA_MOEBindings {
+ public:
+  class WarmUpBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      T* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&T::warm_up, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<T> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+
+  class LoadWeightsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      T* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&T::load_weights, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<T> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static void load_weights(T* moe) { moe->load_weights(); }
+  };
+
+  class ForwardBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      T* moe;
+      int batch_size;
+      intptr_t expert_ids;
+      intptr_t softmax;
+      intptr_t input;
+      intptr_t output;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&T::forward, args_->moe, args_->batch_size, reinterpret_cast<int*>(args_->expert_ids),
+                               reinterpret_cast<float*>(args_->softmax), reinterpret_cast<uint16_t*>(args_->input),
+                               reinterpret_cast<uint16_t*>(args_->output));
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<T> moe, int batch_size, intptr_t expert_ids,
+                                                            intptr_t softmax, intptr_t input, intptr_t output) {
+      Args* args = new Args{nullptr, moe.get(), batch_size, expert_ids, softmax, input, output};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static void forward_direct(T& moe, int batch_size, intptr_t activated_expert_ids, intptr_t expert_weights,
+                               intptr_t input_A, intptr_t output_C) {
+      // 将 intptr_t 转换为正确的指针类型
+      int* expert_ids_ptr = reinterpret_cast<int*>(activated_expert_ids);
+      float* weights_ptr = reinterpret_cast<float*>(expert_weights);
+      uint16_t* input_ptr = reinterpret_cast<uint16_t*>(input_A);
+      uint16_t* output_ptr = reinterpret_cast<uint16_t*>(output_C);
+
+      // 直接调用 forward 函数
+      moe.forward(batch_size, expert_ids_ptr, weights_ptr, input_ptr, output_ptr);
+    }
+  };
+
+  class PrefetchBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      T* moe;
+      intptr_t expert_ids;
+      int nums;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&T::prefetch_pool, args_->moe, reinterpret_cast<int*>(args_->expert_ids), args_->nums);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<T> moe, intptr_t expert_ids, int nums) {
+      Args* args = new Args{nullptr, moe.get(), expert_ids, nums};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static void prefetch_direct(T& moe, intptr_t activated_expert_ids, int prefetch_nums) {
+      // 将 intptr_t 转换为正确的指针类型
+      int* expert_ids_ptr = reinterpret_cast<int*>(activated_expert_ids);
+      // 直接调用 forward 函数
+      moe.prefetch(expert_ids_ptr, prefetch_nums);
+    }
+  };
+};
+
+template <typename MoeNUMA>
+void bind_amx_numa_moe_module(py::module_& moe_module, const char* name) {
+  using MoeClass = MoeNUMA;
+  using MoeBindings = AMX_NUMA_MOEBindings<MoeClass>;
+
+  auto moe_cls = py::class_<MoeClass, std::shared_ptr<MoeClass>>(moe_module, name);
+
+  moe_cls.def(py::init<AMX_MOEConfig>())
+      .def(py::init<GeneralMOEConfig>())
+      .def("warm_up_task", &MoeBindings::WarmUpBindings::cpuinfer_interface)
+      .def("load_weights_task", &MoeBindings::LoadWeightsBindings::cpuinfer_interface)
+      .def("forward_task", &MoeBindings::ForwardBindings::cpuinfer_interface, py::arg("batch_size"),
+           py::arg("expert_ids"), py::arg("softmax"), py::arg("input"), py::arg("output"))
+      .def("prefetch_task", &MoeBindings::PrefetchBindings::cpuinfer_interface, py::arg("expert_ids"), py::arg("nums"))
+      .def("forward_direct", &MoeBindings::ForwardBindings::forward_direct, py::arg("batch_size"),
+           py::arg("expert_ids"), py::arg("softmax"), py::arg("input"), py::arg("output"))
+      .def("prefetch_direct", &MoeBindings::PrefetchBindings::prefetch_direct, py::arg("expert_ids"), py::arg("nums"))
+      // Direct method bindings
+      .def("warm_up", &MoeClass::warm_up)
+      .def("load_weights", &MoeClass::load_weights);
+}
 
 template <typename MoeTP>
 void bind_moe_module(py::module_& moe_module, const char* name) {
@@ -498,7 +622,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("per_channel", &QuantConfig::per_channel);
 
   auto moe_module = m.def_submodule("moe");
-
+  py::class_<AMX_MOEConfig>(moe_module, "AMX_MOEConfig")
+      .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size, int max_len,
+                       bool use_silu, intptr_t gate_proj, intptr_t up_proj, intptr_t down_proj) {
+        return AMX_MOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size, max_len, use_silu,
+                             (void*)gate_proj, (void*)up_proj, (void*)down_proj);
+      }));
   py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
       .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
         return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
@@ -572,6 +701,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
+
+  bind_amx_numa_moe_module<AMX_Qwen2_MOE>(moe_module, "AMX_Qwen2_MOE");
 #if defined(__AVX512BF16__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
