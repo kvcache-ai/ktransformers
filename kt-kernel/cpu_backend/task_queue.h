@@ -23,6 +23,8 @@ class TaskQueue {
   TaskQueue();
   ~TaskQueue();
 
+  TaskQueue(int cpu_core_id);
+
   void enqueue(std::function<void()>);
 
   void sync(size_t allow_n_pending);
@@ -42,6 +44,7 @@ class TaskQueue {
   std::thread workerThread;
 
   void worker();
+  bool set_cpu_affinity(int cpu_core_id);
 };
 
 #endif
