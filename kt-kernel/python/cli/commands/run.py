@@ -419,7 +419,7 @@ def _run_impl(
     )
 
     # CPU/GPU configuration with smart defaults
-    total_threads = cpu.cores * cpu.numa_nodes
+    total_threads = cpu.threads  # Use logical threads instead of physical cores
     final_cpu_threads = resolve(cpu_threads, "inference.cpu_threads", int(total_threads * 0.8))
     final_numa_nodes = resolve(numa_nodes, "inference.numa_nodes", cpu.numa_nodes)
     final_gpu_experts = resolve(gpu_experts, "inference.gpu_experts", 1)

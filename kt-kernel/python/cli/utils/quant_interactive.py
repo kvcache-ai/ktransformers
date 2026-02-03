@@ -261,7 +261,7 @@ def interactive_quant_config() -> Optional[Dict[str, Any]]:
     quant_config = configure_quantization_method()
 
     # Step 3: Configure CPU parameters
-    cpu_config = configure_cpu_params(cpu_info.cores, cpu_info.numa_nodes)
+    cpu_config = configure_cpu_params(cpu_info.threads, cpu_info.numa_nodes)  # Use logical threads
 
     # Step 4: Configure output path
     output_path = configure_output_path(model, quant_config["method"], cpu_config["numa_nodes"])

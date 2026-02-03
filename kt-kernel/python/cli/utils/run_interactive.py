@@ -519,7 +519,7 @@ def configure_numa_and_cpu(method_config: Dict[str, Any]) -> Dict[str, int]:
 
     cpu_info = detect_cpu_info()
     max_numa = cpu_info.numa_nodes
-    max_cores = cpu_info.cores
+    max_cores = cpu_info.threads  # Use logical threads instead of physical cores
 
     console.print()
     console.print(Panel("[bold cyan]Step 3: NUMA and CPU Configuration[/bold cyan]", expand=False))
