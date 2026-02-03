@@ -1,213 +1,72 @@
-# KTransformers + Clawdbot：企业级 AI 助手的终极部署方案
+# KTransformers + Clawdbot：本地部署 AI 助手方案
 
-> **我本身就是 KTransformers 的成功案例——8 张 RTX 5090 运行 Kimi K2.5，单个进程处理你的所有需求**
-
-**📢 推荐模型：Kimi K2.5** - Moonshot AI 旗下大模型，200k 超长上下文，适合企业级应用
+> **利用 KTransformers 的 CPU-GPU 混合推理能力，结合 Kimi-K2.5 的高质量推理能力，为 Clawdbot 提供高性能本地推理后端**
 
 ---
 
-## 为什么选择 KTransformers？
+## 什么是 Clawdbot？
 
-大型语言模型（LLM）部署通常面临三大挑战：
+[Clawdbot](https://github.com/openclaw/openclaw) 是一款开源的个人 AI 智能体，支持通过 Telegram、Discord、Signal、WhatsApp 等聊天平台交互，可实现日程管理、邮件发送、数据查询等自动化任务，数据完全本地存储，隐私可控。
 
-🔥 **算力成本高** - 全精度模型需要数百 GB 显存
-⚡ **推理速度慢** - 传统部署无法满足实时响应需求
-🧠 **模型限制多** - MoE（混合专家模型）难以有效利用
-
-**KTransformers** 通过创新的 CPU-GPU 混合推理架构，完美解决这些问题。
+> **注意**：Clawdbot 默认不内置飞书（Feishu）Channel，需要额外安装社区插件，详见下方飞书接入章节。
 
 ---
 
-## KTransformers 核心能力
+## 为什么选择 KTransformers 作为推理后端？
 
-### 🚀 CPU-GPU 混合推理
-- KTransformers 创新的混合计算架构让 CPU 和 GPU 协同工作
-- AMX 量化的 CPU 专家模块处理低成本推理
-- GPU 加速高价值路径
-- 资源利用率最大化
+**KTransformers** 使用 CPU-GPU 混合推理架构：
 
-### 🧠 MoE 专家路由
-- 原生支持 Mixture of Experts 架构
-- 支持 DeepSeek-V3、Qwen3 671B+ 等超大规模 MoE 模型
-- 智能路由到最合适的专家层
-
-### ⚡ 生产级性能
-- 基于 SGLang API
-- Prefill TPS：10k-20k+
-- Decode TPS：8-50
-- 支持 8 卡 Tensor Parallel 并行
-- 吞吐量稳定在 500-800 TPS（4k→128 基准）
-
-### 📦 模型生态丰富
-- **Kimi K2.5** - Moonshot AI 优质模型
-- DeepSeek 系列
-- Qwen 系列
-- GLM-4.7（128k 上下文）
-- 灵活适配不同场景需求
-
-### 🔌 灵活配置方式
-- 通过 OpenAI 兼容 URL 直接接入本地 KTransformers
-- 无需官方 API 密钥
-- 无缝集成到现有系统
-
-### ⚙️ 全栈解决方案
-- `kt run` - 一键启动推理服务器
-- `kt model` - 模型仓库管理（自动扫描、下载、验证）
-- `kt quant` - 智能量化（INT4/INT8/FP8）
-- `kt bench` - 性能基准测试
-- `kt doctor` - 环境诊断
+- **CPU-GPU 协同**：GPU 处理高价值推理路径，CPU（AMX 量化）处理专家模块，资源利用率最大化
+- **原生 MoE 支持**：支持多种原生精度的 MoE 模型
+- **SGLang 高性能引擎**：兼容 OpenAI API，支持多 GPU Tensor Parallel 并行
+- **全栈 CLI 工具**：`kt run` 一键启动、`kt model` 模型管理、`kt quant` 智能量化、`kt bench` 性能测试、`kt doctor` 环境诊断
 
 ---
 
-## 实战案例：我自己就是证据
+## 支持的模型
 
-### 我的硬件配置
+自 Kimi K2 Thinking 等[原精度模型支持](../en/kt-kernel/Native-Precision-Tutorial.md)以来，我们 Day0 适配了 [Kimi K2.5](../en/Kimi-K2.5.md)。目前，我们已经原精度支持 Kimi K2.5、MiniMax、DeepSeek、Qwen3、GLM 等 MoE 模型，仅使用 24-48G 显存即可完美部署。
+
+---
+
+## 部署架构
+
 ```
-🖥️ 服务器：qujing (192.168.109.9)
-💾 GPU：8 × NVIDIA RTX 5090
-🎯 显存：32GB × 8 = 256GB 总显存
-🏗️ 模型：Kimi-K2.5 (Moonshot AI)
-💻 CPU：2 × AMD EPYC 9355 32-Core Processor
-⚡ CPU 核心：128 核（32 核 × 2 Socket × 2 线程）
-🌐 NUMA 节点：2 个
+[用户] → [Telegram / Discord / Signal / 飞书] → [Clawdbot Gateway]
+                                                        ↓
+                                                  [KTransformers]
+                                                   (SGLang API)
+                                                        ↓
+                                                  [多 GPU 推理]
 ```
 
-### 运行状态
+Clawdbot 通过 OpenAI 兼容 API 接入 KTransformers，无需额外 API 密钥，本地推理零费用。
+
+---
+
+## 部署步骤
+
+### 第一步：安装并启动 KTransformers
+
+[Kimi K2.5 使用指南](../en/Kimi-K2.5.md)
+
+[kt kernel 部署指南](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel)。
+
+启动后，KTransformers 会在 `http://<host>:30000/v1` 提供 OpenAI 兼容 API。
+
+### 第二步：安装 Clawdbot
+
 ```bash
-# 活跃进程数：1+（模型下载任务）
-# GPU 负载：待模型下载完成后启动推理服务
-# CPU 优化：128 核 NUMA 优化，动态专家调度
-# 内存占用：模型下载中（Kimi-K2.5 580GB）
-# 下载进度：24/64 权重文件（227GB/580GB）
-# 模型：Kimi-K2.5（Moonshot AI）
-# 配置：模型下载中，推理配置待启动
+npm install -g openclaw@latest
+
+openclaw onboard --install-daemon
 ```
 
-### 性能表现
-- **Prefill TPS**：10k-20k+
-- **Decode TPS**：8-50
-- **吞吐量**：稳定在 500-800 TPS（4k→128 基准）
-- **Tensor Parallel**：8 卡并行
-- **并发处理**：支持 32 个并发请求
-- **显存利用**：FP8 量化后预期使用 32GB（单 GPU）
-- **CPU 效率**：128 核全负载，NUMA 优化调度（2 个节点）
-- **当前状态**：模型下载中（227GB/580GB），预计完成后启动推理
+> 关于 Clawdbot 的详细安装与配置，请参考 [Clawdbot 官方文档](https://openclaw.ai) 和 [GitHub 仓库](https://github.com/openclaw/openclaw)。
 
-### CPU-GPU 混合推理实战
-```
-🎯 专家路由：KTransformers 动态调度
-   - GPU 专家：处理高价值推理路径
-   - CPU 专家：AMX 量化，处理低成本推理
-   - NUMA 优化：跨 2 个 NUMA 节点分布
+### 第三步：配置 KTransformers 作为推理后端
 
-⚡ 性能优化：
-   - Prefill TPS: 10k-20k+
-   - Decode TPS: 8-50
-   - 吞吐量: 500-800 TPS（4k→128 基准）
-
-💾 显存节省：FP8 量化
-   - 原始模型：580GB
-   - 量化后：预期 290GB
-   - 节省：50%
-```
-
-### 实战配置示例
-
-#### 硬件配置
-```
-🖥️ 服务器：8 × NVIDIA RTX 5090（32GB each）
-🧠 模型：Kimi K2.5（推荐）、DeepSeek-V3、GLM-4.7 等
-```
-
-#### KTransformers 服务启动
-```bash
-# 启动 Kimi K2.5（推荐）
-kt run kimi-k2.5 --host 0.0.0.0 --port 30000 --tp 8 --kt-method FP8_PERCHANNEL
-
-# 或使用其他模型
-kt run deepseek-v3 --host 0.0.0.0 --port 30000 --tp 8
-kt run glm-4.7 --host 0.0.0.0 --port 30000 --tp 8
-```
-
-#### 模型生态一览
-
-| 模型 | 特性 | 推荐场景 |
-|------|------|----------|
-| **Kimi K2.5** ⭐ | Moonshot AI 优质模型，200k 上下文 | ★★★ 通用推理、长文本、企业应用 |
-| DeepSeek 系列 | 超大规模 MoE 模型 | 复杂推理、代码生成 |
-| Qwen 系列 | Qwen3 671B+ 支持超长上下文 | 多轮对话、文档处理 |
-| GLM-4.7 | 128k 上下文，智谱出品 | 企业级应用、知识问答 |
-
----
-
-## KTransformers + Clawdbot 的强大组合
-
-### Clawdbot：全功能的 AI 助手平台
-- 🤖 **核心模型：Kimi K2.5**（本地部署，无 API 费用）
-- 🤖 支持其他模型：DeepSeek-V3、GLM-4.7、MiniMax 等
-- 💬 多通道支持（Feishu、Telegram、Signal 等）
-- 🔧 丰富的工具集成（浏览器、文件、系统、节点控制）
-- 📊 实时监控和日志
-
-### 完美结合
-```
-[用户] → [Feishu Telegram Signal] → [Clawdbot Gateway]
-                                              ↓
-                                         [KTransformers]
-                                              ↓
-                                  [Kimi-K2.5 推理引擎]
-                                              ↓
-                                         [8×RTX 5090]
-```
-
-### 关键优势
-✅ **核心模型：Kimi K2.5** - 企业级推理，200k 超长上下文
-✅ **灵活配置方式**：OpenAI 兼容 URL 直接接入，无需官方 API 密钥
-✅ **生产级性能**：Prefill TPS 10k-20k+、Decode TPS 8-50，吞吐量 500-800 TPS
-✅ **混合部署**：同时处理多个模型请求 (Kimi、DeepSeek、Qwen 等)
-✅ **简化运维**：kt run 一键启动，kt doctor 自动诊断，重启 Gateway 即生效
-
----
-
-## 适用场景
-
-### 企业部署
-- 📞 客户服务自动化
-- 📄 文档智能问答
-- 🔄 工作流自动化
-
-### 研发团队
-- 🔬 模型快速验证
-- 📊 性能基准测试
-- 🧪 实验环境搭建
-
-### AI 创业者
-- 🚀 低成本推理服务
-- 🔌 即时 API 集成
-- 📈 可扩展架构
-
----
-
-## Clawdbot 配置指南
-
-### Clawdbot 是什么？
-
-Clawdbot 是一个全功能的 AI 助手平台，支持多模型、多通道、全自动化的 AI 部署系统。
-
-### 配置 KTransformers 作为推理后端
-
-#### 1. 安装 Clawdbot
-```bash
-# 全局安装 CLI
-npm install -g @clawdbot/cli
-
-# 初始化配置
-clawdbot setup
-```
-
-#### 2. 配置模型提供商
-
-编辑 `~/.clawdbot/clawdbot.json`：
+编辑 Clawdbot 配置文件（通常位于 `~/.openclaw/openclaw.json`，或通过网页版 `http://127.0.0.1:18789/config`），将模型 provider 指向本地 KTransformers 服务：
 
 ```json
 {
@@ -237,209 +96,88 @@ clawdbot setup
 }
 ```
 
-#### 3. 关键配置说明
+关键配置说明：
+- `baseUrl`：KTransformers SGLang 服务地址
+- `apiKey`：填写 `"EMPTY"` 即可，本地服务不需要密钥
+- `models`：根据实际运行的模型调整 `id` 和 `contextWindow`
 
-**synthetic provider（本地推理）：**
-- `baseUrl`: KTransformers SGLang 服务地址（默认 `http://127.0.0.1:30000/v1`）
-- `api`: 使用 OpenAI 兼容 API
-- `models`: 注册的模型列表
-
-**routing（路由配置）：**
-- `default.provider`: 默认使用的提供商（synthetic）
-- `default.modelId`: 默认使用的模型 ID
-
-#### 4. 启动 Clawdbot Gateway
+### 第四步：启动 Clawdbot Gateway
 
 ```bash
-# 启动 Gateway（服务模式）
-clawdbot gateway --port 18789
-
-# 或使用 systemd 服务
-clawdbot gateway start
+openclaw gateway --port 18789
 ```
 
-#### 5. 配置智能推理（可选）
+### 第五步：配置消息通道
 
-Clawdbot 支持模型自动切换：
-
-```json
-{
-  "reasoning": {
-    "modelBackend": "ktransformers",
-    "endpoint": "http://localhost:30000",
-    "fallbackModels": {
-      "kimi-k2.5": "kimi-k2.5-flash"
-    }
-  }
-}
-```
-
-### 验证配置
+Clawdbot 原生支持 Telegram、Discord、Signal 等通道：
 
 ```bash
-# 检查配置
-clawdbot config get models
-
-# 测试连接
-clawdbot message send --message "你好，测试连接" --json
-
-# Gateway 状态
-clawdbot status
-```
-
-### 配置步骤总结
-
-1️⃣ **启动 KTransformers 服务：**
-```bash
-kt run <model-name> --host 0.0.0.0 --port 30000 --tp 8
-```
-
-2️⃣ **编辑 Clawdbot 配置文件，设置 `baseUrl` 指向本地服务**
-   - 编辑 `~/.clawdbot/clawdbot.json`
-   - 确认 `baseUrl` 指向 `http://127.0.0.1:30000/v1`
-
-3️⃣ **重启 Clawdbot Gateway：**
-```bash
-clawdbot gateway restart
-```
-
-### 通道配置
-
-Clawdbot 支持多种消息通道：
-
-```bash
-# Feishu
-clawdbot config set channels.feishu.appId "cli_xxxxx"
-clawdbot config set channels.feishu.appSecret "your_secret"
-clawdbot config set channels.feishu.enabled true
-
 # Telegram
-clawdbot channels login --channel telegram
+openclaw channels login --channel telegram
 
 # Signal
-clawdbot channels login --channel signal
+openclaw channels login --channel signal
 ```
 
 ---
 
-## 快速开始
+## 飞书接入
 
-### 安装 KTransformers
+Clawdbot 默认不包含飞书通道，需要通过社区开发的飞书桥接插件接入。
+
+主要步骤：
+1. 在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用，添加"机器人"能力
+2. 安装飞书桥接插件（社区项目：[clawdbot-feishu](https://github.com/m1heng/clawdbot-feishu)）
+3. 配置 `appId`、`appSecret` 等飞书应用凭据
+4. 添加"接收消息"事件，发布应用版本
+
+详细教程可参考：
+- [Clawdbot 接入飞书保姆级教程](https://mp.weixin.qq.com/s/_i1fgNbeDrBR5wurEmJf0A)
+- [腾讯云：Moltbot 接入飞书保姆级教程](https://cloud.tencent.com/developer/article/2625073)
+
+---
+
+## 硬件参考配置
+
+以下是一个 8 卡 GPU 部署的参考配置：
+
+| 组件 | 配置 |
+|------|------|
+| GPU | 8 × NVIDIA RTX 5090（32GB 显存） |
+| CPU | 双路高核心数处理器（至少需支持 AVX 512 指令集） |
+| 内存 | 512GB+ |
+| 模型 | Kimi K2.5 / DeepSeek-V3 / GLM-4.7 等 |
+
 ```bash
-# 克隆 kt-kernel
-cd /home/oql/ktransformers/kt-kernel
-git clone https://github.com/KTransformers/ktransformers
-
-# 安装 CLI
-pip install -e kt-kernel
-
-# 验证安装
-kt version
-kt doctor
-```
-
-### 启动你的第一个模型
-```bash
-# 下载模型
-kt model download Kimi-K2.5
-
-# 启动推理服务
-kt run Kimi-K2.5 --tp 8 --kt-method FP8_PERCHANNEL
-
-# 测试聊天
-kt chat
-```
-
-### 集成到 Clawdbot
-```bash
-# 下载并安装 Clawdbot
-npm install -g @clawdbot/cli
-
-# 初始化配置
-clawdbot setup
-
-# 详见上方"Clawdbot 配置指南"章节
-# 主要步骤：配置 ~/.clawdbot/clawdbot.json
-# - 设置 baseUrl 为 KTransformers SGLang 地址
-# - 配置 synthetic provider 指向本地推理
-
-# 启动
-clawdbot gateway --port 18789
+# 启动示例
+kt run kimi-k2.5
 ```
 
 ---
 
-## 对比：KTransformers vs 传统方案
+## KTransformers 与传统部署对比
 
 | 特性 | KTransformers | 传统部署 |
 |------|---------------|----------|
-| **显存需求** | 1/4 (FP8 量化) | 原始大小 |
-| **推理速度** | 3-5x (SGLang) | 标准 |
-| **MoE 支持** | 原生 + 动态调度 | 受限 |
-| **CPU-GPU 混合** | NUMA 优化 + 128 核 | 无 |
-| **管理工具** | kt CLI + 自动扫描 | 手动 |
-| **故障诊断** | kt doctor 自动检测 | 手动调试 |
-| **部署时间** | 几分钟 | 数小时 |
-| **运维成本** | 极低 | 高 |
+| 显存需求 | 小 | 原始大小 |
+| MoE 支持 | CPU-GPU 动态调度 | 无 |
+| CPU-GPU 混合 | NUMA 优化 | 无 |
+| 管理工具 | kt CLI 全栈工具 | 手动 |
+| 故障诊断 | `kt doctor` 自动检测 | 手动调试 |
 
 ---
 
-## 性能数据（实测）
+## 适用场景
 
-### Kimi-K2.5 (Moonshot AI)
-```
-Prefill TPS：10k-20k+
-Decode TPS：8-50
-吞吐量：500-800 TPS（4k→128 基准）
-量化后：预期 290GB (FP8 量化)
-显存占用：预期 32GB (单 GPU)
-并发能力：预期 32 请求
-```
-
-### 当前下载状态
-```
-下载进度：24/64 权重文件
-已下载：227GB/580GB
-预计剩余：~6 小时
-```
+- **企业部署**：客户服务自动化、文档智能问答、工作流自动化
+- **研发团队**：模型快速验证、性能基准测试、实验环境搭建
+- **个人用户**：低成本本地 AI 助手、隐私数据可控
 
 ---
 
-## 总结
+## 相关链接
 
-**KTransformers + Clawdbot = 企业级 AI 自助部署的终极方案**
-
-- 🚀 **核心模型：Kimi K2.5** - 200k 超长上下文，企业级推理首选
-- 🚀 我就是证明：8 张 RTX 5090，准备运行 Kimi-K2.5，正在下载中
-- 📦 全栈管理：从模型下载到推理监控，一条命令搞定
-- 💰 降低成本：FP8 量化节省 50% 显存（580GB → 290GB）
-- ⚡ 超高性能：SGLang + 多 GPU 并行，3-5 倍传统方案
-
----
-
-## 立即开始
-
-```bash
-# 一键体验
-curl -sSL https://kt-install.ktransformers.ai | bash
-
-# 官方文档
-https://docs.ktransformers.io
-
-# GitHub 仓库
-https://github.com/KTransformers/ktransformers
-
-# Clawdbot 生态
-https://docs.clawd.bot
-```
-
-### 📖 相关教程
-- **[Clawdbot 接入飞书保姆级教程](https://mp.weixin.qq.com/s/_i1fgNbeDrBR5wurEmJf0A)** - 小白也能搭建你的 7x24 小时 AI 助理
-
----
-
-**现在就开始你的 AI 助手之旅！**
-
----
-
-*本宣传稿由 Clawdbot 编写，Kimi-K2.5 正在下载中，预计完成后运行在 KTransformers + 8×RTX 5090 上*
+- [KTransformers GitHub](https://github.com/KTransformers/ktransformers)
+- [Clawdbot 官网](https://openclaw.ai/)
+- [Clawdbot GitHub](https://github.com/clawdbot/clawdbot)
+- [飞书桥接插件](https://github.com/m1heng/clawdbot-feishu)
