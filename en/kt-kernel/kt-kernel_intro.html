@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-32305819.js";
+            window.path_to_searchindex_js = "../../searchindex-b0c7c361.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-a83fdfe0.js"></script>
@@ -223,17 +223,17 @@
 <h2 id="note"><a class="header" href="#note">Note</a></h2>
 <p><strong>Current Support Status:</strong></p>
 <ul>
+<li>✅ <strong>Native Precision with AVX512/AMX</strong>: Supported with AVX512 CPUs in <code>FP8</code>, <code>BF16</code> and <code>RAWINT4</code> format - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Native-Precision-Tutorial.md">Guide</a></li>
 <li>✅ <strong>Intel CPUs with AMX</strong>: Fully supported (using weights converted to INT4/INT8 format)</li>
 <li>✅ <strong>Universal CPU (llamafile backend)</strong>: Supported (using GGUF-format weights)</li>
 <li>✅ <strong>AMD CPUs with BLIS</strong>: Supported (for int8 prefill &amp; decode) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis.md">Guide</a></li>
-<li>✅ <strong>Kimi-K2 Native INT4 (RAWINT4)</strong>: Supported on AVX512 CPUs (CPU-GPU shared INT4 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/Kimi-K2-Thinking-Native.md">Guide</a></li>
-<li>✅ <strong>FP8 weights (e.g., MiniMax-M2.1)</strong>: Supported on AVX512 CPUs (CPU-GPU shared FP8 weights) - <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/MiniMax-M2.1-Tutorial.md">Guide</a></li>
 </ul>
 <p><strong>KT-CLI</strong></p>
 <p>We are developing a simpler way to use KTransformers. Check out the <a href="https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md">KT-CLI Guide</a> for more details.</p>
 <h2 id="features"><a class="header" href="#features">Features</a></h2>
 <ul>
 <li><strong>CPU-Optimized MoE Kernels</strong>: High-throughput MoE expert kernels optimized for instruction sets.</li>
+<li><strong>AVX512 Native Precision Backend</strong>: FP8 / BF16 / INT4 native MoE backend for AVX512-capable servers.</li>
 <li><strong>AMX INT4/INT8 Backend</strong>: INT4 / INT8 quantized expert inference backend for AMX-capable servers.</li>
 <li><strong>Llamafile CPU Backend</strong>: AVX2/AVX512-based MoE backend built on Llamafile for universal CPU deployment.</li>
 <li><strong>NUMA-Aware Execution</strong>: Thread pool and memory layout designed for multi-socket / multi-NUMA machines.</li>
@@ -262,8 +262,6 @@
 <li>CPU with AVX2 support (Intel Haswell 2013+, AMD Zen+)</li>
 <li>Optional: NVIDIA GPU with compute capability 8.0+ for CUDA features</li>
 </ul>
-<h1 id="-head-gpu-compatibility-optional"><a class="header" href="#-head-gpu-compatibility-optional">&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD
-<strong>GPU Compatibility (Optional):</strong></a></h1>
 <h4 id="cuda-installation-gpu-acceleration"><a class="header" href="#cuda-installation-gpu-acceleration">CUDA Installation (GPU Acceleration)</a></h4>
 <p>For NVIDIA GPU-accelerated inference:</p>
 <pre><code class="language-bash">pip install kt-kernel-cuda
@@ -288,21 +286,6 @@
 <li>NVIDIA driver with CUDA 11.8+ or 12.x support (no CUDA toolkit needed)</li>
 </ul>
 <p><strong>GPU Compatibility Matrix:</strong></p>
-<blockquote>
-<blockquote>
-<blockquote>
-<blockquote>
-<blockquote>
-<blockquote>
-<blockquote>
-<p>main</p>
-</blockquote>
-</blockquote>
-</blockquote>
-</blockquote>
-</blockquote>
-</blockquote>
-</blockquote>
 <div class="table-wrapper">
 <table>
 <thead>
@@ -397,6 +380,8 @@ conda activate kt-kernel
 <tr><td><strong>LLAMAFILE</strong></td><td>AVX2</td><td>Intel Haswell (2013+), AMD Zen+</td><td>Universal compatibility</td></tr>
 <tr><td><strong>RAWINT4</strong></td><td>AVX512F + AVX512BW</td><td>Intel Skylake-X (2017+), Ice Lake, Cascade Lake</td><td>Software fallbacks for VNNI/BF16</td></tr>
 <tr><td><strong>AMXINT4/INT8</strong></td><td>AMX</td><td>Intel Sapphire Rapids (2023+)</td><td>Best performance, requires AMX hardware</td></tr>
+<tr><td><strong>FP8</strong></td><td>AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI</td><td>Intel Cooper Lake (2020+), Sapphire Rapids (2023+); AMD Zen 4+ (e.g., EPYC 9355)</td><td>Native Precision (e.g., DeepSeek V3.2, MiniMax M2.1)</td></tr>
+<tr><td><strong>BF16</strong></td><td>AVX512F + AVX512BW + AVX512_BF16</td><td>Intel Cooper Lake (2020+), Sapphire Rapids (2023+); AMD Zen 4+ (e.g., EPYC 9355)</td><td>Native Precision (e.g., Qwen3-235B-A22B, GLM-4.7)</td></tr>
 </tbody>
 </table>
 </div>
@@ -507,7 +492,7 @@ KT-Kernel supports multiple GGUF quantization formats such as <code>Q4_KM</code>
 </code></pre>
 <p>See <a href="#kt-kernel-parameters">KT-Kernel Parameters</a> section below for detailed parameter tuning guidelines.</p>
 <h3 id="complete-example-qwen3-30b-a3b"><a class="header" href="#complete-example-qwen3-30b-a3b">Complete Example: Qwen3-30B-A3B</a></h3>
-<p>This example demonstrates the full workflow from downloading weights to launching the server, showing both <strong>AMX backend</strong> and <strong>LLAMAFILE backend</strong> options.</p>
+<p>This example demonstrates the full workflow from downloading weights to launching the server, showing <strong>Native backend</strong>, <strong>AMX backend</strong> and <strong>LLAMAFILE backend</strong> options.</p>
 <p><strong>Hardware Configuration:</strong></p>
 <ul>
 <li><strong>GPU</strong>: NVIDIA RTX 4090 24GB</li>
@@ -530,9 +515,42 @@ NUMA node(s):                            2
 <li><code>--kt-threadpool-count 2</code>: 2 NUMA nodes detected (dual-socket system)</li>
 <li><code>--kt-num-gpu-experts 32</code>: With 24GB GPU memory, we can fit ~32 experts on GPU for this model (varies by model architecture and actual memory usage)</li>
 <li><code>--kt-max-deferred-experts-per-token 2</code>: Enable pipelined execution; allows CPU to process next batch while GPU completes current batch</li>
+<li><code>--kt-gpu-prefill-token-threshold 2048</code>: Use layerwise prefill strategy when token count exceeds 2048 (for native backends only)</li>
 </ul>
 <hr>
-<h4 id="option-a-amx-backend-amxint8"><a class="header" href="#option-a-amx-backend-amxint8">Option A: AMX Backend (AMXINT8)</a></h4>
+<h4 id="option-a-native-backend-bf16"><a class="header" href="#option-a-native-backend-bf16">Option A: Native Backend (BF16)</a></h4>
+<p>For AVX512 CPUs with BF16 support.</p>
+<p><strong>Step 1: Download model weights</strong></p>
+<pre><code class="language-bash"># Install huggingface-cli if not already installed
+pip install huggingface-hub
+# Download model from Hugging Face  
+huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-30B-A3B
+</code></pre>
+<p><strong>Step 2: Launch SGLang server</strong></p>
+<pre><code class="language-bash">python -m sglang.launch_server \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --model /mnt/data/models/Qwen3-30B-A3B \
+    --kt-weight-path /mnt/data/models/Qwen3-30B-A3B \
+    --kt-cpuinfer 64 \
+    --kt-threadpool-count 2 \
+    --kt-num-gpu-experts 32 \
+    --kt-method BF16 \
+    --attention-backend flashinfer \
+    --trust-remote-code \
+    --mem-fraction-static 0.80 \
+    --chunked-prefill-size 16384 \
+    --max-running-requests 4 \
+    --served-model-name Qwen3 \
+    --enable-mixed-chunk \
+    --tensor-parallel-size 1 \
+    --enable-p2p-check \
+    --disable-shared-experts-fusion \
+    --kt-gpu-prefill-token-threshold 4096 \
+    --kt-enable-dynamic-expert-update
+</code></pre>
+<hr>
+<h4 id="option-b-amx-backend-amxint8"><a class="header" href="#option-b-amx-backend-amxint8">Option B: AMX Backend (AMXINT8)</a></h4>
 <p>For Intel CPUs with AMX instruction set support.</p>
 <p><strong>Step 1: Download model weights</strong></p>
 <pre><code class="language-bash"># Install huggingface-cli if not already installed
@@ -566,7 +584,7 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
   --kt-max-deferred-experts-per-token 2
 </code></pre>
 <hr>
-<h4 id="option-b-llamafile-backend-gguf"><a class="header" href="#option-b-llamafile-backend-gguf">Option B: LLAMAFILE Backend (GGUF)</a></h4>
+<h4 id="option-c-llamafile-backend-gguf"><a class="header" href="#option-c-llamafile-backend-gguf">Option C: LLAMAFILE Backend (GGUF)</a></h4>
 <p>For universal CPUs (no AMX required), using pre-quantized GGUF weights directly.</p>
 <p><strong>Step 1: Download GPU weights (original model)</strong></p>
 <pre><code class="language-bash">pip install huggingface-hub
@@ -601,13 +619,15 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <tr><th>Parameter</th><th>Description</th><th>Example Value</th></tr>
 </thead>
 <tbody>
-<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, <code>RAWINT4</code>, <code>FP8</code> or <code>LLAMAFILE</code></td></tr>
+<tr><td><code>--kt-method</code></td><td>CPU inference backend method</td><td><code>AMXINT4</code>, <code>AMXINT8</code>, <code>RAWINT4</code>, <code>FP8</code>, <code>FP8_PERCHANNEL</code>, <code>BF16</code> or <code>LLAMAFILE</code></td></tr>
 <tr><td><code>--kt-weight-path</code></td><td>Path to quantized CPU weights</td><td><code>/path/to/cpu-weights</code></td></tr>
 <tr><td><code>--kt-cpuinfer</code></td><td>Number of CPU inference threads</td><td><code>64</code> (adjust based on CPU cores)</td></tr>
 <tr><td><code>--kt-threadpool-count</code></td><td>Number of thread pools for parallel execution</td><td><code>2</code> (typically 1-4)</td></tr>
 <tr><td><code>--kt-num-gpu-experts</code></td><td>Number of experts to keep on GPU</td><td><code>32</code> (remaining experts go to CPU)</td></tr>
 <tr><td><code>--kt-max-deferred-experts-per-token</code></td><td>Number of experts per token to defer for pipelined execution</td><td><code>2</code> (0 to disable, 1-4 recommended)</td></tr>
-<tr><td><code>--kt-gpu-prefill-token-threshold</code></td><td>Token count threshold for prefill strategy (FP8 and RAWINT4 only)</td><td>~<code>1024</code></td></tr>
+<tr><td><code>--kt-gpu-prefill-token-threshold</code></td><td>Token count threshold for prefill strategy (native backend only)</td><td>~<code>1024-4096</code></td></tr>
+<tr><td><code>--kt-enable-dynamic-expert-update</code></td><td>Enable dynamic expert placement updates during prefill based on actual routing statistics</td><td>(flag, no value needed)</td></tr>
+<tr><td><code>--kt-expert-placement-strategy</code></td><td>Strategy for initial GPU expert placement</td><td><code>uniform</code>, <code>frequency</code>, <code>front-loading</code>, or <code>random</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -618,8 +638,9 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <ul>
 <li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
 <li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
-<li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (AMX backend only, currently supports Kimi-K2-Thinking model). See <a href="../doc/en/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
-<li><code>FP8</code>: FP8 weights shared by CPU and GPU</li>
+<li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (currently supports Kimi-K2-Thinking model). See <a href="../doc/en/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
+<li><code>FP8</code>, <code>FP8_PERCHANNEL</code>: FP8 weights shared by CPU and GPU</li>
+<li><code>BF16</code>: BF16 weights shared by CPU and GPU</li>
 <li><code>LLAMAFILE</code>: GGUF-based backend</li>
 </ul>
 </li>
@@ -667,6 +688,25 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <li><strong>≤ threshold</strong>: Uses hybrid CPU+GPU prefill. No extra VRAM needed, but performance degrades slowly as token count increases.</li>
 <li><strong>&gt; threshold</strong>: Uses layerwise GPU prefill. Performance scales better with longer sequences, but requires one MoE layer extra VRAM (e.g., ~9GB+ for Kimi-K2-Thinking and ~3.6GB for MiniMax-M2.1).</li>
 <li>Only applicable when <code>--kt-method RAWINT4</code> or <code>--kt-method FP8</code> is used.</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-enable-dynamic-expert-update</code></strong>: Enables dynamic expert placement updates during inference.</p>
+<ul>
+<li>During layerwise prefill, the system collects actual routing statistics and redistributes GPU experts accordingly.</li>
+<li>Requires <code>--kt-gpu-prefill-token-threshold</code> to be set, and prefill length must be ≥ the threshold value.</li>
+<li>Particularly effective at lower GPU expert ratios (10%-70%), where it can significantly outperform static strategies.</li>
+<li>See <a href="../doc/en/kt-kernel/experts-sched-Tutorial.html">Expert Scheduling Tutorial</a> for benchmarks and details.</li>
+</ul>
+</li>
+<li>
+<p><strong><code>kt-expert-placement-strategy</code></strong>: Determines which experts are placed on GPU at server startup.</p>
+<ul>
+<li><code>uniform</code>: Distributes GPU experts evenly across all MoE layers. Default option, no prior statistics needed.</li>
+<li><code>frequency</code>: Places the most frequently activated experts on GPU. Best performance when activation statistics are available; requires <code>--init-expert-location</code> pointing to a <code>.pt</code> statistics file.</li>
+<li><code>front-loading</code>: Fills GPU experts from the first MoE layer onwards.</li>
+<li><code>random</code>: Randomly selects experts with a fixed seed (42).</li>
+<li>See <a href="../doc/en/kt-kernel/experts-sched-Tutorial.html">Expert Scheduling Tutorial</a> for strategy comparison.</li>
 </ul>
 </li>
 </ul>
