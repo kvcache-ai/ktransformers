@@ -672,98 +672,61 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
-    // Free previously allocated partitioned weights
-    free_partitioned_lora_weights();
-
-    // Get full intermediate_size from original sft_config (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
     int expert_num = config.expert_num;
     int lora_rank = sft_config.lora_rank;
 
-    // size_t gate_a_elems = static_cast<size_t>(expert_num) * lora_rank * config.hidden_size;
-    // size_t gate_b_elems = static_cast<size_t>(expert_num) * full_intermediate_size * lora_rank;
-    // size_t up_a_elems = static_cast<size_t>(expert_num) * lora_rank * config.hidden_size;
-    // size_t up_b_elems = static_cast<size_t>(expert_num) * full_intermediate_size * lora_rank;
-    // size_t down_a_elems = static_cast<size_t>(expert_num) * lora_rank * full_intermediate_size;
-    // size_t down_b_elems = static_cast<size_t>(expert_num) * config.hidden_size * lora_rank;
-
-    // print_tp_bf16_stats(sft_config.layer_idx, "gate_lora_a", (ggml_bf16_t*)gate_lora_a, gate_a_elems);
-    // print_tp_bf16_stats(sft_config.layer_idx, "gate_lora_b", (ggml_bf16_t*)gate_lora_b, gate_b_elems);
-    // print_tp_bf16_stats(sft_config.layer_idx, "up_lora_a", (ggml_bf16_t*)up_lora_a, up_a_elems);
-    // print_tp_bf16_stats(sft_config.layer_idx, "up_lora_b", (ggml_bf16_t*)up_lora_b, up_b_elems);
-    // print_tp_bf16_stats(sft_config.layer_idx, "down_lora_a", (ggml_bf16_t*)down_lora_a, down_a_elems);
-    // print_tp_bf16_stats(sft_config.layer_idx, "down_lora_b", (ggml_bf16_t*)down_lora_b, down_b_elems);
-
-    // Initialize partition vectors
-    partitioned_gate_lora_b_.resize(tp_count, nullptr);
-    partitioned_up_lora_b_.resize(tp_count, nullptr);
-    partitioned_down_lora_a_.resize(tp_count, nullptr);
-
-    // Partition LoRA weights for each NUMA node
-    for (int i = 0; i < tp_count; i++) {
-      int tp_intermediate = tp_configs[i].intermediate_size;  // Partitioned size
-
-      // gate_lora_b/up_lora_b: [expert_num, intermediate_size, lora_rank]
-      // Slice contiguously by intermediate_size dimension
-      size_t lora_b_slice_size = (size_t)tp_intermediate * lora_rank;
-      partitioned_gate_lora_b_[i] = new ggml_bf16_t[expert_num * lora_b_slice_size];
-      partitioned_up_lora_b_[i] = new ggml_bf16_t[expert_num * lora_b_slice_size];
-
-      for (int expert_id = 0; expert_id < expert_num; expert_id++) {
-        // Source offset: expert_id * full_intermediate * lora_rank + i * tp_intermediate * lora_rank
-        memcpy(partitioned_gate_lora_b_[i] + expert_id * lora_b_slice_size,
-               (ggml_bf16_t*)gate_lora_b + expert_id * full_intermediate_size * lora_rank + i * lora_b_slice_size,
-               sizeof(ggml_bf16_t) * lora_b_slice_size);
-
-        memcpy(partitioned_up_lora_b_[i] + expert_id * lora_b_slice_size,
-               (ggml_bf16_t*)up_lora_b + expert_id * full_intermediate_size * lora_rank + i * lora_b_slice_size,
-               sizeof(ggml_bf16_t) * lora_b_slice_size);
-      }
-
-      // down_lora_a: [expert_num, lora_rank, intermediate_size]
-      // Need to slice row-wise by intermediate_size dimension
-      partitioned_down_lora_a_[i] = new ggml_bf16_t[expert_num * lora_rank * tp_intermediate];
-
-      for (int expert_id = 0; expert_id < expert_num; expert_id++) {
-        for (int r = 0; r < lora_rank; r++) {
-          // Source: expert_id * lora_rank * full_intermediate + r * full_intermediate + i * tp_intermediate
-          memcpy(partitioned_down_lora_a_[i] + expert_id * lora_rank * tp_intermediate + r * tp_intermediate,
-                 (ggml_bf16_t*)down_lora_a + expert_id * lora_rank * full_intermediate_size +
-                     r * full_intermediate_size + i * tp_intermediate,
-                 sizeof(ggml_bf16_t) * tp_intermediate);
-        }
+    // Allocate partitioned weight buffers on first call
+    if (partitioned_gate_lora_b_.empty()) {
+      partitioned_gate_lora_b_.resize(tp_count, nullptr);
+      partitioned_up_lora_b_.resize(tp_count, nullptr);
+      partitioned_down_lora_a_.resize(tp_count, nullptr);
+      for (int i = 0; i < tp_count; i++) {
+        int tp_inter = tp_configs[i].intermediate_size;
+        size_t lora_b_size = (size_t)expert_num * tp_inter * lora_rank;
+        partitioned_gate_lora_b_[i] = new ggml_bf16_t[lora_b_size];
+        partitioned_up_lora_b_[i] = new ggml_bf16_t[lora_b_size];
+        partitioned_down_lora_a_[i] = new ggml_bf16_t[expert_num * lora_rank * tp_inter];
       }
     }
 
-    // Update each NUMA node with partitioned weights
+    // Single do_numa_job: work-stealing memcpy + update_lora_weights
     auto pool = config.pool;
-    pool->dispense_backend()->do_numa_job([this, gate_lora_a, up_lora_a, down_lora_b](int numa_id) {
-      tps[numa_id]->update_lora_weights(gate_lora_a,                        // Not partitioned
-                                        partitioned_gate_lora_b_[numa_id],  // Partitioned
-                                        up_lora_a,                          // Not partitioned
-                                        partitioned_up_lora_b_[numa_id],    // Partitioned
-                                        partitioned_down_lora_a_[numa_id],  // Partitioned
-                                        down_lora_b);                       // Not partitioned
-    });
+    pool->dispense_backend()->do_numa_job(
+        [this, gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b, full_intermediate_size,
+         expert_num, lora_rank, pool](int numa_id) {
+          int tp_inter = tp_configs[numa_id].intermediate_size;
+          size_t lora_b_slice = (size_t)tp_inter * lora_rank;
+          auto subpool = pool->get_subpool(numa_id);
+
+          // Work-stealing: copy all weights for this expert (gate + up + down)
+          subpool->do_work_stealing_job(expert_num, [&](int e) {
+            // gate_lora_b: [expert_num, intermediate_size, lora_rank]
+            memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
+                   (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+                   sizeof(ggml_bf16_t) * lora_b_slice);
+
+            // up_lora_b: [expert_num, intermediate_size, lora_rank]
+            memcpy(partitioned_up_lora_b_[numa_id] + e * lora_b_slice,
+                   (ggml_bf16_t*)up_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+                   sizeof(ggml_bf16_t) * lora_b_slice);
+
+            // down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
+            for (int r = 0; r < lora_rank; r++) {
+              memcpy(partitioned_down_lora_a_[numa_id] + e * lora_rank * tp_inter + r * tp_inter,
+                     (ggml_bf16_t*)down_lora_a + e * lora_rank * full_intermediate_size + r * full_intermediate_size +
+                         numa_id * tp_inter,
+                     sizeof(ggml_bf16_t) * tp_inter);
+            }
+          }, "upd_lora_tp");
+
+          // Update weights after all memcpy complete
+          tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
+                                            partitioned_up_lora_b_[numa_id], partitioned_down_lora_a_[numa_id],
+                                            down_lora_b);
+        });
   }
 
-  /**
-   * @brief Free previously allocated partitioned LoRA weights.
-   */
-  void free_partitioned_lora_weights() {
-    for (auto ptr : partitioned_gate_lora_b_) {
-      if (ptr) delete[] ptr;
-    }
-    for (auto ptr : partitioned_up_lora_b_) {
-      if (ptr) delete[] ptr;
-    }
-    for (auto ptr : partitioned_down_lora_a_) {
-      if (ptr) delete[] ptr;
-    }
-    partitioned_gate_lora_b_.clear();
-    partitioned_up_lora_b_.clear();
-    partitioned_down_lora_a_.clear();
-  }
 
   /**
    * @brief Free previously allocated partitioned base weights.
@@ -788,7 +751,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * @brief Destructor - free partitioned weights.
    */
   ~TP_MOE_SFT() {
-    free_partitioned_lora_weights();
     free_partitioned_base_weights();
   }
 

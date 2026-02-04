@@ -9,6 +9,7 @@
 #define CPUINFER_OPERATOR_AMX_SFT_MOE_H
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -22,6 +23,8 @@
 #include <vector>
 
 #include "../../cpu_backend/worker_pool.h"
+#include "ggml.h"
+#include "la/amx_kernels.hpp"
 #include "la/avx_kernels.hpp"
 #include "moe.hpp"
 
@@ -2350,6 +2353,26 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   /**
    * @brief Set base weight pointers for TP partitioning.
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights before calling load_weights().
+   * Unlike prepare_bwd, this does NOT call prepare_backward_weights() and does NOT reset pointers.
+   */
+  void set_weight_pointers_for_forward(void* gate_proj, void* up_proj, void* down_proj) {
+    config_.gate_proj = gate_proj;
+    config_.up_proj = up_proj;
+    config_.down_proj = down_proj;
+  }
+
+  /**
+   * @brief Clear base weight pointers after forward path initialization.
+   */
+  void clear_weight_pointers() {
+    config_.gate_proj = nullptr;
+    config_.up_proj = nullptr;
+    config_.down_proj = nullptr;
+  }
+
+  /**
+   * @brief Set base weight pointers for TP partitioning (backward path).
+   * Used by TP_MOE_SFT::load_weights() to set partitioned weights and prepare backward weights.
    */
   void prepare_bwd(void* gate_proj, void* up_proj, void* down_proj) {
     config_.gate_proj = gate_proj;
