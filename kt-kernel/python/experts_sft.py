@@ -285,7 +285,13 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         up_lora_a: torch.Tensor,
         up_lora_b: torch.Tensor,
         down_lora_a: torch.Tensor,
-        down_lora_b: torch.Tensor,
+        down_lora_b: torch.Tensor,     
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
     ) -> None:
         """
         Initialize LoRA weights.
@@ -336,9 +342,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def backward(
         self,
         grad_output: torch.Tensor,
-        lora_params: Optional[Dict[str, "torch.nn.Parameter"]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Backward pass computing gradients.
 

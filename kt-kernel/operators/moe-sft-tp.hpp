@@ -412,6 +412,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("Weights not loaded");
     }
 
+    auto start_sft = sft_timer::get_trace_timestamp();
+
     int qlen = *qlen_ptr;
     auto pool = config.pool;
 
@@ -428,6 +430,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
+
+    auto end_fwd = sft_timer::get_trace_timestamp();
+
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
     //   sft_timer::collect_forward(pool->get_subpool(i));
@@ -438,6 +443,14 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
+
+    auto end_merge = sft_timer::get_trace_timestamp();
+
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {
+      sft_timer::add_kernel_trace("fwd", start_sft, end_fwd, numa_id, 0);
+      sft_timer::add_kernel_trace("merge", end_fwd, end_merge, numa_id, 0);
+    });
+
   }
 
   /**
@@ -471,6 +484,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights) {
     auto pool = config.pool;
+
+    auto start_sft = sft_timer::get_trace_timestamp();
 
     // Get full intermediate_size (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
@@ -512,6 +527,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
       part_grad_weights[i] = grad_weights ? new float[qlen * k]() : nullptr;
     }
 
+    auto end_alloc = sft_timer::get_trace_timestamp();
+
     // // Reset backward timing before computation
     // sft_timer::reset_backward();
     // // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
@@ -520,13 +537,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // }
 
     // Run backward on each NUMA node with separate grad_input buffers
-    pool->dispense_backend()->do_numa_job([this, grad_output, &part_grad_input, &part_grad_gate_lora_a, &part_grad_up_lora_a,
-                                           grad_down_lora_b, &part_grad_gate_lora_b, &part_grad_up_lora_b,
-                                           &part_grad_down_lora_a, &part_grad_weights](int numa_id) {
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {
       // Bug #23 fix: use partitioned lora_a gradient buffers
+      auto start_Bwd = sft_timer::get_trace_timestamp();
       tps[numa_id]->backward(grad_output, part_grad_input[numa_id], part_grad_gate_lora_a[numa_id], part_grad_gate_lora_b[numa_id],
                              part_grad_up_lora_a[numa_id], part_grad_up_lora_b[numa_id], part_grad_down_lora_a[numa_id],
                              grad_down_lora_b, part_grad_weights[numa_id]);
+        auto end_bwd = sft_timer::get_trace_timestamp();
+        sft_timer::add_kernel_trace("bwd_alloc", start_sft, end_alloc, numa_id, 0);
+        sft_timer::add_kernel_trace("bwd_tp", start_Bwd, end_bwd, numa_id, 0);
     });
 
     // // Collect per-thread timing from all NUMA subpools
@@ -555,11 +574,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // }
 
     // DUMP: per-TP grad_input before merge
-    for (int i = 0; i < tp_count; i++) {
-      tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
-    }
+    // for (int i = 0; i < tp_count; i++) {
+    //   tp_dump::dump_bf16_matrix(part_grad_input[i], qlen, hidden_size, "backward_grad_input", i);
+    // }
 
     // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
+    auto start_sum = sft_timer::get_trace_timestamp();
     {
       for (int i = 0; i < qlen * hidden_size; i++) {
         float sum = 0.0f;
@@ -569,12 +589,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
         ((ggml_bf16_t*)grad_input)[i] = GGML_FP32_TO_BF16(sum);
       }
     }
-
+    auto end_sum = sft_timer::get_trace_timestamp();
     // DUMP: final merged grad_input
     tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
 
     // Bug #23 fix: Merge grad_gate_lora_a and grad_up_lora_a from all NUMA nodes (sum them)
     // Each TP computes partial contribution from its partition of lora_b
+    auto start_merge = sft_timer::get_trace_timestamp();
     {
       size_t lora_a_size = (size_t)expert_num * lora_rank * hidden_size;
       for (size_t i = 0; i < lora_a_size; i++) {
@@ -587,8 +608,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
         ((ggml_bf16_t*)grad_up_lora_a)[i] = GGML_FP32_TO_BF16(sum_up);
       }
     }
-
     // Merge partitioned gradients to full gradients
+
     for (int i = 0; i < tp_count; i++) {
       int tp_intermediate = tp_configs[i].intermediate_size;
 
@@ -629,6 +650,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
         out_grad_weights[i] = sum;
       }
     }
+    auto end_merge = sft_timer::get_trace_timestamp();
+
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {
+      sft_timer::add_kernel_trace("merge_tp", start_sum, end_sum, numa_id, 0);
+      sft_timer::add_kernel_trace("merge_lora_a", end_sum, start_merge, numa_id, 0);
+      sft_timer::add_kernel_trace("merge_grad_weights", start_merge, end_merge, numa_id, 0);
+    });
 
     // Clean up temporary buffers
     for (int i = 0; i < tp_count; i++) {
@@ -729,6 +757,24 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
 
   /**
+   * @brief Free previously allocated partitioned LoRA weights.
+   */
+  void free_partitioned_lora_weights() {
+    for (auto ptr : partitioned_gate_lora_b_) {
+      if (ptr) delete[] ptr;
+    }
+    for (auto ptr : partitioned_up_lora_b_) {
+      if (ptr) delete[] ptr;
+    }
+    for (auto ptr : partitioned_down_lora_a_) {
+      if (ptr) delete[] ptr;
+    }
+    partitioned_gate_lora_b_.clear();
+    partitioned_up_lora_b_.clear();
+    partitioned_down_lora_a_.clear();
+  }
+
+  /**
    * @brief Free previously allocated partitioned base weights.
    * Bug #20 fix: These are needed for backward pass and must not be freed in load_weights().
    */
@@ -751,6 +797,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * @brief Destructor - free partitioned weights.
    */
   ~TP_MOE_SFT() {
+    free_partitioned_lora_weights();
     free_partitioned_base_weights();
   }
 

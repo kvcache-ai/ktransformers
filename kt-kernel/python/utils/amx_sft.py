@@ -430,6 +430,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         up_lora_b: torch.Tensor,
         down_lora_a: torch.Tensor,
         down_lora_b: torch.Tensor,
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
     ) -> None:
         """
         Initialize LoRA weights.
@@ -478,44 +484,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.down_lora_a = down_lora_a.contiguous()
         self.down_lora_b = down_lora_b.contiguous()
 
-        self.grad_gate_lora_a = (
-            torch.empty((self.num_experts, self.lora_rank, self.hidden_size), dtype=torch.bfloat16, device="cpu")
-            .zero_()
-            .contiguous()
-        )
-        self.grad_gate_lora_b = (
-            torch.empty(
-                (self.num_experts, self.moe_intermediate_size, self.lora_rank), dtype=torch.bfloat16, device="cpu"
-            )
-            .zero_()
-            .contiguous()
-        )
-
-        self.grad_up_lora_a = (
-            torch.empty((self.num_experts, self.lora_rank, self.hidden_size), dtype=torch.bfloat16, device="cpu")
-            .zero_()
-            .contiguous()
-        )
-        self.grad_up_lora_b = (
-            torch.empty(
-                (self.num_experts, self.moe_intermediate_size, self.lora_rank), dtype=torch.bfloat16, device="cpu"
-            )
-            .zero_()
-            .contiguous()
-        )
-
-        self.grad_down_lora_a = (
-            torch.empty(
-                (self.num_experts, self.lora_rank, self.moe_intermediate_size), dtype=torch.bfloat16, device="cpu"
-            )
-            .zero_()
-            .contiguous()
-        )
-        self.grad_down_lora_b = (
-            torch.empty((self.num_experts, self.hidden_size, self.lora_rank), dtype=torch.bfloat16, device="cpu")
-            .zero_()
-            .contiguous()
-        )
+        self.grad_gate_lora_a = grad_gate_lora_a.contiguous()
+        self.grad_gate_lora_b = grad_gate_lora_b.contiguous()
+        self.grad_up_lora_a = grad_up_lora_a.contiguous()
+        self.grad_up_lora_b = grad_up_lora_b.contiguous()
+        self.grad_down_lora_a = grad_down_lora_a.contiguous()
+        self.grad_down_lora_b = grad_down_lora_b.contiguous()
 
         self._lora_initialized = True
 
@@ -625,9 +599,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
     def backward(
         self,
         grad_output: torch.Tensor,
-        lora_params: Optional[Dict[str, torch.nn.Parameter]] = None,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Backward pass computing gradients.
 
@@ -674,15 +647,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         buffer.grad_input_cpu.zero_()
         buffer.grad_weights.zero_()
 
-        # Zero out LoRA gradient buffers (C++ backward accumulates into these)
-        if self.grad_gate_lora_a is not None:
-            self.grad_gate_lora_a.zero_()
-            self.grad_gate_lora_b.zero_()
-            self.grad_up_lora_a.zero_()
-            self.grad_up_lora_b.zero_()
-            self.grad_down_lora_a.zero_()
-            self.grad_down_lora_b.zero_()
-
         # Synchronize CUDA stream if input was on GPU to ensure data has arrived
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
@@ -703,22 +667,6 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
         self.cpu_infer.sync()
 
-        # # Debug: print LoRA weights and computed gradients
-        # print(f"\033[33m[AMX_SFT DEBUG] layer={self.layer_idx} backward "
-        #       f"lora_a weights: gate={self.gate_lora_a.float().norm().item():.6f} "
-        #       f"up={self.up_lora_a.float().norm().item():.6f} "
-        #       f"down={self.down_lora_a.float().norm().item():.6f} | "
-        #       f"lora_b weights: gate={self.gate_lora_b.float().norm().item():.6f} "
-        #       f"up={self.up_lora_b.float().norm().item():.6f} "
-        #       f"down={self.down_lora_b.float().norm().item():.6f} | "
-        #       f"grad_a: gate={self.grad_gate_lora_a.float().norm().item():.6f} "
-        #       f"up={self.grad_up_lora_a.float().norm().item():.6f} "
-        #       f"down={self.grad_down_lora_a.float().norm().item():.6f} | "
-        #       f"grad_b: gate={self.grad_gate_lora_b.float().norm().item():.6f} "
-        #       f"up={self.grad_up_lora_b.float().norm().item():.6f} "
-        #       f"down={self.grad_down_lora_b.float().norm().item():.6f}"
-        #       f"\033[0m", flush=True)
-
         # Decrease cache depth
         self._cache_depth -= 1
 
@@ -731,16 +679,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_input = buffer.grad_input_cpu.clone()
             grad_weights = buffer.grad_weights.clone()
 
-        grad_loras = {
-            "grad_gate_lora_a": self.grad_gate_lora_a,
-            "grad_gate_lora_b": self.grad_gate_lora_b,
-            "grad_up_lora_a": self.grad_up_lora_a,
-            "grad_up_lora_b": self.grad_up_lora_b,
-            "grad_down_lora_a": self.grad_down_lora_a,
-            "grad_down_lora_b": self.grad_down_lora_b,
-        }
-
-        return grad_input, grad_loras, grad_weights
+        return grad_input, grad_weights
 
     def update_lora_weights(self) -> None:
         """

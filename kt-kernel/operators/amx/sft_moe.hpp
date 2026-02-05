@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -157,7 +158,7 @@ inline bool is_nan_check_enabled() {
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
 inline bool is_dump_enabled() {
-  return false;
+  // return false;
   static int enabled = -1;
   if (enabled < 0) {
     const char* env = getenv("SFT_MOE_DUMP");
@@ -431,6 +432,34 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   using Base::up_bc_;
 
  private:
+  static constexpr size_t kAmxAlignment = 64;
+  static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
+
+  static inline void* alloc_aligned(size_t align, size_t bytes) {
+    if (bytes == 0) return nullptr;
+    void* ptr = nullptr;
+    int rc = posix_memalign(&ptr, align, bytes);
+    if (rc != 0 || !ptr) {
+      errno = rc;  // posix_memalign returns error code instead of setting errno
+      perror("posix_memalign");
+      throw std::runtime_error("posix_memalign failed");
+    }
+    return ptr;
+  }
+
+  void alloc_or_resize_forward_pool(size_t required_bytes) {
+    required_bytes = round_up(required_bytes, kAmxAlignment);
+    if (required_bytes == 0) return;
+    if (required_bytes <= forward_pool_bytes_) return;
+    if (forward_pool_) {
+      free(forward_pool_);
+      forward_pool_ = nullptr;
+      forward_pool_bytes_ = 0;
+    }
+    forward_pool_ = alloc_aligned(kAmxAlignment, required_bytes);
+    forward_pool_bytes_ = required_bytes;
+  }
+
   // SFT configuration
   MOESFTConfig sft_config_;
 
@@ -446,9 +475,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   ggml_bf16_t* down_lora_a_;
   ggml_bf16_t* down_lora_b_;
 
-  // Pre-transposed LoRA B weights for AVX512 optimized fused_add
-  // Layout: [expert_num][rank][output_dim] instead of [expert_num][output_dim][rank]
-  // This enables contiguous memory access for 16 outputs at a time
   ggml_bf16_t* gate_lora_b_transposed_ = nullptr;  // [expert_num, lora_rank, intermediate_size]
   ggml_bf16_t* up_lora_b_transposed_ = nullptr;    // [expert_num, lora_rank, intermediate_size]
   ggml_bf16_t* down_lora_b_transposed_ = nullptr;  // [expert_num, lora_rank, hidden_size]
@@ -475,6 +501,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void* cache_down_output_pool_ = nullptr;  // For grad_weights computation
   size_t cache_slot_bytes_input_;
   size_t cache_slot_bytes_intermediate_;
+
+  // Forward pooled buffers (to avoid frequent aligned_alloc/free in inference/training loops)
+  void* forward_pool_ = nullptr;
+  size_t forward_pool_bytes_ = 0;
 
   // Gradient intermediate buffers
   ggml_bf16_t* grad_intermediate_ = nullptr;  // [max_len * k, intermediate_size]
@@ -637,17 +667,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   ~AMX_SFT_MOE_TP() {
     // Safety net: free any buffers that weren't freed (normally freed at end of backward)
-    // LoRA working buffers
-    if (lora_ba_pool_) free(lora_ba_pool_);
-    if (lora_bc_inter_pool_) free(lora_bc_inter_pool_);
-    if (lora_bc_out_pool_) free(lora_bc_out_pool_);
-    if (lora_intermediate_bf16_pool_) free(lora_intermediate_bf16_pool_);
-    // Cache buffers
-    if (cache_input_pool_) free(cache_input_pool_);
-    if (cache_gate_output_pool_) free(cache_gate_output_pool_);
-    if (cache_up_output_pool_) free(cache_up_output_pool_);
-    if (cache_intermediate_pool_) free(cache_intermediate_pool_);
-    if (cache_down_output_pool_) free(cache_down_output_pool_);
+    // Forward pooled buffers (includes LoRA working buffers and cache pools)
+    if (forward_pool_) free(forward_pool_);
     // Gradient buffers
     if (grad_intermediate_pool_) free(grad_intermediate_pool_);
     if (grad_gate_output_pool_) free(grad_gate_output_pool_);
@@ -672,38 +693,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @param alloc_cache Whether to allocate cache buffers (for backward pass)
    */
   void alloc_forward_buffers(bool alloc_cache) {
+    const size_t cache_input_bytes = alloc_cache ? (cache_slot_bytes_input_ * max_cache_depth_) : 0;
+    const size_t cache_intermediate_bytes = alloc_cache ? (cache_slot_bytes_intermediate_ * max_cache_depth_) : 0;
+
+    size_t required = 0;
+    required += round_up(lora_ba_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_bc_inter_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_bc_out_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_intermediate_bf16_pool_bytes_, kAmxAlignment);
+    if (alloc_cache) {
+      required += round_up(cache_input_bytes, kAmxAlignment);
+      required += round_up(cache_intermediate_bytes, kAmxAlignment) * 3;
+      required += round_up(cache_down_output_bytes_, kAmxAlignment);
+    }
+
+    alloc_or_resize_forward_pool(required);
+
+    auto* base = static_cast<uint8_t*>(forward_pool_);
+    size_t offset = 0;
+    auto assign = [&](void** ptr, size_t bytes) {
+      if (bytes == 0) {
+        *ptr = nullptr;
+        return;
+      }
+      *ptr = base + offset;
+      offset += round_up(bytes, kAmxAlignment);
+    };
+
     // LoRA working buffers (always needed for forward, even for inference)
-    // ★ AMX requires 64-byte alignment for all buffers ★
-    if (lora_ba_pool_bytes_ > 0 && lora_ba_pool_ == nullptr) {
-      lora_ba_pool_ = aligned_alloc(64, lora_ba_pool_bytes_);
-    }
-    if (lora_bc_inter_pool_bytes_ > 0 && lora_bc_inter_pool_ == nullptr) {
-      lora_bc_inter_pool_ = aligned_alloc(64, lora_bc_inter_pool_bytes_);
-    }
-    if (lora_bc_out_pool_bytes_ > 0 && lora_bc_out_pool_ == nullptr) {
-      lora_bc_out_pool_ = aligned_alloc(64, lora_bc_out_pool_bytes_);
-    }
-    if (lora_intermediate_bf16_pool_bytes_ > 0 && lora_intermediate_bf16_pool_ == nullptr) {
-      lora_intermediate_bf16_pool_ = aligned_alloc(64, lora_intermediate_bf16_pool_bytes_);
-    }
+    assign(&lora_ba_pool_, lora_ba_pool_bytes_);
+    assign(&lora_bc_inter_pool_, lora_bc_inter_pool_bytes_);
+    assign(&lora_bc_out_pool_, lora_bc_out_pool_bytes_);
+    assign(&lora_intermediate_bf16_pool_, lora_intermediate_bf16_pool_bytes_);
 
     // Cache buffers (only for training with backward pass)
-    // ★ AMX requires 64-byte alignment for all buffers ★
     if (alloc_cache) {
-      size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
-      size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
-
-      if (cache_input_bytes > 0 && cache_input_pool_ == nullptr) {
-        cache_input_pool_ = aligned_alloc(64, cache_input_bytes);
-      }
-      if (cache_intermediate_bytes > 0 && cache_gate_output_pool_ == nullptr) {
-        cache_gate_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
-        cache_up_output_pool_ = aligned_alloc(64, cache_intermediate_bytes);
-        cache_intermediate_pool_ = aligned_alloc(64, cache_intermediate_bytes);
-      }
-      if (cache_down_output_bytes_ > 0 && cache_down_output_pool_ == nullptr) {
-        cache_down_output_pool_ = aligned_alloc(64, cache_down_output_bytes_);
-      }
+      assign(&cache_input_pool_, cache_input_bytes);
+      assign(&cache_gate_output_pool_, cache_intermediate_bytes);
+      assign(&cache_up_output_pool_, cache_intermediate_bytes);
+      assign(&cache_intermediate_pool_, cache_intermediate_bytes);
+      assign(&cache_down_output_pool_, cache_down_output_bytes_);
 
       // Initialize cache stack pointers
       for (int i = 0; i < max_cache_depth_; i++) {
@@ -719,6 +748,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         cache_stack_[i].down_output_cache = (ggml_bf16_t*)cache_down_output_pool_ +
                                             i * config_.max_len * config_.num_experts_per_tok * config_.hidden_size;
       }
+    } else {
+      cache_input_pool_ = nullptr;
+      cache_gate_output_pool_ = nullptr;
+      cache_up_output_pool_ = nullptr;
+      cache_intermediate_pool_ = nullptr;
+      cache_down_output_pool_ = nullptr;
     }
   }
 
@@ -727,22 +762,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Called at the end of forward_sft when save_for_backward=false.
    */
   void free_lora_working_buffers() {
-    if (lora_ba_pool_) {
-      free(lora_ba_pool_);
-      lora_ba_pool_ = nullptr;
-    }
-    if (lora_bc_inter_pool_) {
-      free(lora_bc_inter_pool_);
-      lora_bc_inter_pool_ = nullptr;
-    }
-    if (lora_bc_out_pool_) {
-      free(lora_bc_out_pool_);
-      lora_bc_out_pool_ = nullptr;
-    }
-    if (lora_intermediate_bf16_pool_) {
-      free(lora_intermediate_bf16_pool_);
-      lora_intermediate_bf16_pool_ = nullptr;
-    }
+    // Intentionally keep pooled buffers to avoid frequent alloc/free in inference loops.
   }
 
   /**
@@ -790,28 +810,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Called at the end of backward.
    */
   void free_seqlen_buffers() {
-    // Cache buffers
-    if (cache_input_pool_) {
-      free(cache_input_pool_);
-      cache_input_pool_ = nullptr;
-    }
-    if (cache_gate_output_pool_) {
-      free(cache_gate_output_pool_);
-      cache_gate_output_pool_ = nullptr;
-    }
-    if (cache_up_output_pool_) {
-      free(cache_up_output_pool_);
-      cache_up_output_pool_ = nullptr;
-    }
-    if (cache_intermediate_pool_) {
-      free(cache_intermediate_pool_);
-      cache_intermediate_pool_ = nullptr;
-    }
-    if (cache_down_output_pool_) {
-      free(cache_down_output_pool_);
-      cache_down_output_pool_ = nullptr;
-    }
-
     // Gradient buffers
     if (grad_intermediate_pool_) {
       free(grad_intermediate_pool_);
@@ -828,24 +826,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     grad_intermediate_ = nullptr;
     grad_gate_output_ = nullptr;
     grad_up_output_ = nullptr;
-
-    // LoRA working buffers
-    if (lora_ba_pool_) {
-      free(lora_ba_pool_);
-      lora_ba_pool_ = nullptr;
-    }
-    if (lora_bc_inter_pool_) {
-      free(lora_bc_inter_pool_);
-      lora_bc_inter_pool_ = nullptr;
-    }
-    if (lora_bc_out_pool_) {
-      free(lora_bc_out_pool_);
-      lora_bc_out_pool_ = nullptr;
-    }
-    if (lora_intermediate_bf16_pool_) {
-      free(lora_intermediate_bf16_pool_);
-      lora_intermediate_bf16_pool_ = nullptr;
-    }
 
     // Backward working buffers
     if (backward_ba_pool_) {
@@ -1454,8 +1434,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       check_fp32_buffer_for_nan((const float*)output, qlen * config_.hidden_size, label);
     }
 
-    // ★ Free LoRA working buffers for inference mode ★
-    // In training mode, these buffers are kept for backward pass and freed in free_seqlen_buffers()
+    // ★ Inference mode cleanup ★
+    // LoRA working buffers are pooled (kept) to avoid frequent alloc/free overhead.
     if (!save_for_backward) {
       free_lora_working_buffers();
     }
@@ -1943,7 +1923,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       print_grad_stats_fp32("grad_weights", (const float*)grad_weights, qlen * k);
     }
 
-    // ★ Free all seqlen-dependent buffers ★
+    // ★ Free backward-only buffers ★
+    // Note: forward_pool_ (forward/cache) is pooled and NOT freed here.
     // Note: backward_bb_pool_ and lora_bb_pool_ are NOT freed (persistent)
     free_seqlen_buffers();
 
@@ -2571,11 +2552,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // which corrupts the cache when apply_activation() writes to m_local_gate_output_.
     // Solution: Use aligned_alloc for cache pools so they have dedicated memory.
 
-    // ★ seqlen-dependent buffers are allocated on-demand and freed after backward ★
-    // This saves memory when not training or between training steps.
-    // - Cache buffers: allocated in forward_sft() when save_for_backward=true
-    // - Gradient buffers: allocated in backward()
-    // - LoRA working buffers (ba/bc/bf16): allocated in forward_sft() when save_for_backward=true
+    // ★ seqlen-dependent buffers are allocated on-demand ★
+    // Forward/cache buffers are pooled to avoid frequent alloc/free overhead:
+    // - Cache buffers: allocated in forward_sft() when save_for_backward=true (kept in forward_pool_)
+    // - LoRA working buffers (ba/bc/bf16): allocated in forward_sft() (kept in forward_pool_)
+    // Backward-only buffers are still allocated/freed per backward():
+    // - Gradient buffers: allocated in backward(), freed in free_seqlen_buffers()
     //
     // Only persistent buffers are allocated here:
     // - lora_bb_pool_: LoRA weights in BufferB format (not seqlen-dependent)
