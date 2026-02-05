@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <iostream>
 #include <stdexcept>
 #include <type_traits>
@@ -492,6 +493,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   // Last backward expert token distribution (for load balancing analysis)
   std::vector<int> last_backward_expert_tokens_;
+  // Experts that had non-zero contributions in last backward (for selective zeroing)
+  std::vector<int> last_backward_active_experts_;
+  bool grad_outputs_initialized_ = false;
 
   // Cache buffer pools
   void* cache_input_pool_ = nullptr;
@@ -595,6 +599,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void* backward_ba_pool_ = nullptr;
   void* backward_bc_pool_ = nullptr;
   void* grad_output_bf16_pool_ = nullptr;
+  void* backward_pool_ = nullptr;
+  size_t backward_pool_bytes_ = 0;
 
   // Backward buffer pool sizes
   size_t backward_ba_pool_bytes_ = 0;
@@ -635,6 +641,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   bool lora_b_transposed_ = false;   // For transpose_lora_b_weights (used in forward)
   bool lora_a_bb_prepared_ = false;  // For gate_lora_a_bb_ and up_lora_a_bb_ (used in backward)
 
+ private:
+  void alloc_or_resize_backward_pool(size_t required_bytes) {
+    required_bytes = round_up(required_bytes, kAmxAlignment);
+    if (required_bytes == 0) return;
+    if (required_bytes <= backward_pool_bytes_) return;
+    if (backward_pool_) {
+      free(backward_pool_);
+      backward_pool_ = nullptr;
+      backward_pool_bytes_ = 0;
+    }
+    backward_pool_ = alloc_aligned(kAmxAlignment, required_bytes);
+    backward_pool_bytes_ = required_bytes;
+  }
+
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
@@ -669,14 +689,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Safety net: free any buffers that weren't freed (normally freed at end of backward)
     // Forward pooled buffers (includes LoRA working buffers and cache pools)
     if (forward_pool_) free(forward_pool_);
-    // Gradient buffers
-    if (grad_intermediate_pool_) free(grad_intermediate_pool_);
-    if (grad_gate_output_pool_) free(grad_gate_output_pool_);
-    if (grad_up_output_pool_) free(grad_up_output_pool_);
-    // Backward working buffers
-    if (backward_ba_pool_) free(backward_ba_pool_);
-    if (backward_bc_pool_) free(backward_bc_pool_);
-    if (grad_output_bf16_pool_) free(grad_output_bf16_pool_);
+    // Backward pooled buffers (grad + working)
+    if (backward_pool_) free(backward_pool_);
     // Persistent buffers (allocated in constructor)
     if (lora_bb_pool_) free(lora_bb_pool_);
     if (backward_bb_pool_) free(backward_bb_pool_);
@@ -771,38 +785,43 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Includes: gradient buffers + backward working buffers
    */
   void alloc_backward_buffers() {
-    // Gradient buffers
-    // ★ AMX requires 64-byte alignment for all buffers ★
-    if (grad_buffer_bytes_ > 0 && grad_intermediate_pool_ == nullptr) {
-      grad_intermediate_pool_ = aligned_alloc(64, grad_buffer_bytes_);
-      grad_gate_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
-      grad_up_output_pool_ = aligned_alloc(64, grad_buffer_bytes_);
-      grad_intermediate_ = (ggml_bf16_t*)grad_intermediate_pool_;
-      grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
-      grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
-    }
+    // Allocate backward-phase buffers from a single resizable pool (like forward_pool_).
+    size_t required = 0;
+    required += round_up(grad_buffer_bytes_, kAmxAlignment) * 3;  // grad_intermediate, grad_gate_output, grad_up_output
+    required += round_up(backward_ba_pool_bytes_, kAmxAlignment);
+    required += round_up(backward_bc_pool_bytes_, kAmxAlignment);
+    required += round_up(grad_output_bf16_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_grad_out_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_inter_proj_pool_bytes_, kAmxAlignment);
+    required += round_up(lora_grad_times_b_pool_bytes_, kAmxAlignment);
 
-    // Backward working buffers
-    // ★ AMX requires 64-byte alignment for all buffers ★
-    if (backward_ba_pool_bytes_ > 0 && backward_ba_pool_ == nullptr) {
-      backward_ba_pool_ = aligned_alloc(64, backward_ba_pool_bytes_);
-    }
-    if (backward_bc_pool_bytes_ > 0 && backward_bc_pool_ == nullptr) {
-      backward_bc_pool_ = aligned_alloc(64, backward_bc_pool_bytes_);
-    }
-    if (grad_output_bf16_pool_bytes_ > 0 && grad_output_bf16_pool_ == nullptr) {
-      grad_output_bf16_pool_ = aligned_alloc(64, grad_output_bf16_pool_bytes_);
-    }
-    // LoRA gradient computation FP32 pools
-    if (lora_grad_out_pool_bytes_ > 0 && lora_grad_out_pool_ == nullptr) {
-      lora_grad_out_pool_ = (float*)aligned_alloc(64, lora_grad_out_pool_bytes_);
-    }
-    if (lora_inter_proj_pool_bytes_ > 0 && lora_inter_proj_pool_ == nullptr) {
-      lora_inter_proj_pool_ = (float*)aligned_alloc(64, lora_inter_proj_pool_bytes_);
-    }
-    if (lora_grad_times_b_pool_bytes_ > 0 && lora_grad_times_b_pool_ == nullptr) {
-      lora_grad_times_b_pool_ = (float*)aligned_alloc(64, lora_grad_times_b_pool_bytes_);
-    }
+    alloc_or_resize_backward_pool(required);
+
+    auto* base = static_cast<uint8_t*>(backward_pool_);
+    size_t offset = 0;
+    auto assign = [&](void** ptr, size_t bytes) {
+      if (bytes == 0) {
+        *ptr = nullptr;
+        return;
+      }
+      *ptr = base + offset;
+      offset += round_up(bytes, kAmxAlignment);
+    };
+
+    assign(&grad_intermediate_pool_, grad_buffer_bytes_);
+    assign(&grad_gate_output_pool_, grad_buffer_bytes_);
+    assign(&grad_up_output_pool_, grad_buffer_bytes_);
+    grad_intermediate_ = (ggml_bf16_t*)grad_intermediate_pool_;
+    grad_gate_output_ = (ggml_bf16_t*)grad_gate_output_pool_;
+    grad_up_output_ = (ggml_bf16_t*)grad_up_output_pool_;
+
+    assign(&backward_ba_pool_, backward_ba_pool_bytes_);
+    assign(&backward_bc_pool_, backward_bc_pool_bytes_);
+    assign(&grad_output_bf16_pool_, grad_output_bf16_pool_bytes_);
+
+    assign((void**)&lora_grad_out_pool_, lora_grad_out_pool_bytes_);
+    assign((void**)&lora_inter_proj_pool_, lora_inter_proj_pool_bytes_);
+    assign((void**)&lora_grad_times_b_pool_, lora_grad_times_b_pool_bytes_);
   }
 
   /**
@@ -810,49 +829,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Called at the end of backward.
    */
   void free_seqlen_buffers() {
-    // Gradient buffers
-    if (grad_intermediate_pool_) {
-      free(grad_intermediate_pool_);
-      grad_intermediate_pool_ = nullptr;
-    }
-    if (grad_gate_output_pool_) {
-      free(grad_gate_output_pool_);
-      grad_gate_output_pool_ = nullptr;
-    }
-    if (grad_up_output_pool_) {
-      free(grad_up_output_pool_);
-      grad_up_output_pool_ = nullptr;
-    }
-    grad_intermediate_ = nullptr;
-    grad_gate_output_ = nullptr;
-    grad_up_output_ = nullptr;
-
-    // Backward working buffers
-    if (backward_ba_pool_) {
-      free(backward_ba_pool_);
-      backward_ba_pool_ = nullptr;
-    }
-    if (backward_bc_pool_) {
-      free(backward_bc_pool_);
-      backward_bc_pool_ = nullptr;
-    }
-    if (grad_output_bf16_pool_) {
-      free(grad_output_bf16_pool_);
-      grad_output_bf16_pool_ = nullptr;
-    }
-    // LoRA gradient computation FP32 pools
-    if (lora_grad_out_pool_) {
-      free(lora_grad_out_pool_);
-      lora_grad_out_pool_ = nullptr;
-    }
-    if (lora_inter_proj_pool_) {
-      free(lora_inter_proj_pool_);
-      lora_inter_proj_pool_ = nullptr;
-    }
-    if (lora_grad_times_b_pool_) {
-      free(lora_grad_times_b_pool_);
-      lora_grad_times_b_pool_ = nullptr;
-    }
+    // Intentionally keep pooled backward buffers to avoid frequent alloc/free in training loops.
   }
 
   /**
@@ -4097,23 +4074,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       grad_output_bf16_ptr += align64(local_max_m * config_.hidden_size * sizeof(ggml_bf16_t));
     }
 
-    // Initialize gradient intermediate buffer (parallelized)
-    {
-      size_t total_size =
-          config_.max_len * config_.num_experts_per_tok * config_.intermediate_size * sizeof(ggml_bf16_t);
-      const int num_chunks = 32;
-      size_t chunk_size = (total_size + num_chunks - 1) / num_chunks;
-      pool->do_work_stealing_job(
-          num_chunks, nullptr,
-          [this, total_size, chunk_size](int i) {
-            size_t offset = i * chunk_size;
-            size_t size = std::min(chunk_size, total_size - offset);
-            if (size > 0) {
-              memset(reinterpret_cast<char*>(grad_intermediate_) + offset, 0, size);
-            }
-          },
-          nullptr, "bwd_gu_memset");
-    }
+    // NOTE: no full-buffer memset here; grad_intermediate_ is overwritten by to_mat() for active tokens.
 
     // =====================================================
     // Step 1+2: Scatter grad_output to per-expert BF16 buffers AND quantize to BufferA (merged)
