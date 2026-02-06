@@ -31,4 +31,4 @@ Maintainers steward the project and keep it healthy for users and contributors.
 
 ## Becoming a Maintainer
 
-We welcome contributors who show sustained, high‑quality contributions and collaborative behavior. If you are interested, please contact an existing maintainer and share your recent contributions and areas of focus.
+We welcome contributors who show sustained, high-quality contributions and collaborative behavior. If you are interested, please contact an existing maintainer and share your recent contributions and areas of focus.
