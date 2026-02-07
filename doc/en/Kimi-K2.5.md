@@ -28,7 +28,6 @@ Before starting, ensure you have:
 
 ```
 git clone https://github.com/kvcache-ai/ktransformers.git
-git checkout kimi_k2.5
 git submodule update --init --recursive
 cd kt-kernel && ./install.sh
 ```
@@ -39,10 +38,9 @@ Note: Currently, please clone our custom SGLang repository:
 
 ```
 git clone https://github.com/kvcache-ai/sglang.git
-git checkout kimi_k2.5
 cd sglang && pip install -e "python[all]"
 // maybe need to reinstall cudnn according to the issue when launching SGLang
-pip install nvidia-cudnn-cu12==9.16.0.29
+// pip install nvidia-cudnn-cu12==9.16.0.29
 ```
 
 3. **CUDA toolkit** - Compatible with your GPU (CUDA 12.8+ recommended)
