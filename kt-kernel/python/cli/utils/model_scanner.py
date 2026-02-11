@@ -259,13 +259,15 @@ def find_files_fast(mount_point: str, pattern: str, max_depth: int = 6, timeout:
         List of absolute file paths
     """
     try:
-        # Use shell=True to redirect stderr to /dev/null, ignoring permission errors
+        # Use shell=False for better security and handling of special characters in paths
+        cmd = ["find", mount_point, "-maxdepth", str(max_depth), "-name", pattern, "-type", "f"]
         result = subprocess.run(
-            f'find "{mount_point}" -maxdepth {max_depth} -name "{pattern}" -type f 2>/dev/null',
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
-            shell=True,
+            shell=False,
+            stderr=subprocess.DEVNULL,
         )
 
         # Return results even if returncode is non-zero (due to permission errors)
@@ -433,8 +435,8 @@ def scan_directory_for_models(directory: str, min_file_size_gb: float = 2.0) -> 
         size_filter = f"+{size_mb}M"
 
     # 1. Find *.gguf files >= 2GB
-    gguf_cmd = f'find "{directory}" -name "*.gguf" -type f -size {size_filter} -printf "%p\\t%s\\n" 2>/dev/null'
-    result = subprocess.run(gguf_cmd, shell=True, capture_output=True, text=True, timeout=120)
+    gguf_cmd = ["find", directory, "-name", "*.gguf", "-type", "f", "-size", size_filter, "-printf", "%p\t%s\n"]
+    result = subprocess.run(gguf_cmd, shell=False, capture_output=True, text=True, timeout=120, stderr=subprocess.DEVNULL)
 
     # Group by directory
     gguf_dirs = defaultdict(list)
@@ -455,10 +457,8 @@ def scan_directory_for_models(directory: str, min_file_size_gb: float = 2.0) -> 
         model_info[dir_path] = ("gguf", total_size, len(files), [name for name, _ in files])
 
     # 2. Find *.safetensors files >= 2GB
-    safetensors_cmd = (
-        f'find "{directory}" -name "*.safetensors" -type f -size {size_filter} -printf "%p\\t%s\\n" 2>/dev/null'
-    )
-    result = subprocess.run(safetensors_cmd, shell=True, capture_output=True, text=True, timeout=120)
+    safetensors_cmd = ["find", directory, "-name", "*.safetensors", "-type", "f", "-size", size_filter, "-printf", "%p\t%s\n"]
+    result = subprocess.run(safetensors_cmd, shell=False, capture_output=True, text=True, timeout=120, stderr=subprocess.DEVNULL)
 
     # Group by directory
     safetensors_dirs = defaultdict(list)
