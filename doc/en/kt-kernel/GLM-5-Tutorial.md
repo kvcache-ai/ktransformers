@@ -31,12 +31,10 @@ Before starting, ensure you have:
 
 2. **KT-Kernel installed**
 
-    Please follow [kt-kernel](https://github.com/kvcache-ai/ktransformers/blob/main/kt-kernel/README.md)
-
-    After installation, verify the CLI is working:
-
     ```bash
-    kt version
+    git clone https://github.com/kvcache-ai/ktransformers.git
+    git submodule update --init --recursive
+    cd kt-kernel && ./install.sh
     ```
 
 3. **transformers reinstalled**
@@ -140,6 +138,8 @@ python -m sglang.launch_server \
 Layerwise prefill requires one extra MoE layer's worth of VRAM.
 
 If you encounter OOM, adjust `--kt-num-gpu-experts`, `--chunked-prefill-size`, `--mem-fraction-static` and `--max-total-tokens` when launching the server.
+
+If you encounter other issues, try `kt doctor` to diagnose your setup.
 
 See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for detailed parameter tuning guidelines.
 
