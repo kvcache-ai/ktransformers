@@ -14,7 +14,7 @@ This tutorial demonstrates how to run MiniMax-M2.5 model inference using SGLang 
 
 **Minimum Configuration:**
 - **GPU**: NVIDIA RTX 2x4090 48GB (or equivalent with at least total 48GB VRAM available)
-- **CPU**: x86 CPU with AVX512F support (e.g., Intel Sapphire Rapids)
+- **CPU**: x86 CPU with AVX512BF16 support (e.g., Intel Sapphire Rapids)
 - **RAM**: At least 200GB system memory
 - **Storage**: ~200GB for model weights (FP8 weight, same weight folder for CPU and GPU)
 
