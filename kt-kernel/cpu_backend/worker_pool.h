@@ -195,7 +195,7 @@ class WorkerPool {
 // Global per-thread timing for SFT MOE forward/backward
 // =====================================================
 // Define SFT_TIMER_DISABLED to disable all timing (functions become no-ops)
-#define SFT_TIMER_DISABLED
+// #define SFT_TIMER_DISABLED
 namespace sft_timer {
 
 #ifdef SFT_TIMER_DISABLED

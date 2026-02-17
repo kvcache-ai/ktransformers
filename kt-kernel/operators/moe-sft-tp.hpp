@@ -151,6 +151,8 @@ class AMX_SFT_MOE_TP;
 template <class T>
 class TP_MOE_SFT : public TP_MOE<T> {
  public:
+  static constexpr bool kSkipLoRA = T::kSkipLoRA;
+
   using Base = TP_MOE<T>;
   using Base::config;
   using Base::local_output_numa;
@@ -240,17 +242,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
     part_grad_input_.assign(tp_count, nullptr);
     part_grad_weights_.assign(tp_count, nullptr);
 
-    // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
-    // LoRA pointers. We need to propagate LoRA pointers to all NUMA node instances.
-    if (config.gate_lora_a != nullptr) {
-      update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
-                          config.down_lora_a, config.down_lora_b);
-    }
+    if constexpr (!kSkipLoRA) {
+      // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
+      // LoRA pointers. We need to propagate LoRA pointers to all NUMA node instances.
+      if (config.gate_lora_a != nullptr) {
+        update_lora_weights(config.gate_lora_a, config.gate_lora_b, config.up_lora_a, config.up_lora_b,
+                            config.down_lora_a, config.down_lora_b);
+      }
 
-    // Bug #007 fix: TP_MOE base class uses GeneralMOEConfig which doesn't have
-    // lora_rank/lora_alpha. Propagate both to all NUMA node instances.
-    for (int i = 0; i < tp_count; i++) {
-      tps[i]->set_lora_params(config.lora_rank, config.lora_alpha);
+      // Bug #007 fix: TP_MOE base class uses GeneralMOEConfig which doesn't have
+      // lora_rank/lora_alpha. Propagate both to all NUMA node instances.
+      for (int i = 0; i < tp_count; i++) {
+        tps[i]->set_lora_params(config.lora_rank, config.lora_alpha);
+      }
     }
   }
 
@@ -565,6 +569,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     int k = sft_config.num_experts_per_tok;
     const bool need_grad_weights = (grad_weights != nullptr);
 
+    // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
+    if constexpr (kSkipLoRA) lora_rank = 0;
+
     // Allocate per-TP temporary buffers from a resizable aligned pool to avoid repeated new[]/delete[].
     // Keep the original semantics of "new[]()" by explicitly zeroing these buffers each backward().
     std::vector<size_t> clear_bytes(tp_count, 0);
@@ -747,9 +754,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // DUMP: final merged grad_input
     tp_dump::dump_bf16_matrix_final((ggml_bf16_t*)grad_input, qlen, hidden_size, "backward_grad_input_final");
 
+    // Merge LoRA gradients from all NUMA nodes (skip entirely when SkipLoRA=true)
+    auto start_merge = sft_timer::get_trace_timestamp();
+    if constexpr (!kSkipLoRA) {
     // Bug #23 fix: Merge grad_gate_lora_a and grad_up_lora_a from all NUMA nodes (sum them)
     // Each TP computes partial contribution from its partition of lora_b
-    auto start_merge = sft_timer::get_trace_timestamp();
     {
       auto* out_gate_a = (ggml_bf16_t*)grad_gate_lora_a;
       auto* out_up_a = (ggml_bf16_t*)grad_up_lora_a;
@@ -883,6 +892,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
           },
           nullptr, "merge_down_a_copy");
     }
+    } // if constexpr (!kSkipLoRA)
 
     // Merge grad_weights from all NUMA nodes (sum them together)
     // Each NUMA computes partial grad_weights based on its down_output partition
@@ -959,6 +969,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void update_lora_weights(void* gate_lora_a, void* gate_lora_b, void* up_lora_a, void* up_lora_b, void* down_lora_a,
                            void* down_lora_b) {
+    if constexpr (kSkipLoRA) return;  // No LoRA weights to update in SkipLoRA mode
     int full_intermediate_size = sft_config.intermediate_size;
     int expert_num = config.expert_num;
     int lora_rank = sft_config.lora_rank;

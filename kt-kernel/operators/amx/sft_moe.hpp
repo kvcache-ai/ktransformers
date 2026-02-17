@@ -408,6 +408,9 @@ struct ForwardCache {
  */
 template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = false>
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
+ public:
+  static constexpr bool kSkipLoRA = SkipLoRA;
+
  protected:
   using Base = BaseMOE<T>;
   using Base::config_;
@@ -658,8 +661,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
-    printf("Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d\n", config.layer_idx, tp_part_idx,
-           numa_node_of_cpu(sched_getcpu()));
+    printf("Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s\n", config.layer_idx, tp_part_idx,
+           numa_node_of_cpu(sched_getcpu()), SkipLoRA ? "true" : "false");
 
     // Initialize LoRA configuration
     lora_rank_ = config.lora_rank;

@@ -156,6 +156,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         # Store method and quantization config
         self.method = method
+        self._is_skip_lora = "SkipLoRA" in method
         self.group_size = group_size
         self.zero_point = zero_point
 
@@ -525,7 +526,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if not self._weights_loaded:
             raise RuntimeError("Weights not loaded. Call load_weights() or load_weights_from_tensors() first.")
 
-        if not self._lora_initialized:
+        if not self._lora_initialized and not self._is_skip_lora:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         qlen = hidden_states.shape[0]
@@ -652,19 +653,31 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             torch.cuda.synchronize(input_device)
 
         # Submit backward task
-        self.cpu_infer.submit(
-            self.moe.backward_task(
-                buffer.grad_output_cpu.data_ptr(),
-                buffer.grad_input_cpu.data_ptr(),
-                self.grad_gate_lora_a.data_ptr(),
-                self.grad_gate_lora_b.data_ptr(),
-                self.grad_up_lora_a.data_ptr(),
-                self.grad_up_lora_b.data_ptr(),
-                self.grad_down_lora_a.data_ptr(),
-                self.grad_down_lora_b.data_ptr(),
-                buffer.grad_weights.data_ptr(),
+        # SkipLoRA: grad LoRA pointers unused by C++ (SkipLoRA template skips all LoRA grad writes), pass 0
+        if self._is_skip_lora:
+            _gl = 0
+            self.cpu_infer.submit(
+                self.moe.backward_task(
+                    buffer.grad_output_cpu.data_ptr(),
+                    buffer.grad_input_cpu.data_ptr(),
+                    _gl, _gl, _gl, _gl, _gl, _gl,
+                    buffer.grad_weights.data_ptr(),
+                )
             )
-        )
+        else:
+            self.cpu_infer.submit(
+                self.moe.backward_task(
+                    buffer.grad_output_cpu.data_ptr(),
+                    buffer.grad_input_cpu.data_ptr(),
+                    self.grad_gate_lora_a.data_ptr(),
+                    self.grad_gate_lora_b.data_ptr(),
+                    self.grad_up_lora_a.data_ptr(),
+                    self.grad_up_lora_b.data_ptr(),
+                    self.grad_down_lora_a.data_ptr(),
+                    self.grad_down_lora_b.data_ptr(),
+                    buffer.grad_weights.data_ptr(),
+                )
+            )
         self.cpu_infer.sync()
 
         # Decrease cache depth
@@ -701,6 +714,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         """
         if not self._weights_loaded:
             raise RuntimeError("Weights not loaded. Call load_weights() first.")
+
+        if self._is_skip_lora:
+            return  # SkipLoRA mode: no LoRA weights to update
 
         if not self._lora_initialized:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
@@ -744,7 +760,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if not self._weights_loaded:
             raise RuntimeError("Weights not loaded. Call load_weights() or load_weights_from_tensors() first.")
 
-        if not self._lora_initialized:
+        if not self._lora_initialized and not self._is_skip_lora:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         qlen = hidden_states.shape[0]
