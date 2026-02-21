@@ -318,7 +318,7 @@ class FP8SafeTensorLoader(SafeTensorLoader):
                         # VL models(Qwen3.5): model.layers.{N} -> model.language_model.layers.{N}
                         self._is_vl_model = True
                         print("[FP8SafeTensorLoader] Detected VL model")
-                        return
+                    return
                 elif f".{gate}.weight_scale" in key and "weight_scale_inv" not in key:
                     self._scale_suffix = "weight_scale"
                     self._is_per_channel = True
