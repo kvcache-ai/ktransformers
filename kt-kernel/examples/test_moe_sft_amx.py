@@ -962,6 +962,7 @@ def test_moe_sft_backward(quant_mode: str = "bf16"):
                 grad_up_lora_b.data_ptr(),
                 grad_down_lora_a.data_ptr(),
                 grad_down_lora_b.data_ptr(),
+                0,  # grad_weights (not needed for this test)
             )
         )
         CPUInfer.sync()
@@ -1418,6 +1419,7 @@ def test_moe_sft_training_loop(quant_mode: str = "bf16"):
                     grad_up_lora_b.data_ptr(),
                     grad_down_lora_a.data_ptr(),
                     grad_down_lora_b.data_ptr(),
+                    0,  # grad_weights (not needed for this test)
                 )
             )
             CPUInfer.sync()
@@ -1641,6 +1643,7 @@ def test_moe_sft_performance(quant_mode: str = "bf16"):
                 grad_up_lora_b.data_ptr(),
                 grad_down_lora_a.data_ptr(),
                 grad_down_lora_b.data_ptr(),
+                0,  # grad_weights
             )
         )
         CPUInfer.sync()
@@ -1698,6 +1701,7 @@ def test_moe_sft_performance(quant_mode: str = "bf16"):
                 grad_up_lora_b.data_ptr(),
                 grad_down_lora_a.data_ptr(),
                 grad_down_lora_b.data_ptr(),
+                0,  # grad_weights
             )
         )
         CPUInfer.sync()
@@ -1737,6 +1741,7 @@ def test_moe_sft_performance(quant_mode: str = "bf16"):
                 grad_up_lora_b.data_ptr(),
                 grad_down_lora_a.data_ptr(),
                 grad_down_lora_b.data_ptr(),
+                0,  # grad_weights
             )
         )
         CPUInfer.sync()

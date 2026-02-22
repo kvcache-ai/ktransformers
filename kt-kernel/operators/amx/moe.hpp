@@ -249,29 +249,32 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
 
       if (config_.load) {
-        std::cout << "Loading from " << prefix << std::endl;
-        for (int task_id = 0; task_id < config_.expert_num * mat_type_all * mat_split; task_id++) {
-          int64_t expert_idx = task_id / (mat_type_all * mat_split);
-          uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-          uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
-          uint8_t mat_split_idex = task_id % mat_split;
-          if (mat_class == 0) {  // the up matrix
-            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
-            size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, logical_expert_id, size, scale_size, mat_split,
-                         mat_split_idex);
-          } else if (mat_class == 1) {
-            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
-            size_t scale_size = config_.intermediate_size * sizeof(float);
-            read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
-          } else {
-            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
-            size_t scale_size = config_.hidden_size * sizeof(float);
-            read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                         mat_split, mat_split_idex);
-          }
-        }
+        std::cout << "Loading from \"" << prefix << "\"" << std::endl;
+        pool->do_work_stealing_job(
+            config_.expert_num * mat_type_all * mat_split, nullptr,
+            [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
+              int64_t expert_idx = task_id / (mat_type_all * mat_split);
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
+              uint8_t mat_split_idex = task_id % mat_split;
+              if (mat_class == 0) {  // the up matrix
+                size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+                size_t scale_size = config_.intermediate_size * sizeof(float);
+                read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
+                             mat_split, mat_split_idex);
+              } else if (mat_class == 1) {
+                size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+                size_t scale_size = config_.intermediate_size * sizeof(float);
+                read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
+                             mat_split, mat_split_idex);
+              } else {
+                size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+                size_t scale_size = config_.hidden_size * sizeof(float);
+                read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
+                             mat_split, mat_split_idex);
+              }
+            },
+            nullptr, "load_fwd_kt");
       }
 // check process, store down matrix to check
 #ifdef CHECK

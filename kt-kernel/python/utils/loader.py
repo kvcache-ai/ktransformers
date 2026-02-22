@@ -206,6 +206,20 @@ class SafeTensorLoader:
         up_scales = [[] for _ in range(max_numa_id + 1)]
         gate_scales = [[] for _ in range(max_numa_id + 1)]
         down_scales = [[] for _ in range(max_numa_id + 1)]
+        # Check if backward weights exist
+        up_bwd_base_key = f"{base_key}.ffn_up_bwd_exps"
+        gate_bwd_base_key = f"{base_key}.ffn_gate_bwd_exps"
+        down_bwd_base_key = f"{base_key}.ffn_down_bwd_exps"
+        has_bwd = self.has_tensor(f"{gate_bwd_base_key}.{0}.numa.{0}.weight")
+
+        if has_bwd:
+            up_bwd_weights = [[] for _ in range(max_numa_id + 1)]
+            gate_bwd_weights = [[] for _ in range(max_numa_id + 1)]
+            down_bwd_weights = [[] for _ in range(max_numa_id + 1)]
+            up_bwd_scales = [[] for _ in range(max_numa_id + 1)]
+            gate_bwd_scales = [[] for _ in range(max_numa_id + 1)]
+            down_bwd_scales = [[] for _ in range(max_numa_id + 1)]
+
         for numa_id in range(max_numa_id + 1):
             for expert_id in range(max_experts_count + 1):
                 up_key = f"{up_base_key}.{expert_id}.numa.{numa_id}.weight"
@@ -228,7 +242,29 @@ class SafeTensorLoader:
                 up_scales[numa_id].append(up_scale_tensor)
                 gate_scales[numa_id].append(gate_scale_tensor)
                 down_scales[numa_id].append(down_scale_tensor)
-        return {
+
+                # Load backward weights if available
+                if has_bwd:
+                    gate_bwd_weights[numa_id].append(
+                        self.load_tensor(f"{gate_bwd_base_key}.{expert_id}.numa.{numa_id}.weight", device).numpy()
+                    )
+                    up_bwd_weights[numa_id].append(
+                        self.load_tensor(f"{up_bwd_base_key}.{expert_id}.numa.{numa_id}.weight", device).numpy()
+                    )
+                    down_bwd_weights[numa_id].append(
+                        self.load_tensor(f"{down_bwd_base_key}.{expert_id}.numa.{numa_id}.weight", device).numpy()
+                    )
+                    gate_bwd_scales[numa_id].append(
+                        self.load_tensor(f"{gate_bwd_base_key}.{expert_id}.numa.{numa_id}.scale", device).numpy()
+                    )
+                    up_bwd_scales[numa_id].append(
+                        self.load_tensor(f"{up_bwd_base_key}.{expert_id}.numa.{numa_id}.scale", device).numpy()
+                    )
+                    down_bwd_scales[numa_id].append(
+                        self.load_tensor(f"{down_bwd_base_key}.{expert_id}.numa.{numa_id}.scale", device).numpy()
+                    )
+
+        result = {
             "up": up_weights,
             "gate": gate_weights,
             "down": down_weights,
@@ -236,6 +272,14 @@ class SafeTensorLoader:
             "gate_scale": gate_scales,
             "down_scale": down_scales,
         }
+        if has_bwd:
+            result["gate_bwd"] = gate_bwd_weights
+            result["up_bwd"] = up_bwd_weights
+            result["down_bwd"] = down_bwd_weights
+            result["gate_bwd_scale"] = gate_bwd_scales
+            result["up_bwd_scale"] = up_bwd_scales
+            result["down_bwd_scale"] = down_bwd_scales
+        return result
 
     def has_tensor(self, name: str):
         return name in self.tensor_file_map

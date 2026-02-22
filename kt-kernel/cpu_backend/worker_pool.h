@@ -239,6 +239,8 @@ uint64_t get_trace_timestamp();
 // @param args      Optional JSON args string (e.g., "{\"tokens\":128,\"rank\":8}")
 void add_kernel_trace(const char* name, uint64_t start_ts, uint64_t end_ts, int numa_id, int thread_id,
                       const char* args = nullptr);
+
+static void write_trace_to_file();  // Write all collected traces to a file (e.g., "sft_kernel_traces.json")
 #endif
 
 }  // namespace sft_timer

@@ -17,8 +17,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iterator>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -1165,7 +1165,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Save gate/up outputs before activation (for backward)
     if (save_for_backward) {
-      ForwardCache& cache = push_cache();
+      // If a cache entry already exists (checkpoint recompute scenario),
+      // overwrite it instead of pushing a new one.  This keeps the cache
+      // consistent with the current forward's buffer state (max_m, routing)
+      // and avoids cache stack overflow from duplicate pushes.
+      ForwardCache& cache = (cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1] : push_cache();
       save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
 
       // NaN Check: Forward Cache - input, gate_output, up_output
@@ -2233,80 +2237,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
-    // Parallel conversion of all base weights to transposed BufferB format
-    // 3 matrices per expert: gate, up, down
+    // Fine-grained parallelism: nth_gate_up * expert_num * 2 + nth_down * expert_num tasks
+    int nth_gate_up = T::recommended_nth(config_.hidden_size);
+    int nth_down = T::recommended_nth(config_.intermediate_size);
+
+    // Phase 1: gate + up backward (both have same dimensions)
+    // gate/up_proj: [intermediate_size, hidden_size] -> transposed BufferB [hidden_size, intermediate_size]
     pool->do_work_stealing_job(
-        config_.expert_num * 3, nullptr,
-        [this](int task_id) {
-          int expert_idx = task_id / 3;
-          int weight_type = task_id % 3;
+        nth_gate_up * config_.expert_num * 2, nullptr,
+        [this, nth_gate_up](int task_id) {
+          int proj_idx = task_id / (nth_gate_up * config_.expert_num);  // 0=gate, 1=up
+          int remaining = task_id % (nth_gate_up * config_.expert_num);
+          int expert_idx = remaining / nth_gate_up;
+          int ith = remaining % nth_gate_up;
 
-          switch (weight_type) {
-            case 0: {  // gate_proj: [intermediate_size, hidden_size] -> transposed [hidden_size, intermediate_size]
-              const ggml_bf16_t* gate_proj = (const ggml_bf16_t*)config_.gate_proj;
-              size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
+          const ggml_bf16_t* src =
+              (proj_idx == 0) ? (const ggml_bf16_t*)config_.gate_proj : (const ggml_bf16_t*)config_.up_proj;
+          auto& dst_bb = (proj_idx == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
 
-              // Create transposed matrix: [hidden_size, intermediate_size]
-              // Original: [intermediate_size, hidden_size] stored row-major
-              // Transposed: [hidden_size, intermediate_size] stored row-major
-              std::vector<ggml_bf16_t> transposed(config_.hidden_size * config_.intermediate_size);
-              for (int i = 0; i < config_.intermediate_size; i++) {
-                for (int h = 0; h < config_.hidden_size; h++) {
-                  transposed[h * config_.intermediate_size + i] =
-                      gate_proj[expert_offset + i * config_.hidden_size + h];
-                }
-              }
-              // FIX: Use the same nth as mat_mul will use, to ensure BufferB layout matches.
-              // mat_mul uses nth = recommended_nth(hidden_size) which partitions by N_BLOCK.
-              int nth = T::recommended_nth(config_.hidden_size);
-              for (int ith = 0; ith < nth; ith++) {
-                gate_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
-              }
-              break;
-            }
-            case 1: {  // up_proj: same as gate
-              const ggml_bf16_t* up_proj = (const ggml_bf16_t*)config_.up_proj;
-              size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
-
-              std::vector<ggml_bf16_t> transposed(config_.hidden_size * config_.intermediate_size);
-              for (int i = 0; i < config_.intermediate_size; i++) {
-                for (int h = 0; h < config_.hidden_size; h++) {
-                  transposed[h * config_.intermediate_size + i] = up_proj[expert_offset + i * config_.hidden_size + h];
-                }
-              }
-              // FIX: Use the same nth as mat_mul will use, to ensure BufferB layout matches.
-              // mat_mul uses nth = recommended_nth(hidden_size) which partitions by N_BLOCK.
-              int nth = T::recommended_nth(config_.hidden_size);
-              for (int ith = 0; ith < nth; ith++) {
-                up_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
-              }
-              break;
-            }
-            case 2: {  // down_proj: [hidden_size, intermediate_size] -> transposed [intermediate_size, hidden_size]
-              const ggml_bf16_t* down_proj = (const ggml_bf16_t*)config_.down_proj;
-              size_t expert_offset = (size_t)expert_idx * config_.hidden_size * config_.intermediate_size;
-
-              // Create transposed matrix: [intermediate_size, hidden_size]
-              // Original: [hidden_size, intermediate_size] stored row-major
-              // Transposed: [intermediate_size, hidden_size] stored row-major
-              std::vector<ggml_bf16_t> transposed(config_.intermediate_size * config_.hidden_size);
-              for (int h = 0; h < config_.hidden_size; h++) {
-                for (int i = 0; i < config_.intermediate_size; i++) {
-                  transposed[i * config_.hidden_size + h] =
-                      down_proj[expert_offset + h * config_.intermediate_size + i];
-                }
-              }
-              // FIX: Use the same nth as mat_mul will use, to ensure BufferB layout matches.
-              // mat_mul uses nth = recommended_nth(intermediate_size) which partitions by N_BLOCK.
-              int nth = T::recommended_nth(config_.intermediate_size);
-              for (int ith = 0; ith < nth; ith++) {
-                down_backward_bb_[expert_idx]->from_mat(transposed.data(), ith, nth);
-              }
-              break;
-            }
-          }
+          // source: [intermediate_size, hidden_size], target: [hidden_size, intermediate_size]
+          size_t expert_offset = (size_t)expert_idx * config_.intermediate_size * config_.hidden_size;
+          dst_bb->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.intermediate_size,
+                                      config_.hidden_size, ith, nth_gate_up);
         },
-        nullptr, "bwd_prep");
+        nullptr, "bwd_prep_gate_up");
+
+    // Phase 2: down backward
+    // down_proj: [hidden_size, intermediate_size] -> transposed BufferB [intermediate_size, hidden_size]
+    pool->do_work_stealing_job(
+        nth_down * config_.expert_num, nullptr,
+        [this, nth_down](int task_id) {
+          int expert_idx = task_id / nth_down;
+          int ith = task_id % nth_down;
+
+          const ggml_bf16_t* src = (const ggml_bf16_t*)config_.down_proj;
+          // source: [hidden_size, intermediate_size], target: [intermediate_size, hidden_size]
+          size_t expert_offset = (size_t)expert_idx * config_.hidden_size * config_.intermediate_size;
+          down_backward_bb_[expert_idx]->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.hidden_size,
+                                                             config_.intermediate_size, ith, nth_down);
+        },
+        nullptr, "bwd_prep_down");
 
     backward_weights_prepared_ = true;
   }
@@ -2336,13 +2306,200 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights and prepare backward weights.
    */
   void prepare_bwd(void* gate_proj, void* up_proj, void* down_proj) {
+    // Try loading pre-quantized backward weights from disk first
+    if (!config_.path.empty()) {
+      std::filesystem::path prefix = config_.path;
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+      if (load_backward_weights(prefix)) {
+        printf("  [BWD] Loaded pre-quantized backward weights from disk (layer %d, numa %d)\n", config_.layer_idx,
+               tp_part_idx);
+        return;
+      }
+    }
+
+    // Fall back to online transpose + quantize
     config_.gate_proj = gate_proj;
     config_.up_proj = up_proj;
     config_.down_proj = down_proj;
     prepare_backward_weights();
+
+    // Save to disk for next time if save mode is enabled
+    if (config_.save && !config_.path.empty()) {
+      std::filesystem::path prefix = config_.path;
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+      save_backward_weights(prefix);
+    }
+
     config_.gate_proj = 0;
     config_.up_proj = 0;
     config_.down_proj = 0;
+  }
+
+  /**
+   * @brief Write backward weights to disk (reuses forward weight save pattern from moe.hpp).
+   */
+  void write_bwd_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
+                         size_t scale_size) {
+    std::ofstream of(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                               std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"));
+    if (!of.is_open()) {
+      printf("write_bwd_weights: cannot open file: %s\n",
+             (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" + std::to_string(size - scale_size) +
+                        "Byte" + "_quant_" + ".kt"))
+                 .c_str());
+    }
+    of.write(bb, size - scale_size);
+    of.close();
+    of.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" + std::to_string(scale_size) + "Byte" +
+                      "_scale_" + ".kt"));
+    if (!of.is_open()) {
+      printf("write_bwd_weights: cannot open scale file\n");
+    }
+    of.write(bb + (size - scale_size), scale_size);
+    of.close();
+  }
+
+  /**
+   * @brief Save pre-quantized backward weights to disk.
+   * Must be called after prepare_backward_weights().
+   */
+  void save_backward_weights(const std::filesystem::path& prefix) {
+    if constexpr (!supports_standard_mat_mul_v<T>) return;
+    if (!backward_weights_prepared_) return;
+
+    std::filesystem::create_directories(prefix);
+
+    for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
+      // gate_bwd: [hidden_size, intermediate_size]
+      size_t gu_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+      size_t gu_scale = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
+      write_bwd_weights(prefix, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, expert_idx, gu_size, gu_scale);
+      write_bwd_weights(prefix, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, expert_idx, gu_size, gu_scale);
+      // down_bwd: [intermediate_size, hidden_size]
+      size_t d_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+      size_t d_scale = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
+      write_bwd_weights(prefix, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, expert_idx, d_size, d_scale);
+    }
+  }
+
+  /**
+   * @brief Load pre-quantized backward weights from disk.
+   * @return true if files exist and loading succeeds, false otherwise.
+   */
+  bool load_backward_weights(const std::filesystem::path& prefix) {
+    if constexpr (!supports_standard_mat_mul_v<T>) return false;
+    if (backward_weights_prepared_) return true;
+
+    // Check if files exist for the first expert
+    size_t gu_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+    size_t gu_scale = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
+    std::string test_file = T::name() + "_gate_bwd_0_" + std::to_string(gu_size - gu_scale) + "Byte_quant_.kt";
+    if (!std::filesystem::exists(prefix / test_file)) return false;
+
+    size_t d_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+    size_t d_scale = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
+
+    // mat_class: 0=gate_bwd, 1=up_bwd, 2=down_bwd
+    static constexpr int mat_type_all = 3;
+    std::atomic<bool> ok{true};
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    auto read_one = [&](int expert_idx, const char* proj_name, char* dst_b, size_t size, size_t scale_size,
+                        auto* bb_ptr /* only used when SCALE */) {
+      std::ifstream f(prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
+                                std::to_string(size - scale_size) + "Byte_quant_.kt"));
+      if (!f.is_open()) {
+        ok.store(false, std::memory_order_relaxed);
+        return;
+      }
+      f.read(dst_b, size - scale_size);
+      f.close();
+
+      if constexpr (T::BufferB::SCALE) {
+        f.open(prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" + std::to_string(scale_size) +
+                         "Byte_scale_.kt"));
+        if (!f.is_open()) {
+          ok.store(false, std::memory_order_relaxed);
+          return;
+        }
+        f.read((char*)bb_ptr->d, scale_size);
+      }
+    };
+
+    pool->do_work_stealing_job(
+        config_.expert_num * mat_type_all, nullptr,
+        [&](int task_id) {
+          if (!ok.load(std::memory_order_relaxed)) return;
+          int expert_idx = task_id / mat_type_all;
+          int mat_class = task_id % mat_type_all;
+
+          if (mat_class == 0) {
+            read_one(expert_idx, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, gu_size, gu_scale,
+                     gate_backward_bb_[expert_idx].get());
+          } else if (mat_class == 1) {
+            read_one(expert_idx, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, gu_size, gu_scale,
+                     up_backward_bb_[expert_idx].get());
+          } else {
+            read_one(expert_idx, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, d_size, d_scale,
+                     down_backward_bb_[expert_idx].get());
+          }
+        },
+        nullptr, "load_bwd_kt");
+
+    if (!ok.load()) return false;
+    backward_weights_prepared_ = true;
+    return true;
+  }
+
+  /**
+   * @brief Load backward weights from pre-quantized per-NUMA buffers (memcpy path).
+   * Uses gate_bwd_projs/scales etc. from GeneralMOEConfig.
+   */
+  void load_backward_weights_from_projs() {
+    if constexpr (!supports_standard_mat_mul_v<T>) return;
+    if (backward_weights_prepared_) return;
+
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    pool->do_work_stealing_job(
+        config_.expert_num, nullptr,
+        [this](int expert_idx) {
+          const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+          uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+
+          // gate_bwd: [hidden_size, intermediate_size]
+          {
+            size_t scale_size = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
+            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
+            memcpy(gate_backward_bb_[expert_idx]->b, config_.gate_bwd_projs[tp_part_idx][logical_expert_id], size);
+            if constexpr (T::BufferB::SCALE) {
+              memcpy(gate_backward_bb_[expert_idx]->d, config_.gate_bwd_scales[tp_part_idx][logical_expert_id],
+                     scale_size);
+            }
+          }
+          // up_bwd
+          {
+            size_t scale_size = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
+            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
+            memcpy(up_backward_bb_[expert_idx]->b, config_.up_bwd_projs[tp_part_idx][logical_expert_id], size);
+            if constexpr (T::BufferB::SCALE) {
+              memcpy(up_backward_bb_[expert_idx]->d, config_.up_bwd_scales[tp_part_idx][logical_expert_id], scale_size);
+            }
+          }
+          // down_bwd: [intermediate_size, hidden_size]
+          {
+            size_t scale_size = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
+            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size) - scale_size;
+            memcpy(down_backward_bb_[expert_idx]->b, config_.down_bwd_projs[tp_part_idx][logical_expert_id], size);
+            if constexpr (T::BufferB::SCALE) {
+              memcpy(down_backward_bb_[expert_idx]->d, config_.down_bwd_scales[tp_part_idx][logical_expert_id],
+                     scale_size);
+            }
+          }
+        },
+        nullptr, "load_bwd_projs");
+
+    backward_weights_prepared_ = true;
   }
 
   /**
@@ -4043,7 +4200,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Ensure backward weights are prepared
     assert(backward_weights_prepared_);
-
 
     // =====================================================
     // Bug-C Fix Step 2: Allocate backward buffers from shared pool

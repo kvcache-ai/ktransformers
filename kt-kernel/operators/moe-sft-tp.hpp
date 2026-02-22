@@ -280,10 +280,16 @@ class TP_MOE_SFT : public TP_MOE<T> {
       printf("TP_MOE_SFT: Pre-quantized per-NUMA mode (gate_projs path)\n");
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
+      // Check if pre-quantized backward weights are available
+      if (!config.gate_bwd_projs.empty()) {
+        printf("  [MEM] Pre-quantized backward weights available, loading via memcpy...\n");
+        pool->dispense_backend()->do_numa_job(
+            [this](int numa_id) { tps[numa_id]->load_backward_weights_from_projs(); });
+      }
       // Also partition BF16 weights for backward gradient computation if available.
       // C++ backward needs BF16 base weights to compute gate/up LoRA B gradients
       // through the gated MLP chain (prepare_backward_weights checks config_.gate_proj).
-      if (config.gate_proj != nullptr) {
+      else if (config.gate_proj != nullptr) {
         printf("  [MEM] BF16 backward weights available, partitioning for TP...\n");
         std::vector<ggml_bf16_t*> temp_gate(tp_count);
         std::vector<ggml_bf16_t*> temp_up(tp_count);
@@ -302,23 +308,21 @@ class TP_MOE_SFT : public TP_MOE<T> {
               [&, i, gate_up_elcount](int expert_id_) {
                 size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
-                size_t src_gate_offset = expert_id * config.intermediate_size * config.hidden_size + i * gate_up_elcount;
+                size_t src_gate_offset =
+                    expert_id * config.intermediate_size * config.hidden_size + i * gate_up_elcount;
                 size_t dst_offset = expert_id * gate_up_elcount;
                 size_t copy_bytes = sizeof(ggml_bf16_t) * gate_up_elcount;
 
-                memcpy(temp_gate[i] + dst_offset,
-                       (ggml_bf16_t*)config.gate_proj + src_gate_offset,
-                       copy_bytes);
+                memcpy(temp_gate[i] + dst_offset, (ggml_bf16_t*)config.gate_proj + src_gate_offset, copy_bytes);
 
-                memcpy(temp_up[i] + dst_offset,
-                       (ggml_bf16_t*)config.up_proj + src_gate_offset,
-                       copy_bytes);
+                memcpy(temp_up[i] + dst_offset, (ggml_bf16_t*)config.up_proj + src_gate_offset, copy_bytes);
 
                 for (size_t col = 0; col < config.hidden_size; col++) {
-                  memcpy(temp_down[i] + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
-                         (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
-                             col * config.intermediate_size + i * tpc.intermediate_size,
-                         sizeof(ggml_bf16_t) * tpc.intermediate_size);
+                  memcpy(
+                      temp_down[i] + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
+                      (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
+                          col * config.intermediate_size + i * tpc.intermediate_size,
+                      sizeof(ggml_bf16_t) * tpc.intermediate_size);
                 }
               },
               nullptr, "memcpy_weights_tmp");
@@ -331,9 +335,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
         // free the memory
         for (int i = 0; i < tp_count; i++) {
-          delete [] (temp_gate[i]);
-          delete [] (temp_up[i]);
-          delete [] (temp_down[i]);
+          delete[] (temp_gate[i]);
+          delete[] (temp_up[i]);
+          delete[] (temp_down[i]);
         }
       }
     } else if (is_k2_prequantized) {
@@ -393,7 +397,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
             nullptr);
       }
 
-
       // Step 2: Set weight pointers BEFORE load_weights (Bug #24 fix)
       for (int i = 0; i < tp_count; i++) {
         tps[i]->set_weight_pointers_for_forward(temp_gate[i], temp_up[i], temp_down[i]);
@@ -408,13 +411,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
 
       for (int i = 0; i < tp_count; i++) {
-        delete [] (temp_gate[i]);
-        delete [] (temp_up[i]);
-        delete [] (temp_down[i]);
+        delete[] (temp_gate[i]);
+        delete[] (temp_up[i]);
+        delete[] (temp_down[i]);
       }
     } else {
       // Other loading methods (from loader or file)
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+
+      // Try loading backward weights from disk (.kt files) — parallel across NUMA nodes.
+      pool->dispense_backend()->do_numa_job(
+          [this](int numa_id) { tps[numa_id]->prepare_bwd(nullptr, nullptr, nullptr); });
     }
 
     weights_loaded = true;
@@ -502,7 +509,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
-
     auto end_fwd = sft_timer::get_trace_timestamp();
 
     // // Collect per-thread timing from all NUMA subpools
@@ -522,7 +528,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
       sft_timer::add_kernel_trace("fwd", start_sft, end_fwd, numa_id, 0);
       sft_timer::add_kernel_trace("merge", end_fwd, end_merge, numa_id, 0);
     });
-
   }
 
   /**
@@ -642,13 +647,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
-    pool->do_work_stealing_job(
-        (int)clear_segs.size(), nullptr,
-        [&](int seg_idx) {
-          const auto& seg = clear_segs[(size_t)seg_idx];
-          std::memset(seg.ptr, 0, seg.len);
-        },
-        nullptr, "bwd_alloc_memset");
+    pool->do_work_stealing_job((int)clear_segs.size(), nullptr,
+                               [&](int seg_idx) {
+                                 const auto& seg = clear_segs[(size_t)seg_idx];
+                                 std::memset(seg.ptr, 0, seg.len);
+                               },
+                               nullptr, "bwd_alloc_memset");
 
     auto end_alloc = sft_timer::get_trace_timestamp();
 
@@ -667,9 +671,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              part_grad_gate_lora_b_[numa_id], part_grad_up_lora_a_[numa_id],
                              part_grad_up_lora_b_[numa_id], part_grad_down_lora_a_[numa_id], grad_down_lora_b,
                              part_grad_weights_[numa_id]);
-        auto end_bwd = sft_timer::get_trace_timestamp();
-        sft_timer::add_kernel_trace("bwd_alloc", start_sft, end_alloc, numa_id, 0);
-        sft_timer::add_kernel_trace("bwd_tp", start_Bwd, end_bwd, numa_id, 0);
+      auto end_bwd = sft_timer::get_trace_timestamp();
+      sft_timer::add_kernel_trace("bwd_alloc", start_sft, end_alloc, numa_id, 0);
+      sft_timer::add_kernel_trace("bwd_tp", start_Bwd, end_bwd, numa_id, 0);
     });
 
     // // Collect per-thread timing from all NUMA subpools
@@ -757,142 +761,141 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Merge LoRA gradients from all NUMA nodes (skip entirely when SkipLoRA=true)
     auto start_merge = sft_timer::get_trace_timestamp();
     if constexpr (!kSkipLoRA) {
-    // Bug #23 fix: Merge grad_gate_lora_a and grad_up_lora_a from all NUMA nodes (sum them)
-    // Each TP computes partial contribution from its partition of lora_b
-    {
-      auto* out_gate_a = (ggml_bf16_t*)grad_gate_lora_a;
-      auto* out_up_a = (ggml_bf16_t*)grad_up_lora_a;
-      const int rows = expert_num * lora_rank;
-      pool->do_work_stealing_job(
-          rows, nullptr,
-          [&](int row_id) {
-            const size_t base = (size_t)row_id * (size_t)hidden_size;
-            const ggml_bf16_t* g0 = part_grad_gate_lora_a_[0] + base;
-            const ggml_bf16_t* g1 = (tp_count > 1) ? (part_grad_gate_lora_a_[1] + base) : nullptr;
-            const ggml_bf16_t* g2 = (tp_count > 2) ? (part_grad_gate_lora_a_[2] + base) : nullptr;
-            const ggml_bf16_t* g3 = (tp_count > 3) ? (part_grad_gate_lora_a_[3] + base) : nullptr;
+      // Bug #23 fix: Merge grad_gate_lora_a and grad_up_lora_a from all NUMA nodes (sum them)
+      // Each TP computes partial contribution from its partition of lora_b
+      {
+        auto* out_gate_a = (ggml_bf16_t*)grad_gate_lora_a;
+        auto* out_up_a = (ggml_bf16_t*)grad_up_lora_a;
+        const int rows = expert_num * lora_rank;
+        pool->do_work_stealing_job(
+            rows, nullptr,
+            [&](int row_id) {
+              const size_t base = (size_t)row_id * (size_t)hidden_size;
+              const ggml_bf16_t* g0 = part_grad_gate_lora_a_[0] + base;
+              const ggml_bf16_t* g1 = (tp_count > 1) ? (part_grad_gate_lora_a_[1] + base) : nullptr;
+              const ggml_bf16_t* g2 = (tp_count > 2) ? (part_grad_gate_lora_a_[2] + base) : nullptr;
+              const ggml_bf16_t* g3 = (tp_count > 3) ? (part_grad_gate_lora_a_[3] + base) : nullptr;
 
-            const ggml_bf16_t* u0 = part_grad_up_lora_a_[0] + base;
-            const ggml_bf16_t* u1 = (tp_count > 1) ? (part_grad_up_lora_a_[1] + base) : nullptr;
-            const ggml_bf16_t* u2 = (tp_count > 2) ? (part_grad_up_lora_a_[2] + base) : nullptr;
-            const ggml_bf16_t* u3 = (tp_count > 3) ? (part_grad_up_lora_a_[3] + base) : nullptr;
+              const ggml_bf16_t* u0 = part_grad_up_lora_a_[0] + base;
+              const ggml_bf16_t* u1 = (tp_count > 1) ? (part_grad_up_lora_a_[1] + base) : nullptr;
+              const ggml_bf16_t* u2 = (tp_count > 2) ? (part_grad_up_lora_a_[2] + base) : nullptr;
+              const ggml_bf16_t* u3 = (tp_count > 3) ? (part_grad_up_lora_a_[3] + base) : nullptr;
 
-            ggml_bf16_t* gd = out_gate_a + base;
-            ggml_bf16_t* ud = out_up_a + base;
+              ggml_bf16_t* gd = out_gate_a + base;
+              ggml_bf16_t* ud = out_up_a + base;
 
-            int h = 0;
-            for (; h + 32 <= hidden_size; h += 32) {
-              __m512 gs0, gs1;
-              avx512_32xbf16_to_32xfp32((__m512i*)(g0 + h), &gs0, &gs1);
-              if (g1) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(g1 + h), &x0, &x1);
-                gs0 = _mm512_add_ps(gs0, x0);
-                gs1 = _mm512_add_ps(gs1, x1);
+              int h = 0;
+              for (; h + 32 <= hidden_size; h += 32) {
+                __m512 gs0, gs1;
+                avx512_32xbf16_to_32xfp32((__m512i*)(g0 + h), &gs0, &gs1);
+                if (g1) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(g1 + h), &x0, &x1);
+                  gs0 = _mm512_add_ps(gs0, x0);
+                  gs1 = _mm512_add_ps(gs1, x1);
+                }
+                if (g2) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(g2 + h), &x0, &x1);
+                  gs0 = _mm512_add_ps(gs0, x0);
+                  gs1 = _mm512_add_ps(gs1, x1);
+                }
+                if (g3) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(g3 + h), &x0, &x1);
+                  gs0 = _mm512_add_ps(gs0, x0);
+                  gs1 = _mm512_add_ps(gs1, x1);
+                }
+                avx512_32xfp32_to_32xbf16(&gs0, &gs1, (__m512i*)(gd + h));
+
+                __m512 us0, us1;
+                avx512_32xbf16_to_32xfp32((__m512i*)(u0 + h), &us0, &us1);
+                if (u1) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(u1 + h), &x0, &x1);
+                  us0 = _mm512_add_ps(us0, x0);
+                  us1 = _mm512_add_ps(us1, x1);
+                }
+                if (u2) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(u2 + h), &x0, &x1);
+                  us0 = _mm512_add_ps(us0, x0);
+                  us1 = _mm512_add_ps(us1, x1);
+                }
+                if (u3) {
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(u3 + h), &x0, &x1);
+                  us0 = _mm512_add_ps(us0, x0);
+                  us1 = _mm512_add_ps(us1, x1);
+                }
+                avx512_32xfp32_to_32xbf16(&us0, &us1, (__m512i*)(ud + h));
               }
-              if (g2) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(g2 + h), &x0, &x1);
-                gs0 = _mm512_add_ps(gs0, x0);
-                gs1 = _mm512_add_ps(gs1, x1);
+              for (; h < hidden_size; h++) {
+                float gs = GGML_BF16_TO_FP32(g0[h]);
+                if (g1) gs += GGML_BF16_TO_FP32(g1[h]);
+                if (g2) gs += GGML_BF16_TO_FP32(g2[h]);
+                if (g3) gs += GGML_BF16_TO_FP32(g3[h]);
+                gd[h] = GGML_FP32_TO_BF16(gs);
+
+                float us = GGML_BF16_TO_FP32(u0[h]);
+                if (u1) us += GGML_BF16_TO_FP32(u1[h]);
+                if (u2) us += GGML_BF16_TO_FP32(u2[h]);
+                if (u3) us += GGML_BF16_TO_FP32(u3[h]);
+                ud[h] = GGML_FP32_TO_BF16(us);
               }
-              if (g3) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(g3 + h), &x0, &x1);
-                gs0 = _mm512_add_ps(gs0, x0);
-                gs1 = _mm512_add_ps(gs1, x1);
-              }
-              avx512_32xfp32_to_32xbf16(&gs0, &gs1, (__m512i*)(gd + h));
+            },
+            nullptr, "merge_lora_a");
+      }
+      // Merge partitioned gradients to full gradients
 
-              __m512 us0, us1;
-              avx512_32xbf16_to_32xfp32((__m512i*)(u0 + h), &us0, &us1);
-              if (u1) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(u1 + h), &x0, &x1);
-                us0 = _mm512_add_ps(us0, x0);
-                us1 = _mm512_add_ps(us1, x1);
-              }
-              if (u2) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(u2 + h), &x0, &x1);
-                us0 = _mm512_add_ps(us0, x0);
-                us1 = _mm512_add_ps(us1, x1);
-              }
-              if (u3) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(u3 + h), &x0, &x1);
-                us0 = _mm512_add_ps(us0, x0);
-                us1 = _mm512_add_ps(us1, x1);
-              }
-              avx512_32xfp32_to_32xbf16(&us0, &us1, (__m512i*)(ud + h));
-            }
-            for (; h < hidden_size; h++) {
-              float gs = GGML_BF16_TO_FP32(g0[h]);
-              if (g1) gs += GGML_BF16_TO_FP32(g1[h]);
-              if (g2) gs += GGML_BF16_TO_FP32(g2[h]);
-              if (g3) gs += GGML_BF16_TO_FP32(g3[h]);
-              gd[h] = GGML_FP32_TO_BF16(gs);
+      // grad_gate_lora_b/grad_up_lora_b: [expert_num, intermediate_size, lora_rank] (contiguous slice)
+      {
+        auto* out_gate_b = (ggml_bf16_t*)grad_gate_lora_b;
+        auto* out_up_b = (ggml_bf16_t*)grad_up_lora_b;
+        pool->do_work_stealing_job(
+            tp_count * expert_num, nullptr,
+            [&](int task_id) {
+              const int tp_idx = task_id / expert_num;
+              const int expert_id = task_id - tp_idx * expert_num;
+              const int tp_intermediate = tp_configs[tp_idx].intermediate_size;
 
-              float us = GGML_BF16_TO_FP32(u0[h]);
-              if (u1) us += GGML_BF16_TO_FP32(u1[h]);
-              if (u2) us += GGML_BF16_TO_FP32(u2[h]);
-              if (u3) us += GGML_BF16_TO_FP32(u3[h]);
-              ud[h] = GGML_FP32_TO_BF16(us);
-            }
-          },
-          nullptr, "merge_lora_a");
-    }
-    // Merge partitioned gradients to full gradients
+              const size_t copy_elems = (size_t)tp_intermediate * (size_t)lora_rank;
+              const size_t src_offset = (size_t)expert_id * copy_elems;
+              const size_t dst_offset =
+                  (size_t)expert_id * (size_t)full_intermediate_size * (size_t)lora_rank + (size_t)tp_idx * copy_elems;
 
-    // grad_gate_lora_b/grad_up_lora_b: [expert_num, intermediate_size, lora_rank] (contiguous slice)
-    {
-      auto* out_gate_b = (ggml_bf16_t*)grad_gate_lora_b;
-      auto* out_up_b = (ggml_bf16_t*)grad_up_lora_b;
-      pool->do_work_stealing_job(
-          tp_count * expert_num, nullptr,
-          [&](int task_id) {
-            const int tp_idx = task_id / expert_num;
-            const int expert_id = task_id - tp_idx * expert_num;
-            const int tp_intermediate = tp_configs[tp_idx].intermediate_size;
+              std::memcpy(out_gate_b + dst_offset, part_grad_gate_lora_b_[tp_idx] + src_offset,
+                          copy_elems * sizeof(ggml_bf16_t));
+              std::memcpy(out_up_b + dst_offset, part_grad_up_lora_b_[tp_idx] + src_offset,
+                          copy_elems * sizeof(ggml_bf16_t));
+            },
+            nullptr, "merge_lora_b_copy");
+      }
 
-            const size_t copy_elems = (size_t)tp_intermediate * (size_t)lora_rank;
-            const size_t src_offset = (size_t)expert_id * copy_elems;
-            const size_t dst_offset =
-                (size_t)expert_id * (size_t)full_intermediate_size * (size_t)lora_rank +
-                (size_t)tp_idx * copy_elems;
+      // grad_down_lora_a: [expert_num, lora_rank, intermediate_size] (row-wise slice)
+      {
+        auto* out_down_a = (ggml_bf16_t*)grad_down_lora_a;
+        pool->do_work_stealing_job(
+            tp_count * expert_num * lora_rank, nullptr,
+            [&](int task_id) {
+              const int per_tp = expert_num * lora_rank;
+              const int tp_idx = task_id / per_tp;
+              const int rem = task_id - tp_idx * per_tp;
+              const int expert_id = rem / lora_rank;
+              const int r = rem - expert_id * lora_rank;
 
-            std::memcpy(out_gate_b + dst_offset, part_grad_gate_lora_b_[tp_idx] + src_offset,
-                        copy_elems * sizeof(ggml_bf16_t));
-            std::memcpy(out_up_b + dst_offset, part_grad_up_lora_b_[tp_idx] + src_offset,
-                        copy_elems * sizeof(ggml_bf16_t));
-          },
-          nullptr, "merge_lora_b_copy");
-    }
-
-    // grad_down_lora_a: [expert_num, lora_rank, intermediate_size] (row-wise slice)
-    {
-      auto* out_down_a = (ggml_bf16_t*)grad_down_lora_a;
-      pool->do_work_stealing_job(
-          tp_count * expert_num * lora_rank, nullptr,
-          [&](int task_id) {
-            const int per_tp = expert_num * lora_rank;
-            const int tp_idx = task_id / per_tp;
-            const int rem = task_id - tp_idx * per_tp;
-            const int expert_id = rem / lora_rank;
-            const int r = rem - expert_id * lora_rank;
-
-            const int tp_intermediate = tp_configs[tp_idx].intermediate_size;
-            const size_t src_offset =
-                (size_t)expert_id * (size_t)lora_rank * (size_t)tp_intermediate + (size_t)r * (size_t)tp_intermediate;
-            const size_t dst_offset =
-                (size_t)expert_id * (size_t)lora_rank * (size_t)full_intermediate_size +
-                (size_t)r * (size_t)full_intermediate_size + (size_t)tp_idx * (size_t)tp_intermediate;
-            std::memcpy(out_down_a + dst_offset, part_grad_down_lora_a_[tp_idx] + src_offset,
-                        (size_t)tp_intermediate * sizeof(ggml_bf16_t));
-          },
-          nullptr, "merge_down_a_copy");
-    }
-    } // if constexpr (!kSkipLoRA)
+              const int tp_intermediate = tp_configs[tp_idx].intermediate_size;
+              const size_t src_offset =
+                  (size_t)expert_id * (size_t)lora_rank * (size_t)tp_intermediate + (size_t)r * (size_t)tp_intermediate;
+              const size_t dst_offset = (size_t)expert_id * (size_t)lora_rank * (size_t)full_intermediate_size +
+                                        (size_t)r * (size_t)full_intermediate_size +
+                                        (size_t)tp_idx * (size_t)tp_intermediate;
+              std::memcpy(out_down_a + dst_offset, part_grad_down_lora_a_[tp_idx] + src_offset,
+                          (size_t)tp_intermediate * sizeof(ggml_bf16_t));
+            },
+            nullptr, "merge_down_a_copy");
+      }
+    }  // if constexpr (!kSkipLoRA)
 
     // Merge grad_weights from all NUMA nodes (sum them together)
     // Each NUMA computes partial grad_weights based on its down_output partition
@@ -990,15 +993,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Single do_numa_job: work-stealing memcpy + update_lora_weights
     auto pool = config.pool;
-    pool->dispense_backend()->do_numa_job(
-        [this, gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a, down_lora_b, full_intermediate_size,
-         expert_num, lora_rank, pool](int numa_id) {
-          int tp_inter = tp_configs[numa_id].intermediate_size;
-          size_t lora_b_slice = (size_t)tp_inter * lora_rank;
-          auto subpool = pool->get_subpool(numa_id);
+    pool->dispense_backend()->do_numa_job([this, gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a,
+                                           down_lora_b, full_intermediate_size, expert_num, lora_rank,
+                                           pool](int numa_id) {
+      int tp_inter = tp_configs[numa_id].intermediate_size;
+      size_t lora_b_slice = (size_t)tp_inter * lora_rank;
+      auto subpool = pool->get_subpool(numa_id);
 
-          // Work-stealing: copy all weights for this expert (gate + up + down)
-          subpool->do_work_stealing_job(expert_num, [&](int e) {
+      // Work-stealing: copy all weights for this expert (gate + up + down)
+      subpool->do_work_stealing_job(
+          expert_num,
+          [&](int e) {
             // gate_lora_b: [expert_num, intermediate_size, lora_rank]
             memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
                    (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
@@ -1016,15 +1021,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
                          numa_id * tp_inter,
                      sizeof(ggml_bf16_t) * tp_inter);
             }
-          }, "upd_lora_tp");
+          },
+          "upd_lora_tp");
 
-          // Update weights after all memcpy complete
-          tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
-                                            partitioned_up_lora_b_[numa_id], partitioned_down_lora_a_[numa_id],
-                                            down_lora_b);
-        });
+      // Update weights after all memcpy complete
+      tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
+                                        partitioned_up_lora_b_[numa_id], partitioned_down_lora_a_[numa_id],
+                                        down_lora_b);
+    });
   }
-
 
   /**
    * @brief Free previously allocated partitioned LoRA weights.
@@ -1061,6 +1066,58 @@ class TP_MOE_SFT : public TP_MOE<T> {
     partitioned_gate_proj_.clear();
     partitioned_up_proj_.clear();
     partitioned_down_proj_.clear();
+  }
+
+  /**
+   * @brief Prepare backward weights from BF16 tensors and save to disk.
+   * @param gate BF16 gate_proj pointer [expert_num, intermediate_size, hidden_size]
+   * @param up BF16 up_proj pointer
+   * @param down BF16 down_proj pointer
+   * @param path Output directory path
+   */
+  void prepare_and_save_bwd(void* gate, void* up, void* down, const std::string& path) {
+    auto pool = config.pool;
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+
+    for (int i = 0; i < tp_count; i++) {
+      auto& tpc = tp_configs[i];
+      size_t gate_up_elcount = (size_t)tpc.intermediate_size * tpc.hidden_size;
+
+      ggml_bf16_t* temp_gate = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      ggml_bf16_t* temp_up = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+      ggml_bf16_t* temp_down = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+
+      pool->get_subpool(i)->do_work_stealing_job(
+          tpc.expert_num, nullptr,
+          [&, i, gate_up_elcount](int expert_id_) {
+            size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
+
+            size_t src_gate_offset = expert_id * config.intermediate_size * config.hidden_size + i * gate_up_elcount;
+            size_t dst_offset = expert_id * gate_up_elcount;
+            size_t copy_bytes = sizeof(ggml_bf16_t) * gate_up_elcount;
+
+            memcpy(temp_gate + dst_offset, (ggml_bf16_t*)gate + src_gate_offset, copy_bytes);
+            memcpy(temp_up + dst_offset, (ggml_bf16_t*)up + src_gate_offset, copy_bytes);
+
+            for (size_t col = 0; col < config.hidden_size; col++) {
+              memcpy(temp_down + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
+                     (ggml_bf16_t*)down + expert_id * config.intermediate_size * config.hidden_size +
+                         col * config.intermediate_size + i * tpc.intermediate_size,
+                     sizeof(ggml_bf16_t) * tpc.intermediate_size);
+            }
+          },
+          nullptr, "memcpy_bwd_tmp");
+
+      tps[i]->prepare_bwd(temp_gate, temp_up, temp_down);
+
+      std::filesystem::path prefix =
+          std::filesystem::path(path) / ("_layer_" + std::to_string(config.layer_idx)) / ("_numa_" + std::to_string(i));
+      tps[i]->save_backward_weights(prefix);
+
+      delete[] temp_gate;
+      delete[] temp_up;
+      delete[] temp_down;
+    }
   }
 
   /**

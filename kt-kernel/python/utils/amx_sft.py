@@ -12,6 +12,8 @@ Supports quantization methods:
 """
 
 import ctypes
+import os
+from datetime import datetime
 import torch
 from typing import Dict, Tuple, Optional, List
 
@@ -54,6 +56,33 @@ except (ImportError, AttributeError):
     # AMXInt4_KGroup_SFT_MOE_SkipLoRA = None
 
 from ..experts_sft import BaseSFTMoEWrapper, KExpertsSFTBuffer
+
+SFT_LIFECYCLE_LOG = os.environ.get("ACCELERATE_KT_LIFECYCLE_LOG", "0") == "1"
+
+
+def _sft_lifecycle_log(tag: str, **stats) -> None:
+    if not SFT_LIFECYCLE_LOG:
+        return
+    try:
+        rank = int(os.environ.get("RANK", "0"))
+    except Exception:
+        rank = 0
+    path_tpl = os.environ.get("ACCELERATE_KT_MEM_LOG_FILE", "kt_mem_rank{rank}.log")
+    path = path_tpl.format(rank=rank)
+    try:
+        pieces = []
+        for k, v in stats.items():
+            if isinstance(v, int) and ("bytes" in k or "nbytes" in k):
+                pieces.append(f"{k}={v/1024/1024:.2f}MB")
+            else:
+                pieces.append(f"{k}={v}")
+        line = (
+            f"{datetime.now().isoformat()} pid={os.getpid()} rank={rank} " f"tag=sft_{tag} " + " ".join(pieces) + "\n"
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        return
 
 
 # Mapping from method string to C++ SFT MOE class
@@ -212,7 +241,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.layer_idx = self.layer_idx
 
         # Set base weight pointers
-        if getattr(self, "_use_projs_path", False):
+        if getattr(self, "_use_kt_direct_load", False):
+            # .kt directory: C++ reads forward + backward .kt files directly.
+            # Do NOT set config.gate_proj here — that would trigger the BF16 online-quant
+            # branch in moe-sft-tp.hpp instead of the .kt file-read branch.
+            config.load = True
+            config.path = self.weight_path
+        elif getattr(self, "_use_projs_path", False):
             # Pre-quantized per-NUMA per-expert path (INT8/INT4)
             config.gate_projs = self._gate_projs_ptrs
             config.up_projs = self._up_projs_ptrs
@@ -227,6 +262,14 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 config.gate_proj = self._bf16_gate_proj.data_ptr()
                 config.up_proj = self._bf16_up_proj.data_ptr()
                 config.down_proj = self._bf16_down_proj.data_ptr()
+            # Set pre-quantized backward weight pointers if available
+            if getattr(self, "_has_bwd_projs", False):
+                config.gate_bwd_projs = self._gate_bwd_projs_ptrs
+                config.up_bwd_projs = self._up_bwd_projs_ptrs
+                config.down_bwd_projs = self._down_bwd_projs_ptrs
+                config.gate_bwd_scales = self._gate_bwd_scale_ptrs
+                config.up_bwd_scales = self._up_bwd_scale_ptrs
+                config.down_bwd_scales = self._down_bwd_scale_ptrs
         else:
             # Flat BF16 buffer path
             config.gate_proj = self.gate_proj.data_ptr()
@@ -267,7 +310,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.gate_proj = None
         self.up_proj = None
         self.down_proj = None
-                
+
         if getattr(self, "_bf16_gate_proj", None) is not None:
             self._bf16_gate_proj = None
             self._bf16_up_proj = None
@@ -288,6 +331,20 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self._gate_scale_ptrs = None
             self._up_scale_ptrs = None
             self._down_scale_ptrs = None
+            # Release backward weight arrays
+            if getattr(self, "_has_bwd_projs", False):
+                self._gate_bwd_weights_per_numa = None
+                self._up_bwd_weights_per_numa = None
+                self._down_bwd_weights_per_numa = None
+                self._gate_bwd_scales_per_numa = None
+                self._up_bwd_scales_per_numa = None
+                self._down_bwd_scales_per_numa = None
+                self._gate_bwd_projs_ptrs = None
+                self._up_bwd_projs_ptrs = None
+                self._down_bwd_projs_ptrs = None
+                self._gate_bwd_scale_ptrs = None
+                self._up_bwd_scale_ptrs = None
+                self._down_bwd_scale_ptrs = None
 
         self._weights_loaded = True
 
@@ -317,17 +374,17 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         # Now load weights
         self.load_weights(physical_to_logical_map_cpu)
-        
+
         del gate_proj
         del up_proj
         del down_proj
-
 
     def _load_base_weights_from_file(self) -> None:
         """
         Load base MoE weights from file based on the SFT method.
 
         Loading strategy:
+        - .kt directory structure: Let C++ read .kt files directly (fastest)
         - AMXBF16_SFT: Use BF16SafeTensorLoader (HuggingFace format, no scales)
         - AMXINT8_SFT/AMXINT4_SFT: Use SafeTensorLoader (pre-quantized format with scales)
         """
@@ -336,6 +393,21 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 "weight_path not set. Cannot load weights from file. "
                 "Either set weight_path or call load_weights_from_tensors() instead."
             )
+
+        # Check if weight_path contains .kt directory structure (_layer_*/_numa_*/*.kt)
+        # If so, skip Python loading entirely — C++ reads .kt files directly via config.load
+        import os, glob as _glob
+
+        kt_layer_dir = os.path.join(self.weight_path, f"_layer_{self.layer_idx}")
+        if os.path.isdir(kt_layer_dir):
+            kt_files = _glob.glob(os.path.join(kt_layer_dir, "_numa_0", "*.kt"))
+            if kt_files:
+                print(
+                    f"[AMXSFTMoEWrapper] Detected .kt directory for layer {self.layer_idx}, "
+                    f"C++ will load directly from {self.weight_path}"
+                )
+                self._use_kt_direct_load = True
+                return
 
         print(
             f"[AMXSFTMoEWrapper] Loading base weights for layer {self.layer_idx} "
@@ -400,6 +472,25 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self._gate_scale_ptrs = _make_ptrs(experts_data["gate_scale"])
             self._up_scale_ptrs = _make_ptrs(experts_data["up_scale"])
             self._down_scale_ptrs = _make_ptrs(experts_data["down_scale"])
+
+            # Build backward weight pointer arrays if available
+            if "gate_bwd" in experts_data:
+                self._gate_bwd_weights_per_numa = experts_data["gate_bwd"]
+                self._up_bwd_weights_per_numa = experts_data["up_bwd"]
+                self._down_bwd_weights_per_numa = experts_data["down_bwd"]
+                self._gate_bwd_scales_per_numa = experts_data["gate_bwd_scale"]
+                self._up_bwd_scales_per_numa = experts_data["up_bwd_scale"]
+                self._down_bwd_scales_per_numa = experts_data["down_bwd_scale"]
+
+                self._gate_bwd_projs_ptrs = _make_ptrs(experts_data["gate_bwd"])
+                self._up_bwd_projs_ptrs = _make_ptrs(experts_data["up_bwd"])
+                self._down_bwd_projs_ptrs = _make_ptrs(experts_data["down_bwd"])
+                self._gate_bwd_scale_ptrs = _make_ptrs(experts_data["gate_bwd_scale"])
+                self._up_bwd_scale_ptrs = _make_ptrs(experts_data["up_bwd_scale"])
+                self._down_bwd_scale_ptrs = _make_ptrs(experts_data["down_bwd_scale"])
+                self._has_bwd_projs = True
+            else:
+                self._has_bwd_projs = False
 
             # Set gate_proj to None so load_weights() uses gate_projs path
             self.gate_proj = None
@@ -566,7 +657,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
 
-        # Submit forward task
+        # Submit forward task — always pass the real save_for_backward.
+        # C++ will overwrite the existing cache entry (if any) instead of
+        # pushing a duplicate, so checkpoint recomputes are safe.
         self.cpu_infer.submit(
             self.moe.forward_sft_task(
                 buffer.bsz_tensor.data_ptr(),
@@ -580,14 +673,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
         self.cpu_infer.sync()
 
-        # Track cache depth
-        if save_for_backward:
+        # Track cache depth (only increment on first push, not on overwrites)
+        if save_for_backward and self._cache_depth == 0:
             self._cache_depth += 1
-            if self._cache_depth > self.max_cache_depth:
-                raise RuntimeError(
-                    f"Forward cache full (depth={self._cache_depth}, max={self.max_cache_depth}). "
-                    "Call backward() to release cache entries."
-                )
+        _sft_lifecycle_log(
+            "forward_sync",
+            layer=self.layer_idx,
+            qlen=qlen,
+            save_for_backward=save_for_backward,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+            output_device=str(output_device) if output_device is not None else "None",
+        )
 
         # Return output: if output_device specified, copy directly to that device
         # This avoids clone() when transferring to GPU (pinned->GPU is fast)
@@ -660,7 +757,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 self.moe.backward_task(
                     buffer.grad_output_cpu.data_ptr(),
                     buffer.grad_input_cpu.data_ptr(),
-                    _gl, _gl, _gl, _gl, _gl, _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
                     buffer.grad_weights.data_ptr(),
                 )
             )
@@ -682,6 +784,15 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         # Decrease cache depth
         self._cache_depth -= 1
+        _sft_lifecycle_log(
+            "backward",
+            layer=self.layer_idx,
+            qlen=qlen,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+            grad_output_device=str(grad_output.device),
+            output_device=str(output_device) if output_device is not None else "None",
+        )
 
         # Return gradients: if output_device specified, transfer grad_input directly
         if output_device is not None:
@@ -693,6 +804,41 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_weights = buffer.grad_weights.clone()
 
         return grad_input, grad_weights
+
+    def save_backward_weights_from_tensors(
+        self,
+        gate_proj: "torch.Tensor",
+        up_proj: "torch.Tensor",
+        down_proj: "torch.Tensor",
+        physical_to_logical_map: "torch.Tensor",
+        output_path: str,
+    ) -> None:
+        """
+        Prepare backward weights from BF16 tensors and save to disk.
+
+        The C++ side transposes + quantizes the weights, then writes to .kt files.
+        This can be called offline to pre-compute backward weights.
+
+        Args:
+            gate_proj: Gate projection weights [num_experts, intermediate_size, hidden_size]
+            up_proj: Up projection weights [num_experts, intermediate_size, hidden_size]
+            down_proj: Down projection weights [num_experts, hidden_size, intermediate_size]
+            physical_to_logical_map: Mapping from physical to logical expert IDs
+            output_path: Directory to save backward weight files
+        """
+        if not self._weights_loaded:
+            raise RuntimeError("Weights not loaded. Call load_weights() first.")
+
+        gate_proj = gate_proj.contiguous()
+        up_proj = up_proj.contiguous()
+        down_proj = down_proj.contiguous()
+
+        self.moe.prepare_and_save_bwd(
+            gate_proj.data_ptr(),
+            up_proj.data_ptr(),
+            down_proj.data_ptr(),
+            output_path,
+        )
 
     def update_lora_weights(self) -> None:
         """
@@ -798,10 +944,22 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if input_device.type == "cuda":
             torch.cuda.synchronize(input_device)
 
-        # Store buffer reference and save_for_backward flag for sync_forward_sft
+        # Store buffer reference and save_for_backward flag for sync_forward_sft.
+        # Always pass the real save_for_backward — C++ will overwrite the
+        # existing cache entry (if any) instead of pushing a duplicate.
         self._pending_buffer = buffer
         self._pending_save_for_backward = save_for_backward
         self._pending_qlen = qlen
+        _sft_lifecycle_log(
+            "submit_pending_set",
+            layer=self.layer_idx,
+            qlen=qlen,
+            pending_buffer_id=id(buffer),
+            save_for_backward=save_for_backward,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+            hidden_states_device=str(hidden_states.device),
+        )
 
         # Submit forward task (non-blocking)
         self.cpu_infer.submit(
@@ -837,19 +995,31 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         buffer = self._pending_buffer
         save_for_backward = self._pending_save_for_backward
 
-        # Track cache depth
-        if save_for_backward:
+        # Track cache depth (only increment on first push, not on overwrites)
+        if save_for_backward and self._cache_depth == 0:
             self._cache_depth += 1
-            if self._cache_depth > self.max_cache_depth:
-                raise RuntimeError(
-                    f"Forward cache full (depth={self._cache_depth}, max={self.max_cache_depth}). "
-                    "Call backward() to release cache entries."
-                )
+        _sft_lifecycle_log(
+            "sync_before_clear",
+            layer=self.layer_idx,
+            qlen=self._pending_qlen,
+            pending_buffer_id=id(buffer),
+            save_for_backward=save_for_backward,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+            output_device=str(output_device) if output_device is not None else "None",
+        )
 
         # Clear pending state
         self._pending_buffer = None
         self._pending_save_for_backward = None
         self._pending_qlen = None
+        _sft_lifecycle_log(
+            "sync_after_clear",
+            layer=self.layer_idx,
+            pending_exists=False,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+        )
 
         # Return output: if output_device specified, transfer directly
         if output_device is not None:

@@ -725,16 +725,13 @@ struct GemmKernel224BF {
 
     void set_data(void* new_ptr) { b = reinterpret_cast<ggml_bf16_t*>(new_ptr); }
 
-    void from_mat(ggml_bf16_t* src, int ith, int nth) {
-      auto [n_start, n_end] = split_range_n(n, ith, nth);
-      int n_block_begin = n_start;
-      int n_block_size = n_end - n_block_begin;
+    void _pack_block(ggml_bf16_t* src, int src_stride, int n_block_begin, int n_block_size) {
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
           for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
             for (int i = 0; i < N_STEP; i++) {
-              __m512i* s = (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin);
+              __m512i* s = (__m512i*)(src + (n_begin + i) * src_stride + k_block_begin + k_begin);
               __m512i* d = (__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                                       k_begin * N_STEP + i * K_STEP);
               avx512_copy_32xbf16(s, d);
@@ -746,6 +743,52 @@ struct GemmKernel224BF {
           }
         }
       }
+    }
+
+    void from_mat(ggml_bf16_t* src, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      _pack_block(src + n_block_begin * k, k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Pack a transposed matrix into BufferB format.
+     *
+     * src is a row-major (src_n, src_k) matrix. The target BufferB has shape (n=src_k, k=src_n),
+     * i.e., the logical transpose. Each call processes one N_BLOCK of the target (selected by ith/nth).
+     *
+     * Uses a thread-local strip buffer for tiled transpose, then reuses the same packing logic as from_mat.
+     */
+    void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local strip buffer: n_block_size × k BF16 values
+      thread_local std::vector<ggml_bf16_t> strip;
+      strip.resize(n_block_size * k);
+
+      // Tiled transpose from source into strip
+      // Target row r (in N_BLOCK) corresponds to source column (n_block_begin + r)
+      // Target col c corresponds to source row c
+      // strip[r * k + c] = src[c * src_k + (n_block_begin + r)]
+      constexpr int TILE = 32;
+      for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+        int c_end = std::min(c_tile + TILE, k);
+        for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+          int r_end = std::min(r_tile + TILE, n_block_size);
+          for (int c = c_tile; c < c_end; c++) {
+            for (int r = r_tile; r < r_end; r++) {
+              strip[r * k + c] = src[c * src_k + (n_block_begin + r)];
+            }
+          }
+        }
+      }
+
+      // Reuse existing packing logic on the transposed strip buffer
+      _pack_block(strip.data(), k, n_block_begin, n_block_size);
     }
 
     ggml_bf16_t* get_submat(int n, int k, int n_begin, int k_begin) {
@@ -943,22 +986,21 @@ struct GemmKernel224Int8 {
       d = reinterpret_cast<float*>(b + n * k);
     }
 
-    void from_mat(ggml_bf16_t* src, int ith, int nth) {  // CHECK: nth has no usage
-      auto [n_start, n_end] = split_range_n(n, ith, nth);
-      int n_block_begin = n_start;
-      int n_block_size = n_end - n_block_begin;
+    void _pack_block(ggml_bf16_t* src_data, int src_stride, int n_block_begin, int n_block_size) {
+      // Phase 1: compute per-row scales
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int i = 0; i < N_STEP; i++) {
           float amax = 0.0f;
           for (int j = 0; j < k; j += 32) {
             __m512 f0, f1;
-            avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + j), &f0, &f1);
+            avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + j), &f0, &f1);
             amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
             amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
           }
           d[n_block_begin + n_begin + i] = amax / ((1 << 7) - 1);
         }
       }
+      // Phase 2: quantize and pack
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
@@ -968,10 +1010,10 @@ struct GemmKernel224Int8 {
               int8_t* dst = b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                             k_begin * N_STEP + i * K_STEP;
               __m512 f0, f1, f2, f3;
-              avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin),
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin),
                                         &f0, &f1);
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin) + 1, &f2, &f3);
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin) + 1,
+                                        &f2, &f3);
               __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
               __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
               __m512i i2 = _mm512_cvtps_epi32(_mm512_mul_ps(f2, id));
@@ -992,6 +1034,47 @@ struct GemmKernel224Int8 {
           }
         }
       }
+    }
+
+    void from_mat(ggml_bf16_t* src, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      _pack_block(src + (size_t)n_block_begin * k, k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Pack a transposed matrix into INT8 BufferB format.
+     *
+     * src is a row-major (src_n, src_k) BF16 matrix. The target BufferB has shape (n=src_k, k=src_n).
+     * Each call processes one N_BLOCK of the target (selected by ith/nth).
+     */
+    void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local strip buffer: n_block_size × k BF16 values
+      thread_local std::vector<ggml_bf16_t> strip;
+      strip.resize(n_block_size * k);
+
+      // Tiled transpose from source into strip
+      constexpr int TILE = 32;
+      for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+        int c_end = std::min(c_tile + TILE, k);
+        for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+          int r_end = std::min(r_tile + TILE, n_block_size);
+          for (int c = c_tile; c < c_end; c++) {
+            for (int r = r_tile; r < r_end; r++) {
+              strip[r * k + c] = src[c * src_k + (n_block_begin + r)];
+            }
+          }
+        }
+      }
+
+      // Reuse existing packing logic (scale computation + quantization) on the transposed strip buffer
+      _pack_block(strip.data(), k, n_block_begin, n_block_size);
     }
 
     int8_t* get_submat(int n, int k, int n_begin, int k_begin) {

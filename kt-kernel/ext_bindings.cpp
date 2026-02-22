@@ -381,7 +381,11 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward_sft", &MoeClass::forward_sft_binding)
       .def("backward", &MoeClass::backward_binding)
-      .def("update_lora_weights", &MoeClass::update_lora_weights_binding);
+      .def("update_lora_weights", &MoeClass::update_lora_weights_binding)
+      .def("prepare_and_save_bwd",
+           [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down, const std::string& path) {
+             self.prepare_and_save_bwd((void*)gate, (void*)up, (void*)down, path);
+           });
 }
 #endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 
@@ -751,6 +755,13 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, gate_zeros)
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, up_zeros)
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, down_zeros)
+
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, gate_bwd_projs)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, up_bwd_projs)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, down_bwd_projs)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, gate_bwd_scales)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, up_bwd_scales)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, down_bwd_scales)
 
       .def_readwrite("path", &GeneralMOEConfig::path)
       .def_readwrite("save", &GeneralMOEConfig::save)

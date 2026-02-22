@@ -266,6 +266,14 @@ struct GeneralMOEConfig {
   std::vector<std::vector<void*>> up_zeros;
   std::vector<std::vector<void*>> down_zeros;
 
+  // Pre-quantized backward weights (transposed, in BufferB format) [tp_count][expert_id]
+  std::vector<std::vector<void*>> gate_bwd_projs;
+  std::vector<std::vector<void*>> up_bwd_projs;
+  std::vector<std::vector<void*>> down_bwd_projs;
+  std::vector<std::vector<void*>> gate_bwd_scales;
+  std::vector<std::vector<void*>> up_bwd_scales;
+  std::vector<std::vector<void*>> down_bwd_scales;
+
   std::string path;
   bool save = false;
   bool load = false;
