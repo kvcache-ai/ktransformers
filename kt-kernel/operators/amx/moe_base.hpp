@@ -687,10 +687,16 @@ class AMX_MOE_BASE {
       auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
 
       // Bias pointers for this expert (if present)
+      // intermediate_size is the sharded (per-TP-part) size; bias tensors are unsharded,
+      // so stride by the full intermediate size and offset to this TP part's slice.
+      int tp_count = config_.pool->config.subpool_count;
+      size_t full_intermediate_size = (size_t)config_.intermediate_size * tp_count;
+      size_t tp_offset = (size_t)tp_part_idx * config_.intermediate_size;
+
       ggml_bf16_t* gate_bias_ptr = has_bias ?
-          (ggml_bf16_t*)config_.gate_bias + (size_t)expert_idx * config_.intermediate_size : nullptr;
+          (ggml_bf16_t*)config_.gate_bias + (size_t)expert_idx * full_intermediate_size + tp_offset : nullptr;
       ggml_bf16_t* up_bias_ptr = has_bias ?
-          (ggml_bf16_t*)config_.up_bias + (size_t)expert_idx * config_.intermediate_size : nullptr;
+          (ggml_bf16_t*)config_.up_bias + (size_t)expert_idx * full_intermediate_size + tp_offset : nullptr;
 
       // Alpha activation constants (set once, reused per element)
       __m512 alpha_vec, limit_vec;
@@ -746,7 +752,9 @@ class AMX_MOE_BASE {
   }
 
   void apply_down_bias(int activated_expert, int qlen) {
-    if (config_.down_bias == nullptr) return;
+    // Only apply down_bias on tp_part 0 — merge_results sums all TP parts,
+    // so applying on every part would multiply bias by tp_count.
+    if (config_.down_bias == nullptr || tp_part_idx != 0) return;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
     auto fn = [this](int task_id) {

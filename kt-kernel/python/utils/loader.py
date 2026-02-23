@@ -37,7 +37,7 @@ def _dequant_mxfp4_to_bf16(w_blocks, w_scales):
     del low, high
 
     # E2M1 lookup: 3-bit magnitude → float value (use int32 not int64 to save memory)
-    E2M1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float32)
+    E2M1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float32, device=w_blocks.device)
     sign = 1.0 - 2.0 * ((unfused & 0b1000) >> 3).float()
     magnitude = (unfused & 0b0111).to(torch.int32)
     del unfused
