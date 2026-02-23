@@ -269,6 +269,16 @@ struct GeneralMOEConfig {
   void* up_zero;
   void* down_zero;
 
+  // Expert biases (nullable — only used by models like gpt-oss)
+  // Layout: [expert_num, size] contiguous BF16, same expert ordering as weights
+  void* gate_bias = nullptr;   // [expert_num, intermediate_size] bf16
+  void* up_bias = nullptr;     // [expert_num, intermediate_size] bf16
+  void* down_bias = nullptr;   // [expert_num, hidden_size] bf16
+
+  // Activation parameters (0 = standard SiLU)
+  float gemm1_alpha = 0.0f;        // GPT-OSS: 1.702
+  float gemm1_clamp_limit = 0.0f;  // GPT-OSS: 7.0
+
   QuantConfig quant_config;
 
   // for amx

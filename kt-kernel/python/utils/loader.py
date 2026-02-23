@@ -16,6 +16,46 @@ from safetensors import safe_open
 from gguf.gguf_reader import GGUFReader
 
 
+def _dequant_mxfp4_to_bf16(w_blocks, w_scales):
+    """Dequantize MXFP4 packed weights to BF16.
+
+    Args:
+        w_blocks: [*, num_blocks, 16] uint8 — packed 4-bit values (2 per byte)
+        w_scales: [*, num_blocks] uint8 — E8M0 block scales
+    Returns:
+        [*, num_blocks * 32] bfloat16 tensor
+    """
+    # Unfuse uint8 → two uint4 values
+    low = w_blocks & 0x0F           # even indices
+    high = (w_blocks >> 4) & 0x0F   # odd indices
+    # Interleave: [*, num_blocks, 32]
+    shape = list(w_blocks.shape)
+    shape[-1] = shape[-1] * 2
+    unfused = torch.zeros(shape, dtype=torch.uint8, device=w_blocks.device)
+    unfused[..., 0::2] = low
+    unfused[..., 1::2] = high
+    del low, high
+
+    # E2M1 lookup: 3-bit magnitude → float value (use int32 not int64 to save memory)
+    E2M1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float32)
+    sign = 1.0 - 2.0 * ((unfused & 0b1000) >> 3).float()
+    magnitude = (unfused & 0b0111).to(torch.int32)
+    del unfused
+    x_float = E2M1_values[magnitude]
+    del magnitude
+    x_float = sign * x_float
+    del sign
+
+    # Apply E8M0 block scales: scale = 2^(e8m0 - 127)
+    scale_factor = torch.exp2(w_scales.float() - 127.0)
+    # Broadcast: scale is [*, num_blocks], x_float is [*, num_blocks, 32]
+    x_float = x_float * scale_factor.unsqueeze(-1)
+    del scale_factor
+
+    # Flatten blocks dimension: [*, num_blocks * 32]
+    return x_float.reshape(list(w_blocks.shape[:-2]) + [w_blocks.shape[-2] * 32]).to(torch.bfloat16)
+
+
 class GGMLQuantizationType(IntEnum):
     """GGML quantization type enumeration"""
 
@@ -543,6 +583,13 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         """Auto-detect the MoE naming format by checking tensor keys."""
         sample_keys = list(self.tensor_file_map.keys())[:1000]
 
+        # Check for MXFP4 packed format (gpt-oss style: gate_up_proj_blocks)
+        for key in sample_keys:
+            if key.endswith(".mlp.experts.gate_up_proj_blocks"):
+                self._detected_format = "mxfp4_packed"
+                print("[BF16SafeTensorLoader] Detected format: mxfp4_packed (gpt-oss style)")
+                return
+
         # Check for packed format first (Qwen3.5 MoE style: all experts in one 3D tensor)
         for key in sample_keys:
             if key.endswith(".mlp.experts.gate_up_proj"):
@@ -589,6 +636,8 @@ class BF16SafeTensorLoader(SafeTensorLoader):
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load BF16 expert weights (no scales needed)."""
+        if self._detected_format == "mxfp4_packed":
+            return self._load_experts_mxfp4_packed(base_key, device)
         if self._detected_format == "packed":
             return self._load_experts_packed(base_key, device)
 
@@ -621,6 +670,49 @@ class BF16SafeTensorLoader(SafeTensorLoader):
             "down": down_weights,
         }
 
+    def _load_experts_mxfp4_packed(self, base_key: str, device: str = "cpu"):
+        """Load MXFP4-packed expert weights (gpt-oss style), dequantize to BF16.
+
+        Dequantizes one expert at a time to avoid OOM from intermediate tensors.
+        """
+        experts_prefix = f"{base_key}.mlp.experts"
+
+        # Try alternate prefix for VL models
+        if not self.has_tensor(f"{experts_prefix}.gate_up_proj_blocks"):
+            parts = base_key.split(".", 1)
+            if len(parts) == 2:
+                alt_base = f"{parts[0]}.language_model.{parts[1]}"
+                experts_prefix = f"{alt_base}.mlp.experts"
+            if not self.has_tensor(f"{experts_prefix}.gate_up_proj_blocks"):
+                raise ValueError(f"No MXFP4 packed experts found for base_key '{base_key}'")
+
+        # Load packed MXFP4 tensors (kept as-is, ~1.7 GB total)
+        gate_up_blocks = self.load_tensor(f"{experts_prefix}.gate_up_proj_blocks", device)
+        gate_up_scales = self.load_tensor(f"{experts_prefix}.gate_up_proj_scales", device)
+
+        num_experts = gate_up_blocks.shape[0]
+        mid = gate_up_blocks.shape[1] // 2  # Split fused gate+up
+
+        # Dequantize gate_up per-expert to avoid ~40 GB intermediate spike
+        gate_list = [None] * num_experts
+        up_list = [None] * num_experts
+        for i in range(num_experts):
+            expert_bf16 = _dequant_mxfp4_to_bf16(gate_up_blocks[i], gate_up_scales[i])
+            gate_list[i] = expert_bf16[:mid, :].contiguous()
+            up_list[i] = expert_bf16[mid:, :].contiguous()
+            del expert_bf16
+        del gate_up_blocks, gate_up_scales
+
+        # Dequantize down per-expert
+        down_blocks = self.load_tensor(f"{experts_prefix}.down_proj_blocks", device)
+        down_scales = self.load_tensor(f"{experts_prefix}.down_proj_scales", device)
+        down_list = [None] * num_experts
+        for i in range(num_experts):
+            down_list[i] = _dequant_mxfp4_to_bf16(down_blocks[i], down_scales[i]).contiguous()
+        del down_blocks, down_scales
+
+        return {"gate": gate_list, "up": up_list, "down": down_list}
+
     def _resolve_packed_experts_prefix(self, base_key: str) -> str:
         """Resolve the experts prefix for packed format, trying fallbacks."""
         # Direct: model.layers.{N}.mlp.experts
@@ -644,6 +736,11 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         Packed format stores all experts in stacked 3D tensors:
         - gate_up_proj: [num_experts, 2 * intermediate_size, hidden_size]
         - down_proj:    [num_experts, hidden_size, intermediate_size]
+
+        Two layouts exist for gate_up_proj:
+        - Concatenated (Qwen3.5): first half = gate, second half = up
+        - Interleaved (gpt-oss):  even rows = gate, odd rows = up
+        Detected by presence of gate_up_proj_bias in the tensor index.
         """
         experts_prefix = self._resolve_packed_experts_prefix(base_key)
 
@@ -653,9 +750,16 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         gate_up = self.load_tensor(gate_up_key, device)  # [E, 2*I, H]
         down = self.load_tensor(down_key, device)  # [E, H, I]
 
-        mid = gate_up.shape[1] // 2
-        gate_list = [gate_up[i, :mid, :].contiguous() for i in range(gate_up.shape[0])]
-        up_list = [gate_up[i, mid:, :].contiguous() for i in range(gate_up.shape[0])]
+        # Detect interleaved layout (gpt-oss): set by wrapper via _force_interleaved flag
+        interleaved = getattr(self, '_force_interleaved', False)
+
+        if interleaved:
+            gate_list = [gate_up[i, ::2, :].contiguous() for i in range(gate_up.shape[0])]
+            up_list = [gate_up[i, 1::2, :].contiguous() for i in range(gate_up.shape[0])]
+        else:
+            mid = gate_up.shape[1] // 2
+            gate_list = [gate_up[i, :mid, :].contiguous() for i in range(gate_up.shape[0])]
+            up_list = [gate_up[i, mid:, :].contiguous() for i in range(gate_up.shape[0])]
         down_list = [down[i].contiguous() for i in range(down.shape[0])]
 
         return {

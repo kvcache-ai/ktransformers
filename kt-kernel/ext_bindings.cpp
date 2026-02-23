@@ -532,6 +532,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_PROPERTY(GeneralMOEConfig, up_zero)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, down_zero)
 
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_bias)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, up_bias)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, down_bias)
+      .def_readwrite("gemm1_alpha", &GeneralMOEConfig::gemm1_alpha)
+      .def_readwrite("gemm1_clamp_limit", &GeneralMOEConfig::gemm1_clamp_limit)
+
       .def_readwrite("quant_config", &GeneralMOEConfig::quant_config)
 
       .def_readwrite("max_len", &GeneralMOEConfig::max_len)
