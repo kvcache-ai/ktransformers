@@ -661,6 +661,77 @@ struct BufferBInt4Impl {
     _pack_block(strip.data(), k, n_block_begin, n_block_size);
   }
 
+  /**
+   * @brief Dequantize INT4 BufferB back to BF16 row-major matrix.
+   *
+   * Reverses _pack_block(): undo transpose_16x16_32bit, extract 4-bit nibbles,
+   * sign-extend, multiply by (scale * 16) to recover BF16 values.
+   *
+   * Each byte stores two 4-bit values:
+   *   low nibble  → first  K_STEP (64) elements
+   *   high nibble → second K_STEP (64) elements
+   *
+   * Each (ith, nth) call processes one N_BLOCK. Use recommended_nth(n) and
+   * loop ith=0..nth-1 to process the full matrix.
+   */
+  void to_mat(ggml_bf16_t* dst, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+
+    // Tile buffer: N_STEP rows × B_K_STEP/2 bytes = 32 × 64 = 2048 bytes
+    alignas(64) uint8_t tile_copy[N_STEP * B_K_STEP / 2];
+
+    // LUT for 4-bit sign extension: nibble [0..15] → signed int8 [-8..7]
+    const __m128i sign_lut = _mm_set_epi8(-1, -2, -3, -4, -5, -6, -7, -8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0F);
+
+    for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += B_K_STEP) {
+          // Source tile address (byte offset, /2 because INT4)
+          uint8_t* tile_src = (uint8_t*)offset_pointer(
+              b, (n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size + k_begin * N_STEP) / 2);
+
+          // Copy tile and reverse VNNI transpose (self-inverse)
+          memcpy(tile_copy, tile_src, N_STEP * B_K_STEP / 2);
+          transpose_16x16_32bit((__m512i*)tile_copy);
+          transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * B_K_STEP / 2));
+
+          // Dequantize: nibble_value * 16 * scale = nibble_value * dequant_scale
+          for (int i = 0; i < N_STEP; i++) {
+            __m512 vs = _mm512_set1_ps(d[n_block_begin + n_begin + i] * 16.0f);
+            uint8_t* row = tile_copy + i * (B_K_STEP / 2);
+            ggml_bf16_t* dst_first = dst + (size_t)(n_block_begin + n_begin + i) * k + k_block_begin + k_begin;
+            ggml_bf16_t* dst_second = dst_first + K_STEP;
+
+            // Process 32 packed bytes per iteration → 32 first-half + 32 second-half bf16 values
+            for (int j = 0; j < K_STEP; j += 32) {
+              __m128i packed0 = _mm_load_si128((__m128i*)(row + j));
+              __m128i packed1 = _mm_load_si128((__m128i*)(row + j + 16));
+
+              // Low nibble → first half values
+              __m128i lo0 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(packed0, nibble_mask));
+              __m128i lo1 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(packed1, nibble_mask));
+              __m512 lo0_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo0)), vs);
+              __m512 lo1_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo1)), vs);
+              avx512_32xfp32_to_32xbf16(&lo0_f, &lo1_f, (__m512i*)(dst_first + j));
+
+              // High nibble → second half values
+              __m128i hi0 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(_mm_srli_epi16(packed0, 4), nibble_mask));
+              __m128i hi1 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(_mm_srli_epi16(packed1, 4), nibble_mask));
+              __m512 hi0_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi0)), vs);
+              __m512 hi1_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi1)), vs);
+              avx512_32xfp32_to_32xbf16(&hi0_f, &hi1_f, (__m512i*)(dst_second + j));
+            }
+          }
+        }
+      }
+    }
+  }
+
   dt* get_submat(int n, int k, int n_begin, int k_begin) {
     int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
     n_begin -= n_block_begin;

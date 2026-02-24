@@ -11,6 +11,7 @@
 #include <immintrin.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "amx/la/amx.hpp"
@@ -267,6 +269,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
   }
 
+  // Async backward repack state (Phase 2: overlap repack with GPU attention backward)
+  std::thread repack_thread_;
+  std::atomic<bool> repack_in_flight_{false};
+
   // Per-instance references to shared per-TP backward temporary pools.
   std::vector<void*> backward_temp_pools_;
   std::vector<size_t> backward_temp_pool_bytes_;
@@ -334,14 +340,18 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
       // Check if pre-quantized backward weights are available
       if (!config.gate_bwd_projs.empty()) {
-        printf("  [MEM] Pre-quantized backward weights available, loading via memcpy...\n");
-        pool->dispense_backend()->do_numa_job(
-            [this](int numa_id) { tps[numa_id]->load_backward_weights_from_projs(); });
+        if (!config.share_backward_bb) {
+          printf("  [MEM] Pre-quantized backward weights available, loading via memcpy...\n");
+          pool->dispense_backend()->do_numa_job(
+              [this](int numa_id) { tps[numa_id]->load_backward_weights_from_projs(); });
+        } else {
+          printf("  [MEM] share_backward_bb: skipping pre-quantized backward weight load (dynamic repack)\n");
+        }
       }
       // Also partition BF16 weights for backward gradient computation if available.
       // C++ backward needs BF16 base weights to compute gate/up LoRA B gradients
       // through the gated MLP chain (prepare_backward_weights checks config_.gate_proj).
-      else if (config.gate_proj != nullptr) {
+      else if (config.gate_proj != nullptr && !config.share_backward_bb) {
         printf("  [MEM] BF16 backward weights available, partitioning for TP...\n");
         std::vector<ggml_bf16_t*> temp_gate(tp_count);
         std::vector<ggml_bf16_t*> temp_up(tp_count);
@@ -458,7 +468,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
       // Step 3: Prepare backward weights (this also clears weight pointers)
       for (int i = 0; i < tp_count; i++) {
-        tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
+        if (!config.share_backward_bb) {
+          tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
+        }
         tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
       }
 
@@ -472,8 +484,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
       // Try loading backward weights from disk (.kt files) — parallel across NUMA nodes.
-      pool->dispense_backend()->do_numa_job(
-          [this](int numa_id) { tps[numa_id]->prepare_bwd(nullptr, nullptr, nullptr); });
+      if (!config.share_backward_bb) {
+        pool->dispense_backend()->do_numa_job(
+            [this](int numa_id) { tps[numa_id]->prepare_bwd(nullptr, nullptr, nullptr); });
+      } else {
+        printf("  [MEM] share_backward_bb: skipping .kt backward weight load (dynamic repack)\n");
+      }
     }
 
     weights_loaded = true;
@@ -1173,9 +1189,40 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   /**
+   * @brief Submit async backward weight repack for this layer (non-blocking).
+   * Launches a worker thread that repacks backward BB from forward weights across all NUMA nodes.
+   * Called from Python after MoE backward completes, to overlap repack with GPU attention backward.
+   */
+  void submit_backward_repack() {
+    if (!config.share_backward_bb) return;
+
+    // Join any previous repack first
+    if (repack_thread_.joinable()) repack_thread_.join();
+
+    repack_in_flight_.store(true, std::memory_order_release);
+    repack_thread_ = std::thread([this]() {
+      config.pool->dispense_backend()->do_numa_job([this](int numa_id) {
+        tps[numa_id]->prepare_backward_bb_for_async();
+      });
+      repack_in_flight_.store(false, std::memory_order_release);
+    });
+  }
+
+  /**
+   * @brief Wait for async backward weight repack to complete (blocking).
+   * Must be called before any operation that uses the CPU thread pool (e.g., checkpoint recompute).
+   */
+  void wait_backward_repack() {
+    if (repack_thread_.joinable()) {
+      repack_thread_.join();
+    }
+  }
+
+  /**
    * @brief Destructor - free partitioned weights.
    */
   ~TP_MOE_SFT() {
+    wait_backward_repack();
     free_backward_temp_pools();
     free_partitioned_lora_weights();
     free_partitioned_base_weights();

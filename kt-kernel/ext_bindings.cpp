@@ -385,7 +385,9 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
       .def("prepare_and_save_bwd",
            [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down, const std::string& path) {
              self.prepare_and_save_bwd((void*)gate, (void*)up, (void*)down, path);
-           });
+           })
+      .def("submit_backward_repack", &MoeClass::submit_backward_repack)
+      .def("wait_backward_repack", &MoeClass::wait_backward_repack);
 }
 #endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 
@@ -766,6 +768,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("path", &GeneralMOEConfig::path)
       .def_readwrite("save", &GeneralMOEConfig::save)
       .def_readwrite("load", &GeneralMOEConfig::load)
+      .def_readwrite("share_backward_bb", &GeneralMOEConfig::share_backward_bb)
       .def_readwrite("m_block", &GeneralMOEConfig::m_block)
       .def_readwrite("group_min_len", &GeneralMOEConfig::group_min_len)
       .def_readwrite("group_max_len", &GeneralMOEConfig::group_max_len)

@@ -239,6 +239,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.max_cache_depth = self.max_cache_depth
         config.max_len = self.chunked_prefill_size
         config.layer_idx = self.layer_idx
+        config.share_backward_bb = getattr(self, "share_backward_bb", False)
+        print(f"[amx_sft] layer {self.layer_idx}: share_backward_bb={config.share_backward_bb}, "
+              f"attr={getattr(self, 'share_backward_bb', 'MISSING')}", flush=True)
 
         # Set base weight pointers
         if getattr(self, "_use_kt_direct_load", False):
@@ -804,6 +807,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_weights = buffer.grad_weights[:qlen].clone()
 
         return grad_input, grad_weights
+
+    def submit_backward_repack(self):
+        """Start async backward weight repacking (non-blocking)."""
+        if not self._weights_loaded or self.moe is None:
+            return
+        self.moe.submit_backward_repack()
+
+    def wait_backward_repack(self):
+        """Wait for async backward weight repacking to complete."""
+        if not self._weights_loaded or self.moe is None:
+            return
+        self.moe.wait_backward_repack()
 
     def save_backward_weights_from_tensors(
         self,

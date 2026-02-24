@@ -277,6 +277,7 @@ struct GeneralMOEConfig {
   std::string path;
   bool save = false;
   bool load = false;
+  bool share_backward_bb = false;
 
   // for llamafile
   int m_block = 4;

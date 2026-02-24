@@ -418,6 +418,19 @@ struct supports_standard_mat_mul<amx::GemmKernel224Int4_1> : std::true_type {};
 template <typename T>
 inline constexpr bool supports_standard_mat_mul_v = supports_standard_mat_mul<T>::value;
 
+// =====================================================
+// Type trait: kernel has direct BB→BB transposed repack (from_bb_transposed)
+// INT4 lacks this, so it falls back to to_mat + from_mat_transposed.
+// =====================================================
+template <typename T>
+struct has_bb_transposed_repack : std::false_type {};
+template <>
+struct has_bb_transposed_repack<amx::GemmKernel224BF> : std::true_type {};
+template <>
+struct has_bb_transposed_repack<amx::GemmKernel224Int8> : std::true_type {};
+template <typename T>
+inline constexpr bool has_bb_transposed_repack_v = has_bb_transposed_repack<T>::value;
+
 /**
  * @brief Forward cache structure for gradient checkpointing.
  *
@@ -458,6 +471,9 @@ struct SFTSharedPools {
     size_t fwd_work_bytes = 0;
     void* bwd_work = nullptr;
     size_t bwd_work_bytes = 0;
+    void* bwd_bb = nullptr;
+    size_t bwd_bb_bytes = 0;
+    int bwd_bb_owner_layer = -1;  // layer_idx that last repacked into this pool
   };
   std::vector<PerNuma> pools;
 
@@ -493,6 +509,10 @@ struct SFTSharedPools {
       if (p.bwd_work) {
         free(p.bwd_work);
         p.bwd_work = nullptr;
+      }
+      if (p.bwd_bb) {
+        free(p.bwd_bb);
+        p.bwd_bb = nullptr;
       }
     }
   }
@@ -758,6 +778,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   // Flag to track if backward weights have been prepared
   bool backward_weights_prepared_ = false;
 
+  // true = per-instance alloc, false = shared pool or nullptr
+  bool backward_bb_locally_owned_ = false;
+
   // Flag to track if LoRA weights have been converted to BufferB format
   bool lora_weights_prepared_ = false;
   bool lora_backward_weights_prepared_ = false;
@@ -775,11 +798,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     backward_pool_bytes_ = p.bwd_work_bytes;
   }
 
+  void alloc_or_resize_backward_bb(size_t required_bytes) {
+    auto& shared = SFTSharedPools::instance();
+    shared.ensure_numa_count(tp_part_idx + 1);
+    auto& p = shared.pools[tp_part_idx];
+    backward_bb_pool_ = SFTSharedPools::acquire(p.bwd_bb, p.bwd_bb_bytes,
+                                                required_bytes, kAmxAlignment);
+    backward_bb_pool_bytes_ = p.bwd_bb_bytes;
+  }
+
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
-    printf("Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s\n", config.layer_idx, tp_part_idx,
-           numa_node_of_cpu(sched_getcpu()), SkipLoRA ? "true" : "false");
+    printf("Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s share_backward_bb %s\n",
+           config.layer_idx, tp_part_idx, numa_node_of_cpu(sched_getcpu()),
+           SkipLoRA ? "true" : "false", config.share_backward_bb ? "true" : "false");
 
     // Initialize LoRA configuration
     lora_rank_ = config.lora_rank;
@@ -812,7 +845,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (cache_pool_) free(cache_pool_);
     // Persistent buffers (allocated in constructor)
     if (lora_bb_pool_) free(lora_bb_pool_);
-    if (backward_bb_pool_) free(backward_bb_pool_);
+    if (backward_bb_locally_owned_ && backward_bb_pool_) free(backward_bb_pool_);
     // Pre-transposed LoRA weights
     free_transposed_lora_weights();
   }
@@ -1689,6 +1722,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // ★ Allocate backward-phase buffers ★
     alloc_backward_buffers();
 
+    // ★ share_backward_bb: check if async repack already prepared this layer ★
+    if (config_.share_backward_bb) {
+      auto& shared = SFTSharedPools::instance();
+      shared.ensure_numa_count(tp_part_idx + 1);
+      if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
+        // Pool was overwritten by another layer or not yet repacked — sync fallback
+        prepare_backward_bb_for_async();
+      }
+    }
+
     // auto print_lora_stats = [&](const char* name, const ggml_bf16_t* ptr, size_t elems) {
     //   if (ptr == nullptr) {
     //     printf("KT MoE param stats (layer %d, %s): null\n", config_.layer_idx, name);
@@ -2455,6 +2498,97 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   }
 
   /**
+   * @brief Dynamically repack backward BufferB from forward weights using to_mat() + from_mat_transposed().
+   * Used in share_backward_bb mode (Mode 1) to avoid persistent backward_bb_pool_ per instance.
+   */
+  void prepare_backward_weights_from_forward() {
+    if constexpr (!supports_standard_mat_mul_v<T>) return;
+
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    // Phase 1: gate + up (both use [intermediate_size, hidden_size] -> [hidden_size, intermediate_size])
+    pool->do_work_stealing_job(
+        config_.expert_num * 2, nullptr,
+        [this](int task_id) {
+          int proj = task_id / config_.expert_num;
+          int expert_idx = task_id % config_.expert_num;
+          auto& src_bb = (proj == 0) ? gate_bb_[expert_idx] : up_bb_[expert_idx];
+          auto& dst_bb = (proj == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
+
+          if constexpr (has_bb_transposed_repack_v<T>) {
+            int nth = T::recommended_nth(dst_bb->n);
+            for (int p = 0; p < nth; p++)
+              dst_bb->from_bb_transposed(*src_bb, p, nth);
+          } else {
+            thread_local std::vector<ggml_bf16_t> workspace;
+            workspace.resize((size_t)src_bb->n * src_bb->k);
+            int src_nth = T::recommended_nth(src_bb->n);
+            for (int p = 0; p < src_nth; p++)
+              src_bb->to_mat(workspace.data(), p, src_nth);
+            int dst_nth = T::recommended_nth(dst_bb->n);
+            for (int p = 0; p < dst_nth; p++)
+              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
+          }
+        },
+        nullptr, "bwd_repack_gate_up");
+
+    // Phase 2: down (uses [hidden_size, intermediate_size] -> [intermediate_size, hidden_size])
+    pool->do_work_stealing_job(
+        config_.expert_num, nullptr,
+        [this](int task_id) {
+          auto& src_bb = down_bb_[task_id];
+          auto& dst_bb = down_backward_bb_[task_id];
+
+          if constexpr (has_bb_transposed_repack_v<T>) {
+            int nth = T::recommended_nth(dst_bb->n);
+            for (int p = 0; p < nth; p++)
+              dst_bb->from_bb_transposed(*src_bb, p, nth);
+          } else {
+            thread_local std::vector<ggml_bf16_t> workspace;
+            workspace.resize((size_t)src_bb->n * src_bb->k);
+            int src_nth = T::recommended_nth(src_bb->n);
+            for (int p = 0; p < src_nth; p++)
+              src_bb->to_mat(workspace.data(), p, src_nth);
+            int dst_nth = T::recommended_nth(dst_bb->n);
+            for (int p = 0; p < dst_nth; p++)
+              dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
+          }
+        },
+        nullptr, "bwd_repack_down");
+
+    backward_weights_prepared_ = true;
+  }
+
+  /**
+   * @brief Standalone method for async backward BB repack (Phase 2).
+   * Called from TP_MOE_SFT::submit_backward_repack() on a separate thread.
+   * Allocates/resizes the shared backward_bb pool, repacks from forward weights,
+   * and sets the owner layer on the shared pool.
+   */
+  void prepare_backward_bb_for_async() {
+    if constexpr (!supports_standard_mat_mul_v<T>) return;
+    if (backward_bb_pool_bytes_ == 0) return;
+
+    // Free any locally-allocated pool before switching to shared
+    if (backward_bb_locally_owned_ && backward_bb_pool_ != nullptr) {
+      free(backward_bb_pool_);
+      backward_bb_pool_ = nullptr;
+      backward_bb_locally_owned_ = false;
+    }
+
+    alloc_or_resize_backward_bb(backward_bb_pool_bytes_);
+    backward_bb_locally_owned_ = false;
+    init_backward_bb_pointers();
+    backward_weights_prepared_ = false;
+    prepare_backward_weights_from_forward();
+    // backward_weights_prepared_ = true is set inside prepare_backward_weights_from_forward()
+
+    auto& shared = SFTSharedPools::instance();
+    shared.ensure_numa_count(tp_part_idx + 1);
+    shared.pools[tp_part_idx].bwd_bb_owner_layer = config_.layer_idx;
+  }
+
+  /**
    * @brief Set base weight pointers for TP partitioning.
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights before calling load_weights().
    * Unlike prepare_bwd, this does NOT call prepare_backward_weights() and does NOT reset pointers.
@@ -2479,6 +2613,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights and prepare backward weights.
    */
   void prepare_bwd(void* gate_proj, void* up_proj, void* down_proj) {
+    // If pool not yet allocated (Mode 1 init), allocate per-instance for save/load path
+    if (backward_bb_pool_ == nullptr && backward_bb_pool_bytes_ > 0) {
+      backward_bb_pool_ = aligned_alloc(64, backward_bb_pool_bytes_);
+      init_backward_bb_pointers();
+      backward_bb_locally_owned_ = true;
+    }
+
     // Try loading pre-quantized backward weights from disk first
     if (!config_.path.empty()) {
       std::filesystem::path prefix = config_.path;
@@ -2889,8 +3030,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //
     // backward_bb_pool_ is different: it stores transposed base weights (BufferB format) that need to be
     // initialized once and persist. So it's allocated here in the constructor.
-    if (backward_bb_pool_bytes_ > 0) {
-      backward_bb_pool_ = aligned_alloc(64, backward_bb_pool_bytes_);
+    // In share_backward_bb mode (Mode 1), skip per-instance allocation — backward() will use a shared pool
+    // and dynamically repack from forward weights each step.
+    if (config_.share_backward_bb) {
+      backward_bb_pool_ = nullptr;
+      backward_bb_locally_owned_ = false;
+    } else {
+      if (backward_bb_pool_bytes_ > 0) {
+        backward_bb_pool_ = aligned_alloc(64, backward_bb_pool_bytes_);
+      }
+      backward_bb_locally_owned_ = true;
     }
 
     // Single allocation for remaining buffers (only lora_intermediate_pool_ uses SharedMemBuffer now)
@@ -3063,27 +3212,38 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // =====================================================
     // Initialize backward BufferB objects (transposed base weights)
     // =====================================================
-    char* backward_bb_ptr = (char*)backward_bb_pool_;
-    for (int i = 0; i < config_.expert_num; i++) {
-      // BufferB for gate backward: [hidden_size, intermediate_size]
-      gate_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
-      backward_bb_ptr += gate_up_backward_bb_size;
-
-      // BufferB for up backward: [hidden_size, intermediate_size]
-      up_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
-      backward_bb_ptr += gate_up_backward_bb_size;
-
-      // BufferB for down backward: [intermediate_size, hidden_size]
-      down_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size, (void*)backward_bb_ptr);
-      backward_bb_ptr += down_backward_bb_size;
+    if (backward_bb_pool_ != nullptr) {
+      init_backward_bb_pointers();
     }
+    // If nullptr (Mode 1 at init), vectors stay with nullptr shared_ptrs — safe.
 
     lora_weights_prepared_ = false;
     lora_backward_weights_prepared_ = false;
     backward_weights_prepared_ = false;
+  }
+
+  /**
+   * @brief Point backward BufferB objects at the current backward_bb_pool_.
+   * Requires backward_bb_pool_ != nullptr and backward_bb_pool_bytes_ > 0.
+   */
+  void init_backward_bb_pointers() {
+    size_t gate_up_backward_bb_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+    size_t down_backward_bb_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+
+    char* backward_bb_ptr = (char*)backward_bb_pool_;
+    for (int i = 0; i < config_.expert_num; i++) {
+      gate_backward_bb_[i] =
+          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
+      backward_bb_ptr += gate_up_backward_bb_size;
+
+      up_backward_bb_[i] =
+          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
+      backward_bb_ptr += gate_up_backward_bb_size;
+
+      down_backward_bb_[i] =
+          std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size, (void*)backward_bb_ptr);
+      backward_bb_ptr += down_backward_bb_size;
+    }
   }
 
   /**
