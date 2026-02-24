@@ -159,7 +159,7 @@ inline bool is_nan_check_enabled() {
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
 inline bool is_dump_enabled() {
-  // return false;
+  return false;
   static int enabled = -1;
   if (enabled < 0) {
     const char* env = getenv("SFT_MOE_DUMP");
@@ -347,6 +347,58 @@ inline void dump_routing_info(int qlen, int k, const int64_t* expert_ids, const 
 }
 
 // =====================================================
+// Pool Memory Logger — writes per-call alloc/free events to file
+// Enable: set SFT_POOL_LOG=1 (or any non-zero)
+// Output: sft_pool_log.txt in current directory (append mode)
+// Disable: return false; at the top of is_pool_log_enabled()
+// =====================================================
+inline bool is_pool_log_enabled() {
+  // return false;
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char* env = getenv("SFT_POOL_LOG");
+    enabled = (env && env[0] != '0') ? 1 : 0;
+  }
+  return enabled == 1;
+}
+
+inline FILE* get_pool_log_file() {
+  static FILE* f = nullptr;
+  if (f == nullptr) {
+    const char* path = getenv("SFT_POOL_LOG_FILE");
+    if (!path) path = "sft_pool_log.txt";
+    f = fopen(path, "a");
+    if (f) {
+      fprintf(f, "# event | layer | numa | qlen | cache_stack_top | "
+                 "fwd_work_bytes | cache_pool_bytes | bwd_pool_bytes | "
+                 "alloc_request_bytes | detail\n");
+      fflush(f);
+    }
+  }
+  return f;
+}
+
+// Printf-style pool log: writes one line per event
+// event: "fwd_alloc", "fwd_cache_alloc", "bwd_alloc", "cache_free", "fwd_enter", "bwd_enter", etc.
+#define SFT_POOL_LOG(event, layer, numa, qlen, cache_top,                  \
+                     fwd_bytes, cache_bytes, bwd_bytes, req_bytes, ...)     \
+  do {                                                                     \
+    if (is_pool_log_enabled()) {                                           \
+      FILE* _pf = get_pool_log_file();                                     \
+      if (_pf) {                                                           \
+        fprintf(_pf, "%-16s | L%02d | N%d | q%-5d | cst=%-2d | "           \
+                     "fwd=%10zu | cache=%10zu | bwd=%10zu | req=%10zu | ",  \
+                event, layer, numa, qlen, cache_top,                       \
+                (size_t)(fwd_bytes), (size_t)(cache_bytes),                \
+                (size_t)(bwd_bytes), (size_t)(req_bytes));                 \
+        fprintf(_pf, __VA_ARGS__);                                         \
+        fprintf(_pf, "\n");                                                \
+        fflush(_pf);                                                       \
+      }                                                                    \
+    }                                                                      \
+  } while (0)
+
+// =====================================================
 // Type trait to detect if kernel supports standard mat_mul API
 // Only these kernels have the standard amx::mat_mul(m,n,k,ba,bb,bc,ith,nth) overload
 // KGroup kernels use mat_mul_kgroup() with different BufferB interface
@@ -391,6 +443,62 @@ struct ForwardCache {
   int activated_expert_cache = 0;
 
   bool valid = false;
+};
+
+/**
+ * @brief Singleton holding shared forward/backward working pools (one per NUMA node).
+ *
+ * In this training path, each NUMA partition executes layer forward/backward sequentially,
+ * so seqlen-dependent working buffers can be reused across all MoE layers on that partition.
+ * The shared pools are process-lifetime (freed on static destruction).
+ */
+struct SFTSharedPools {
+  struct PerNuma {
+    void* fwd_work = nullptr;
+    size_t fwd_work_bytes = 0;
+    void* bwd_work = nullptr;
+    size_t bwd_work_bytes = 0;
+  };
+  std::vector<PerNuma> pools;
+
+  static SFTSharedPools& instance() {
+    static SFTSharedPools inst;
+    return inst;
+  }
+
+  void ensure_numa_count(int n) {
+    if ((int)pools.size() < n) pools.resize(n);
+  }
+
+  static void* acquire(void*& ptr, size_t& cur_bytes, size_t required, size_t align) {
+    required = (required + align - 1) / align * align;
+    if (required <= cur_bytes) return ptr;
+    if (ptr) {
+      free(ptr);
+      ptr = nullptr;
+      cur_bytes = 0;
+    }
+    int rc = posix_memalign(&ptr, align, required);
+    if (rc != 0 || !ptr) throw std::runtime_error("SFTSharedPools: posix_memalign failed");
+    cur_bytes = required;
+    return ptr;
+  }
+
+  ~SFTSharedPools() {
+    for (auto& p : pools) {
+      if (p.fwd_work) {
+        free(p.fwd_work);
+        p.fwd_work = nullptr;
+      }
+      if (p.bwd_work) {
+        free(p.bwd_work);
+        p.bwd_work = nullptr;
+      }
+    }
+  }
+
+ private:
+  SFTSharedPools() = default;
 };
 
 /**
@@ -452,16 +560,25 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   }
 
   void alloc_or_resize_forward_pool(size_t required_bytes) {
+    auto& shared = SFTSharedPools::instance();
+    shared.ensure_numa_count(tp_part_idx + 1);
+    auto& p = shared.pools[tp_part_idx];
+    forward_pool_ = SFTSharedPools::acquire(p.fwd_work, p.fwd_work_bytes,
+                                             required_bytes, kAmxAlignment);
+    forward_pool_bytes_ = p.fwd_work_bytes;
+  }
+
+  void alloc_or_resize_cache_pool(size_t required_bytes) {
     required_bytes = round_up(required_bytes, kAmxAlignment);
     if (required_bytes == 0) return;
-    if (required_bytes <= forward_pool_bytes_) return;
-    if (forward_pool_) {
-      free(forward_pool_);
-      forward_pool_ = nullptr;
-      forward_pool_bytes_ = 0;
+    if (required_bytes <= cache_pool_bytes_) return;
+    if (cache_pool_) {
+      free(cache_pool_);
+      cache_pool_ = nullptr;
+      cache_pool_bytes_ = 0;
     }
-    forward_pool_ = alloc_aligned(kAmxAlignment, required_bytes);
-    forward_pool_bytes_ = required_bytes;
+    cache_pool_ = alloc_aligned(kAmxAlignment, required_bytes);
+    cache_pool_bytes_ = required_bytes;
   }
 
   // SFT configuration
@@ -509,9 +626,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   size_t cache_slot_bytes_input_;
   size_t cache_slot_bytes_intermediate_;
 
-  // Forward pooled buffers (to avoid frequent aligned_alloc/free in inference/training loops)
+  // Forward pooled buffers (shared across layers via SFTSharedPools singleton)
   void* forward_pool_ = nullptr;
   size_t forward_pool_bytes_ = 0;
+
+  // Per-instance cache pool (separate from shared forward working pool)
+  void* cache_pool_ = nullptr;
+  size_t cache_pool_bytes_ = 0;
 
   // Gradient intermediate buffers
   ggml_bf16_t* grad_intermediate_ = nullptr;  // [max_len * k, intermediate_size]
@@ -646,16 +767,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
  private:
   void alloc_or_resize_backward_pool(size_t required_bytes) {
-    required_bytes = round_up(required_bytes, kAmxAlignment);
-    if (required_bytes == 0) return;
-    if (required_bytes <= backward_pool_bytes_) return;
-    if (backward_pool_) {
-      free(backward_pool_);
-      backward_pool_ = nullptr;
-      backward_pool_bytes_ = 0;
-    }
-    backward_pool_ = alloc_aligned(kAmxAlignment, required_bytes);
-    backward_pool_bytes_ = required_bytes;
+    auto& shared = SFTSharedPools::instance();
+    shared.ensure_numa_count(tp_part_idx + 1);
+    auto& p = shared.pools[tp_part_idx];
+    backward_pool_ = SFTSharedPools::acquire(p.bwd_work, p.bwd_work_bytes,
+                                             required_bytes, kAmxAlignment);
+    backward_pool_bytes_ = p.bwd_work_bytes;
   }
 
  public:
@@ -689,11 +806,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   AMX_SFT_MOE_TP(GeneralMOEConfig config, int tp_part_idx) : AMX_SFT_MOE_TP(MOESFTConfig(config), tp_part_idx) {}
 
   ~AMX_SFT_MOE_TP() {
-    // Safety net: free any buffers that weren't freed (normally freed at end of backward)
-    // Forward pooled buffers (includes LoRA working buffers and cache pools)
-    if (forward_pool_) free(forward_pool_);
-    // Backward pooled buffers (grad + working)
-    if (backward_pool_) free(backward_pool_);
+    // forward_pool_ → shared (singleton-owned, process-lifetime), do NOT free
+    // backward_pool_ → shared (singleton-owned, process-lifetime), do NOT free
+    // Per-instance cache pool
+    if (cache_pool_) free(cache_pool_);
     // Persistent buffers (allocated in constructor)
     if (lora_bb_pool_) free(lora_bb_pool_);
     if (backward_bb_pool_) free(backward_bb_pool_);
@@ -710,30 +826,27 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @param alloc_cache Whether to allocate cache buffers (for backward pass)
    */
   void alloc_forward_buffers(bool alloc_cache) {
-    const size_t cache_input_bytes = alloc_cache ? (cache_slot_bytes_input_ * max_cache_depth_) : 0;
-    const size_t cache_intermediate_bytes = alloc_cache ? (cache_slot_bytes_intermediate_ * max_cache_depth_) : 0;
+    // 1. Working buffers → shared pool (across all layers on same NUMA)
+    size_t work_required = 0;
+    work_required += round_up(lora_ba_pool_bytes_, kAmxAlignment);
+    work_required += round_up(lora_bc_inter_pool_bytes_, kAmxAlignment);
+    work_required += round_up(lora_bc_out_pool_bytes_, kAmxAlignment);
+    work_required += round_up(lora_intermediate_bf16_pool_bytes_, kAmxAlignment);
 
-    size_t required = 0;
-    required += round_up(lora_ba_pool_bytes_, kAmxAlignment);
-    required += round_up(lora_bc_inter_pool_bytes_, kAmxAlignment);
-    required += round_up(lora_bc_out_pool_bytes_, kAmxAlignment);
-    required += round_up(lora_intermediate_bf16_pool_bytes_, kAmxAlignment);
-    if (alloc_cache) {
-      required += round_up(cache_input_bytes, kAmxAlignment);
-      required += round_up(cache_intermediate_bytes, kAmxAlignment) * 3;
-      required += round_up(cache_down_output_bytes_, kAmxAlignment);
-    }
+    alloc_or_resize_forward_pool(work_required);
 
-    alloc_or_resize_forward_pool(required);
+    SFT_POOL_LOG("fwd_work", config_.layer_idx, tp_part_idx, 0, cache_stack_top_,
+                 forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, work_required,
+                 "shared_pool alloc_cache=%d", (int)alloc_cache);
 
-    auto* base = static_cast<uint8_t*>(forward_pool_);
+    auto* work_base = static_cast<uint8_t*>(forward_pool_);
     size_t offset = 0;
     auto assign = [&](void** ptr, size_t bytes) {
       if (bytes == 0) {
         *ptr = nullptr;
         return;
       }
-      *ptr = base + offset;
+      *ptr = work_base + offset;
       offset += round_up(bytes, kAmxAlignment);
     };
 
@@ -743,13 +856,38 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     assign(&lora_bc_out_pool_, lora_bc_out_pool_bytes_);
     assign(&lora_intermediate_bf16_pool_, lora_intermediate_bf16_pool_bytes_);
 
-    // Cache buffers (only for training with backward pass)
+    // 2. Cache buffers → per-instance pool
     if (alloc_cache) {
-      assign(&cache_input_pool_, cache_input_bytes);
-      assign(&cache_gate_output_pool_, cache_intermediate_bytes);
-      assign(&cache_up_output_pool_, cache_intermediate_bytes);
-      assign(&cache_intermediate_pool_, cache_intermediate_bytes);
-      assign(&cache_down_output_pool_, cache_down_output_bytes_);
+      const size_t cache_input_bytes = cache_slot_bytes_input_ * max_cache_depth_;
+      const size_t cache_intermediate_bytes = cache_slot_bytes_intermediate_ * max_cache_depth_;
+
+      size_t cache_required = 0;
+      cache_required += round_up(cache_input_bytes, kAmxAlignment);
+      cache_required += round_up(cache_intermediate_bytes, kAmxAlignment) * 3;
+      cache_required += round_up(cache_down_output_bytes_, kAmxAlignment);
+
+      alloc_or_resize_cache_pool(cache_required);
+
+      SFT_POOL_LOG("fwd_cache", config_.layer_idx, tp_part_idx, 0, cache_stack_top_,
+                   forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, cache_required,
+                   "cache_pool alloc");
+
+      auto* cache_base = static_cast<uint8_t*>(cache_pool_);
+      size_t cache_offset = 0;
+      auto cache_assign = [&](void** ptr, size_t bytes) {
+        if (bytes == 0) {
+          *ptr = nullptr;
+          return;
+        }
+        *ptr = cache_base + cache_offset;
+        cache_offset += round_up(bytes, kAmxAlignment);
+      };
+
+      cache_assign(&cache_input_pool_, cache_input_bytes);
+      cache_assign(&cache_gate_output_pool_, cache_intermediate_bytes);
+      cache_assign(&cache_up_output_pool_, cache_intermediate_bytes);
+      cache_assign(&cache_intermediate_pool_, cache_intermediate_bytes);
+      cache_assign(&cache_down_output_pool_, cache_down_output_bytes_);
 
       // Initialize cache stack pointers
       for (int i = 0; i < max_cache_depth_; i++) {
@@ -800,6 +938,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     alloc_or_resize_backward_pool(required);
 
+    SFT_POOL_LOG("bwd_alloc", config_.layer_idx, tp_part_idx, 0, cache_stack_top_,
+                 forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, required,
+                 "backward_pool alloc");
+
     auto* base = static_cast<uint8_t*>(backward_pool_);
     size_t offset = 0;
     auto assign = [&](void** ptr, size_t bytes) {
@@ -832,7 +974,30 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Called at the end of backward.
    */
   void free_seqlen_buffers() {
-    // Intentionally keep pooled backward buffers to avoid frequent alloc/free in training loops.
+    SFT_POOL_LOG("cache_free", config_.layer_idx, tp_part_idx, 0, cache_stack_top_,
+                 forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, cache_pool_bytes_,
+                 "freeing cache_pool");
+
+    // Hard check: all cache entries must have been popped before freeing.
+    // A non-zero cache_stack_top_ means backward didn't consume all pushes,
+    // and freeing would leave dangling pointers in the cache stack.
+    if (cache_stack_top_ != 0) {
+      fprintf(stderr,
+              "[KT-MOE BUG] free_seqlen_buffers called with cache_stack_top_=%d "
+              "(expected 0) on layer %d numa %d. Skipping cache free.\n",
+              cache_stack_top_, config_.layer_idx, tp_part_idx);
+      return;  // Do NOT free — better to leak than corrupt
+    }
+    if (cache_pool_) {
+      free(cache_pool_);
+      cache_pool_ = nullptr;
+      cache_pool_bytes_ = 0;
+    }
+    cache_input_pool_ = nullptr;
+    cache_gate_output_pool_ = nullptr;
+    cache_up_output_pool_ = nullptr;
+    cache_intermediate_pool_ = nullptr;
+    cache_down_output_pool_ = nullptr;
   }
 
   /**
@@ -867,6 +1032,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
     uint64_t _fwd_start_cycles = __rdtsc();
+
+    SFT_POOL_LOG("fwd_enter", config_.layer_idx, tp_part_idx, qlen, cache_stack_top_,
+                 forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, 0,
+                 "save_bwd=%d", (int)save_for_backward);
 
     // =====================================================
     // Bounds Check: Verify qlen doesn't exceed max_len
@@ -1447,6 +1616,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights) {
+    SFT_POOL_LOG("bwd_enter", config_.layer_idx, tp_part_idx, 0, cache_stack_top_,
+                 forward_pool_bytes_, cache_pool_bytes_, backward_pool_bytes_, 0,
+                 "backward entry");
+
     // Pop cache from stack
     ForwardCache cache = pop_cache();
     if (!cache.valid) {
@@ -2691,10 +2864,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // ★ seqlen-dependent buffers are allocated on-demand ★
     // Forward/cache buffers are pooled to avoid frequent alloc/free overhead:
-    // - Cache buffers: allocated in forward_sft() when save_for_backward=true (kept in forward_pool_)
-    // - LoRA working buffers (ba/bc/bf16): allocated in forward_sft() (kept in forward_pool_)
-    // Backward-only buffers are still allocated/freed per backward():
-    // - Gradient buffers: allocated in backward(), freed in free_seqlen_buffers()
+    // - Cache buffers: allocated in forward_sft() when save_for_backward=true (kept in per-instance cache_pool_)
+    // - LoRA working buffers (ba/bc/bf16): allocated in forward_sft() (kept in shared forward_pool_)
+    // - Backward working buffers: allocated in backward() (kept in shared backward_pool_)
     //
     // Only persistent buffers are allocated here:
     // - lora_bb_pool_: LoRA weights in BufferB format (not seqlen-dependent)
@@ -2758,45 +2930,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                             gate_up_backward_bb_size, down_backward_bb_size);
     }
 
-    // Bug-C Debug: Memory allocation summary (commented out after verification)
-    // Uncomment to see memory allocation details
-    /*
-    printf("\n========== Memory Allocation Summary ==========\n");
-    printf("Config: expert_num=%d, hidden_size=%d, intermediate_size=%d\n",
-           config_.expert_num, config_.hidden_size, config_.intermediate_size);
-    printf("Config: max_len=%d, num_experts_per_tok=%d, lora_rank=%d, padded_lora_rank=%d\n",
-           config_.max_len, config_.num_experts_per_tok, lora_rank_, padded_lora_rank_);
-    printf("Calculated max_m=%zu, max_total_tokens=%zu\n",
-           max_m, (size_t)config_.max_len * config_.num_experts_per_tok);
-    printf("\n--- LoRA Buffers (aligned_alloc) ---\n");
-    printf("  lora_bb_pool_bytes_:              %12zu bytes (%6.2f MB)\n", lora_bb_pool_bytes_, lora_bb_pool_bytes_ /
-    1024.0 / 1024.0); printf("  lora_ba_pool_bytes_:              %12zu bytes (%6.2f MB)\n", lora_ba_pool_bytes_,
-    lora_ba_pool_bytes_ / 1024.0 / 1024.0); printf("  lora_bc_inter_pool_bytes_:        %12zu bytes (%6.2f MB)\n",
-    lora_bc_inter_pool_bytes_, lora_bc_inter_pool_bytes_ / 1024.0 / 1024.0); printf("  lora_bc_out_pool_bytes_: %12zu
-    bytes (%6.2f GB)\n", lora_bc_out_pool_bytes_, lora_bc_out_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("
-    lora_intermediate_bf16_pool_bytes_:%12zu bytes (%6.2f MB)\n", lora_intermediate_bf16_pool_bytes_,
-    lora_intermediate_bf16_pool_bytes_ / 1024.0 / 1024.0); printf("\n--- Backward Buffers (shared_mem_buffer) ---\n");
-    printf("  backward_ba_pool_bytes_:          %12zu bytes (%6.2f GB)\n", backward_ba_pool_bytes_,
-    backward_ba_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("  backward_bc_pool_bytes_:          %12zu bytes (%6.2f
-    GB)\n", backward_bc_pool_bytes_, backward_bc_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("
-    grad_output_bf16_pool_bytes_:     %12zu bytes (%6.2f GB)\n", grad_output_bf16_pool_bytes_,
-    grad_output_bf16_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("  backward_bb_pool_bytes_:          %12zu bytes
-    (%6.2f GB)\n", backward_bb_pool_bytes_, backward_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf("\n--- Other
-    Buffers (shared_mem_buffer) ---\n"); printf("  lora_intermediate_pool_bytes_:    %12zu bytes (%6.2f GB)\n",
-    lora_intermediate_pool_bytes_, lora_intermediate_pool_bytes_ / 1024.0 / 1024.0 / 1024.0); printf(" grad_buffer_bytes
-    (×3):           %12zu bytes (%6.2f GB)\n", grad_buffer_bytes * 3, grad_buffer_bytes * 3 / 1024.0 / 1024.0 / 1024.0);
-    size_t cache_total = (cache_slot_bytes_input_ + cache_slot_bytes_intermediate_ * 3) * max_cache_depth_;
-    printf("  cache_total (depth=%d):           %12zu bytes (%6.2f GB)\n", max_cache_depth_, cache_total, cache_total /
-    1024.0 / 1024.0 / 1024.0); size_t total_aligned = lora_bb_pool_bytes_ + lora_ba_pool_bytes_ +
-    lora_bc_inter_pool_bytes_ + lora_bc_out_pool_bytes_ + lora_intermediate_bf16_pool_bytes_; size_t total_shared =
-    backward_ba_pool_bytes_ + backward_bc_pool_bytes_ + grad_output_bf16_pool_bytes_ + backward_bb_pool_bytes_ +
-    lora_intermediate_pool_bytes_ + grad_buffer_bytes * 3 + cache_total; printf("\n--- Summary ---\n"); printf("  Total
-    aligned_alloc:              %12zu bytes (%6.2f GB)\n", total_aligned, total_aligned / 1024.0 / 1024.0 / 1024.0);
-    printf("  Total shared_mem_buffer:          %12zu bytes (%6.2f GB)\n", total_shared, total_shared / 1024.0 / 1024.0
-    / 1024.0); printf("  GRAND TOTAL:                      %12zu bytes (%6.2f GB)\n", total_aligned + total_shared,
-    (total_aligned + total_shared) / 1024.0 / 1024.0 / 1024.0);
-    printf("===============================================\n\n");
-    */
+    // Pool logger: static allocation summary (printed once per instance at init)
+    SFT_POOL_LOG("init_static", config_.layer_idx, tp_part_idx, config_.max_len, 0,
+                 lora_bb_pool_bytes_, backward_bb_pool_bytes_, 0, backward_bb_pool_bytes_ + lora_bb_pool_bytes_,
+                 "static_alloc: expert_num=%d hidden=%d inter=%d lora_bb=%.2fGB bwd_bb=%.2fGB",
+                 config_.expert_num, config_.hidden_size, config_.intermediate_size,
+                 lora_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0,
+                 backward_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0);
   }
 
   /**

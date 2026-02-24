@@ -648,9 +648,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         # For GPU tensors: this is a single GPU->pinned copy (faster than GPU->CPU->pinned)
         # For CPU tensors: this is a CPU->pinned copy
         input_device = hidden_states.device
-        buffer.input_cpu.copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
-        buffer.expert_ids_cpu.copy_(expert_ids.to(torch.int64), non_blocking=True)
-        buffer.weights_cpu.copy_(weights.to(torch.float32), non_blocking=True)
+        # Buffer may be larger than qlen (grow-only pool), slice for copy
+        buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
+        buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=True)
+        buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=True)
         buffer.bsz_tensor[0] = qlen
 
         # Synchronize CUDA stream if input was on GPU to ensure data has arrived
@@ -660,6 +661,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         # Submit forward task — always pass the real save_for_backward.
         # C++ will overwrite the existing cache entry (if any) instead of
         # pushing a duplicate, so checkpoint recomputes are safe.
+        # data_ptr() is the same for [:qlen] slice (offset 0), C++ uses bsz_tensor for actual size.
         self.cpu_infer.submit(
             self.moe.forward_sft_task(
                 buffer.bsz_tensor.data_ptr(),
@@ -686,13 +688,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             output_device=str(output_device) if output_device is not None else "None",
         )
 
-        # Return output: if output_device specified, copy directly to that device
-        # This avoids clone() when transferring to GPU (pinned->GPU is fast)
+        # Return output: slice to actual qlen
         if output_device is not None:
-            return buffer.output_cpu.to(device=output_device, non_blocking=True)
+            return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
         else:
-            # No output device specified: clone for safety (legacy behavior)
-            return buffer.output_cpu.clone()
+            return buffer.output_cpu[:qlen].clone()
 
     def backward(
         self,
@@ -738,12 +738,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
 
         # Copy gradient directly to pinned CPU buffer (works for both CPU and GPU tensors)
+        # Buffer may be larger than qlen (grow-only pool), slice for copy
         input_device = grad_output.device
-        buffer.grad_output_cpu.copy_(grad_output.to(torch.bfloat16), non_blocking=True)
+        buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16), non_blocking=True)
 
-        # Zero out gradient buffers
-        buffer.grad_input_cpu.zero_()
-        buffer.grad_weights.zero_()
+        # Zero out gradient buffers (only the active region)
+        buffer.grad_input_cpu[:qlen].zero_()
+        buffer.grad_weights[:qlen].zero_()
 
         # Synchronize CUDA stream if input was on GPU to ensure data has arrived
         if input_device.type == "cuda":
@@ -794,14 +795,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             output_device=str(output_device) if output_device is not None else "None",
         )
 
-        # Return gradients: if output_device specified, transfer grad_input directly
+        # Return gradients: slice to actual qlen
         if output_device is not None:
-            grad_input = buffer.grad_input_cpu.to(device=output_device, non_blocking=True)
-            grad_weights = buffer.grad_weights.to(device=output_device, non_blocking=True)
+            grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
+            grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
         else:
-            # No output device: clone for safety (legacy behavior)
-            grad_input = buffer.grad_input_cpu.clone()
-            grad_weights = buffer.grad_weights.clone()
+            grad_input = buffer.grad_input_cpu[:qlen].clone()
+            grad_weights = buffer.grad_weights[:qlen].clone()
 
         return grad_input, grad_weights
 
@@ -933,11 +933,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             dtype=torch.bfloat16,
         )
 
-        # Copy input data directly to pinned CPU buffers (works for both CPU and GPU tensors)
+        # Buffer may be larger than qlen (grow-only pool), slice for copy
         input_device = hidden_states.device
-        buffer.input_cpu.copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
-        buffer.expert_ids_cpu.copy_(expert_ids.to(torch.int64), non_blocking=True)
-        buffer.weights_cpu.copy_(weights.to(torch.float32), non_blocking=True)
+        buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
+        buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=True)
+        buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=True)
         buffer.bsz_tensor[0] = qlen
 
         # Synchronize CUDA stream if input was on GPU to ensure data has arrived
@@ -994,6 +994,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         buffer = self._pending_buffer
         save_for_backward = self._pending_save_for_backward
+        qlen = self._pending_qlen
 
         # Track cache depth (only increment on first push, not on overwrites)
         if save_for_backward and self._cache_depth == 0:
@@ -1001,7 +1002,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         _sft_lifecycle_log(
             "sync_before_clear",
             layer=self.layer_idx,
-            qlen=self._pending_qlen,
+            qlen=qlen,
             pending_buffer_id=id(buffer),
             save_for_backward=save_for_backward,
             cache_depth=self._cache_depth,
@@ -1021,8 +1022,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             max_cache_depth=self.max_cache_depth,
         )
 
-        # Return output: if output_device specified, transfer directly
+        # Return output: slice to actual qlen
         if output_device is not None:
-            return buffer.output_cpu.to(device=output_device, non_blocking=True)
+            return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
         else:
-            return buffer.output_cpu.clone()
+            return buffer.output_cpu[:qlen].clone()

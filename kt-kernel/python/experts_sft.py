@@ -39,7 +39,9 @@ class KExpertsSFTBuffer:
     - LoRA gradients: grad_gate_lora_a/b, grad_up_lora_a/b, grad_down_lora_a/b
     """
 
-    capture_buffers: Dict[tuple, "KExpertsSFTBuffer"] = {}
+    # Single grow-only buffer (never shrinks).  Replaces the old per-qlen
+    # dict that leaked one buffer per unique sequence length.
+    _shared_buffer: Optional["KExpertsSFTBuffer"] = None
 
     def __init__(
         self,
@@ -51,18 +53,6 @@ class KExpertsSFTBuffer:
         lora_rank: int,
         dtype: torch.dtype = torch.bfloat16,
     ):
-        """
-        Initialize SFT buffer.
-
-        Args:
-            qlen: Sequence length (batch size)
-            hidden_size: Hidden dimension
-            moe_intermediate_size: MoE intermediate dimension
-            num_experts: Total number of experts
-            num_experts_per_tok: Number of experts per token
-            lora_rank: LoRA rank
-            dtype: Data type for buffers
-        """
         self.qlen = qlen
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
@@ -105,41 +95,32 @@ class KExpertsSFTBuffer:
         dtype: torch.dtype = torch.bfloat16,
     ) -> "KExpertsSFTBuffer":
         """
-        Get or create SFT buffer (with caching).
+        Get or grow the single shared buffer.
 
-        Uses parameter combination as cache key to reuse buffers.
-
-        Args:
-            qlen: Sequence length
-            hidden_size: Hidden dimension
-            moe_intermediate_size: MoE intermediate dimension
-            num_experts: Total number of experts
-            num_experts_per_tok: Number of experts per token
-            lora_rank: LoRA rank
-            dtype: Data type
-
-        Returns:
-            KExpertsSFTBuffer instance
+        Only reallocates when qlen exceeds current capacity.
+        Callers must use [:qlen] slicing for copy/return since the
+        buffer may be larger than the current batch.
         """
-        key = (qlen, hidden_size, moe_intermediate_size, num_experts, num_experts_per_tok, lora_rank, dtype)
+        buf = cls._shared_buffer
+        if buf is not None and qlen <= buf.qlen:
+            return buf
 
-        if key not in cls.capture_buffers:
-            cls.capture_buffers[key] = cls(
-                qlen=qlen,
-                hidden_size=hidden_size,
-                moe_intermediate_size=moe_intermediate_size,
-                num_experts=num_experts,
-                num_experts_per_tok=num_experts_per_tok,
-                lora_rank=lora_rank,
-                dtype=dtype,
-            )
-
-        return cls.capture_buffers[key]
+        # Need a (re)allocation — grow to new qlen
+        cls._shared_buffer = cls(
+            qlen=qlen,
+            hidden_size=hidden_size,
+            moe_intermediate_size=moe_intermediate_size,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            lora_rank=lora_rank,
+            dtype=dtype,
+        )
+        return cls._shared_buffer
 
     @classmethod
     def clear_cache(cls) -> None:
-        """Clear all cached buffers."""
-        cls.capture_buffers.clear()
+        """Clear the shared buffer."""
+        cls._shared_buffer = None
 
 
 class BaseSFTMoEWrapper(_MoEBase, ABC):

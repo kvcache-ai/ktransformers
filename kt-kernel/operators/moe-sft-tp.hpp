@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -140,6 +141,66 @@ template <class T, template <class> class BaseMOE, bool SkipLoRA>
 class AMX_SFT_MOE_TP;
 
 /**
+ * @brief Shared TP backward temporary pools (one buffer per TP index).
+ *
+ * Backward for different layers runs sequentially in this training path, so
+ * per-TP temporary buffers can be reused across layers instead of being kept
+ * per-layer/per-instance.
+ */
+struct SFTTPSharedBackwardPools {
+  struct PerTP {
+    void* work = nullptr;
+    size_t work_bytes = 0;
+  };
+
+  std::mutex lock;
+  std::vector<PerTP> pools;
+
+  static SFTTPSharedBackwardPools& instance() {
+    static SFTTPSharedBackwardPools inst;
+    return inst;
+  }
+
+  void ensure_tp_count(int n) {
+    if ((int)pools.size() < n) pools.resize(n);
+  }
+
+  static void* acquire(void*& ptr, size_t& cur_bytes, size_t required, size_t align) {
+    required = (required + align - 1) / align * align;
+    if (required == 0) return ptr;
+    if (required <= cur_bytes) return ptr;
+    if (ptr) {
+      free(ptr);
+      ptr = nullptr;
+      cur_bytes = 0;
+    }
+    void* new_ptr = nullptr;
+    int rc = posix_memalign(&new_ptr, align, required);
+    if (rc != 0 || !new_ptr) {
+      errno = rc;  // posix_memalign returns error code instead of setting errno
+      perror("posix_memalign");
+      throw std::runtime_error("posix_memalign failed");
+    }
+    ptr = new_ptr;
+    cur_bytes = required;
+    return ptr;
+  }
+
+  ~SFTTPSharedBackwardPools() {
+    for (auto& p : pools) {
+      if (p.work) {
+        free(p.work);
+        p.work = nullptr;
+      }
+      p.work_bytes = 0;
+    }
+  }
+
+ private:
+  SFTTPSharedBackwardPools() = default;
+};
+
+/**
  * @brief TP_MOE_SFT - Tensor Parallel wrapper for SFT MoE with LoRA support.
  *
  * Inherits from TP_MOE<T> and adds SFT-specific methods:
@@ -179,43 +240,34 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
-  static inline void* alloc_aligned(size_t align, size_t bytes) {
-    if (bytes == 0) return nullptr;
-    void* ptr = nullptr;
-    int rc = posix_memalign(&ptr, align, bytes);
-    if (rc != 0 || !ptr) {
-      errno = rc;  // posix_memalign returns error code instead of setting errno
-      perror("posix_memalign");
-      throw std::runtime_error("posix_memalign failed");
-    }
-    return ptr;
-  }
-
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
     required_bytes = round_up(required_bytes, kAmxAlignment);
-    if (required_bytes == 0) return;
-    if (required_bytes <= backward_temp_pool_bytes_[tp_idx]) return;
-
-    if (backward_temp_pools_[tp_idx]) {
-      free(backward_temp_pools_[tp_idx]);
+    if (required_bytes == 0) {
       backward_temp_pools_[tp_idx] = nullptr;
       backward_temp_pool_bytes_[tp_idx] = 0;
+      return;
     }
-    backward_temp_pools_[tp_idx] = alloc_aligned(kAmxAlignment, required_bytes);
-    backward_temp_pool_bytes_[tp_idx] = required_bytes;
+    auto& shared = SFTTPSharedBackwardPools::instance();
+    {
+      std::lock_guard<std::mutex> guard(shared.lock);
+      shared.ensure_tp_count(tp_idx + 1);
+      auto& p = shared.pools[tp_idx];
+      backward_temp_pools_[tp_idx] =
+          SFTTPSharedBackwardPools::acquire(p.work, p.work_bytes, required_bytes, kAmxAlignment);
+      backward_temp_pool_bytes_[tp_idx] = p.work_bytes;
+    }
   }
 
   void free_backward_temp_pools() {
+    // Shared pools are singleton-owned; per-instance destructor should only
+    // clear local references.
     for (size_t i = 0; i < backward_temp_pools_.size(); i++) {
-      if (backward_temp_pools_[i]) {
-        free(backward_temp_pools_[i]);
-        backward_temp_pools_[i] = nullptr;
-      }
+      backward_temp_pools_[i] = nullptr;
       backward_temp_pool_bytes_[i] = 0;
     }
   }
 
-  // Per-TP backward temporary pools (avoid repeated new[]/delete[] in each backward call)
+  // Per-instance references to shared per-TP backward temporary pools.
   std::vector<void*> backward_temp_pools_;
   std::vector<size_t> backward_temp_pool_bytes_;
 
