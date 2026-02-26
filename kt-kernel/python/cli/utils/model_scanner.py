@@ -263,11 +263,10 @@ def find_files_fast(mount_point: str, pattern: str, max_depth: int = 6, timeout:
         cmd = ["find", mount_point, "-maxdepth", str(max_depth), "-name", pattern, "-type", "f"]
         result = subprocess.run(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             timeout=timeout,
-            shell=False,
-            stderr=subprocess.DEVNULL,
         )
 
         # Return results even if returncode is non-zero (due to permission errors)
@@ -436,7 +435,7 @@ def scan_directory_for_models(directory: str, min_file_size_gb: float = 2.0) -> 
 
     # 1. Find *.gguf files >= 2GB
     gguf_cmd = ["find", directory, "-name", "*.gguf", "-type", "f", "-size", size_filter, "-printf", "%p\t%s\n"]
-    result = subprocess.run(gguf_cmd, shell=False, capture_output=True, text=True, timeout=120, stderr=subprocess.DEVNULL)
+    result = subprocess.run(gguf_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120)
 
     # Group by directory
     gguf_dirs = defaultdict(list)
@@ -458,7 +457,7 @@ def scan_directory_for_models(directory: str, min_file_size_gb: float = 2.0) -> 
 
     # 2. Find *.safetensors files >= 2GB
     safetensors_cmd = ["find", directory, "-name", "*.safetensors", "-type", "f", "-size", size_filter, "-printf", "%p\t%s\n"]
-    result = subprocess.run(safetensors_cmd, shell=False, capture_output=True, text=True, timeout=120, stderr=subprocess.DEVNULL)
+    result = subprocess.run(safetensors_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=120)
 
     # Group by directory
     safetensors_dirs = defaultdict(list)
