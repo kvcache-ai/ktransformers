@@ -691,7 +691,10 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         gate_up_scales = self.load_tensor(f"{experts_prefix}.gate_up_proj_scales", device)
 
         num_experts = gate_up_blocks.shape[0]
-        mid = gate_up_blocks.shape[1] // 2  # Split fused gate+up
+        # Concatenated split is correct for MXFP4: the packed blocks are stored
+        # with gate rows in the first half and up rows in the second half,
+        # unlike the BF16 packed format where gpt-oss uses interleaved layout.
+        mid = gate_up_blocks.shape[1] // 2
 
         # Dequantize gate_up per-expert to avoid ~40 GB intermediate spike
         gate_list = [None] * num_experts

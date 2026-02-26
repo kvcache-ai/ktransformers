@@ -698,12 +698,9 @@ class AMX_MOE_BASE {
       ggml_bf16_t* up_bias_ptr = has_bias ?
           (ggml_bf16_t*)config_.up_bias + (size_t)expert_idx * full_intermediate_size + tp_offset : nullptr;
 
-      // Alpha activation constants (set once, reused per element)
-      __m512 alpha_vec, limit_vec;
-      if (use_alpha) {
-          alpha_vec = _mm512_set1_ps(config_.gemm1_alpha);
-          limit_vec = _mm512_set1_ps(config_.gemm1_clamp_limit);
-      }
+      // Alpha activation constants — only initialized when use_alpha is true
+      const __m512 alpha_vec = use_alpha ? _mm512_set1_ps(config_.gemm1_alpha) : _mm512_setzero_ps();
+      const __m512 limit_vec = use_alpha ? _mm512_set1_ps(config_.gemm1_clamp_limit) : _mm512_setzero_ps();
 
       for (int i = 0; i < m_local_num_[expert_idx]; i++) {
         ggml_bf16_t* gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];

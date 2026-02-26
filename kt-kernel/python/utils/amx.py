@@ -473,9 +473,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
             down_scale_ptrs = [[t.data_ptr() for t in self.down_scales]]
         t3 = time.time()
 
-        # Use actual tensor dimensions for MOEConfig — hidden_size may have been
-        # padded by GPU kernels (e.g. FlashInfer MXFP4 rounds up to 256), but
-        # CPU weights use the real model dimensions.
+        # Use actual tensor dimensions for MOEConfig instead of config values.
+        # This is intentional for ALL models, not just gpt-oss: GPU kernels may
+        # pad hidden_size/intermediate_size (e.g. FlashInfer MXFP4 rounds up to
+        # 256-byte alignment), but CPU weights use the real model dimensions.
+        # For existing models where no padding occurs, tensor shapes already
+        # match config values, so this is a no-op.
         actual_hidden = self.gate_weights[0].shape[1]
         actual_intermediate = self.gate_weights[0].shape[0]
         moe_config = MOEConfig(
@@ -497,7 +500,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
 
-        # Pass expert biases if set on this wrapper (by kt_ep_wrapper)
+        # Pass expert biases if set on this wrapper (by kt_ep_wrapper).
+        # IMPORTANT: The caller must store bias tensors as attributes on `self`
+        # (e.g. self._gate_bias_tensor) — not as locals — to prevent garbage
+        # collection while C++ holds the raw data_ptr().
         if hasattr(self, '_gate_bias_tensor') and self._gate_bias_tensor is not None:
             moe_config.gate_bias = self._gate_bias_tensor.data_ptr()
             moe_config.up_bias = self._up_bias_tensor.data_ptr()
