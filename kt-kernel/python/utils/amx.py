@@ -414,6 +414,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         import time
 
+        # Propagate interleaved gate/up flag to loader (set by kt_ep_wrapper for gpt-oss)
+        if getattr(self, '_interleaved_gate_up', False):
+            self.loader._force_interleaved = True
+
         t0 = time.time()
         base_key = f"model.layers.{self.layer_idx}"
         weights = self.loader.load_experts(base_key)
@@ -469,11 +473,19 @@ class NativeMoEWrapper(BaseMoEWrapper):
             down_scale_ptrs = [[t.data_ptr() for t in self.down_scales]]
         t3 = time.time()
 
+        # Use actual tensor dimensions for MOEConfig instead of config values.
+        # This is intentional for ALL models, not just gpt-oss: GPU kernels may
+        # pad hidden_size/intermediate_size (e.g. FlashInfer MXFP4 rounds up to
+        # 256-byte alignment), but CPU weights use the real model dimensions.
+        # For existing models where no padding occurs, tensor shapes already
+        # match config values, so this is a no-op.
+        actual_hidden = self.gate_weights[0].shape[1]
+        actual_intermediate = self.gate_weights[0].shape[0]
         moe_config = MOEConfig(
             self.num_experts,
             self.num_experts_per_tok,
-            self.hidden_size,
-            self.moe_intermediate_size,
+            actual_hidden,
+            actual_intermediate,
             self.gpu_experts_mask.data_ptr(),
         )
         moe_config.layer_idx = self.layer_idx
@@ -487,6 +499,17 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
+
+        # Pass expert biases if set on this wrapper (by kt_ep_wrapper).
+        # IMPORTANT: The caller must store bias tensors as attributes on `self`
+        # (e.g. self._gate_bias_tensor) — not as locals — to prevent garbage
+        # collection while C++ holds the raw data_ptr().
+        if hasattr(self, '_gate_bias_tensor') and self._gate_bias_tensor is not None:
+            moe_config.gate_bias = self._gate_bias_tensor.data_ptr()
+            moe_config.up_bias = self._up_bias_tensor.data_ptr()
+            moe_config.down_bias = self._down_bias_tensor.data_ptr()
+            moe_config.gemm1_alpha = self._gemm1_alpha
+            moe_config.gemm1_clamp_limit = self._gemm1_clamp_limit
 
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size

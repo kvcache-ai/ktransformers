@@ -56,6 +56,27 @@ static inline __m512 act_fn(__m512 gate_val, __m512 up_val) {
   return _mm512_mul_ps(act_val, up_val);
 }
 
+// GPT-OSS activation: gate * sigmoid(gate * alpha) * (up + 1)
+// with asymmetric clamping: gate clamped to max=limit, up clamped to [-limit, limit]
+static inline __m512 act_fn_alpha(__m512 gate_val, __m512 up_val,
+                                   __m512 alpha, __m512 limit) {
+    // Clamp: gate max=limit, up both sides
+    gate_val = _mm512_min_ps(gate_val, limit);
+    __m512 neg_limit = _mm512_sub_ps(_mm512_setzero_ps(), limit);
+    up_val = _mm512_max_ps(_mm512_min_ps(up_val, limit), neg_limit);
+
+    // sigmoid(gate * alpha) = 1 / (1 + exp(-gate * alpha))
+    __m512 neg_scaled = _mm512_sub_ps(_mm512_setzero_ps(), _mm512_mul_ps(gate_val, alpha));
+    neg_scaled = _mm512_min_ps(neg_scaled, _mm512_set1_ps(88.0f));  // avoid exp overflow
+    __m512 exp_neg = exp_avx512(neg_scaled);
+    __m512 sigmoid_val = _mm512_div_ps(_mm512_set1_ps(1.0f),
+                                        _mm512_add_ps(_mm512_set1_ps(1.0f), exp_neg));
+
+    // gate * sigmoid * (up + 1)
+    __m512 up_plus_1 = _mm512_add_ps(up_val, _mm512_set1_ps(1.0f));
+    return _mm512_mul_ps(_mm512_mul_ps(gate_val, sigmoid_val), up_plus_1);
+}
+
 #define AMX_DISPATCH_QTYPES(QA, QB, ...)                                 \
   [&] {                                                                  \
     switch (QB) {                                                        \

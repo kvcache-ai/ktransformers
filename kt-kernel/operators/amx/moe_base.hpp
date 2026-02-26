@@ -396,6 +396,8 @@ class AMX_MOE_BASE {
     }
 #endif
 
+    apply_down_bias(activated_expert, qlen);
+
     pool->do_work_stealing_job(
         qlen, nullptr,
         [this, output, k, expert_ids, weights](int i) {
@@ -603,6 +605,8 @@ class AMX_MOE_BASE {
     }
 #endif
 
+    apply_down_bias(activated_expert, qlen);
+
     for (int e = 0; e < config_.hidden_size; e += 32) {
       __m512 x0 = _mm512_setzero_ps();
       __m512 x1 = _mm512_setzero_ps();
@@ -674,10 +678,30 @@ class AMX_MOE_BASE {
 
   void apply_activation(int activated_expert, int nth, int qlen) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    auto fn = [this, nth](int task_id) {
+    const bool has_bias = (config_.gate_bias != nullptr);
+    const bool use_alpha = (config_.gemm1_alpha > 0.0f);
+
+    auto fn = [this, nth, has_bias, use_alpha](int task_id) {
       int expert_idx = m_expert_id_map_[task_id / nth];
       int ith = task_id % nth;
       auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
+
+      // Bias pointers for this expert (if present)
+      // intermediate_size is the sharded (per-TP-part) size; bias tensors are unsharded,
+      // so stride by the full intermediate size and offset to this TP part's slice.
+      int tp_count = config_.pool->config.subpool_count;
+      size_t full_intermediate_size = (size_t)config_.intermediate_size * tp_count;
+      size_t tp_offset = (size_t)tp_part_idx * config_.intermediate_size;
+
+      ggml_bf16_t* gate_bias_ptr = has_bias ?
+          (ggml_bf16_t*)config_.gate_bias + (size_t)expert_idx * full_intermediate_size + tp_offset : nullptr;
+      ggml_bf16_t* up_bias_ptr = has_bias ?
+          (ggml_bf16_t*)config_.up_bias + (size_t)expert_idx * full_intermediate_size + tp_offset : nullptr;
+
+      // Alpha activation constants — only initialized when use_alpha is true
+      const __m512 alpha_vec = use_alpha ? _mm512_set1_ps(config_.gemm1_alpha) : _mm512_setzero_ps();
+      const __m512 limit_vec = use_alpha ? _mm512_set1_ps(config_.gemm1_clamp_limit) : _mm512_setzero_ps();
+
       for (int i = 0; i < m_local_num_[expert_idx]; i++) {
         ggml_bf16_t* gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
         ggml_bf16_t* up_output_ptr = &m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size];
@@ -685,8 +709,27 @@ class AMX_MOE_BASE {
           __m512 gate_val0, gate_val1, up_val0, up_val1;
           avx512_32xbf16_to_32xfp32((__m512i*)(gate_output_ptr + j), &gate_val0, &gate_val1);
           avx512_32xbf16_to_32xfp32((__m512i*)(up_output_ptr + j), &up_val0, &up_val1);
-          __m512 result0 = amx::act_fn(gate_val0, up_val0);
-          __m512 result1 = amx::act_fn(gate_val1, up_val1);
+
+          // Add biases
+          if (has_bias) {
+              __m512 gb0, gb1, ub0, ub1;
+              avx512_32xbf16_to_32xfp32((__m512i*)(gate_bias_ptr + j), &gb0, &gb1);
+              avx512_32xbf16_to_32xfp32((__m512i*)(up_bias_ptr + j), &ub0, &ub1);
+              gate_val0 = _mm512_add_ps(gate_val0, gb0);
+              gate_val1 = _mm512_add_ps(gate_val1, gb1);
+              up_val0 = _mm512_add_ps(up_val0, ub0);
+              up_val1 = _mm512_add_ps(up_val1, ub1);
+          }
+
+          // Activation
+          __m512 result0, result1;
+          if (use_alpha) {
+              result0 = amx::act_fn_alpha(gate_val0, up_val0, alpha_vec, limit_vec);
+              result1 = amx::act_fn_alpha(gate_val1, up_val1, alpha_vec, limit_vec);
+          } else {
+              result0 = amx::act_fn(gate_val0, up_val0);
+              result1 = amx::act_fn(gate_val1, up_val1);
+          }
           avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i*)(gate_output_ptr + j));
         }
       }
@@ -702,6 +745,36 @@ class AMX_MOE_BASE {
       }
     } else {
       pool->do_work_stealing_job(nth * activated_expert, nullptr, fn, nullptr);
+    }
+  }
+
+  void apply_down_bias(int activated_expert, int qlen) {
+    // Only apply down_bias on tp_part 0 — merge_results sums all TP parts,
+    // so applying on every part would multiply bias by tp_count.
+    if (config_.down_bias == nullptr || tp_part_idx != 0) return;
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    auto fn = [this](int task_id) {
+      int expert_idx = m_expert_id_map_[task_id];
+      ggml_bf16_t* bias_ptr = (ggml_bf16_t*)config_.down_bias +
+          (size_t)expert_idx * config_.hidden_size;
+      for (int i = 0; i < m_local_num_[expert_idx]; i++) {
+        ggml_bf16_t* out = m_local_down_output_ptr_[expert_idx] + i * config_.hidden_size;
+        for (int j = 0; j < config_.hidden_size; j += 32) {
+          __m512 o0, o1, b0, b1;
+          avx512_32xbf16_to_32xfp32((__m512i*)(out + j), &o0, &o1);
+          avx512_32xbf16_to_32xfp32((__m512i*)(bias_ptr + j), &b0, &b1);
+          o0 = _mm512_add_ps(o0, b0);
+          o1 = _mm512_add_ps(o1, b1);
+          avx512_32xfp32_to_32xbf16(&o0, &o1, (__m512i*)(out + j));
+        }
+      }
+    };
+
+    if (qlen < 10) {
+      for (int i = 0; i < activated_expert; i++) fn(i);
+    } else {
+      pool->do_work_stealing_job(activated_expert, nullptr, fn, nullptr);
     }
   }
 };
