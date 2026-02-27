@@ -646,53 +646,11 @@ class OnlineQuantConverter(ConverterBase):
             input_path, output_path, model_config, cpuinfer_threads, threadpool_count, input_type, merge_to_safetensor
         )
         self.quant_method = quant_method
-        self.expert_key_filter = ".mlp.experts."
         # For FP8, get block size from model_config
         if input_type == "fp8":
             self.fp8_block_size = model_config.get("fp8_weight_block_size", [128, 128])
         else:
             self.fp8_block_size = None
-
-    def _find_expert_layers(self) -> Dict[int, List[int]]:
-        """Find all layers and experts in the model."""
-        layers = defaultdict(set)
-        # detect layout
-        for key in self.tensor_file_map.keys():
-            if "mlp.experts" in key and "gate_up" in key:
-                self.layout = "fused"
-                break
-
-        if self.layout == "fused":
-            layers = set()
-            for key in self.tensor_file_map.keys():
-                if "model.layers." in key and ".mlp.experts." in key:
-                    parts = key.split(".")
-                    if len(parts) >= 6:
-                        layer_idx = int(parts[2])
-                        layers.add(layer_idx)
-            result: Dict[int, List[int]] = {}
-            for layer_idx in sorted(layers):
-                result[layer_idx] = [-1]
-            print(f"Found {len(result)} layers with fused MoE experts")
-            return result
-
-        # Pattern: model.layers.{layer}.mlp.experts.{expert}.{proj}.{type}
-        for key in self.tensor_file_map.keys():
-            if "model.layers." in key and ".mlp.experts." in key:
-                parts = key.split(".")
-                if len(parts) >= 6:
-                    layer_idx = int(parts[2])
-                    expert_idx = int(parts[5])
-                    layers[layer_idx].add(expert_idx)
-
-        # Convert to sorted lists
-        result: Dict[int, List[int]] = {}
-        for layer_idx, expert_set in layers.items():
-            result[layer_idx] = sorted(list(expert_set))
-        print(f"Found {len(result)} layers with MoE experts:")
-        for layer_idx, experts in sorted(result.items()):
-            print(f"  Layer {layer_idx}: {len(experts)} experts (0-{max(experts)})")
-        return result
 
     def _convert_layer_experts(self, layer_idx: int, expert_ids: List[int]) -> Dict[str, torch.Tensor]:
         """Convert all experts in a layer using online quantization via AMXMoEWrapper"""
@@ -1164,7 +1122,7 @@ def main():
                 merge_to_safetensor=merge_to_safetensor,
             )
         elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16"]:
-            if is_minimax and args.input_type == "fp8":
+            if is_minimax:
                 converter = MiniMaxConverter(
                     args.input_path,
                     args.output,
