@@ -448,6 +448,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
                     self.down_scales = [t.to(torch.float32).contiguous() for t in weights["down_scale"]]
                 assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8"
             elif self.method == "FP8_PERCHANNEL":
+                if self.gate_scales[0].dtype != torch.float32:
+                    self.gate_scales = [t.to(torch.float32).contiguous() for t in weights["gate_scale"]]
+                    self.up_scales = [t.to(torch.float32).contiguous() for t in weights["up_scale"]]
+                    self.down_scales = [t.to(torch.float32).contiguous() for t in weights["down_scale"]]
                 assert self.gate_scales[0].dtype == torch.float32, "Expected float32 scales for FP8_PERCHANNEL"
 
         t2 = time.time()
