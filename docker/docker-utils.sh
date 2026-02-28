@@ -183,7 +183,7 @@ generate_image_name() {
     llama_ver=$(echo "$versions" | grep "^LLAMAFACTORY_VERSION=" | cut -d= -f2)
 
     # Validate versions were extracted
-    if [ -z "$sglang_ver" ] || [ -z "$ktrans_ver" ] || [ -z "$llama_ver" ]; then
+    if [ -z "$sglang_ver" ] || [ -z "$ktrans_ver" ]; then
         log_error "Failed to parse versions from input"
         return 1
     fi
