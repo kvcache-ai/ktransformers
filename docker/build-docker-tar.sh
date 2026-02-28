@@ -261,6 +261,7 @@ build_image() {
     build_args+=("--build-arg" "UBUNTU_MIRROR=$UBUNTU_MIRROR")
     build_args+=("--build-arg" "CPU_VARIANT=$CPU_VARIANT")
     build_args+=("--build-arg" "BUILD_ALL_CPU_VARIANTS=1")
+    build_args+=("--build-arg" "FUNCTIONALITY=$FUNCTIONALITY")
 
     # Add proxy settings if provided
     if [ -n "$HTTP_PROXY" ]; then
