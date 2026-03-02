@@ -631,7 +631,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         gpu_w13_scale_ptrs_per_rank,
         gpu_w2_weight_ptrs_per_rank,
         gpu_w2_scale_ptrs_per_rank,
-        cuda_stream: int,
+        cuda_streams,
         w13_weight_expert_nbytes: int,
         w13_scale_expert_nbytes: int,
         w2_weight_expert_nbytes: int,
@@ -642,15 +642,15 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         Args:
             gpu_tp_count: Number of GPU tensor parallel instances
-            pinned_w13_weight_ptrs: List of pinned buffer pointers for w13 weights [slot0, slot1]
-            pinned_w13_scale_ptrs: List of pinned buffer pointers for w13 scales [slot0, slot1]
-            pinned_w2_weight_ptrs: List of pinned buffer pointers for w2 weights [slot0, slot1]
-            pinned_w2_scale_ptrs: List of pinned buffer pointers for w2 scales [slot0, slot1]
+            pinned_w13_weight_ptrs: List of pinned buffer pointers [slot0_rank0, ..., slot1_rank0, ...]
+            pinned_w13_scale_ptrs: List of pinned buffer pointers for w13 scales
+            pinned_w2_weight_ptrs: List of pinned buffer pointers for w2 weights
+            pinned_w2_scale_ptrs: List of pinned buffer pointers for w2 scales
             gpu_w13_weight_ptrs_per_rank: GPU destination pointers per rank (IPC)
             gpu_w13_scale_ptrs_per_rank: GPU destination pointers per rank (IPC)
             gpu_w2_weight_ptrs_per_rank: GPU destination pointers per rank (IPC)
             gpu_w2_scale_ptrs_per_rank: GPU destination pointers per rank (IPC)
-            cuda_stream: CUDA stream handle
+            cuda_streams: List of per-rank CUDA stream handles
             w13_weight_expert_nbytes: Per-expert w13 weight size in bytes (TP-sharded)
             w13_scale_expert_nbytes: Per-expert w13 scale size in bytes (TP-sharded)
             w2_weight_expert_nbytes: Per-expert w2 weight size in bytes (TP-sharded)
@@ -672,7 +672,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             list(gpu_w13_scale_ptrs_per_rank),
             list(gpu_w2_weight_ptrs_per_rank),
             list(gpu_w2_scale_ptrs_per_rank),
-            cuda_stream,
+            list(cuda_streams),
             w13_weight_expert_nbytes,
             w13_scale_expert_nbytes,
             w2_weight_expert_nbytes,
@@ -708,3 +708,234 @@ class NativeMoEWrapper(BaseMoEWrapper):
         Block until previously submitted batch_load_cpu_experts_to_gpu tasks finish.
         """
         self.cpu_infer.sync()
+
+    # ==================== V3 Polling-Based Batch Load API ====================
+
+    def setup_polling_batch_load(
+        self,
+        num_ranks: int,
+        sync_slot_ptrs,
+        src_buffer_ptrs_per_rank,
+        dst_w13_weight_per_rank,
+        dst_w13_scale_per_rank,
+        dst_w2_weight_per_rank,
+        dst_w2_scale_per_rank,
+        stream_ptrs,
+        w13_weight_size: int,
+        w13_scale_size: int,
+        w2_weight_size: int,
+        w2_scale_size: int,
+    ):
+        """
+        V3 API: Setup polling-based batch load with per-rank sync slots.
+
+        This sets up persistent polling kernels for each rank. Each kernel
+        polls a shared CPU memory flag and copies data when signaled.
+
+        Args:
+            num_ranks: Number of GPU TP ranks
+            sync_slot_ptrs: Per-rank sync slot pointers (pinned memory, 64 bytes each)
+            src_buffer_ptrs_per_rank: List of [8] source buffer pointers per rank
+                Format per rank: [w13_w_s0, w13_w_s1, w13_s_s0, w13_s_s1, w2_w_s0, w2_w_s1, w2_s_s0, w2_s_s1]
+            dst_w13_weight_per_rank: Per-rank GPU destination for w13 weight
+            dst_w13_scale_per_rank: Per-rank GPU destination for w13 scale
+            dst_w2_weight_per_rank: Per-rank GPU destination for w2 weight
+            dst_w2_scale_per_rank: Per-rank GPU destination for w2 scale
+            stream_ptrs: Per-rank CUDA stream handles for persistent kernels
+            w13_weight_size: Per-expert size for w13 weight in bytes
+            w13_scale_size: Per-expert size for w13 scale in bytes
+            w2_weight_size: Per-expert size for w2 weight in bytes
+            w2_scale_size: Per-expert size for w2 scale in bytes
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot setup polling batch load.")
+
+        if not hasattr(self.moe, "setup_polling_batch_load"):
+            raise NotImplementedError("setup_polling_batch_load is not available for this backend implementation.")
+
+        self.moe.setup_polling_batch_load(
+            num_ranks,
+            list(sync_slot_ptrs),
+            [list(bufs) for bufs in src_buffer_ptrs_per_rank],
+            list(dst_w13_weight_per_rank),
+            list(dst_w13_scale_per_rank),
+            list(dst_w2_weight_per_rank),
+            list(dst_w2_scale_per_rank),
+            list(stream_ptrs),
+            w13_weight_size,
+            w13_scale_size,
+            w2_weight_size,
+            w2_scale_size,
+        )
+
+    def launch_polling_kernel(self, local_rank: int, total_experts: int = -1):
+        """
+        V3 API: Launch persistent polling kernel for the local rank.
+
+        Each rank calls this to launch its own persistent kernel.
+        Kernels run until total_experts reached or shutdown.
+
+        Args:
+            local_rank: The rank to launch kernel for (must match calling process's rank)
+            total_experts: Total number of experts to process (-1 for infinite loop)
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot launch polling kernel.")
+
+        if not hasattr(self.moe, "launch_polling_kernel"):
+            raise NotImplementedError("launch_polling_kernel is not available for this backend implementation.")
+
+        self.moe.launch_polling_kernel(local_rank, total_experts)
+
+    def shutdown_polling_kernel(self, local_rank: int):
+        """
+        V3 API: Shutdown polling kernel for the local rank.
+
+        Args:
+            local_rank: The rank to shutdown (must match calling process's rank)
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot shutdown polling kernel.")
+
+        if not hasattr(self.moe, "shutdown_polling_kernel"):
+            raise NotImplementedError("shutdown_polling_kernel is not available for this backend implementation.")
+
+        self.moe.shutdown_polling_kernel(local_rank)
+
+    def shutdown_all_polling_kernels(self):
+        """
+        V3 API: Shutdown all persistent polling kernels (for cleanup).
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot shutdown polling kernels.")
+
+        if not hasattr(self.moe, "shutdown_all_polling_kernels"):
+            raise NotImplementedError("shutdown_all_polling_kernels is not available for this backend implementation.")
+
+        self.moe.shutdown_all_polling_kernels()
+
+    def submit_batch_load_cpu_experts_polling(self, cpu_expert_ids):
+        """
+        V3 API: Submit polling-based batch CPU expert weight loading task.
+
+        This is a non-blocking call. The cpuinfer will:
+        1. For each expert, write to pinned double buffer
+        2. Signal GPU via shared memory flag
+        3. Wait for GPU to complete copy before signaling next
+
+        Note: setup_polling_batch_load() and launch_polling_kernels() must be
+        called before using this method.
+
+        Args:
+            cpu_expert_ids: List of CPU expert IDs to load
+        """
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot submit polling batch load task.")
+
+        if not hasattr(self.moe, "batch_load_cpu_experts_to_gpu_polling_task"):
+            raise NotImplementedError(
+                "batch_load_cpu_experts_to_gpu_polling_task is not available for this backend implementation."
+            )
+
+        self.cpu_infer.submit(self.moe.batch_load_cpu_experts_to_gpu_polling_task(list(cpu_expert_ids)))
+
+    def sync_batch_load_cpu_experts_polling(self):
+        """
+        V3 API: Block until previously submitted polling batch load tasks finish.
+        """
+        self.cpu_infer.sync()
+
+
+# ============================================================================
+# V4 API: Polling Memcpy Worker (dedicated worker thread per rank)
+# ============================================================================
+
+def get_polling_memcpy_worker_manager():
+    """
+    Get the singleton PollingMemcpyWorkerManager instance.
+
+    Returns:
+        PollingMemcpyWorkerManager instance from kt_kernel_ext.polling_worker
+    """
+    try:
+        from kt_kernel_ext import polling_worker
+        return polling_worker.PollingMemcpyWorkerManager.instance()
+    except (ImportError, AttributeError) as e:
+        raise RuntimeError(
+            f"PollingMemcpyWorkerManager is not available. "
+            f"Ensure kt_kernel_ext was compiled with AMX/AVX512 support. Error: {e}"
+        )
+
+
+def create_polling_memcpy_worker(
+    rank: int,
+    cuda_device: int,
+    cpu_core: int,
+    sync_slot_ptr: int,
+    src_buffer_ptrs: list,
+    dst_w13_weight: int,
+    dst_w13_scale: int,
+    dst_w2_weight: int,
+    dst_w2_scale: int,
+    w13_weight_size: int,
+    w13_scale_size: int,
+    w2_weight_size: int,
+    w2_scale_size: int,
+):
+    """
+    V4 API: Create a polling memcpy worker for the local rank.
+
+    Each rank should call this to create its own worker thread that will:
+    1. Poll sync_slot->signal for DATA_READY
+    2. Perform cudaMemcpyAsync for all 4 weight/scale buffers
+    3. Set signal = GPU_DONE
+
+    Args:
+        rank: Worker's rank ID
+        cuda_device: CUDA device ID for this rank
+        cpu_core: CPU core to bind worker thread (-1 for auto-select)
+        sync_slot_ptr: Pointer to sync slot (pinned memory)
+        src_buffer_ptrs: List of 8 source buffer pointers:
+            [w13_w_s0, w13_w_s1, w13_s_s0, w13_s_s1, w2_w_s0, w2_w_s1, w2_s_s0, w2_s_s1]
+        dst_w13_weight: GPU destination for w13 weight (base pointer)
+        dst_w13_scale: GPU destination for w13 scale
+        dst_w2_weight: GPU destination for w2 weight
+        dst_w2_scale: GPU destination for w2 scale
+        w13_weight_size: Per-expert w13 weight size in bytes
+        w13_scale_size: Per-expert w13 scale size in bytes
+        w2_weight_size: Per-expert w2 weight size in bytes
+        w2_scale_size: Per-expert w2 scale size in bytes
+    """
+    manager = get_polling_memcpy_worker_manager()
+    manager.create_worker(
+        rank, cuda_device, cpu_core, sync_slot_ptr, src_buffer_ptrs,
+        dst_w13_weight, dst_w13_scale, dst_w2_weight, dst_w2_scale,
+        w13_weight_size, w13_scale_size, w2_weight_size, w2_scale_size
+    )
+
+
+def start_polling_memcpy_worker():
+    """
+    V4 API: Start the local polling memcpy worker thread.
+    """
+    manager = get_polling_memcpy_worker_manager()
+    manager.start_worker()
+
+
+def stop_polling_memcpy_worker():
+    """
+    V4 API: Stop the local polling memcpy worker thread.
+    """
+    manager = get_polling_memcpy_worker_manager()
+    manager.stop_worker()
+
+
+def is_polling_memcpy_worker_running() -> bool:
+    """
+    V4 API: Check if the local polling memcpy worker is running.
+
+    Returns:
+        True if worker exists and is running
+    """
+    manager = get_polling_memcpy_worker_manager()
+    return manager.is_worker_running()

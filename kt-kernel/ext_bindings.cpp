@@ -44,6 +44,7 @@ static const bool _is_plain_ = false;
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
+#include "operators/amx/polling_memcpy_worker.h"  // Polling-based memcpy worker
 #endif
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
 
@@ -306,11 +307,12 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
         [](MoeClass& moe, int gpu_tp_count, py::list pinned_w13_weight_ptrs, py::list pinned_w13_scale_ptrs,
            py::list pinned_w2_weight_ptrs, py::list pinned_w2_scale_ptrs, py::list gpu_w13_weight_ptrs_per_rank,
            py::list gpu_w13_scale_ptrs_per_rank, py::list gpu_w2_weight_ptrs_per_rank,
-           py::list gpu_w2_scale_ptrs_per_rank, intptr_t cuda_stream, size_t w13_weight_expert_nbytes,
+           py::list gpu_w2_scale_ptrs_per_rank, py::list cuda_streams, size_t w13_weight_expert_nbytes,
            size_t w13_scale_expert_nbytes, size_t w2_weight_expert_nbytes, size_t w2_scale_expert_nbytes) {
           // Convert Python lists to std::vector
           std::vector<uintptr_t> pinned_w13_weight_vec, pinned_w13_scale_vec, pinned_w2_weight_vec, pinned_w2_scale_vec;
           std::vector<uintptr_t> gpu_w13_weight_vec, gpu_w13_scale_vec, gpu_w2_weight_vec, gpu_w2_scale_vec;
+          std::vector<intptr_t> streams_vec;
 
           for (auto item : pinned_w13_weight_ptrs) pinned_w13_weight_vec.push_back(py::cast<uintptr_t>(item));
           for (auto item : pinned_w13_scale_ptrs) pinned_w13_scale_vec.push_back(py::cast<uintptr_t>(item));
@@ -320,16 +322,17 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
           for (auto item : gpu_w13_scale_ptrs_per_rank) gpu_w13_scale_vec.push_back(py::cast<uintptr_t>(item));
           for (auto item : gpu_w2_weight_ptrs_per_rank) gpu_w2_weight_vec.push_back(py::cast<uintptr_t>(item));
           for (auto item : gpu_w2_scale_ptrs_per_rank) gpu_w2_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : cuda_streams) streams_vec.push_back(py::cast<intptr_t>(item));
 
           moe.setup_batch_load_buffers(gpu_tp_count, pinned_w13_weight_vec, pinned_w13_scale_vec, pinned_w2_weight_vec,
                                        pinned_w2_scale_vec, gpu_w13_weight_vec, gpu_w13_scale_vec, gpu_w2_weight_vec,
-                                       gpu_w2_scale_vec, cuda_stream, w13_weight_expert_nbytes, w13_scale_expert_nbytes,
+                                       gpu_w2_scale_vec, streams_vec, w13_weight_expert_nbytes, w13_scale_expert_nbytes,
                                        w2_weight_expert_nbytes, w2_scale_expert_nbytes);
         },
         py::arg("gpu_tp_count"), py::arg("pinned_w13_weight_ptrs"), py::arg("pinned_w13_scale_ptrs"),
         py::arg("pinned_w2_weight_ptrs"), py::arg("pinned_w2_scale_ptrs"), py::arg("gpu_w13_weight_ptrs_per_rank"),
         py::arg("gpu_w13_scale_ptrs_per_rank"), py::arg("gpu_w2_weight_ptrs_per_rank"),
-        py::arg("gpu_w2_scale_ptrs_per_rank"), py::arg("cuda_stream"), py::arg("w13_weight_expert_nbytes"),
+        py::arg("gpu_w2_scale_ptrs_per_rank"), py::arg("cuda_streams"), py::arg("w13_weight_expert_nbytes"),
         py::arg("w13_scale_expert_nbytes"), py::arg("w2_weight_expert_nbytes"), py::arg("w2_scale_expert_nbytes"),
         "V2 API: Register fixed buffer pointers once during initialization");
   }
@@ -360,6 +363,85 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 
     moe_cls.def("batch_load_cpu_experts_to_gpu_task", &BatchLoadCpuExpertsToGpuBindings::cpuinfer_interface,
                 py::arg("cpu_expert_ids"), "V2 API: Only pass cpu_expert_ids, buffers are pre-registered");
+  }
+
+  // Bind polling-based batch load APIs (V3 API)
+  if constexpr (requires { &MoeClass::setup_polling_batch_load; }) {
+    moe_cls.def(
+        "setup_polling_batch_load",
+        [](MoeClass& moe, int num_ranks, py::list sync_slot_ptrs, py::list src_buffer_ptrs_per_rank,
+           py::list dst_w13_weight_per_rank, py::list dst_w13_scale_per_rank, py::list dst_w2_weight_per_rank,
+           py::list dst_w2_scale_per_rank, py::list stream_ptrs, size_t w13_weight_size, size_t w13_scale_size,
+           size_t w2_weight_size, size_t w2_scale_size) {
+          std::vector<uintptr_t> sync_slots_vec;
+          std::vector<std::vector<uintptr_t>> src_buffers_vec;
+          std::vector<uintptr_t> dst_w13_weight_vec, dst_w13_scale_vec, dst_w2_weight_vec, dst_w2_scale_vec;
+          std::vector<intptr_t> streams_vec;
+
+          for (auto item : sync_slot_ptrs) sync_slots_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto rank_list : src_buffer_ptrs_per_rank) {
+            std::vector<uintptr_t> rank_buffers;
+            for (auto item : py::cast<py::list>(rank_list)) {
+              rank_buffers.push_back(py::cast<uintptr_t>(item));
+            }
+            src_buffers_vec.push_back(rank_buffers);
+          }
+          for (auto item : dst_w13_weight_per_rank) dst_w13_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : dst_w13_scale_per_rank) dst_w13_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : dst_w2_weight_per_rank) dst_w2_weight_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : dst_w2_scale_per_rank) dst_w2_scale_vec.push_back(py::cast<uintptr_t>(item));
+          for (auto item : stream_ptrs) streams_vec.push_back(py::cast<intptr_t>(item));
+
+          moe.setup_polling_batch_load(num_ranks, sync_slots_vec, src_buffers_vec, dst_w13_weight_vec,
+                                       dst_w13_scale_vec, dst_w2_weight_vec, dst_w2_scale_vec, streams_vec,
+                                       w13_weight_size, w13_scale_size, w2_weight_size, w2_scale_size);
+        },
+        py::arg("num_ranks"), py::arg("sync_slot_ptrs"), py::arg("src_buffer_ptrs_per_rank"),
+        py::arg("dst_w13_weight_per_rank"), py::arg("dst_w13_scale_per_rank"), py::arg("dst_w2_weight_per_rank"),
+        py::arg("dst_w2_scale_per_rank"), py::arg("stream_ptrs"), py::arg("w13_weight_size"),
+        py::arg("w13_scale_size"), py::arg("w2_weight_size"), py::arg("w2_scale_size"),
+        "V3 API: Setup polling-based batch load with per-rank sync slots and buffers");
+
+    moe_cls.def(
+        "launch_polling_kernel",
+        [](MoeClass& moe, int local_rank, int total_experts) { moe.launch_polling_kernel(local_rank, total_experts); },
+        py::arg("local_rank"), py::arg("total_experts"),
+        "V3 API: Launch persistent polling kernel for the local rank");
+
+    moe_cls.def(
+        "shutdown_polling_kernel",
+        [](MoeClass& moe, int local_rank) { moe.shutdown_polling_kernel(local_rank); }, py::arg("local_rank"),
+        "V3 API: Shutdown polling kernel for the local rank");
+
+    moe_cls.def(
+        "shutdown_all_polling_kernels", [](MoeClass& moe) { moe.shutdown_all_polling_kernels(); },
+        "V3 API: Shutdown all polling kernels (for cleanup)");
+  }
+
+  // Bind polling-based batch load task (V3 API)
+  if constexpr (requires { &MoeClass::batch_load_cpu_experts_to_gpu_polling; }) {
+    struct BatchLoadPollingBindings {
+      struct Args {
+        CPUInfer* cpuinfer;
+        MoeClass* moe;
+        std::vector<int> cpu_expert_ids;
+      };
+
+      static void inner(void* args) {
+        Args* args_ = (Args*)args;
+        args_->cpuinfer->enqueue(&MoeClass::batch_load_cpu_experts_to_gpu_polling, args_->moe, args_->cpu_expert_ids);
+      }
+
+      static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<MoeClass> moe, py::list cpu_expert_ids) {
+        std::vector<int> expert_ids_vec;
+        for (auto item : cpu_expert_ids) expert_ids_vec.push_back(py::cast<int>(item));
+        Args* args = new Args{nullptr, moe.get(), expert_ids_vec};
+        return std::make_pair((intptr_t)&inner, (intptr_t)args);
+      }
+    };
+
+    moe_cls.def("batch_load_cpu_experts_to_gpu_polling_task", &BatchLoadPollingBindings::cpuinfer_interface,
+                py::arg("cpu_expert_ids"), "V3 API: Polling-based batch load, buffers are pre-registered");
   }
 #endif  // KTRANSFORMERS_CPU_ONLY
 }
@@ -855,4 +937,42 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         py::arg("ptr"));
 #endif  // KTRANSFORMERS_USE_CUDA
 #endif  // KTRANSFORMERS_CPU_ONLY
+
+#if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
+  // Polling-based memcpy worker for batch expert loading
+  {
+    using namespace polling_memcpy_worker;
+    auto polling_worker_module = m.def_submodule("polling_worker");
+
+    py::class_<PollingMemcpyWorkerManager>(polling_worker_module, "PollingMemcpyWorkerManager")
+        .def_static("instance", &PollingMemcpyWorkerManager::instance, py::return_value_policy::reference,
+                    "Get the singleton instance")
+        .def(
+            "create_worker",
+            [](PollingMemcpyWorkerManager& self, int rank, int cuda_device, int cpu_core, uintptr_t sync_slot_ptr,
+               const std::vector<uintptr_t>& src_buffer_ptrs, uintptr_t dst_w13_weight, uintptr_t dst_w13_scale,
+               uintptr_t dst_w2_weight, uintptr_t dst_w2_scale, size_t w13_weight_size, size_t w13_scale_size,
+               size_t w2_weight_size, size_t w2_scale_size) {
+              if (src_buffer_ptrs.size() != 8) {
+                throw std::runtime_error("src_buffer_ptrs must have exactly 8 elements");
+              }
+              void* src_buffers[8];
+              for (int i = 0; i < 8; ++i) {
+                src_buffers[i] = (void*)src_buffer_ptrs[i];
+              }
+              self.create_worker(rank, cuda_device, cpu_core,
+                                 (polling_sync_batch::BatchSyncSlot*)sync_slot_ptr, src_buffers,
+                                 (void*)dst_w13_weight, (void*)dst_w13_scale, (void*)dst_w2_weight, (void*)dst_w2_scale,
+                                 w13_weight_size, w13_scale_size, w2_weight_size, w2_scale_size);
+            },
+            py::arg("rank"), py::arg("cuda_device"), py::arg("cpu_core"), py::arg("sync_slot_ptr"),
+            py::arg("src_buffer_ptrs"), py::arg("dst_w13_weight"), py::arg("dst_w13_scale"), py::arg("dst_w2_weight"),
+            py::arg("dst_w2_scale"), py::arg("w13_weight_size"), py::arg("w13_scale_size"), py::arg("w2_weight_size"),
+            py::arg("w2_scale_size"), "Create a polling memcpy worker for the local rank")
+        .def("start_worker", &PollingMemcpyWorkerManager::start_worker, "Start the local worker thread")
+        .def("stop_worker", &PollingMemcpyWorkerManager::stop_worker, "Stop the local worker thread")
+        .def("has_worker", &PollingMemcpyWorkerManager::has_worker, "Check if worker exists")
+        .def("is_worker_running", &PollingMemcpyWorkerManager::is_worker_running, "Check if worker is running");
+  }
+#endif  // __x86_64__ && USE_AMX_AVX_KERNEL
 }

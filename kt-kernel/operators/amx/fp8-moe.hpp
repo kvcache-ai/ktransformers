@@ -16,6 +16,7 @@
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "moe_base.hpp"
+#include "polling_sync_batch.cuh"
 
 #ifndef KTRANSFORMERS_CPU_ONLY
 #ifdef KTRANSFORMERS_USE_CUDA
@@ -793,12 +794,23 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
   std::vector<uintptr_t> batch_load_gpu_w13_scale_ptrs_;
   std::vector<uintptr_t> batch_load_gpu_w2_weight_ptrs_;
   std::vector<uintptr_t> batch_load_gpu_w2_scale_ptrs_;
-  intptr_t batch_load_cuda_stream_ = 0;
+  std::vector<intptr_t> batch_load_cuda_streams_;
   // Precomputed weight sizes
   size_t batch_load_w13_weight_size_ = 0;
   size_t batch_load_w13_scale_size_ = 0;
   size_t batch_load_w2_weight_size_ = 0;
   size_t batch_load_w2_scale_size_ = 0;
+
+  // Polling-based batch load configuration
+  bool polling_batch_load_configured_ = false;
+  int polling_num_ranks_ = 0;
+  std::vector<polling_sync_batch::BatchSyncSlot*> polling_sync_slots_;  // Per-rank sync slots (pinned memory)
+  std::vector<std::vector<uintptr_t>> polling_src_buffers_;  // [rank][8 buffers] - double-buffered src ptrs
+  std::vector<uintptr_t> polling_dst_w13_weight_;  // [rank] GPU dst ptrs
+  std::vector<uintptr_t> polling_dst_w13_scale_;
+  std::vector<uintptr_t> polling_dst_w2_weight_;
+  std::vector<uintptr_t> polling_dst_w2_scale_;
+  std::vector<cudaStream_t> polling_streams_;  // Per-rank streams for persistent kernel
 
  public:
   /**
@@ -816,7 +828,7 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
    * @param gpu_w13_scale_ptrs_per_rank
    * @param gpu_w2_weight_ptrs_per_rank
    * @param gpu_w2_scale_ptrs_per_rank
-   * @param cuda_stream CUDA stream for H2D transfers
+   * @param cuda_streams Per-rank CUDA streams for parallel H2D transfers
    */
   void setup_batch_load_buffers(int gpu_tp_count, const std::vector<uintptr_t>& pinned_w13_weight_ptrs,
                                 const std::vector<uintptr_t>& pinned_w13_scale_ptrs,
@@ -825,7 +837,8 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
                                 const std::vector<uintptr_t>& gpu_w13_weight_ptrs_per_rank,
                                 const std::vector<uintptr_t>& gpu_w13_scale_ptrs_per_rank,
                                 const std::vector<uintptr_t>& gpu_w2_weight_ptrs_per_rank,
-                                const std::vector<uintptr_t>& gpu_w2_scale_ptrs_per_rank, intptr_t cuda_stream,
+                                const std::vector<uintptr_t>& gpu_w2_scale_ptrs_per_rank,
+                                const std::vector<intptr_t>& cuda_streams,
                                 size_t w13_weight_expert_nbytes, size_t w13_scale_expert_nbytes,
                                 size_t w2_weight_expert_nbytes, size_t w2_scale_expert_nbytes) {
     batch_load_pinned_w13_weight_ptrs_ = pinned_w13_weight_ptrs;
@@ -836,7 +849,7 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
     batch_load_gpu_w13_scale_ptrs_ = gpu_w13_scale_ptrs_per_rank;
     batch_load_gpu_w2_weight_ptrs_ = gpu_w2_weight_ptrs_per_rank;
     batch_load_gpu_w2_scale_ptrs_ = gpu_w2_scale_ptrs_per_rank;
-    batch_load_cuda_stream_ = cuda_stream;
+    batch_load_cuda_streams_ = cuda_streams;
 
     // Use actual per-expert sizes from Python (accounts for TP sharding)
     batch_load_w13_weight_size_ = w13_weight_expert_nbytes;
@@ -873,7 +886,11 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
     const size_t w2_weight_size = batch_load_w2_weight_size_;
     const size_t w2_scale_size = batch_load_w2_scale_size_;
 
-    cudaStream_t stream = (cudaStream_t)batch_load_cuda_stream_;
+    // Per-rank CUDA streams for parallel H2D transfers
+    std::vector<cudaStream_t> streams(num_ranks);
+    for (int r = 0; r < num_ranks; ++r) {
+      streams[r] = (cudaStream_t)batch_load_cuda_streams_[r];
+    }
 
     // Helper: get pinned buffer pointers for a given slot (returns num_ranks pointers)
     auto get_slot_ptrs = [&](const std::vector<uintptr_t>& all_ptrs, int slot) {
@@ -884,15 +901,14 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
       return result;
     };
 
-    // CUDA events to track copy completion
-    std::vector<cudaEvent_t> copy_done_events(num_experts);
-    for (int i = 0; i < num_experts; ++i) {
+    // Per-expert, per-rank CUDA events for double-buffer sync
+    // copy_done_events[idx * num_ranks + rank]
+    std::vector<cudaEvent_t> copy_done_events(num_experts * num_ranks);
+    for (int i = 0; i < num_experts * num_ranks; ++i) {
       cudaEventCreateWithFlags(&copy_done_events[i], cudaEventDisableTiming);
     }
 
     // Pre-submit first expert's write (slot 0)
-    // write_weight_scale_to_buffer with gpu_tp_count=num_ranks writes each TP shard
-    // to a separate pinned buffer
     const int first_expert = cpu_expert_ids[0];
     auto slot0_w13w = get_slot_ptrs(batch_load_pinned_w13_weight_ptrs_, 0);
     auto slot0_w13s = get_slot_ptrs(batch_load_pinned_w13_scale_ptrs_, 0);
@@ -904,16 +920,17 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
       const int expert_id = cpu_expert_ids[idx];
       const int slot = idx % 2;
 
-      // 1. Wait for previous copy using same slot to complete (double buffering protection)
+      // 1. Wait for previous copy using same slot to complete (all ranks)
       if (idx >= 2) {
         uint64_t act_start = sft_timer::get_trace_timestamp();
-        cudaEventSynchronize(copy_done_events[idx - 2]);
+        for (int r = 0; r < num_ranks; ++r) {
+          cudaEventSynchronize(copy_done_events[(idx - 2) * num_ranks + r]);
+        }
         uint64_t act_end = sft_timer::get_trace_timestamp();
         sft_timer::add_kernel_trace("sync1", act_start, act_end, 0, 0);
       }
 
-      // 2. Issue async H2D memcpy for current expert
-      //    Each rank's shard is in pinned buffer [slot * num_ranks + rank]
+      // 2. Issue async H2D memcpy for current expert on per-rank streams
       for (int rank = 0; rank < num_ranks; ++rank) {
         if (batch_load_gpu_w13_weight_ptrs_[rank] == 0) continue;
 
@@ -923,35 +940,29 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
         const size_t expert_offset_w2_scale = (size_t)expert_id * w2_scale_size;
 
         const int pinned_idx = slot * num_ranks + rank;
-
+        cudaStream_t rank_stream = streams[rank];
         uint64_t act_start = sft_timer::get_trace_timestamp();
-
         cudaMemcpyAsync((void*)(batch_load_gpu_w13_weight_ptrs_[rank] + expert_offset_w13_weight),
-                        (void*)batch_load_pinned_w13_weight_ptrs_[pinned_idx], w13_weight_size, cudaMemcpyHostToDevice,
-                        stream);
+                        (void*)batch_load_pinned_w13_weight_ptrs_[pinned_idx],
+                        w13_weight_size, cudaMemcpyHostToDevice, rank_stream);
         cudaMemcpyAsync((void*)(batch_load_gpu_w13_scale_ptrs_[rank] + expert_offset_w13_scale),
-                        (void*)batch_load_pinned_w13_scale_ptrs_[pinned_idx], w13_scale_size, cudaMemcpyHostToDevice,
-                        stream);
+                        (void*)batch_load_pinned_w13_scale_ptrs_[pinned_idx],
+                        w13_scale_size, cudaMemcpyHostToDevice, rank_stream);
         cudaMemcpyAsync((void*)(batch_load_gpu_w2_weight_ptrs_[rank] + expert_offset_w2_weight),
-                        (void*)batch_load_pinned_w2_weight_ptrs_[pinned_idx], w2_weight_size, cudaMemcpyHostToDevice,
-                        stream);
+                        (void*)batch_load_pinned_w2_weight_ptrs_[pinned_idx],
+                        w2_weight_size, cudaMemcpyHostToDevice, rank_stream);
         cudaMemcpyAsync((void*)(batch_load_gpu_w2_scale_ptrs_[rank] + expert_offset_w2_scale),
-                        (void*)batch_load_pinned_w2_scale_ptrs_[pinned_idx], w2_scale_size, cudaMemcpyHostToDevice,
-                        stream);
+                        (void*)batch_load_pinned_w2_scale_ptrs_[pinned_idx],
+                        w2_scale_size, cudaMemcpyHostToDevice, rank_stream);
 
-        uint64_t act_end = sft_timer::get_trace_timestamp();
+        // Record per-rank event
+        cudaEventRecord(copy_done_events[idx * num_ranks + rank], rank_stream);
+         uint64_t act_end = sft_timer::get_trace_timestamp();
         sft_timer::add_kernel_trace("memcpyh2d", act_start, act_end, 0, rank);
-      }
+ 
+    }
 
-      // 3. Record copy completion event
-      uint64_t act_start = sft_timer::get_trace_timestamp();
-
-      cudaEventRecord(copy_done_events[idx], stream);
-      uint64_t act_end = sft_timer::get_trace_timestamp();
-
-      sft_timer::add_kernel_trace("record", act_start, act_end, 0, 0);
-
-      // 4. Pre-submit next expert's write (CPU blocks here, GPU does copy in parallel)
+      // 3. Pre-submit next expert's write (CPU blocks here, GPU does copy in parallel)
       if (idx + 1 < num_experts) {
         const int next_expert = cpu_expert_ids[idx + 1];
         const int next_slot = (idx + 1) % 2;
@@ -963,16 +974,231 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
       }
     }
 
-    // 5. Wait for all copies to complete
-    cudaEventSynchronize(copy_done_events[num_experts - 1]);
+    // 4. Wait for all copies to complete (all ranks, last expert)
+    for (int r = 0; r < num_ranks; ++r) {
+      cudaEventSynchronize(copy_done_events[(num_experts - 1) * num_ranks + r]);
+    }
 
-    // 6. Cleanup events
+    // 5. Cleanup events
     for (auto& event : copy_done_events) {
       cudaEventDestroy(event);
     }
   }
+
+  /**
+   * @brief Setup polling-based batch load (call once during initialization)
+   *
+   * This sets up persistent polling kernels on each rank's GPU.
+   * Each kernel polls a shared CPU memory flag and copies data when signaled.
+   *
+   * @param num_ranks Number of GPU TP ranks
+   * @param sync_slot_ptrs Per-rank sync slot pointers (pinned memory)
+   * @param src_buffer_ptrs_per_rank [rank][8] source buffer pointers (double-buffered)
+   *        Format per rank: [w13_w_s0, w13_w_s1, w13_s_s0, w13_s_s1, w2_w_s0, w2_w_s1, w2_s_s0, w2_s_s1]
+   * @param dst_w13_weight_per_rank [rank] GPU destination for w13 weight
+   * @param dst_w13_scale_per_rank [rank] GPU destination for w13 scale
+   * @param dst_w2_weight_per_rank [rank] GPU destination for w2 weight
+   * @param dst_w2_scale_per_rank [rank] GPU destination for w2 scale
+   * @param stream_ptrs Per-rank CUDA stream pointers for persistent kernels
+   * @param w13_weight_size Per-expert size for w13 weight
+   * @param w13_scale_size Per-expert size for w13 scale
+   * @param w2_weight_size Per-expert size for w2 weight
+   * @param w2_scale_size Per-expert size for w2 scale
+   */
+  void setup_polling_batch_load(
+      int num_ranks,
+      const std::vector<uintptr_t>& sync_slot_ptrs,
+      const std::vector<std::vector<uintptr_t>>& src_buffer_ptrs_per_rank,
+      const std::vector<uintptr_t>& dst_w13_weight_per_rank,
+      const std::vector<uintptr_t>& dst_w13_scale_per_rank,
+      const std::vector<uintptr_t>& dst_w2_weight_per_rank,
+      const std::vector<uintptr_t>& dst_w2_scale_per_rank,
+      const std::vector<intptr_t>& stream_ptrs,
+      size_t w13_weight_size, size_t w13_scale_size,
+      size_t w2_weight_size, size_t w2_scale_size) {
+
+    polling_num_ranks_ = num_ranks;
+
+    // Store sync slots
+    polling_sync_slots_.resize(num_ranks);
+    for (int r = 0; r < num_ranks; ++r) {
+      polling_sync_slots_[r] = (polling_sync_batch::BatchSyncSlot*)sync_slot_ptrs[r];
+    }
+
+    // Store source buffer pointers
+    polling_src_buffers_ = src_buffer_ptrs_per_rank;
+
+    // Store destination pointers
+    polling_dst_w13_weight_ = dst_w13_weight_per_rank;
+    polling_dst_w13_scale_ = dst_w13_scale_per_rank;
+    polling_dst_w2_weight_ = dst_w2_weight_per_rank;
+    polling_dst_w2_scale_ = dst_w2_scale_per_rank;
+
+    // Store streams
+    polling_streams_.resize(num_ranks);
+    for (int r = 0; r < num_ranks; ++r) {
+      polling_streams_[r] = (cudaStream_t)stream_ptrs[r];
+    }
+
+    // Store sizes
+    batch_load_w13_weight_size_ = w13_weight_size;
+    batch_load_w13_scale_size_ = w13_scale_size;
+    batch_load_w2_weight_size_ = w2_weight_size;
+    batch_load_w2_scale_size_ = w2_scale_size;
+
+    polling_batch_load_configured_ = true;
+  }
+
+  /**
+   * @brief Launch persistent polling kernel for the local rank
+   *
+   * Each rank calls this to launch its own persistent kernel.
+   * Kernels run until total_experts reached or shutdown signal.
+   *
+   * @param local_rank The rank to launch kernel for (must match calling process's rank)
+   * @param total_experts Total number of experts to process (-1 for infinite)
+   */
+  void launch_polling_kernel(int local_rank, int total_experts = -1) {
+#ifdef __CUDACC__
+    if (!polling_batch_load_configured_) {
+      throw std::runtime_error("Polling batch load not configured. Call setup_polling_batch_load() first.");
+    }
+    if (local_rank < 0 || local_rank >= polling_num_ranks_) {
+      throw std::runtime_error("Invalid local_rank for launch_polling_kernel");
+    }
+
+    // Build source buffer array for this rank
+    void* src_buffers[8];
+    for (int i = 0; i < 8; ++i) {
+      src_buffers[i] = (void*)polling_src_buffers_[local_rank][i];
+    }
+
+    polling_sync_batch::launch_polling_copy_kernel(
+        polling_streams_[local_rank],
+        polling_sync_slots_[local_rank],
+        src_buffers,
+        (void*)polling_dst_w13_weight_[local_rank],
+        (void*)polling_dst_w13_scale_[local_rank],
+        (void*)polling_dst_w2_weight_[local_rank],
+        (void*)polling_dst_w2_scale_[local_rank],
+        batch_load_w13_weight_size_,
+        batch_load_w13_scale_size_,
+        batch_load_w2_weight_size_,
+        batch_load_w2_scale_size_,
+        total_experts,
+        256  // num_threads for cooperative memcpy
+    );
+#else
+    (void)local_rank;
+    (void)total_experts;
+    throw std::runtime_error("launch_polling_kernel requires CUDA compilation");
+#endif
+  }
+
+  /**
+   * @brief Batch load CPU expert weights to all ranks' GPUs using polling mechanism
+   *
+   * Uses persistent polling kernels launched by launch_polling_kernels().
+   * Pipeline: write(e) -> signal(e) -> write(e+1) -> wait(e) -> signal(e+1) -> ...
+   * This allows GPU copy of expert[i] to overlap with CPU write of expert[i+1].
+   *
+   * @param cpu_expert_ids List of CPU expert IDs to load
+   */
+  void batch_load_cpu_experts_to_gpu_polling(const std::vector<int>& cpu_expert_ids) {
+    if (!polling_batch_load_configured_) {
+      throw std::runtime_error("Polling batch load not configured. Call setup_polling_batch_load() first.");
+    }
+    if (this->weights_loaded == false) {
+      throw std::runtime_error("Weights not loaded");
+    }
+
+    const int num_experts = cpu_expert_ids.size();
+    if (num_experts == 0) return;
+
+    // Helper to get slot pointers for a given buffer slot
+    auto get_slot_ptrs = [&](const std::vector<uintptr_t>& all_ptrs, int slot) {
+      std::vector<uintptr_t> result(polling_num_ranks_);
+      for (int r = 0; r < polling_num_ranks_; ++r) {
+        result[r] = all_ptrs[slot * polling_num_ranks_ + r];
+      }
+      return result;
+    };
+
+    for (int idx = 0; idx < num_experts; ++idx) {
+      const int expert_id = cpu_expert_ids[idx];
+      const int slot = idx % 2;
+
+      // 1. Write current expert's weights to double buffer slot
+      auto slot_w13w = get_slot_ptrs(batch_load_pinned_w13_weight_ptrs_, slot);
+      auto slot_w13s = get_slot_ptrs(batch_load_pinned_w13_scale_ptrs_, slot);
+      auto slot_w2w = get_slot_ptrs(batch_load_pinned_w2_weight_ptrs_, slot);
+      auto slot_w2s = get_slot_ptrs(batch_load_pinned_w2_scale_ptrs_, slot);
+      this->write_weight_scale_to_buffer(polling_num_ranks_, expert_id, slot_w13w, slot_w13s, slot_w2w, slot_w2s);
+
+      // 2. Wait for previous expert's GPU copy to complete (if not first expert)
+      //    This ensures the double buffer slot we're about to signal is free
+      if (idx > 0) {
+        for (int rank = 0; rank < polling_num_ranks_; ++rank) {
+          polling_sync_batch::cpu_wait_gpu_done(polling_sync_slots_[rank]);
+        }
+      }
+
+      // 3. Signal all ranks that current expert's data is ready
+      for (int rank = 0; rank < polling_num_ranks_; ++rank) {
+        polling_sync_batch::cpu_signal_data_ready(polling_sync_slots_[rank], expert_id, slot);
+      }
+
+      // Pipeline: Now GPU starts copying expert[idx] while we loop back to write expert[idx+1]
+    }
+
+    // 4. Wait for the last expert's GPU copy to complete
+    for (int rank = 0; rank < polling_num_ranks_; ++rank) {
+      polling_sync_batch::cpu_wait_gpu_done(polling_sync_slots_[rank]);
+    }
+  }
+
+  /**
+   * @brief Shutdown polling kernel for the local rank
+   *
+   * Each rank calls this to shutdown its own kernel.
+   *
+   * @param local_rank The rank to shutdown (must match calling process's rank)
+   */
+  void shutdown_polling_kernel(int local_rank) {
+    if (!polling_batch_load_configured_) return;
+    if (local_rank < 0 || local_rank >= polling_num_ranks_) return;
+
+    polling_sync_batch::cpu_signal_shutdown(polling_sync_slots_[local_rank]);
+#ifdef __CUDACC__
+    cudaStreamSynchronize(polling_streams_[local_rank]);
+#endif
+  }
+
+  /**
+   * @brief Shutdown all polling kernels (for cleanup, called by any rank)
+   *
+   * Signals shutdown to all ranks' sync slots. Note: only ranks with valid
+   * sync slot pointers will receive the signal.
+   */
+  void shutdown_all_polling_kernels() {
+    if (!polling_batch_load_configured_) return;
+
+    for (int rank = 0; rank < polling_num_ranks_; ++rank) {
+      if (polling_sync_slots_[rank] != nullptr) {
+        polling_sync_batch::cpu_signal_shutdown(polling_sync_slots_[rank]);
+      }
+    }
+
+#ifdef __CUDACC__
+    // Only synchronize streams that are valid (non-null)
+    for (int rank = 0; rank < polling_num_ranks_; ++rank) {
+      if (polling_streams_[rank] != nullptr) {
+        cudaStreamSynchronize(polling_streams_[rank]);
+      }
+    }
+#endif
+  }
 #endif  // KTRANSFORMERS_CPU_ONLY
 };
-/
 
 #endif  // CPUINFER_OPERATOR_AMX_FP8_MOE_H
