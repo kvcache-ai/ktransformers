@@ -38,6 +38,7 @@ def check_sglang_installation() -> dict:
         editable = False
         git_info = None
         from_source = False
+        is_kvcache_fork = False  # True if installed as sglang-kt package
 
         try:
             # Get pip show output (try sglang-kt first, then sglang)
@@ -47,7 +48,9 @@ def check_sglang_installation() -> dict:
                 text=True,
                 timeout=10,
             )
-            if result.returncode != 0:
+            if result.returncode == 0:
+                is_kvcache_fork = True  # sglang-kt package name proves it's the fork
+            else:
                 result = subprocess.run(
                     [sys.executable, "-m", "pip", "show", "sglang"],
                     capture_output=True,
@@ -135,6 +138,7 @@ def check_sglang_installation() -> dict:
             "editable": editable,
             "git_info": git_info,
             "from_source": from_source,
+            "is_kvcache_fork": is_kvcache_fork,
         }
     except ImportError:
         return {
@@ -144,6 +148,7 @@ def check_sglang_installation() -> dict:
             "editable": False,
             "git_info": None,
             "from_source": False,
+            "is_kvcache_fork": False,
         }
 
 

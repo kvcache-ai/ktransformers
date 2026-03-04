@@ -369,7 +369,19 @@ def doctor(
     sglang_info = check_sglang_installation()
 
     if sglang_info["installed"]:
-        if sglang_info["from_source"]:
+        if sglang_info.get("is_kvcache_fork"):
+            # Package name is sglang-kt — this is definitively the kvcache-ai fork
+            if sglang_info["from_source"] and sglang_info["git_info"]:
+                git_remote = sglang_info["git_info"].get("remote", "unknown")
+                git_branch = sglang_info["git_info"].get("branch", "unknown")
+                sglang_source_value = f"sglang-kt (Source: {git_remote}, branch: {git_branch})"
+            elif sglang_info["editable"]:
+                sglang_source_value = "sglang-kt (editable)"
+            else:
+                sglang_source_value = "sglang-kt"
+            sglang_source_status = "ok"
+            sglang_source_hint = None
+        elif sglang_info["from_source"]:
             if sglang_info["git_info"]:
                 git_remote = sglang_info["git_info"].get("remote", "unknown")
                 git_branch = sglang_info["git_info"].get("branch", "unknown")
@@ -381,7 +393,7 @@ def doctor(
                 sglang_source_status = "ok"
                 sglang_source_hint = None
         else:
-            sglang_source_value = "PyPI (not recommended)"
+            sglang_source_value = "PyPI sglang (not kvcache-ai fork)"
             sglang_source_status = "warning"
             sglang_source_hint = t("sglang_pypi_hint")
     else:

@@ -17,56 +17,36 @@ from kt_kernel.cli.utils.environment import detect_cuda_version, get_installed_p
 
 def _get_sglang_info() -> str:
     """Get sglang-kt version and installation source information."""
-    try:
-        import sglang
+    from kt_kernel.cli.utils.sglang_checker import check_sglang_installation
 
-        # Use the sglang-kt package version (aligned with ktransformers)
-        version = get_installed_package_version("sglang-kt")
+    info = check_sglang_installation()
 
-        if not version:
-            version = get_installed_package_version("sglang")
-
-        if not version:
-            version = getattr(sglang, "__version__", None)
-
-        if not version:
-            return t("version_not_installed")
-
-        # Try to detect installation source
-        from pathlib import Path
-        import subprocess
-
-        if hasattr(sglang, "__file__") and sglang.__file__:
-            location = Path(sglang.__file__).parent.parent
-            git_dir = location / ".git"
-
-            if git_dir.exists():
-                # Installed from git (editable install)
-                try:
-                    # Get remote URL
-                    result = subprocess.run(
-                        ["git", "remote", "get-url", "origin"],
-                        cwd=location,
-                        capture_output=True,
-                        text=True,
-                        timeout=2,
-                    )
-                    if result.returncode == 0:
-                        remote_url = result.stdout.strip()
-                        # Simplify GitHub URLs
-                        if "github.com" in remote_url:
-                            repo_name = remote_url.split("/")[-1].replace(".git", "")
-                            owner = remote_url.split("/")[-2]
-                            return f"{version} [dim](GitHub: {owner}/{repo_name})[/dim]"
-                        return f"{version} [dim](Git: {remote_url})[/dim]"
-                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                    pass
-
-        # Default: installed from PyPI
-        return f"{version} [dim](PyPI)[/dim]"
-
-    except ImportError:
+    if not info["installed"]:
         return t("version_not_installed")
+
+    # Get version from package metadata (prefer sglang-kt)
+    version = get_installed_package_version("sglang-kt")
+    if not version:
+        version = get_installed_package_version("sglang")
+    if not version:
+        version = info.get("version") or "unknown"
+
+    # Determine source label
+    if info.get("is_kvcache_fork"):
+        if info["from_source"] and info.get("git_info"):
+            git_remote = info["git_info"].get("remote", "")
+            return f"{version} [dim](Source: {git_remote})[/dim]"
+        elif info["editable"]:
+            return f"{version} [dim](editable)[/dim]"
+        else:
+            return f"{version} [dim](sglang-kt)[/dim]"
+    elif info["from_source"]:
+        if info.get("git_info"):
+            git_remote = info["git_info"].get("remote", "")
+            return f"{version} [dim](Source: {git_remote})[/dim]"
+        return f"{version} [dim](source)[/dim]"
+    else:
+        return f"{version} [dim](PyPI)[/dim]"
 
 
 def version(
