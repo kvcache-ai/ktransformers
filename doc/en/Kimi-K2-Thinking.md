@@ -5,10 +5,16 @@ Please Note This is Quantization Deployment. For Native Kimi K2 Thinking deploym
 
 Step 1: Install SGLang
 
-Follow the [official SGLang installation](https://docs.sglang.ai/get_started/install.html) guide to install SGLang:
+Install the kvcache-ai fork of SGLang (one of):
+```bash
+# Option A: One-click install (from ktransformers root)
+./install.sh
+
+# Option B: pip install
+pip install sglang-kt
 ```
-pip install "sglang[all]"
-```
+
+> **Important:** Use `sglang-kt` (kvcache-ai fork), not the official `sglang` package. Run `pip uninstall sglang` first if you have the official version installed.
 
 Step 2: Install KTransformers CPU Kernels
 

@@ -1,0 +1,81 @@
+name: Sync sglang submodule
+
+on:
+  schedule:
+    # Run daily at 08:00 UTC
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Check for sglang-kt updates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update sglang submodule to latest main
+        id: update
+        run: |
+          OLD_SHA=$(git -C third_party/sglang rev-parse HEAD)
+          git submodule update --remote third_party/sglang
+          NEW_SHA=$(git -C third_party/sglang rev-parse HEAD)
+
+          echo "old_sha=$OLD_SHA" >> "$GITHUB_OUTPUT"
+          echo "new_sha=$NEW_SHA" >> "$GITHUB_OUTPUT"
+
+          if [ "$OLD_SHA" = "$NEW_SHA" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "sglang submodule is already up to date ($OLD_SHA)"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+
+            # Collect commit log between old and new
+            COMMITS=$(git -C third_party/sglang log --oneline "$OLD_SHA..$NEW_SHA" | head -20)
+            echo "commits<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$COMMITS" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+
+            # sglang-kt version = ktransformers version (from version.py)
+            VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown")
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+            echo "sglang submodule updated: $OLD_SHA -> $NEW_SHA (v$VERSION)"
+          fi
+
+      - name: Create pull request
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            [build]: sync sglang submodule to ${{ steps.update.outputs.new_sha }}
+          branch: auto/sync-sglang
+          delete-branch: true
+          title: "[build] Sync sglang-kt submodule (v${{ steps.update.outputs.version }})"
+          body: |
+            Automated sync of `third_party/sglang` submodule to latest `main`.
+
+            **Old ref:** `${{ steps.update.outputs.old_sha }}`
+            **New ref:** `${{ steps.update.outputs.new_sha }}`
+            **sglang-kt version:** `${{ steps.update.outputs.version }}`
+
+            ### Commits included
+            ```
+            ${{ steps.update.outputs.commits }}
+            ```
+
+            ---
+            *This PR was created automatically by the [sync-sglang-submodule](${{ github.server_url }}/${{ github.repository }}/actions/workflows/sync-sglang-submodule.yml) workflow.*
+          labels: |
+            dependencies
+            automated

@@ -30,16 +30,17 @@ git submodule update --init --recursive
 cd kt-kernel && ./install.sh
 ```
 
-2. **SGLang installed** - Follow [SGLang integration steps](./kt-kernel_intro.md#integration-with-sglang)
+2. **SGLang installed** - Install the kvcache-ai fork of SGLang (one of):
 
-Note: Currently, please clone our custom SGLang repository:
+```bash
+# Option A: One-click install (from ktransformers root)
+./install.sh
 
+# Option B: pip install
+pip install sglang-kt
 ```
-git clone https://github.com/kvcache-ai/sglang.git
-cd sglang && pip install -e "python[all]"
-// maybe need to reinstall cudnn according to the issue when launching SGLang
-// pip install nvidia-cudnn-cu12==9.16.0.29
-```
+
+> Note: You may need to reinstall cudnn: `pip install nvidia-cudnn-cu12==9.16.0.29`
 
 3. **CUDA toolkit** - Compatible with your GPU (CUDA 12.8+ recommended)
 4. **Hugging Face CLI** - For downloading models:

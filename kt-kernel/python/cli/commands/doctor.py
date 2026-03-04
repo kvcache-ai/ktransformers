@@ -411,7 +411,7 @@ def doctor(
         else:
             kt_kernel_value = t("sglang_kt_kernel_not_supported")
             kt_kernel_status = "error"
-            kt_kernel_hint = 'Reinstall SGLang from: git clone https://github.com/kvcache-ai/sglang && cd sglang && pip install -e "python[all]"'
+            kt_kernel_hint = "Reinstall SGLang: pip uninstall sglang -y && pip install sglang-kt (or run ./install.sh from ktransformers root)"
             issues_found = True
 
         checks.append(

@@ -40,13 +40,20 @@ def check_sglang_installation() -> dict:
         from_source = False
 
         try:
-            # Get pip show output
+            # Get pip show output (try sglang-kt first, then sglang)
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "show", "sglang"],
+                [sys.executable, "-m", "pip", "show", "sglang-kt"],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
+            if result.returncode != 0:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "show", "sglang"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
 
             if result.returncode == 0:
                 pip_info = {}
@@ -158,20 +165,19 @@ def get_sglang_install_instructions(lang: Optional[str] = None) -> str:
         return """
 [bold yellow]SGLang \u672a\u5b89\u88c5[/bold yellow]
 
-\u8bf7\u6309\u7167\u4ee5\u4e0b\u6b65\u9aa4\u5b89\u88c5 SGLang:
+\u8bf7\u9009\u62e9\u4ee5\u4e0b\u65b9\u5f0f\u4e4b\u4e00\u5b89\u88c5 SGLang (kvcache-ai \u5206\u652f):
 
-[bold]1. \u514b\u9686\u4ed3\u5e93:[/bold]
-   git clone https://github.com/kvcache-ai/sglang.git
-   cd sglang
+[bold]\u65b9\u5f0f A - \u4e00\u952e\u5b89\u88c5 (\u63a8\u8350):[/bold]
+   \u4ece ktransformers \u6839\u76ee\u5f55\u8fd0\u884c:
+   [cyan]./install.sh[/cyan]
 
-[bold]2. \u5b89\u88c5 (\u4e8c\u9009\u4e00):[/bold]
+[bold]\u65b9\u5f0f B - pip \u5b89\u88c5:[/bold]
+   [cyan]pip install sglang-kt[/cyan]
 
-   [cyan]\u65b9\u5f0f A - pip \u5b89\u88c5 (\u63a8\u8350):[/cyan]
-   pip install -e "python[all]"
-
-   [cyan]\u65b9\u5f0f B - uv \u5b89\u88c5 (\u66f4\u5feb):[/cyan]
-   pip install uv
-   uv pip install -e "python[all]"
+[bold]\u65b9\u5f0f C - \u4ece\u6e90\u7801\u5b89\u88c5:[/bold]
+   git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+   cd ktransformers
+   pip install "third_party/sglang/python[all]"
 
 [dim]\u6ce8\u610f: \u8bf7\u786e\u4fdd\u5728\u6b63\u786e\u7684 Python \u73af\u5883\u4e2d\u6267\u884c\u4ee5\u4e0a\u547d\u4ee4[/dim]
 """
@@ -179,20 +185,19 @@ def get_sglang_install_instructions(lang: Optional[str] = None) -> str:
         return """
 [bold yellow]SGLang is not installed[/bold yellow]
 
-Please follow these steps to install SGLang:
+Install SGLang (kvcache-ai fork) using one of these methods:
 
-[bold]1. Clone the repository:[/bold]
-   git clone https://github.com/kvcache-ai/sglang.git
-   cd sglang
+[bold]Option A - One-click install (recommended):[/bold]
+   From the ktransformers root directory, run:
+   [cyan]./install.sh[/cyan]
 
-[bold]2. Install (choose one):[/bold]
+[bold]Option B - pip install:[/bold]
+   [cyan]pip install sglang-kt[/cyan]
 
-   [cyan]Option A - pip install (recommended):[/cyan]
-   pip install -e "python[all]"
-
-   [cyan]Option B - uv install (faster):[/cyan]
-   pip install uv
-   uv pip install -e "python[all]"
+[bold]Option C - From source:[/bold]
+   git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+   cd ktransformers
+   pip install "third_party/sglang/python[all]"
 
 [dim]Note: Make sure to run these commands in the correct Python environment[/dim]
 """
@@ -369,17 +374,18 @@ def print_sglang_kt_kernel_instructions() -> None:
 您当前安装的 SGLang 不包含 kt-kernel 支持。
 kt-kernel 需要使用 kvcache-ai 维护的 SGLang 分支。
 
-[bold]请按以下步骤重新安装 SGLang:[/bold]
+[bold]请按以下步骤重新安装:[/bold]
 
 [cyan]1. 卸载当前的 SGLang:[/cyan]
    pip uninstall sglang -y
 
-[cyan]2. 克隆 kvcache-ai 的 SGLang 仓库:[/cyan]
-   git clone https://github.com/kvcache-ai/sglang.git
-   cd sglang
+[cyan]2. 安装 kvcache-ai 版本 (选择一种方式):[/cyan]
 
-[cyan]3. 安装 SGLang:[/cyan]
-   pip install -e "python[all]"
+   [bold]方式 A - 一键安装 (推荐):[/bold]
+   从 ktransformers 根目录运行: ./install.sh
+
+   [bold]方式 B - pip 安装:[/bold]
+   pip install sglang-kt
 
 [dim]注意: 请确保在正确的 Python 环境中执行以上命令[/dim]
 """
@@ -390,17 +396,18 @@ kt-kernel 需要使用 kvcache-ai 维护的 SGLang 分支。
 Your current SGLang installation does not include kt-kernel support.
 kt-kernel requires the kvcache-ai maintained fork of SGLang.
 
-[bold]Please reinstall SGLang with the following steps:[/bold]
+[bold]Please reinstall SGLang:[/bold]
 
 [cyan]1. Uninstall current SGLang:[/cyan]
    pip uninstall sglang -y
 
-[cyan]2. Clone the kvcache-ai SGLang repository:[/cyan]
-   git clone https://github.com/kvcache-ai/sglang.git
-   cd sglang
+[cyan]2. Install the kvcache-ai fork (choose one):[/cyan]
 
-[cyan]3. Install SGLang:[/cyan]
-   pip install -e "python[all]"
+   [bold]Option A - One-click install (recommended):[/bold]
+   From the ktransformers root directory, run: ./install.sh
+
+   [bold]Option B - pip install:[/bold]
+   pip install sglang-kt
 
 [dim]Note: Make sure to run these commands in the correct Python environment[/dim]
 """
