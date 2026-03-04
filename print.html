@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-c9713685.js";
+            window.path_to_searchindex_js = "searchindex-1bf866f2.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-a83fdfe0.js"></script>
@@ -584,10 +584,21 @@ kt doctor
 <p>KT-Kernel can be used standalone via <a href="#direct-python-api-usage">Direct Python API</a> or integrated with SGLang for production deployment. This section describes SGLang integration to enable CPU-GPU heterogeneous inference, where “hot” experts run on GPU and “cold” experts run on CPU for optimal resource utilization.</p>
 <h3 id="installation-steps"><a class="header" href="#installation-steps">Installation Steps</a></h3>
 <h4 id="1-install-sglang"><a class="header" href="#1-install-sglang">1. Install SGLang</a></h4>
-<pre><code class="language-bash">git clone https://github.com/sgl-project/sglang.git
-cd sglang
-pip install -e "python[all]"
+<p>Install the kvcache-ai fork of SGLang (required for kt-kernel support):</p>
+<pre><code class="language-bash"># Option A: One-click install (from ktransformers root, installs sglang + kt-kernel)
+./install.sh
+
+# Option B: pip install
+pip install sglang-kt
+
+# Option C: From source (editable mode)
+git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+pip install -e "third_party/sglang/python[all]"
 </code></pre>
+<blockquote>
+<p><strong>Important:</strong> Use <code>sglang-kt</code> (kvcache-ai fork), not the official <code>sglang</code> package. If you have the official version installed, uninstall it first: <code>pip uninstall sglang -y</code></p>
+</blockquote>
 <h4 id="2-prepare-weights"><a class="header" href="#2-prepare-weights">2. Prepare Weights</a></h4>
 <p>You need both GPU weights and CPU-side expert weights for heterogeneous inference. The exact format depends on the backend:</p>
 <p><strong>GPU Weights (for all backends):</strong><br>Use the model weights required by SGLang for GPU inference (for example, the original or already-quantized model directory from Hugging Face).</p>
