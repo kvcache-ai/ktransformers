@@ -37,7 +37,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "version_cuda_not_found": "Not found",
         "version_kt_kernel": "kt-kernel",
         "version_ktransformers": "ktransformers",
-        "version_sglang": "sglang",
+        "version_sglang": "sglang-kt",
         "version_llamafactory": "llamafactory",
         "version_not_installed": "Not installed",
         # Install command
@@ -657,7 +657,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "version_cuda_not_found": "未找到",
         "version_kt_kernel": "kt-kernel",
         "version_ktransformers": "ktransformers",
-        "version_sglang": "sglang",
+        "version_sglang": "sglang-kt",
         "version_llamafactory": "llamafactory",
         "version_not_installed": "未安装",
         # Install command

@@ -16,14 +16,18 @@ from kt_kernel.cli.utils.environment import detect_cuda_version, get_installed_p
 
 
 def _get_sglang_info() -> str:
-    """Get sglang version and installation source information."""
+    """Get sglang-kt version and installation source information."""
     try:
         import sglang
 
-        version = getattr(sglang, "__version__", None)
+        # Use the sglang-kt package version (aligned with ktransformers)
+        version = get_installed_package_version("sglang-kt")
 
         if not version:
             version = get_installed_package_version("sglang")
+
+        if not version:
+            version = getattr(sglang, "__version__", None)
 
         if not version:
             return t("version_not_installed")
