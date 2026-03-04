@@ -708,14 +708,14 @@ else:
     VERSION = _base_version
     print(f"-- Version: {VERSION}")
 
-# Package name is always kt-kernel
+# Package name is ktransformers (formerly kt-kernel)
 # The CUDA-enabled wheel includes both CPU multi-variant support and CUDA capabilities
-PACKAGE_NAME = "kt-kernel"
+PACKAGE_NAME = "ktransformers"
 cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
 if cuda_enabled:
-    print(f"-- Building kt-kernel with CUDA support (+ CPU multi-variant)")
+    print(f"-- Building ktransformers with CUDA support (+ CPU multi-variant)")
 else:
-    print(f"-- Building kt-kernel (CPU-only multi-variant)")
+    print(f"-- Building ktransformers (CPU-only multi-variant)")
 
 ################################################################################
 # Setup
@@ -724,7 +724,7 @@ else:
 setup(
     name=PACKAGE_NAME,
     version=VERSION,
-    description="KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)",
+    description="KTransformers: CPU-GPU heterogeneous inference framework for LLMs (AMX/AVX/KML optimizations)",
     author="kvcache-ai",
     license="Apache-2.0",
     python_requires=">=3.8",

@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 jobs:
-  # ── sglang-kt (must be on PyPI before users can pip install kt-kernel) ──
+  # ── sglang-kt (must be on PyPI before users can pip install ktransformers) ──
   build-and-publish-sglang-kt:
     name: Build & publish sglang-kt
     runs-on: [self-hosted, linux, x64]
@@ -72,9 +72,9 @@ jobs:
         run: |
           python -m twine upload --repository testpypi --skip-existing --verbose third_party/sglang/python/dist/*.whl
 
-  # ── kt-kernel ──
-  build-kt-kernel:
-    name: Build kt-kernel (Python ${{ matrix.python-version }})
+  # ── ktransformers (formerly kt-kernel) ──
+  build-ktransformers:
+    name: Build ktransformers (Python ${{ matrix.python-version }})
     runs-on: [self-hosted, linux, x64, gpu]
     strategy:
       fail-fast: false
@@ -103,7 +103,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu118
 
-      - name: Build kt-kernel wheel
+      - name: Build ktransformers wheel
         working-directory: kt-kernel
         env:
           CPUINFER_BUILD_ALL_VARIANTS: '1'
@@ -115,7 +115,7 @@ jobs:
           CPUINFER_FORCE_REBUILD: '1'
           CUDA_HOME: '/usr/local/cuda-11.8'
         run: |
-          echo "Building kt-kernel with:"
+          echo "Building ktransformers with:"
           echo "  - CUDA support (SM 80, 86, 89, 90)"
           echo "  - CPU multi-variant (AMX, AVX512, AVX2)"
           python -m build --wheel -v
@@ -171,13 +171,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kt-kernel-wheels-py${{ matrix.python-version }}
+          name: ktransformers-wheels-py${{ matrix.python-version }}
           path: kt-kernel/dist/*.whl
           retention-days: 7
 
   publish-pypi:
-    name: Publish kt-kernel to PyPI
-    needs: [build-and-publish-sglang-kt, build-kt-kernel]
+    name: Publish ktransformers to PyPI
+    needs: [build-and-publish-sglang-kt, build-ktransformers]
     runs-on: [self-hosted, linux, x64]
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     environment: prod
@@ -203,8 +203,8 @@ jobs:
         run: |
           # Extract version from first wheel filename
           wheel_name=$(ls dist/*.whl | head -1 | xargs basename)
-          # Extract version (format: kt_kernel-X.Y.Z-...)
-          version=$(echo "$wheel_name" | sed 's/kt_kernel-\([0-9.]*\)-.*/\1/')
+          # Extract version (format: ktransformers-X.Y.Z-...)
+          version=$(echo "$wheel_name" | sed 's/ktransformers-\([0-9.]*\)-.*/\1/')
           echo "VERSION=$version" >> $GITHUB_OUTPUT
           echo "Publishing version: $version"
 
@@ -238,11 +238,11 @@ jobs:
 
       - name: Create release summary
         run: |
-          echo "## 🎉 kt-kernel v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎉 ktransformers v${{ steps.get_version.outputs.VERSION }} Published to PyPI" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Installation" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "pip install kt-kernel==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "pip install ktransformers==${{ steps.get_version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published Wheels" >> $GITHUB_STEP_SUMMARY
@@ -269,4 +269,4 @@ jobs:
           echo "- Linux x86-64 (manylinux_2_17 compatible)" >> $GITHUB_STEP_SUMMARY
           echo "- For CUDA features: NVIDIA driver with CUDA 11.8+ or 12.x support" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "PyPI link: https://pypi.org/project/kt-kernel/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
+          echo "PyPI link: https://pypi.org/project/ktransformers/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
