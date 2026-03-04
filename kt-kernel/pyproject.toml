@@ -4,10 +4,10 @@ requires = ["setuptools>=61", "wheel", "cmake>=3.16", "pybind11"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ktransformers"
+name = "kt-kernel"
 # Version is dynamically read from ../version.py via setup.py
 dynamic = ["version"]
-description = "KTransformers: CPU-GPU heterogeneous inference framework for LLMs (AMX/AVX/KML optimizations)"
+description = "KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)"
 readme = "README.md"
 authors = [{ name = "kvcache-ai" }]
 # Use SPDX string form (table form deprecated in newer setuptools)
