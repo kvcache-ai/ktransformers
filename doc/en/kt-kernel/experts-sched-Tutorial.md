@@ -40,12 +40,14 @@ Before starting, ensure you have:
 
 1. **SGLang installed**
 
-    Note: Currently, please clone our custom SGLang repository:
+    Install the kvcache-ai fork of SGLang (one of):
 
     ```bash
-    git clone https://github.com/kvcache-ai/sglang.git
-    cd sglang
-    pip install -e "python[all]"
+    # Option A: One-click install (from ktransformers root)
+    ./install.sh
+
+    # Option B: pip install
+    pip install sglang-kt
     ```
 
 2. **KTransformers installed**

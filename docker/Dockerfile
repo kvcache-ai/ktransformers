@@ -215,13 +215,10 @@ RUN /opt/miniconda3/envs/serve/bin/pip config set global.index-url https://mirro
         /opt/miniconda3/envs/fine-tune/bin/pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple; \
     fi
 
-# Clone repositories
-# Use kvcache-ai/sglang fork with kimi_k2 branch
-RUN git clone https://${GITHUB_ARTIFACTORY}/kvcache-ai/sglang.git /workspace/sglang \
-    && cd /workspace/sglang && git checkout kimi_k2
-
+# Clone repositories (sglang is included as a submodule in ktransformers)
 RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
     && cd /workspace/ktransformers && git submodule update --init --recursive \
+    && ln -s /workspace/ktransformers/third_party/sglang /workspace/sglang \
     && if [ "$FUNCTIONALITY" = "sft" ]; then \
         git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory; \
     fi
@@ -262,7 +259,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     ; \
     fi
 
-# Install SGLang in serve env
+# Install SGLang in serve env (version aligned with ktransformers)
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$CUDA_VERSION" in \
         12.6.1) CUINDEX=126 ;; \
@@ -270,6 +267,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         12.9.1) CUINDEX=129 ;; \
         13.0.1) CUINDEX=130 ;; \
     esac \
+    && export SGLANG_KT_VERSION=$(python3 -c "exec(open('/workspace/ktransformers/version.py').read()); print(__version__)") \
+    && echo "Installing sglang-kt v${SGLANG_KT_VERSION}" \
     && cd /workspace/sglang \
     && /opt/miniconda3/envs/serve/bin/pip install -e "python[all]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX}
 
@@ -404,17 +403,15 @@ RUN echo '\n# Conda environment aliases\nalias serve="conda activate serve"' >> 
 
 # Extract versions from each component and save to versions.env
 RUN set -x && \
-    # SGLang version (from version.py file)
-    cd /workspace/sglang/python/sglang && \
-    SGLANG_VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown") && \
-    echo "SGLANG_VERSION=$SGLANG_VERSION" > /workspace/versions.env && \
-    echo "Extracted SGLang version: $SGLANG_VERSION" && \
-    \
-    # KTransformers version (from version.py in repo)
+    # KTransformers version (single source of truth for both kt-kernel and sglang-kt)
     cd /workspace/ktransformers && \
     KTRANSFORMERS_VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown") && \
-    echo "KTRANSFORMERS_VERSION=$KTRANSFORMERS_VERSION" >> /workspace/versions.env && \
+    echo "KTRANSFORMERS_VERSION=$KTRANSFORMERS_VERSION" > /workspace/versions.env && \
     echo "Extracted KTransformers version: $KTRANSFORMERS_VERSION" && \
+    \
+    # sglang-kt version = ktransformers version (aligned)
+    echo "SGLANG_KT_VERSION=$KTRANSFORMERS_VERSION" >> /workspace/versions.env && \
+    echo "sglang-kt version (aligned): $KTRANSFORMERS_VERSION" && \
     \
     # LLaMA-Factory version (from fine-tune environment, sft mode only)
     if [ "$FUNCTIONALITY" = "sft" ]; then \

@@ -65,10 +65,11 @@ cd kt-kernel && ./install.sh
 **Recommended for Kimi-K2.5:**
 
 ```bash
-git clone https://github.com/kvcache-ai/sglang.git
-cd sglang
-git checkout kimi_k2.5
-pip install -e "python[all]"
+# Option A: One-click install (from ktransformers root, installs sglang + kt-kernel)
+./install.sh
+
+# Option B: pip install
+pip install sglang-kt
 ```
 
 ### 0.3 Training Environment: `kt-sft`

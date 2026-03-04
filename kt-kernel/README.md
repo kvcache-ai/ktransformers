@@ -262,11 +262,22 @@ KT-Kernel can be used standalone via [Direct Python API](#direct-python-api-usag
 
 #### 1. Install SGLang
 
+Install the kvcache-ai fork of SGLang (required for kt-kernel support):
+
 ```bash
-git clone https://github.com/sgl-project/sglang.git
-cd sglang
-pip install -e "python[all]"
+# Option A: One-click install (from ktransformers root, installs sglang + kt-kernel)
+./install.sh
+
+# Option B: pip install
+pip install sglang-kt
+
+# Option C: From source (editable mode)
+git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+pip install -e "third_party/sglang/python[all]"
 ```
+
+> **Important:** Use `sglang-kt` (kvcache-ai fork), not the official `sglang` package. If you have the official version installed, uninstall it first: `pip uninstall sglang -y`
 
 #### 2. Prepare Weights
 
