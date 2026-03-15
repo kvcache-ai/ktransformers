@@ -9,6 +9,7 @@ from safetensors.torch import save_file
 import gc
 import json
 import shutil
+import sys
 
 
 def discover_layers(input_path: str):
@@ -76,7 +77,7 @@ def process_layer(layer_path: str, amx_prefix: str, layer_idx: int) -> dict:
     numa_folders = discover_numa_folders(layer_path)
 
     if not numa_folders:
-        print(f"  Warning: No NUMA folders found in {layer_path}")
+        print(f"  Warning: No NUMA folders found in {layer_path}", file=sys.stderr)
         return tensors
 
     proj_mappings = [
@@ -101,7 +102,7 @@ def process_layer(layer_path: str, amx_prefix: str, layer_idx: int) -> dict:
                 try:
                     expert_idx = int(parts[2])
                 except (ValueError, IndexError):
-                    print(f"    Warning: Could not parse expert index from {filename}")
+                    print(f"    Warning: Could not parse expert index from {filename}", file=sys.stderr)
                     continue
 
                 weight_key = f"blk.{layer_idx}.{proj_key}.{expert_idx}.numa.{numa_idx}.weight"
@@ -113,7 +114,7 @@ def process_layer(layer_path: str, amx_prefix: str, layer_idx: int) -> dict:
                 try:
                     expert_idx = int(parts[2])
                 except (ValueError, IndexError):
-                    print(f"    Warning: Could not parse expert index from {filename}")
+                    print(f"    Warning: Could not parse expert index from {filename}", file=sys.stderr)
                     continue
 
                 scale_key = f"blk.{layer_idx}.{proj_key}.{expert_idx}.numa.{numa_idx}.scale"
@@ -195,7 +196,7 @@ def copy_config_files(original_path: str, output_path: str):
             shutil.copy2(src_path, dst_path)
             print(f"Copied: {config_file}")
         else:
-            print(f"Warning: {config_file} not found in {original_path}, skipping")
+            print(f"Warning: {config_file} not found in {original_path}, skipping", file=sys.stderr)
 
 
 def main():
@@ -222,7 +223,7 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists(args.input_path):
-        print(f"Error: Input path does not exist: {args.input_path}")
+        print(f"Error: Input path does not exist: {args.input_path}", file=sys.stderr)
         return 1
 
     os.makedirs(args.output, exist_ok=True)
@@ -230,7 +231,7 @@ def main():
     print("Discovering layer folders...")
     layer_folders = discover_layers(args.input_path)
     if not layer_folders:
-        print(f"Error: No _layer_* folders found in {args.input_path}")
+        print(f"Error: No _layer_* folders found in {args.input_path}", file=sys.stderr)
         return 1
 
     print(f"Found {len(layer_folders)} layer folders")
