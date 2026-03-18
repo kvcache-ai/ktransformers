@@ -278,6 +278,7 @@ struct GeneralMOEConfig {
   bool save = false;
   bool load = false;
   bool share_backward_bb = false;
+  bool share_cache_pool = false;
 
   // for llamafile
   int m_block = 4;

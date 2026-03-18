@@ -66,6 +66,10 @@ static const bool _is_plain_ = false;
 namespace py = pybind11;
 using namespace pybind11::literals;
 
+// Manually bump this before each rebuild so imports can confirm the loaded
+// extension is the latest build artifact.
+static constexpr int kExtBindingsVersion = 7;
+
 py::object to_float_ptr(uintptr_t input_ptr, int size, ggml_type type) {
   if (type < 0 || type >= GGML_TYPE_COUNT) {
     PyErr_SetString(PyExc_ValueError, "Invalid ggml_type");
@@ -511,6 +515,8 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
+  m.attr("__ext_bindings_version__") = py::int_(kExtBindingsVersion);
+
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())
@@ -769,6 +775,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("save", &GeneralMOEConfig::save)
       .def_readwrite("load", &GeneralMOEConfig::load)
       .def_readwrite("share_backward_bb", &GeneralMOEConfig::share_backward_bb)
+      .def_readwrite("share_cache_pool", &GeneralMOEConfig::share_cache_pool)
       .def_readwrite("m_block", &GeneralMOEConfig::m_block)
       .def_readwrite("group_min_len", &GeneralMOEConfig::group_min_len)
       .def_readwrite("group_max_len", &GeneralMOEConfig::group_max_len)
@@ -1016,4 +1023,9 @@ __attribute__((constructor)) static void install_handlers() {
   sigaction(SIGABRT, &sa, nullptr);
 }
 
-__attribute__((constructor)) void print_pid() { std::cout << "[kt-kernel] PID: " << getpid() << std::endl; }
+__attribute__((constructor)) static void print_ext_bindings_version() {
+  std::cout << "[kt-kernel] ext_bindings version: " << kExtBindingsVersion << ", sft_moe: " << kSftMoeVersion
+            << ", moe_sft_tp: " << kMoeSftTpVersion << std::endl;
+}
+
+__attribute__((constructor)) static void print_pid() { std::cout << "[kt-kernel] PID: " << getpid() << std::endl; }

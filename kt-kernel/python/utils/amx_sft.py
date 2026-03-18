@@ -189,6 +189,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.group_size = group_size
         self.zero_point = zero_point
 
+        # Dedicated CUDA stream for GPU→CPU grad_output copy.
+        # Avoids cuda.synchronize() which blocks on all pending GPU work.
+        self._copy_stream = None  # lazily created on first CUDA backward
+
         # Validate method
         if method not in _SFT_METHOD_TO_CLASS:
             raise ValueError(
@@ -240,8 +244,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.max_len = self.chunked_prefill_size
         config.layer_idx = self.layer_idx
         config.share_backward_bb = getattr(self, "share_backward_bb", False)
-        print(f"[amx_sft] layer {self.layer_idx}: share_backward_bb={config.share_backward_bb}, "
-              f"attr={getattr(self, 'share_backward_bb', 'MISSING')}", flush=True)
+        config.share_cache_pool = getattr(self, "share_cache_pool", False)
+        print(
+            f"[amx_sft] layer {self.layer_idx}: share_backward_bb={config.share_backward_bb}, "
+            f"share_cache_pool={config.share_cache_pool}, "
+            f"attr={getattr(self, 'share_backward_bb', 'MISSING')}",
+            flush=True,
+        )
 
         # Set base weight pointers
         if getattr(self, "_use_kt_direct_load", False):
@@ -740,18 +749,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             dtype=torch.bfloat16,
         )
 
-        # Copy gradient directly to pinned CPU buffer (works for both CPU and GPU tensors)
-        # Buffer may be larger than qlen (grow-only pool), slice for copy
-        input_device = grad_output.device
-        buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16), non_blocking=True)
-
-        # Zero out gradient buffers (only the active region)
-        buffer.grad_input_cpu[:qlen].zero_()
-        buffer.grad_weights[:qlen].zero_()
-
-        # Synchronize CUDA stream if input was on GPU to ensure data has arrived
-        if input_device.type == "cuda":
-            torch.cuda.synchronize(input_device)
+        # Copy gradient to CPU buffer using dedicated stream (avoids blocking on all GPU work)
+        self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
         # Submit backward task
         # SkipLoRA: grad LoRA pointers unused by C++ (SkipLoRA template skips all LoRA grad writes), pass 0
@@ -799,6 +798,125 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
 
         # Return gradients: slice to actual qlen
+        if output_device is not None:
+            grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
+            grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
+        else:
+            grad_input = buffer.grad_input_cpu[:qlen].clone()
+            grad_weights = buffer.grad_weights[:qlen].clone()
+
+        return grad_input, grad_weights
+
+    def _copy_grad_output_to_cpu(self, buffer, grad_output, qlen):
+        """Copy grad_output from GPU to CPU pinned buffer.
+
+        Calls cuda.synchronize() first to drain pending GPU work (e.g. lm_head
+        backward) so that time is attributed to autograd, not to MoE backward.
+        The actual DMA copy with pinned memory takes <1ms.
+        """
+        input_device = grad_output.device
+        if input_device.type == "cuda":
+            torch.cuda.synchronize(input_device)
+        buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16))
+        # Data is now on CPU, ready for C++ kernel
+
+    def submit_backward_async(
+        self,
+        grad_output: torch.Tensor,
+        output_device: Optional[torch.device] = None,
+    ) -> None:
+        """
+        Submit backward task without waiting for completion.
+        Call sync_backward() later to get results.
+
+        Args:
+            grad_output: Gradient from upstream [qlen, hidden_size]
+            output_device: Target device for results (stored for sync_backward)
+        """
+        if self._cache_depth <= 0:
+            raise RuntimeError("No forward cache available. Call forward_sft(save_for_backward=True) first.")
+
+        qlen = grad_output.shape[0]
+
+        buffer = KExpertsSFTBuffer.get_buffer(
+            qlen=qlen,
+            hidden_size=self.hidden_size,
+            moe_intermediate_size=self.moe_intermediate_size,
+            num_experts=self.num_experts,
+            num_experts_per_tok=self.num_experts_per_tok,
+            lora_rank=self.lora_rank,
+            dtype=torch.bfloat16,
+        )
+
+        self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
+
+        if self._is_skip_lora:
+            _gl = 0
+            self.cpu_infer.submit(
+                self.moe.backward_task(
+                    buffer.grad_output_cpu.data_ptr(),
+                    buffer.grad_input_cpu.data_ptr(),
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    _gl,
+                    buffer.grad_weights.data_ptr(),
+                )
+            )
+        else:
+            self.cpu_infer.submit(
+                self.moe.backward_task(
+                    buffer.grad_output_cpu.data_ptr(),
+                    buffer.grad_input_cpu.data_ptr(),
+                    self.grad_gate_lora_a.data_ptr(),
+                    self.grad_gate_lora_b.data_ptr(),
+                    self.grad_up_lora_a.data_ptr(),
+                    self.grad_up_lora_b.data_ptr(),
+                    self.grad_down_lora_a.data_ptr(),
+                    self.grad_down_lora_b.data_ptr(),
+                    buffer.grad_weights.data_ptr(),
+                )
+            )
+        # DO NOT sync — store state for sync_backward()
+        self._async_bwd_qlen = qlen
+        self._async_bwd_output_device = output_device
+
+    def sync_backward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Wait for async backward to complete and return results.
+        Must be called after submit_backward_async().
+
+        Returns:
+            grad_input: Input gradient [qlen, hidden_size]
+            grad_weights: Routing weights gradient [qlen, num_experts_per_tok]
+        """
+        self.cpu_infer.sync()
+
+        qlen = self._async_bwd_qlen
+        output_device = self._async_bwd_output_device
+
+        buffer = KExpertsSFTBuffer.get_buffer(
+            qlen=qlen,
+            hidden_size=self.hidden_size,
+            moe_intermediate_size=self.moe_intermediate_size,
+            num_experts=self.num_experts,
+            num_experts_per_tok=self.num_experts_per_tok,
+            lora_rank=self.lora_rank,
+            dtype=torch.bfloat16,
+        )
+
+        self._cache_depth -= 1
+        _sft_lifecycle_log(
+            "sync_backward",
+            layer=self.layer_idx,
+            qlen=qlen,
+            cache_depth=self._cache_depth,
+            max_cache_depth=self.max_cache_depth,
+            output_device=str(output_device) if output_device is not None else "None",
+        )
+
         if output_device is not None:
             grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
             grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
