@@ -45,6 +45,12 @@ static const bool _is_plain_ = false;
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
 #endif
+// AVX2 backends — always available on x86_64 (no AMX/AVX512 dependency)
+#if defined(__x86_64__)
+#include "operators/avx2/bf16-moe.hpp"
+#include "operators/avx2/fp8-moe.hpp"
+#endif
+
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
 
 #include <cstdint>
@@ -578,6 +584,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_FP8_PERCHANNEL_MOE_TP<amx::GemmKernel224FP8PerChannel>>(moe_module, "AMXFP8PerChannel_MOE");
 #endif
 #endif
+// AVX2 backends — available on all x86_64 (no AMX/AVX512 requirement)
+#if defined(__x86_64__)
+  bind_moe_module<AVX2_BF16_MOE_TP<avx2::GemmKernelAVX2BF16>>(moe_module, "AVX2BF16_MOE");
+  bind_moe_module<AVX2_FP8_MOE_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE");
+#endif
+
 #if defined(USE_MOE_KERNEL)
   bind_moe_module<MOE_KERNEL_TP<moe_kernel::GemmKernelInt8, _is_plain_>>(moe_module, "Int8_KERNEL_MOE");
 #if defined(__aarch64__) && defined(CPU_USE_KML)
