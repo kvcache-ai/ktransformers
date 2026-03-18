@@ -5,7 +5,7 @@ from typing import Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader
+from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader, GPTQSafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
 import kt_kernel_ext.moe as _moe_mod
 
@@ -17,6 +17,7 @@ AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
 AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 AVX2BF16_MOE = getattr(_moe_mod, "AVX2BF16_MOE", None)
 AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
+AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
@@ -26,6 +27,7 @@ _HAS_BF16_SUPPORT = AMXBF16_MOE is not None
 _HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
 _HAS_AVX2_BF16_SUPPORT = AVX2BF16_MOE is not None
 _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
+_HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
 
 
 class AMXMoEWrapper(BaseMoEWrapper):
@@ -370,6 +372,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
+        if method == "GPTQ_INT4" and not _HAS_AVX2_GPTQ_INT4_SUPPORT:
+            raise RuntimeError(
+                "GPTQ_INT4 backend not available.\n"
+                "Please recompile kt_kernel_ext with AVX2 enabled."
+            )
 
         super().__init__(
             layer_idx=layer_idx,
@@ -397,6 +404,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
             elif method == "BF16":
                 NativeMoEWrapper._native_loader_instance = BF16SafeTensorLoader(weight_path)
+            elif method == "GPTQ_INT4":
+                NativeMoEWrapper._native_loader_instance = GPTQSafeTensorLoader(weight_path)
             else:
                 raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
         self.loader = NativeMoEWrapper._native_loader_instance
@@ -521,6 +530,15 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.per_channel = True
             moe_config.quant_config.zero_point = False
             self.moe = AMXFP8PerChannel_MOE(moe_config)
+        elif self.method == "GPTQ_INT4":
+            # GPTQ symmetric INT4: qweight (int32) + scales (fp32)
+            group_size = self.gate_scales[0].shape[0]  # scales shape [K/gs, N], first dim = num_groups
+            # hidden_size / num_groups = group_size
+            actual_gs = self.hidden_size // group_size
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = actual_gs
+            moe_config.quant_config.zero_point = False
+            self.moe = AVX2GPTQInt4_MOE(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2
