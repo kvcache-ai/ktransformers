@@ -65,6 +65,7 @@ class KTMoEWrapper:
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Factory method to create the appropriate backend implementation.
@@ -85,6 +86,7 @@ class KTMoEWrapper:
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
+            numa_nodes: Explicit list of NUMA node IDs for subpool mapping. If None, defaults to sequential.
             method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "FP8", "BF16", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
 
         Returns:
@@ -117,6 +119,7 @@ class KTMoEWrapper:
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
+            numa_nodes=numa_nodes,
         )
 
     # Forward static methods to the base class
