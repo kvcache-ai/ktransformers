@@ -324,7 +324,7 @@ def check_sglang_kt_kernel_support(use_cache: bool = True, silent: bool = False)
             [sys.executable, "-m", "sglang.launch_server", "--help"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=90,  # Increased for slow CUDA init and module loading in some environments
         )
 
         help_output = result.stdout + result.stderr
