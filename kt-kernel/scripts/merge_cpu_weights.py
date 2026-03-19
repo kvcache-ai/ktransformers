@@ -98,9 +98,9 @@ def process_layer(layer_path: str, amx_prefix: str, layer_idx: int) -> dict:
 
             for quant_file in quant_files:
                 filename = os.path.basename(quant_file)
-                parts = filename.split("_")
+                remainder = filename[len(f"{amx_prefix}_{proj_name}_"):]
                 try:
-                    expert_idx = int(parts[2])
+                    expert_idx = int(remainder.split("_")[0])
                 except (ValueError, IndexError):
                     print(f"    Warning: Could not parse expert index from {filename}", file=sys.stderr)
                     continue
@@ -110,9 +110,9 @@ def process_layer(layer_path: str, amx_prefix: str, layer_idx: int) -> dict:
 
             for scale_file in scale_files:
                 filename = os.path.basename(scale_file)
-                parts = filename.split("_")
+                remainder = filename[len(f"{amx_prefix}_{proj_name}_"):]
                 try:
-                    expert_idx = int(parts[2])
+                    expert_idx = int(remainder.split("_")[0])
                 except (ValueError, IndexError):
                     print(f"    Warning: Could not parse expert index from {filename}", file=sys.stderr)
                     continue
