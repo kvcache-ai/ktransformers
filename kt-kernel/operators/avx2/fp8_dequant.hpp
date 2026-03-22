@@ -39,11 +39,9 @@ struct FP8LUT {
         val = 0.0f;                                   // zero
       } else if (exp == 0) {
         val = std::ldexp((float)man / 8.0f, -6);      // subnormal: 2^(-6) * (0.man)
-      } else if (exp == 15) {
-        val = 0.0f;  // NaN → treat as 0 for computation safety
-        // All exp==15 are NaN in E4M3 (no Inf). Using 0 avoids NaN propagation
-        // in GEMM. This matches the practical behavior where NaN weights don't
-        // appear in trained models.
+      } else if (exp == 15 && man == 7) {
+        val = 0.0f;  // Only 0x7F is NaN in E4M3. Treat as 0 to avoid propagation.
+        // E4M3 has no Inf. exp=15 with man=0-6 are valid finite values (256-448).
       } else {
         val = std::ldexp(1.0f + (float)man / 8.0f, exp - 7);  // normal: 2^(exp-7) * (1.man)
       }
