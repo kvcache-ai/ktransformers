@@ -8,7 +8,6 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
-// Bump on every change to this file. Printed at construction time.
 static constexpr int kMoeSftTpVersion = 3;
 
 #include <immintrin.h>
@@ -575,12 +574,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     // Run forward on each NUMA node
-    pool->dispense_backend()->do_numa_job([this, qlen, k, expert_ids, input, weights, save_for_backward, start_sft](int numa_id) {
-      auto start_fwd_tp = sft_timer::get_trace_timestamp();
+    pool->dispense_backend()->do_numa_job([this, qlen, k, expert_ids, input, weights, save_for_backward](int numa_id) {
       tps[numa_id]->forward_sft(qlen, k, expert_ids, weights, input, this->local_output_numa[numa_id],
                                 save_for_backward);
-      auto end_fwd_tp = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace("fwd_tp", start_fwd_tp, end_fwd_tp, numa_id, 0);
     });
 
     auto end_fwd = sft_timer::get_trace_timestamp();
@@ -651,16 +647,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
     if constexpr (kSkipLoRA) lora_rank = 0;
 
-    auto ts_after_metadata = sft_timer::get_trace_timestamp();
-
     // Snapshot active expert metadata before dispatch (cache is popped inside backward())
     int active_count = tps[0]->get_cache_activated_expert_count();
     std::vector<int> active_expert_map(active_count);
     if (active_count > 0) {
       std::memcpy(active_expert_map.data(), tps[0]->get_cache_expert_id_map(), active_count * sizeof(int));
     }
-
-    auto ts_after_snapshot = sft_timer::get_trace_timestamp();
 
     // =====================================================================
     // Allocate per-TP temporary buffers.
@@ -717,51 +709,36 @@ class TP_MOE_SFT : public TP_MOE<T> {
       clear_bytes[i] = offset;
     }
 
-    auto ts_after_alloc_loop = sft_timer::get_trace_timestamp();
+    // Parallel memset: zero only per-TP sparse partials and per-TP grad_input/grad_weights partials.
+    // The caller is responsible for passing zero-initialized final grad tensors.
+    struct ClearSeg {
+      uint8_t* ptr;
+      size_t len;
+    };
+    std::vector<ClearSeg> clear_segs;
+    clear_segs.reserve((size_t)tp_count * 8);
 
-    // Step-1 optimization: only memset grad_input and grad_weights (tiny, ~2MB).
-    // FP32 sparse LoRA grad buffers (~384MB) are zeroed per-expert inside backward kernels.
-    {
-      struct ClearSeg { uint8_t* ptr; size_t len; };
-      std::vector<ClearSeg> clear_segs;
-      clear_segs.reserve((size_t)tp_count * 2);
+    constexpr size_t kChunkBytes = 2 * 1024 * 1024;
 
-      constexpr size_t kChunkBytes = 2 * 1024 * 1024;
-      for (int tp_idx = 0; tp_idx < tp_count; tp_idx++) {
-        // Only zero grad_input and grad_weights partials
-        if (part_grad_input_[tp_idx]) {
-          size_t gi_bytes = (size_t)qlen * (size_t)hidden_size * sizeof(ggml_bf16_t);
-          auto* ptr = reinterpret_cast<uint8_t*>(part_grad_input_[tp_idx]);
-          for (size_t off = 0; off < gi_bytes; off += kChunkBytes)
-            clear_segs.push_back(ClearSeg{ptr + off, std::min(kChunkBytes, gi_bytes - off)});
-        }
-        if (part_grad_weights_[tp_idx]) {
-          size_t gw_bytes = (size_t)qlen * (size_t)k * sizeof(float);
-          auto* ptr = reinterpret_cast<uint8_t*>(part_grad_weights_[tp_idx]);
-          for (size_t off = 0; off < gw_bytes; off += kChunkBytes)
-            clear_segs.push_back(ClearSeg{ptr + off, std::min(kChunkBytes, gw_bytes - off)});
-        }
-      }
-
-      if (!clear_segs.empty()) {
-        pool->do_work_stealing_job((int)clear_segs.size(), nullptr,
-                                   [&](int seg_idx) {
-                                     const auto& seg = clear_segs[(size_t)seg_idx];
-                                     std::memset(seg.ptr, 0, seg.len);
-                                   },
-                                   nullptr, "bwd_alloc_memset");
+    // Zero per-TP sparse partial pools
+    for (int tp_idx = 0; tp_idx < tp_count; tp_idx++) {
+      if (!backward_temp_pools_[tp_idx] || clear_bytes[tp_idx] == 0) continue;
+      uint8_t* base = static_cast<uint8_t*>(backward_temp_pools_[tp_idx]);
+      size_t total = clear_bytes[tp_idx];
+      for (size_t off = 0; off < total; off += kChunkBytes) {
+        size_t len = std::min(kChunkBytes, total - off);
+        clear_segs.push_back(ClearSeg{base + off, len});
       }
     }
 
-    auto ts_after_clear_segs = sft_timer::get_trace_timestamp();
+    pool->do_work_stealing_job((int)clear_segs.size(), nullptr,
+                               [&](int seg_idx) {
+                                 const auto& seg = clear_segs[(size_t)seg_idx];
+                                 std::memset(seg.ptr, 0, seg.len);
+                               },
+                               nullptr, "bwd_alloc_memset");
 
     auto end_alloc = sft_timer::get_trace_timestamp();
-
-    // Emit fine-grained bwd_alloc sub-phase traces (direct, not deferred via do_numa_job)
-    sft_timer::add_kernel_trace("bwd_alloc_metadata", start_sft, ts_after_metadata, 0, 0);
-    sft_timer::add_kernel_trace("bwd_alloc_snapshot", ts_after_metadata, ts_after_snapshot, 0, 0);
-    sft_timer::add_kernel_trace("bwd_alloc_buffers", ts_after_snapshot, ts_after_alloc_loop, 0, 0);
-    sft_timer::add_kernel_trace("bwd_alloc_clear_segs", ts_after_alloc_loop, ts_after_clear_segs, 0, 0);
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
@@ -943,73 +920,38 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
 
       // Sparse merge for down_lora_b: [active_count, H, r] FP32 → [E, H, r] BF16
-      // Merged with grad_weights merge into one dispatch to save barrier overhead.
       {
-        const int sparse_rows = active_count;
+        const int sparse_rows = active_count;  // one task per active expert
         auto* out_down_b = (ggml_bf16_t*)grad_down_lora_b;
-        const size_t gw_total = (grad_weights != nullptr) ? (size_t)qlen * (size_t)k : 0;
-        constexpr size_t kGwBlock = 256;  // smaller blocks for better parallelism
-        const int gw_tasks = (int)((gw_total + kGwBlock - 1) / kGwBlock);
-        const int total_tasks = sparse_rows + gw_tasks;
-
         pool->do_work_stealing_job(
-            total_tasks, nullptr,
-            [&, sparse_rows, gw_total, gw_tasks](int task_id) {
-              if (task_id < sparse_rows) {
-                // === merge_down_lora_b ===
-                int task = task_id;
-                int expert_idx = active_expert_map[task];
-                size_t src_expert_base = (size_t)task * hidden_size * lora_rank;
-                size_t dst_expert_base = (size_t)expert_idx * hidden_size * lora_rank;
+            sparse_rows, nullptr,
+            [&](int task) {
+              int expert_idx = active_expert_map[task];
+              size_t src_expert_base = (size_t)task * hidden_size * lora_rank;
+              size_t dst_expert_base = (size_t)expert_idx * hidden_size * lora_rank;
 
-                for (int hh = 0; hh < hidden_size; hh++) {
-                  size_t src_row = src_expert_base + (size_t)hh * lora_rank;
-                  size_t dst_row = dst_expert_base + (size_t)hh * lora_rank;
-                  for (int r = 0; r < lora_rank; r++) {
-                    float sum = ((const float*)tp_fp32_down_b[0])[src_row + r];
-                    for (int tp = 1; tp < tp_count; tp++) {
-                      sum += ((const float*)tp_fp32_down_b[tp])[src_row + r];
-                    }
-                    out_down_b[dst_row + r] = GGML_FP32_TO_BF16(sum);
+              for (int hh = 0; hh < hidden_size; hh++) {
+                size_t src_row = src_expert_base + (size_t)hh * lora_rank;
+                size_t dst_row = dst_expert_base + (size_t)hh * lora_rank;
+                for (int r = 0; r < lora_rank; r++) {
+                  float sum = ((const float*)tp_fp32_down_b[0])[src_row + r];
+                  for (int tp = 1; tp < tp_count; tp++) {
+                    sum += ((const float*)tp_fp32_down_b[tp])[src_row + r];
                   }
-                }
-              } else if (grad_weights != nullptr) {
-                // === merge_grad_weights ===
-                int gw_id = task_id - sparse_rows;
-                const size_t begin = (size_t)gw_id * kGwBlock;
-                size_t end = begin + kGwBlock;
-                if (end > gw_total) end = gw_total;
-
-                float* out_gw = (float*)grad_weights;
-                const float* s0 = part_grad_weights_[0];
-                const float* s1 = (tp_count > 1) ? part_grad_weights_[1] : nullptr;
-                const float* s2 = (tp_count > 2) ? part_grad_weights_[2] : nullptr;
-                const float* s3 = (tp_count > 3) ? part_grad_weights_[3] : nullptr;
-
-                size_t i = begin;
-                for (; i + 16 <= end; i += 16) {
-                  __m512 v = _mm512_loadu_ps(s0 + i);
-                  if (s1) v = _mm512_add_ps(v, _mm512_loadu_ps(s1 + i));
-                  if (s2) v = _mm512_add_ps(v, _mm512_loadu_ps(s2 + i));
-                  if (s3) v = _mm512_add_ps(v, _mm512_loadu_ps(s3 + i));
-                  _mm512_storeu_ps(out_gw + i, v);
-                }
-                for (; i < end; i++) {
-                  float sum = s0[i];
-                  if (s1) sum += s1[i];
-                  if (s2) sum += s2[i];
-                  if (s3) sum += s3[i];
-                  out_gw[i] = sum;
+                  out_down_b[dst_row + r] = GGML_FP32_TO_BF16(sum);
                 }
               }
             },
-            nullptr, "merge_down_lora_b_and_grad_weights");
+            nullptr, "merge_down_lora_b");
       }
-    } else if (grad_weights != nullptr) {
-      // SkipLoRA path: only merge grad_weights
+    }  // if constexpr (!kSkipLoRA)
+
+    // Merge grad_weights from all NUMA nodes (sum them together)
+    // Each NUMA computes partial grad_weights based on its down_output partition
+    if (grad_weights != nullptr) {
       float* out_grad_weights = (float*)grad_weights;
       const size_t total = (size_t)qlen * (size_t)k;
-      constexpr size_t kBlock = 256;
+      constexpr size_t kBlock = 4096;
       const int tasks = (int)((total + kBlock - 1) / kBlock);
       pool->do_work_stealing_job(
           tasks, nullptr,
@@ -1020,15 +962,23 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
             const float* s0 = part_grad_weights_[0];
             const float* s1 = (tp_count > 1) ? part_grad_weights_[1] : nullptr;
+            const float* s2 = (tp_count > 2) ? part_grad_weights_[2] : nullptr;
+            const float* s3 = (tp_count > 3) ? part_grad_weights_[3] : nullptr;
 
             size_t i = begin;
             for (; i + 16 <= end; i += 16) {
               __m512 v = _mm512_loadu_ps(s0 + i);
               if (s1) v = _mm512_add_ps(v, _mm512_loadu_ps(s1 + i));
+              if (s2) v = _mm512_add_ps(v, _mm512_loadu_ps(s2 + i));
+              if (s3) v = _mm512_add_ps(v, _mm512_loadu_ps(s3 + i));
               _mm512_storeu_ps(out_grad_weights + i, v);
             }
             for (; i < end; i++) {
-              out_grad_weights[i] = s0[i] + (s1 ? s1[i] : 0.0f);
+              float sum = s0[i];
+              if (s1) sum += s1[i];
+              if (s2) sum += s2[i];
+              if (s3) sum += s3[i];
+              out_grad_weights[i] = sum;
             }
           },
           nullptr, "merge_grad_weights");

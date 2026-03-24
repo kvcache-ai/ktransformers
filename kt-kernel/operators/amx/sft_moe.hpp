@@ -11,47 +11,6 @@
 // Bump on every change to this file. Printed at construction time.
 static constexpr int kSftMoeVersion = 5;
 
-// =====================================================
-// AVX vectorized BF16 LoRA grad write-back helpers
-// =====================================================
-
-// Vectorized BF16 read-modify-write for rank=8:
-//   out[i*rank..i*rank+7] += acc[i*rank..i*rank+7] * scale
-// Processes `count` rows of `rank` BF16 values each.
-static inline void bf16_fma_writeback_rank8(ggml_bf16_t* out, const float* acc,
-                                            int count, int rank, float scale) {
-  (void)rank;  // always 8
-  __m256 scale_vec = _mm256_set1_ps(scale);
-  for (int i = 0; i < count; i++) {
-    ggml_bf16_t* row_out = out + static_cast<size_t>(i) * 8;
-    const float* row_acc = acc + static_cast<size_t>(i) * 8;
-    // BF16 → FP32: zero-extend 16→32 bit, shift left 16
-    __m128i bf16_in = _mm_loadu_si128((const __m128i*)row_out);
-    __m256 fp32_cur = _mm256_castsi256_ps(
-        _mm256_slli_epi32(_mm256_cvtepu16_epi32(bf16_in), 16));
-    // FMA: cur += acc * scale
-    __m256 acc_val = _mm256_loadu_ps(row_acc);
-    fp32_cur = _mm256_fmadd_ps(acc_val, scale_vec, fp32_cur);
-    // FP32 → BF16 (AVX512_BF16)
-    __m128i bf16_out = (__m128i)_mm256_cvtneps_pbh(fp32_cur);
-    _mm_storeu_si128((__m128i*)row_out, bf16_out);
-  }
-}
-
-// Vectorized FP32 scale-write for rank=8:
-//   out[i*rank..i*rank+7] = acc[i*rank..i*rank+7] * scale
-static inline void fp32_scale_write_rank8(float* out, const float* acc,
-                                          int count, int rank, float scale) {
-  (void)rank;
-  __m256 scale_vec = _mm256_set1_ps(scale);
-  for (int i = 0; i < count; i++) {
-    float* row_out = out + static_cast<size_t>(i) * 8;
-    const float* row_acc = acc + static_cast<size_t>(i) * 8;
-    __m256 val = _mm256_mul_ps(_mm256_loadu_ps(row_acc), scale_vec);
-    _mm256_storeu_ps(row_out, val);
-  }
-}
-
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -204,6 +163,7 @@ inline bool is_nan_check_enabled() {
 // Controlled by SFT_MOE_DUMP environment variable
 // =====================================================
 inline bool is_dump_enabled() {
+  return false;
   static int enabled = -1;
   if (enabled < 0) {
     const char* env = getenv("SFT_MOE_DUMP");
@@ -821,27 +781,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void* backward_pool_ = nullptr;
   size_t backward_pool_bytes_ = 0;
 
-  // Duplicate pools for up-path in merged gate+up GEMM
-  void* gu_up_ba_pool_ = nullptr;         // BufferA for up quantized grad
-  void* gu_up_bc_pool_ = nullptr;         // BufferC for up GEMM output
-  void* gu_up_bf16_pool_ = nullptr;       // BF16 output buffer for up
-  size_t gu_up_ba_pool_bytes_ = 0;
-  size_t gu_up_bc_pool_bytes_ = 0;
-  size_t gu_up_bf16_pool_bytes_ = 0;
-
-
-  // Per-expert buffers for up-path (gate uses down_ba_, grad_gate_up_bc_, grad_output_bf16_ptr_)
-  std::vector<std::shared_ptr<typename T::BufferA>> down_ba_up_;             // [expert_num]
-  std::vector<std::shared_ptr<typename T::BufferC>> grad_gate_up_bc_up_;     // [expert_num]
-  std::vector<ggml_bf16_t*> grad_output_bf16_up_ptr_;                        // [expert_num]
-
-  // Pre-allocated FP32 accumulators for gate+up LoRA grad_B
-  // Avoids 5ms std::vector alloc+zero on every backward call
-  float* gu_gate_gradb_accum_ = nullptr;  // [expert_num * intermediate_size * lora_rank]
-  float* gu_up_gradb_accum_ = nullptr;    // [expert_num * intermediate_size * lora_rank]
-  size_t gu_gradb_accum_pool_bytes_ = 0;
-  void* gu_gradb_accum_pool_ = nullptr;
-
   // Backward buffer pool sizes
   size_t backward_ba_pool_bytes_ = 0;
   size_t backward_bc_pool_bytes_ = 0;
@@ -1077,10 +1016,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     required += round_up(backward_ba_pool_bytes_, kAmxAlignment);
     required += round_up(backward_bc_pool_bytes_, kAmxAlignment);
     required += round_up(grad_output_bf16_pool_bytes_, kAmxAlignment);
-    required += round_up(gu_up_ba_pool_bytes_, kAmxAlignment);
-    required += round_up(gu_up_bc_pool_bytes_, kAmxAlignment);
-    required += round_up(gu_up_bf16_pool_bytes_, kAmxAlignment);
-    required += round_up(gu_gradb_accum_pool_bytes_, kAmxAlignment);
     required += round_up(lora_grad_out_pool_bytes_, kAmxAlignment);
     required += round_up(lora_inter_proj_pool_bytes_, kAmxAlignment);
     required += round_up(lora_grad_times_b_pool_bytes_, kAmxAlignment);
@@ -1114,15 +1049,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     assign(&backward_ba_pool_, backward_ba_pool_bytes_);
     assign(&backward_bc_pool_, backward_bc_pool_bytes_);
     assign(&grad_output_bf16_pool_, grad_output_bf16_pool_bytes_);
-    assign(&gu_up_ba_pool_, gu_up_ba_pool_bytes_);
-    assign(&gu_up_bc_pool_, gu_up_bc_pool_bytes_);
-    assign(&gu_up_bf16_pool_, gu_up_bf16_pool_bytes_);
-    assign(&gu_gradb_accum_pool_, gu_gradb_accum_pool_bytes_);
-    if (gu_gradb_accum_pool_ && gu_gradb_accum_pool_bytes_ > 0) {
-      size_t half = gu_gradb_accum_pool_bytes_ / 2;
-      gu_gate_gradb_accum_ = (float*)gu_gradb_accum_pool_;
-      gu_up_gradb_accum_ = (float*)((char*)gu_gradb_accum_pool_ + round_up(half, kAmxAlignment));
-    }
 
     assign((void**)&lora_grad_out_pool_, lora_grad_out_pool_bytes_);
     assign((void**)&lora_inter_proj_pool_, lora_inter_proj_pool_bytes_);
@@ -3135,19 +3061,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       // BF16 buffer for scattered grad_output
       grad_output_bf16_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(ggml_bf16_t) + align_overhead;
 
-      // Duplicate pools for up-path in merged gate+up GEMM
-      // BufferA: intermediate_size dimension (same as down_ba_)
-      gu_up_ba_pool_bytes_ = T::BufferA::required_size(safe_alloc_tokens, config_.intermediate_size) + align_overhead;
-      // BufferC: hidden_size dimension (same as grad_gate_up_bc_)
-      gu_up_bc_pool_bytes_ = T::BufferC::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead;
-      // BF16: hidden_size dimension (same as grad_output_bf16_)
-      gu_up_bf16_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(ggml_bf16_t) + align_overhead;
-
-      // FP32 accumulators for gate+up LoRA grad_B: 2 × expert_num × intermediate_size × lora_rank
-      gu_gradb_accum_pool_bytes_ =
-          2 * static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_ * sizeof(float) +
-          align_overhead;
-
       // LoRA gradient computation FP32 pools (used in bwd_down_lora_precompute and grad computation)
       // Total tokens across all activated experts = safe_alloc_tokens
       lora_grad_out_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(float) + align_overhead;
@@ -3179,10 +3092,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       backward_ba_pool_bytes_ = 0;
       backward_bc_pool_bytes_ = 0;
       grad_output_bf16_pool_bytes_ = 0;
-      gu_up_ba_pool_bytes_ = 0;
-      gu_up_bc_pool_bytes_ = 0;
-      gu_up_bf16_pool_bytes_ = 0;
-      gu_gradb_accum_pool_bytes_ = 0;
       backward_bb_pool_bytes_ = 0;
       lora_grad_out_pool_bytes_ = 0;
       lora_inter_proj_pool_bytes_ = 0;
@@ -3325,10 +3234,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     grad_intermediate_bc_.resize(config_.expert_num);
     grad_gate_up_bc_.resize(config_.expert_num);
     grad_output_bf16_ptr_.resize(config_.expert_num);
-    // Up-path duplicates for merged gate+up GEMM
-    down_ba_up_.resize(config_.expert_num);
-    grad_gate_up_bc_up_.resize(config_.expert_num);
-    grad_output_bf16_up_ptr_.resize(config_.expert_num);
 
     // Resize vectors - backward BufferB (transposed base weights)
     gate_backward_bb_.resize(config_.expert_num);
@@ -3419,11 +3324,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       // BF16 pointer: will be assigned in backward
       grad_output_bf16_ptr_[i] = nullptr;
-
-      // Up-path duplicates for merged gate+up GEMM
-      down_ba_up_[i] = std::make_shared<typename T::BufferA>(max_m, config_.intermediate_size, nullptr);
-      grad_gate_up_bc_up_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
-      grad_output_bf16_up_ptr_[i] = nullptr;
     }
 
     // =====================================================
@@ -5013,9 +4913,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         max_down_lora_tokens = std::max(max_down_lora_tokens, num_tokens);
       }
 
-      // Step-1 note: FP32 sparse buffers are NOT pre-zeroed.
-      // First write uses '=' (overwrite), subsequent writes use '+=' (accumulate).
-
       const float scale = lora_scaling_;
       constexpr int kDownGradABBlockedThreshold = 4096;
 
@@ -5084,13 +4981,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 }
 
                 if (use_fp32_down_b) {
-                  // Step-1 opt: '=' instead of '+=' — each (expert, h_block) written by exactly one task.
-                  // No pre-zeroing needed.
                   for (int hh = 0; hh < block_len; hh++) {
                     float* fp32_out = fp32_grad_down_lora_b + buf.lora_b_offset + static_cast<size_t>(task.start + hh) * rank;
                     float* acc_row = accum + static_cast<size_t>(hh) * rank;
                     for (int r = 0; r < rank; r++) {
-                      fp32_out[r] = acc_row[r] * scale;
+                      fp32_out[r] += acc_row[r] * scale;
                     }
                   }
                 } else {
@@ -5300,104 +5195,63 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           int grad_b_blocks = (hidden + kDownGradBTile - 1) / kDownGradBTile;
           int grad_a_blocks = (inter_size + kDownGradATile - 1) / kDownGradATile;
 
-          // Merged: write grad_B and grad_A in one dispatch (was two separate dispatches).
-          int total_write_tasks = activated_expert * (grad_b_blocks + grad_a_blocks);
-          int ab_boundary = activated_expert * grad_b_blocks;
           pool->do_work_stealing_job(
-              total_write_tasks, nullptr,
-              [&, hidden, inter_size, rank, scale, grad_b_elems, grad_a_elems,
-               grad_b_blocks, grad_a_blocks, ab_boundary, use_fp32_down_b, down_a_row_stride](int task_id) {
-                if (task_id < ab_boundary) {
-                  // === Write grad_B ===
-                  int expert_task = task_id / grad_b_blocks;
-                  int block_idx = task_id % grad_b_blocks;
-                  LoraGradBuf& buf = lora_grad_bufs[expert_task];
-                  if (buf.num_tokens == 0) return;
+              activated_expert * grad_b_blocks, nullptr,
+              [&, hidden, rank, scale, grad_b_elems, grad_b_blocks, use_fp32_down_b](int task_id) {
+                int expert_task = task_id / grad_b_blocks;
+                int block_idx = task_id % grad_b_blocks;
+                LoraGradBuf& buf = lora_grad_bufs[expert_task];
+                if (buf.num_tokens == 0) return;
 
-                  int h_start = block_idx * kDownGradBTile;
-                  int h_end = std::min(hidden, h_start + kDownGradBTile);
-                  float* grad_b_global = grad_b_accum_all + static_cast<size_t>(expert_task) * grad_b_elems;
+                int h_start = block_idx * kDownGradBTile;
+                int h_end = std::min(hidden, h_start + kDownGradBTile);
+                float* grad_b_global = grad_b_accum_all + static_cast<size_t>(expert_task) * grad_b_elems;
 
-                  if (use_fp32_down_b) {
-                    if (rank == 8) {
-                      fp32_scale_write_rank8(
-                          fp32_grad_down_lora_b + buf.lora_b_offset + static_cast<size_t>(h_start) * rank,
-                          grad_b_global + static_cast<size_t>(h_start) * rank,
-                          h_end - h_start, rank, scale);
-                    } else {
-                      for (int hh = h_start; hh < h_end; hh++) {
-                        float* fp32_out = fp32_grad_down_lora_b + buf.lora_b_offset + static_cast<size_t>(hh) * rank;
-                        float* acc_row = grad_b_global + static_cast<size_t>(hh) * rank;
-                        for (int r = 0; r < rank; r++) {
-                          fp32_out[r] = acc_row[r] * scale;
-                        }
-                      }
-                    }
-                  } else {
-                    if (rank == 8) {
-                      bf16_fma_writeback_rank8(
-                          grad_down_b + buf.lora_b_offset + static_cast<size_t>(h_start) * rank,
-                          grad_b_global + static_cast<size_t>(h_start) * rank,
-                          h_end - h_start, rank, scale);
-                    } else {
-                      for (int hh = h_start; hh < h_end; hh++) {
-                        ggml_bf16_t* out = grad_down_b + buf.lora_b_offset + static_cast<size_t>(hh) * rank;
-                        float* acc_row = grad_b_global + static_cast<size_t>(hh) * rank;
-                        for (int r = 0; r < rank; r++) {
-                          float cur = GGML_BF16_TO_FP32(out[r]);
-                          cur += acc_row[r] * scale;
-                          out[r] = GGML_FP32_TO_BF16(cur);
-                        }
-                      }
+                if (use_fp32_down_b) {
+                  for (int hh = h_start; hh < h_end; hh++) {
+                    float* fp32_out = fp32_grad_down_lora_b + buf.lora_b_offset + static_cast<size_t>(hh) * rank;
+                    float* acc_row = grad_b_global + static_cast<size_t>(hh) * rank;
+                    for (int r = 0; r < rank; r++) {
+                      fp32_out[r] += acc_row[r] * scale;
                     }
                   }
                 } else {
-                  // === Write grad_A ===
-                  int local_id = task_id - ab_boundary;
-                  int expert_task = local_id / grad_a_blocks;
-                  int block_idx = local_id % grad_a_blocks;
-                  LoraGradBuf& buf = lora_grad_bufs[expert_task];
-                  if (buf.num_tokens == 0) return;
-
-                  int i_start = block_idx * kDownGradATile;
-                  int i_end = std::min(inter_size, i_start + kDownGradATile);
-                  float* grad_a_global = grad_a_accum_all + static_cast<size_t>(expert_task) * grad_a_elems;
-
-                  for (int r = 0; r < rank; r++) {
-                    ggml_bf16_t* grad_row =
-                        grad_down_a + buf.lora_a_offset + static_cast<size_t>(r) * down_a_row_stride + i_start;
-                    int len = i_end - i_start;
-                    int ii = 0;
-                    // AVX512: 16 BF16 at a time, gather from strided grad_a_global
-                    __m512 scale_v = _mm512_set1_ps(scale);
-                    __m512i stride_idx = _mm512_mullo_epi32(
-                        _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15),
-                        _mm512_set1_epi32(rank));
-                    for (; ii + 16 <= len; ii += 16) {
-                      // Load 16 BF16 → 16 FP32
-                      __m256i bf16_in = _mm256_loadu_si256((const __m256i*)(grad_row + ii));
-                      __m512 fp32_cur = _mm512_castsi512_ps(
-                          _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16_in), 16));
-                      // Gather 16 FP32 from grad_a_global with stride=rank
-                      __m512i base_idx = _mm512_add_epi32(
-                          _mm512_set1_epi32(static_cast<int>((i_start + ii) * rank + r)),
-                          stride_idx);
-                      __m512 acc_val = _mm512_i32gather_ps(base_idx, grad_a_global, 4);
-                      // FMA + convert back
-                      fp32_cur = _mm512_fmadd_ps(acc_val, scale_v, fp32_cur);
-                      __m256i bf16_out = (__m256i)_mm512_cvtneps_pbh(fp32_cur);
-                      _mm256_storeu_si256((__m256i*)(grad_row + ii), bf16_out);
-                    }
-                    // Scalar remainder
-                    for (; ii < len; ii++) {
-                      float cur = GGML_BF16_TO_FP32(grad_row[ii]);
-                      cur += grad_a_global[static_cast<size_t>(i_start + ii) * rank + r] * scale;
-                      grad_row[ii] = GGML_FP32_TO_BF16(cur);
+                  for (int hh = h_start; hh < h_end; hh++) {
+                    ggml_bf16_t* out = grad_down_b + buf.lora_b_offset + static_cast<size_t>(hh) * rank;
+                    float* acc_row = grad_b_global + static_cast<size_t>(hh) * rank;
+                    for (int r = 0; r < rank; r++) {
+                      float cur = GGML_BF16_TO_FP32(out[r]);
+                      cur += acc_row[r] * scale;
+                      out[r] = GGML_FP32_TO_BF16(cur);
                     }
                   }
                 }
               },
-              nullptr, "bwd_down_lora_write_AB");
+              nullptr, "bwd_down_lora_write_B");
+
+          pool->do_work_stealing_job(
+              activated_expert * grad_a_blocks, nullptr,
+              [&, inter_size, rank, scale, grad_a_elems, grad_a_blocks, down_a_row_stride](int task_id) {
+                int expert_task = task_id / grad_a_blocks;
+                int block_idx = task_id % grad_a_blocks;
+                LoraGradBuf& buf = lora_grad_bufs[expert_task];
+                if (buf.num_tokens == 0) return;
+
+                int i_start = block_idx * kDownGradATile;
+                int i_end = std::min(inter_size, i_start + kDownGradATile);
+                float* grad_a_global = grad_a_accum_all + static_cast<size_t>(expert_task) * grad_a_elems;
+
+                for (int r = 0; r < rank; r++) {
+                  ggml_bf16_t* grad_row =
+                      grad_down_a + buf.lora_a_offset + static_cast<size_t>(r) * down_a_row_stride + i_start;
+                  for (int ii = i_start; ii < i_end; ii++) {
+                    float cur = GGML_BF16_TO_FP32(grad_row[ii - i_start]);
+                    cur += grad_a_global[static_cast<size_t>(ii) * rank + r] * scale;
+                    grad_row[ii - i_start] = GGML_FP32_TO_BF16(cur);
+                  }
+                }
+              },
+              nullptr, "bwd_down_lora_write_A");
         }
       }
     }
@@ -5626,34 +5480,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
 
-      // Allocate BufferC for grad_gate_up (gate path)
+      // Allocate BufferC for grad_gate_up
       grad_gate_up_bc_[expert_idx]->max_m = local_max_m;
       grad_gate_up_bc_[expert_idx]->set_data(grad_gate_up_bc_ptr);
       grad_gate_up_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
-    }
-
-    // Allocate up-path duplicate buffers for merged gate+up GEMM
-    {
-      char* up_ba_ptr = (char*)gu_up_ba_pool_;
-      char* up_bc_ptr = (char*)gu_up_bc_pool_;
-      char* up_bf16_ptr = (char*)gu_up_bf16_pool_;
-      for (int task_id = 0; task_id < activated_expert; task_id++) {
-        int expert_idx = m_expert_id_map_[task_id];
-        int m = m_local_num_[expert_idx];
-        if (m == 0) continue;
-        size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
-
-        down_ba_up_[expert_idx]->max_m = local_max_m;
-        down_ba_up_[expert_idx]->set_data(up_ba_ptr);
-        up_ba_ptr += align64(T::BufferA::required_size(local_max_m, config_.intermediate_size));
-
-        grad_gate_up_bc_up_[expert_idx]->max_m = local_max_m;
-        grad_gate_up_bc_up_[expert_idx]->set_data(up_bc_ptr);
-        up_bc_ptr += align64(T::BufferC::required_size(local_max_m, config_.hidden_size));
-
-        grad_output_bf16_up_ptr_[expert_idx] = (ggml_bf16_t*)up_bf16_ptr;
-        up_bf16_ptr += align64(local_max_m * config_.hidden_size * sizeof(ggml_bf16_t));
-      }
     }
 
     // Allocate LoRA intermediate buffers from shared pools (for LoRA backward pass)
@@ -5773,20 +5603,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           task_name);
     };
 
-    // =====================================================
-    // Merged gate+up base pass: quantize + GEMM in one dispatch
-    // Gate uses: down_ba_, grad_gate_up_bc_, grad_output_bf16_ptr_
-    // Up uses:   down_ba_up_, grad_gate_up_bc_up_, grad_output_bf16_up_ptr_
-    // No buffer conflicts → gate and up experts can run in parallel.
-    // =====================================================
-    {
-      // Step 1: Quantize both gate and up grads to their respective BufferA
-      // Interleaved: task_id/2=expert, task_id%2=do_up (same thread does gate+up for same expert)
+    auto base_pass = [&](bool do_up) {
+      const char* quant_name = do_up ? "bwd_gu_base_q_up" : "bwd_gu_base_q_gate";
+      const char* gemm_name = do_up ? "bwd_gu_base_gemm_up" : "bwd_gu_base_gemm_gate";
+
+      // Quantize grad to BufferA
       direct_or_pool(
-          activated_expert * 2,
-          [&](int task_id2) {
-            int task_id = task_id2 / 2;
-            bool do_up = task_id2 % 2;
+          activated_expert,
+          [&, do_up](int task_id) {
             int expert_idx = m_expert_id_map_[task_id];
             int m = m_local_num_[expert_idx];
             if (m == 0) return;
@@ -5794,42 +5618,46 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             size_t offset = expert_offsets[task_id];
             ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
                                       : (grad_gate_output_ + offset * config_.intermediate_size);
-            auto& ba = do_up ? down_ba_up_[expert_idx] : down_ba_[expert_idx];
-            ba->from_mat(m, grad, 0, 1);
+            down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
           },
-          "bwd_gu_base_q");
+          quant_name);
 
-      // Step 2: GEMM both gate and up in one dispatch
-      // Use interleaved layout (same as forward fwd_gate_up_gemm):
-      // task_id2 / 2 = task_id (expert × nth), task_id2 % 2 = do_up
-      // This ensures gate and up for same expert run on same thread sequentially,
-      // avoiding cache thrashing between gate_backward_bb_ and up_backward_bb_.
       int nth = T::recommended_nth(config_.hidden_size);
       pool->do_work_stealing_job(
-          nth * activated_expert * 2, [](int _) { T::config(); },
-          [&, nth](int task_id2) {
-            int task_id = task_id2 / 2;
-            bool do_up = task_id2 % 2;
+          nth * activated_expert, [](int _) { T::config(); },
+          [&, do_up, nth](int task_id) {
             int task_idx = task_id / nth;
             int expert_idx = m_expert_id_map_[task_idx];
             int ith = task_id % nth;
             int m = m_local_num_[expert_idx];
             if (m == 0) return;
 
-            auto& ba = do_up ? down_ba_up_[expert_idx] : down_ba_[expert_idx];
+            auto& ba = down_ba_[expert_idx];
             auto& bb = do_up ? up_backward_bb_[expert_idx] : gate_backward_bb_[expert_idx];
-            auto& bc = do_up ? grad_gate_up_bc_up_[expert_idx] : grad_gate_up_bc_[expert_idx];
-            ggml_bf16_t* out = do_up ? grad_output_bf16_up_ptr_[expert_idx] : grad_output_bf16_ptr_[expert_idx];
+            auto& bc = grad_gate_up_bc_[expert_idx];
 
             amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
-            bc->to_mat(m, out, ith, nth);
+            bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
           },
-          nullptr, "bwd_gu_base_gemm", 1);
+          nullptr, gemm_name, 1);
 
-      // scatter_base removed: lora_compute_gradin now accumulates scaled lora gradin
-      // on top of base gradin in-place. A single scatter pass (bwd_gu_scatter_combined)
-      // at the end handles both base + lora contributions with scale=1.0.
-    }
+      // DUMP: base backward output before scatter
+      if (is_dump_enabled()) {
+        for (int i = 0; i < activated_expert; i++) {
+          int expert_idx = m_expert_id_map_[i];
+          int m = m_local_num_[expert_idx];
+          if (m > 0) {
+            const char* name = do_up ? "backward_up_base" : "backward_gate_base";
+            dump_bf16_matrix(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, name, tp_part_idx, expert_idx);
+          }
+        }
+      }
+
+      scatter_to_grad_input(1.0f, "bwd_gu_scatter_base");
+    };
+
+    base_pass(false);  // gate
+    base_pass(true);   // up
 
     // // DEBUG: Check m_local_input_ptr_ AFTER base_pass (before LoRA)
     // {
@@ -5862,65 +5690,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     const bool use_fp32_lora_a = (fp32_grad_gate_lora_a != nullptr);
 
     // =====================================================
-    // Step 6a: Repack input → gate_up_ba_ (AMX BufferA format)
-    // gate_up_ba_ is free during backward (only used in forward).
-    // =====================================================
-    {
-      auto align64_fn = [](size_t v) { return (v + 63) & (~(size_t)63); };
-      void* ba_ptr = Base::gate_up_ba_pool_;
-      for (int task_id = 0; task_id < activated_expert; task_id++) {
-        int expert_idx = m_expert_id_map_[task_id];
-        int m = m_local_num_[expert_idx];
-        if (m == 0) continue;
-        size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
-        gate_up_ba_[expert_idx]->max_m = local_max_m;
-        gate_up_ba_[expert_idx]->set_data(ba_ptr);
-        ba_ptr = (void*)((uintptr_t)ba_ptr +
-            align64_fn(T::BufferA::required_size(local_max_m, config_.hidden_size)));
-      }
-      direct_or_pool(activated_expert,
-          [this](int task_id) {
-            int expert_idx = m_expert_id_map_[task_id];
-            if (m_local_num_[expert_idx] == 0) return;
-            gate_up_ba_[expert_idx]->from_mat(
-                m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
-          }, "bwd_gu_repack_ba", 1);
-    }
-
-    // =====================================================
-    // Step 6b: AMX GEMM input @ lora_a^T → BF16 intermediate
-    // Replaces dpbf16 lora_bf16_matmul_t4r4 in the fused kernel.
-    // =====================================================
-    {
-      int amx_nth = T::recommended_nth(padded_lora_rank_);
-      pool->do_work_stealing_job(
-          amx_nth * activated_expert * 2,
-          [](int) { T::config(); },
-          [this, amx_nth](int task_id2) {
-            int task_id = task_id2 / 2;
-            bool do_up = task_id2 % 2;
-            int expert_idx = m_expert_id_map_[task_id / amx_nth];
-            int ith = task_id % amx_nth;
-            int m = m_local_num_[expert_idx];
-            if (m == 0) return;
-            amx::mat_mul(m, padded_lora_rank_, config_.hidden_size,
-                         gate_up_ba_[expert_idx],
-                         do_up ? up_lora_a_bb_[expert_idx] : gate_lora_a_bb_[expert_idx],
-                         do_up ? lora_up_intermediate_bc_[expert_idx]
-                               : lora_gate_intermediate_bc_[expert_idx],
-                         ith, amx_nth);
-            (do_up ? lora_up_intermediate_bc_[expert_idx]
-                   : lora_gate_intermediate_bc_[expert_idx])
-                ->to_mat(m, do_up ? lora_up_intermediate_ptr_[expert_idx]
-                                   : lora_gate_intermediate_ptr_[expert_idx],
-                         ith, amx_nth);
-          }, nullptr, "bwd_gu_lora_amx", 1);
-    }
-
-    // =====================================================
-    // Fused LoRA gradb:
-    //   u_gate/u_up already in BF16 intermediate (from Step 6b AMX GEMM)
+    // Fused LoRA Step 1+2:
+    //   input -> u_gate/u_up (stored for later gb_gemm/gradA)
     //   grad_gate/grad_up + u_gate/u_up -> grad_B
+    // This removes the extra BF16 reread between u_merged and gradb_merged.
     // =====================================================
     struct GuLoraFusedBuf {
         int expert_idx = -1;
@@ -5950,12 +5723,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       const size_t gradb_elems = static_cast<size_t>(inter_size) * rank;
       std::vector<GuLoraFusedBuf> fused_bufs(activated_expert);
       std::vector<GuLoraFusedTask> fused_tasks;
-      // Use pre-allocated pool (no alloc or zero-init on hot path).
-      // First write uses memcpy (=), subsequent writes use += (same as backward_down pattern).
-      float* gate_gradb_all = gu_gate_gradb_accum_;
-      float* up_gradb_all = gu_up_gradb_accum_;
+      std::vector<float> gate_gradb_all(static_cast<size_t>(activated_expert) * gradb_elems, 0.0f);
+      std::vector<float> up_gradb_all(static_cast<size_t>(activated_expert) * gradb_elems, 0.0f);
       std::vector<std::mutex> gradb_mutexes(activated_expert);
-      std::vector<uint8_t> gu_gradb_initialized(activated_expert, 0);
 
       for (int task_id = 0; task_id < activated_expert; task_id++) {
         GuLoraFusedBuf& buf = fused_bufs[task_id];
@@ -5984,9 +5754,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         }
       }
 
-      // Step-1 note: FP32 sparse lora_a buffers are NOT pre-zeroed.
-      // First write uses '=' (overwrite), subsequent writes use '+=' (accumulate).
-
       if (!fused_tasks.empty()) {
         direct_or_pool(
             static_cast<int>(fused_tasks.size()),
@@ -5996,40 +5763,54 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               if (buf.num_tokens == 0) return;
 
               int local_tokens = task.t_end - task.t_start;
-              // u values already computed by AMX GEMM (Step 6b) → read from buf.gate_inter / buf.up_inter
-              size_t scratch_elems = gradb_elems * 2;
+              size_t u_elems = static_cast<size_t>(local_tokens) * rank;
+              size_t scratch_elems = u_elems * 2 + gradb_elems * 2;
               float* scratch = get_lora_fp32_buffer(scratch_elems);
-              float* gate_gradb_local = scratch;
+              float* gate_u = scratch;
+              float* up_u = gate_u + u_elems;
+              float* gate_gradb_local = up_u + u_elems;
               float* up_gradb_local = gate_gradb_local + gradb_elems;
               memset(gate_gradb_local, 0, gradb_elems * 2 * sizeof(float));
 
+              avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, buf.gate_lora_a, gate_u,
+                                         local_tokens, hidden, rank);
+              avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, buf.up_lora_a, up_u,
+                                         local_tokens, hidden, rank);
+
               for (int t = 0; t < local_tokens; t++) {
-                const ggml_bf16_t* gate_inter_row = buf.gate_inter + static_cast<size_t>(task.t_start + t) * padded_lora_rank_;
-                const ggml_bf16_t* up_inter_row = buf.up_inter + static_cast<size_t>(task.t_start + t) * padded_lora_rank_;
+                ggml_bf16_t* gate_row = buf.gate_inter + static_cast<size_t>(task.t_start + t) * padded_lora_rank_;
+                ggml_bf16_t* up_row = buf.up_inter + static_cast<size_t>(task.t_start + t) * padded_lora_rank_;
+                memset(gate_row, 0, padded_lora_rank_ * sizeof(ggml_bf16_t));
+                memset(up_row, 0, padded_lora_rank_ * sizeof(ggml_bf16_t));
+
+                const float* gate_u_row = gate_u + static_cast<size_t>(t) * rank;
+                const float* up_u_row = up_u + static_cast<size_t>(t) * rank;
+                for (int r = 0; r < rank; r++) {
+                  gate_row[r] = GGML_FP32_TO_BF16(gate_u_row[r]);
+                  up_row[r] = GGML_FP32_TO_BF16(up_u_row[r]);
+                }
+
                 const ggml_bf16_t* gate_grad_row = buf.gate_grad + static_cast<size_t>(task.t_start + t) * inter_size;
                 const ggml_bf16_t* up_grad_row = buf.up_grad + static_cast<size_t>(task.t_start + t) * inter_size;
 
                 if (rank == 8) {
-                  // Load u values from BF16 intermediate → FP32
-                  __m128i g_raw = _mm_loadu_si128((__m128i*)gate_inter_row);
-                  __m256 gate_u_vec = _mm256_castsi256_ps(
-                      _mm256_slli_epi32(_mm256_cvtepu16_epi32(g_raw), 16));
-                  __m128i u_raw = _mm_loadu_si128((__m128i*)up_inter_row);
-                  __m256 up_u_vec = _mm256_castsi256_ps(
-                      _mm256_slli_epi32(_mm256_cvtepu16_epi32(u_raw), 16));
-
+                  __m256 gate_u_vec = _mm256_loadu_ps(gate_u_row);
+                  __m256 up_u_vec = _mm256_loadu_ps(up_u_row);
                   for (int i = 0; i < inter_size; i++) {
                     float gg = GGML_BF16_TO_FP32(gate_grad_row[i]);
-                    float* g_out = gate_gradb_local + static_cast<size_t>(i) * 8;
-                    __m256 g_acc = _mm256_loadu_ps(g_out);
-                    g_acc = _mm256_fmadd_ps(_mm256_set1_ps(gg), gate_u_vec, g_acc);
-                    _mm256_storeu_ps(g_out, g_acc);
-
+                    if (gg != 0.0f) {
+                      float* out = gate_gradb_local + static_cast<size_t>(i) * rank;
+                      __m256 acc = _mm256_loadu_ps(out);
+                      acc = _mm256_fmadd_ps(_mm256_set1_ps(gg), gate_u_vec, acc);
+                      _mm256_storeu_ps(out, acc);
+                    }
                     float ug = GGML_BF16_TO_FP32(up_grad_row[i]);
-                    float* u_out = up_gradb_local + static_cast<size_t>(i) * 8;
-                    __m256 u_acc = _mm256_loadu_ps(u_out);
-                    u_acc = _mm256_fmadd_ps(_mm256_set1_ps(ug), up_u_vec, u_acc);
-                    _mm256_storeu_ps(u_out, u_acc);
+                    if (ug != 0.0f) {
+                      float* out = up_gradb_local + static_cast<size_t>(i) * rank;
+                      __m256 acc = _mm256_loadu_ps(out);
+                      acc = _mm256_fmadd_ps(_mm256_set1_ps(ug), up_u_vec, acc);
+                      _mm256_storeu_ps(out, acc);
+                    }
                   }
                 } else {
                   for (int i = 0; i < inter_size; i++) {
@@ -6037,14 +5818,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                     if (gg != 0.0f) {
                       float* out = gate_gradb_local + static_cast<size_t>(i) * rank;
                       for (int r = 0; r < rank; r++) {
-                        out[r] += gg * GGML_BF16_TO_FP32(gate_inter_row[r]);
+                        out[r] += gg * gate_u_row[r];
                       }
                     }
                     float ug = GGML_BF16_TO_FP32(up_grad_row[i]);
                     if (ug != 0.0f) {
                       float* out = up_gradb_local + static_cast<size_t>(i) * rank;
                       for (int r = 0; r < rank; r++) {
-                        out[r] += ug * GGML_BF16_TO_FP32(up_inter_row[r]);
+                        out[r] += ug * up_u_row[r];
                       }
                     }
                   }
@@ -6053,14 +5834,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
               std::lock_guard<std::mutex> lock(gradb_mutexes[task.expert_task]);
               float* gate_gradb_global =
-                  gate_gradb_all + static_cast<size_t>(task.expert_task) * gradb_elems;
-              float* up_gradb_global = up_gradb_all + static_cast<size_t>(task.expert_task) * gradb_elems;
-              if (!gu_gradb_initialized[task.expert_task]) {
-                // First write: memcpy (no zero-init needed)
-                std::memcpy(gate_gradb_global, gate_gradb_local, gradb_elems * sizeof(float));
-                std::memcpy(up_gradb_global, up_gradb_local, gradb_elems * sizeof(float));
-                gu_gradb_initialized[task.expert_task] = 1;
-              } else if (rank == 8) {
+                  gate_gradb_all.data() + static_cast<size_t>(task.expert_task) * gradb_elems;
+              float* up_gradb_global = up_gradb_all.data() + static_cast<size_t>(task.expert_task) * gradb_elems;
+              if (rank == 8) {
                 for (size_t off = 0; off < gradb_elems; off += rank) {
                   __m256 gate_acc = _mm256_loadu_ps(gate_gradb_global + off);
                   gate_acc = _mm256_add_ps(gate_acc, _mm256_loadu_ps(gate_gradb_local + off));
@@ -6097,23 +5873,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               int i_start = block_idx * kGuGradBBlock;
               int i_end = std::min(inter_size, i_start + kGuGradBBlock);
               float* gradb_global =
-                  (do_up ? up_gradb_all : gate_gradb_all) + static_cast<size_t>(expert_task) * gradb_elems;
+                  (do_up ? up_gradb_all.data() : gate_gradb_all.data()) + static_cast<size_t>(expert_task) * gradb_elems;
               ggml_bf16_t* grad_lora_b = do_up ? grad_up_b : grad_gate_b;
 
-              if (rank == 8) {
-                bf16_fma_writeback_rank8(
-                    grad_lora_b + buf.lora_b_offset + static_cast<size_t>(i_start) * rank,
-                    gradb_global + static_cast<size_t>(i_start) * rank,
-                    i_end - i_start, rank, scale);
-              } else {
-                for (int i = i_start; i < i_end; i++) {
-                  ggml_bf16_t* out = grad_lora_b + buf.lora_b_offset + static_cast<size_t>(i) * rank;
-                  float* acc_row = gradb_global + static_cast<size_t>(i) * rank;
-                  for (int r = 0; r < rank; r++) {
-                    float cur = GGML_BF16_TO_FP32(out[r]);
-                    cur += acc_row[r] * scale;
-                    out[r] = GGML_FP32_TO_BF16(cur);
-                  }
+              for (int i = i_start; i < i_end; i++) {
+                ggml_bf16_t* out = grad_lora_b + buf.lora_b_offset + static_cast<size_t>(i) * rank;
+                float* acc_row = gradb_global + static_cast<size_t>(i) * rank;
+                for (int r = 0; r < rank; r++) {
+                  float cur = GGML_BF16_TO_FP32(out[r]);
+                  cur += acc_row[r] * scale;
+                  out[r] = GGML_FP32_TO_BF16(cur);
                 }
               }
             },
@@ -6125,11 +5894,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //   grad @ B^T -> G_B
     //   G_B @ A -> grad_input contribution
     //   scatter + grad_A
-    // Gate writes to grad_output_bf16_ptr_, up writes to grad_output_bf16_up_ptr_
-    // → no buffer conflict → gb_gradin runs in parallel, scatter merges both.
+    // Gate and up still run sequentially because they share grad_output_bf16_ptr_.
     // =====================================================
-    auto lora_compute_gradin = [&](bool do_up) {
+    auto lora_pass_remainder = [&](bool do_up) {
       const char* gb_gradin_name = do_up ? "bwd_gu_lora_gb_gradin_fused_up" : "bwd_gu_lora_gb_gradin_fused_gate";
+      const char* grad_a_name = do_up ? "bwd_gu_lora_gradA_up" : "bwd_gu_lora_gradA_gate";
 
       struct GuLoraGradInTask {
         int expert_task = -1;
@@ -6165,10 +5934,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               ggml_bf16_t* inter_ptr_base =
                   do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
               ggml_bf16_t* inter_ptr = inter_ptr_base + static_cast<size_t>(task.t_start) * padded_lora_rank_;
-              // Gate → grad_output_bf16_ptr_, Up → grad_output_bf16_up_ptr_ (separate buffers)
-              ggml_bf16_t* grad_out = do_up
-                  ? (grad_output_bf16_up_ptr_[expert_idx] + static_cast<size_t>(task.t_start) * hidden)
-                  : (grad_output_bf16_ptr_[expert_idx] + static_cast<size_t>(task.t_start) * hidden);
+              ggml_bf16_t* grad_out = grad_output_bf16_ptr_[expert_idx] + static_cast<size_t>(task.t_start) * hidden;
               const ggml_bf16_t* lora_b_t =
                   (do_up ? up_lora_b_transposed_ : gate_lora_b_transposed_) +
                   static_cast<size_t>(expert_idx) * lora_rank_ * inter_size;
@@ -6187,16 +5953,31 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 }
               }
 
-              // Accumulate scaled lora gradin on top of existing base gradin in-place.
-              // (base gradin was written here by bwd_gu_base_gemm → to_mat; we skip scatter_base
-              //  and do a single merged scatter at the end with scale=1.0)
-              avx::lora_fp32_bf16_fused_add_transposed(gb, lora_a, grad_out, local_tokens, lora_rank_, hidden, lora_scaling_);
+              memset(grad_out, 0, static_cast<size_t>(local_tokens) * hidden * sizeof(ggml_bf16_t));
+              avx::lora_fp32_bf16_fused_add_transposed(gb, lora_a, grad_out, local_tokens, lora_rank_, hidden, 1.0f);
             },
             gb_gradin_name);
       }
-    };
 
-    auto lora_gradA = [&](bool do_up) {
+      // DUMP: LoRA contribution before scatter
+      if (is_dump_enabled()) {
+        for (int i = 0; i < activated_expert; i++) {
+          int expert_idx = m_expert_id_map_[i];
+          int m = m_local_num_[expert_idx];
+          if (m > 0) {
+            ggml_bf16_t* inter_ptr =
+                do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
+            const char* inter_name = do_up ? "backward_up_lora_inter" : "backward_gate_lora_inter";
+            dump_bf16_matrix(inter_ptr, m, padded_lora_rank_, inter_name, tp_part_idx, expert_idx);
+            const char* lora_name = do_up ? "backward_up_lora" : "backward_gate_lora";
+            dump_bf16_matrix_scaled(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, lora_scaling_, lora_name,
+                                    tp_part_idx, expert_idx);
+          }
+        }
+      }
+
+      scatter_to_grad_input(lora_scaling_, "bwd_gu_scatter_lora");
+
       // Step 6: grad_A = G_B^T @ X
       ggml_bf16_t* grad_lora_a = do_up ? grad_up_a : grad_gate_a;
       float* fp32_grad_lora_a = do_up ? fp32_grad_up_lora_a : fp32_grad_gate_lora_a;
@@ -6226,57 +6007,54 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             __m512 scale_vec = _mm512_set1_ps(lora_scaling_);
             const int lora_r = lora_rank_;
 
+            // Split one expert into hidden-dimension tiles so LoRA grad_A can use all CPU threads.
             std::vector<float> accum(lora_r * tile_len, 0.0f);
 
             for (int t = 0; t < num_tokens; t++) {
               const ggml_bf16_t* g_row = g_ptr + t * padded_lora_rank_;
               const ggml_bf16_t* input_row = expert_input + t * hidden + h_start;
-              // Pre-load g values for all ranks (tiny: 8 floats)
-              float g_vals[8];
-              for (int r = 0; r < lora_r && r < 8; r++)
-                g_vals[r] = GGML_BF16_TO_FP32(g_row[r]);
-              // Swap r/h loops: convert input BF16→FP32 once, FMA into all 8 rank accumulators
-              int h = 0;
-              for (; h < tile_vec_end; h += kVecWidth) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(input_row + h), &x0, &x1);
-                for (int r = 0; r < lora_r; r++) {
-                  if (g_vals[r] == 0.0f) continue;
-                  __m512 gb_vec = _mm512_set1_ps(g_vals[r]);
-                  float* acc_row = accum.data() + r * tile_len;
+              for (int r = 0; r < lora_r; r++) {
+                float gb = GGML_BF16_TO_FP32(g_row[r]);
+                if (gb == 0.0f) continue;
+                __m512 gb_vec = _mm512_set1_ps(gb);
+                float* acc_row = accum.data() + r * tile_len;
+                int h = 0;
+                for (; h < tile_vec_end; h += kVecWidth) {
                   __m512 acc0 = _mm512_loadu_ps(acc_row + h);
                   __m512 acc1 = _mm512_loadu_ps(acc_row + h + 16);
+                  __m512 x0, x1;
+                  avx512_32xbf16_to_32xfp32((__m512i*)(input_row + h), &x0, &x1);
                   acc0 = _mm512_fmadd_ps(x0, gb_vec, acc0);
                   acc1 = _mm512_fmadd_ps(x1, gb_vec, acc1);
                   _mm512_storeu_ps(acc_row + h, acc0);
                   _mm512_storeu_ps(acc_row + h + 16, acc1);
                 }
-              }
-              for (; h < tile_len; h++) {
-                float inp = GGML_BF16_TO_FP32(input_row[h]);
-                for (int r = 0; r < lora_r; r++) {
-                  if (g_vals[r] == 0.0f) continue;
-                  accum[r * tile_len + h] += inp * g_vals[r];
+                for (; h < tile_len; h++) {
+                  float inp = GGML_BF16_TO_FP32(input_row[h]);
+                  acc_row[h] += inp * gb;
                 }
               }
             }
 
             // Write back
             if (use_fp32_lora_a) {
+              // Sparse FP32 direct accumulation
               for (int r = 0; r < lora_r; r++) {
                 float* fp32_row = fp32_grad_lora_a + buf.lora_a_sparse_offset + r * hidden + h_start;
                 float* acc_row = accum.data() + r * tile_len;
                 int h = 0;
                 for (; h + 16 <= tile_len; h += 16) {
+                  __m512 cur = _mm512_loadu_ps(fp32_row + h);
                   __m512 val = _mm512_loadu_ps(acc_row + h);
-                  __m512 result = _mm512_mul_ps(val, scale_vec);
-                  _mm512_storeu_ps(fp32_row + h, result);
+                  cur = _mm512_fmadd_ps(val, scale_vec, cur);
+                  _mm512_storeu_ps(fp32_row + h, cur);
                 }
                 for (; h < tile_len; h++) {
-                  fp32_row[h] = acc_row[h] * lora_scaling_;
+                  fp32_row[h] += acc_row[h] * lora_scaling_;
                 }
               }
             } else {
+              // Legacy dense BF16 RMW
               for (int r = 0; r < lora_r; r++) {
                 ggml_bf16_t* grad_row = grad_lora_a + buf.lora_a_dense_offset + r * hidden + h_start;
                 float* acc_row = accum.data() + r * tile_len;
@@ -6298,87 +6076,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               }
             }
           },
-          nullptr, do_up ? "bwd_gu_lora_gradA_up" : "bwd_gu_lora_gradA_gate");
+          nullptr, grad_a_name);
     };
 
-    // Phase 1: Compute gate+up LoRA grad_input into separate buffers (no conflict → parallel)
-    lora_compute_gradin(false);  // gate → grad_output_bf16_ptr_
-    lora_compute_gradin(true);   // up → grad_output_bf16_up_ptr_
-
-    // DUMP: LoRA intermediate + combined gradin before scatter
-    // NOTE: grad_output_bf16_ptr_ now contains base_gradin + scaled_lora_gradin (not lora-only).
-    // The dump of "backward_gate_lora" / "backward_up_lora" will reflect this combined value.
-    if (is_dump_enabled()) {
-      for (int i = 0; i < activated_expert; i++) {
-        int expert_idx = m_expert_id_map_[i];
-        int m = m_local_num_[expert_idx];
-        if (m > 0) {
-          dump_bf16_matrix(lora_gate_intermediate_ptr_[expert_idx], m, padded_lora_rank_,
-                           "backward_gate_lora_inter", tp_part_idx, expert_idx);
-          // Buffer contains base + scaled lora; dump as-is (scale=1.0)
-          dump_bf16_matrix_scaled(grad_output_bf16_ptr_[expert_idx], m, config_.hidden_size, 1.0f,
-                                  "backward_gate_combined_gradin", tp_part_idx, expert_idx);
-          dump_bf16_matrix(lora_up_intermediate_ptr_[expert_idx], m, padded_lora_rank_,
-                           "backward_up_lora_inter", tp_part_idx, expert_idx);
-          dump_bf16_matrix_scaled(grad_output_bf16_up_ptr_[expert_idx], m, config_.hidden_size, 1.0f,
-                                  "backward_up_combined_gradin", tp_part_idx, expert_idx);
-        }
-      }
-    }
-
-    // Combined scatter: buffers now contain base_gradin + scaled_lora_gradin.
-    // Scatter with scale=1.0 to grad_input.
-    {
-      ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
-      const int hidden = config_.hidden_size;
-      const int hidden_vec_end = hidden & ~31;
-      direct_or_pool(
-          qlen,
-          [&, hidden, hidden_vec_end](int token_id) {
-            ggml_bf16_t* dst = grad_input_bf16 + token_id * hidden;
-            for (int j = 0; j < k; j++) {
-              int expert_idx = cache.expert_ids_cache[token_id * k + j];
-              if (expert_idx < config_.num_gpu_experts || expert_idx >= config_.expert_num) continue;
-              if (m_local_num_[expert_idx] == 0) continue;
-              int pos = cache.m_local_pos_cache[token_id][j];
-
-              ggml_bf16_t* gate_contrib = grad_output_bf16_ptr_[expert_idx] + pos * hidden;
-              ggml_bf16_t* up_contrib = grad_output_bf16_up_ptr_[expert_idx] + pos * hidden;
-
-              // Accumulate for dump (buffer already contains base + scaled lora)
-              if (dump_enabled) {
-                auto it = expert_grad_accum.find(expert_idx);
-                if (it != expert_grad_accum.end()) {
-                  float* accum = it->second.data() + pos * hidden;
-                  for (int h = 0; h < hidden; h++) {
-                    accum[h] += GGML_BF16_TO_FP32(gate_contrib[h]) + GGML_BF16_TO_FP32(up_contrib[h]);
-                  }
-                }
-              }
-
-              int h = 0;
-              for (; h < hidden_vec_end; h += 32) {
-                __m512 g0, g1, u0, u1, cur0, cur1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(gate_contrib + h), &g0, &g1);
-                avx512_32xbf16_to_32xfp32((__m512i*)(up_contrib + h), &u0, &u1);
-                avx512_32xbf16_to_32xfp32((__m512i*)(dst + h), &cur0, &cur1);
-                cur0 = _mm512_add_ps(cur0, _mm512_add_ps(g0, u0));
-                cur1 = _mm512_add_ps(cur1, _mm512_add_ps(g1, u1));
-                avx512_32xfp32_to_32xbf16(&cur0, &cur1, (__m512i*)(dst + h));
-              }
-              for (; h < hidden; h++) {
-                float cur = GGML_BF16_TO_FP32(dst[h]);
-                cur += GGML_BF16_TO_FP32(gate_contrib[h]) + GGML_BF16_TO_FP32(up_contrib[h]);
-                dst[h] = GGML_FP32_TO_BF16(cur);
-              }
-            }
-          },
-          "bwd_gu_scatter_combined");
-    }
-
-    // Phase 3: grad_A (gate and up independently)
-    lora_gradA(false);  // gate
-    lora_gradA(true);   // up
+    lora_pass_remainder(false);  // gate: gb_gradin_fused, scatter, gradA
+    lora_pass_remainder(true);   // up: gb_gradin_fused, scatter, gradA
 
     // DUMP: backward grad_input per expert (accumulated sum of gate_base + gate_lora + up_base + up_lora)
     if (is_dump_enabled()) {
