@@ -53,7 +53,8 @@ void TaskQueue::enqueue(std::function<void()> task) {
 void TaskQueue::sync(size_t allow_n_pending) {
   std::unique_lock<std::mutex> lock(mtx);
   cv.wait(lock, [&] {
-    return pending.load(std::memory_order_acquire) <= allow_n_pending;
+    return pending.load(std::memory_order_acquire) <= allow_n_pending
+        || done.load(std::memory_order_acquire);
   });
 }
 
