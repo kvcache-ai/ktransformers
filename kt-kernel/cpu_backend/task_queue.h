@@ -40,6 +40,8 @@ class TaskQueue {
   std::atomic<bool> done;
   std::atomic<size_t> pending;
   std::thread workerThread;
+  std::mutex mtx;
+  std::condition_variable cv;
 
   void worker();
 };

@@ -24,7 +24,11 @@ TaskQueue::TaskQueue() : done(false), pending(0) {
 }
 
 TaskQueue::~TaskQueue() {
-  done.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+    done.store(true, std::memory_order_release);
+  }
+  cv.notify_all();
   if (workerThread.joinable()) workerThread.join();
 
   Node* node = head.load(std::memory_order_relaxed);
@@ -40,11 +44,17 @@ void TaskQueue::enqueue(std::function<void()> task) {
   Node* node = new Node(task);
   Node* prev = tail.exchange(node, std::memory_order_acq_rel);
   prev->next.store(node, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(mtx);
+  }
+  cv.notify_one();
 }
 
 void TaskQueue::sync(size_t allow_n_pending) {
-  // Spin until the pending task count drops to the allowed threshold.
-  while (pending.load(std::memory_order_acquire) > allow_n_pending);
+  std::unique_lock<std::mutex> lock(mtx);
+  cv.wait(lock, [&] {
+    return pending.load(std::memory_order_acquire) <= allow_n_pending;
+  });
 }
 
 void TaskQueue::worker() {
@@ -58,7 +68,17 @@ void TaskQueue::worker() {
       delete curr;
       curr = next;
       head.store(curr, std::memory_order_release);
-      pending.fetch_sub(1, std::memory_order_acq_rel);
+      {
+        std::lock_guard<std::mutex> lock(mtx);
+        pending.fetch_sub(1, std::memory_order_acq_rel);
+      }
+      cv.notify_all();
+    } else {
+      std::unique_lock<std::mutex> lock(mtx);
+      cv.wait(lock, [&] {
+        return curr->next.load(std::memory_order_acquire) != nullptr
+            || done.load(std::memory_order_acquire);
+      });
     }
   }
 }
