@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1bf866f2.js";
+            window.path_to_searchindex_js = "searchindex-b4d4a2ba.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-a83fdfe0.js"></script>
+        <script src="toc-1efa58c4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -197,6 +197,7 @@
 <p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/">kt-kernel</a> and <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft">kt-sft</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
+<li><strong>Mar 26, 2026</strong>: Support AVX2-only CPU backend for KT-Kernel inference. (<a href="doc/en/kt-kernel/AVX2-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Feb 13, 2026</strong>: MiniMax-M2.5 Day0 Support! (<a href="doc/en/MiniMax-M2.5.html">Tutorial</a>)</li>
 <li><strong>Feb 12, 2026</strong>: GLM-5 Day0 Support! (<a href="doc/en/kt-kernel/GLM-5-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Jan 27, 2026</strong>: Kimi-K2.5 Day0 Support! (<a href="doc/en/Kimi-K2.5.html">Tutorial</a>) (<a href="doc/en/SFT_Installation_Guide_KimiK2.5.html">SFT Tutorial</a>)</li>
@@ -1980,6 +1981,334 @@ chunk_size: 8192
 </tbody>
 </table>
 </div>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="running-ktransformers-on-avx2-cpus"><a class="header" href="#running-ktransformers-on-avx2-cpus">Running KTransformers on AVX2 CPUs</a></h1>
+<p>This tutorial explains how to run KTransformers on machines that only support AVX2 (without AVX512 or AMX).</p>
+<h2 id="table-of-contents"><a class="header" href="#table-of-contents">Table of Contents</a></h2>
+<ul>
+<li><a href="#supported-precision-formats">Supported Precision Formats</a></li>
+<li><a href="#hardware-requirements">Hardware Requirements</a></li>
+<li><a href="#installation-2">Installation</a></li>
+<li><a href="#verification-1">Verification</a></li>
+<li><a href="#starting-the-inference-server">Starting the Inference Server</a>
+<ul>
+<li><a href="#example-qwen3-30b-a3b-bf16">Example: Qwen3-30B-A3B (BF16)</a></li>
+<li><a href="#example-qwen35-35b-a3b-fp8-fp8">Example: Qwen3.5-35B-A3B-FP8 (FP8)</a></li>
+<li><a href="#example-qwen3-30b-a3b-gptq-int4-gptq_int4">Example: Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)</a></li>
+<li><a href="#sending-requests">Sending Requests</a></li>
+</ul>
+</li>
+<li><a href="#performance-tuning">Performance Tuning</a></li>
+<li><a href="#faq">FAQ</a></li>
+</ul>
+<h2 id="supported-precision-formats"><a class="header" href="#supported-precision-formats">Supported Precision Formats</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>--kt-method</code></th><th>Precision</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>BF16</code></td><td>BF16 native precision</td><td>Zero precision loss, uses BF16 weights directly</td></tr>
+<tr><td><code>FP8</code></td><td>FP8 block quantization</td><td></td></tr>
+<tr><td><code>GPTQ_INT4</code></td><td>INT4 GPTQ</td><td></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="hardware-requirements"><a class="header" href="#hardware-requirements">Hardware Requirements</a></h2>
+<ul>
+<li><strong>CPU</strong>: x86-64 + AVX2 + FMA (Intel Haswell 2013+ / AMD Zen+)</li>
+<li><strong>GPU</strong>: NVIDIA 24GB+ VRAM (RTX 3090/4090/5090, etc.)</li>
+<li><strong>Memory</strong>: At least the size of the model weights (e.g., Qwen3-30B-A3B BF16 requires 64GB+)</li>
+<li><strong>OS</strong>: Linux</li>
+</ul>
+<h2 id="installation-2"><a class="header" href="#installation-2">Installation</a></h2>
+<p>Build and install from source (one-click install for kt-kernel + SGLang):</p>
+<pre><code class="language-bash">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+# One-click install
+./install.sh
+</code></pre>
+<p>On AVX512 or AMX machines, you can also manually force AVX2 compilation:</p>
+<pre><code class="language-bash">export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh kt-kernel --manual
+</code></pre>
+<h2 id="verification-1"><a class="header" href="#verification-1">Verification</a></h2>
+<pre><code class="language-bash"># Check if the CPU supports AVX2
+lscpu | grep -i avx2
+
+# Check the loaded kt-kernel variant
+python -c "import kt_kernel; print(kt_kernel.__cpu_variant__)"
+# Expected output: avx2
+
+# System diagnostics
+kt doctor
+</code></pre>
+<h2 id="starting-the-inference-server"><a class="header" href="#starting-the-inference-server">Starting the Inference Server</a></h2>
+<p>Use <code>--kt-method BF16</code>, <code>FP8</code>, or <code>GPTQ_INT4</code>. KT-Kernel will <strong>automatically detect</strong> the CPU and fall back to the AVX2 backend when AVX512/AMX is unavailable.</p>
+<h3 id="example-qwen3-30b-a3b-bf16"><a class="header" href="#example-qwen3-30b-a3b-bf16">Example: Qwen3-30B-A3B (BF16)</a></h3>
+<pre><code class="language-bash"># Download the model
+huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /path/to/Qwen3-30B-A3B
+
+# Check physical core count and NUMA node count
+lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core|NUMA node\(s\)"
+
+# Start the server (adjust kt-cpuinfer and kt-threadpool-count based on your hardware)
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3-30B-A3B \
+  --kt-weight-path /path/to/Qwen3-30B-A3B \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 32 \
+  --kt-method BF16 \
+  --attention-backend flashinfer \
+  --trust-remote-code \
+  --mem-fraction-static 0.80 \
+  --chunked-prefill-size 8192 \
+  --max-running-requests 2 \
+  --served-model-name Qwen3 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --enable-p2p-check \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="example-qwen35-35b-a3b-fp8-fp8"><a class="header" href="#example-qwen35-35b-a3b-fp8-fp8">Example: Qwen3.5-35B-A3B-FP8 (FP8)</a></h3>
+<pre><code class="language-bash"># Download the model
+huggingface-cli download Qwen/Qwen3.5-35B-A3B-FP8 --local-dir /path/to/Qwen3.5-35B-A3B-FP8
+
+# Start the server
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3.5-35B-A3B-FP8 \
+  --kt-weight-path /path/to/Qwen3.5-35B-A3B-FP8 \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 2 \
+  --kt-method FP8 \
+  --kt-gpu-prefill-token-threshold 400 \
+  --attention-backend triton \
+  --trust-remote-code \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 4096 \
+  --max-running-requests 1 \
+  --max-total-tokens 32000 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="example-qwen3-30b-a3b-gptq-int4-gptq_int4"><a class="header" href="#example-qwen3-30b-a3b-gptq-int4-gptq_int4">Example: Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)</a></h3>
+<pre><code class="language-bash"># Download the model
+huggingface-cli download Qwen/Qwen3-30B-A3B-GPTQ-Int4 --local-dir /path/to/Qwen3-30B-A3B-GPTQ-Int4
+
+# Start the server
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3-30B-A3B-GPTQ-Int4 \
+  --kt-weight-path /path/to/Qwen3-30B-A3B-GPTQ-Int4 \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 2 \
+  --kt-method GPTQ_INT4 \
+  --attention-backend triton \
+  --trust-remote-code \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 4096 \
+  --max-running-requests 1 \
+  --max-total-tokens 32000 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="sending-requests"><a class="header" href="#sending-requests">Sending Requests</a></h3>
+<pre><code class="language-bash"># Interactive chat
+kt chat
+
+# OpenAI-compatible API
+curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen3","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+</code></pre>
+<h2 id="performance-tuning"><a class="header" href="#performance-tuning">Performance Tuning</a></h2>
+<ul>
+<li><code>--kt-cpuinfer</code>: set to the number of <strong>physical cores</strong></li>
+<li><code>--kt-threadpool-count</code>: set to the number of <strong>NUMA nodes</strong></li>
+<li><code>--kt-num-gpu-experts</code>: higher values reduce CPU load but increase GPU VRAM usage</li>
+<li>Memory bandwidth is often the bottleneck; high-frequency DDR5 memory helps significantly</li>
+</ul>
+<h2 id="faq"><a class="header" href="#faq">FAQ</a></h2>
+<p><strong>GPU OOM</strong></p>
+<ul>
+<li>Reduce <code>--kt-num-gpu-experts</code>, <code>--chunked-prefill-size</code>, <code>--max-total-tokens</code></li>
+<li>Lower <code>--mem-fraction-static</code></li>
+</ul>
+<p>For more questions, see <a href="#see-the-issue-faq-page">FAQ</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="在-avx2-cpu-上使用-ktransformers"><a class="header" href="#在-avx2-cpu-上使用-ktransformers">在 AVX2 CPU 上使用 KTransformers</a></h1>
+<p>本教程介绍如何在仅支持 AVX2 的机器上运行 KTransformers（无需 AVX512 或 AMX）。</p>
+<h2 id="目录"><a class="header" href="#目录">目录</a></h2>
+<ul>
+<li><a href="#支持的精度格式">支持的精度格式</a></li>
+<li><a href="#硬件要求">硬件要求</a></li>
+<li><a href="#安装">安装</a></li>
+<li><a href="#验证">验证</a></li>
+<li><a href="#启动推理服务">启动推理服务</a>
+<ul>
+<li><a href="#示例qwen3-30b-a3b-bf16">示例：Qwen3-30B-A3B (BF16)</a></li>
+<li><a href="#示例qwen35-35b-a3b-fp8-fp8">示例：Qwen3.5-35B-A3B-FP8 (FP8)</a></li>
+<li><a href="#示例qwen3-30b-a3b-gptq-int4-gptq_int4">示例：Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)</a></li>
+<li><a href="#发送请求">发送请求</a></li>
+</ul>
+</li>
+<li><a href="#性能调优">性能调优</a></li>
+<li><a href="#常见问题">常见问题</a></li>
+</ul>
+<h2 id="支持的精度格式"><a class="header" href="#支持的精度格式">支持的精度格式</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th><code>--kt-method</code></th><th>精度</th><th>说明</th></tr>
+</thead>
+<tbody>
+<tr><td><code>BF16</code></td><td>BF16 原精度</td><td>零精度损失，直接使用 BF16 权重</td></tr>
+<tr><td><code>FP8</code></td><td>FP8 分块量化</td><td></td></tr>
+<tr><td><code>GPTQ_INT4</code></td><td>INT4 GPTQ</td><td></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="硬件要求"><a class="header" href="#硬件要求">硬件要求</a></h2>
+<ul>
+<li><strong>CPU</strong>：x86-64 + AVX2 + FMA（Intel Haswell 2013+ / AMD Zen+）</li>
+<li><strong>GPU</strong>：NVIDIA 24GB+ 显存（RTX 3090/4090/5090 等）</li>
+<li><strong>内存</strong>：不少于模型权重大小（如 Qwen3-30B-A3B BF16 需 64GB+）</li>
+<li><strong>系统</strong>：Linux</li>
+</ul>
+<h2 id="安装"><a class="header" href="#安装">安装</a></h2>
+<p>从源码编译安装（一键安装 kt-kernel + SGLang）：</p>
+<pre><code class="language-bash">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+# 一键安装
+./install.sh
+</code></pre>
+<p>在AVX512， AMX机器上， 也可以手动强制 AVX2 编译：</p>
+<pre><code class="language-bash">export CPUINFER_CPU_INSTRUCT=AVX2
+export CPUINFER_ENABLE_AMX=OFF
+./install.sh kt-kernel --manual
+</code></pre>
+<h2 id="验证"><a class="header" href="#验证">验证</a></h2>
+<pre><code class="language-bash"># 检查 CPU 是否支持 AVX2
+lscpu | grep -i avx2
+
+# 检查 kt-kernel 加载的变体
+python -c "import kt_kernel; print(kt_kernel.__cpu_variant__)"
+# 预期输出：avx2
+
+# 系统诊断
+kt doctor
+</code></pre>
+<h2 id="启动推理服务"><a class="header" href="#启动推理服务">启动推理服务</a></h2>
+<p>使用 <code>--kt-method BF16</code>、<code>FP8</code> 或 <code>GPTQ_INT4</code>，KT-Kernel 会<strong>自动检测</strong> CPU 并在缺少 AVX512/AMX 时回退到 AVX2 后端。</p>
+<h3 id="示例qwen3-30b-a3b-bf16"><a class="header" href="#示例qwen3-30b-a3b-bf16">示例：Qwen3-30B-A3B (BF16)</a></h3>
+<pre><code class="language-bash"># 下载模型
+huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /path/to/Qwen3-30B-A3B
+
+# 查看物理核心数和 NUMA 节点数
+lscpu | grep -E "^CPU\(s\)|Thread\(s\) per core|NUMA node\(s\)"
+
+# 启动服务（按实际硬件调整 kt-cpuinfer 和 kt-threadpool-count）
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3-30B-A3B \
+  --kt-weight-path /path/to/Qwen3-30B-A3B \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 32 \
+  --kt-method BF16 \
+  --attention-backend flashinfer \
+  --trust-remote-code \
+  --mem-fraction-static 0.80 \
+  --chunked-prefill-size 8192 \
+  --max-running-requests 2 \
+  --served-model-name Qwen3 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --enable-p2p-check \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="示例qwen35-35b-a3b-fp8-fp8"><a class="header" href="#示例qwen35-35b-a3b-fp8-fp8">示例：Qwen3.5-35B-A3B-FP8 (FP8)</a></h3>
+<pre><code class="language-bash"># 下载模型
+huggingface-cli download Qwen/Qwen3.5-35B-A3B-FP8 --local-dir /path/to/Qwen3.5-35B-A3B-FP8
+
+# 启动服务
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3.5-35B-A3B-FP8 \
+  --kt-weight-path /path/to/Qwen3.5-35B-A3B-FP8 \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 2 \
+  --kt-method FP8 \
+  --kt-gpu-prefill-token-threshold 400 \
+  --attention-backend triton \
+  --trust-remote-code \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 4096 \
+  --max-running-requests 1 \
+  --max-total-tokens 32000 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="示例qwen3-30b-a3b-gptq-int4-gptq_int4"><a class="header" href="#示例qwen3-30b-a3b-gptq-int4-gptq_int4">示例：Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)</a></h3>
+<pre><code class="language-bash"># 下载模型
+huggingface-cli download Qwen/Qwen3-30B-A3B-GPTQ-Int4 --local-dir /path/to/Qwen3-30B-A3B-GPTQ-Int4
+
+# 启动服务
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Qwen3-30B-A3B-GPTQ-Int4 \
+  --kt-weight-path /path/to/Qwen3-30B-A3B-GPTQ-Int4 \
+  --kt-cpuinfer 16 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 2 \
+  --kt-method GPTQ_INT4 \
+  --attention-backend triton \
+  --trust-remote-code \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 4096 \
+  --max-running-requests 1 \
+  --max-total-tokens 32000 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 1 \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="发送请求"><a class="header" href="#发送请求">发送请求</a></h3>
+<pre><code class="language-bash"># 交互聊天
+kt chat
+
+# OpenAI 兼容 API
+curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen3","messages":[{"role":"user","content":"你好"}],"stream":true}'
+</code></pre>
+<h2 id="性能调优"><a class="header" href="#性能调优">性能调优</a></h2>
+<ul>
+<li><code>--kt-cpuinfer</code> 设为<strong>物理核心数</strong></li>
+<li><code>--kt-threadpool-count</code> 设为 <strong>NUMA 节点数</strong></li>
+<li><code>--kt-num-gpu-experts</code> 越大 CPU 负担越小，但 GPU 显存占用越高</li>
+<li>内存带宽往往是瓶颈，DDR5 高频内存有明显帮助</li>
+</ul>
+<h2 id="常见问题"><a class="header" href="#常见问题">常见问题</a></h2>
+<p><strong>GPU OOM</strong></p>
+<ul>
+<li>减小 <code>--kt-num-gpu-experts</code>、<code>--chunked-prefill-size</code>、<code>--max-total-tokens</code></li>
+<li>降低 <code>--mem-fraction-static</code></li>
+</ul>
+<p>更多问题参见 <a href="#see-the-issue-faq-page">FAQ</a>。</p>
 <div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
 <h1 id="see-the-issue-faq-page"><a class="header" href="#see-the-issue-faq-page">see the issue <a href="https://github.com/kvcache-ai/ktransformers/issues/1608">FAQ page</a></a></h1>
 
