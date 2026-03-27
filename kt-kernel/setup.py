@@ -579,7 +579,7 @@ class CMakeBuild(build_ext):
             avx512_extension_enabled = True
 
         # If any AVX512 extension is enabled, ensure base AVX512 is also enabled
-        if avx512_extension_enabled and cpu_mode in ("NATIVE", "FANCY", "AVX512"):
+        if avx512_extension_enabled and cpu_mode in ("NATIVE", "FANCY", "AVX512") and "AVX512" in d["features"]:
             if not any("LLAMA_AVX512=ON" in a for a in cmake_args):
                 cmake_args.append("-DLLAMA_AVX512=ON")
                 print("-- AVX512 extensions enabled; also enabling base AVX512F (-DLLAMA_AVX512=ON)")

@@ -961,3 +961,120 @@ class GGUFLoader:
         data = torch.from_numpy(np.frombuffer(data_bytes, dtype=np.uint8).copy())
 
         return data, ggml_type
+
+
+class GPTQSafeTensorLoader(FP8SafeTensorLoader):
+    """Loader for symmetric GPTQ-Int4 expert weights (qweight + scales, no qzeros).
+
+    Only supports sym=true, desc_act=false GPTQ models.
+
+    Tensor keys:
+    - qweight: {prefix}.{id}.{proj}.qweight  (int32, packed 8x4-bit along K)
+    - scales:  {prefix}.{id}.{proj}.scales    (fp16 -> converted to fp32)
+    """
+
+    def __init__(self, file_path: str):
+        # Call FP8SafeTensorLoader init (which calls SafeTensorLoader init + format detection)
+        super().__init__(file_path, scale_suffix="scales")
+        # Verify GPTQ config
+        self._verify_gptq_config(file_path)
+
+    def _detect_format(self):
+        """Override FP8 format detection to look for .qweight instead of .weight."""
+        sample_keys = list(self.tensor_file_map.keys())[:2000]
+
+        for fmt_name, (path_tpl, gate, up, down) in self.MOE_FORMATS.items():
+            for key in sample_keys:
+                if ".experts." in key and f".{gate}.qweight" in key:
+                    if "block_sparse_moe.experts" in key and fmt_name == "mixtral":
+                        self._detected_format = fmt_name
+                        break
+                    elif "mlp.experts" in key and "block_sparse_moe" not in key and fmt_name == "deepseek":
+                        self._detected_format = fmt_name
+                        # Check for VL model (language_model prefix)
+                        if "language_model." in key:
+                            self._is_vl_model = True
+                        break
+                    elif fmt_name == "mistral" and "block_sparse_moe" not in key and "mlp" not in key:
+                        self._detected_format = fmt_name
+                        break
+            if self._detected_format is not None:
+                break
+
+        if self._detected_format is None:
+            self._detected_format = "deepseek"
+
+        vl_str = " (VL model)" if self._is_vl_model else ""
+        print(f"[GPTQSafeTensorLoader] Detected format: {self._detected_format}{vl_str}")
+
+    def _verify_gptq_config(self, file_path):
+        """Check that the model uses sym=true, desc_act=false."""
+        import json
+        import os
+
+        config_path = os.path.join(os.path.dirname(file_path), "config.json")
+        if not os.path.exists(config_path):
+            # Try parent directory
+            config_path = os.path.join(file_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+            qc = config.get("quantization_config", {})
+            if qc.get("quant_method") == "gptq":
+                if qc.get("desc_act", False):
+                    raise NotImplementedError(
+                        "GPTQ desc_act=true is not supported. Only desc_act=false models are supported."
+                    )
+                if not qc.get("sym", True):
+                    raise NotImplementedError(
+                        "GPTQ sym=false (asymmetric) is not supported. Only sym=true models are supported."
+                    )
+                print(f"[GPTQSafeTensorLoader] Verified: sym={qc.get('sym')}, desc_act={qc.get('desc_act')}, "
+                      f"bits={qc.get('bits')}, group_size={qc.get('group_size')}")
+
+    def load_experts(self, base_key: str, device: str = "cpu"):
+        """Load GPTQ expert qweight and scales.
+
+        Returns dict with keys: gate, up, down (qweight int32), gate_scale, up_scale, down_scale (fp32).
+        """
+        experts_prefix_candidates = self._get_experts_prefix_candidates(base_key)
+        gate_name, up_name, down_name = self._get_proj_names()
+
+        expert_count = 0
+        experts_prefix = None
+        for prefix in experts_prefix_candidates:
+            expert_count = 0
+            while self.has_tensor(f"{prefix}.{expert_count}.{gate_name}.qweight"):
+                expert_count += 1
+            if expert_count > 0:
+                experts_prefix = prefix
+                break
+
+        if expert_count == 0 or experts_prefix is None:
+            raise ValueError(f"No GPTQ experts found for keys: {experts_prefix_candidates}")
+
+        gate_weights = [None] * expert_count
+        up_weights = [None] * expert_count
+        down_weights = [None] * expert_count
+        gate_scales = [None] * expert_count
+        up_scales = [None] * expert_count
+        down_scales = [None] * expert_count
+
+        for exp_id in range(expert_count):
+            gate_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device).contiguous()
+            up_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.qweight", device).contiguous()
+            down_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.qweight", device).contiguous()
+
+            gate_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
+            up_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
+            down_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
+
+        print(f"[GPTQSafeTensorLoader] Loaded {expert_count} experts from {experts_prefix}")
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": gate_scales,
+            "up_scale": up_scales,
+            "down_scale": down_scales,
+        }
