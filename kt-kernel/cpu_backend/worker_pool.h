@@ -62,6 +62,8 @@ enum ThreadStatus {
 
 struct alignas(64) ThreadState {
   std::atomic<ThreadStatus> status;
+  std::mutex mutex;
+  std::condition_variable cv;
 #ifdef PROFILE_BALANCE
   size_t finish_ns;
 #endif
@@ -119,6 +121,8 @@ class NumaJobDistributor {
   int numa_count;
   std::vector<int> numa_ids;
   std::vector<std::unique_ptr<std::atomic<ThreadStatus>>> status;
+  std::vector<std::unique_ptr<std::mutex>> mutexes;
+  std::vector<std::unique_ptr<std::condition_variable>> cvs;
   std::function<void(int)> compute_func;
   std::vector<std::thread> workers;
 
