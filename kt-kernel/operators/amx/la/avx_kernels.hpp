@@ -1194,11 +1194,22 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
 #endif
 
   constexpr int T_BLOCK = 4;
-  constexpr int O_BLOCK = 16;  // Process 16 outputs at a time (one AVX-512 vector)
+  constexpr int PANEL = 5;  // 5 output vectors = 80 outputs per panel
+  constexpr int PANEL_WIDTH = PANEL * 16;
+  constexpr int O_BLOCK = 16;  // Fallback for panel remainder
 
   const __m512 scale_vec = _mm512_set1_ps(scale);
   const int output_tail = output_dim & 15;
   const __mmask16 output_tail_mask = output_tail ? ((__mmask16)1 << output_tail) - 1 : 0;
+
+  // Epilogue helper: scale, load BF16 output, add, convert back, store
+#define LORA_FUSED_ADD_EPILOGUE(out_ptr, acc, offset)                                                        \
+  do {                                                                                                       \
+    __m512 _ov = _mm512_castsi512_ps(                                                                        \
+        _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)((out_ptr) + (offset)))), 16)); \
+    _ov = _mm512_add_ps(_ov, _mm512_mul_ps(scale_vec, acc));                                                 \
+    _mm256_storeu_si256((__m256i*)((out_ptr) + (offset)), (__m256i)_mm512_cvtneps_pbh(_ov));                 \
+  } while (0)
 
   int t = 0;
   for (; t + T_BLOCK <= num_tokens; t += T_BLOCK) {
@@ -1211,86 +1222,107 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
     ggml_bf16_t* out2 = output + (t + 2) * output_dim;
     ggml_bf16_t* out3 = output + (t + 3) * output_dim;
 
+    // Panel-5 rank-outer: each broadcast drives 5 weight vectors
     int i = 0;
-    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
-      // 4 accumulators for 4 tokens, each accumulating 16 outputs
-      __m512 acc0 = _mm512_setzero_ps();
-      __m512 acc1 = _mm512_setzero_ps();
-      __m512 acc2 = _mm512_setzero_ps();
-      __m512 acc3 = _mm512_setzero_ps();
+    for (; i + PANEL_WIDTH <= output_dim; i += PANEL_WIDTH) {
+      // 20 accumulators: 4 tokens × 5 output vectors
+      __m512 a00 = _mm512_setzero_ps(), a01 = _mm512_setzero_ps(), a02 = _mm512_setzero_ps(), a03 = _mm512_setzero_ps(),
+             a04 = _mm512_setzero_ps();
+      __m512 a10 = _mm512_setzero_ps(), a11 = _mm512_setzero_ps(), a12 = _mm512_setzero_ps(), a13 = _mm512_setzero_ps(),
+             a14 = _mm512_setzero_ps();
+      __m512 a20 = _mm512_setzero_ps(), a21 = _mm512_setzero_ps(), a22 = _mm512_setzero_ps(), a23 = _mm512_setzero_ps(),
+             a24 = _mm512_setzero_ps();
+      __m512 a30 = _mm512_setzero_ps(), a31 = _mm512_setzero_ps(), a32 = _mm512_setzero_ps(), a33 = _mm512_setzero_ps(),
+             a34 = _mm512_setzero_ps();
 
-      // Inner loop over rank - weights are contiguous for each rank position
       for (int r = 0; r < rank; r++) {
-        // Load 16 consecutive weights: weight_t[r][i:i+16]
-        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
-            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+        __m512 v0 = _mm512_set1_ps(inter0[r]);
+        __m512 v1 = _mm512_set1_ps(inter1[r]);
+        __m512 v2 = _mm512_set1_ps(inter2[r]);
+        __m512 v3 = _mm512_set1_ps(inter3[r]);
 
-        // Broadcast intermediate values and FMA
-        __m512 iv0 = _mm512_set1_ps(inter0[r]);
-        __m512 iv1 = _mm512_set1_ps(inter1[r]);
-        __m512 iv2 = _mm512_set1_ps(inter2[r]);
-        __m512 iv3 = _mm512_set1_ps(inter3[r]);
+        const ggml_bf16_t* wp = weight_t + r * output_dim + i;
+#define LOAD_BF16_FP32(off) \
+  _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(wp + (off)))), 16))
+        __m512 w0 = LOAD_BF16_FP32(0), w1 = LOAD_BF16_FP32(16), w2 = LOAD_BF16_FP32(32), w3 = LOAD_BF16_FP32(48),
+               w4 = LOAD_BF16_FP32(64);
+#undef LOAD_BF16_FP32
 
-        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
-        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
-        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
-        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+        a00 = _mm512_fmadd_ps(v0, w0, a00);
+        a01 = _mm512_fmadd_ps(v0, w1, a01);
+        a02 = _mm512_fmadd_ps(v0, w2, a02);
+        a03 = _mm512_fmadd_ps(v0, w3, a03);
+        a04 = _mm512_fmadd_ps(v0, w4, a04);
+        a10 = _mm512_fmadd_ps(v1, w0, a10);
+        a11 = _mm512_fmadd_ps(v1, w1, a11);
+        a12 = _mm512_fmadd_ps(v1, w2, a12);
+        a13 = _mm512_fmadd_ps(v1, w3, a13);
+        a14 = _mm512_fmadd_ps(v1, w4, a14);
+        a20 = _mm512_fmadd_ps(v2, w0, a20);
+        a21 = _mm512_fmadd_ps(v2, w1, a21);
+        a22 = _mm512_fmadd_ps(v2, w2, a22);
+        a23 = _mm512_fmadd_ps(v2, w3, a23);
+        a24 = _mm512_fmadd_ps(v2, w4, a24);
+        a30 = _mm512_fmadd_ps(v3, w0, a30);
+        a31 = _mm512_fmadd_ps(v3, w1, a31);
+        a32 = _mm512_fmadd_ps(v3, w2, a32);
+        a33 = _mm512_fmadd_ps(v3, w3, a33);
+        a34 = _mm512_fmadd_ps(v3, w4, a34);
       }
 
-      // Scale
-      acc0 = _mm512_mul_ps(acc0, scale_vec);
-      acc1 = _mm512_mul_ps(acc1, scale_vec);
-      acc2 = _mm512_mul_ps(acc2, scale_vec);
-      acc3 = _mm512_mul_ps(acc3, scale_vec);
+      // Epilogue: scale + BF16 read-modify-write
+      LORA_FUSED_ADD_EPILOGUE(out0, a00, i);
+      LORA_FUSED_ADD_EPILOGUE(out0, a01, i + 16);
+      LORA_FUSED_ADD_EPILOGUE(out0, a02, i + 32);
+      LORA_FUSED_ADD_EPILOGUE(out0, a03, i + 48);
+      LORA_FUSED_ADD_EPILOGUE(out0, a04, i + 64);
+      LORA_FUSED_ADD_EPILOGUE(out1, a10, i);
+      LORA_FUSED_ADD_EPILOGUE(out1, a11, i + 16);
+      LORA_FUSED_ADD_EPILOGUE(out1, a12, i + 32);
+      LORA_FUSED_ADD_EPILOGUE(out1, a13, i + 48);
+      LORA_FUSED_ADD_EPILOGUE(out1, a14, i + 64);
+      LORA_FUSED_ADD_EPILOGUE(out2, a20, i);
+      LORA_FUSED_ADD_EPILOGUE(out2, a21, i + 16);
+      LORA_FUSED_ADD_EPILOGUE(out2, a22, i + 32);
+      LORA_FUSED_ADD_EPILOGUE(out2, a23, i + 48);
+      LORA_FUSED_ADD_EPILOGUE(out2, a24, i + 64);
+      LORA_FUSED_ADD_EPILOGUE(out3, a30, i);
+      LORA_FUSED_ADD_EPILOGUE(out3, a31, i + 16);
+      LORA_FUSED_ADD_EPILOGUE(out3, a32, i + 32);
+      LORA_FUSED_ADD_EPILOGUE(out3, a33, i + 48);
+      LORA_FUSED_ADD_EPILOGUE(out3, a34, i + 64);
+    }
 
-      // Load output, add, convert, store
-      __m512 out_v0 =
-          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out0 + i))), 16));
-      __m512 out_v1 =
-          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out1 + i))), 16));
-      __m512 out_v2 =
-          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out2 + i))), 16));
-      __m512 out_v3 =
-          _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(out3 + i))), 16));
-
-      out_v0 = _mm512_add_ps(out_v0, acc0);
-      out_v1 = _mm512_add_ps(out_v1, acc1);
-      out_v2 = _mm512_add_ps(out_v2, acc2);
-      out_v3 = _mm512_add_ps(out_v3, acc3);
-
-      __m256bh bf16_0 = _mm512_cvtneps_pbh(out_v0);
-      __m256bh bf16_1 = _mm512_cvtneps_pbh(out_v1);
-      __m256bh bf16_2 = _mm512_cvtneps_pbh(out_v2);
-      __m256bh bf16_3 = _mm512_cvtneps_pbh(out_v3);
-
-      _mm256_storeu_si256((__m256i*)(out0 + i), (__m256i)bf16_0);
-      _mm256_storeu_si256((__m256i*)(out1 + i), (__m256i)bf16_1);
-      _mm256_storeu_si256((__m256i*)(out2 + i), (__m256i)bf16_2);
-      _mm256_storeu_si256((__m256i*)(out3 + i), (__m256i)bf16_3);
+    // Remainder outputs: O_BLOCK=16 fallback (rank-inner, same as before)
+    for (; i + O_BLOCK <= output_dim; i += O_BLOCK) {
+      __m512 acc0 = _mm512_setzero_ps(), acc1 = _mm512_setzero_ps(), acc2 = _mm512_setzero_ps(),
+             acc3 = _mm512_setzero_ps();
+      for (int r = 0; r < rank; r++) {
+        __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
+            _mm512_cvtepu16_epi32(_mm256_loadu_si256((__m256i*)(weight_t + r * output_dim + i))), 16));
+        acc0 = _mm512_fmadd_ps(_mm512_set1_ps(inter0[r]), wv, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_set1_ps(inter1[r]), wv, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_set1_ps(inter2[r]), wv, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_set1_ps(inter3[r]), wv, acc3);
+      }
+      LORA_FUSED_ADD_EPILOGUE(out0, acc0, i);
+      LORA_FUSED_ADD_EPILOGUE(out1, acc1, i);
+      LORA_FUSED_ADD_EPILOGUE(out2, acc2, i);
+      LORA_FUSED_ADD_EPILOGUE(out3, acc3, i);
     }
 
     // Handle remaining outputs (< 16)
     if (output_tail_mask) {
-      __m512 acc0 = _mm512_setzero_ps();
-      __m512 acc1 = _mm512_setzero_ps();
-      __m512 acc2 = _mm512_setzero_ps();
-      __m512 acc3 = _mm512_setzero_ps();
-
+      __m512 acc0 = _mm512_setzero_ps(), acc1 = _mm512_setzero_ps(), acc2 = _mm512_setzero_ps(),
+             acc3 = _mm512_setzero_ps();
       for (int r = 0; r < rank; r++) {
         __m512 wv = _mm512_castsi512_ps(_mm512_slli_epi32(
             _mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, weight_t + r * output_dim + i)), 16));
-
-        __m512 iv0 = _mm512_set1_ps(inter0[r]);
-        __m512 iv1 = _mm512_set1_ps(inter1[r]);
-        __m512 iv2 = _mm512_set1_ps(inter2[r]);
-        __m512 iv3 = _mm512_set1_ps(inter3[r]);
-
-        acc0 = _mm512_fmadd_ps(iv0, wv, acc0);
-        acc1 = _mm512_fmadd_ps(iv1, wv, acc1);
-        acc2 = _mm512_fmadd_ps(iv2, wv, acc2);
-        acc3 = _mm512_fmadd_ps(iv3, wv, acc3);
+        acc0 = _mm512_fmadd_ps(_mm512_set1_ps(inter0[r]), wv, acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_set1_ps(inter1[r]), wv, acc1);
+        acc2 = _mm512_fmadd_ps(_mm512_set1_ps(inter2[r]), wv, acc2);
+        acc3 = _mm512_fmadd_ps(_mm512_set1_ps(inter3[r]), wv, acc3);
       }
-
       acc0 = _mm512_mul_ps(acc0, scale_vec);
       acc1 = _mm512_mul_ps(acc1, scale_vec);
       acc2 = _mm512_mul_ps(acc2, scale_vec);
@@ -1305,17 +1337,14 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
       __m512 out_v3 = _mm512_castsi512_ps(
           _mm512_slli_epi32(_mm512_cvtepu16_epi32(_mm256_maskz_loadu_epi16(output_tail_mask, out3 + i)), 16));
 
-      out_v0 = _mm512_add_ps(out_v0, acc0);
-      out_v1 = _mm512_add_ps(out_v1, acc1);
-      out_v2 = _mm512_add_ps(out_v2, acc2);
-      out_v3 = _mm512_add_ps(out_v3, acc3);
-
-      _mm256_mask_storeu_epi16(out0 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v0));
-      _mm256_mask_storeu_epi16(out1 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v1));
-      _mm256_mask_storeu_epi16(out2 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v2));
-      _mm256_mask_storeu_epi16(out3 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(out_v3));
+      _mm256_mask_storeu_epi16(out0 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(_mm512_add_ps(out_v0, acc0)));
+      _mm256_mask_storeu_epi16(out1 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(_mm512_add_ps(out_v1, acc1)));
+      _mm256_mask_storeu_epi16(out2 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(_mm512_add_ps(out_v2, acc2)));
+      _mm256_mask_storeu_epi16(out3 + i, output_tail_mask, (__m256i)_mm512_cvtneps_pbh(_mm512_add_ps(out_v3, acc3)));
     }
   }
+
+#undef LORA_FUSED_ADD_EPILOGUE
 
   // Remaining tokens (< T_BLOCK)
   for (; t < num_tokens; t++) {
