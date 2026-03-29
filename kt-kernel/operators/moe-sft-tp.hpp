@@ -679,7 +679,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
       size_t required = 0;
       required += round_up(lora_a_sparse_bytes, kAmxAlignment) * 2;  // gate_lora_a + up_lora_a (sparse FP32)
-      required += round_up(down_b_sparse_bytes, kAmxAlignment);       // down_lora_b (sparse FP32)
+      required += round_up(down_b_sparse_bytes, kAmxAlignment);      // down_lora_b (sparse FP32)
       required += round_up(grad_input_bytes, kAmxAlignment);
       if (need_grad_weights) {
         required += round_up(grad_weights_bytes, kAmxAlignment);
@@ -754,13 +754,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
       for (int i = 0; i < tp_count; i++) {
         // Copy-type: pointer into final tensor at this TP's I-slice
         tp_gate_b_ptr[i] = (ggml_bf16_t*)grad_gate_lora_b + (size_t)tp_offset * lora_rank;
-        tp_up_b_ptr[i]   = (ggml_bf16_t*)grad_up_lora_b   + (size_t)tp_offset * lora_rank;
-        tp_down_a_ptr[i] = (ggml_bf16_t*)grad_down_lora_a  + tp_offset;  // row-wise, offset added per-row
+        tp_up_b_ptr[i] = (ggml_bf16_t*)grad_up_lora_b + (size_t)tp_offset * lora_rank;
+        tp_down_a_ptr[i] = (ggml_bf16_t*)grad_down_lora_a + tp_offset;  // row-wise, offset added per-row
 
         // Reduce-type: sparse FP32 partials (reinterpret from part_grad pointers)
         tp_fp32_down_b[i] = (float*)part_grad_down_lora_a_[i];  // reused slot for down_lora_b FP32
         tp_fp32_gate_a[i] = (float*)part_grad_gate_lora_a_[i];
-        tp_fp32_up_a[i]   = (float*)part_grad_up_lora_a_[i];
+        tp_fp32_up_a[i] = (float*)part_grad_up_lora_a_[i];
 
         tp_offset += tp_configs[i].intermediate_size;
       }
@@ -771,17 +771,14 @@ class TP_MOE_SFT : public TP_MOE<T> {
       auto start_Bwd = sft_timer::get_trace_timestamp();
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
-                             nullptr, /* grad_gate_lora_a — unused, FP32 path below */
-                             tp_gate_b_ptr[numa_id],  /* copy-type: direct write to final tensor */
-                             nullptr, /* grad_up_lora_a — unused */
-                             tp_up_b_ptr[numa_id],    /* copy-type: direct write */
-                             tp_down_a_ptr[numa_id],  /* copy-type: direct write */
-                             nullptr, /* grad_down_lora_b — unused, FP32 path below */
-                             part_grad_weights_[numa_id],
-                             full_intermediate_size,
-                             tp_fp32_down_b[numa_id],
-                             tp_fp32_gate_a[numa_id],
-                             tp_fp32_up_a[numa_id]);
+                             nullptr,                /* grad_gate_lora_a — unused, FP32 path below */
+                             tp_gate_b_ptr[numa_id], /* copy-type: direct write to final tensor */
+                             nullptr,                /* grad_up_lora_a — unused */
+                             tp_up_b_ptr[numa_id],   /* copy-type: direct write */
+                             tp_down_a_ptr[numa_id], /* copy-type: direct write */
+                             nullptr,                /* grad_down_lora_b — unused, FP32 path below */
+                             part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
+                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id]);
       auto end_bwd = sft_timer::get_trace_timestamp();
       sft_timer::add_kernel_trace("bwd_alloc", start_sft, end_alloc, numa_id, 0);
       sft_timer::add_kernel_trace("bwd_tp", start_Bwd, end_bwd, numa_id, 0);
@@ -1182,9 +1179,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     repack_in_flight_.store(true, std::memory_order_release);
     repack_thread_ = std::thread([this]() {
-      config.pool->dispense_backend()->do_numa_job([this](int numa_id) {
-        tps[numa_id]->prepare_backward_bb_for_async();
-      });
+      config.pool->dispense_backend()->do_numa_job(
+          [this](int numa_id) { tps[numa_id]->prepare_backward_bb_for_async(); });
       repack_in_flight_.store(false, std::memory_order_release);
     });
   }
