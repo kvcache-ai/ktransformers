@@ -49,6 +49,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "MOE_INT8",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Initialize general MoE Wrapper.

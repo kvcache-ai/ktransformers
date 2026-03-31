@@ -40,7 +40,14 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 @click.option("--port", "-p", type=int, default=None, help="Server port")
 @click.option("--gpu-experts", type=int, default=None, help="Number of GPU experts per layer")
 @click.option("--cpu-threads", type=int, default=None, help="Number of CPU inference threads")
-@click.option("--numa-nodes", type=int, default=None, help="Number of NUMA nodes")
+@click.option(
+    "--numa-nodes",
+    "numa_nodes",
+    type=int,
+    multiple=True,
+    default=(),
+    help="Number of KT threadpools, or explicit NUMA node IDs for each threadpool (e.g. --numa-nodes 2 or --numa-nodes 0 --numa-nodes 1)",
+)
 @click.option(
     "--tensor-parallel-size", "--tp", "tensor_parallel_size", type=int, default=None, help="Tensor parallel size"
 )
@@ -82,7 +89,7 @@ def run(
     port: Optional[int],
     gpu_experts: Optional[int],
     cpu_threads: Optional[int],
-    numa_nodes: Optional[int],
+    numa_nodes: Optional[tuple[int, ...]],
     tensor_parallel_size: Optional[int],
     model_path: Optional[str],
     weights_path: Optional[str],
@@ -166,7 +173,7 @@ def _run_impl(
     port: Optional[int],
     gpu_experts: Optional[int],
     cpu_threads: Optional[int],
-    numa_nodes: Optional[int],
+    numa_nodes: Optional[tuple[int, ...]],
     tensor_parallel_size: Optional[int],
     model_path: Optional[Path],
     weights_path: Optional[Path],
@@ -226,7 +233,7 @@ def _run_impl(
         gpu_experts is None
         or tensor_parallel_size is None
         or cpu_threads is None
-        or numa_nodes is None
+        or not numa_nodes
         or max_total_tokens is None
     ):
         # Model specified but some parameters missing - use interactive
@@ -254,7 +261,10 @@ def _run_impl(
         # Extract parameters
         gpu_experts = config["gpu_experts"]
         cpu_threads = config["cpu_threads"]
-        numa_nodes = config["numa_nodes"]
+        if config.get("numa_nodes") is not None:
+            numa_nodes = (int(config["numa_nodes"]),)
+        else:
+            numa_nodes = ()
         tensor_parallel_size = config["tp_size"]
 
         # Get kt-method and other method-specific settings
@@ -421,7 +431,15 @@ def _run_impl(
     # CPU/GPU configuration with smart defaults
     total_threads = cpu.threads  # Use logical threads instead of physical cores
     final_cpu_threads = resolve(cpu_threads, "inference.cpu_threads", int(total_threads * 0.8))
-    final_numa_nodes = resolve(numa_nodes, "inference.numa_nodes", cpu.numa_nodes)
+    final_numa_nodes = resolve(None, "inference.numa_nodes", cpu.numa_nodes)
+    final_kt_numa_nodes = None
+
+    if numa_nodes:
+        if len(numa_nodes) == 1:
+            final_numa_nodes = numa_nodes[0]
+        else:
+            final_kt_numa_nodes = list(numa_nodes)
+            final_numa_nodes = len(final_kt_numa_nodes)
     final_gpu_experts = resolve(gpu_experts, "inference.gpu_experts", 1)
 
     # KT-kernel options
@@ -436,7 +454,6 @@ def _run_impl(
     final_mem_fraction_static = resolve(mem_fraction_static, "inference.mem_fraction_static", 0.98)
     final_watchdog_timeout = resolve(watchdog_timeout, "inference.watchdog_timeout", 3000)
     final_served_model_name = resolve(served_model_name, "inference.served_model_name", "")
-
     # Performance flags
     final_disable_shared_experts_fusion = resolve(
         disable_shared_experts_fusion, "inference.disable_shared_experts_fusion", True
@@ -472,6 +489,7 @@ def _run_impl(
         watchdog_timeout=final_watchdog_timeout,
         served_model_name=final_served_model_name,
         disable_shared_experts_fusion=final_disable_shared_experts_fusion,
+        kt_numa_nodes=final_kt_numa_nodes,
         tool_call_parser=final_tool_call_parser,
         reasoning_parser=final_reasoning_parser,
         settings=settings,
@@ -503,6 +521,8 @@ def _run_impl(
     console.print(f"  GPU Experts: [cyan]{final_gpu_experts}[/cyan] per layer")
     console.print(f"  CPU Threads (kt-cpuinfer): [cyan]{final_cpu_threads}[/cyan]")
     console.print(f"  NUMA Nodes (kt-threadpool-count): [cyan]{final_numa_nodes}[/cyan]")
+    if final_kt_numa_nodes is not None:
+        console.print(f"  NUMA Nodes (binding): [cyan]{', '.join(map(str, final_kt_numa_nodes))}[/cyan]")
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
@@ -577,6 +597,7 @@ def _build_sglang_command(
     watchdog_timeout: int,
     served_model_name: str,
     disable_shared_experts_fusion: bool,
+    kt_numa_nodes: Optional[list[int]],
     tool_call_parser: Optional[str],
     reasoning_parser: Optional[str],
     settings,
@@ -632,6 +653,8 @@ def _build_sglang_command(
                 "--kt-enable-dynamic-expert-update",  # Enable dynamic expert updates
             ]
         )
+        if kt_numa_nodes is not None:
+            cmd.extend(["--kt-numa-nodes", *map(str, kt_numa_nodes)])
 
     # Add SGLang options
     cmd.extend(
@@ -681,6 +704,7 @@ def _build_sglang_command(
             "kt-num-gpu-experts",
             "kt-cpuinfer",
             "kt-threadpool-count",
+            "kt-numa-nodes",
             "kt-method",
             "kt-gpu-prefill-token-threshold",
             "attention-backend",

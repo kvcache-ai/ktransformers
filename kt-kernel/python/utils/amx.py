@@ -5,7 +5,13 @@ from typing import List, Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader, GPTQSafeTensorLoader
+from .loader import (
+    SafeTensorLoader,
+    CompressedSafeTensorLoader,
+    FP8SafeTensorLoader,
+    BF16SafeTensorLoader,
+    GPTQSafeTensorLoader,
+)
 from kt_kernel_ext.moe import MOEConfig
 import kt_kernel_ext.moe as _moe_mod
 
@@ -351,6 +357,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
+        numa_nodes: Optional[List[int]] = None,
     ):
         if method == "RAWINT4" and not _HAS_RAWINT4_SUPPORT:
             raise RuntimeError(
@@ -379,10 +386,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
         if method == "GPTQ_INT4" and not _HAS_AVX2_GPTQ_INT4_SUPPORT:
-            raise RuntimeError(
-                "GPTQ_INT4 backend not available.\n"
-                "Please recompile kt_kernel_ext with AVX2 enabled."
-            )
+            raise RuntimeError("GPTQ_INT4 backend not available.\n" "Please recompile kt_kernel_ext with AVX2 enabled.")
 
         super().__init__(
             layer_idx=layer_idx,
