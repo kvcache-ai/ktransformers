@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import List, Optional
 import os
 
 # Use relative imports for package structure
@@ -133,6 +133,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
+            numa_nodes=numa_nodes,
         )
 
         self.weights_to_keep = None

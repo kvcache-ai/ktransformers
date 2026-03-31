@@ -164,6 +164,7 @@ class BaseMoEWrapper(ABC):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Initialize base MoE Wrapper.
@@ -185,6 +186,8 @@ class BaseMoEWrapper(ABC):
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer on this layer. Defaults to 0 (no defer).
             method: Backend method string
+            numa_nodes: Explicit list of NUMA node IDs for subpool mapping.
+                        If None, defaults to [0, 1, ..., threadpool_count-1].
         """
         self.layer_idx = layer_idx
         self.num_experts = num_experts
@@ -221,7 +224,15 @@ class BaseMoEWrapper(ABC):
         if BaseMoEWrapper._cpu_infer_instance is None:
             worker_config = kt_kernel_ext.WorkerPoolConfig()
 
-            subpool_numa_map = list(range(threadpool_count))
+            if numa_nodes is not None:
+                if len(numa_nodes) != threadpool_count:
+                    raise ValueError(
+                        f"numa_nodes length ({len(numa_nodes)}) must match "
+                        f"threadpool_count ({threadpool_count})"
+                    )
+                subpool_numa_map = list(numa_nodes)
+            else:
+                subpool_numa_map = list(range(threadpool_count))
             subpool_thread_count = [
                 cpuinfer_threads // threadpool_count + (1 if i < cpuinfer_threads % threadpool_count else 0)
                 for i in range(threadpool_count)
