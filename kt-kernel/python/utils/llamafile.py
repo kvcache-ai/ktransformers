@@ -41,6 +41,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "LLAMAFILE",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Initialize Llamafile MoE Wrapper.
