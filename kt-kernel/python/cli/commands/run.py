@@ -44,9 +44,9 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
     "--numa-nodes",
     "numa_nodes",
     type=int,
-    nargs=-1,
+    multiple=True,
     default=(),
-    help="Number of KT threadpools, or explicit NUMA node IDs for each threadpool (e.g. --numa-nodes 2 or --numa-nodes 0 1)",
+    help="Number of KT threadpools, or explicit NUMA node IDs for each threadpool (e.g. --numa-nodes 2 or --numa-nodes 0 --numa-nodes 1)",
 )
 @click.option(
     "--tensor-parallel-size", "--tp", "tensor_parallel_size", type=int, default=None, help="Tensor parallel size"
