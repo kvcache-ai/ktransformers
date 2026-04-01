@@ -210,9 +210,9 @@ generate_image_name() {
 
 # Generate simplified tag for DockerHub
 # Input:
-#   $1: ktransformers_version (e.g., 0.4.3)
+#   $1: ktransformers_version (e.g., 0.5.3)
 #   $2: cuda_version (e.g., 12.8.1)
-# Output: Simplified tag (e.g., v0.4.3-cu128)
+# Output: Simplified tag (e.g., v0.5.3-cu128)
 generate_simplified_tag() {
     local ktrans_ver="$1"
     local cuda_version="$2"

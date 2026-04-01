@@ -27,7 +27,7 @@ option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.5.0)
+project(kt_kernel_ext VERSION 0.5.3)
 
 # Auto-detect CPU features early (unless building with LLAMA_NATIVE)
 if(NOT LLAMA_NATIVE AND NOT MSVC)
@@ -692,4 +692,3 @@ if(NUMA_LIBRARY)
 else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
-
