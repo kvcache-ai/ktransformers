@@ -695,9 +695,9 @@ if _version_file.exists():
     _version_ns = {}
     with open(_version_file, "r", encoding="utf-8") as f:
         exec(f.read(), _version_ns)
-    _base_version = _version_ns.get("__version__", "0.5.0")
+    _base_version = _version_ns.get("__version__", "0.5.3")
 else:
-    _base_version = "0.5.0"
+    _base_version = "0.5.3"
 
 # Determine version
 if "CPUINFER_VERSION" in os.environ:
