@@ -24,6 +24,7 @@ AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 AVX2BF16_MOE = getattr(_moe_mod, "AVX2BF16_MOE", None)
 AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
 AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
+AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
@@ -34,6 +35,44 @@ _HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
 _HAS_AVX2_BF16_SUPPORT = AVX2BF16_MOE is not None
 _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
 _HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
+_HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
+
+
+def _host_has_cpu_flag(*flag_names: str) -> bool:
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if line.startswith("flags"):
+                    flags = set(line.split(":", 1)[1].strip().split())
+                    return any(name in flags for name in flag_names)
+    except OSError:
+        return False
+    return False
+
+
+_HOST_HAS_AVX_VNNI = _host_has_cpu_flag("avx_vnni", "avxvnni")
+
+
+def _select_gptq_int4_backend():
+    forced = os.getenv("KT_GPTQ_INT4_BACKEND", "").strip().lower()
+
+    if forced in {"avxvnni", "avxvnni256"}:
+        if not _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but AVXVNNI256GPTQInt4_MOE is not compiled in.")
+        if not _HOST_HAS_AVX_VNNI:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but the current CPU does not support avx_vnni.")
+        return AVXVNNI256GPTQInt4_MOE
+
+    if forced == "avx2":
+        if not _HAS_AVX2_GPTQ_INT4_SUPPORT:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avx2 requested, but AVX2GPTQInt4_MOE is not compiled in.")
+        return AVX2GPTQInt4_MOE
+
+    if _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI:
+        return AVXVNNI256GPTQInt4_MOE
+    if _HAS_AVX2_GPTQ_INT4_SUPPORT:
+        return AVX2GPTQInt4_MOE
+    return None
 
 
 class AMXMoEWrapper(BaseMoEWrapper):
@@ -385,8 +424,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
-        if method == "GPTQ_INT4" and not _HAS_AVX2_GPTQ_INT4_SUPPORT:
-            raise RuntimeError("GPTQ_INT4 backend not available.\n" "Please recompile kt_kernel_ext with AVX2 enabled.")
+        if method == "GPTQ_INT4" and _select_gptq_int4_backend() is None:
+            raise RuntimeError(
+                "GPTQ_INT4 backend not available.\n"
+                "Please recompile kt_kernel_ext with AVX2 enabled.\n"
+                "AVX-VNNI-256 will be selected automatically when available on the current CPU."
+            )
 
         super().__init__(
             layer_idx=layer_idx,
@@ -554,7 +597,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.bits = 4
             moe_config.quant_config.group_size = actual_gs
             moe_config.quant_config.zero_point = False
-            self.moe = AVX2GPTQInt4_MOE(moe_config)
+            backend_cls = _select_gptq_int4_backend()
+            if backend_cls is None:
+                raise RuntimeError("No GPTQ_INT4 backend is available after runtime selection.")
+            self.moe = backend_cls(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2
