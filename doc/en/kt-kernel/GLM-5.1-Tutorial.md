@@ -15,7 +15,6 @@ GLM-5.1 introduces thinking mode (enabled by default), interleaved and preserved
   - [Option B: OpenAI-Compatible API](#option-b-openai-compatible-api)
 - [Thinking Mode](#thinking-mode)
 - [Recommended Parameters](#recommended-parameters)
-- [Deployment Verification](#deployment-verification)
 - [Additional Resources](#additional-resources)
 
 ## Prerequisites
