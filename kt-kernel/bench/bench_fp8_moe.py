@@ -17,7 +17,7 @@ import platform
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 
 import torch
-import kt_kernel_ext
+from kt_kernel import kt_kernel_ext
 from tqdm import tqdm
 
 # Test parameters
@@ -29,9 +29,9 @@ fp8_group_size = 128
 max_len = 25600
 
 layer_num = 2
-qlen = 1024
-warm_up_iter = 10
-test_iter = 30
+qlen = 1
+warm_up_iter = 1000
+test_iter = 3000
 CPUINFER_PARAM = 80
 
 CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)

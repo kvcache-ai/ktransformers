@@ -5,7 +5,7 @@
 - [For kt-kernel](en/kt-kernel/kt-kernel_intro.md)
 - [For kt-sft](en/SFT/KTransformers-Fine-Tuning_User-Guide.md)
 
-# Tutorial 
+# Tutorial
 - [kt-sft part](en/SFT/README.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
   - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
@@ -19,6 +19,8 @@
 - [Makefile Usage](en/makefile_usage.md) -->
 - [kt-kernel part](en/kt-kernel/README.md)
   - [kt-cli](en/kt-kernel/kt-cli.md)
+  - [AVX2 Backend Tutorial](en/kt-kernel/AVX2-Tutorial.md)
+  - [AVX2 后端教程（中文）](zh/AVX2-Tutorial_zh.md)
 # FAQ
 - [FAQ](en/FAQ.md)
 <!-- # V3 Reproduction

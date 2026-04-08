@@ -201,31 +201,35 @@ ARG GITHUB_ARTIFACTORY
 ARG KTRANSFORMERS_VERSION
 ARG KTRANSFORMERS_WHEEL
 ARG FLASH_ATTN_WHEEL
+ARG FUNCTIONALITY=sft
 
 WORKDIR /workspace
 
-# Create two conda environments with Python 3.12
+# Create conda environments (fine-tune only needed for sft mode)
 RUN conda create -n serve python=3.12 -y \
-    && conda create -n fine-tune python=3.12 -y
+    && if [ "$FUNCTIONALITY" = "sft" ]; then conda create -n fine-tune python=3.12 -y; fi
 
-# Set pip mirror for both conda envs
+# Set pip mirror for conda envs
 RUN /opt/miniconda3/envs/serve/bin/pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-    && /opt/miniconda3/envs/fine-tune/bin/pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+    && if [ "$FUNCTIONALITY" = "sft" ]; then \
+        /opt/miniconda3/envs/fine-tune/bin/pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple; \
+    fi
 
-# Clone repositories
-# Use kvcache-ai/sglang fork with kimi_k2 branch
-RUN git clone https://${GITHUB_ARTIFACTORY}/kvcache-ai/sglang.git /workspace/sglang \
-    && cd /workspace/sglang && git checkout kimi_k2
+# Clone repositories (sglang is included as a submodule in ktransformers)
+RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
+    && cd /workspace/ktransformers && git submodule update --init --recursive \
+    && ln -s /workspace/ktransformers/third_party/sglang /workspace/sglang \
+    && if [ "$FUNCTIONALITY" = "sft" ]; then \
+        git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory; \
+    fi
 
-RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory \
-    && git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.git /workspace/ktransformers \
-    && cd /workspace/ktransformers && git submodule update --init --recursive
-
-# Download ktransformers wheel and flash_attn wheel for fine-tune env
-RUN curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${KTRANSFORMERS_WHEEL} \
-    https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers/releases/download/v${KTRANSFORMERS_VERSION}/${KTRANSFORMERS_WHEEL} \
-    && curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${FLASH_ATTN_WHEEL} \
-    https://${GITHUB_ARTIFACTORY}/Dao-AILab/flash-attention/releases/download/v2.8.3/${FLASH_ATTN_WHEEL}
+# Download ktransformers wheel and flash_attn wheel for fine-tune env (sft mode only)
+RUN if [ "$FUNCTIONALITY" = "sft" ]; then \
+        curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${KTRANSFORMERS_WHEEL} \
+            https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers/releases/download/v${KTRANSFORMERS_VERSION}/${KTRANSFORMERS_WHEEL} \
+        && curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${FLASH_ATTN_WHEEL} \
+            https://${GITHUB_ARTIFACTORY}/Dao-AILab/flash-attention/releases/download/v2.8.3/${FLASH_ATTN_WHEEL}; \
+    fi
 
 ########################################################
 # Environment 1: serve (sglang + kt-kernel)
@@ -255,7 +259,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     ; \
     fi
 
-# Install SGLang in serve env
+# Install SGLang in serve env (version aligned with ktransformers)
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$CUDA_VERSION" in \
         12.6.1) CUINDEX=126 ;; \
@@ -263,6 +267,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         12.9.1) CUINDEX=129 ;; \
         13.0.1) CUINDEX=130 ;; \
     esac \
+    && export SGLANG_KT_VERSION=$(python3 -c "exec(open('/workspace/ktransformers/version.py').read()); print(__version__)") \
+    && echo "Installing sglang-kt v${SGLANG_KT_VERSION}" \
     && cd /workspace/sglang \
     && /opt/miniconda3/envs/serve/bin/pip install -e "python[all]" --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX}
 
@@ -318,47 +324,59 @@ RUN . /opt/miniconda3/etc/profile.d/conda.sh && conda activate serve \
     && CPUINFER_BUILD_ALL_VARIANTS=1 ./install.sh build
 
 ########################################################
-# Environment 2: fine-tune (LLaMA-Factory + ktransformers)
+# Environment 2: fine-tune (LLaMA-Factory + ktransformers) - sft mode only
 ########################################################
 
 # Install dependency libraries for ktransformers (CUDA 11.8 runtime required)
-RUN conda install -n fine-tune -y -c conda-forge libstdcxx-ng gcc_impl_linux-64 \
-    && conda install -n fine-tune -y -c nvidia/label/cuda-11.8.0 cuda-runtime
+RUN if [ "$FUNCTIONALITY" = "sft" ]; then \
+        conda install -n fine-tune -y -c conda-forge libstdcxx-ng gcc_impl_linux-64 \
+        && conda install -n fine-tune -y -c nvidia/label/cuda-11.8.0 cuda-runtime; \
+    fi
 
 # Install PyTorch 2.8 in fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
-    case "$CUDA_VERSION" in \
-        12.6.1) CUINDEX=126 ;; \
-        12.8.1) CUINDEX=128 ;; \
-        12.9.1) CUINDEX=129 ;; \
-        13.0.1) CUINDEX=130 ;; \
-    esac \
-    && /opt/miniconda3/envs/fine-tune/bin/pip install --upgrade pip setuptools wheel \
-    && /opt/miniconda3/envs/fine-tune/bin/pip install \
-        torch==2.8.0 \
-        torchvision \
-        torchaudio \
-        --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX}
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        case "$CUDA_VERSION" in \
+            12.6.1) CUINDEX=126 ;; \
+            12.8.1) CUINDEX=128 ;; \
+            12.9.1) CUINDEX=129 ;; \
+            13.0.1) CUINDEX=130 ;; \
+        esac \
+        && /opt/miniconda3/envs/fine-tune/bin/pip install --upgrade pip setuptools wheel hatchling \
+        && /opt/miniconda3/envs/fine-tune/bin/pip install \
+            torch==2.8.0 \
+            torchvision \
+            torchaudio \
+            --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX}; \
+    fi
 
 # Install LLaMA-Factory in fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
-    cd /workspace/LLaMA-Factory \
-    && /opt/miniconda3/envs/fine-tune/bin/pip install -e ".[torch,metrics]" --no-build-isolation
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        cd /workspace/LLaMA-Factory \
+        && /opt/miniconda3/envs/fine-tune/bin/pip install -e ".[torch,metrics]" --no-build-isolation; \
+    fi
 
 # Install ktransformers wheel in fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
-    /opt/miniconda3/envs/fine-tune/bin/pip install /workspace/${KTRANSFORMERS_WHEEL}
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        /opt/miniconda3/envs/fine-tune/bin/pip install /workspace/${KTRANSFORMERS_WHEEL}; \
+    fi
 
 # Install flash_attn wheel in fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
-    /opt/miniconda3/envs/fine-tune/bin/pip install /workspace/${FLASH_ATTN_WHEEL}
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        /opt/miniconda3/envs/fine-tune/bin/pip install /workspace/${FLASH_ATTN_WHEEL}; \
+    fi
 
 # Install NCCL for fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
-    if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
-        /opt/miniconda3/envs/fine-tune/bin/pip install nvidia-nccl-cu12==2.28.3 --force-reinstall --no-deps ; \
-    elif [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        /opt/miniconda3/envs/fine-tune/bin/pip install nvidia-nccl-cu13==2.28.3 --force-reinstall --no-deps ; \
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
+            /opt/miniconda3/envs/fine-tune/bin/pip install nvidia-nccl-cu12==2.28.3 --force-reinstall --no-deps ; \
+        elif [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+            /opt/miniconda3/envs/fine-tune/bin/pip install nvidia-nccl-cu13==2.28.3 --force-reinstall --no-deps ; \
+        fi; \
     fi
 
 ########################################################
@@ -366,13 +384,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 ########################################################
 
 # Clean up downloaded wheels
-RUN rm -f /workspace/${KTRANSFORMERS_WHEEL} /workspace/${FLASH_ATTN_WHEEL}
+RUN if [ "$FUNCTIONALITY" = "sft" ]; then \
+        rm -f /workspace/${KTRANSFORMERS_WHEEL} /workspace/${FLASH_ATTN_WHEEL}; \
+    fi
 
 # Initialize conda for bash
 RUN /opt/miniconda3/bin/conda init bash
 
 # Create shell aliases for convenience
-RUN echo '\n# Conda environment aliases\nalias serve="conda activate serve"\nalias finetune="conda activate fine-tune"' >> /root/.bashrc
+RUN echo '\n# Conda environment aliases\nalias serve="conda activate serve"' >> /root/.bashrc \
+    && if [ "$FUNCTIONALITY" = "sft" ]; then \
+        echo 'alias finetune="conda activate fine-tune"' >> /root/.bashrc; \
+    fi
 
 ########################################################
 # Extract version information for image naming
@@ -380,24 +403,27 @@ RUN echo '\n# Conda environment aliases\nalias serve="conda activate serve"\nali
 
 # Extract versions from each component and save to versions.env
 RUN set -x && \
-    # SGLang version (from version.py file)
-    cd /workspace/sglang/python/sglang && \
-    SGLANG_VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown") && \
-    echo "SGLANG_VERSION=$SGLANG_VERSION" > /workspace/versions.env && \
-    echo "Extracted SGLang version: $SGLANG_VERSION" && \
-    \
-    # KTransformers version (from version.py in repo)
+    # KTransformers version (single source of truth for both kt-kernel and sglang-kt)
     cd /workspace/ktransformers && \
     KTRANSFORMERS_VERSION=$(python3 -c "exec(open('version.py').read()); print(__version__)" 2>/dev/null || echo "unknown") && \
-    echo "KTRANSFORMERS_VERSION=$KTRANSFORMERS_VERSION" >> /workspace/versions.env && \
+    echo "KTRANSFORMERS_VERSION=$KTRANSFORMERS_VERSION" > /workspace/versions.env && \
     echo "Extracted KTransformers version: $KTRANSFORMERS_VERSION" && \
     \
-    # LLaMA-Factory version (from fine-tune environment)
-    . /opt/miniconda3/etc/profile.d/conda.sh && conda activate fine-tune && \
-    cd /workspace/LLaMA-Factory && \
-    LLAMAFACTORY_VERSION=$(python -c "import sys; sys.path.insert(0, 'src'); from llamafactory import __version__; print(__version__)" 2>/dev/null || echo "unknown") && \
-    echo "LLAMAFACTORY_VERSION=$LLAMAFACTORY_VERSION" >> /workspace/versions.env && \
-    echo "Extracted LLaMA-Factory version: $LLAMAFACTORY_VERSION" && \
+    # sglang-kt version = ktransformers version (aligned)
+    echo "SGLANG_KT_VERSION=$KTRANSFORMERS_VERSION" >> /workspace/versions.env && \
+    echo "sglang-kt version (aligned): $KTRANSFORMERS_VERSION" && \
+    \
+    # LLaMA-Factory version (from fine-tune environment, sft mode only)
+    if [ "$FUNCTIONALITY" = "sft" ]; then \
+        . /opt/miniconda3/etc/profile.d/conda.sh && conda activate fine-tune && \
+        cd /workspace/LLaMA-Factory && \
+        LLAMAFACTORY_VERSION=$(python -c "import sys; sys.path.insert(0, 'src'); from llamafactory import __version__; print(__version__)" 2>/dev/null || echo "unknown") && \
+        echo "LLAMAFACTORY_VERSION=$LLAMAFACTORY_VERSION" >> /workspace/versions.env && \
+        echo "Extracted LLaMA-Factory version: $LLAMAFACTORY_VERSION"; \
+    else \
+        echo "LLAMAFACTORY_VERSION=none" >> /workspace/versions.env && \
+        echo "LLaMA-Factory not installed (infer mode)"; \
+    fi && \
     \
     # Display all versions
     echo "=== Version Summary ===" && \

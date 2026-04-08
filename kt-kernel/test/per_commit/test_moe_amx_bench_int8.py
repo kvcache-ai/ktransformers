@@ -34,13 +34,13 @@ except ImportError as e:
     import_error = str(e)
 
 # Test parameters (from original bench_moe_amx.py)
-expert_num = 16
+expert_num = 128
 hidden_size = 7168
 intermediate_size = 2048
 max_len = 25600
-num_experts_per_tok = 8
+num_experts_per_tok = 0
 layer_num = 2
-qlen = 2048
+qlen = 1
 warm_up_iter = 1000
 test_iter = 2000
 

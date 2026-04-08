@@ -30,7 +30,7 @@ This tutorial demonstrates how to run DeepSeek V3.2 model inference using SGLang
 Before starting, ensure you have:
 
 1. **KT-Kernel installed** - Follow the [installation guide](./kt-kernel_intro.md#installation)
-2. **SGLang installed** - Follow [SGLang integration steps](./kt-kernel_intro.md#integration-with-sglang)
+2. **SGLang installed** - Install the kvcache-ai fork: `pip install sglang-kt` or run `./install.sh` from the ktransformers root
 3. **CUDA toolkit** - Compatible with your GPU (CUDA 11.8+ recommended)
 4. **Hugging Face CLI** - For downloading models:
    ```bash

@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import torch
 from typing import List, Optional, Union
 
 # Import base infrastructure for inference
@@ -36,6 +37,9 @@ INFERENCE_METHODS = frozenset(
         "AMXINT8",  # AMX quantization
         "RAWINT4",
         "FP8",  # Native quantization
+        "BF16",  # BF16 native MoE
+        "FP8_PERCHANNEL",  # Per-channel FP8
+        "GPTQ_INT4",  # GPTQ INT4
         "LLAMAFILE",  # GGUF format
         "MOE_INT4",
         "MOE_INT8",  # General kernel
@@ -73,15 +77,19 @@ class KTMoEWrapper:
         - "sft": Supervised fine-tuning with LoRA adapters
 
     Usage (Inference):
+        # Create a mask where experts 0, 2, 5 are on GPU
+        gpu_mask = torch.zeros(8, dtype=torch.bool)
+        gpu_mask[[0, 2, 5]] = True
+
         wrapper = KTMoEWrapper(
             layer_idx=0,
-            num_experts=256,
-            num_experts_per_tok=8,
-            hidden_size=7168,
-            moe_intermediate_size=2048,
-            num_gpu_experts=0,
-            cpuinfer_threads=60,
-            threadpool_count=4,
+            num_experts=8,
+            num_experts_per_tok=2,
+            hidden_size=4096,
+            moe_intermediate_size=14336,
+            gpu_experts_mask=gpu_mask,  # or None for all experts on CPU
+            cpuinfer_threads=32,
+            threadpool_count=2,
             weight_path="/path/to/weights",
             chunked_prefill_size=25600,
             method="AMXINT4",  # or "AMXINT8", "LLAMAFILE"
@@ -114,7 +122,7 @@ class KTMoEWrapper:
         num_experts_per_tok: int,
         hidden_size: int,
         moe_intermediate_size: int,
-        num_gpu_experts: int,
+        gpu_experts_mask: Optional[torch.Tensor],
         cpuinfer_threads: int,
         threadpool_count: int,
         weight_path: str,
@@ -126,6 +134,7 @@ class KTMoEWrapper:
         method: str = "AMXINT4",
         mode: str = "inference",
         # SFT-specific parameters (only used when mode="sft")
+        num_gpu_experts: int = 0,
         lora_rank: int = 16,
         lora_alpha: float = 32.0,
         max_cache_depth: int = 1,
@@ -142,7 +151,11 @@ class KTMoEWrapper:
             num_experts_per_tok: Number of experts per token (top-k)
             hidden_size: Hidden dimension size
             moe_intermediate_size: MoE intermediate size
-            num_gpu_experts: Number of experts to run on GPU (usually 0 for SFT)
+            gpu_experts_mask: Boolean mask indicating which experts are on GPU (inference).
+                              Shape: [num_experts], dtype: torch.bool.
+                              mask[i] = True means expert i is on GPU.
+                              If None, all experts are on CPU.
+                              SFT mode uses num_gpu_experts instead.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools (TP count)
             weight_path: Path to weights
@@ -188,7 +201,7 @@ class KTMoEWrapper:
                 num_experts_per_tok=num_experts_per_tok,
                 hidden_size=hidden_size,
                 moe_intermediate_size=moe_intermediate_size,
-                num_gpu_experts=num_gpu_experts,
+                gpu_experts_mask=gpu_experts_mask,
                 cpuinfer_threads=cpuinfer_threads,
                 threadpool_count=threadpool_count,
                 weight_path=weight_path,
@@ -274,7 +287,7 @@ def _create_inference_wrapper(
     num_experts_per_tok: int,
     hidden_size: int,
     moe_intermediate_size: int,
-    num_gpu_experts: int,
+    gpu_experts_mask: Optional[torch.Tensor],
     cpuinfer_threads: int,
     threadpool_count: int,
     weight_path: str,
@@ -295,7 +308,7 @@ def _create_inference_wrapper(
     # Select backend based on method
     if method in ["AMXINT4", "AMXINT8"]:
         backend_cls = AMXMoEWrapper
-    elif method in ["RAWINT4", "FP8"]:
+    elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4"]:
         backend_cls = NativeMoEWrapper
     elif method == "LLAMAFILE":
         backend_cls = LlamafileMoEWrapper
@@ -312,7 +325,7 @@ def _create_inference_wrapper(
         num_experts_per_tok=num_experts_per_tok,
         hidden_size=hidden_size,
         moe_intermediate_size=moe_intermediate_size,
-        num_gpu_experts=num_gpu_experts,
+        gpu_experts_mask=gpu_experts_mask,
         cpuinfer_threads=cpuinfer_threads,
         threadpool_count=threadpool_count,
         weight_path=weight_path,

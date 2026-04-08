@@ -9,7 +9,7 @@ _kt_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Main commands
-    local commands="version run chat quant bench microbench doctor model config sft"
+    local commands="version run chat quant edit bench microbench doctor model config sft"
 
     # Global options
     local global_opts="--help --version"
@@ -35,6 +35,10 @@ _kt_completion() {
                 quant)
                     local quant_opts="--method --output --help"
                     COMPREPLY=( $(compgen -W "${quant_opts}" -- ${cur}) )
+                    ;;
+                edit)
+                    local edit_opts="--help"
+                    COMPREPLY=( $(compgen -W "${edit_opts}" -- ${cur}) )
                     ;;
                 bench|microbench)
                     local bench_opts="--model --config --help"

@@ -384,11 +384,6 @@ build_step() {
 # Close MANUAL_MODE conditional
   fi
 
-# Set defaults for optional variables
-export CPUINFER_BUILD_TYPE=${CPUINFER_BUILD_TYPE:-Release}
-export CPUINFER_PARALLEL=${CPUINFER_PARALLEL:-8}
-export CPUINFER_VERBOSE=${CPUINFER_VERBOSE:-1}
-
 echo "=========================================="
 echo "Building kt-kernel with configuration:"
 echo "=========================================="
@@ -397,11 +392,16 @@ echo "  CPUINFER_ENABLE_AMX          = $CPUINFER_ENABLE_AMX"
 echo "  CPUINFER_ENABLE_AVX512_VNNI  = ${CPUINFER_ENABLE_AVX512_VNNI:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_BF16  = ${CPUINFER_ENABLE_AVX512_BF16:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_VBMI  = ${CPUINFER_ENABLE_AVX512_VBMI:-AUTO}"
-echo "  CPUINFER_BUILD_TYPE          = $CPUINFER_BUILD_TYPE"
-echo "  CPUINFER_PARALLEL            = $CPUINFER_PARALLEL"
+echo "  CPUINFER_BUILD_TYPE          = ${CPUINFER_BUILD_TYPE:-Release}"
+echo "  CPUINFER_PARALLEL            = ${CPUINFER_PARALLEL:-AUTO}"
+echo "  CPUINFER_VERBOSE             = ${CPUINFER_VERBOSE:-1}"
 echo ""
 
-pip install . -v
+if [ ${CPUINFER_VERBOSE:-1} = "0" ]; then
+  python3 -m pip install .
+else
+  python3 -m pip install . -v
+fi
 }
 
 # Subcommand dispatcher: default to "all"

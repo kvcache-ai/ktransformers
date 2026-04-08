@@ -50,6 +50,7 @@ kt_kernel_ext = _kt_kernel_ext
 
 # Import main API
 from .experts import KTMoEWrapper
+from .experts_base import generate_gpu_experts_masks
 
 def __getattr__(name):
     if name == "AMXSFTMoEWrapper":
@@ -91,4 +92,4 @@ except ImportError:
     except ImportError:
         __version__ = "0.4.3"
 
-__all__ = ["KTMoEWrapper", "AMXSFTMoEWrapper", "kt_kernel_ext", "__cpu_variant__", "__version__"]
+__all__ = ["KTMoEWrapper", "AMXSFTMoEWrapper", "generate_gpu_experts_masks", "kt_kernel_ext", "__cpu_variant__", "__version__"]

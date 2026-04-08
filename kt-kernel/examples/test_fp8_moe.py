@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__) + "/../build")
 
 import torch
 import kt_kernel
+from kt_kernel import kt_kernel_ext
 
 torch.manual_seed(42)
 

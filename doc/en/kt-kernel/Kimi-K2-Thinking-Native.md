@@ -30,15 +30,14 @@ This tutorial demonstrates how to run Kimi-K2 model inference using SGLang integ
 Before starting, ensure you have:
 
 1. **KT-Kernel installed** - Follow the [installation guide](./kt-kernel_intro.md#installation)
-2. **SGLang installed** - Follow [SGLang integration steps](./kt-kernel_intro.md#integration-with-sglang)
+2. **SGLang installed** - Install the kvcache-ai fork of SGLang (one of):
 
-Note: Currently, please clone our custom SGLang repository:
+```bash
+# Option A: One-click install (from ktransformers root)
+./install.sh
 
-```
-git clone https://github.com/kvcache-ai/sglang.git
-cd sglang
-git checkout kimi_k2
-pip install -e "python[all]"
+# Option B: pip install
+pip install sglang-kt
 ```
 
 3. **CUDA toolkit** - Compatible with your GPU (CUDA 11.8+ recommended)
