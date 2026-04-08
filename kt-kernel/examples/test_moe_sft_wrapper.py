@@ -24,7 +24,7 @@ import torch.nn.functional as F
 # Try to import kt_kernel
 try:
     from kt_kernel.experts import KTMoEWrapper
-    from kt_kernel.experts_sft import KExpertsSFTBuffer, BaseSFTMoEWrapper
+    from kt_kernel.sft.base import KExpertsSFTBuffer, BaseSFTMoEWrapper
 
     HAS_KT_KERNEL = True
 except ImportError:
@@ -32,7 +32,7 @@ except ImportError:
         # Alternative import path (for development)
         sys.path.insert(0, os.path.dirname(__file__) + "/../python")
         from experts import KTMoEWrapper
-        from experts_sft import KExpertsSFTBuffer, BaseSFTMoEWrapper
+        from kt_kernel.sft.base import KExpertsSFTBuffer, BaseSFTMoEWrapper
 
         HAS_KT_KERNEL = True
     except ImportError as e:
@@ -513,7 +513,7 @@ def test_wrapper_forward(quant_mode: str = "AMXBF16_SFT", tp_count: int = TP_COU
         )
 
         # Wrapper forward
-        output = wrapper.forward_sft(input_data, expert_ids, weights, save_for_backward=False)
+        output = wrapper.forward(input_data, expert_ids, weights, save_for_backward=False)
 
         # Compare results
         diff = torch.mean(torch.abs(output - torch_output)) / (torch.mean(torch.abs(torch_output)) + 1e-8)
@@ -639,7 +639,7 @@ def test_wrapper_backward(quant_mode: str = "AMXBF16_SFT", tp_count: int = TP_CO
         )
 
         # Wrapper forward (with save_for_backward=True)
-        output = wrapper.forward_sft(input_data, expert_ids, weights, save_for_backward=True)
+        output = wrapper.forward(input_data, expert_ids, weights, save_for_backward=True)
 
         # Wrapper backward
         grad_input, grad_loras = wrapper.backward(grad_output)
@@ -794,7 +794,7 @@ def test_wrapper_training_loop(quant_mode: str = "AMXBF16_SFT", tp_count: int = 
         target = torch.randn((qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
         # Forward pass
-        output = wrapper.forward_sft(input_data, expert_ids, weights, save_for_backward=True)
+        output = wrapper.forward(input_data, expert_ids, weights, save_for_backward=True)
 
         # Compute loss
         loss = torch.mean((output.float() - target.float()) ** 2)

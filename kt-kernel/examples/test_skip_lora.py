@@ -429,8 +429,8 @@ def test_skip_lora(tp_count, threshold):
 
     # Run forward on both
     print("\n[7] Running C++ forward...")
-    output_normal = wrapper_normal.forward_sft(input_tensor, expert_ids, routing_weights, save_for_backward=True)
-    output_skip = wrapper_skip.forward_sft(input_tensor, expert_ids, routing_weights, save_for_backward=True)
+    output_normal = wrapper_normal.forward(input_tensor, expert_ids, routing_weights, save_for_backward=True)
+    output_skip = wrapper_skip.forward(input_tensor, expert_ids, routing_weights, save_for_backward=True)
 
     print(f"  Normal forward output mean: {output_normal.float().mean():.6e}")
     print(f"  SkipLoRA forward output mean: {output_skip.float().mean():.6e}")

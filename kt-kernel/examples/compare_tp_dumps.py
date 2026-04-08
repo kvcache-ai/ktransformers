@@ -766,7 +766,7 @@ def run_cpp_forward_with_dump(wrapper, input_tensor, expert_ids, routing_weights
     os.environ["SFT_MOE_DUMP_DIR"] = dump_dir
 
     # Run forward with save_for_backward=True to enable backward
-    output = wrapper.forward_sft(input_tensor, expert_ids, routing_weights, save_for_backward=True)
+    output = wrapper.forward(input_tensor, expert_ids, routing_weights, save_for_backward=True)
 
     # Clean up environment
     del os.environ["SFT_MOE_DUMP"]

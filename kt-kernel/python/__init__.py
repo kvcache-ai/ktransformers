@@ -51,10 +51,14 @@ kt_kernel_ext = _kt_kernel_ext
 # Import main API
 from .experts import KTMoEWrapper
 
-try:
-    from .utils.amx_sft import AMXSFTMoEWrapper
-except (ImportError, AttributeError):
-    AMXSFTMoEWrapper = None
+def __getattr__(name):
+    if name == "AMXSFTMoEWrapper":
+        try:
+            from .sft.amx import AMXSFTMoEWrapper
+            return AMXSFTMoEWrapper
+        except (ImportError, AttributeError):
+            return None
+    raise AttributeError(f"module 'kt_kernel' has no attribute {name!r}")
 
 # Read version from package metadata (preferred) or fallback to project root
 try:

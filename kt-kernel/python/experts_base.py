@@ -451,31 +451,3 @@ class BaseMoEWrapper(_MoEBase, ABC):
         KExpertsCPUBuffer.temp_bs = 0
         KExpertsCPUBuffer.temp_buffer = tuple()
 
-    # ========== SFT methods (not available in inference mode) ==========
-
-    def forward_sft(self, *args, **kwargs):
-        """SFT forward is not available in inference mode."""
-        raise RuntimeError(
-            "forward_sft() is not available in inference mode. "
-            "Use forward() instead, or create wrapper with mode='sft'."
-        )
-
-    def backward(self, *args, **kwargs):
-        """Backward pass is not available in inference mode."""
-        raise RuntimeError(
-            "backward() is not available in inference mode. " "Create wrapper with mode='sft' to use SFT features."
-        )
-
-    def init_lora_weights(self, *args, **kwargs):
-        """LoRA weight initialization is not available in inference mode."""
-        raise RuntimeError(
-            "init_lora_weights() is not available in inference mode. "
-            "Create wrapper with mode='sft' to use SFT features."
-        )
-
-    def update_lora_weights(self, *args, **kwargs):
-        """LoRA weight update is not available in inference mode."""
-        raise RuntimeError(
-            "update_lora_weights() is not available in inference mode. "
-            "Create wrapper with mode='sft' to use SFT features."
-        )

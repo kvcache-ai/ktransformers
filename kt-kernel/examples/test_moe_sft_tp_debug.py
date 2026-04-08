@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Tuple
 # Try to import kt_kernel
 try:
     from kt_kernel.experts import KTMoEWrapper
-    from kt_kernel.experts_sft import KExpertsSFTBuffer, BaseSFTMoEWrapper
+    from kt_kernel.sft.base import KExpertsSFTBuffer, BaseSFTMoEWrapper
 
     HAS_KT_KERNEL = True
 except ImportError:
@@ -41,7 +41,7 @@ except ImportError:
         # Alternative import path (for development)
         sys.path.insert(0, os.path.dirname(__file__) + "/../python")
         from experts import KTMoEWrapper
-        from experts_sft import KExpertsSFTBuffer, BaseSFTMoEWrapper
+        from kt_kernel.sft.base import KExpertsSFTBuffer, BaseSFTMoEWrapper
 
         HAS_KT_KERNEL = True
     except ImportError as e:
@@ -1460,7 +1460,7 @@ def test_tp_vs_cpp_wrapper(quant_mode: str = "AMXBF16_SFT", tp_count: int = TP_C
         py_output, py_intermediates = simulator.forward_moe(input_data, expert_ids, weights, dump_intermediates=True)
 
         # C++ wrapper forward
-        cpp_output = wrapper.forward_sft(input_data, expert_ids, weights, save_for_backward=False)
+        cpp_output = wrapper.forward(input_data, expert_ids, weights, save_for_backward=False)
 
         # Compare results
         diff = torch.mean(torch.abs(cpp_output - py_output)) / (torch.mean(torch.abs(py_output)) + 1e-8)
@@ -1585,8 +1585,8 @@ def test_tp_vs_no_tp_cpp(quant_mode: str = "AMXBF16_SFT"):
         input_data = torch.randn((test_qlen, test_hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
         # Forward passes
-        output_tp = wrapper_tp.forward_sft(input_data, expert_ids, weights, save_for_backward=False)
-        output_no_tp = wrapper_no_tp.forward_sft(input_data, expert_ids, weights, save_for_backward=False)
+        output_tp = wrapper_tp.forward(input_data, expert_ids, weights, save_for_backward=False)
+        output_no_tp = wrapper_no_tp.forward(input_data, expert_ids, weights, save_for_backward=False)
 
         # Compare
         diff = torch.mean(torch.abs(output_tp - output_no_tp)) / (torch.mean(torch.abs(output_no_tp)) + 1e-8)
@@ -1838,7 +1838,7 @@ def test_tp_backward_vs_cpp(quant_mode: str = "AMXBF16_SFT", tp_count: int = TP_
         grad_output = torch.randn((test_qlen, test_hidden_size), dtype=torch.bfloat16).contiguous() / 100
 
         # C++ forward (with save_for_backward=True)
-        cpp_output = wrapper.forward_sft(input_data, expert_ids, weights, save_for_backward=True)
+        cpp_output = wrapper.forward(input_data, expert_ids, weights, save_for_backward=True)
 
         # C++ backward
         cpp_grad_input, cpp_grad_loras = wrapper.backward(grad_output)
@@ -2042,7 +2042,7 @@ def test_comprehensive_backward_with_dump(
 
     # C++ Forward Pass
     print("\n[Running C++ Forward Pass]")
-    cpp_output = wrapper.forward_sft(input_tensor, expert_ids, routing_weights, save_for_backward=True)
+    cpp_output = wrapper.forward(input_tensor, expert_ids, routing_weights, save_for_backward=True)
     cpp_fwd_has_nan = check_nan(cpp_output, "cpp_forward_output")
 
     # C++ Backward Pass
@@ -2252,7 +2252,7 @@ def test_moe_backward_full(quant_mode: str = "AMXBF16_SFT", tp_count: int = TP_C
 
     # C++ forward + backward
     print("\n[Running C++ Forward + Backward]")
-    cpp_output = wrapper.forward_sft(input_tensor, expert_ids, routing_weights, save_for_backward=True)
+    cpp_output = wrapper.forward(input_tensor, expert_ids, routing_weights, save_for_backward=True)
     cpp_grad_input, cpp_grad_loras = wrapper.backward(output_grad)
 
     # PyTorch forward + backward using non-TP reference

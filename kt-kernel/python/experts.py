@@ -23,16 +23,10 @@ from typing import List, Optional, Union
 # Import base infrastructure for inference
 from .experts_base import BaseMoEWrapper, KExpertsCPUBuffer
 
-# Import base infrastructure for SFT
-from .experts_sft import BaseSFTMoEWrapper, KExpertsSFTBuffer
-
 # Import inference backend implementations
 from .utils.amx import AMXMoEWrapper, NativeMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
 from .utils.moe_kernel import GeneralMoEWrapper
-
-# Import SFT backend implementations
-from .utils.amx_sft import AMXSFTMoEWrapper
 
 
 # Valid methods for each mode
@@ -138,7 +132,7 @@ class KTMoEWrapper:
         # Quantization config (for K-Group SFT methods)
         group_size: int = 128,
         zero_point: bool = True,
-    ) -> Union[BaseMoEWrapper, BaseSFTMoEWrapper]:
+    ):
         """
         Factory method to create the appropriate backend implementation.
 
@@ -265,6 +259,7 @@ class KTMoEWrapper:
         This frees up memory by clearing the SFT buffer cache. Useful when you want
         to reset the buffer state or free memory during SFT.
         """
+        from .sft.base import KExpertsSFTBuffer
         KExpertsSFTBuffer.clear_cache()
 
 
@@ -345,7 +340,7 @@ def _create_sft_wrapper(
     max_cache_depth: int,
     group_size: int,
     zero_point: bool,
-) -> BaseSFTMoEWrapper:
+):
     """
     Create an SFT wrapper based on the method.
 
@@ -355,8 +350,9 @@ def _create_sft_wrapper(
     Returns:
         BaseSFTMoEWrapper instance
     """
+    from .sft.amx import AMXSFTMoEWrapper
+
     # Currently only AMX SFT methods are supported
-    # All SFT methods use AMXSFTMoEWrapper with different quantization
     return AMXSFTMoEWrapper(
         layer_idx=layer_idx,
         num_experts=num_experts,
