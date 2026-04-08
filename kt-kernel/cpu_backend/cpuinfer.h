@@ -83,11 +83,13 @@ class CPUInfer {
   }
 #ifndef KTRANSFORMERS_CPU_ONLY
   void submit_with_cuda_stream(intptr_t user_cuda_stream, std::pair<intptr_t, intptr_t> params) {
-#if defined(KTRANSFORMERS_USE_CUDA)
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_ROCM)
     void (*func)(void*) = (void (*)(void*))params.first;
     void* args = (void*)params.second;
     *((CPUInfer**)args) = this;
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)func, args);
+#else
+    submit(params);
 #endif
   }
 #endif
@@ -100,6 +102,7 @@ class CPUInfer {
   static void sync_(void* sync_args) {
     SyncArgs* args = (SyncArgs*)sync_args;
     args->cpuinfer->task_queue_->sync(args->allow_n_pending);
+    delete args;
   }
 
   void sync(size_t allow_n_pending = 0) {
@@ -108,9 +111,11 @@ class CPUInfer {
   }
 #ifndef KTRANSFORMERS_CPU_ONLY
   void sync_with_cuda_stream(intptr_t user_cuda_stream, size_t allow_n_pending = 0) {
-#if defined(KTRANSFORMERS_USE_CUDA)
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_ROCM)
     SyncArgs* args = new SyncArgs{this, allow_n_pending};
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)args);
+#else
+    sync(allow_n_pending);
 #endif
   }
 #endif
