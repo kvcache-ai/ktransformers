@@ -418,6 +418,18 @@ class KSFTExpertsCPU(torch.autograd.Function):
     #stream_map:dict = {} # Manage cuda stream on different gpu
     #gguf_loader:GGUFLoader = None
     CPU_INFER = CPUInfer(Config().cpu_infer)
+
+    # Pinned memory buffers for training (batch mode)
+    # These are used for efficient CPU-GPU data transfer
+    _pinned_input_buf: Tensor = None      # [max_tokens, hidden_size]
+    _pinned_output_buf: Tensor = None     # [max_tokens, hidden_size]
+    _pinned_expert_ids_buf: Tensor = None # [max_tokens, num_experts_per_tok]
+    _pinned_weights_buf: Tensor = None    # [max_tokens, num_experts_per_tok]
+    _pinned_grad_out_buf: Tensor = None   # [max_tokens, hidden_size] for backward
+    _pinned_grad_in_buf: Tensor = None    # [max_tokens, hidden_size] for backward
+    _pinned_buf_size: int = 0             # current buffer capacity (max_tokens)
+    _hidden_size: int = 0
+    _num_experts_per_tok: int = 0
     def __init__(
         self,
         key: str,
@@ -448,6 +460,57 @@ class KSFTExpertsCPU(torch.autograd.Function):
         
         self.tflops_fwd = []
         self.tflops_bwd = []
+
+    @classmethod
+    def _ensure_pinned_buffers(cls, num_tokens: int, hidden_size: int, num_experts_per_tok: int):
+        """
+        Ensure pinned memory buffers are allocated with sufficient size.
+        Buffers are reused across calls and only reallocated if more space is needed.
+        """
+        # Check if we need to allocate or expand buffers
+        if (cls._pinned_input_buf is None or
+            num_tokens > cls._pinned_buf_size or
+            hidden_size != cls._hidden_size or
+            num_experts_per_tok != cls._num_experts_per_tok):
+
+            # Allocate with some extra capacity to reduce reallocations
+            new_size = max(num_tokens, cls._pinned_buf_size * 2) if cls._pinned_buf_size > 0 else num_tokens
+            new_size = max(new_size, 1024)  # minimum 1024 tokens
+
+            # Free old buffers
+            cls._pinned_input_buf = None
+            cls._pinned_output_buf = None
+            cls._pinned_expert_ids_buf = None
+            cls._pinned_weights_buf = None
+            cls._pinned_grad_out_buf = None
+            cls._pinned_grad_in_buf = None
+
+            # Allocate new pinned buffers
+            cls._pinned_input_buf = torch.empty(
+                (new_size, hidden_size), dtype=torch.bfloat16, device="cpu", pin_memory=True
+            )
+            cls._pinned_output_buf = torch.empty(
+                (new_size, hidden_size), dtype=torch.bfloat16, device="cpu", pin_memory=True
+            )
+            cls._pinned_expert_ids_buf = torch.empty(
+                (new_size, num_experts_per_tok), dtype=torch.long, device="cpu", pin_memory=True
+            )
+            cls._pinned_weights_buf = torch.empty(
+                (new_size, num_experts_per_tok), dtype=torch.float32, device="cpu", pin_memory=True
+            )
+            cls._pinned_grad_out_buf = torch.empty(
+                (new_size, hidden_size), dtype=torch.bfloat16, device="cpu", pin_memory=True
+            )
+            cls._pinned_grad_in_buf = torch.empty(
+                (new_size, hidden_size), dtype=torch.bfloat16, device="cpu", pin_memory=True
+            )
+
+            cls._pinned_buf_size = new_size
+            cls._hidden_size = hidden_size
+            cls._num_experts_per_tok = num_experts_per_tok
+
+            print(f"[KSFTExpertsCPU] Allocated pinned memory buffers: "
+                  f"size={new_size}, hidden={hidden_size}, k={num_experts_per_tok}")
 
     def load(self, w: dict | nn.Parameter | tuple | None = None, device:str|None = None, warmup:bool = False):
         if device:
@@ -548,7 +611,16 @@ class KSFTExpertsCPU(torch.autograd.Function):
             KSFTExpertsCPU.expert_ids_cpu = torch.zeros((num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)
             KSFTExpertsCPU.weights_cpu = torch.zeros((num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True)
             KSFTExpertsCPU.output_cpu = torch.zeros((self.config.hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
-            
+
+        # Initialize pinned memory buffers for training (batch mode)
+        # Default size is 4096 tokens, will expand automatically if needed
+        default_max_tokens = 4096
+        KSFTExpertsCPU._ensure_pinned_buffers(
+            default_max_tokens,
+            self.config.hidden_size,
+            num_experts_per_tok
+        )
+
         self.gate = None
         self.up = None
         self.down = None
@@ -577,37 +649,68 @@ class KSFTExpertsCPU(torch.autograd.Function):
         if input_tensor.size(0)==1 and torch.cuda.is_current_stream_capturing():
             # TODO: this branch is unreachable, but the shape of input_tensor([1,hidden_size]) and input_tensor_cpu([hidden_size]) is not compatible
             #print("capturing experts")
+            wall_t0 = time.time()
             KSFTExpertsCPU.input_tensor_cpu.copy_(input_tensor, non_blocking=True)
             KSFTExpertsCPU.expert_ids_cpu.copy_(expert_ids, non_blocking=True)
             KSFTExpertsCPU.weights_cpu.copy_(weights, non_blocking=True)
             cpu_infer.submit_with_cuda_stream(torch.cuda.current_stream().cuda_stream, moe.forward(1, expert_ids.size(1), KSFTExpertsCPU.expert_ids_cpu.data_ptr(), KSFTExpertsCPU.weights_cpu.data_ptr(), KSFTExpertsCPU.input_tensor_cpu.data_ptr(), KSFTExpertsCPU.output_cpu.data_ptr()))
             cpu_infer.sync_with_cuda_stream(torch.cuda.current_stream().cuda_stream)
-            t_fwd     = time.time() - wall_t0
+            t_fwd = time.time() - wall_t0
             KSFTExpertsCPU.output_gpu_map[out_device].copy_(KSFTExpertsCPU.output_cpu, non_blocking=True)
             result = KSFTExpertsCPU.output_gpu_map[out_device]
+            # For backward compatibility, copy to CPU tensors
+            input_cpu = input_tensor.contiguous().cpu()
+            expert_ids_cpu = expert_ids.contiguous().cpu()
+            weights_cpu = weights.to(torch.float32).contiguous().cpu()
         else:
-            input_tensor = input_tensor.contiguous().cpu()
-            expert_ids = expert_ids.contiguous().cpu()
-            weights = weights.contiguous().to(torch.float32).cpu()
-            output = torch.empty_like(input_tensor).contiguous()
-            # print("success record")
+            num_tokens = input_tensor.size(0)
+            hidden_size = input_tensor.size(1)
+            num_experts_per_tok = expert_ids.size(1)
+
+            # Ensure pinned buffers are large enough
+            KSFTExpertsCPU._ensure_pinned_buffers(num_tokens, hidden_size, num_experts_per_tok)
+
+            # Use pinned memory buffers for efficient CPU-GPU transfer
+            input_buf = KSFTExpertsCPU._pinned_input_buf[:num_tokens]
+            output_buf = KSFTExpertsCPU._pinned_output_buf[:num_tokens]
+            expert_ids_buf = KSFTExpertsCPU._pinned_expert_ids_buf[:num_tokens]
+            weights_buf = KSFTExpertsCPU._pinned_weights_buf[:num_tokens]
+
+            # Copy data to pinned memory (non_blocking for async transfer)
+            input_buf.copy_(input_tensor.to(torch.bfloat16), non_blocking=True)
+            expert_ids_buf.copy_(expert_ids, non_blocking=True)
+            weights_buf.copy_(weights.to(torch.float32), non_blocking=True)
+
+            # Synchronize to ensure data is ready on CPU
+            if input_tensor.is_cuda:
+                torch.cuda.current_stream().synchronize()
+
+            # Make contiguous views for CPU computation
+            input_cpu = input_buf.contiguous()
+            expert_ids_cpu = expert_ids_buf.contiguous()
+            weights_cpu = weights_buf.contiguous()
+            output_cpu = output_buf.contiguous()
+
             wall_t0 = time.time()
             cpu_infer.submit(
                 moe.forward(
-                    expert_ids.size(0), 
-                    expert_ids.size(1), 
-                    expert_ids.data_ptr(), 
-                    weights.data_ptr(), 
-                    input_tensor.data_ptr(), 
-                    output.data_ptr(),
+                    expert_ids_cpu.size(0),
+                    expert_ids_cpu.size(1),
+                    expert_ids_cpu.data_ptr(),
+                    weights_cpu.data_ptr(),
+                    input_cpu.data_ptr(),
+                    output_cpu.data_ptr(),
                 )
             )
             cpu_infer.sync()
-            t_fwd     = time.time() - wall_t0
+            t_fwd = time.time() - wall_t0
 
-            result = output.to(device=out_device)
+            # Copy result back to GPU using pinned memory (async)
+            result = torch.empty((num_tokens, hidden_size), dtype=input_tensor.dtype, device=out_device)
+            result.copy_(output_cpu, non_blocking=True)
 
-        ctx.save_for_backward(input_tensor, expert_ids, weights)
+        # Save CPU tensors for backward (already in pinned memory)
+        ctx.save_for_backward(input_cpu, expert_ids_cpu, weights_cpu)
         ctx.cpu_infer  = cpu_infer
         ctx.moe        = moe
         ctx.out_device = out_device
@@ -632,50 +735,63 @@ class KSFTExpertsCPU(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_grad):
         # print("Go into the backward!!")
-        
-        # Pick back the middle results
-        input_tensor, expert_ids, weights = ctx.saved_tensors
-        import random
-        layer_idx = random.randint(0, 10000)
-        # print(f"layer_idx:{layer_idx}")
-        # layer_idx   = ctx.layer_idx
-        
-        # cpu_infer  = ctx.cpu_infer
-        # moe        = ctx.moe
-        # out_device = ctx.out_device
 
-        # ready for computing gradient
-        output_grad = output_grad.contiguous().cpu()
-        input_grad = torch.empty_like(input_tensor).contiguous()
-        # print(dir(cpuinfer_ext.moe.MOE))
+        # Pick back the middle results (already in pinned memory from forward)
+        input_tensor, expert_ids, weights = ctx.saved_tensors
+
+        num_tokens = output_grad.size(0)
+        hidden_size = output_grad.size(1)
+        num_experts_per_tok = expert_ids.size(1)
+
+        # Ensure pinned buffers are large enough (should already be from forward)
+        KSFTExpertsCPU._ensure_pinned_buffers(num_tokens, hidden_size, num_experts_per_tok)
+
+        # Use pinned memory buffers for gradient transfer
+        grad_out_buf = KSFTExpertsCPU._pinned_grad_out_buf[:num_tokens]
+        grad_in_buf = KSFTExpertsCPU._pinned_grad_in_buf[:num_tokens]
+
+        # Copy output_grad to pinned memory (async)
+        grad_out_buf.copy_(output_grad.to(torch.bfloat16), non_blocking=True)
+
+        # Synchronize to ensure data is ready on CPU
+        if output_grad.is_cuda:
+            torch.cuda.current_stream().synchronize()
+
+        # Make contiguous for CPU computation
+        output_grad_cpu = grad_out_buf.contiguous()
+        input_grad_cpu = grad_in_buf.contiguous()
+
         bw_start = time.time()
         ctx.cpu_infer.submit(
             ctx.moe.backward(
-                # layer_idx,
-                output_grad.size(0),  # qlen
-                expert_ids.size(1),   # k
+                output_grad_cpu.size(0),  # qlen
+                expert_ids.size(1),       # k
                 expert_ids.data_ptr(),
                 weights.data_ptr(),
-                input_tensor.data_ptr(), 
-                output_grad.data_ptr(),
-                input_grad.data_ptr(),
+                input_tensor.data_ptr(),
+                output_grad_cpu.data_ptr(),
+                input_grad_cpu.data_ptr(),
             )
         )
         ctx.cpu_infer.sync()
-        
-        bw_end   = time.time()
-        t_bw    = bw_end - bw_start
-        
+
+        bw_end = time.time()
+        t_bw = bw_end - bw_start
+
+        # Copy gradient back to GPU using pinned memory (async)
+        result_grad = torch.empty((num_tokens, hidden_size), dtype=output_grad.dtype, device=ctx.out_device)
+        result_grad.copy_(input_grad_cpu, non_blocking=True)
+
         # ---------- FLOPs ----------
-        qlen, k  = ctx.saved_dims
+        qlen, k = ctx.saved_dims
         flops_bw = 10 * qlen * k * H_FIXED * M_FIXED
         tflops_b = flops_bw / t_bw / 1e12
         # print(f"qlen:{qlen}, k:{k}")
 
         # with open("test_V3_ESC.txt", "a", encoding="utf-8") as f:
         #     f.write(f"[KSFTExpertsCPU]Backward: {flops_bw/1e9:.3f} GFLOPs {tflops_b:.2f} TFLOPS {t_bw*1e3:.2f} ms\n")
-        
-        return input_grad.to(device=ctx.out_device), None, None, None, None, None, None
+
+        return result_grad, None, None, None, None, None, None
     
     def unload(self):
         return

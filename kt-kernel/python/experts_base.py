@@ -36,33 +36,35 @@ class KExpertsCPUBuffer:
         hidden_size = hidden_states.shape[-1]
         batch_size = hidden_states.shape[0]
 
+        pin_memory = False
+
         if batch_size in cls.capture_buffers:
             return cls.capture_buffers[batch_size]
         if batch_size == cls.temp_bs:
             return cls.temp_buffer
 
         input_tensor_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         immediate_experts_ids_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=True)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         deferred_experts_ids_cpu = [
-            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=True)
+            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         weights_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=True)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=True, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         bsz_tensor_cpu = [
-            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=True)
+            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_gpu = [
@@ -86,13 +88,84 @@ class KExpertsCPUBuffer:
         return cur_buffer
 
 
-class BaseMoEWrapper(ABC):
+class _MoEBase:
+    """
+    Shared base class for inference and SFT MoE wrappers.
+
+    Provides:
+    - CPUInfer singleton management
+    - Basic configuration validation
+
+    This class is shared between BaseMoEWrapper (inference) and BaseSFTMoEWrapper (SFT).
+    """
+
+    _cpu_infer_instance = None
+
+    @classmethod
+    def _get_cpu_infer(
+        cls,
+        cpuinfer_threads: int,
+        threadpool_count: int,
+    ):
+        """
+        Get or create the CPUInfer singleton instance.
+
+        Args:
+            cpuinfer_threads: Total number of CPU inference threads
+            threadpool_count: Number of NUMA subpools (TP count)
+
+        Returns:
+            CPUInfer singleton instance
+        """
+        if cls._cpu_infer_instance is None:
+            worker_config = kt_kernel_ext.WorkerPoolConfig()
+
+            subpool_numa_map = list(range(threadpool_count))
+            subpool_thread_count = [
+                cpuinfer_threads // threadpool_count + (1 if i < cpuinfer_threads % threadpool_count else 0)
+                for i in range(threadpool_count)
+            ]
+
+            worker_config.subpool_count = threadpool_count
+            worker_config.subpool_numa_map = subpool_numa_map
+            worker_config.subpool_thread_count = subpool_thread_count
+            cls._cpu_infer_instance = kt_kernel_ext.CPUInfer(worker_config)
+
+        return cls._cpu_infer_instance
+
+    @staticmethod
+    def _validate_base_config(
+        num_experts: int,
+        hidden_size: int,
+        moe_intermediate_size: int,
+        num_experts_per_tok: int,
+    ) -> None:
+        """
+        Validate basic configuration parameters.
+
+        Raises:
+            ValueError: If parameters are invalid
+        """
+        if num_experts <= 0:
+            raise ValueError(f"num_experts must be positive, got {num_experts}")
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if moe_intermediate_size <= 0:
+            raise ValueError(f"moe_intermediate_size must be positive, got {moe_intermediate_size}")
+        if num_experts_per_tok <= 0:
+            raise ValueError(f"num_experts_per_tok must be positive, got {num_experts_per_tok}")
+        if num_experts_per_tok > num_experts:
+            raise ValueError(
+                f"num_experts_per_tok ({num_experts_per_tok}) cannot exceed " f"num_experts ({num_experts})"
+            )
+
+
+class BaseMoEWrapper(_MoEBase, ABC):
     """
     Base class for MoE CPU inference operations.
     Provides common functionality for all backend implementations.
     """
 
-    _cpu_infer_instance = None
     _layer_has_pending_deferred: Dict[int, bool] = {}
 
     def __init__(
@@ -145,22 +218,8 @@ class BaseMoEWrapper(ABC):
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
 
-        # Initialize CPU inference engine (singleton)
-        if BaseMoEWrapper._cpu_infer_instance is None:
-            worker_config = kt_kernel_ext.WorkerPoolConfig()
-
-            subpool_numa_map = list(range(threadpool_count))
-            subpool_thread_count = [
-                cpuinfer_threads // threadpool_count + (1 if i < cpuinfer_threads % threadpool_count else 0)
-                for i in range(threadpool_count)
-            ]
-
-            worker_config.subpool_count = threadpool_count
-            worker_config.subpool_numa_map = subpool_numa_map
-            worker_config.subpool_thread_count = subpool_thread_count
-            BaseMoEWrapper._cpu_infer_instance = kt_kernel_ext.CPUInfer(worker_config)
-
-        self.cpu_infer = BaseMoEWrapper._cpu_infer_instance
+        # Initialize CPU inference engine (singleton via shared base class)
+        self.cpu_infer = self._get_cpu_infer(cpuinfer_threads, threadpool_count)
 
         # Backend-specific initialization happens in subclasses
         self.moe = None
@@ -391,3 +450,4 @@ class BaseMoEWrapper(ABC):
         KExpertsCPUBuffer.capture_buffers.clear()
         KExpertsCPUBuffer.temp_bs = 0
         KExpertsCPUBuffer.temp_buffer = tuple()
+

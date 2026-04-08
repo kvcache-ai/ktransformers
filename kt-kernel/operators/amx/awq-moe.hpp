@@ -28,7 +28,7 @@
  */
 template <class T>
 class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
- private:
+ protected:
   using Base = AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>>;
   using Base::config_;
   using Base::down_ba_;
