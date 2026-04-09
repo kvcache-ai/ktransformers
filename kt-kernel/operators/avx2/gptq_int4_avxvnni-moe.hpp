@@ -37,13 +37,7 @@
 
 namespace avxvnni {
 
-static inline int packed_weight_sum_8x4bit(uint32_t packed_weight) {
-  int sum = 0;
-  for (int i = 0; i < 8; ++i) {
-    sum += ((packed_weight >> (i * 4)) & 0xF) - 8;
-  }
-  return sum;
-}
+static constexpr int MAX_SUPPORTED_GROUP_SIZE = 256;
 
 static inline int hsum_epi32_avx2(__m256i v) {
   __m128i lo = _mm256_castsi256_si128(v);
@@ -57,13 +51,10 @@ static inline int hsum_epi32_avx2(__m256i v) {
 // Quantize one activation group to biased uint8 for dpbusd.
 // Returns the activation scale. A return value of 0 means the group is all zero.
 static inline float quantize_activation_group_u8(const ggml_bf16_t* src, int group_size, uint8_t* dst) {
-  alignas(32) float tmp[256];
   float absmax = 0.0f;
 
   for (int i = 0; i < group_size; ++i) {
-    const float v = GGML_BF16_TO_FP32(src[i]);
-    tmp[i] = v;
-    absmax = std::max(absmax, std::fabs(v));
+    absmax = std::max(absmax, std::fabs(GGML_BF16_TO_FP32(src[i])));
   }
 
   if (absmax <= std::numeric_limits<float>::min()) {
@@ -74,7 +65,7 @@ static inline float quantize_activation_group_u8(const ggml_bf16_t* src, int gro
   const float scale = absmax / 127.0f;
   const float inv_scale = 1.0f / scale;
   for (int i = 0; i < group_size; ++i) {
-    int q = (int)std::lrint(tmp[i] * inv_scale);
+    int q = (int)std::lrint(GGML_BF16_TO_FP32(src[i]) * inv_scale);
     q = std::clamp(q, -127, 127);
     dst[i] = (uint8_t)(((uint8_t)(int8_t)q) ^ 0x80);
   }
@@ -134,6 +125,9 @@ struct GemmKernelAVXVNNI256GPTQInt4 {
     BufferB(size_t n_, size_t k_, int gs, void* ptr) : n((int)n_), k((int)k_), group_size(gs) {
       if (group_size <= 0 || (group_size % 32) != 0) {
         throw std::runtime_error("AVX-VNNI GPTQ INT4 requires group_size to be a positive multiple of 32");
+      }
+      if (group_size > MAX_SUPPORTED_GROUP_SIZE) {
+        throw std::runtime_error("AVX-VNNI GPTQ INT4 requires group_size <= 256");
       }
       if ((k % 8) != 0 || (k % group_size) != 0) {
         throw std::runtime_error("AVX-VNNI GPTQ INT4 requires k to be divisible by both 8 and group_size");
@@ -215,7 +209,7 @@ static inline void gemm_gptq_sym_int4_avxvnni256(int m, int n, int k, GemmKernel
   const int group_size = b.group_size;
   const int num_groups = b.num_groups;
 
-  alignas(32) std::array<uint8_t, 256> a_u8{};
+  alignas(32) std::array<uint8_t, MAX_SUPPORTED_GROUP_SIZE> a_u8{};
 
   for (int mi = 0; mi < m; ++mi) {
     const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
@@ -278,6 +272,9 @@ class AVXVNNI256_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVXVNNI256_GPTQ_INT4
     auto& qc = config_.quant_config;
     if (qc.group_size == 0 || (qc.group_size % 32) != 0) {
       throw std::runtime_error("AVX-VNNI-256 GPTQ_INT4 requires group_size to be a positive multiple of 32");
+    }
+    if (qc.group_size > avxvnni::MAX_SUPPORTED_GROUP_SIZE) {
+      throw std::runtime_error("AVX-VNNI-256 GPTQ_INT4 requires group_size <= 256");
     }
     printf("Created AVXVNNI256_GPTQ_INT4_MOE_TP %d at numa %d (group_size=%d)\n", tp_part_idx,
            numa_node_of_cpu(sched_getcpu()), qc.group_size);

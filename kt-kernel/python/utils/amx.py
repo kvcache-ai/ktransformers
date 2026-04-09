@@ -36,6 +36,7 @@ _HAS_AVX2_BF16_SUPPORT = AVX2BF16_MOE is not None
 _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
 _HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
 _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
+_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
 
 
 def _host_has_cpu_flag(*flag_names: str) -> bool:
@@ -53,14 +54,27 @@ def _host_has_cpu_flag(*flag_names: str) -> bool:
 _HOST_HAS_AVX_VNNI = _host_has_cpu_flag("avx_vnni", "avxvnni")
 
 
-def _select_gptq_int4_backend():
+def _supports_avxvnni256_gptq_int4_group_size(group_size: Optional[int]) -> bool:
+    if group_size is None:
+        return True
+    return group_size > 0 and group_size % 32 == 0 and group_size <= _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE
+
+
+def _select_gptq_int4_backend(group_size: Optional[int] = None):
     forced = os.getenv("KT_GPTQ_INT4_BACKEND", "").strip().lower()
+    avxvnni_group_supported = _supports_avxvnni256_gptq_int4_group_size(group_size)
 
     if forced in {"avxvnni", "avxvnni256"}:
         if not _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT:
             raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but AVXVNNI256GPTQInt4_MOE is not compiled in.")
         if not _HOST_HAS_AVX_VNNI:
             raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but the current CPU does not support avx_vnni.")
+        if not avxvnni_group_supported:
+            raise RuntimeError(
+                "KT_GPTQ_INT4_BACKEND=avxvnni requested, but "
+                f"group_size={group_size} is unsupported. AVX-VNNI-256 GPTQ_INT4 only supports "
+                f"positive multiples of 32 up to {_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE}."
+            )
         return AVXVNNI256GPTQInt4_MOE
 
     if forced == "avx2":
@@ -68,7 +82,7 @@ def _select_gptq_int4_backend():
             raise RuntimeError("KT_GPTQ_INT4_BACKEND=avx2 requested, but AVX2GPTQInt4_MOE is not compiled in.")
         return AVX2GPTQInt4_MOE
 
-    if _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI:
+    if _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI and avxvnni_group_supported:
         return AVXVNNI256GPTQInt4_MOE
     if _HAS_AVX2_GPTQ_INT4_SUPPORT:
         return AVX2GPTQInt4_MOE
@@ -424,10 +438,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
-        if method == "GPTQ_INT4" and _select_gptq_int4_backend() is None:
+        if method == "GPTQ_INT4" and not (_HAS_AVX2_GPTQ_INT4_SUPPORT or _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT):
             raise RuntimeError(
                 "GPTQ_INT4 backend not available.\n"
-                "Please recompile kt_kernel_ext with AVX2 enabled.\n"
+                "Please recompile kt_kernel_ext with GPTQ INT4 support enabled.\n"
                 "AVX-VNNI-256 will be selected automatically when available on the current CPU."
             )
 
@@ -597,9 +611,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.bits = 4
             moe_config.quant_config.group_size = actual_gs
             moe_config.quant_config.zero_point = False
-            backend_cls = _select_gptq_int4_backend()
+            backend_cls = _select_gptq_int4_backend(actual_gs)
             if backend_cls is None:
-                raise RuntimeError("No GPTQ_INT4 backend is available after runtime selection.")
+                raise RuntimeError(
+                    "No GPTQ_INT4 backend is available after runtime selection for "
+                    f"group_size={actual_gs}. AVX-VNNI-256 supports positive multiples of 32 up to "
+                    f"{_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE}; AVX2 is used as the fallback when available."
+                )
             self.moe = backend_cls(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed

@@ -2,13 +2,19 @@
 # coding=utf-8
 """GPTQ INT4 MoE accuracy tests for KT-Kernel x86 backends."""
 
+import importlib.util
 import os
 import sys
+import types
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
 
+import pytest
 import torch
 import kt_kernel_ext
+
+KT_KERNEL_ROOT = Path(__file__).resolve().parents[2]
 
 expert_num = 8
 hidden_size = 256
@@ -18,6 +24,41 @@ max_len = 128
 group_size = 128
 validation_iter = 3
 CPUINFER_PARAM = 16
+
+
+def load_amx_utils():
+    pkg_root = KT_KERNEL_ROOT / "python"
+    utils_root = pkg_root / "utils"
+
+    if "kt_kernel" not in sys.modules:
+        kt_kernel_pkg = types.ModuleType("kt_kernel")
+        kt_kernel_pkg.__path__ = [str(pkg_root)]
+        kt_kernel_pkg.kt_kernel_ext = kt_kernel_ext
+        sys.modules["kt_kernel"] = kt_kernel_pkg
+
+    if "kt_kernel_ext" not in sys.modules:
+        sys.modules["kt_kernel_ext"] = kt_kernel_ext
+
+    if "kt_kernel.utils" not in sys.modules:
+        utils_pkg = types.ModuleType("kt_kernel.utils")
+        utils_pkg.__path__ = [str(utils_root)]
+        sys.modules["kt_kernel.utils"] = utils_pkg
+
+    module_specs = [
+        ("kt_kernel.experts_base", pkg_root / "experts_base.py"),
+        ("kt_kernel.utils.loader", utils_root / "loader.py"),
+        ("kt_kernel.utils.amx", utils_root / "amx.py"),
+    ]
+    for module_name, module_path in module_specs:
+        if module_name in sys.modules:
+            continue
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+    return sys.modules["kt_kernel.utils.amx"]
 
 
 def gptq_sym_int4_quantize(weight_bf16):
@@ -234,6 +275,33 @@ def test_gptq_int4_accuracy():
     for backend_name, backend_cls, threshold in backends:
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=1)
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=16)
+
+
+def test_gptq_int4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):
+    amx_utils = load_amx_utils()
+    fake_avx2_backend = object()
+    fake_avxvnni_backend = object()
+
+    monkeypatch.setattr(amx_utils, "AVX2GPTQInt4_MOE", fake_avx2_backend)
+    monkeypatch.setattr(amx_utils, "AVXVNNI256GPTQInt4_MOE", fake_avxvnni_backend)
+    monkeypatch.setattr(amx_utils, "_HAS_AVX2_GPTQ_INT4_SUPPORT", True)
+    monkeypatch.setattr(amx_utils, "_HAS_AVXVNNI256_GPTQ_INT4_SUPPORT", True)
+    monkeypatch.setattr(amx_utils, "_HOST_HAS_AVX_VNNI", True)
+    monkeypatch.delenv("KT_GPTQ_INT4_BACKEND", raising=False)
+
+    assert amx_utils._select_gptq_int4_backend(512) is fake_avx2_backend
+    assert amx_utils._select_gptq_int4_backend(128) is fake_avxvnni_backend
+
+
+def test_gptq_int4_backend_selection_rejects_forced_avxvnni_with_large_group_size(monkeypatch):
+    amx_utils = load_amx_utils()
+
+    monkeypatch.setattr(amx_utils, "_HAS_AVXVNNI256_GPTQ_INT4_SUPPORT", True)
+    monkeypatch.setattr(amx_utils, "_HOST_HAS_AVX_VNNI", True)
+    monkeypatch.setenv("KT_GPTQ_INT4_BACKEND", "avxvnni")
+
+    with pytest.raises(RuntimeError, match="group_size=512 is unsupported"):
+        amx_utils._select_gptq_int4_backend(512)
 
 
 if __name__ == "__main__":
