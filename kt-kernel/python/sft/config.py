@@ -64,8 +64,8 @@ class KTConfig:
     kt_expert_checkpoint_path: str | None = None
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
-    kt_share_backward_bb: bool | None = None
-    kt_share_cache_pool: bool | None = None
+    kt_share_backward_bb: bool | None = None  # default True — always saves memory
+    kt_share_cache_pool: bool | None = None  # auto-set by trainer_config_process, not user-facing
 
     # Cache
     kt_max_cache_depth: int | None = None
@@ -117,9 +117,9 @@ class KTConfig:
         if self.kt_max_cache_depth is None:
             self.kt_max_cache_depth = _env_int("ACCELERATE_KT_MAX_CACHE_DEPTH", 2)
         if self.kt_share_backward_bb is None:
-            self.kt_share_backward_bb = _env_bool("ACCELERATE_KT_SHARE_BACKWARD_BB", False)
+            self.kt_share_backward_bb = _env_bool("ACCELERATE_KT_SHARE_BACKWARD_BB", True)
         if self.kt_share_cache_pool is None:
-            self.kt_share_cache_pool = _env_bool("ACCELERATE_KT_SHARE_CACHE_POOL", False)
+            self.kt_share_cache_pool = False
         if self.kt_use_lora_experts is None:
             self.kt_use_lora_experts = _env_bool("ACCELERATE_KT_USE_LORA_EXPERTS", False)
         if self.kt_lora_expert_num is None:
