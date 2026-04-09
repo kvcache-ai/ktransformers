@@ -14,8 +14,6 @@ from .dist_utils import (
     _qlen_offsets,
     _dist_gather_varlen_to_rank0,
     _dist_scatter_varlen_from_rank0,
-    _checkpoint_hook_mode,
-    _is_in_checkpoint_first_forward,
 )
 
 _KT_SFT_DEBUG = os.environ.get("KT_SFT_DEBUG", "0") == "1"

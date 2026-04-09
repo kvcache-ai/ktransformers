@@ -9,7 +9,6 @@ This is a leaf module — no imports from other sft/ submodules.
 
 from __future__ import annotations
 
-import inspect
 from contextlib import nullcontext
 from typing import Any
 
@@ -124,18 +123,6 @@ def _dist_scatter_varlen_from_rank0(
             req.wait()
     return local_out
 
-
-def _is_in_checkpoint_first_forward() -> bool:
-    """Best-effort detection for non-reentrant checkpoint first forward."""
-    try:
-        for frame_info in inspect.stack(context=0):
-            fn = frame_info.function
-            file = frame_info.filename or ""
-            if fn == "custom_gradient_checkpointing_func" and file.endswith("checkpointing.py"):
-                return True
-    except Exception:
-        return False
-    return False
 
 
 def _checkpoint_hook_mode() -> str:
