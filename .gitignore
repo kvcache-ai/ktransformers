@@ -31,3 +31,4 @@ CMakeFiles/
 kvc2/
 sched/
 *.png
+.direnv/
