@@ -17,9 +17,13 @@
       in {
         formatter = pkgs.alejandra;
         devShells.default = pkgs.mkShell {
+          NIX_ENFORCE_NO_NATIVE = "";
           buildInputs = with pkgs; [
-            conda
             cmake
+            conda
+            hwloc
+            numactl
+            pkg-config
           ];
         };
       }
