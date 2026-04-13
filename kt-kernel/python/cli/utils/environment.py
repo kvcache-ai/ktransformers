@@ -446,6 +446,9 @@ def _parse_cpu_flags(flags: list[str]) -> list[str]:
 def _parse_cpu_list(cpulist: str) -> list[int]:
     """Parse CPU list string like '0-3,8-11' to list of CPU IDs."""
     cpus = []
+    if cpulist == "":
+        # if there are no cpu cores for a specific numa node (for example, virtual numa on optane), return empty list
+        return cpus
     for part in cpulist.split(","):
         if "-" in part:
             start, end = part.split("-")
