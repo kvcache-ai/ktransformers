@@ -6,16 +6,17 @@ GLM-5.1 introduces thinking mode (enabled by default), interleaved and preserved
 
 ## Table of Contents
 
-- [Table of Contents](#table-of-contents)
-- [Prerequisites](#prerequisites)
-- [Step 1: Download Model Weights](#step-1-download-model-weights)
-- [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
-- [Step 3: Send Inference Requests](#step-3-send-inference-requests)
-  - [Option A: Interactive Chat with KT CLI](#option-a-interactive-chat-with-kt-cli)
-  - [Option B: OpenAI-Compatible API](#option-b-openai-compatible-api)
-- [Thinking Mode](#thinking-mode)
-- [Recommended Parameters](#recommended-parameters)
-- [Additional Resources](#additional-resources)
+- [Running GLM-5.1 with SGLang and KT-Kernel](#running-glm-51-with-sglang-and-kt-kernel)
+  - [Table of Contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Step 1: Download Model Weights](#step-1-download-model-weights)
+  - [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
+  - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
+    - [Option A: Interactive Chat with KT CLI](#option-a-interactive-chat-with-kt-cli)
+    - [Option B: OpenAI-Compatible API](#option-b-openai-compatible-api)
+  - [Thinking Mode](#thinking-mode)
+  - [Recommended Parameters](#recommended-parameters)
+  - [Additional Resources](#additional-resources)
 
 ## Prerequisites
 
@@ -41,8 +42,14 @@ Before starting, ensure you have:
     cd kt-kernel && ./install.sh
     ```
 
-3. **CUDA toolkit** - CUDA 12.0+ recommended (12.8+ for best FP8 support)
-4. **Hugging Face CLI** - For downloading models:
+3. **Transformers 5.3.0** — GLM-5 and GLM-5.1 require exactly `transformers==5.3.0` (the default pip install gives 4.x, which will not work):
+    ```bash
+    pip install transformers==5.3.0
+    ```
+    > **Note:** `transformers==5.3.0` is **not** compatible with some older models (e.g., DeepSeek). If you need to run those models, switch back to a 4.x release. Consider using a separate virtual environment for GLM-5/5.1 to avoid conflicts.
+
+4. **CUDA toolkit** - CUDA 12.0+ recommended (12.8+ for best FP8 support)
+5. **Hugging Face CLI** - For downloading models:
    ```bash
    pip install -U huggingface-hub
    ```
