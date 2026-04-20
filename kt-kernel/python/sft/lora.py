@@ -118,6 +118,10 @@ def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
                             params.append(lora_A.weight)
                         if hasattr(lora_B, 'weight') and lora_B.weight.requires_grad:
                             params.append(lora_B.weight)
+            # Fused expert LoRA parameters (KT-managed, not PEFT)
+            fused_params = getattr(wrapper, "_fused_expert_lora_params", None)
+            if fused_params is not None:
+                params.extend(fused_params)
             # lora_experts parameters (separate feature)
             if getattr(wrapper, "lora_experts", None) is not None:
                 params.extend(wrapper.lora_experts.parameters())
@@ -163,7 +167,34 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         experts_attr = getattr(wrapper, "_experts_attr", "experts")
         experts = getattr(wrapper, experts_attr, None)
 
-        if experts is None or len(experts) == 0:
+        if experts is None:
+            continue
+
+        # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
+        # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init,
+        # wrap as nn.Parameter for optimizer, and pre-assign .grad for C++ backward.
+        if getattr(wrapper, "_fused_experts", False):
+            lora_rank = getattr(wrapper, "_lora_rank", 1)
+            lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
+                wrapper, moe_config, lora_rank, torch.bfloat16,
+            )
+
+            if is_rank_0 and wrapper.wrapper is not None:
+                all_buffers = {}
+                all_buffers.update(lora_buffers)
+                all_buffers.update(lora_grad_buffers)
+                wrapper.wrapper.init_lora_weights(**all_buffers)
+                logger.info(
+                    f"[kt_adapt_peft_lora] Layer {layer_idx}: fused expert LoRA "
+                    f"(r={lora_rank}, E={moe_config.expert_num})"
+                )
+
+            wrapper._fused_expert_lora_params = lora_params
+            wrapper._peft_lora_modules = None
+            adapted_count += 1
+            continue
+
+        if len(experts) == 0:
             continue
 
         # Collect references to PEFT LoRA modules for each expert
@@ -197,21 +228,11 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         # Store PEFT LoRA references on wrapper
         wrapper._peft_lora_modules = peft_lora_modules
 
-        # SkipLoRA mode: if no LoRA found on experts, skip buffer creation
         if not peft_lora_modules:
-            if getattr(wrapper, '_skip_lora', False):
-                logger.info(
-                    f"[kt_adapt_peft_lora] Layer {layer_idx}: SkipLoRA mode, "
-                    f"no PEFT LoRA on experts — skipping LoRA buffer creation"
-                )
-                adapted_count += 1
-                continue
-            else:
-                raise RuntimeError(
-                    f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found on any expert. "
-                    f"If you intend to train without expert LoRA, use a SkipLoRA backend "
-                    f"(e.g., kt_backend: AMXINT8_SkipLoRA)."
-                )
+            raise RuntimeError(
+                f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found on any expert. "
+                f"Check that PEFT lora_target includes expert modules."
+            )
 
         # Allocate contiguous bf16 buffers and populate with initial PEFT values (all ranks)
         lora_buffers = _create_lora_view_buffers(peft_lora_modules, moe_config, torch.bfloat16)
@@ -242,6 +263,8 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         experts_attr = getattr(wrapper, "_experts_attr", "experts")
         experts = getattr(wrapper, experts_attr, None)
         if experts is None:
+            continue
+        if getattr(wrapper, "_fused_experts", False):
             continue
         for expert in experts:
             for param_name, param in list(expert.named_parameters()):
@@ -370,6 +393,62 @@ def _create_lora_grad_buffers(
     }
 
     return buffers
+
+
+def _create_fused_expert_lora_buffers(
+    wrapper,
+    moe_config: MOEArchConfig,
+    lora_rank: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], list[nn.Parameter]]:
+    """
+    Create KT-managed LoRA buffers for fused expert modules.
+
+    Fused experts store weights as 3D parameters (gate_up_proj [E, 2I, H], down_proj [E, H, I])
+    rather than per-expert nn.Linear modules. PEFT can't attach per-expert LoRA to these,
+    so we create our own LoRA buffers that the C++ kernel reads/writes directly.
+
+    Returns:
+        (lora_buffers, lora_grad_buffers, lora_params):
+        - lora_buffers: dict of weight buffers for C++ init_lora_weights()
+        - lora_grad_buffers: dict of grad buffers for C++ backward
+        - lora_params: list of nn.Parameter wrappers for the optimizer
+    """
+    E = moe_config.expert_num
+    I = moe_config.intermediate_size
+    H = wrapper.hidden_size
+    r = lora_rank
+
+    logger.info(f"[_create_fused_expert_lora_buffers] E={E}, I={I}, H={H}, r={r}")
+
+    lora_buffers = {
+        "gate_lora_a": torch.zeros(E, r, H, dtype=dtype, device="cpu"),
+        "gate_lora_b": torch.zeros(E, I, r, dtype=dtype, device="cpu"),
+        "up_lora_a": torch.zeros(E, r, H, dtype=dtype, device="cpu"),
+        "up_lora_b": torch.zeros(E, I, r, dtype=dtype, device="cpu"),
+        "down_lora_a": torch.zeros(E, r, I, dtype=dtype, device="cpu"),
+        "down_lora_b": torch.zeros(E, H, r, dtype=dtype, device="cpu"),
+    }
+
+    for key in ("gate_lora_a", "up_lora_a", "down_lora_a"):
+        nn.init.kaiming_uniform_(lora_buffers[key].view(E * r, -1), a=math.sqrt(5))
+
+    lora_grad_buffers = {
+        "grad_gate_lora_a": torch.zeros(E, r, H, dtype=dtype, device="cpu"),
+        "grad_gate_lora_b": torch.zeros(E, I, r, dtype=dtype, device="cpu"),
+        "grad_up_lora_a": torch.zeros(E, r, H, dtype=dtype, device="cpu"),
+        "grad_up_lora_b": torch.zeros(E, I, r, dtype=dtype, device="cpu"),
+        "grad_down_lora_a": torch.zeros(E, r, I, dtype=dtype, device="cpu"),
+        "grad_down_lora_b": torch.zeros(E, H, r, dtype=dtype, device="cpu"),
+    }
+
+    lora_params = []
+    for key in ("gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"):
+        param = nn.Parameter(lora_buffers[key], requires_grad=True)
+        param.grad = lora_grad_buffers[f"grad_{key}"]
+        lora_params.append(param)
+
+    return lora_buffers, lora_grad_buffers, lora_params
 
 
 # =============================================================================
@@ -510,15 +589,7 @@ def save_lora_experts_to_adapter(model: nn.Module, output_dir: str) -> None:
     from safetensors import safe_open
     from safetensors.torch import save_file
 
-    wrappers = getattr(model, "_kt_wrappers", [])
-    if not wrappers:
-        base_model = model
-        for attr in ["base_model", "model"]:
-            if hasattr(base_model, attr):
-                base_model = getattr(base_model, attr)
-                wrappers = getattr(base_model, "_kt_wrappers", [])
-                if wrappers:
-                    break
+    wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
         logger.warning("No KT wrappers found, skipping LoRA Experts saving")
         return
@@ -568,25 +639,80 @@ def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
     Note: Per-expert PEFT LoRA is saved by PEFT directly, not here.
     This function only handles lora_experts (a separate feature).
     """
-    wrappers = getattr(model, "_kt_wrappers", [])
-    if not wrappers:
-        base_model = model
-        for attr in ["base_model", "model"]:
-            if hasattr(base_model, attr):
-                base_model = getattr(base_model, attr)
-                wrappers = getattr(base_model, "_kt_wrappers", [])
-                if wrappers:
-                    break
+    wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
         logger.info("[save_kt_moe] No KT wrappers found, skipping")
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
+    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
 
     if has_lora_experts:
         save_lora_experts_to_adapter(model, output_dir)
-    else:
-        logger.info("[save_kt_moe] No lora_experts in KT wrappers")
+
+    if has_fused_lora:
+        _save_fused_expert_lora(wrappers, output_dir)
+
+    if not has_lora_experts and not has_fused_lora:
+        logger.info("[save_kt_moe] No lora_experts or fused expert LoRA in KT wrappers")
+
+
+def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
+    """Save fused expert LoRA params to a safetensors file."""
+    from safetensors.torch import save_file
+
+    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
+    tensors = {}
+    for w in wrappers:
+        fused = getattr(w, "_fused_expert_lora_params", None)
+        if fused is None:
+            continue
+        for param, name in zip(fused, names):
+            key = f"layers.{w.layer_idx}.experts.{name}"
+            tensors[key] = param.data.clone()
+
+    if tensors:
+        path = os.path.join(output_dir, "fused_expert_lora.safetensors")
+        save_file(tensors, path)
+        logger.info(f"[save_kt_moe] Saved {len(tensors)} fused expert LoRA tensors to {path}")
+
+
+def _load_fused_expert_lora(wrappers: list, adapter_path: str) -> None:
+    """Load fused expert LoRA params from a safetensors file into existing wrapper buffers."""
+    path = os.path.join(adapter_path, "fused_expert_lora.safetensors")
+    if not os.path.isfile(path):
+        logger.warning(f"No fused_expert_lora.safetensors found at {adapter_path}")
+        return
+
+    from safetensors.torch import load_file
+
+    saved = load_file(path)
+    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
+    wrapper_map = {w.layer_idx: w for w in wrappers}
+    loaded_count = 0
+
+    for key, tensor in saved.items():
+        parts = key.split(".")
+        if len(parts) != 4 or parts[0] != "layers" or parts[2] != "experts":
+            logger.warning(f"Unexpected key in fused_expert_lora.safetensors: {key}")
+            continue
+        layer_idx = int(parts[1])
+        name = parts[3]
+        if name not in names:
+            continue
+
+        wrapper = wrapper_map.get(layer_idx)
+        if wrapper is None:
+            continue
+        fused = getattr(wrapper, "_fused_expert_lora_params", None)
+        if fused is None:
+            continue
+
+        param_idx = names.index(name)
+        fused[param_idx].data.copy_(tensor)
+        loaded_count += 1
+
+    logger.info(f"[_load_fused_expert_lora] Loaded {loaded_count} tensors from {path}")
 
 
 def load_lora_experts_from_adapter(model: nn.Module, adapter_path: str) -> None:
@@ -595,15 +721,7 @@ def load_lora_experts_from_adapter(model: nn.Module, adapter_path: str) -> None:
     """
     from safetensors import safe_open
 
-    wrappers = getattr(model, "_kt_wrappers", [])
-    if not wrappers:
-        base_model = model
-        for attr in ["base_model", "model"]:
-            if hasattr(base_model, attr):
-                base_model = getattr(base_model, attr)
-                wrappers = getattr(base_model, "_kt_wrappers", [])
-                if wrappers:
-                    break
+    wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
         logger.warning("No KT wrappers found, skipping LoRA Experts loading")
         return
@@ -667,22 +785,19 @@ def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
     Note: Per-expert PEFT LoRA is loaded by PEFT directly, not here.
     This function only handles lora_experts (a separate feature).
     """
-    wrappers = getattr(model, "_kt_wrappers", [])
-    if not wrappers:
-        base_model = model
-        for attr in ["base_model", "model"]:
-            if hasattr(base_model, attr):
-                base_model = getattr(base_model, attr)
-                wrappers = getattr(base_model, "_kt_wrappers", [])
-                if wrappers:
-                    break
+    wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
         logger.warning("No KT wrappers found, skipping KT MoE loading")
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
+    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
 
     if has_lora_experts:
         load_lora_experts_from_adapter(model, adapter_path)
-    else:
-        logger.info("No lora_experts in KT wrappers (PEFT LoRA is loaded by PEFT directly)")
+
+    if has_fused_lora:
+        _load_fused_expert_lora(wrappers, adapter_path)
+
+    if not has_lora_experts and not has_fused_lora:
+        logger.info("No lora_experts or fused expert LoRA in KT wrappers")

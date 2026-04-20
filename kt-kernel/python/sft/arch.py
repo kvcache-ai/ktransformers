@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,21 @@ def get_moe_module(layer: nn.Module, moe_config: MOEArchConfig) -> nn.Module | N
     if not hasattr(moe_module, moe_config.experts_attr):
         return None
     return moe_module
+
+
+def detect_fused_experts(experts: nn.Module) -> bool:
+    """Detect if experts module uses the transformers v5 fused format.
+
+    Fused format: a single Module with ``gate_up_proj`` [E, 2I, H] and
+    ``down_proj`` [E, H, I] 3-D tensors instead of a ModuleList of Linear experts.
+    """
+    if experts is None:
+        return False
+    gate_up = getattr(experts, "gate_up_proj", None)
+    down = getattr(experts, "down_proj", None)
+    if isinstance(gate_up, torch.Tensor) and isinstance(down, torch.Tensor):
+        return gate_up.dim() == 3 and down.dim() == 3
+    return False
 
 
 def _get_layers_prefix(config) -> str:

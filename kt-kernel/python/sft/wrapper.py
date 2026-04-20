@@ -264,12 +264,17 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     model_container, layers = _get_model_container_and_layers(model, purpose="wrapping")
     logger.info(f"Total layers={len(layers)}, is_rank_0={is_rank_0}")
 
+    from .arch import detect_fused_experts as _detect_fused
+
     for layer_idx, layer in enumerate(layers):
         moe_module = get_moe_module(layer, moe_config)
         if moe_module is None:
             continue
 
-        logger.debug(f"Wrapping MoE layer {layer_idx} (method={kt_method})")
+        _layer_experts = getattr(moe_module, moe_config.experts_attr, None)
+        _layer_is_fused = _detect_fused(_layer_experts)
+
+        logger.debug(f"Wrapping MoE layer {layer_idx} (method={kt_method}, fused={_layer_is_fused})")
 
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
@@ -312,7 +317,6 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 num_experts_per_tok=moe_config.num_experts_per_tok,
                 hidden_size=hidden_size,
                 moe_intermediate_size=moe_config.intermediate_size,
-                gpu_experts_mask=None,
                 num_gpu_experts=0,
                 cpuinfer_threads=getattr(cfg, "kt_num_threads", 1),
                 threadpool_count=threadpool_count,
@@ -370,7 +374,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             layer_idx=layer_idx,
             lora_experts=lora_experts,
         )
-        layer_wrapper._skip_lora = "SkipLoRA" in kt_method
+        layer_wrapper._fused_experts = _layer_is_fused
+        layer_wrapper._lora_rank = lora_rank
 
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
