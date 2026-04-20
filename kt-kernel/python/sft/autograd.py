@@ -76,7 +76,7 @@ class KTMoEFunction(torch.autograd.Function):
 
             # Rank 0: sync CPU result and split by real lengths
             if rank == 0:
-                cpu_output = wrapper.sync_forward_sft(output_device=original_device)
+                cpu_output = wrapper.sync_forward(output_device=original_device)
                 cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, hidden_size)
                 offsets = _qlen_offsets(all_qlens_list)
                 scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
@@ -96,7 +96,7 @@ class KTMoEFunction(torch.autograd.Function):
             del output_flat
         elif wrapper is not None:
             # Single-GPU: sync directly
-            cpu_output = wrapper.sync_forward_sft(output_device=original_device)
+            cpu_output = wrapper.sync_forward(output_device=original_device)
             output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
         else:
             # Broadcast-only rank (no wrapper)

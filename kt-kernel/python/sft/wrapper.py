@@ -318,6 +318,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 num_experts_per_tok=moe_config.num_experts_per_tok,
                 hidden_size=hidden_size,
                 moe_intermediate_size=moe_config.intermediate_size,
+                gpu_experts_mask=None,
                 num_gpu_experts=0,
                 cpuinfer_threads=getattr(cfg, "kt_num_threads", 1),
                 threadpool_count=threadpool_count,

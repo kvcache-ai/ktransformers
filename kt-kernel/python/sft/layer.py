@@ -206,7 +206,7 @@ class KTMoELayerWrapper(nn.Module):
             if rank == 0:
                 if self.wrapper is None:
                     raise RuntimeError("Rank0 wrapper is required in distributed KT overlap path.")
-                cpu_output = self.wrapper.sync_forward_sft(output_device=original_device)
+                cpu_output = self.wrapper.sync_forward(output_device=original_device)
                 cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, self.hidden_size)
                 offsets = _qlen_offsets(all_qlens_list)
                 scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
@@ -227,7 +227,7 @@ class KTMoELayerWrapper(nn.Module):
             return output
 
         if self.wrapper is not None:
-            cpu_output = self.wrapper.sync_forward_sft(output_device=original_device)
+            cpu_output = self.wrapper.sync_forward(output_device=original_device)
             output = cpu_output.view(batch_size, seq_len, self.hidden_size).to(dtype=original_dtype)
             return output
 
@@ -335,7 +335,7 @@ class KTMoELayerWrapper(nn.Module):
                 all_hs = torch.cat(gathered_hs, dim=0)
                 all_ids = torch.cat(gathered_ids, dim=0)
                 all_wts = torch.cat(gathered_wts, dim=0)
-                self.wrapper.submit_forward_sft(
+                self.wrapper.submit_forward(
                     all_hs,
                     all_ids,
                     all_wts,
@@ -364,7 +364,7 @@ class KTMoELayerWrapper(nn.Module):
             submit_hs = input_flat.detach()
             submit_ids = expert_ids.detach()
             submit_wts = weights.detach()
-            self.wrapper.submit_forward_sft(
+            self.wrapper.submit_forward(
                 submit_hs,
                 submit_ids,
                 submit_wts,
