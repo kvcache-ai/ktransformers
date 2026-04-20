@@ -157,7 +157,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         is_rank_0 = dist.get_rank() == 0
 
     moe_config = get_moe_arch_config(model.config)
-    hidden_size = model.config.hidden_size
+    _text_cfg = getattr(model.config, "text_config", model.config)
+    hidden_size = _text_cfg.hidden_size
 
     cfg = _get_kt_config(kt_plugin)
 
