@@ -8,7 +8,6 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
-static constexpr int kMoeSftTpVersion = 3;
 
 #include <immintrin.h>
 

@@ -74,9 +74,6 @@ static const bool _is_plain_ = false;
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-// Manually bump this before each rebuild so imports can confirm the loaded
-// extension is the latest build artifact.
-static constexpr int kExtBindingsVersion = 7;
 
 py::object to_float_ptr(uintptr_t input_ptr, int size, ggml_type type) {
   if (type < 0 || type >= GGML_TYPE_COUNT) {
@@ -476,7 +473,6 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
-  m.attr("__ext_bindings_version__") = py::int_(kExtBindingsVersion);
 
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
@@ -1006,9 +1002,3 @@ __attribute__((constructor)) static void install_handlers() {
   sigaction(SIGABRT, &sa, nullptr);
 }
 
-__attribute__((constructor)) static void print_ext_bindings_version() {
-  std::cout << "[kt-kernel] ext_bindings version: " << kExtBindingsVersion << ", sft_moe: " << kSftMoeVersion
-            << ", moe_sft_tp: " << kMoeSftTpVersion << std::endl;
-}
-
-__attribute__((constructor)) static void print_pid() { std::cout << "[kt-kernel] PID: " << getpid() << std::endl; }

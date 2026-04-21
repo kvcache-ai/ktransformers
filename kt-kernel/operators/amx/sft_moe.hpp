@@ -8,8 +8,6 @@
 #ifndef CPUINFER_OPERATOR_AMX_SFT_MOE_H
 #define CPUINFER_OPERATOR_AMX_SFT_MOE_H
 
-// Bump on every change to this file. Printed at construction time.
-static constexpr int kSftMoeVersion = 5;
 
 #include <algorithm>
 #include <cassert>
