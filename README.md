@@ -8,7 +8,7 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1582">🚀 Roadmap(2025Q4)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
 </div>
 
 ## 🎯 Overview
@@ -16,6 +16,7 @@
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/) and [kt-sft](https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft).
 
 ## 🔥 Updates
+* **May 6, 2026**: KTransformers at [GOSIM Paris 2026](https://paris2026.gosim.org/zh/schedule/) — "Agentic AI on Edge" track. We'll present KT's inference performance on consumer hardware.
 * **Mar 26, 2026**: Support AVX2-only CPU backend for KT-Kernel inference. ([Tutorial](./doc/en/kt-kernel/AVX2-Tutorial.md))
 * **Feb 13, 2026**: MiniMax-M2.5 Day0 Support! ([Tutorial](./doc/en/MiniMax-M2.5.md))
 * **Feb 12, 2026**: GLM-5 Day0 Support! ([Tutorial](./doc/en/kt-kernel/GLM-5-Tutorial.md))
