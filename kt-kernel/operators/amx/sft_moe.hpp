@@ -1075,13 +1075,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Step 3: Copy input to expert buffers
-    auto direct_or_pool = [&](int count, auto&& fn, const char* task_name, int block_size) {
+    auto direct_or_pool = [&](int count, auto&& fn) {
       if (qlen < 10) {
         for (int i = 0; i < count; i++) {
           fn(i);
         }
       } else {
-        pool->do_work_stealing_job(count, nullptr, fn, nullptr, task_name, block_size);
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
 
@@ -1095,8 +1095,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             memcpy(m_local_input_ptr_[expert_ids[i * k + j]] + m_local_pos_[i][j] * config_.hidden_size,
                    (ggml_bf16_t*)input + i * config_.hidden_size, sizeof(ggml_bf16_t) * config_.hidden_size);
           }
-        },
-        "fwd_pack_input", 1);
+        });
 
     // NaN Check: Step 3 - Packed input
     if (is_nan_check_enabled()) {
@@ -1118,8 +1117,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         [this](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
           gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
-        },
-        "fwd_quantize_in", 1);
+        });
 
     // Step 5: Gate + Up GEMM (base projection)
     int nth = T::recommended_nth(config_.intermediate_size);
@@ -1137,7 +1135,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
           }
         },
-        nullptr, "fwd_gate_up_gemm", 1);
+        nullptr);
 
     // NaN Check: Step 5 - Gate/Up GEMM output (before LoRA)
     if (is_nan_check_enabled()) {
@@ -1230,10 +1228,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Step 6: Activation (silu(gate) * up)
     {
-      uint64_t act_start = sft_timer::get_trace_timestamp();
       Base::apply_activation(activated_expert, nth, qlen);
-      uint64_t act_end = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace("apply_activation", act_start, act_end, tp_part_idx, 0);
     }
 
     // NaN Check: Step 6 - Activation output (silu(gate) * up)
@@ -1295,7 +1290,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           int expert_idx = m_expert_id_map_[task_id];
           down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
         },
-        nullptr, "fwd_down_quantize");
+        nullptr);
 
     // Step 8: Down GEMM
     nth = T::recommended_nth(config_.hidden_size);
@@ -1307,7 +1302,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           this->do_down_gemm(expert_idx, ith, nth, qlen);
           down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
-        nullptr, "fwd_down_gemm", 1);
+        nullptr);
 
     // NaN Check: Step 8 - Down GEMM output (before LoRA)
     if (is_nan_check_enabled()) {
@@ -1373,7 +1368,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             f32out[1] = x1;
           }
         },
-        nullptr, "fwd_merge");
+        nullptr);
 
     // NaN Check: Step 9 - Final output (after weighted merge)
     if (is_nan_check_enabled()) {
@@ -1428,12 +1423,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int activated_expert = cache.activated_expert_cache;
     constexpr int kSmallBwdDirectQlen = 0;
     constexpr int kSmallBwdDirectMaxTasks = 16;
-    auto trace_phase = [this](const char* name, auto&& fn) {
-      uint64_t start = sft_timer::get_trace_timestamp();
-      fn();
-      uint64_t end = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace(name, start, end, tp_part_idx, 0);
-    };
 
     // NaN Check: grad_output input
     if (is_nan_check_enabled()) {
@@ -1492,9 +1481,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // ★ Allocate backward-phase buffers ★
-    trace_phase("bwd_setup_alloc", [&] { alloc_backward_buffers(); });
+    alloc_backward_buffers();
 
-    trace_phase("bwd_setup_state", [&] {
       // ★ share_backward_bb: check if async repack already prepared this layer ★
       if (config_.share_backward_bb) {
         auto& shared = SFTSharedPools::instance();
@@ -1544,12 +1532,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         m_local_down_output_ptr_[i] = m_local_down_output_ + offset * config_.hidden_size;
         offset += m_local_num_[i];
       }
-    });
 
     // Restore input data from cache into m_local_input_ (shared_mem_buffer may have been
     // overwritten by subsequent layers' forward passes). This is needed for gate/up LoRA
     // gradient computation which reads from m_local_input_ptr_.
-    trace_phase("bwd_phase_down", [&] {
       auto pool_local = config_.pool->get_subpool(tp_part_idx);
       auto restore_input = [&](int i) {
         for (int j = 0; j < k; j++) {
@@ -1569,7 +1555,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           restore_input(i);
         }
       } else {
-        pool_local->do_work_stealing_job(qlen, nullptr, restore_input, nullptr, "bwd_restore_input", 1);
+        pool_local->do_work_stealing_job(qlen, nullptr, restore_input, nullptr);
       }
 
       // Step 1: Down projection backward
@@ -1579,7 +1565,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       } else {
         // backward_down(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
       }
-    });
 
     // // Compute total tokens for debug
     // size_t total_tokens = 0;
@@ -1655,7 +1640,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //   }
     // }
 
-    trace_phase("bwd_phase_act", [&] { backward_activation(cache); });
+    backward_activation(cache);
 
     // NaN Check: Step 2 - After backward_activation
     if (is_nan_check_enabled()) {
@@ -1695,14 +1680,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //   }
     // }
 
-    trace_phase("bwd_phase_gate_up", [&] {
       if constexpr (supports_standard_mat_mul_v<T>) {
         backward_gate_up_amx(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
                              full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a);
       } else {
         // backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
       }
-    });
 
     // NaN Check: Step 3 - After backward_gate_up
     if (is_nan_check_enabled()) {
@@ -1740,7 +1723,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Step 4: Compute grad_weights (gradient for routing weights)
     // grad_weights[token_idx, expert_pos] = dot(grad_output[token_idx], down_output[token, expert])
     if (grad_weights != nullptr) {
-      trace_phase("bwd_phase_gradw", [&] {
         auto pool = config_.pool->get_subpool(tp_part_idx);
         float* grad_w = (float*)grad_weights;
         const ggml_bf16_t* grad_out = (const ggml_bf16_t*)grad_output;
@@ -1788,9 +1770,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             compute_grad_weight(token_idx);
           }
         } else {
-          pool->do_work_stealing_job(qlen, nullptr, compute_grad_weight, nullptr, "bwd_grad_weights");
+          pool->do_work_stealing_job(qlen, nullptr, compute_grad_weight, nullptr);
         }
-      });
     }
 
     // NaN Check: Step 4 - After grad_weights computation
@@ -2106,7 +2087,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               break;
           }
         },
-        nullptr, "transpose_lora_b_weights");
+        nullptr);
   }
 
   /**
@@ -2167,7 +2148,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               break;
           }
         },
-        nullptr, "fwd_lora_prep");
+        nullptr);
 
     lora_weights_prepared_ = true;
   }
@@ -2212,7 +2193,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               break;
           }
         },
-        nullptr, "bwd_lora_prep");
+        nullptr);
 
     lora_backward_weights_prepared_ = true;
   }
@@ -2265,7 +2246,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           dst_bb->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.intermediate_size,
                                       config_.hidden_size, ith, nth_gate_up);
         },
-        nullptr, "bwd_prep_gate_up");
+        nullptr);
 
     // Phase 2: down backward
     // down_proj: [hidden_size, intermediate_size] -> transposed BufferB [intermediate_size, hidden_size]
@@ -2281,7 +2262,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           down_backward_bb_[expert_idx]->from_mat_transposed((ggml_bf16_t*)(src + expert_offset), config_.hidden_size,
                                                              config_.intermediate_size, ith, nth_down);
         },
-        nullptr, "bwd_prep_down");
+        nullptr);
 
     backward_weights_prepared_ = true;
   }
@@ -2317,7 +2298,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
           }
         },
-        nullptr, "bwd_repack_gate_up");
+        nullptr);
 
     // Phase 2: down (uses [hidden_size, intermediate_size] -> [intermediate_size, hidden_size])
     pool->do_work_stealing_job(
@@ -2339,7 +2320,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               dst_bb->from_mat_transposed(workspace.data(), src_bb->n, src_bb->k, p, dst_nth);
           }
         },
-        nullptr, "bwd_repack_down");
+        nullptr);
 
     backward_weights_prepared_ = true;
   }
@@ -2543,7 +2524,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                      down_backward_bb_[expert_idx].get());
           }
         },
-        nullptr, "load_bwd_kt");
+        nullptr);
 
     if (!ok.load()) return false;
     backward_weights_prepared_ = true;
@@ -2596,7 +2577,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           }
         },
-        nullptr, "load_bwd_projs");
+        nullptr);
 
     backward_weights_prepared_ = true;
   }
@@ -3421,7 +3402,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
           bc->to_mat(m, inter_ptr, ith, nth);
         },
-        nullptr, "fwd_lora_gu_a");
+        nullptr);
 
     // =====================================================
     // Step 2: Quantize lora_intermediate to BufferA
@@ -3439,7 +3420,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           ggml_bf16_t* ptr = do_up ? lora_up_intermediate_ptr_[expert_idx] : lora_gate_intermediate_ptr_[expert_idx];
           ba->from_mat(m, ptr, 0, 1);
         },
-        nullptr, "fwd_lora_gu_quant");
+        nullptr);
 
     // =====================================================
     // Step 3a: lora_intermediate @ lora_B^T -> lora_output (GEMM only)
@@ -3464,7 +3445,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // GEMM: [m, padded_lora_rank] @ [intermediate_size, padded_lora_rank]^T -> [m, intermediate_size]
           amx::mat_mul(m, config_.intermediate_size, padded_lora_rank_, ba, bb, bc, ith, nth);
         },
-        nullptr, "fwd_lora_gu_gemm");
+        nullptr);
 
     // =====================================================
     // Step 3b: Add LoRA output to main output with scaling
@@ -3489,7 +3470,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           add_lora_output_to_main(bc.get(), main_output, m, config_.intermediate_size, lora_scaling_, ith, nth,
                                   lora_sum_ptr);
         },
-        nullptr, "fwd_lora_gu_add");
+        nullptr);
   }
 
   /**
@@ -3581,7 +3562,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // Convert BufferC to BF16 for step 2 input
           bc->to_mat(m, lora_gate_intermediate_ptr_[expert_idx], ith, nth);
         },
-        nullptr, "fwd_lora_down_a");
+        nullptr);
 
 
 
@@ -3597,7 +3578,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // Reuse gate intermediate buffer (no race condition for down projection)
           lora_gate_intermediate_ba_[expert_idx]->from_mat(m, lora_gate_intermediate_ptr_[expert_idx], 0, 1);
         },
-        nullptr, "fwd_lora_down_quant");
+        nullptr);
 
     // =====================================================
     // Step 3a: lora_intermediate @ down_lora_B^T -> lora_output (GEMM only)
@@ -3620,7 +3601,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // GEMM: [m, padded_lora_rank] @ [hidden_size, padded_lora_rank]^T -> [m, hidden_size]
           amx::mat_mul(m, config_.hidden_size, padded_lora_rank_, ba, bb, bc, ith, nth);
         },
-        nullptr, "fwd_lora_down_gemm", 1);
+        nullptr);
 
     // =====================================================
     // Step 3b: Add LoRA output to main output with scaling
@@ -3642,7 +3623,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           add_lora_output_to_main(bc.get(), m_local_down_output_ptr_[expert_idx], m, config_.hidden_size, lora_scaling_,
                                   ith, nth, &down_lora_sum);
         },
-        nullptr, "fwd_lora_down_add");
+        nullptr);
 
     // // Print LoRA contribution statistics
     // size_t total_elements = 0;
@@ -3791,7 +3772,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               output + t_start * inter_size,  // output [local_num_tokens, inter_size]
               local_num_tokens, rank, inter_size, scale);
         },
-        nullptr, "fwd_lora_gu");
+        nullptr);
   }
 
   /**
@@ -3856,7 +3837,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                                    output + t_start * hidden,  // output [local_num_tokens, hidden]
                                                    local_num_tokens, rank, hidden, scale);
         },
-        nullptr, "fwd_lora_down");
+        nullptr);
   }
 
   ForwardCache& push_cache() {
@@ -3941,7 +3922,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           }
         },
-        nullptr, "save_cache");
+        nullptr);
 
     cache.valid = true;
   }
@@ -3968,7 +3949,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           memcpy(cache.intermediate_cache + cache_offsets_[i] * config_.intermediate_size,
                  m_local_gate_output_ptr_[expert_idx], num_tokens * config_.intermediate_size * sizeof(ggml_bf16_t));
         },
-        nullptr, "save_inter_cache");
+        nullptr);
   }
 
   /**
@@ -3993,7 +3974,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           memcpy(cache.down_output_cache + cache_offsets_[i] * config_.hidden_size, src_ptr,
                  num_tokens * config_.hidden_size * sizeof(ggml_bf16_t));
         },
-        nullptr, "save_down_cache");
+        nullptr);
   }
 
   void backward_down(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
@@ -4025,7 +4006,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               memset(reinterpret_cast<char*>(grad_intermediate_) + offset, 0, size);
             }
           },
-          nullptr, "bwd_down_memset");
+          nullptr);
     }
 
     // Scatter grad_output to per-expert buffers and compute gradients
@@ -4176,7 +4157,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           }
         },
-        nullptr, "bwd_down");
+        nullptr);
   }
 
   /**
@@ -4198,13 +4179,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int k = cache.k_cache;
     constexpr int kSmallBwdDirectQlen = 0;
     constexpr int kSmallBwdDirectMaxTasks = 16;
-    auto direct_or_pool = [&](int count, auto&& fn, const char* task_name, int block_size = 1) {
+    auto direct_or_pool = [&](int count, auto&& fn) {
       if (qlen <= kSmallBwdDirectQlen && count <= kSmallBwdDirectMaxTasks) {
         for (int i = 0; i < count; i++) {
           fn(i);
         }
       } else {
-        pool->do_work_stealing_job(count, nullptr, fn, nullptr, task_name, block_size);
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
 
@@ -4258,8 +4239,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           int num_tokens = m_local_num_[expert_idx];
           if (num_tokens == 0) return;
           memset(grad_output_bf16_ptr_[expert_idx], 0, num_tokens * config_.hidden_size * sizeof(ggml_bf16_t));
-        },
-        "bwd_down_zero");
+        });
 
     // =====================================================
     // Step 2: Scatter grad_output to per-expert BF16 buffers
@@ -4305,8 +4285,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 dst_row[h] = GGML_FP32_TO_BF16(cur);
               }
             }
-          },
-          "bwd_down_scatter");
+          });
     }
 
     // =====================================================
@@ -4319,8 +4298,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           int num_tokens = m_local_num_[expert_idx];
           if (num_tokens == 0) return;
           grad_output_ba_[expert_idx]->from_mat(num_tokens, grad_output_bf16_ptr_[expert_idx], 0, 1);
-        },
-        "bwd_down_quantize");
+        });
 
     // =====================================================
     // Step 3+4: AMX GEMM + to_mat (merged to use same ith/nth)
@@ -4365,7 +4343,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // to_mat: Convert BufferC to BF16 - use same ith, nth as mat_mul!
           bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
         },
-        nullptr, "bwd_down_gemm", 1);
+        nullptr);
 
     // =====================================================
     // Step 3.5: Add LoRA contribution to grad_intermediate (AVX512)
@@ -4417,8 +4395,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                              expert_lora_a,                      // [rank, inter_size] BF16
                                              grad_inter + t_start * inter_size,  // [local_num_tokens, inter_size] BF16
                                              local_num_tokens, rank, inter_size, scale);
-          },
-          "bwd_down_lora_to_inter");
+          });
     }
 
 
@@ -4600,7 +4577,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 }
               }
             },
-            nullptr, "bwd_down_lora_grad_AB");
+            nullptr);
       } else {
         struct LoraGradTask {
           int expert_task = -1;
@@ -4609,7 +4586,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         };
         std::vector<LoraGradTask> lora_grad_tasks;
 
-        uint64_t grad_setup_start = sft_timer::get_trace_timestamp();
         float* grad_b_accum_all = down_lora_grad_b_accum_pool_;
         float* grad_a_accum_all = down_lora_grad_a_accum_pool_;
         if (activated_expert > 0) {
@@ -4630,8 +4606,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             lora_grad_tasks.push_back({task_id, t, std::min(t + token_tile, buf.num_tokens)});
           }
         }
-        uint64_t grad_setup_end = sft_timer::get_trace_timestamp();
-        sft_timer::add_kernel_trace("bwd_down_lora_grad_setup", grad_setup_start, grad_setup_end, tp_part_idx, 0);
 
         if (!lora_grad_tasks.empty()) {
           direct_or_pool(
@@ -4748,8 +4722,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                     grad_a_global[off] += grad_a_local[off];
                   }
                 }
-              },
-              "bwd_down_lora_grad_AB");
+              });
 
           constexpr int kDownGradBTile = 512;
           constexpr int kDownGradATile = 512;
@@ -4788,7 +4761,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   }
                 }
               },
-              nullptr, "bwd_down_lora_write_B");
+              nullptr);
 
           pool->do_work_stealing_job(
               activated_expert * grad_a_blocks, nullptr,
@@ -4812,7 +4785,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   }
                 }
               },
-              nullptr, "bwd_down_lora_write_A");
+              nullptr);
         }
       }
     }
@@ -4824,13 +4797,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int qlen = cache.qlen_cache;
     constexpr int kSmallBwdDirectQlen = 0;
     constexpr int kSmallBwdDirectMaxTasks = 16;
-    auto direct_or_pool = [&](int count, auto&& fn, const char* task_name, int block_size = 1) {
+    auto direct_or_pool = [&](int count, auto&& fn) {
       if (qlen <= kSmallBwdDirectQlen && count <= kSmallBwdDirectMaxTasks) {
         for (int i = 0; i < count; i++) {
           fn(i);
         }
       } else {
-        pool->do_work_stealing_job(count, nullptr, fn, nullptr, task_name, block_size);
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
 
@@ -4942,8 +4915,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             grad_gate[i] = GGML_FP32_TO_BF16(grad_i_val * u_val * sigmoid_val * (1.0f + g_val * (1.0f - sigmoid_val)));
             grad_up[i] = GGML_FP32_TO_BF16(grad_i_val * silu_val);
           }
-        },
-        "bwd_act_silu");
+        });
 
   }
 
@@ -4963,13 +4935,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     int k = cache.k_cache;
     constexpr int kSmallBwdDirectQlen = 0;
     constexpr int kSmallBwdDirectMaxTasks = 16;
-    auto direct_or_pool = [&](int count, auto&& fn, const char* task_name, int block_size = 1) {
+    auto direct_or_pool = [&](int count, auto&& fn) {
       if (qlen <= kSmallBwdDirectQlen && count <= kSmallBwdDirectMaxTasks) {
         for (int i = 0; i < count; i++) {
           fn(i);
         }
       } else {
-        pool->do_work_stealing_job(count, nullptr, fn, nullptr, task_name, block_size);
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
 
@@ -5065,7 +5037,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     }
 
-    auto scatter_to_grad_input = [&](float scale, const char* task_name) {
+    auto scatter_to_grad_input = [&](float scale) {
       ggml_bf16_t* grad_input_bf16 = (ggml_bf16_t*)grad_input;
       const int hidden = config_.hidden_size;
       const int hidden_vec_end = hidden & ~31;
@@ -5101,13 +5073,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 dst[h] = GGML_FP32_TO_BF16(cur);
               }
             }
-          },
-          task_name);
+          });
     };
 
     auto base_pass = [&](bool do_up) {
-      const char* quant_name = do_up ? "bwd_gu_base_q_up" : "bwd_gu_base_q_gate";
-      const char* gemm_name = do_up ? "bwd_gu_base_gemm_up" : "bwd_gu_base_gemm_gate";
 
       // Quantize grad to BufferA
       direct_or_pool(
@@ -5121,8 +5090,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             ggml_bf16_t* grad = do_up ? (grad_up_output_ + offset * config_.intermediate_size)
                                       : (grad_gate_output_ + offset * config_.intermediate_size);
             down_ba_[expert_idx]->from_mat(m, grad, 0, 1);
-          },
-          quant_name);
+          });
 
       int nth = T::recommended_nth(config_.hidden_size);
       pool->do_work_stealing_job(
@@ -5141,9 +5109,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
             bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
           },
-          nullptr, gemm_name, 1);
+          nullptr);
 
-      scatter_to_grad_input(1.0f, "bwd_gu_scatter_base");
+      scatter_to_grad_input(1.0f);
     };
 
     base_pass(false);  // gate
@@ -5341,8 +5309,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 up_gradb_global[off] += up_gradb_local[off];
               }
             }
-          },
-          "bwd_gu_lora_u_gradb_fused");
+          });
 
       constexpr int kGuGradBBlock = 256;
       int gradb_blocks = (inter_size + kGuGradBBlock - 1) / kGuGradBBlock;
@@ -5375,7 +5342,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               }
             }
           },
-          nullptr, "bwd_gu_lora_gradb_fused_write");
+          nullptr);
     }
 
     // =====================================================
@@ -5386,8 +5353,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Gate and up still run sequentially because they share grad_output_bf16_ptr_.
     // =====================================================
     auto lora_pass_remainder = [&](bool do_up) {
-      const char* gb_gradin_name = do_up ? "bwd_gu_lora_gb_gradin_fused_up" : "bwd_gu_lora_gb_gradin_fused_gate";
-      const char* grad_a_name = do_up ? "bwd_gu_lora_gradA_up" : "bwd_gu_lora_gradA_gate";
 
       struct GuLoraGradInTask {
         int expert_task = -1;
@@ -5443,11 +5408,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
               memset(grad_out, 0, static_cast<size_t>(local_tokens) * hidden * sizeof(ggml_bf16_t));
               avx::lora_fp32_bf16_fused_add_transposed(gb, lora_a, grad_out, local_tokens, lora_rank_, hidden, 1.0f);
-            },
-            gb_gradin_name);
+            });
       }
 
-      scatter_to_grad_input(lora_scaling_, "bwd_gu_scatter_lora");
+      scatter_to_grad_input(lora_scaling_);
 
       // Step 6: grad_A = G_B^T @ X
       ggml_bf16_t* grad_lora_a = do_up ? grad_up_a : grad_gate_a;
@@ -5547,7 +5511,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               }
             }
           },
-          nullptr, grad_a_name);
+          nullptr);
     };
 
     lora_pass_remainder(false);  // gate: gb_gradin_fused, scatter, gradA

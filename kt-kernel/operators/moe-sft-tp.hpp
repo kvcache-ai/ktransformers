@@ -318,7 +318,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                       sizeof(ggml_bf16_t) * tpc.intermediate_size);
                 }
               },
-              nullptr, "memcpy_weights_tmp");
+              nullptr);
         }
 
         // Set BF16 weight pointers on sub-MOEs for backward
@@ -490,16 +490,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("Weights not loaded");
     }
 
-    auto start_sft = sft_timer::get_trace_timestamp();
 
     int qlen = *qlen_ptr;
     auto pool = config.pool;
 
     // Reset forward timing before computation
-    // sft_timer::reset_forward();
     // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)
     for (int i = 0; i < tp_count; i++) {
-      pool->get_subpool(i)->reset_counters();
     }
 
     // Run forward on each NUMA node
@@ -508,24 +505,18 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
-    auto end_fwd = sft_timer::get_trace_timestamp();
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
-    //   sft_timer::collect_forward(pool->get_subpool(i));
     // }
 
     // // Print per-thread forward timing
-    // sft_timer::print_forward();
 
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
 
-    auto end_merge = sft_timer::get_trace_timestamp();
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
-      sft_timer::add_kernel_trace("fwd", start_sft, end_fwd, numa_id, 0);
-      sft_timer::add_kernel_trace("merge", end_fwd, end_merge, numa_id, 0);
     });
   }
 
@@ -561,7 +552,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_weights) {
     auto pool = config.pool;
 
-    auto start_sft = sft_timer::get_trace_timestamp();
 
     // Get full intermediate_size (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
@@ -665,9 +655,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  const auto& seg = clear_segs[(size_t)seg_idx];
                                  std::memset(seg.ptr, 0, seg.len);
                                },
-                               nullptr, "bwd_alloc_memset");
+                               nullptr);
 
-    auto end_alloc = sft_timer::get_trace_timestamp();
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
@@ -697,7 +686,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Run backward on each NUMA node
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
-      auto start_Bwd = sft_timer::get_trace_timestamp();
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
                              nullptr,                /* grad_gate_lora_a — unused, FP32 path below */
@@ -708,18 +696,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              nullptr,                /* grad_down_lora_b — unused, FP32 path below */
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
                              tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id]);
-      auto end_bwd = sft_timer::get_trace_timestamp();
-      sft_timer::add_kernel_trace("bwd_alloc", start_sft, end_alloc, numa_id, 0);
-      sft_timer::add_kernel_trace("bwd_tp", start_Bwd, end_bwd, numa_id, 0);
     });
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
-    //   sft_timer::collect_backward(pool->get_subpool(i));
     // }
 
     // // Print per-thread backward timing
-    // sft_timer::print_backward();
 
     // // Print expert token distribution for load balancing analysis
     // {
@@ -739,7 +722,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // }
 
     // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
-    auto start_sum = sft_timer::get_trace_timestamp();
     {
       auto* out = (ggml_bf16_t*)grad_input;
       pool->do_work_stealing_job(
@@ -784,13 +766,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
               dst[h] = GGML_FP32_TO_BF16(sum);
             }
           },
-          nullptr, "merge_grad_input");
+          nullptr);
     }
-    auto end_sum = sft_timer::get_trace_timestamp();
 
     // Merge reduce-type LoRA gradients: sparse FP32 sum across TPs → BF16 final output
     // Copy-type grads (gate/up_lora_b, down_lora_a) were written directly — no merge needed.
-    auto start_merge = sft_timer::get_trace_timestamp();
     if constexpr (!kSkipLoRA) {
       // Sparse merge for gate_lora_a, up_lora_a: [active_count, r, H] FP32 → [E, r, H] BF16
       {
@@ -835,7 +815,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 ud[h] = GGML_FP32_TO_BF16(us);
               }
             },
-            nullptr, "merge_lora_a");
+            nullptr);
       }
 
       // Sparse merge for down_lora_b: [active_count, H, r] FP32 → [E, H, r] BF16
@@ -861,7 +841,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 }
               }
             },
-            nullptr, "merge_down_lora_b");
+            nullptr);
       }
     }  // if constexpr (!kSkipLoRA)
 
@@ -900,14 +880,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
               out_grad_weights[i] = sum;
             }
           },
-          nullptr, "merge_grad_weights");
+          nullptr);
     }
-    auto end_merge = sft_timer::get_trace_timestamp();
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
-      sft_timer::add_kernel_trace("merge_tp", start_sum, end_sum, numa_id, 0);
-      sft_timer::add_kernel_trace("merge_lora_a", end_sum, start_merge, numa_id, 0);
-      sft_timer::add_kernel_trace("merge_grad_weights", start_merge, end_merge, numa_id, 0);
     });
   }
 
@@ -989,8 +965,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                          numa_id * tp_inter,
                      sizeof(ggml_bf16_t) * tp_inter);
             }
-          },
-          "upd_lora_tp");
+          });
 
       // Update weights after all memcpy complete
       tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
@@ -1074,7 +1049,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                      sizeof(ggml_bf16_t) * tpc.intermediate_size);
             }
           },
-          nullptr, "memcpy_bwd_tmp");
+          nullptr);
 
       tps[i]->prepare_bwd(temp_gate, temp_up, temp_down);
 

@@ -48,9 +48,6 @@ namespace avx {
  */
 inline void lora_bf16_matmul_t4r4(const ggml_bf16_t* __restrict input, const ggml_bf16_t* __restrict weight,
                                   float* __restrict output, int num_tokens, int k_dim, int rank) {
-  // #if AVX_KERNEL_TRACE_ENABLED
-  //   uint64_t trace_start = sft_timer::get_trace_timestamp();
-  // #endif
 
   constexpr int T_BLOCK = 4;
   constexpr int R_BLOCK = 4;
@@ -240,13 +237,6 @@ inline void lora_bf16_matmul_t4r4(const ggml_bf16_t* __restrict input, const ggm
     }
   }
 
-  // #if AVX_KERNEL_TRACE_ENABLED
-  //   uint64_t trace_end = sft_timer::get_trace_timestamp();
-  //   char args_buf[128];
-  //   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"K\":%d,\"R\":%d}", num_tokens, k_dim, rank);
-  //   sft_timer::add_kernel_trace("lora_bf16_matmul_t4r4", trace_start, trace_end, 0, WorkerPool::thread_local_id,
-  //                               args_buf);
-  // #endif
 }
 
 /**
@@ -275,7 +265,6 @@ inline void lora_fp32_bf16_fused_add(const float* __restrict intermediate, const
                                      ggml_bf16_t* __restrict output, int num_tokens, int rank, int output_dim,
                                      float scale) {
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_start = sft_timer::get_trace_timestamp();
 #endif
 
   constexpr int T_BLOCK = 4;
@@ -579,11 +568,8 @@ inline void lora_fp32_bf16_fused_add(const float* __restrict intermediate, const
   }
 
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_end = sft_timer::get_trace_timestamp();
   char args_buf[128];
   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"R\":%d,\"O\":%d}", num_tokens, rank, output_dim);
-  sft_timer::add_kernel_trace("lora_fp32_bf16_fused_add", trace_start, trace_end, 0, WorkerPool::thread_local_id,
-                              args_buf);
 #endif
 }
 
@@ -615,7 +601,6 @@ inline void lora_fp32_bf16_fused_add_wt(const float* __restrict intermediate, co
                                         ggml_bf16_t* __restrict output, int num_tokens, int rank, int output_dim,
                                         float scale) {
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_start = sft_timer::get_trace_timestamp();
 #endif
 
   constexpr int T_BLOCK = 4;
@@ -886,11 +871,8 @@ inline void lora_fp32_bf16_fused_add_wt(const float* __restrict intermediate, co
   }
 
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_end = sft_timer::get_trace_timestamp();
   char args_buf[128];
   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"R\":%d,\"O\":%d}", num_tokens, rank, output_dim);
-  sft_timer::add_kernel_trace("lora_fp32_bf16_fused_add_wt", trace_start, trace_end, 0, WorkerPool::thread_local_id,
-                              args_buf);
 #endif
 }
 
@@ -1190,7 +1172,6 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
                                                 const ggml_bf16_t* __restrict weight_t, ggml_bf16_t* __restrict output,
                                                 int num_tokens, int rank, int output_dim, float scale) {
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_start = sft_timer::get_trace_timestamp();
 #endif
 
   constexpr int T_BLOCK = 4;
@@ -1384,11 +1365,8 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
   }
 
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_end = sft_timer::get_trace_timestamp();
   char args_buf[128];
   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"R\":%d,\"O\":%d}", num_tokens, rank, output_dim);
-  sft_timer::add_kernel_trace("lora_fp32_bf16_fused_add_transposed", trace_start, trace_end, 0,
-                              WorkerPool::thread_local_id, args_buf);
 #endif
 }
 
@@ -1408,7 +1386,6 @@ inline void lora_fp32_bf16_fused_add_transposed(const float* __restrict intermed
 inline void lora_backward_matmul_transposed(const ggml_bf16_t* __restrict grad, const ggml_bf16_t* __restrict lora_b_t,
                                             float* __restrict result, int num_tokens, int hidden, int rank) {
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_start = sft_timer::get_trace_timestamp();
 #endif
 
   constexpr int H_BLOCK = 32;
@@ -1448,11 +1425,8 @@ inline void lora_backward_matmul_transposed(const ggml_bf16_t* __restrict grad, 
   }
 
 #if AVX_KERNEL_TRACE_ENABLED
-  uint64_t trace_end = sft_timer::get_trace_timestamp();
   char args_buf[128];
   snprintf(args_buf, sizeof(args_buf), "{\"T\":%d,\"H\":%d,\"R\":%d}", num_tokens, hidden, rank);
-  sft_timer::add_kernel_trace("lora_backward_matmul_transposed", trace_start, trace_end, 0, WorkerPool::thread_local_id,
-                              args_buf);
 #endif
 }
 

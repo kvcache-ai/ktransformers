@@ -90,7 +90,7 @@ class KExpertsCPUBuffer:
         hidden_size = hidden_states.shape[-1]
         batch_size = hidden_states.shape[0]
 
-        pin_memory = False
+        pin_memory = True
 
         if batch_size in cls.capture_buffers:
             return cls.capture_buffers[batch_size]

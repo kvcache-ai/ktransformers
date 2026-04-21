@@ -818,35 +818,30 @@ class OnlineQuantConverter(ConverterBase):
                 print(f"    [Fused] tensor {p} shape: {tuple(w.shape)}")
                 fused_tensors.append(w)
 
-            #   fused_tensors[0] : down_proj, [E, H, I]
-            #   fused_tensors[1] : gate_up_proj, [E, 2I, H]
+            #   fused_tensors[0] : down-like, [E, I, H]
+            #   fused_tensors[1] : gate_up-like, [E, H, 2I]
             down_fused = fused_tensors[0]
             gate_up_fused = fused_tensors[1]
 
-            #    gate_up_fused is [E, 2I, H] — split on dim 1, no transpose needed
+            #    gate_up_fused: [E, H, 2I] -> [E, 2I, H] -> gate / up
             if gate_up_fused.dim() != 3:
                 raise ValueError(
                     f"[Fused] Expect gate_up fused tensor to be 3D, got shape {tuple(gate_up_fused.shape)}"
                 )
-            E = gate_up_fused.shape[0]
-            I = self.moe_intermediate_size
-            H = self.hidden_size
+            E, H, twoI = gate_up_fused.shape
+            if twoI % 2 != 0:
+                raise ValueError(f"[Fused] gate_up last dim (2I) not even: {twoI}")
+            I = twoI // 2
 
-            if gate_up_fused.shape != (E, 2 * I, H):
-                raise ValueError(
-                    f"[Fused] gate_up shape {tuple(gate_up_fused.shape)} != expected ({E}, {2*I}, {H}). "
-                    f"If your model stores gate_up as [E, H, 2I], transpose is needed."
-                )
-
-            gate_proj = gate_up_fused[:, :I, :].contiguous()  # [E, I, H]
-            up_proj = gate_up_fused[:, I:, :].contiguous()  # [E, I, H]
+            gate_up_T = gate_up_fused.transpose(1, 2).contiguous()  # [E, 2I, H]
+            gate_proj = gate_up_T[:, :I, :]  # [E, I, H]
+            up_proj = gate_up_T[:, I:, :]  # [E, I, H]
 
             if down_fused.dim() != 3:
                 raise ValueError(f"[Fused] Expect down fused tensor to be 3D, got shape {tuple(down_fused.shape)}")
             if down_fused.shape[0] != E:
                 raise ValueError(f"[Fused] down_fused expert dim mismatch: {down_fused.shape[0]} vs gate_up {E}")
-            # down_proj is [E, H, I] — matches load_weights_from_tensors expectation, no transpose
-            down_proj = down_fused.contiguous()  # [E, H, I]
+            down_proj = down_fused.transpose(1, 2).contiguous()  # [E, H, I]
             del fused_tensors
             del gate_up_fused
             del down_fused
