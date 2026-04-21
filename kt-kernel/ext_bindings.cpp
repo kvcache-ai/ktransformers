@@ -37,6 +37,7 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 #include "operators/amx/awq-moe.hpp"
 #include "operators/amx/bf16-moe.hpp"            // Native BF16 MoE using CRTP pattern, with fallback for AVX512F
+#include "operators/amx/fp4-moe.hpp"             // MXFP4 MoE: FP4 E2M1 weights × BF16 activations
 #include "operators/amx/fp8-moe.hpp"             // FP8 MoE requires AVX512 BF16 support, with fallback for AVX512F+BW
 #include "operators/amx/fp8-perchannel-moe.hpp"  // FP8 Per-Channel MoE for GLM-4.7-FP8
 #include "operators/amx/k2-moe.hpp"
@@ -47,8 +48,8 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__)
 #include "operators/avx2/bf16-moe.hpp"
 #include "operators/avx2/fp8-moe.hpp"
-#include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #include "operators/avx2/gptq_int4-moe.hpp"
+#include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #endif
 
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
@@ -583,6 +584,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
   bind_moe_module<AMX_FP8_PERCHANNEL_MOE_TP<amx::GemmKernel224FP8PerChannel>>(moe_module, "AMXFP8PerChannel_MOE");
 #endif
+#if defined(__AVX512BF16__)
+  bind_moe_module<AMX_FP4_MOE_TP<amx::GemmKernel224MXFP4SmallKGroup>>(moe_module, "AMXFP4_KGroup_MOE");
+#endif
 #endif
 // AVX2 backends — available on all x86_64 (no AMX/AVX512 requirement)
 #if defined(__x86_64__)
@@ -590,7 +594,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AVX2_FP8_MOE_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE");
   bind_moe_module<AVX2_GPTQ_INT4_MOE_TP<avx2::GemmKernelAVX2GPTQInt4>>(moe_module, "AVX2GPTQInt4_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
-                                                                                        "AVXVNNI256GPTQInt4_MOE");
+                                                                                      "AVXVNNI256GPTQInt4_MOE");
 #endif
 
 #if defined(USE_MOE_KERNEL)
