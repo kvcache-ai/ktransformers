@@ -1,7 +1,7 @@
 import os
 import torch
 import ctypes
-from typing import Optional
+from typing import List, Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -49,6 +49,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "MOE_INT8",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Initialize general MoE Wrapper.
@@ -97,6 +98,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
+            numa_nodes=numa_nodes,
         )
 
         # moe-specific: Check if we should load merged safetensor weights

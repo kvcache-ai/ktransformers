@@ -132,6 +132,7 @@ class KTMoEWrapper:
         max_deferred_experts_per_token: Optional[int] = None,
         # Mode and method selection
         method: str = "AMXINT4",
+        numa_nodes: Optional[List[int]] = None,
         mode: str = "inference",
         # SFT-specific parameters (only used when mode="sft")
         num_gpu_experts: int = 0,
@@ -162,6 +163,7 @@ class KTMoEWrapper:
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory (inference only)
             max_deferred_experts_per_token: Experts per token to defer (inference only)
+            numa_nodes: Explicit list of NUMA node IDs for subpool mapping. If None, defaults to sequential.
             method: Backend method (see INFERENCE_METHODS and SFT_METHODS)
             mode: Operation mode ("inference" or "sft")
             lora_rank: LoRA rank (SFT only)
@@ -209,6 +211,7 @@ class KTMoEWrapper:
                 cpu_save=cpu_save,
                 max_deferred_experts_per_token=max_deferred_experts_per_token,
                 method=method,
+                numa_nodes=numa_nodes,
             )
         else:  # mode == "sft"
             return _create_sft_wrapper(
@@ -295,6 +298,7 @@ def _create_inference_wrapper(
     cpu_save: bool,
     max_deferred_experts_per_token: Optional[int],
     method: str,
+    numa_nodes: Optional[List[int]] = None,
 ) -> BaseMoEWrapper:
     """
     Create an inference wrapper based on the method.
@@ -333,6 +337,7 @@ def _create_inference_wrapper(
         cpu_save=cpu_save,
         max_deferred_experts_per_token=max_deferred_experts_per_token,
         method=method,
+        numa_nodes=numa_nodes,
     )
 
 

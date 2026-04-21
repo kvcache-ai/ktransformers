@@ -77,9 +77,9 @@ try:
             _version_ns = {}
             with open(_root_version_file, "r", encoding="utf-8") as f:
                 exec(f.read(), _version_ns)
-            __version__ = _version_ns.get("__version__", "0.4.3")
+            __version__ = _version_ns.get("__version__", "0.5.3")
         else:
-            __version__ = "0.4.3"
+            __version__ = "0.5.3"
 except ImportError:
     # Python < 3.8, fallback to pkg_resources or hardcoded version
     try:
@@ -88,8 +88,8 @@ except ImportError:
         try:
             __version__ = get_distribution("kt-kernel").version
         except DistributionNotFound:
-            __version__ = "0.4.3"
+            __version__ = "0.5.3"
     except ImportError:
-        __version__ = "0.4.3"
+        __version__ = "0.5.3"
 
 __all__ = ["KTMoEWrapper", "AMXSFTMoEWrapper", "generate_gpu_experts_masks", "kt_kernel_ext", "__cpu_variant__", "__version__"]

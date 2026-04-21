@@ -14,6 +14,54 @@
 #define ALWAYS_INLINE inline
 #endif
 #include <immintrin.h>
+
+#if !defined(__AVX512BF16__)
+#ifndef __m512bh
+#define __m512bh __m512i
+#endif
+
+// BF16 emulation via AVX512F
+static ALWAYS_INLINE __m512 _mm512_dpbf16_ps_emulated(__m512 src, __m512i a, __m512i b) {
+  __m512 a_low = _mm512_castsi512_ps(_mm512_slli_epi32(a, 16));
+  __m512 b_low = _mm512_castsi512_ps(_mm512_slli_epi32(b, 16));
+  __m512i mask = _mm512_set1_epi32(0xFFFF0000);
+  __m512 a_high = _mm512_castsi512_ps(_mm512_and_si512(a, mask));
+  __m512 b_high = _mm512_castsi512_ps(_mm512_and_si512(b, mask));
+  __m512 res = _mm512_fmadd_ps(a_low, b_low, src);
+  res = _mm512_fmadd_ps(a_high, b_high, res);
+  return res;
+}
+
+#ifndef _mm512_dpbf16_ps
+#define _mm512_dpbf16_ps _mm512_dpbf16_ps_emulated
+#endif
+#endif
+
+#if !defined(__AVX512VBMI__)
+// VBMI emulation via AVX512F+BW
+static ALWAYS_INLINE __m512i _mm512_permutex2var_epi8_emulated(__m512i a, __m512i idx, __m512i b) {
+  __m256i idx_lo_256 = _mm512_castsi512_si256(idx);
+  __m256i idx_hi_256 = _mm512_extracti64x4_epi64(idx, 1);
+  __m512i idx_lo_w = _mm512_cvtepu8_epi16(idx_lo_256);
+  __m512i idx_hi_w = _mm512_cvtepu8_epi16(idx_hi_256);
+  __m512i p_lo = _mm512_srli_epi16(idx_lo_w, 1);
+  __m512i p_hi = _mm512_srli_epi16(idx_hi_w, 1);
+  __m512i w_lo = _mm512_permutex2var_epi16(a, p_lo, b);
+  __m512i w_hi = _mm512_permutex2var_epi16(a, p_hi, b);
+  __m512i shift_lo = _mm512_slli_epi16(_mm512_and_si512(idx_lo_w, _mm512_set1_epi16(1)), 3);
+  __m512i shift_hi = _mm512_slli_epi16(_mm512_and_si512(idx_hi_w, _mm512_set1_epi16(1)), 3);
+  __m512i res_lo_w = _mm512_srlv_epi16(w_lo, shift_lo);
+  __m512i res_hi_w = _mm512_srlv_epi16(w_hi, shift_hi);
+  __m256i res_lo = _mm512_cvtepi16_epi8(res_lo_w);
+  __m256i res_hi = _mm512_cvtepi16_epi8(res_hi_w);
+  return _mm512_inserti64x4(_mm512_castsi256_si512(res_lo), res_hi, 1);
+}
+
+#ifndef _mm512_permutex2var_epi8
+#define _mm512_permutex2var_epi8 _mm512_permutex2var_epi8_emulated
+#endif
+#endif
+
 #if defined(__AMX__) || defined(__AMXINT8__) || defined(__AMXBF16__) || defined(__AMX_TILE__) || defined(HAVE_AMX)
 #ifndef HAVE_AMX
 #define HAVE_AMX

@@ -1,11 +1,17 @@
 import os
 import torch
 import ctypes
-from typing import Optional
+from typing import List, Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
-from .loader import SafeTensorLoader, CompressedSafeTensorLoader, FP8SafeTensorLoader, BF16SafeTensorLoader, GPTQSafeTensorLoader
+from .loader import (
+    SafeTensorLoader,
+    CompressedSafeTensorLoader,
+    FP8SafeTensorLoader,
+    BF16SafeTensorLoader,
+    GPTQSafeTensorLoader,
+)
 from kt_kernel_ext.moe import MOEConfig
 import kt_kernel_ext.moe as _moe_mod
 
@@ -18,6 +24,7 @@ AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
 AVX2BF16_MOE = getattr(_moe_mod, "AVX2BF16_MOE", None)
 AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
 AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
+AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
@@ -28,6 +35,58 @@ _HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
 _HAS_AVX2_BF16_SUPPORT = AVX2BF16_MOE is not None
 _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
 _HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
+_HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
+_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
+
+
+def _host_has_cpu_flag(*flag_names: str) -> bool:
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if line.startswith("flags"):
+                    flags = set(line.split(":", 1)[1].strip().split())
+                    return any(name in flags for name in flag_names)
+    except OSError:
+        return False
+    return False
+
+
+_HOST_HAS_AVX_VNNI = _host_has_cpu_flag("avx_vnni", "avxvnni")
+
+
+def _supports_avxvnni256_gptq_int4_group_size(group_size: Optional[int]) -> bool:
+    if group_size is None:
+        return True
+    return group_size > 0 and group_size % 32 == 0 and group_size <= _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE
+
+
+def _select_gptq_int4_backend(group_size: Optional[int] = None):
+    forced = os.getenv("KT_GPTQ_INT4_BACKEND", "").strip().lower()
+    avxvnni_group_supported = _supports_avxvnni256_gptq_int4_group_size(group_size)
+
+    if forced in {"avxvnni", "avxvnni256"}:
+        if not _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but AVXVNNI256GPTQInt4_MOE is not compiled in.")
+        if not _HOST_HAS_AVX_VNNI:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avxvnni requested, but the current CPU does not support avx_vnni.")
+        if not avxvnni_group_supported:
+            raise RuntimeError(
+                "KT_GPTQ_INT4_BACKEND=avxvnni requested, but "
+                f"group_size={group_size} is unsupported. AVX-VNNI-256 GPTQ_INT4 only supports "
+                f"positive multiples of 32 up to {_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE}."
+            )
+        return AVXVNNI256GPTQInt4_MOE
+
+    if forced == "avx2":
+        if not _HAS_AVX2_GPTQ_INT4_SUPPORT:
+            raise RuntimeError("KT_GPTQ_INT4_BACKEND=avx2 requested, but AVX2GPTQInt4_MOE is not compiled in.")
+        return AVX2GPTQInt4_MOE
+
+    if _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT and _HOST_HAS_AVX_VNNI and avxvnni_group_supported:
+        return AVXVNNI256GPTQInt4_MOE
+    if _HAS_AVX2_GPTQ_INT4_SUPPORT:
+        return AVX2GPTQInt4_MOE
+    return None
 
 
 class AMXMoEWrapper(BaseMoEWrapper):
@@ -53,6 +112,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
+        numa_nodes: Optional[List[int]] = None,
     ):
         """
         Initialize AMX MoE Wrapper.
@@ -103,6 +163,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
+            numa_nodes=numa_nodes,
         )
 
         # AMX-specific: Check if we should load merged safetensor weights
@@ -288,7 +349,11 @@ class AMXMoEWrapper(BaseMoEWrapper):
             moe_config.save = True
             moe_config.load = False
             base_key = f"model.layers.{self.layer_idx}"
-            w = self.safetensor_loader.load_experts(base_key)
+            try:
+                w = self.safetensor_loader.load_experts(base_key)
+            except (ValueError, KeyError):
+                base_key = f"model.language_model.layers.{self.layer_idx}"
+                w = self.safetensor_loader.load_experts(base_key)
 
             self.gate_proj = torch.cat(w["gate_weight"], dim=0).contiguous()
             self.up_proj = torch.cat(w["up_weight"], dim=0).contiguous()
@@ -345,6 +410,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
+        numa_nodes: Optional[List[int]] = None,
     ):
         if method == "RAWINT4" and not _HAS_RAWINT4_SUPPORT:
             raise RuntimeError(
@@ -372,10 +438,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with AVX512+BF16 or AVX2 enabled."
             )
-        if method == "GPTQ_INT4" and not _HAS_AVX2_GPTQ_INT4_SUPPORT:
+        if method == "GPTQ_INT4" and not (_HAS_AVX2_GPTQ_INT4_SUPPORT or _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT):
             raise RuntimeError(
                 "GPTQ_INT4 backend not available.\n"
-                "Please recompile kt_kernel_ext with AVX2 enabled."
+                "Please recompile kt_kernel_ext with GPTQ INT4 support enabled.\n"
+                "AVX-VNNI-256 will be selected automatically when available on the current CPU."
             )
 
         super().__init__(
@@ -392,6 +459,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
+            numa_nodes=numa_nodes,
         )
 
         if NativeMoEWrapper._native_loader_instance is None:
@@ -431,7 +499,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         t0 = time.time()
         base_key = f"model.layers.{self.layer_idx}"
-        weights = self.loader.load_experts(base_key)
+        try:
+            weights = self.loader.load_experts(base_key)
+        except (ValueError, KeyError):
+            # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix
+            base_key = f"model.language_model.layers.{self.layer_idx}"
+            weights = self.loader.load_experts(base_key)
         t1 = time.time()
 
         # Keep individual tensors instead of stacking - avoid expensive memory copy
@@ -538,7 +611,14 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.bits = 4
             moe_config.quant_config.group_size = actual_gs
             moe_config.quant_config.zero_point = False
-            self.moe = AVX2GPTQInt4_MOE(moe_config)
+            backend_cls = _select_gptq_int4_backend(actual_gs)
+            if backend_cls is None:
+                raise RuntimeError(
+                    "No GPTQ_INT4 backend is available after runtime selection for "
+                    f"group_size={actual_gs}. AVX-VNNI-256 supports positive multiples of 32 up to "
+                    f"{_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE}; AVX2 is used as the fallback when available."
+                )
+            self.moe = backend_cls(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2

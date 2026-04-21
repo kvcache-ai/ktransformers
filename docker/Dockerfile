@@ -30,8 +30,8 @@ ARG GITHUB_ARTIFACTORY=github.com
 ARG FLASHINFER_VERSION=0.5.3
 
 # ktransformers wheel version (cu128torch28 for CUDA 12.8 + PyTorch 2.8)
-ARG KTRANSFORMERS_VERSION=0.4.2
-ARG KTRANSFORMERS_WHEEL=ktransformers-0.4.2+cu128torch28fancy-cp312-cp312-linux_x86_64.whl
+ARG KTRANSFORMERS_VERSION=0.5.3
+ARG KTRANSFORMERS_WHEEL=ktransformers-0.5.3+cu128torch28fancy-cp312-cp312-linux_x86_64.whl
 
 # flash_attn wheel for fine-tune env
 ARG FLASH_ATTN_WHEEL=flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
