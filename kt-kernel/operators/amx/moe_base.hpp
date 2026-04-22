@@ -90,14 +90,14 @@ class AMX_MOE_BASE {
     }
 
     MemoryRequest mem_requests;
-    mem_requests.append_pointer(
-        &m_local_input_, sizeof(ggml_bf16_t) * config_.num_experts_per_tok * config_.max_len * config_.hidden_size);
-    mem_requests.append_pointer(&m_local_gate_output_, sizeof(ggml_bf16_t) * config_.num_experts_per_tok *
-                                                           config_.max_len * config_.intermediate_size);
-    mem_requests.append_pointer(&m_local_up_output_, sizeof(ggml_bf16_t) * config_.num_experts_per_tok *
-                                                         config_.max_len * config_.intermediate_size);
-    mem_requests.append_pointer(&m_local_down_output_, sizeof(ggml_bf16_t) * config_.num_experts_per_tok *
-                                                           config_.max_len * config_.hidden_size);
+    const size_t ml = config_.max_len;
+    const size_t k_tok = config_.num_experts_per_tok;
+    const size_t H = config_.hidden_size;
+    const size_t I = config_.intermediate_size;
+    mem_requests.append_pointer(&m_local_input_, sizeof(ggml_bf16_t) * k_tok * ml * H);
+    mem_requests.append_pointer(&m_local_gate_output_, sizeof(ggml_bf16_t) * k_tok * ml * I);
+    mem_requests.append_pointer(&m_local_up_output_, sizeof(ggml_bf16_t) * k_tok * ml * I);
+    mem_requests.append_pointer(&m_local_down_output_, sizeof(ggml_bf16_t) * k_tok * ml * H);
 
     m_local_pos_.resize(config_.max_len);
     for (int i = 0; i < config_.max_len; i++) {
@@ -130,7 +130,7 @@ class AMX_MOE_BASE {
     }
     // TODO: need update to all *.hpp
     // (config_.expert_num * T::M_STEP) in pool_count_ is to ensure padding for each experts.
-    pool_count_ = config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::M_STEP;
+    pool_count_ = (size_t)config_.max_len * config_.num_experts_per_tok + config_.expert_num * T::M_STEP;
 
     gate_up_ba_pool_bytes_ = buffer_a_required_size(pool_count_, config_.hidden_size) + pool_count_ * 64;
     gate_bc_pool_bytes_ = buffer_c_required_size(pool_count_, config_.intermediate_size) + pool_count_ * 64;

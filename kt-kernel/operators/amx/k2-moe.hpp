@@ -26,6 +26,7 @@
  */
 template <class T = amx::GemmKernel224Int4SmallKGroup>
 class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
+ protected:
   using Base = AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>>;
   using Base::config_;
   using Base::down_ba_;
@@ -116,6 +117,9 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
    *
    * Loads weights from config_.gate_proj, up_proj, down_proj with scales
    * from config_.gate_scale, up_scale, down_scale.
+   *
+   * Note: K2 MOE only supports offline pre-quantized weights (gate_scale must be set).
+   * For online quantization, use AWQ MOE instead.
    */
   void load_weights() {
     auto& quant_config = config_.quant_config;

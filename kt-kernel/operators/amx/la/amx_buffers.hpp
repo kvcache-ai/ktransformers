@@ -51,34 +51,13 @@ struct BufferAImpl {
       for (int i = 0; i < M_STEP && m_begin + i < m; i++) {
         __m512 amax_v0 = _mm512_setzero_ps();
         __m512 amax_v1 = _mm512_setzero_ps();
-        __m512 amax_v2 = _mm512_setzero_ps();
-        __m512 amax_v3 = _mm512_setzero_ps();
-        __m512 amax_v4 = _mm512_setzero_ps();
-        __m512 amax_v5 = _mm512_setzero_ps();
-        __m512 amax_v6 = _mm512_setzero_ps();
-        __m512 amax_v7 = _mm512_setzero_ps();
-        for (int j = 0; j < k; j += 128) {
-          __m512 f0, f1, f2, f3, f4, f5, f6, f7;
-          avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + j + 0), &f0, &f1);
-          avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + j + 32), &f2, &f3);
-          avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + j + 64), &f4, &f5);
-          avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + j + 96), &f6, &f7);
+        for (int j = 0; j < k; j += 32) {
+          __m512 f0, f1;
+          avx512_32xbf16_to_32xfp32((__m512i*)(src + (m_begin + i) * k + j), &f0, &f1);
           amax_v0 = vector_abs_max(amax_v0, f0);
           amax_v1 = vector_abs_max(amax_v1, f1);
-          amax_v2 = vector_abs_max(amax_v2, f2);
-          amax_v3 = vector_abs_max(amax_v3, f3);
-          amax_v4 = vector_abs_max(amax_v4, f4);
-          amax_v5 = vector_abs_max(amax_v5, f5);
-          amax_v6 = vector_abs_max(amax_v6, f6);
-          amax_v7 = vector_abs_max(amax_v7, f7);
         }
         amax_v0 = vector_abs_max(amax_v0, amax_v1);
-        amax_v2 = vector_abs_max(amax_v2, amax_v3);
-        amax_v4 = vector_abs_max(amax_v4, amax_v5);
-        amax_v6 = vector_abs_max(amax_v6, amax_v7);
-        amax_v0 = vector_abs_max(amax_v0, amax_v2);
-        amax_v4 = vector_abs_max(amax_v4, amax_v6);
-        amax_v0 = vector_abs_max(amax_v0, amax_v4);
         float amax = _mm512_reduce_max_ps(amax_v0);
         d[m_begin + i] = amax / ((1 << 7) - 1);
       }
@@ -554,22 +533,21 @@ struct BufferBInt4Impl {
     return x;
   }
 
-  void from_mat(ggml_bf16_t* src, int ith, int nth) {
-    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
-    int n_block_begin = n_start;
-    int n_block_size = n_end - n_block_begin;
+  void _pack_block(ggml_bf16_t* src_data, int src_stride, int n_block_begin, int n_block_size) {
+    // Phase 1: compute per-row scales
     for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
       for (int i = 0; i < N_STEP; i++) {
         float amax = 0.0f;
         for (int j = 0; j < k; j += 32) {
           __m512 f0, f1;
-          avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + j), &f0, &f1);
+          avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + j), &f0, &f1);
           amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
           amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
         }
         d[n_block_begin + n_begin + i] = amax / 112.0;  // 7*16
       }
     }
+    // Phase 2: quantize and pack
     for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
       for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
         int k_block_size = std::min(K_BLOCK, k - k_block_begin);
@@ -581,10 +559,10 @@ struct BufferBInt4Impl {
                                             2);
             {
               __m512 f0, f1, f2, f3;
-              avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin),
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin),
                                         &f0, &f1);
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin) + 1, &f2, &f3);
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin) + 1,
+                                        &f2, &f3);
               __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
               __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
               __m512i i2 = _mm512_cvtps_epi32(_mm512_mul_ps(f2, id));
@@ -597,8 +575,6 @@ struct BufferBInt4Impl {
               s1 = _mm_srli_epi16(round_4bit_s8(s1), 4);
               s2 = _mm_srli_epi16(round_4bit_s8(s2), 4);
               s3 = _mm_srli_epi16(round_4bit_s8(s3), 4);
-              // s0 = _mm_or_si128(round_up4(s0), _mm_srli_epi16(round_up4(s1), 4));
-              // s2 = _mm_or_si128(round_up4(s2), _mm_srli_epi16(round_up4(s3), 4));
               _mm_store_si128((__m128i*)dst, s0);
               _mm_store_si128((__m128i*)(offset_pointer(dst, 16)), s1);
               _mm_store_si128((__m128i*)(offset_pointer(dst, 32)), s2);
@@ -607,10 +583,10 @@ struct BufferBInt4Impl {
 
             {
               __m512 f0, f1, f2, f3;
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin) + 2, &f0, &f1);
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin) + 3, &f2, &f3);
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin) + 2,
+                                        &f0, &f1);
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin) + 3,
+                                        &f2, &f3);
               __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
               __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
               __m512i i2 = _mm512_cvtps_epi32(_mm512_mul_ps(f2, id));
@@ -639,6 +615,118 @@ struct BufferBInt4Impl {
               (__m512i*)(offset_pointer(b, (n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                                             k_begin * N_STEP + TILE_N * B_K_STEP) /
                                                2)));
+        }
+      }
+    }
+  }
+
+  void from_mat(ggml_bf16_t* src, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    _pack_block(src + (size_t)n_block_begin * k, k, n_block_begin, n_block_size);
+  }
+
+  /**
+   * @brief Pack a transposed matrix into INT4 BufferB format.
+   *
+   * src is a row-major (src_n, src_k) BF16 matrix. The target BufferB has shape (n=src_k, k=src_n).
+   * Each call processes one N_BLOCK of the target (selected by ith/nth).
+   */
+  void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+
+    // Thread-local strip buffer: n_block_size × k BF16 values
+    thread_local std::vector<ggml_bf16_t> strip;
+    strip.resize(n_block_size * k);
+
+    // Tiled transpose from source into strip
+    constexpr int TILE = 32;
+    for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+      int c_end = std::min(c_tile + TILE, k);
+      for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+        int r_end = std::min(r_tile + TILE, n_block_size);
+        for (int c = c_tile; c < c_end; c++) {
+          for (int r = r_tile; r < r_end; r++) {
+            strip[r * k + c] = src[c * src_k + (n_block_begin + r)];
+          }
+        }
+      }
+    }
+
+    // Reuse existing packing logic (scale computation + quantization) on the transposed strip buffer
+    _pack_block(strip.data(), k, n_block_begin, n_block_size);
+  }
+
+  /**
+   * @brief Dequantize INT4 BufferB back to BF16 row-major matrix.
+   *
+   * Reverses _pack_block(): undo transpose_16x16_32bit, extract 4-bit nibbles,
+   * sign-extend, multiply by (scale * 16) to recover BF16 values.
+   *
+   * Each byte stores two 4-bit values:
+   *   low nibble  → first  K_STEP (64) elements
+   *   high nibble → second K_STEP (64) elements
+   *
+   * Each (ith, nth) call processes one N_BLOCK. Use recommended_nth(n) and
+   * loop ith=0..nth-1 to process the full matrix.
+   */
+  void to_mat(ggml_bf16_t* dst, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+
+    // Tile buffer: N_STEP rows × B_K_STEP/2 bytes = 32 × 64 = 2048 bytes
+    alignas(64) uint8_t tile_copy[N_STEP * B_K_STEP / 2];
+
+    // LUT for 4-bit sign extension: nibble [0..15] → signed int8 [-8..7]
+    const __m128i sign_lut = _mm_set_epi8(-1, -2, -3, -4, -5, -6, -7, -8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0F);
+
+    for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += B_K_STEP) {
+          // Source tile address (byte offset, /2 because INT4)
+          uint8_t* tile_src = (uint8_t*)offset_pointer(
+              b, (n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size + k_begin * N_STEP) / 2);
+
+          // Copy tile and reverse VNNI transpose (self-inverse)
+          memcpy(tile_copy, tile_src, N_STEP * B_K_STEP / 2);
+          transpose_16x16_32bit((__m512i*)tile_copy);
+          transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * B_K_STEP / 2));
+
+          // Dequantize: nibble_value * 16 * scale = nibble_value * dequant_scale
+          for (int i = 0; i < N_STEP; i++) {
+            __m512 vs = _mm512_set1_ps(d[n_block_begin + n_begin + i] * 16.0f);
+            uint8_t* row = tile_copy + i * (B_K_STEP / 2);
+            ggml_bf16_t* dst_first = dst + (size_t)(n_block_begin + n_begin + i) * k + k_block_begin + k_begin;
+            ggml_bf16_t* dst_second = dst_first + K_STEP;
+
+            // Process 32 packed bytes per iteration → 32 first-half + 32 second-half bf16 values
+            for (int j = 0; j < K_STEP; j += 32) {
+              __m128i packed0 = _mm_load_si128((__m128i*)(row + j));
+              __m128i packed1 = _mm_load_si128((__m128i*)(row + j + 16));
+
+              // Low nibble → first half values
+              __m128i lo0 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(packed0, nibble_mask));
+              __m128i lo1 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(packed1, nibble_mask));
+              __m512 lo0_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo0)), vs);
+              __m512 lo1_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo1)), vs);
+              avx512_32xfp32_to_32xbf16(&lo0_f, &lo1_f, (__m512i*)(dst_first + j));
+
+              // High nibble → second half values
+              __m128i hi0 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(_mm_srli_epi16(packed0, 4), nibble_mask));
+              __m128i hi1 = _mm_shuffle_epi8(sign_lut, _mm_and_si128(_mm_srli_epi16(packed1, 4), nibble_mask));
+              __m512 hi0_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi0)), vs);
+              __m512 hi1_f = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi1)), vs);
+              avx512_32xfp32_to_32xbf16(&hi0_f, &hi1_f, (__m512i*)(dst_second + j));
+            }
+          }
         }
       }
     }

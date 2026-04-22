@@ -55,6 +55,7 @@ Homepage = "https://github.com/kvcache-ai"
 packages = [
   "kt_kernel",
   "kt_kernel.utils",
+  "kt_kernel.sft",
   "kt_kernel.cli",
   "kt_kernel.cli.commands",
   "kt_kernel.cli.config",
@@ -66,6 +67,7 @@ include-package-data = true
 [tool.setuptools.package-dir]
 kt_kernel = "python"
 "kt_kernel.utils" = "python/utils"
+"kt_kernel.sft" = "python/sft"
 "kt_kernel.cli" = "python/cli"
 "kt_kernel.cli.commands" = "python/cli/commands"
 "kt_kernel.cli.config" = "python/cli/config"
