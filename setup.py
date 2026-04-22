@@ -1,14 +1,12 @@
 """KTransformers: CPU-GPU heterogeneous fine-tuning for MoE models.
 
-``pip install ktransformers`` installs:
-- ``ktransformers`` — integration glue + auto-patching for HF ecosystem
-- ``kt-kernel`` — C++ AMX kernel engine (dependency)
-- ``accelerate-kt`` — accelerate fork with KT plugin support
-- ``transformers-kt`` — transformers fork with KT training integration
+`ktransformers` is a lightweight meta-package for the KT fine-tuning stack.
+Install `transformers-kt` and `accelerate-kt` alongside it for the full
+beginner setup.
 """
 
 from pathlib import Path
-from setuptools import find_packages, setup
+from setuptools import setup
 
 _version_file = Path(__file__).resolve().parent / "version.py"
 _ns = {}
@@ -23,12 +21,10 @@ setup(
     long_description_content_type="text/markdown",
     author="kvcache-ai",
     url="https://github.com/kvcache-ai/ktransformers",
-    packages=find_packages(),
+    packages=[],
     python_requires=">=3.10",
     install_requires=[
         f"kt-kernel=={_v}",
-        "transformers-kt>=5.6.0",
-        "accelerate-kt>=1.14.0",
         "peft>=0.18.0",
         "torch>=2.0.0",
     ],

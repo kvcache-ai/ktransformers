@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ktransformers"
 dynamic = ["version", "dependencies"]
-description = "KTransformers: CPU-GPU heterogeneous inference framework for LLMs"
+description = "KTransformers: CPU-GPU heterogeneous fine-tuning for MoE models"
 readme = "README.md"
 authors = [{ name = "kvcache-ai" }]
 license = "Apache-2.0"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Operating System :: POSIX :: Linux",
@@ -20,4 +20,4 @@ Homepage = "https://github.com/kvcache-ai/ktransformers"
 
 [tool.setuptools]
 # No actual Python packages — this is a meta-package
-packages = ["ktransformers", "ktransformers.integrations"]
+packages = []
