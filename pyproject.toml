@@ -20,4 +20,4 @@ Homepage = "https://github.com/kvcache-ai/ktransformers"
 
 [tool.setuptools]
 # No actual Python packages — this is a meta-package
-packages = []
+packages = ["ktransformers", "ktransformers.integrations"]

@@ -692,3 +692,36 @@ if(NUMA_LIBRARY)
 else()
     message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()
+
+include(FetchContent)
+
+set(KT_CPPTRACE_CACHE_ROOT "/home/lpl/kt-refactor/ktransformers/kt-kernel/build/temp.linux-x86_64-cpython-311/kt_kernel.kt_kernel_ext_Release/_deps")
+set(KT_CPPTRACE_SOURCE_DIR "${KT_CPPTRACE_CACHE_ROOT}/cpptrace-src")
+set(KT_LIBDWARF_SOURCE_DIR "${KT_CPPTRACE_CACHE_ROOT}/libdwarf-src")
+set(KT_ZSTD_SOURCE_DIR "${KT_CPPTRACE_CACHE_ROOT}/zstd-src")
+
+if((NOT DEFINED FETCHCONTENT_SOURCE_DIR_CPPTRACE OR FETCHCONTENT_SOURCE_DIR_CPPTRACE STREQUAL "") AND EXISTS "${KT_CPPTRACE_SOURCE_DIR}")
+    set(FETCHCONTENT_SOURCE_DIR_CPPTRACE "${KT_CPPTRACE_SOURCE_DIR}" CACHE PATH "Local cpptrace source cache for offline kt-kernel builds" FORCE)
+    message(STATUS "Using local cpptrace source cache: ${FETCHCONTENT_SOURCE_DIR_CPPTRACE}")
+endif()
+if((NOT DEFINED FETCHCONTENT_SOURCE_DIR_LIBDWARF OR FETCHCONTENT_SOURCE_DIR_LIBDWARF STREQUAL "") AND EXISTS "${KT_LIBDWARF_SOURCE_DIR}")
+    set(FETCHCONTENT_SOURCE_DIR_LIBDWARF "${KT_LIBDWARF_SOURCE_DIR}" CACHE PATH "Local libdwarf source cache for offline cpptrace builds" FORCE)
+    message(STATUS "Using local libdwarf source cache: ${FETCHCONTENT_SOURCE_DIR_LIBDWARF}")
+endif()
+if((NOT DEFINED FETCHCONTENT_SOURCE_DIR_ZSTD OR FETCHCONTENT_SOURCE_DIR_ZSTD STREQUAL "") AND EXISTS "${KT_ZSTD_SOURCE_DIR}")
+    set(FETCHCONTENT_SOURCE_DIR_ZSTD "${KT_ZSTD_SOURCE_DIR}" CACHE PATH "Local zstd source cache for offline cpptrace builds" FORCE)
+    message(STATUS "Using local zstd source cache: ${FETCHCONTENT_SOURCE_DIR_ZSTD}")
+endif()
+
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Avoid network updates during release builds" FORCE)
+set(CPPTRACE_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(CPPTRACE_BUILD_BENCHMARKING OFF CACHE BOOL "" FORCE)
+set(CPPTRACE_WERROR_BUILD OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+  cpptrace
+  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+  GIT_TAG        v1.0.4
+)
+FetchContent_MakeAvailable(cpptrace)
+target_link_libraries(${PROJECT_NAME} PRIVATE cpptrace::cpptrace)

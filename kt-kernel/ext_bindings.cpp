@@ -1008,8 +1008,7 @@ __attribute__((constructor)) static void install_handlers() {
 
 #if defined(USE_AMX_AVX_KERNEL)
 __attribute__((constructor)) static void print_ext_bindings_version() {
-  printf("[kt-kernel] ext_bindings version: %d, sft_moe: %d, moe_sft_tp: %d\n", kExtBindingsVersion, kSftMoeVersion,
-         kMoeSftTpVersion);
+  printf("[kt-kernel] ext_bindings version: %d, amx_avx_kernel: 1\n", kExtBindingsVersion);
 }
 #else
 __attribute__((constructor)) static void print_ext_bindings_version() {

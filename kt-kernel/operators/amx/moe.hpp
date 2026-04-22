@@ -274,7 +274,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
                              mat_split, mat_split_idex);
               }
             },
-            nullptr, "load_fwd_kt");
+            nullptr);
       }
 // check process, store down matrix to check
 #ifdef CHECK
