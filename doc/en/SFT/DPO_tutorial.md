@@ -22,24 +22,28 @@ pip install -e ".[torch,metrics]" --no-build-isolation
 
 
 ### Step 3: Install KTransformers
-#### Option 1: Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.4
 
-(Note: The CUDA version can differ from that in the wheel filename.)
+#### Option 1: Beginner install (recommended)
 
 ```Bash
-pip install ktransformers-0.4.4+cu128torch28fancy-cp312-cp312-linux_x86_64.whl
+pip install ktransformers transformers-kt accelerate-kt
 ```
 
-#### Option 2: Install KTransformers from source
+`ktransformers` is a lightweight meta-package. This installation path does **not** rely on a runtime patch package.
+
+#### Option 2: Source install
 
 ```Bash
 git clone --depth 1 https://github.com/kvcache-ai/ktransformers.git
-cd ktransformers/kt-sft
-export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0" # set according to your GPU
+cd ktransformers
+git submodule update --init --recursive
 
-pip install -r "requirements-sft.txt"
-KTRANSFORMERS_FORCE_BUILD=TRUE pip install -v . --no-build-isolation
+cd kt-kernel
+CPUINFER_PARALLEL=32 pip install .
+cd ..
 
+pip install -e .
+pip install transformers-kt accelerate-kt
 ```
 
 ### Step 4: Install the Flash-attention wheel that matches your Torch and Python versions, from: https://github.com/Dao-AILab/flash-attention/releases

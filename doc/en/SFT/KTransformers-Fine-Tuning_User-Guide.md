@@ -94,10 +94,9 @@ This section shows how to install and use **LLaMA-Factory + KTransformers** for 
 
 ### Environment Setup
 
-According to the following example, install both the **KTransformers** and **LLaMA-Factory** environments simultaneously.
- This time, to simplify the installation process of KTransformers, we have specially packaged a wheel file to avoid local compilation.
- The detailed installation steps are as follows:
- (Note: Make sure your local **Python version**, **Torch version**, **CUDA version**, and the **KTransformers wheel filename** correspond correctly.)
+We support two installation methods for the **KTransformers** + **LLaMA-Factory** stack.
+
+#### Method 1: Beginner install (recommended)
 
 ```shell
 # 1. Create a conda environment
@@ -110,10 +109,11 @@ git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
-pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
+# 3. Install the KT release packages explicitly
+pip install ktransformers transformers-kt accelerate-kt
 
-# 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
+# 4. Install flash-attention, download the matching file from:
+#    https://github.com/Dao-AILab/flash-attention/releases
 pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 # abi=True/False can find from below
 # import torch
@@ -123,6 +123,25 @@ pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.w
 git clone https://github.com/kvcache-ai/custom_flashinfer.git
 pip install custom_flashinfer/
 ```
+
+`ktransformers` is a lightweight meta-package. The beginner path does **not** rely on a runtime patch package; install `transformers-kt` and `accelerate-kt` explicitly.
+
+#### Method 2: Source install
+
+```shell
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+cd kt-kernel
+CPUINFER_PARALLEL=32 pip install .
+cd ..
+
+pip install -e .
+pip install transformers-kt accelerate-kt
+```
+
+If you need local source changes in the fork packages, install `transformers-kt` and `accelerate-kt` from their source trees instead of the released wheels.
 
 **Usage tip:** In LLaMA-Factory YAML, set `use_kt: true` and pick a `kt_optimize_rule` file to have KTransformers handle the core compute. The features below show typical configs.
 

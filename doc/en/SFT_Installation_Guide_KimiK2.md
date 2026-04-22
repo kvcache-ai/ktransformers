@@ -16,12 +16,29 @@ cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 ```
 
-### Step 3: Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1
+### Step 3: Install KTransformers
 
-(Note: The CUDA version can differ from that in the wheel filename.)
+#### Option 1: Beginner install (recommended)
 
 ```Bash
-pip install ktransformers-0.4.1+cu128torch28fancy-cp310-cp310-linux_x86_64.whl
+pip install ktransformers transformers-kt accelerate-kt
+```
+
+`ktransformers` is a lightweight meta-package. This installation path does **not** rely on a runtime patch package.
+
+#### Option 2: Source install
+
+```Bash
+git clone --depth 1 https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+cd kt-kernel
+CPUINFER_PARALLEL=32 pip install .
+cd ..
+
+pip install -e .
+pip install transformers-kt accelerate-kt
 ```
 
 ### Step 4: Install the Flash-attention wheel that matches your Torch and Python versions, from: https://github.com/Dao-AILab/flash-attention/releases

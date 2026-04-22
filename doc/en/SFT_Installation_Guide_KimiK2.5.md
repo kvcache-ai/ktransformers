@@ -88,9 +88,30 @@ pip install -e .
 ```bash
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
+```
 
-# Install matching wheels (recommended), from https://github.com/kvcache-ai/ktransformers/releases
-pip install ktransformers-<matching-version>.whl
+#### Option 1: Beginner install (recommended)
+
+```bash
+pip install ktransformers transformers-kt accelerate-kt
+pip install flash_attn-<matching-version>.whl
+```
+
+`ktransformers` is a lightweight meta-package. This path does **not** rely on a runtime patch package.
+
+#### Option 2: Source install
+
+```bash
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+cd kt-kernel
+CPUINFER_PARALLEL=32 pip install .
+cd ..
+
+pip install -e .
+pip install transformers-kt accelerate-kt
 pip install flash_attn-<matching-version>.whl
 ```
 

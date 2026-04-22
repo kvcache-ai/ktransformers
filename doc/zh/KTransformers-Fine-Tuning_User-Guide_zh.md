@@ -101,34 +101,53 @@
 
 ### 环境安装
 
-根据下面示例，同时安装KTransformers和LLaMA-Factory环境，这次为了简化KTransformers的安装流程，我们特意封装了wheel包避免本地编译，具体安装步骤如下：（注意对应好本地的python版本、torch版本、cuda版本和不同文件名的KTransformers包）
+我们支持两种安装方式，用于搭建 **KTransformers + LLaMA-Factory** 微调环境。
+
+#### 方式 1：新手安装（推荐）
 
 ```shell
-# 1. 安装conda环境
+# 1. 安装 conda 环境
 conda create -n Kllama python=3.12 # choose from : [3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
 
-# 2. 安装llamafactory环境
+# 2. 安装 LLaMA-Factory 环境
 git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
 pip install -e ".[torch,metrics]" --no-build-isolation
 
-# 3. 安装对应torch和python版本的KTransformers（CUDA版本可以跟whl命名的不一致），从https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1
-pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
+# 3. 显式安装 KT 发布包
+pip install ktransformers transformers-kt accelerate-kt
 
-# 4. 安装flash-attention，参照python版本和torch版本，从https://github.com/Dao-AILab/flash-attention/releases下载
+# 4. 安装 flash-attention，按 Python 和 Torch 版本从官方 release 下载对应文件
 pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
-# abi=True/False可以用下面代码查看
+# abi=True/False 可以用下面代码查看
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
 
-# 5. （可选）如果你想使用flash_infer的话（不然默认triton）
+# 5. （可选）如果你想使用 flash_infer（否则默认 triton）
 git clone https://github.com/kvcache-ai/custom_flashinfer.git
 pip install custom_flashinfer/
 ```
 
+`ktransformers` 现在是轻量级 meta-package。新手安装路径**不再依赖**顶层 runtime patch；请显式安装 `transformers-kt` 和 `accelerate-kt`。
 
+#### 方式 2：源码安装
+
+```shell
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+cd kt-kernel
+CPUINFER_PARALLEL=32 pip install .
+cd ..
+
+pip install -e .
+pip install transformers-kt accelerate-kt
+```
+
+如果你需要修改 fork 源码，再分别从 `transformers-kt` 和 `accelerate-kt` 的源码目录安装即可。
 
 **使用要点**：在 LLaMA-Factory 的配置 YAML 文件中启用 KTransformers 后端，只需设置 `use_kt: true`，并指定相应的 `kt_optimize_rule` YAML 文件，即可切换到底层由 KTransformers 接管计算。下面我们将通过具体功能来说明如何设置这些配置。
 

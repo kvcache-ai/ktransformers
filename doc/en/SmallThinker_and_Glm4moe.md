@@ -48,10 +48,14 @@ huggingface-cli download --resume-download https://huggingface.co/zai-org/GLM-4.
 
 ### 3. Install KTransformers
 
-Follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html).
+For inference, follow the official [Installation Guide](https://kvcache-ai.github.io/ktransformers/en/install.html) and build `kt-kernel` from source. The top-level `ktransformers` PyPI package is only a lightweight meta-package and is not enough by itself for server-side inference.
 
 ```bash
-pip install ktransformers  # or from source if you need bleeding-edge features
+git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+cd kt-kernel
+pip install .
 ```
 
 ### 4. Run SmallThinker-21B Inference Server
