@@ -2,8 +2,8 @@ from datetime import datetime
 import hashlib
 import hmac
 import io
-import json
 import os
+import pickle
 import secrets
 from typing import Optional
 import zmq
@@ -16,12 +16,25 @@ import argparse
 from safetensors.torch import save, load as st_load
 from ktransformers.server.balance_serve.settings import sched_ext, create_sched_settings, create_sched_settings_qwen2moe, create_sched_settings_qwen3moe
 
-# HMAC key for message authentication between server and client.
-# Set KTRANSFORMERS_RPC_SECRET in the environment, or a random key is
-# generated at import time (single-process / inherited-by-fork use).
-_RPC_SECRET = os.environ.get(
-    "KTRANSFORMERS_RPC_SECRET", ""
-).encode() or secrets.token_bytes(32)
+
+# ---------------------------------------------------------------------------
+# HMAC authentication
+# ---------------------------------------------------------------------------
+# The parent process (balance_serve.py) MUST generate a secret and set
+# KTRANSFORMERS_RPC_SECRET in the environment before spawning this process.
+# If unset, a random key is generated (works only for single-process or
+# fork-inherited setups).
+
+def _get_rpc_secret() -> bytes:
+    env = os.environ.get("KTRANSFORMERS_RPC_SECRET", "")
+    if env:
+        return env.encode()
+    secret = secrets.token_bytes(32)
+    os.environ["KTRANSFORMERS_RPC_SECRET"] = secret.hex()
+    return secret
+
+
+_RPC_SECRET = _get_rpc_secret()
 
 
 def _sign(data: bytes) -> bytes:
@@ -32,29 +45,56 @@ def _verify(data: bytes, sig: bytes) -> bool:
     return hmac.compare_digest(_sign(data), sig)
 
 
-def _serialize_msg(obj: dict) -> bytes:
-    """Serialize an RPC message to JSON bytes. Non-JSON-serializable values
-    are dropped with a placeholder so the frame always round-trips."""
-    def _default(o):
-        return f"<non-serializable:{type(o).__name__}>"
-    return json.dumps(obj, default=_default).encode()
+# ---------------------------------------------------------------------------
+# Restricted unpickler - only allow known safe types
+# ---------------------------------------------------------------------------
+# pickle is still required for the C++ scheduler extension objects
+# (QueryAdd, QueryUpdate, BatchQueryTodo, etc.) that are not
+# JSON-serializable. This restricted unpickler ensures only explicitly
+# allowed types can be deserialized, preventing arbitrary code execution.
+
+_ALLOWED_MODULES = {
+    "builtins": {"dict", "list", "tuple", "set", "frozenset", "int", "float",
+                 "str", "bytes", "bool", "NoneType", "complex", "range",
+                 "slice", "type"},
+    "collections": {"OrderedDict", "defaultdict"},
+    "datetime": {"datetime", "timedelta", "date", "time"},
+    "ktransformers.server.balance_serve.settings": {"*"},
+}
 
 
-def _deserialize_msg(data: bytes) -> dict:
-    return json.loads(data)
+class RestrictedUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        allowed = _ALLOWED_MODULES.get(module)
+        if allowed is not None and ("*" in allowed or name in allowed):
+            return super().find_class(module, name)
+        # Also allow sched_ext types (C++ extension objects)
+        if module.startswith("ktransformers"):
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(
+            f"Restricted unpickler refused {module}.{name}"
+        )
 
+
+def _safe_loads(data: bytes):
+    return RestrictedUnpickler(io.BytesIO(data)).load()
+
+
+# ---------------------------------------------------------------------------
+# Safetensors helpers for KV cache
+# ---------------------------------------------------------------------------
 
 def _serialize_tensors(tensor_dict: dict) -> bytes:
-    """Serialize a flat {name: tensor} dict with safetensors."""
     buf = io.BytesIO()
     save(tensor_dict, buf)
     return buf.getvalue()
 
 
 def _deserialize_tensors(data: bytes) -> dict:
-    """Deserialize safetensors bytes back to {name: tensor}."""
     return st_load(data)
 
+
+# ---------------------------------------------------------------------------
 
 if mp.get_start_method(allow_none=True) is None:
     print('set start method')
@@ -87,7 +127,7 @@ class SchedulerServer:
         zmq.proxy(self.frontend, self.backend)
 
     def _send(self, worker, response: dict, tensor_data: bytes = b""):
-        payload = _serialize_msg(response)
+        payload = pickle.dumps(response)
         sig = _sign(payload + tensor_data)
         worker.send_multipart([sig, payload, tensor_data])
 
@@ -95,10 +135,10 @@ class SchedulerServer:
         parts = worker.recv_multipart()
         if len(parts) != 3:
             raise ValueError("Invalid message frame")
-        sig, payload, _ = parts
-        if not _verify(payload, sig):
-            raise ValueError("HMAC verification failed")
-        return _deserialize_msg(payload)
+        sig, payload, tensor_data = parts
+        if not _verify(payload + tensor_data, sig):
+            raise ValueError("HMAC verification failed - unauthorized message")
+        return _safe_loads(payload)
 
     def worker_routine(self):
         worker = self.context.socket(zmq.REP)
@@ -199,8 +239,8 @@ class SchedulerClient:
         self.context.term()
 
     def _send(self, request: dict):
-        payload = _serialize_msg(request)
-        sig = _sign(payload)
+        payload = pickle.dumps(request)
+        sig = _sign(payload + b"")
         self.socket.send_multipart([sig, payload, b""])
 
     def _recv(self) -> tuple:
@@ -209,8 +249,8 @@ class SchedulerClient:
             raise ValueError("Invalid message frame")
         sig, payload, tensor_data = parts
         if not _verify(payload + tensor_data, sig):
-            raise ValueError("HMAC verification failed")
-        return _deserialize_msg(payload), tensor_data
+            raise ValueError("HMAC verification failed - unauthorized message")
+        return _safe_loads(payload), tensor_data
 
     def send_request(self, method, params=None):
         if params is None:
@@ -268,9 +308,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     args = parser.parse_args()
-    with open(args.config, "r") as f:
-        main_args = json.load(f)
-    main_args = argparse.Namespace(**main_args)
+    with open(args.config, "rb") as f:
+        main_args = _safe_loads(f.read())
     if main_args.architectures == "Qwen2MoeForCausalLM":
         settings = create_sched_settings_qwen2moe(main_args)
     elif main_args.architectures == "Qwen3MoeForCausalLM":
