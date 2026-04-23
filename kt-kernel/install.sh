@@ -75,6 +75,7 @@ Optional variables (with defaults):
   CPUINFER_ENABLE_AVX512_VNNI=ON/OFF    Override VNNI detection (auto if unset)
   CPUINFER_ENABLE_AVX512_BF16=ON/OFF    Override BF16 detection (auto if unset)
   CPUINFER_ENABLE_AVX512_VBMI=ON/OFF    Override VBMI detection (auto if unset)
+  CPUINFER_ENABLE_CPPTRACE=ON/OFF       Enable native crash tracing (default OFF)
 
 Software Fallback Support:
   ✓ If VNNI not available: Uses AVX512BW fallback (2-3x slower but works)
@@ -392,6 +393,7 @@ echo "  CPUINFER_ENABLE_AMX          = $CPUINFER_ENABLE_AMX"
 echo "  CPUINFER_ENABLE_AVX512_VNNI  = ${CPUINFER_ENABLE_AVX512_VNNI:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_BF16  = ${CPUINFER_ENABLE_AVX512_BF16:-AUTO}"
 echo "  CPUINFER_ENABLE_AVX512_VBMI  = ${CPUINFER_ENABLE_AVX512_VBMI:-AUTO}"
+echo "  CPUINFER_ENABLE_CPPTRACE     = ${CPUINFER_ENABLE_CPPTRACE:-OFF}"
 echo "  CPUINFER_BUILD_TYPE          = ${CPUINFER_BUILD_TYPE:-Release}"
 echo "  CPUINFER_PARALLEL            = ${CPUINFER_PARALLEL:-AUTO}"
 echo "  CPUINFER_VERBOSE             = ${CPUINFER_VERBOSE:-1}"

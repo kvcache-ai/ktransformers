@@ -24,6 +24,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_AVX512_VNNI=OFF ON/OFF -> -DLLAMA_AVX512_VNNI
   CPUINFER_ENABLE_AVX512_BF16=OFF ON/OFF -> -DLLAMA_AVX512_BF16
   CPUINFER_ENABLE_AVX512_VBMI=OFF ON/OFF -> -DLLAMA_AVX512_VBMI (required for FP8 MoE)
+  CPUINFER_ENABLE_CPPTRACE=ON/OFF  ON/OFF -> -DKTRANSFORMERS_ENABLE_CPPTRACE (debug-only)
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
 
 
@@ -610,6 +611,7 @@ class CMakeBuild(build_ext):
         _forward_bool_env(cmake_args, "CPUINFER_ENABLE_LTO", "CPUINFER_ENABLE_LTO")
         _forward_str_env(cmake_args, "CPUINFER_LTO_JOBS", "CPUINFER_LTO_JOBS")
         _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_CPPTRACE", "KTRANSFORMERS_ENABLE_CPPTRACE")
 
         # CUDA static runtime toggle
         _forward_bool_env(cmake_args, "CPUINFER_CUDA_STATIC_RUNTIME", "KTRANSFORMERS_CUDA_STATIC_RUNTIME")
@@ -695,9 +697,9 @@ if _version_file.exists():
     _version_ns = {}
     with open(_version_file, "r", encoding="utf-8") as f:
         exec(f.read(), _version_ns)
-    _base_version = _version_ns.get("__version__", "0.5.3")
+    _base_version = _version_ns.get("__version__", "0.6.1")
 else:
-    _base_version = "0.5.3"
+    _base_version = "0.6.1"
 
 # Determine version
 if "CPUINFER_VERSION" in os.environ:
@@ -727,23 +729,31 @@ setup(
     description="KT-Kernel: High-performance kernel operations for KTransformers (AMX/AVX/KML optimizations)",
     author="kvcache-ai",
     license="Apache-2.0",
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     packages=[
         "kt_kernel",
         "kt_kernel.utils",
+        "kt_kernel.sft",
         "kt_kernel.cli",
         "kt_kernel.cli.commands",
+        "kt_kernel.cli.completions",
         "kt_kernel.cli.config",
         "kt_kernel.cli.utils",
     ],
     package_dir={
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
+        "kt_kernel.sft": "python/sft",
         "kt_kernel.cli": "python/cli",
         "kt_kernel.cli.commands": "python/cli/commands",
+        "kt_kernel.cli.completions": "python/cli/completions",
         "kt_kernel.cli.config": "python/cli/config",
         "kt_kernel.cli.utils": "python/cli/utils",
     },
+    package_data={
+        "kt_kernel.cli.completions": ["*.bash", "*.fish", "_kt"],
+    },
+    include_package_data=True,
     entry_points={
         "console_scripts": [
             "kt=kt_kernel.cli.main:main",
