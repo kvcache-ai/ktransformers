@@ -12,7 +12,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(KTRANSFORMERS_ENABLE_CPPTRACE)
 #include <cpptrace/cpptrace.hpp>
+#endif
 #include <csignal>
 #include <cstddef>
 #include <cstring>
@@ -54,8 +56,8 @@ static const bool _is_plain_ = false;
 #if defined(__x86_64__)
 #include "operators/avx2/bf16-moe.hpp"
 #include "operators/avx2/fp8-moe.hpp"
-#include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #include "operators/avx2/gptq_int4-moe.hpp"
+#include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
 #endif
 
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
@@ -73,7 +75,6 @@ static const bool _is_plain_ = false;
 
 namespace py = pybind11;
 using namespace pybind11::literals;
-
 
 py::object to_float_ptr(uintptr_t input_ptr, int size, ggml_type type) {
   if (type < 0 || type >= GGML_TYPE_COUNT) {
@@ -473,7 +474,6 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
-
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())
@@ -813,7 +813,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AVX2_FP8_MOE_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE");
   bind_moe_module<AVX2_GPTQ_INT4_MOE_TP<avx2::GemmKernelAVX2GPTQInt4>>(moe_module, "AVX2GPTQInt4_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
-                                                                                        "AVXVNNI256GPTQInt4_MOE");
+                                                                                      "AVXVNNI256GPTQInt4_MOE");
 #endif
 
 #if defined(USE_MOE_KERNEL)
@@ -976,6 +976,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
             py::arg("size"), py::arg("type"));
 }
 
+#if defined(KTRANSFORMERS_ENABLE_CPPTRACE)
 static void warmup_cpptrace() {
   // 避免第一次调用触发 lazy-loading（malloc 等） :contentReference[oaicite:7]{index=7}
   cpptrace::frame_ptr buffer[10];
@@ -1002,3 +1003,4 @@ __attribute__((constructor)) static void install_handlers() {
   sigaction(SIGABRT, &sa, nullptr);
 }
 
+#endif

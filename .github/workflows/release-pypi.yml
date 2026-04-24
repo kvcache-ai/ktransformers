@@ -107,6 +107,7 @@ jobs:
         working-directory: kt-kernel
         env:
           CPUINFER_BUILD_ALL_VARIANTS: '1'
+          CPUINFER_ENABLE_CPPTRACE: '0'
           CPUINFER_USE_CUDA: '1'
           CPUINFER_CUDA_ARCHS: '80;86;89;90'
           CPUINFER_CUDA_STATIC_RUNTIME: '1'
