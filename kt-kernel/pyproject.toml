@@ -18,28 +18,29 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
   # Core dependencies
-  "torch>=2.0.0",
+  "torch>=2.10,<2.12",
   "safetensors>=0.4.0",
-  "compressed-tensors>=0.7.0",
   "numpy>=1.24.0",
   "triton>=2.0.0",
   "gguf>=0.17.0",
   # CLI dependencies
-  "typer[all]>=0.9.0",
+  "typer>=0.9.0",
   "rich>=13.0.0",
   "pyyaml>=6.0",
   "httpx>=0.25.0",
   "packaging>=23.0",
-  # SGLang (kvcache-ai fork)
-  "sglang-kt",
-  # Development dependencies
-  "black>=25.9.0",
 ]
 
 [project.optional-dependencies]
+sglang = [
+  "sglang-kt",
+]
+convert = [
+  "compressed-tensors>=0.7.0",
+]
 test = [
   "pytest>=7.0.0",
   "psutil>=5.9.0",

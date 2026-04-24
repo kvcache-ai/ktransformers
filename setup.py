@@ -1,4 +1,9 @@
-"""Meta-package: pip install ktransformers → installs kt-kernel + sglang-kt."""
+"""Lightweight top-level package: pip install ktransformers -> installs kt-kernel.
+
+Extras:
+  - ktransformers[sft] installs transformers-kt + accelerate-kt
+  - ktransformers[sglang] installs sglang-kt
+"""
 from pathlib import Path
 from setuptools import setup
 
@@ -11,6 +16,14 @@ setup(
     version=_v,
     install_requires=[
         f"kt-kernel=={_v}",
-        f"sglang-kt=={_v}",
     ],
+    extras_require={
+        "sft": [
+            "transformers-kt==5.6.0",
+            "accelerate-kt==1.14.0",
+        ],
+        "sglang": [
+            "sglang-kt>=0.5.3",
+        ],
+    },
 )

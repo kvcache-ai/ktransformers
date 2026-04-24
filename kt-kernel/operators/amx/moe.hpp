@@ -251,7 +251,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (config_.load) {
         std::cout << "Loading from \"" << prefix << "\"" << std::endl;
         pool->do_work_stealing_job(
-            config_.expert_num * mat_type_all * mat_split, nullptr,
+            config_.expert_num * mat_type_all * mat_split,
             [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
               int64_t expert_idx = task_id / (mat_type_all * mat_split);
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
@@ -273,8 +273,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
                 read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
                              mat_split, mat_split_idex);
               }
-            },
-            nullptr, "load_fwd_kt");
+            });
       }
 // check process, store down matrix to check
 #ifdef CHECK

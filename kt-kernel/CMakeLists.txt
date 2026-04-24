@@ -24,10 +24,11 @@ option(KTRANSFORMERS_CPU_DEBUG "ktransformers: DEBUG CPU use AMX" OFF)
 option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
 option(KTRANSFORMERS_CPU_MOE_KERNEL "ktransformers: CPU use moe kernel" OFF)
 option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF)
+option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" OFF)
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.5.3)
+project(kt_kernel_ext VERSION 0.6.1)
 
 # Auto-detect CPU features early (unless building with LLAMA_NATIVE)
 if(NOT LLAMA_NATIVE AND NOT MSVC)
@@ -586,6 +587,19 @@ else()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
     pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
     message(STATUS "LTO: disabled")
+endif()
+
+if(KTRANSFORMERS_ENABLE_CPPTRACE)
+    include(FetchContent)
+    FetchContent_Declare(
+      cpptrace
+      GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
+      GIT_TAG        v1.0.4
+    )
+    FetchContent_MakeAvailable(cpptrace)
+    target_link_libraries(${PROJECT_NAME} PRIVATE cpptrace::cpptrace)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KTRANSFORMERS_ENABLE_CPPTRACE=1)
+    message(STATUS "cpptrace: enabled")
 endif()
 
 # If BLIS was detected earlier, apply its include directory and library to the

@@ -1,6 +1,6 @@
 """
 KTransformers version information.
-Shared across kt-kernel and kt-sft modules.
+Shared across the top-level package and kt-kernel.
 """
 
-__version__ = "0.5.3"
+__version__ = "0.6.1"
