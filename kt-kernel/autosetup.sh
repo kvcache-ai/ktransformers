@@ -2,15 +2,15 @@
 set -euo pipefail
 shopt -s nullglob
 
-PY_LIST=${PY_LIST:-"3.10"}
-TORCH_LIST=${TORCH_LIST:-"2.6.0"}
+PY_LIST=${PY_LIST:-"3.11 3.12 3.13"}
+TORCH_LIST=${TORCH_LIST:-"2.11.0"}
 WORK_ROOT=${WORK_ROOT:-/mnt/data3/lpl/kt-kernel-autosetup}
 WHEELS_DIR=${WHEELS_DIR:-"$PWD/wheels"}
 PIP_CACHE_DIR=${PIP_CACHE_DIR:-/mnt/data3/lpl/pip-cache}
 TMP_ROOT=${TMP_ROOT:-/mnt/data3/lpl/tmp}
 FORCE=${FORCE:-0}
 REPAIR=${REPAIR:-0}
-AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT:-manylinux_2_35_x86_64}
+AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT:-manylinux_2_28_x86_64}
 CPUINFER_ENABLE_CPPTRACE=${CPUINFER_ENABLE_CPPTRACE:-OFF}
 
 mkdir -p "$WORK_ROOT" "$WHEELS_DIR" "$PIP_CACHE_DIR" "$TMP_ROOT"
@@ -24,6 +24,8 @@ index_for_torch_version() {
     2.7.*) echo "https://download.pytorch.org/whl/cu126" ;;
     2.8.*) echo "https://download.pytorch.org/whl/cu128" ;;
     2.9.*) echo "https://download.pytorch.org/whl/cu128" ;;
+    2.10.*) echo "" ;;
+    2.11.*) echo "" ;;
     *)     echo "https://download.pytorch.org/whl/cu124" ;;
   esac
 }
@@ -142,7 +144,11 @@ for py in $PY_LIST; do
     export TMP="$TMP_ROOT"
 
     python -m pip install -U pip setuptools wheel build cmake pybind11 packaging numpy
-    python -m pip install --index-url "$IDX" "torch==$tv"
+    if [[ -n "$IDX" ]]; then
+      python -m pip install --index-url "$IDX" "torch==$tv"
+    else
+      python -m pip install "torch==$tv"
+    fi
     verify_torch_stack
 
     rm -rf build dist kt_kernel.egg-info
