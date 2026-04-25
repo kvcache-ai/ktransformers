@@ -24,7 +24,7 @@ permissions:
 jobs:
   build-sglang-kt:
     name: Build sglang-kt wheel
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -70,7 +70,7 @@ jobs:
   publish-pypi:
     name: Publish sglang-kt to PyPI
     needs: [build-sglang-kt]
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
     environment: prod
     permissions:
