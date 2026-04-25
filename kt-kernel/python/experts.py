@@ -87,7 +87,7 @@ class KTMoEWrapper:
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer. Defaults to 0.
             numa_nodes: Explicit list of NUMA node IDs for subpool mapping. If None, defaults to sequential.
-            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "FP8", "BF16", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
+            method: Backend method ("AMXINT4", "AMXINT8", "RAWINT4", "MXFP4", "FP8", "BF16", "LLAMAFILE", "MOE_INT4", "MOE_INT8")
 
         Returns:
             An instance of the appropriate backend implementation (e.g., AMXMoEWrapper)
@@ -95,7 +95,7 @@ class KTMoEWrapper:
         # Select backend based on method
         if method in ["AMXINT4", "AMXINT8"]:
             backend_cls = AMXMoEWrapper
-        elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4"]:
+        elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4", "MXFP4"]:
             backend_cls = NativeMoEWrapper
         elif method == "LLAMAFILE":
             backend_cls = LlamafileMoEWrapper
