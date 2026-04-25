@@ -19,5 +19,6 @@ classifiers = [
 Homepage = "https://github.com/kvcache-ai/ktransformers"
 
 [tool.setuptools]
-# Ship a minimal top-level Python package so the distribution is importable.
-packages = ["ktransformers"]
+# Ship a minimal top-level Python module so the distribution is importable
+# without keeping a parallel source package directory at the repository root.
+py-modules = ["ktransformers"]
