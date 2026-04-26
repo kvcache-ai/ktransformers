@@ -1264,7 +1264,9 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
         # bf16 = [sign(1) | exp(8) | mant(7)]; setting mant=0, exp=e gives 2^(e-127),
         # which is exactly the value encoded by ue8m0 for e ∈ [1, 254]. e=0 → bf16 +0
         # (acceptable: ue8m0=0 represents 2^-127, below bf16 normal range), e=255 → +inf.
-        return (scale_t.to(torch.uint16) << 7).view(torch.bfloat16).contiguous()
+        # Compute in int32 then narrow to int16 (max value is 255<<7=32640, fits int16),
+        # because torch CPU has no lshift kernel for uint16.
+        return (scale_t.to(torch.int32) << 7).to(torch.int16).view(torch.bfloat16).contiguous()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         gate_name, up_name, down_name = self.PROJ_NAMES
