@@ -26,7 +26,7 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 * **Dec 22, 2025**: Support RL-DPO fine-tuning with LLaMA-Factory. ([Tutorial](./doc/en/SFT/DPO_tutorial.md))
 * **Dec 5, 2025**: Support Native Kimi-K2-Thinking inference ([Tutorial](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md))
 * **Nov 6, 2025**: Support Kimi-K2-Thinking inference ([Tutorial](./doc/en/Kimi-K2-Thinking.md)) and fine-tune ([Tutorial](./doc/en/SFT_Installation_Guide_KimiK2.md))
-* **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration. ([Tutorial](./doc/en/KTransformers-Fine-Tuning_User-Guide.md))
+* **Nov 4, 2025**: KTransformers Fine-Tuning × LLaMA-Factory Integration. ([Tutorial](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md))
 * **Oct 27, 2025**: Support Ascend NPU. ([Tutorial](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md))
 * **Oct 10, 2025**: Integrating into SGLang. ([Roadmap](https://github.com/sgl-project/sglang/issues/11425), [Blog](https://lmsys.org/blog/2025-10-22-KTransformers/))
 * **Sept 11, 2025**: Support Qwen3-Next. ([Tutorial](./doc/en/Qwen3-Next.md))
@@ -87,7 +87,7 @@ pip install .
 
 ---
 
-### 🎓 [kt-sft](./kt-sft/) - Fine-Tuning Framework
+### 🎓 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md) - Fine-Tuning Framework
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
@@ -109,12 +109,15 @@ KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning
 
 **Quick Start:**
 ```bash
-cd kt-sft
-# Install environment following kt-sft/README.md
-USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+cd /path/to/LLaMA-Factory
+pip install -e .
+pip install "ktransformers[sft]"
+USE_KT=1 ACCELERATE_USE_KT=true \
+  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
+  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
 ```
 
-👉 **[Full Documentation →](./kt-sft/README.md)**
+👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
 ---
 
