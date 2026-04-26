@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-7e19aed0.js";
+            window.path_to_searchindex_js = "../../searchindex-edd9eb29.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-1efa58c4.js"></script>
@@ -285,24 +285,24 @@
 </ul>
 <h3 id="environment-setup"><a class="header" href="#environment-setup">Environment Setup</a></h3>
 <p>According to the following example, install both the <strong>KTransformers</strong> and <strong>LLaMA-Factory</strong> environments simultaneously.
-This time, to simplify the installation process of KTransformers, we have specially packaged a wheel file to avoid local compilation.
+This time, to simplify the installation process of KTransformers, use the PyPI packages to avoid local compilation.
 The detailed installation steps are as follows:
-(Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, <strong>CUDA version</strong>, and the <strong>KTransformers wheel filename</strong> correspond correctly.)</p>
+(Note: Make sure your local <strong>Python version</strong>, <strong>Torch version</strong>, and <strong>CUDA version</strong> are compatible with the installed packages.)</p>
 <pre><code class="language-shell"># 1. Create a conda environment
-conda create -n Kllama python=3.12 # choose from : [3.10, 3.11, 3.12, 3.13]
+conda create -n Kllama python=3.12 # choose from : [3.11, 3.12, 3.13]
 conda install -y -c conda-forge libstdcxx-ng gcc_impl_linux-64
 conda install -y -c nvidia/label/cuda-11.8.0 cuda-runtime
 
 # 2. Install the LLaMA-Factory environment
 git clone --depth 1 https://github.com/hiyouga/LLaMA-Factory.git
 cd LLaMA-Factory
-pip install -e ".[torch,metrics]" --no-build-isolation
+pip install -e .
 
-# 3. Install the KTransformers wheel that matches your Torch and Python versions, from https://github.com/kvcache-ai/ktransformers/releases/tag/v0.4.1 (Note: The CUDA version can differ from that in the wheel filename.)
-pip install ktransformers-0.4.1+cu128torch27fancy-cp312-cp312-linux_x86_64.whl
+# 3. Install the KTransformers SFT packages
+pip install "ktransformers[sft]"
 
 # 4. Install flash-attention, download the corresponding file based on your Python and Torch versions from: https://github.com/Dao-AILab/flash-attention/releases
-pip install flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+pip install flash-attn --no-build-isolation
 # abi=True/False can find from below
 # import torch
 # print(torch._C._GLIBCXX_USE_CXX11_ABI)
@@ -313,7 +313,7 @@ pip install custom_flashinfer/
 </code></pre>
 <p><strong>Usage tip:</strong> In LLaMA-Factory YAML, set <code>use_kt: true</code> and pick a <code>kt_optimize_rule</code> file to have KTransformers handle the core compute. The features below show typical configs.</p>
 <h3 id="core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models"><a class="header" href="#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models">Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models</a></h3>
-<p>Run the command: <code>USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml</code>.</p>
+<p>Run the command: <code>USE_KT=1 ACCELERATE_USE_KT=true accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml</code>.</p>
 <p>Note: You <strong>must</strong> provide a <strong>BF16</strong> model. DeepSeek-V3-671B is released in FP8 by default; convert with <a href="https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/fp8_cast_bf16.py">DeepSeek-V3/inference/fp8_cast_bf16.py</a>.</p>
 <pre><code class="language-yaml">### model
 model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
@@ -392,7 +392,7 @@ chunk_size: 8192
 <p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
 <p><img src="../../assets/image-20251016171537997.png" alt="image-20251016171537997"></p>
 <h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>llamafactory-cli chat examples/inference/deepseek3_lora_sft_kt.yaml</code>.</p>
+<p>Run the command: <code>llamafactory-cli chat examples/inference/qwen3_lora_sft.yaml</code>.</p>
 <p>Use the safetensors adapter trained with KT for inference.</p>
 <pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
 adapter_name_or_path: saves/Kllama_deepseekV3
@@ -409,7 +409,7 @@ chunk_size: 8192
 <p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
 <p><img src="../../assets/image-20251016171526210.png" alt="image-20251016171526210"></p>
 <h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
-<p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/deepseek3_lora_sft_kt.yaml</code>.
+<p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/qwen3_lora_sft.yaml</code>.
 Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>
 <pre><code class="language-yaml">model_name_or_path: opensourcerelease/DeepSeek-V3-bf16
 adapter_name_or_path: saves/Kllama_deepseekV3

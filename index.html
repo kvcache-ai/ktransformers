@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7e19aed0.js";
+            window.path_to_searchindex_js = "searchindex-edd9eb29.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-1efa58c4.js"></script>
@@ -208,7 +208,7 @@
 <li><strong>Dec 22, 2025</strong>: Support RL-DPO fine-tuning with LLaMA-Factory. (<a href="./doc/en/SFT/DPO_tutorial.html">Tutorial</a>)</li>
 <li><strong>Dec 5, 2025</strong>: Support Native Kimi-K2-Thinking inference (<a href="./doc/en/kt-kernel/Kimi-K2-Thinking-Native.html">Tutorial</a>)</li>
 <li><strong>Nov 6, 2025</strong>: Support Kimi-K2-Thinking inference (<a href="./doc/en/Kimi-K2-Thinking.html">Tutorial</a>) and fine-tune (<a href="./doc/en/SFT_Installation_Guide_KimiK2.html">Tutorial</a>)</li>
-<li><strong>Nov 4, 2025</strong>: KTransformers Fine-Tuning × LLaMA-Factory Integration. (<a href="./doc/en/KTransformers-Fine-Tuning_User-Guide.html">Tutorial</a>)</li>
+<li><strong>Nov 4, 2025</strong>: KTransformers Fine-Tuning × LLaMA-Factory Integration. (<a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Tutorial</a>)</li>
 <li><strong>Oct 27, 2025</strong>: Support Ascend NPU. (<a href="./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.html">Tutorial</a>)</li>
 <li><strong>Oct 10, 2025</strong>: Integrating into SGLang. (<a href="https://github.com/sgl-project/sglang/issues/11425">Roadmap</a>, <a href="https://lmsys.org/blog/2025-10-22-KTransformers/">Blog</a>)</li>
 <li><strong>Sept 11, 2025</strong>: Support Qwen3-Next. (<a href="./doc/en/Qwen3-Next.html">Tutorial</a>)</li>
@@ -266,7 +266,7 @@ pip install .
 </div>
 <p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
-<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./kt-sft/">kt-sft</a> - Fine-Tuning Framework</a></h3>
+<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">kt-sft</a> - Fine-Tuning Framework</a></h3>
 <p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
 <p><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="image-20251011010558909"></p>
 <p><strong>Key Features:</strong></p>
@@ -289,11 +289,14 @@ pip install .
 </table>
 </div>
 <p><strong>Quick Start:</strong></p>
-<pre><code class="language-bash">cd kt-sft
-# Install environment following kt-sft/README.md
-USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+<pre><code class="language-bash">cd /path/to/LLaMA-Factory
+pip install -e .
+pip install "ktransformers[sft]"
+USE_KT=1 ACCELERATE_USE_KT=true \
+  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
+  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="./kt-sft/README.html">Full Documentation →</a></strong></p>
+<p>👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
 <p>If you use KTransformers in your research, please cite our paper:</p>

@@ -35,7 +35,7 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-7e19aed0.js";
+            window.path_to_searchindex_js = "../../searchindex-edd9eb29.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../../toc-1efa58c4.js"></script>
@@ -264,7 +264,7 @@
 </ul>
 <h4 id="cuda-installation-gpu-acceleration"><a class="header" href="#cuda-installation-gpu-acceleration">CUDA Installation (GPU Acceleration)</a></h4>
 <p>For NVIDIA GPU-accelerated inference:</p>
-<pre><code class="language-bash">pip install kt-kernel-cuda
+<pre><code class="language-bash">pip install kt-kernel
 </code></pre>
 <p><strong>Features:</strong></p>
 <ul>
@@ -446,7 +446,7 @@ kt doctor
 ./install.sh
 
 # Option B: pip install
-pip install sglang-kt
+pip install kt-kernel sglang-kt
 
 # Option C: From source (editable mode)
 git clone --recursive https://github.com/kvcache-ai/ktransformers.git
@@ -649,7 +649,7 @@ huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /mnt/data/models/Qwen3-3
 <ul>
 <li><code>AMXINT4</code>: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)</li>
 <li><code>AMXINT8</code>: Higher accuracy with INT8 quantized weights on AMX CPUs</li>
-<li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (currently supports Kimi-K2-Thinking model). See <a href="../doc/en/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
+<li><code>RAWINT4</code>: Native INT4 weights shared by CPU and GPU (currently supports Kimi-K2-Thinking model). See <a href="../doc/en/kt-kernel/Kimi-K2-Thinking-Native.html">Kimi-K2-Thinking Native Tutorial</a> for details.</li>
 <li><code>FP8</code>, <code>FP8_PERCHANNEL</code>: FP8 weights shared by CPU and GPU</li>
 <li><code>BF16</code>: BF16 weights shared by CPU and GPU</li>
 <li><code>LLAMAFILE</code>: GGUF-based backend</li>
