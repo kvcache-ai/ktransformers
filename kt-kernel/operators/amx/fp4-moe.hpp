@@ -54,7 +54,7 @@ struct GemmKernel224MXFP4SmallKGroup {
 
   // Convert 16 packed FP4 bytes (32 values = 1 k_group) → 32 BF16 values (__m512i)
   // Output column order: [BF16(lo[0]),BF16(hi[0]), ..., BF16(lo[15]),BF16(hi[15])]
-  static inline __m512i mxfp4_to_bf16_32(__m128i packed) {
+  __attribute__((always_inline)) static inline __m512i mxfp4_to_bf16_32(__m128i packed) {
     __m128i lo_mask = _mm_set1_epi8(0x0F);
     __m128i lo = _mm_and_si128(packed, lo_mask);
     __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
@@ -90,30 +90,200 @@ struct GemmKernel224MXFP4SmallKGroup {
   using BufferB = BufferBInt4KGroupImpl<GemmKernel224MXFP4SmallKGroup>;  // nibble-packed FP4
   using BufferC = BufferCReduceImpl<GemmKernel224MXFP4SmallKGroup>;      // FP32 reduce
 
-  // AVX512 kernel: BF16 activation × MXFP4 weight → FP32
-  // Follows integer_mat_vec_kgroup pattern but with dpbf16_ps and weight-only scale
-  static inline void fp4_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc,
-                                        int ith, int nth) {
+  // 4 个 zmm 的 horizontal reduce → 4 个连续 fp32。
+  // 4 次 reduce_add_ps 之间无依赖，编译器/CPU 可并行调度。
+  __attribute__((always_inline)) static inline void
+  reduce4(__m512 s0, __m512 s1, __m512 s2, __m512 s3, float* dst) {
+    dst[0] = _mm512_reduce_add_ps(s0);
+    dst[1] = _mm512_reduce_add_ps(s1);
+    dst[2] = _mm512_reduce_add_ps(s2);
+    dst[3] = _mm512_reduce_add_ps(s3);
+  }
+
+  // mat-vec: M 个独立 token，N 维 4 行一组累加，摊销 horizontal reduce。
+  static void fp4_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc,
+                                 int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
-    for (int m_begin = 0; m_begin < m; m_begin++) {
-      float* c = bc->get_submat(m, n, m_begin, n_start);
-      __m512bh* a_bf16 = (__m512bh*)ba->get_submat(m, k, m_begin, 0);
+    if (n_start >= n_end) return;
+    const int kg_count = k / 32;
 
-      for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin++) {
-        __m128i* b_row = (__m128i*)bb->get_submat(n, k, n_block_begin, 0);
-        float* bs = (float*)bb->get_scale(n, n_block_begin, k, 0);
+    for (int m_idx = 0; m_idx < m; m_idx++) {
+      float* c_row = bc->get_submat(m, n, m_idx, n_start);
+      __m512bh* a_row = (__m512bh*)ba->get_submat(m, k, m_idx, 0);
 
-        __m512 sum = _mm512_setzero_ps();
+      int n_pos = n_start;
+      // 主循环: N 维 4 行一组
+      for (; n_pos + 4 <= n_end; n_pos += 4) {
+        __m128i* w0 = (__m128i*)bb->get_submat(n, k, n_pos + 0, 0);
+        __m128i* w1 = (__m128i*)bb->get_submat(n, k, n_pos + 1, 0);
+        __m128i* w2 = (__m128i*)bb->get_submat(n, k, n_pos + 2, 0);
+        __m128i* w3 = (__m128i*)bb->get_submat(n, k, n_pos + 3, 0);
+        const float* s0 = bb->get_scale(n, n_pos + 0, k, 0);
+        const float* s1 = bb->get_scale(n, n_pos + 1, k, 0);
+        const float* s2 = bb->get_scale(n, n_pos + 2, k, 0);
+        const float* s3 = bb->get_scale(n, n_pos + 3, k, 0);
 
-        // Each iteration: 1 k_group = 32 K elements
-        for (int k_block = 0; k_block < k / 32; k_block++) {
-          __m512 w_scale = _mm512_set1_ps(bs[k_block]);
-          __m512bh a_val = a_bf16[k_block];
-          __m512i w_bf16 = mxfp4_to_bf16_32(b_row[k_block]);
-          sum = _mm512_fmadd_ps(w_scale, _mm512_dpbf16_ps(_mm512_setzero_ps(), a_val, (__m512bh)w_bf16), sum);
+        __m512 acc0 = _mm512_setzero_ps();
+        __m512 acc1 = _mm512_setzero_ps();
+        __m512 acc2 = _mm512_setzero_ps();
+        __m512 acc3 = _mm512_setzero_ps();
+
+        for (int g = 0; g < kg_count; g++) {
+          const __m512bh a  = a_row[g];
+          const __m512bh d0 = (__m512bh)mxfp4_to_bf16_32(w0[g]);
+          const __m512bh d1 = (__m512bh)mxfp4_to_bf16_32(w1[g]);
+          const __m512bh d2 = (__m512bh)mxfp4_to_bf16_32(w2[g]);
+          const __m512bh d3 = (__m512bh)mxfp4_to_bf16_32(w3[g]);
+          acc0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]),
+                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d0), acc0);
+          acc1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]),
+                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d1), acc1);
+          acc2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]),
+                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d2), acc2);
+          acc3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]),
+                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d3), acc3);
         }
+        reduce4(acc0, acc1, acc2, acc3, c_row + (n_pos - n_start));
+      }
+      // N 尾巴: N % 4 != 0 时单行 fallback
+      for (; n_pos < n_end; n_pos++) {
+        __m128i* w = (__m128i*)bb->get_submat(n, k, n_pos, 0);
+        const float* s = bb->get_scale(n, n_pos, k, 0);
+        __m512 acc = _mm512_setzero_ps();
+        for (int g = 0; g < kg_count; g++) {
+          const __m512bh a = a_row[g];
+          const __m512bh d = (__m512bh)mxfp4_to_bf16_32(w[g]);
+          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
+                                _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d), acc);
+        }
+        c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
+      }
+    }
+  }
 
-        c[n_block_begin - n_start] = _mm512_reduce_add_ps(sum);
+  // mat-mat: 4×4 register tile (M_TILE=4, N_TILE=4 → 16 累加器)。
+  // 每 K-group 解码 4 行 N 一次, 被 4 个 token 共享 → PSHUFB 解码开销 / 4。
+  // M / N 尾巴回退到 mat-vec 单 token 内层 (V4 chunked-prefill 16/32/64 整数倍, 极少触发)。
+  static void fp4_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc,
+                                 int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+    const int kg_count = k / 32;
+    constexpr int MB = 4;
+    constexpr int NB = 4;
+
+    int m_pos = 0;
+    for (; m_pos + MB <= m; m_pos += MB) {
+      __m512bh* a_rows[MB] = {
+          (__m512bh*)ba->get_submat(m, k, m_pos + 0, 0),
+          (__m512bh*)ba->get_submat(m, k, m_pos + 1, 0),
+          (__m512bh*)ba->get_submat(m, k, m_pos + 2, 0),
+          (__m512bh*)ba->get_submat(m, k, m_pos + 3, 0),
+      };
+
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        __m128i* w0 = (__m128i*)bb->get_submat(n, k, n_pos + 0, 0);
+        __m128i* w1 = (__m128i*)bb->get_submat(n, k, n_pos + 1, 0);
+        __m128i* w2 = (__m128i*)bb->get_submat(n, k, n_pos + 2, 0);
+        __m128i* w3 = (__m128i*)bb->get_submat(n, k, n_pos + 3, 0);
+        const float* s0 = bb->get_scale(n, n_pos + 0, k, 0);
+        const float* s1 = bb->get_scale(n, n_pos + 1, k, 0);
+        const float* s2 = bb->get_scale(n, n_pos + 2, k, 0);
+        const float* s3 = bb->get_scale(n, n_pos + 3, k, 0);
+
+        __m512 acc[MB][NB];
+        for (int i = 0; i < MB; i++)
+          for (int j = 0; j < NB; j++) acc[i][j] = _mm512_setzero_ps();
+
+        for (int g = 0; g < kg_count; g++) {
+          // 4 行权重解码一次, MB 个 token 共享
+          const __m512bh d0 = (__m512bh)mxfp4_to_bf16_32(w0[g]);
+          const __m512bh d1 = (__m512bh)mxfp4_to_bf16_32(w1[g]);
+          const __m512bh d2 = (__m512bh)mxfp4_to_bf16_32(w2[g]);
+          const __m512bh d3 = (__m512bh)mxfp4_to_bf16_32(w3[g]);
+          const __m512  sv0 = _mm512_set1_ps(s0[g]);
+          const __m512  sv1 = _mm512_set1_ps(s1[g]);
+          const __m512  sv2 = _mm512_set1_ps(s2[g]);
+          const __m512  sv3 = _mm512_set1_ps(s3[g]);
+
+          #define V_FMA_ROW(M_I) do { \
+              const __m512bh a = a_rows[M_I][g]; \
+              acc[M_I][0] = _mm512_fmadd_ps(sv0, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d0), acc[M_I][0]); \
+              acc[M_I][1] = _mm512_fmadd_ps(sv1, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d1), acc[M_I][1]); \
+              acc[M_I][2] = _mm512_fmadd_ps(sv2, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d2), acc[M_I][2]); \
+              acc[M_I][3] = _mm512_fmadd_ps(sv3, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d3), acc[M_I][3]); \
+          } while (0)
+          V_FMA_ROW(0);
+          V_FMA_ROW(1);
+          V_FMA_ROW(2);
+          V_FMA_ROW(3);
+          #undef V_FMA_ROW
+        }
+        for (int i = 0; i < MB; i++) {
+          float* c_row = bc->get_submat(m, n, m_pos + i, n_start);
+          reduce4(acc[i][0], acc[i][1], acc[i][2], acc[i][3], c_row + (n_pos - n_start));
+        }
+      }
+      // N 尾巴: 单 N 列 × MB token (V4 不触发)
+      for (; n_pos < n_end; n_pos++) {
+        __m128i* w = (__m128i*)bb->get_submat(n, k, n_pos, 0);
+        const float* s = bb->get_scale(n, n_pos, k, 0);
+        for (int i = 0; i < MB; i++) {
+          float* c_row = bc->get_submat(m, n, m_pos + i, n_start);
+          __m512 acc = _mm512_setzero_ps();
+          for (int g = 0; g < kg_count; g++) {
+            acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
+                                  _mm512_dpbf16_ps(_mm512_setzero_ps(),
+                                                   a_rows[i][g],
+                                                   (__m512bh)mxfp4_to_bf16_32(w[g])),
+                                  acc);
+          }
+          c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
+        }
+      }
+    }
+    // M 尾巴: M 不是 MB 倍数时余下 token, 退回单 token mat-vec 内层 (V4 不触发)
+    for (int mi = m_pos; mi < m; mi++) {
+      float* c_row = bc->get_submat(m, n, mi, n_start);
+      __m512bh* a_row = (__m512bh*)ba->get_submat(m, k, mi, 0);
+      int n_pos = n_start;
+      for (; n_pos + 4 <= n_end; n_pos += 4) {
+        __m128i* w0 = (__m128i*)bb->get_submat(n, k, n_pos + 0, 0);
+        __m128i* w1 = (__m128i*)bb->get_submat(n, k, n_pos + 1, 0);
+        __m128i* w2 = (__m128i*)bb->get_submat(n, k, n_pos + 2, 0);
+        __m128i* w3 = (__m128i*)bb->get_submat(n, k, n_pos + 3, 0);
+        const float* s0 = bb->get_scale(n, n_pos + 0, k, 0);
+        const float* s1 = bb->get_scale(n, n_pos + 1, k, 0);
+        const float* s2 = bb->get_scale(n, n_pos + 2, k, 0);
+        const float* s3 = bb->get_scale(n, n_pos + 3, k, 0);
+        __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps(),
+               a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps();
+        for (int g = 0; g < kg_count; g++) {
+          const __m512bh a = a_row[g];
+          a0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]),
+                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w0[g])), a0);
+          a1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]),
+                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w1[g])), a1);
+          a2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]),
+                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w2[g])), a2);
+          a3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]),
+                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w3[g])), a3);
+        }
+        reduce4(a0, a1, a2, a3, c_row + (n_pos - n_start));
+      }
+      for (; n_pos < n_end; n_pos++) {
+        __m128i* w = (__m128i*)bb->get_submat(n, k, n_pos, 0);
+        const float* s = bb->get_scale(n, n_pos, k, 0);
+        __m512 acc = _mm512_setzero_ps();
+        for (int g = 0; g < kg_count; g++) {
+          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
+                                _mm512_dpbf16_ps(_mm512_setzero_ps(),
+                                                 a_row[g],
+                                                 (__m512bh)mxfp4_to_bf16_32(w[g])),
+                                acc);
+        }
+        c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
       }
     }
   }
@@ -131,7 +301,7 @@ inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferC> bc, int ith, int nth) {
-  GemmKernel224MXFP4SmallKGroup::fp4_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+  GemmKernel224MXFP4SmallKGroup::fp4_mat_mat_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
 }
 
 }  // namespace amx
