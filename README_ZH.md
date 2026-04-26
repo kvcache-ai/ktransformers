@@ -13,13 +13,13 @@
 
 ## 🎯 概览
 
-KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。该项目已发展为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [kt-sft](./kt-sft/)。
+KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。该项目已发展为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)。
 
 ## 🔥 更新
 
-* **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking-Native.md)）
+* **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)）
 * **2025 年 11 月 6 日**：支持 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking.md)）和微调（[教程](./doc/en/SFT_Installation_Guide_KimiK2.md)）
-* **2025 年 11 月 4 日**：KTransformers 微调 × LLaMA-Factory 集成（[教程](./doc/en/KTransformers-Fine-Tuning_User-Guide.md)）
+* **2025 年 11 月 4 日**：KTransformers 微调 × LLaMA-Factory 集成（[教程](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)）
 * **2025 年 10 月 27 日**：支持昇腾 NPU（[教程](./doc/zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md)）
 * **2025 年 10 月 10 日**：集成到 SGLang（[路线图](https://github.com/sgl-project/sglang/issues/11425)，[博客](https://lmsys.org/blog/2025-10-22-KTransformers/)）
 * **2025 年 9 月 11 日**：支持 Qwen3-Next（[教程](./doc/en/Qwen3-Next.md)）
@@ -79,7 +79,7 @@ pip install .
 
 ---
 
-### 🎓 [kt-sft](./kt-sft/) - 微调框架
+### 🎓 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md) - 微调框架
 
 KTransformers × LLaMA-Factory 集成，用于超大型 MoE 模型微调。
 
@@ -101,12 +101,15 @@ KTransformers × LLaMA-Factory 集成，用于超大型 MoE 模型微调。
 
 **快速开始：**
 ```bash
-cd kt-sft
-# 按照 kt-sft/README.md 安装环境
-USE_KT=1 llamafactory-cli train examples/train_lora/deepseek3_lora_sft_kt.yaml
+cd /path/to/LLaMA-Factory
+pip install -e .
+pip install "ktransformers[sft]"
+USE_KT=1 ACCELERATE_USE_KT=true \
+  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
+  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
 ```
 
-👉 **[完整文档 →](./kt-sft/README.md)**
+👉 **[完整文档 →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
 ---
 
