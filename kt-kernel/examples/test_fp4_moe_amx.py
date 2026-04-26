@@ -17,12 +17,17 @@ max_len = 25600
 expert_num = 16
 num_experts_per_tok = 8
 
-qlen = 1
 layer_num = 1
 CPUInfer = kt_kernel_ext.CPUInfer(40)
-validation_iter = 10
+validation_iter = 3
 k_group_size = 32
 debug_print_count = 16
+
+# Forward dispatch in do_gate_up_gemm uses `qlen > 4 * expert_num / top_k`
+# (= 8 with these constants), so qlen=1 hits mat-vec and qlen=32 hits the
+# mat-mat 4×4 register tile (per-expert avg m = qlen*top_k/expert_num = 16).
+QLEN_LIST = [1, 32]
+DISPATCH_THRESHOLD = 4 * expert_num / num_experts_per_tok
 
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
@@ -263,10 +268,11 @@ def build_moes_from_quantized_data(quant_data: Dict[str, torch.Tensor]):
     return moes
 
 
-def run_case(pattern: str) -> Dict[str, float]:
+def run_case(pattern: str, qlen: int) -> Dict[str, float]:
     print("\n" + "=" * 70)
     desc = WEIGHT_PATTERNS[pattern][0]
-    print(f"Running case: {pattern} -> {desc}")
+    path = "mat-vec" if qlen <= DISPATCH_THRESHOLD else "mat-mat"
+    print(f"Running case: {pattern} -> {desc}  (qlen={qlen}, path={path})")
     print("=" * 70)
 
     quant_data = prepare_mxfp4_quantized_weights(pattern)
@@ -328,14 +334,20 @@ def run_case(pattern: str) -> Dict[str, float]:
 
 def run_fp4_moe_test():
     summary_rows = []
-    for case_name in WEIGHT_PATTERNS.keys():
-        results = run_case(case_name)
-        summary_rows.append(results)
+    for qlen in QLEN_LIST:
+        path = "mat-vec" if qlen <= DISPATCH_THRESHOLD else "mat-mat"
+        print(f"\n##### qlen={qlen}  path={path} #####")
+        for case_name in WEIGHT_PATTERNS.keys():
+            results = run_case(case_name, qlen)
+            results["qlen"] = qlen
+            results["path"] = path
+            summary_rows.append(results)
 
     print("\n=== Case vs. Relative Error Summary ===")
-    print(f"{'Case':<20} {'Mean':>10} {'Max':>10} {'Min':>10}")
+    print(f"{'Case':<20} {'qlen':>5} {'path':<8} {'Mean':>10} {'Max':>10} {'Min':>10}")
     for row in summary_rows:
-        print(f"{row['case']:<20} {row['mean']*100:9.2f}% {row['max']*100:9.2f}% {row['min']*100:9.2f}%")
+        print(f"{row['case']:<20} {row['qlen']:>5} {row['path']:<8} "
+              f"{row['mean']*100:9.2f}% {row['max']*100:9.2f}% {row['min']*100:9.2f}%")
 
 
 if __name__ == "__main__":
