@@ -44,6 +44,7 @@ _kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
 import sys
 
 sys.modules["kt_kernel_ext"] = _kt_kernel_ext
+sys.modules[f"{__name__}.kt_kernel_ext"] = _kt_kernel_ext
 
 # Also expose kt_kernel_ext as an attribute for backward compatibility
 kt_kernel_ext = _kt_kernel_ext
