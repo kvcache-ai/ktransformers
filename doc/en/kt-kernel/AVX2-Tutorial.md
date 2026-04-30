@@ -50,6 +50,7 @@ git submodule update --init --recursive
 On AVX512 or AMX machines, you can also manually force AVX2 compilation:
 
 ```bash
+export KT_RAWINT4_BACKEND=avx2
 export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 ./install.sh kt-kernel --manual
