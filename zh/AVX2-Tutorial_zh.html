@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e437a84d.js";
+            window.path_to_searchindex_js = "../searchindex-a219b390.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-1efa58c4.js"></script>
@@ -193,6 +193,7 @@
 <li><a href="#示例qwen3-30b-a3b-bf16">示例：Qwen3-30B-A3B (BF16)</a></li>
 <li><a href="#示例qwen35-35b-a3b-fp8-fp8">示例：Qwen3.5-35B-A3B-FP8 (FP8)</a></li>
 <li><a href="#示例qwen3-30b-a3b-gptq-int4-gptq_int4">示例：Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)</a></li>
+<li><a href="#示例kimi-k25-rawint4">示例：Kimi-K2.5 (RAWINT4)</a></li>
 <li><a href="#发送请求">发送请求</a></li>
 </ul>
 </li>
@@ -209,6 +210,7 @@
 <tr><td><code>BF16</code></td><td>BF16 原精度</td><td>零精度损失，直接使用 BF16 权重</td></tr>
 <tr><td><code>FP8</code></td><td>FP8 分块量化</td><td></td></tr>
 <tr><td><code>GPTQ_INT4</code></td><td>INT4 GPTQ</td><td></td></tr>
+<tr><td><code>RAWINT4</code></td><td>Raw INT4 + BF16 缩放因子</td><td>Kimi-K2.5 专用；权重以压缩 SafeTensor 格式存储</td></tr>
 </tbody>
 </table>
 </div>
@@ -229,7 +231,8 @@ git submodule update --init --recursive
 ./install.sh
 </code></pre>
 <p>在AVX512， AMX机器上， 也可以手动强制 AVX2 编译：</p>
-<pre><code class="language-bash">export CPUINFER_CPU_INSTRUCT=AVX2
+<pre><code class="language-bash">export KT_RAWINT4_BACKEND=avx2
+export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 ./install.sh kt-kernel --manual
 </code></pre>
@@ -245,7 +248,7 @@ python -c "import kt_kernel; print(kt_kernel.__cpu_variant__)"
 kt doctor
 </code></pre>
 <h2 id="启动推理服务"><a class="header" href="#启动推理服务">启动推理服务</a></h2>
-<p>使用 <code>--kt-method BF16</code>、<code>FP8</code> 或 <code>GPTQ_INT4</code>，KT-Kernel 会<strong>自动检测</strong> CPU 并在缺少 AVX512/AMX 时回退到 AVX2 后端。</p>
+<p>使用 <code>--kt-method BF16</code>、<code>FP8</code>、<code>GPTQ_INT4</code> 或 <code>RAWINT4</code>，KT-Kernel 会<strong>自动检测</strong> CPU 并在缺少 AVX512/AMX 时回退到 AVX2 后端。</p>
 <h3 id="示例qwen3-30b-a3b-bf16"><a class="header" href="#示例qwen3-30b-a3b-bf16">示例：Qwen3-30B-A3B (BF16)</a></h3>
 <pre><code class="language-bash"># 下载模型
 huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir /path/to/Qwen3-30B-A3B
@@ -318,6 +321,34 @@ python -m sglang.launch_server \
   --max-total-tokens 32000 \
   --enable-mixed-chunk \
   --tensor-parallel-size 1 \
+  --disable-shared-experts-fusion
+</code></pre>
+<h3 id="示例kimi-k25-rawint4"><a class="header" href="#示例kimi-k25-rawint4">示例：Kimi-K2.5 (RAWINT4)</a></h3>
+<blockquote>
+<p><strong>说明</strong>：以下命令针对 4x RTX PRO 6000 Blackwell（各 96GB）+ AMD Threadripper PRO 5995WX（64 核，1 NUMA 节点）+ 256GB RAM 优化。</p>
+</blockquote>
+<pre><code class="language-bash"># 下载模型
+huggingface-cli download moonshotai/Kimi-K2.5 --local-dir /path/to/Kimi-K2.5
+
+# 启动服务
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Kimi-K2.5 \
+  --kt-weight-path /path/to/Kimi-K2.5 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 228 \
+  --kt-enable-dynamic-expert-update \
+  --kt-method RAWINT4 \
+  --attention-backend flashinfer \
+  --trust-remote-code \
+  --mem-fraction-static 0.95 \
+  --chunked-prefill-size 8192 \
+  --max-running-requests 4 \
+  --context-length 262144 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 4 \
+  --enable-p2p-check \
   --disable-shared-experts-fusion
 </code></pre>
 <h3 id="发送请求"><a class="header" href="#发送请求">发送请求</a></h3>
