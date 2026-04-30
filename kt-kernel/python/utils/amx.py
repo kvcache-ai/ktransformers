@@ -1,7 +1,11 @@
+import gc
+import logging
 import os
 import torch
 import ctypes
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -394,6 +398,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
     """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
+    _total_layer_count: int = 0  # Number of NativeMoEWrapper instances created
+    _load_call_count: int = 0    # Number of load_weights() calls completed
 
     def __init__(
         self,
@@ -484,6 +490,36 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
+
+        # Track total number of wrapper instances for auto-release logic
+        NativeMoEWrapper._total_layer_count += 1
+
+    @staticmethod
+    def _release_loader():
+        """Release the shared SafeTensor loader singleton and free mmap page cache.
+
+        This is called automatically when all layers have finished load_weights().
+        Counters are reset to 0 to support future hot-reload scenarios.
+        """
+        if NativeMoEWrapper._native_loader_instance is not None:
+            NativeMoEWrapper._native_loader_instance.close_all_handles()
+            NativeMoEWrapper._native_loader_instance = None
+            logger.info(
+                "[KT] Released NativeMoEWrapper loader: all safetensors file handles closed, "
+                "mmap page cache will be reclaimed by OS."
+            )
+        # Reset counters to support hot-reload
+        NativeMoEWrapper._total_layer_count = 0
+        NativeMoEWrapper._load_call_count = 0
+
+    @staticmethod
+    def force_release_loader():
+        """Forcibly release the loader singleton regardless of load completion state.
+
+        This is intended for testing and special scenarios.
+        Bypasses the auto-release counter check and immediately frees the loader.
+        """
+        NativeMoEWrapper._release_loader()
 
     def load_weights_from_tensors(
         self,
@@ -640,6 +676,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
             del self.up_scales
             del self.down_scales
         t6 = time.time()
+
+        # Auto-release loader when all layers have finished loading weights.
+        # This frees the safetensors mmap page cache since C++ engine already has a deep copy.
+        NativeMoEWrapper._load_call_count += 1
+        if NativeMoEWrapper._load_call_count >= NativeMoEWrapper._total_layer_count > 0:
+            NativeMoEWrapper._release_loader()
 
         print(
             f"[NativeMoEWrapper Layer {self.layer_idx}] "
