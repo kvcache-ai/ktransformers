@@ -8,15 +8,16 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-inference---high-performance-kt-kernel-serving">🚀 Inference</a> | <a href="#-sft---fine-tuning-with-llama-factory">🎓 SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
 </div>
 
 ## 🎯 Overview
 
-KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into **two core modules**: [kt-kernel](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/) and [kt-sft](https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft).
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md).
 
 ## 🔥 Updates
 * **May 6, 2026**: KTransformers at [GOSIM Paris 2026](https://paris2026.gosim.org/zh/schedule/) — "Agentic AI on Edge" track. We'll present KT's inference performance on consumer hardware.
+* **Apr 30, 2026**: KTransformers v0.6.1 refreshes kt-kernel inference and SFT docs with separate [Inference](./kt-kernel/README.md) and [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) entry points.
 * **Mar 26, 2026**: Support AVX2-only CPU backend for KT-Kernel inference. ([Tutorial](./doc/en/kt-kernel/AVX2-Tutorial.md))
 * **Feb 13, 2026**: MiniMax-M2.5 Day0 Support! ([Tutorial](./doc/en/MiniMax-M2.5.md))
 * **Feb 12, 2026**: GLM-5 Day0 Support! ([Tutorial](./doc/en/kt-kernel/GLM-5-Tutorial.md))
@@ -51,9 +52,9 @@ KTransformers is a research project focused on efficient inference and fine-tuni
 
 ---
 
-## 📦 Core Modules
+## 📦 Capabilities
 
-### 🚀 [kt-kernel](./kt-kernel/) - High-Performance Inference Kernels
+### 🚀 [Inference](./kt-kernel/README.md) - High-Performance kt-kernel Serving
 
 CPU-optimized kernel operations for heterogeneous LLM inference.
 
@@ -87,36 +88,37 @@ pip install .
 
 ---
 
-### 🎓 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md) - Fine-Tuning Framework
+### 🎓 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) - Fine-Tuning with LLaMA-Factory
 
 KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
 
-![image-20251011010558909](https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png)
+![KTransformers SFT](https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png)
 
 **Key Features:**
-
-- **Resource Efficient**: Fine-tune 671B DeepSeek-V3 with just **70GB GPU memory** + 1.3TB RAM
-- **LoRA Support**: Full LoRA fine-tuning with heterogeneous acceleration
+- **Multi-Backend Support**: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization
+- **Ultra-Large MoE Support**: Fine-tune models like DeepSeek-V3/R1 on limited GPU memory
+- **Faster than ZeRO-Offload**: 6-12x training speedup in benchmarked MoE SFT workloads
+- **Lower CPU Memory**: About half the CPU memory of the previous KT SFT path in the benchmarked setup
 - **LLaMA-Factory Integration**: Seamless integration with popular fine-tuning framework
-- **Production Ready**: Chat, batch inference, and metrics evaluation
 
-**Performance Examples:**
-
-| Model | Configuration | Throughput | GPU Memory |
-|-------|--------------|------------|------------|
-| DeepSeek-V3 (671B) | LoRA + AMX | ~40 tokens/s | 70GB (multi-GPU) |
-| DeepSeek-V2-Lite (14B) | LoRA + AMX | ~530 tokens/s | 6GB |
+| Model | GPU Memory | Training Speed | Hardware |
+|-------|------------|----------------|----------|
+| DeepSeek-V3 | ~80GB total | 3.7 it/s | 4x RTX 4090 |
+| DeepSeek-R1 | ~80GB total | 3.7 it/s | 4x RTX 4090 |
+| Qwen3-30B-A3B | ~24GB total | 8+ it/s | 1x RTX 4090 |
 
 **Quick Start:**
 ```bash
 cd /path/to/LLaMA-Factory
 pip install -e .
-pip install "ktransformers[sft]"
-USE_KT=1 ACCELERATE_USE_KT=true \
-  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
-  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
+pip install -r requirements/ktransformers.txt
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
+  src/train.py \
+  examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
+👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
 ---
@@ -151,7 +153,7 @@ We welcome contributions! Please feel free to submit issues and pull requests.
 
 ## 📦 KT original Code
 
-The original integrated KTransformers framework has been archived to the [`archive/`](./archive/) directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.
+The original integrated KTransformers framework has been archived to the [`archive/`](./archive/) directory for reference. The project now organizes the two capabilities above from the kt-kernel source tree for clearer documentation and maintenance.
 
 For the original documentation with full quick-start guides and examples, see:
 - [archive/README.md](./archive/README.md) (English)

@@ -8,15 +8,16 @@
 
 </p>
   <h3>一个用于体验尖端 LLM 推理/微调优化的灵活框架</h3>
-  <strong><a href="#-概览">🎯 概览</a> | <a href="#-kt-kernel---高性能推理内核">🚀 kt-kernel</a> | <a href="#-kt-sft---微调框架">🎓 kt-sft</a> | <a href="#-引用">🔥 引用</a> </strong>
+  <strong><a href="#-概览">🎯 概览</a> | <a href="#-推理---kt-kernel-高性能推理">🚀 推理</a> | <a href="#-sft---llama-factory-微调">🎓 SFT</a> | <a href="#-引用">🔥 引用</a> </strong>
 </div>
 
 ## 🎯 概览
 
-KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。该项目已发展为**两个核心模块**：[kt-kernel](./kt-kernel/) 和 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)。
+KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。目前两个面向用户的能力都来自 kt-kernel 源码目录：[推理](./kt-kernel/README.md) 和 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)。
 
 ## 🔥 更新
 
+* **2026 年 4 月 30 日**：KTransformers v0.6.1 更新 kt-kernel 推理和 SFT 文档，提供独立的[推理](./kt-kernel/README.md)和 [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)入口。
 * **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)）
 * **2025 年 11 月 6 日**：支持 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking.md)）和微调（[教程](./doc/en/SFT_Installation_Guide_KimiK2.md)）
 * **2025 年 11 月 4 日**：KTransformers 微调 × LLaMA-Factory 集成（[教程](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)）
@@ -44,9 +45,9 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 
 ---
 
-## 📦 核心模块
+## 📦 功能入口
 
-### 🚀 [kt-kernel](./kt-kernel/) - 高性能推理内核
+### 🚀 [推理](./kt-kernel/README.md) - kt-kernel 高性能推理
 
 用于异构 LLM 推理的 CPU 优化内核操作。
 
@@ -79,36 +80,37 @@ pip install .
 
 ---
 
-### 🎓 [kt-sft](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md) - 微调框架
+### 🎓 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) - LLaMA-Factory 微调
 
-KTransformers × LLaMA-Factory 集成，用于超大型 MoE 模型微调。
+KTransformers × LLaMA-Factory 集成，面向超大 MoE 模型微调。
 
-![image-20251011010558909](./doc/assets/image-20251011010558909.png)
+![KTransformers SFT](./doc/assets/image-20251011010558909.png)
 
-**主要特性：**
+**主要特性:**
+- **多后端支持**: CPU/GPU 混合微调，支持 INT8/INT4 量化
+- **超大 MoE 支持**: 在有限 GPU 内存下微调 DeepSeek-V3/R1 等模型
+- **相对 ZeRO-Offload 加速**: 在基准 MoE SFT 任务中训练速度提升 6-12 倍
+- **降低 CPU 内存**: 相比上一版 KT SFT 路径，基准配置下 CPU 内存约降至 1/2
+- **LLaMA-Factory 集成**: 与流行微调框架无缝集成
 
-- **资源高效**：仅需 **70GB GPU 显存** + 1.3TB 内存即可微调 671B DeepSeek-V3
-- **LoRA 支持**：完整的 LoRA 微调，带有异构加速
-- **LLaMA-Factory 集成**：与流行的微调框架无缝集成
-- **生产就绪**：聊天、批量推理和指标评估
+| 模型 | GPU 内存 | 训练速度 | 硬件 |
+|-------|------------|----------------|----------|
+| DeepSeek-V3 | ~80GB 总计 | 3.7 it/s | 4x RTX 4090 |
+| DeepSeek-R1 | ~80GB 总计 | 3.7 it/s | 4x RTX 4090 |
+| Qwen3-30B-A3B | ~24GB 总计 | 8+ it/s | 1x RTX 4090 |
 
-**性能示例：**
-
-| 模型 | 配置 | 吞吐量 | GPU 显存 |
-|-------|--------------|------------|--------------|
-| DeepSeek-V3 (671B) | LoRA + AMX | ~40 tokens/s | 70GB（多 GPU）|
-| DeepSeek-V2-Lite (14B) | LoRA + AMX | ~530 tokens/s | 6GB |
-
-**快速开始：**
+**快速开始:**
 ```bash
 cd /path/to/LLaMA-Factory
 pip install -e .
-pip install "ktransformers[sft]"
-USE_KT=1 ACCELERATE_USE_KT=true \
-  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
-  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
+pip install -r requirements/ktransformers.txt
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
+  src/train.py \
+  examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
+👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[完整文档 →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
 ---
@@ -142,7 +144,7 @@ USE_KT=1 ACCELERATE_USE_KT=true \
 
 ## 📦 KT原仓库
 
-原始的集成 KTransformers 框架已归档到 [`archive/`](./archive/) 目录以供参考。该项目现在专注于上述两个核心模块，以获得更好的模块化和可维护性。
+原始的集成 KTransformers 框架已归档到 [`archive/`](./archive/) 目录以供参考。该项目现在围绕 kt-kernel 源码树中的上述两个能力入口组织文档和维护。
 
 有关原始文档以及完整的快速入门指南和示例，请参见：
 - [archive/README.md](./archive/README.md)（英文）
