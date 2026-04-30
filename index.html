@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-edd9eb29.js";
+            window.path_to_searchindex_js = "searchindex-e437a84d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-1efa58c4.js"></script>
@@ -191,14 +191,15 @@
   
 <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
 
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-kt-kernel---high-performance-inference-kernels">🚀 kt-kernel</a> | <a href="#-kt-sft---fine-tuning-framework">🎓 kt-sft</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-inference---high-performance-kt-kernel-serving">🚀 Inference</a> | <a href="#-sft---fine-tuning-with-llama-factory">🎓 SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
 </div>
 
 <h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
-<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project has evolved into <strong>two core modules</strong>: <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel/">kt-kernel</a> and <a href="https://github.com/kvcache-ai/ktransformers/tree/main/kt-sft">kt-sft</a>.</p>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="./kt-kernel/README.html">Inference</a> and <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
 <li><strong>May 6, 2026</strong>: KTransformers at <a href="https://paris2026.gosim.org/zh/schedule/">GOSIM Paris 2026</a> — “Agentic AI on Edge” track. We’ll present KT’s inference performance on consumer hardware.</li>
+<li><strong>Apr 30, 2026</strong>: KTransformers v0.6.1 refreshes kt-kernel inference and SFT docs with separate <a href="./kt-kernel/README.html">Inference</a> and <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT Quick Start</a> entry points.</li>
 <li><strong>Mar 26, 2026</strong>: Support AVX2-only CPU backend for KT-Kernel inference. (<a href="./doc/en/kt-kernel/AVX2-Tutorial.html">Tutorial</a>)</li>
 <li><strong>Feb 13, 2026</strong>: MiniMax-M2.5 Day0 Support! (<a href="./doc/en/MiniMax-M2.5.html">Tutorial</a>)</li>
 <li><strong>Feb 12, 2026</strong>: GLM-5 Day0 Support! (<a href="./doc/en/kt-kernel/GLM-5-Tutorial.html">Tutorial</a>)</li>
@@ -232,8 +233,8 @@
 <li><strong>Aug 9, 2024</strong>: Support windows native.</li>
 </ul>
 <hr>
-<h2 id="-core-modules"><a class="header" href="#-core-modules">📦 Core Modules</a></h2>
-<h3 id="-kt-kernel---high-performance-inference-kernels"><a class="header" href="#-kt-kernel---high-performance-inference-kernels">🚀 <a href="./kt-kernel/">kt-kernel</a> - High-Performance Inference Kernels</a></h3>
+<h2 id="-capabilities"><a class="header" href="#-capabilities">📦 Capabilities</a></h2>
+<h3 id="-inference---high-performance-kt-kernel-serving"><a class="header" href="#-inference---high-performance-kt-kernel-serving">🚀 <a href="./kt-kernel/README.html">Inference</a> - High-Performance kt-kernel Serving</a></h3>
 <p>CPU-optimized kernel operations for heterogeneous LLM inference.</p>
 <img width="1049" height="593" alt="image" src="https://github.com/user-attachments/assets/68f423da-3f55-4025-bdc9-9ceaa554f00b" />
 <p><strong>Key Features:</strong></p>
@@ -266,37 +267,40 @@ pip install .
 </div>
 <p>👉 <strong><a href="./kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
-<h3 id="-kt-sft---fine-tuning-framework"><a class="header" href="#-kt-sft---fine-tuning-framework">🎓 <a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">kt-sft</a> - Fine-Tuning Framework</a></h3>
+<h3 id="-sft---fine-tuning-with-llama-factory"><a class="header" href="#-sft---fine-tuning-with-llama-factory">🎓 <a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a> - Fine-Tuning with LLaMA-Factory</a></h3>
 <p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
-<p><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="image-20251011010558909"></p>
+<p><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"></p>
 <p><strong>Key Features:</strong></p>
 <ul>
-<li><strong>Resource Efficient</strong>: Fine-tune 671B DeepSeek-V3 with just <strong>70GB GPU memory</strong> + 1.3TB RAM</li>
-<li><strong>LoRA Support</strong>: Full LoRA fine-tuning with heterogeneous acceleration</li>
+<li><strong>Multi-Backend Support</strong>: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization</li>
+<li><strong>Ultra-Large MoE Support</strong>: Fine-tune models like DeepSeek-V3/R1 on limited GPU memory</li>
+<li><strong>Faster than ZeRO-Offload</strong>: 6-12x training speedup in benchmarked MoE SFT workloads</li>
+<li><strong>Lower CPU Memory</strong>: About half the CPU memory of the previous KT SFT path in the benchmarked setup</li>
 <li><strong>LLaMA-Factory Integration</strong>: Seamless integration with popular fine-tuning framework</li>
-<li><strong>Production Ready</strong>: Chat, batch inference, and metrics evaluation</li>
 </ul>
-<p><strong>Performance Examples:</strong></p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>Model</th><th>Configuration</th><th>Throughput</th><th>GPU Memory</th></tr>
+<tr><th>Model</th><th>GPU Memory</th><th>Training Speed</th><th>Hardware</th></tr>
 </thead>
 <tbody>
-<tr><td>DeepSeek-V3 (671B)</td><td>LoRA + AMX</td><td>~40 tokens/s</td><td>70GB (multi-GPU)</td></tr>
-<tr><td>DeepSeek-V2-Lite (14B)</td><td>LoRA + AMX</td><td>~530 tokens/s</td><td>6GB</td></tr>
+<tr><td>DeepSeek-V3</td><td>~80GB total</td><td>3.7 it/s</td><td>4x RTX 4090</td></tr>
+<tr><td>DeepSeek-R1</td><td>~80GB total</td><td>3.7 it/s</td><td>4x RTX 4090</td></tr>
+<tr><td>Qwen3-30B-A3B</td><td>~24GB total</td><td>8+ it/s</td><td>1x RTX 4090</td></tr>
 </tbody>
 </table>
 </div>
 <p><strong>Quick Start:</strong></p>
 <pre><code class="language-bash">cd /path/to/LLaMA-Factory
 pip install -e .
-pip install "ktransformers[sft]"
-USE_KT=1 ACCELERATE_USE_KT=true \
-  accelerate launch --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml \
-  -m llamafactory.cli train examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml
+pip install -r requirements/ktransformers.txt
+CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
+  --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
+  src/train.py \
+  examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
+<p>👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
+👉 <strong><a href="./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
 <h2 id="-citation"><a class="header" href="#-citation">🔥 Citation</a></h2>
 <p>If you use KTransformers in your research, please cite our paper:</p>
@@ -322,7 +326,7 @@ USE_KT=1 ACCELERATE_USE_KT=true \
 <li><strong>WeChat Group</strong>: See <a href="./archive/WeChatGroup.png">archive/WeChatGroup.png</a></li>
 </ul>
 <h2 id="-kt-original-code"><a class="header" href="#-kt-original-code">📦 KT original Code</a></h2>
-<p>The original integrated KTransformers framework has been archived to the <a href="./archive/"><code>archive/</code></a> directory for reference. The project now focuses on the two core modules above for better modularity and maintainability.</p>
+<p>The original integrated KTransformers framework has been archived to the <a href="./archive/"><code>archive/</code></a> directory for reference. The project now organizes the two capabilities above from the kt-kernel source tree for clearer documentation and maintenance.</p>
 <p>For the original documentation with full quick-start guides and examples, see:</p>
 <ul>
 <li><a href="./archive/README.html">archive/README.md</a> (English)</li>
