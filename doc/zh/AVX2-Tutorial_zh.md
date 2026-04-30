@@ -50,6 +50,7 @@ git submodule update --init --recursive
 在AVX512， AMX机器上， 也可以手动强制 AVX2 编译：
 
 ```bash
+export KT_RAWINT4_BACKEND=avx2
 export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 ./install.sh kt-kernel --manual
