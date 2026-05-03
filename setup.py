@@ -23,7 +23,7 @@ setup(
             "accelerate-kt==1.14.0.post1",
         ],
         "sglang": [
-            "sglang-kt==0.6.2",
+            "sglang-kt==0.6.2.post1",
         ],
     },
 )
