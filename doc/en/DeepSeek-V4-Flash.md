@@ -53,7 +53,13 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
    ```bash
    pip install --upgrade flashinfer-python flashinfer-cubin
    ```
-   This upgrade is required (even though `sglang-kt` pins `flashinfer_python==0.6.3`) because V4-Flash's MXFP4 MoE module imports `mxfp8_quantize`, `trtllm_fp4_block_scale_routed_moe`, etc., which only exist in flashinfer ≥ 0.6.9; 
+   This upgrade is required (even though `sglang-kt` pins `flashinfer_python==0.6.3`) because V4-Flash's MXFP4 MoE module imports `mxfp8_quantize`, `trtllm_fp4_block_scale_routed_moe`, etc., which only exist in flashinfer ≥ 0.6.9.
+
+4. **transformers==4.57.1** (V4-Flash is incompatible with the 5.x series):
+   ```bash
+   pip install "transformers==4.57.1"
+   ```
+   `transformers` 5.x adds default-valued fields to `PretrainedConfig` that make `DeepSeekV4Config`'s dataclass declaration raise `TypeError: non-default argument 'quantization_config' follows default argument` at import time. `sglang-kt`'s pyproject does not pin `transformers`, so a fresh `pip install` will pull the latest 5.x and break server startup; pinning explicitly to `4.57.1` is required until the upstream fix lands.
 
 
 ## Step 1: Download Model Weights
