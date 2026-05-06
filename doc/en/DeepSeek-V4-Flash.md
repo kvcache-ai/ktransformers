@@ -11,6 +11,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Step 1: Download Model Weights](#step-1-download-model-weights)
   - [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
     - [Launch Command (8× RTX 5090 Example)](#launch-command-8-rtx-5090-example)
+    - [Optional: Enable MTP (Multi-Token Prediction) Speculative Decoding](#optional-enable-mtp-multi-token-prediction-speculative-decoding)
   - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
@@ -31,7 +32,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 | Datacenter Blackwell (B100 / B200) | SM_100 | trtllm-fp4 | Triton fallback | — |
 | Consumer Blackwell (RTX 5090) | SM_120 | triton_kernels | Triton fallback | ✓ |
 | Ada Lovelace (RTX 4090 / L20 / L40) | SM_89 | triton_kernels | Triton fallback | — |
-| Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | — |
+| Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | ✗ (not supported) |
 
 
 ## Prerequisites
@@ -60,6 +61,12 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
    pip install "transformers==4.57.1"
    ```
    `transformers` 5.x adds default-valued fields to `PretrainedConfig` that make `DeepSeekV4Config`'s dataclass declaration raise `TypeError: non-default argument 'quantization_config' follows default argument` at import time. `sglang-kt`'s pyproject does not pin `transformers`, so a fresh `pip install` will pull the latest 5.x and break server startup; pinning explicitly to `4.57.1` is required until the upstream fix lands.
+
+5. **tilelang** (manual install — required for the NSA sparse-MLA tilelang indexer path used on non-Hopper GPUs):
+   ```bash
+   pip install tilelang
+   ```
+   `sglang-kt`'s pyproject does not declare `tilelang` as a dependency, so `pip install ./python[all]` will not pull it in. Validated with `tilelang==0.1.8`.
 
 
 ## Step 1: Download Model Weights
@@ -102,6 +109,20 @@ numactl --interleave=all python -m sglang.launch_server \
 It takes about 4-5 minutes to start the server (weight load + CUDA Graph capture).
 
 See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for detailed parameter tuning guidelines.
+
+### Optional: Enable MTP (Multi-Token Prediction) Speculative Decoding
+
+V4-Flash ships a NextN draft head that can be run as EAGLE-style speculative decoding for ~1.2× throughput on single-request decode (validated 26.5 → 32.74 tok/s on 8× RTX 5090, 90% accept rate at chain depth 1).
+
+Append the following flags to the launch command above:
+
+```bash
+  --speculative-algorithm EAGLE \
+  --speculative-num-steps 3 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 4 \
+  --speculative-moe-runner-backend auto \
+```
 
 ## Step 3: Send Inference Requests
 
