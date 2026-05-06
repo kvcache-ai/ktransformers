@@ -248,6 +248,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
+        swiglu_limit: float = 0.0,
     ):
         """
         Initialize base MoE Wrapper.
@@ -302,6 +303,11 @@ class BaseMoEWrapper(_MoEBase, ABC):
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
+        # V4-Flash 2604B SwiGLU clamp limit; 0.0 = disabled. NativeMoEWrapper
+        # (MXFP4 path) reads this in load_weights() and writes it into
+        # MOEConfig.swiglu_limit. Other backends ignore it (C++ act_fn skips
+        # the clamp branch when limit==0). Origin: kt-sglang 耦合.
+        self.swiglu_limit = float(swiglu_limit)
 
         # Initialize CPU inference engine (singleton via shared base class)
         self.cpu_infer = self._get_cpu_infer(cpuinfer_threads, threadpool_count, numa_nodes=numa_nodes)

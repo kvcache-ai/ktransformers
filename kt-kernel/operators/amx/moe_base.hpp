@@ -685,8 +685,8 @@ class AMX_MOE_BASE {
           __m512 gate_val0, gate_val1, up_val0, up_val1;
           avx512_32xbf16_to_32xfp32((__m512i*)(gate_output_ptr + j), &gate_val0, &gate_val1);
           avx512_32xbf16_to_32xfp32((__m512i*)(up_output_ptr + j), &up_val0, &up_val1);
-          __m512 result0 = amx::act_fn(gate_val0, up_val0);
-          __m512 result1 = amx::act_fn(gate_val1, up_val1);
+          __m512 result0 = amx::act_fn(gate_val0, up_val0, config_.swiglu_limit);
+          __m512 result1 = amx::act_fn(gate_val1, up_val1, config_.swiglu_limit);
           avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i*)(gate_output_ptr + j));
         }
       }
