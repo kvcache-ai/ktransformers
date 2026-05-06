@@ -398,8 +398,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
     """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
-    _total_layer_count: int = 0  # Number of NativeMoEWrapper instances created
-    _load_call_count: int = 0    # Number of load_weights() calls completed
 
     def __init__(
         self,
@@ -469,19 +467,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         )
 
         if NativeMoEWrapper._native_loader_instance is None:
-            if method == "RAWINT4":
-                NativeMoEWrapper._native_loader_instance = CompressedSafeTensorLoader(weight_path)
-            elif method == "FP8":
-                NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path)
-            elif method == "FP8_PERCHANNEL":
-                # Use FP8SafeTensorLoader with per-channel scale format
-                NativeMoEWrapper._native_loader_instance = FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
-            elif method == "BF16":
-                NativeMoEWrapper._native_loader_instance = BF16SafeTensorLoader(weight_path)
-            elif method == "GPTQ_INT4":
-                NativeMoEWrapper._native_loader_instance = GPTQSafeTensorLoader(weight_path)
-            else:
-                raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
+            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(method, weight_path)
         self.loader = NativeMoEWrapper._native_loader_instance
 
         self.gate_weights = None
@@ -491,26 +477,50 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.up_scales = None
         self.down_scales = None
 
-        # Track total number of wrapper instances for auto-release logic
-        NativeMoEWrapper._total_layer_count += 1
+    @staticmethod
+    def _create_loader(method: str, weight_path: str):
+        """Create a SafeTensor loader instance based on the quantization method.
+
+        Args:
+            method: Quantization method (RAWINT4, FP8, FP8_PERCHANNEL, BF16, GPTQ_INT4)
+            weight_path: Path to the safetensor files
+
+        Returns:
+            SafeTensorLoader subclass instance
+        """
+        if method == "RAWINT4":
+            return CompressedSafeTensorLoader(weight_path)
+        elif method == "FP8":
+            return FP8SafeTensorLoader(weight_path)
+        elif method == "FP8_PERCHANNEL":
+            return FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
+        elif method == "BF16":
+            return BF16SafeTensorLoader(weight_path)
+        elif method == "GPTQ_INT4":
+            return GPTQSafeTensorLoader(weight_path)
+        else:
+            raise NotImplementedError(f"Unsupported method for NativeMoEWrapper: {method}")
 
     @staticmethod
-    def _release_loader():
+    def _release_loader(layer_idx: int = -1):
         """Release the shared SafeTensor loader singleton and free mmap page cache.
 
-        This is called automatically when all layers have finished load_weights().
-        Counters are reset to 0 to support future hot-reload scenarios.
+        Called after each layer's load_weights() completes. The C++ engine already
+        has a deep copy of the weight data (guaranteed by cpu_infer.sync()), so
+        releasing the mmap handles is safe.
         """
         if NativeMoEWrapper._native_loader_instance is not None:
             NativeMoEWrapper._native_loader_instance.close_all_handles()
             NativeMoEWrapper._native_loader_instance = None
-            logger.info(
-                "[KT] Released NativeMoEWrapper loader: all safetensors file handles closed, "
-                "mmap page cache will be reclaimed by OS."
-            )
-        # Reset counters to support hot-reload
-        NativeMoEWrapper._total_layer_count = 0
-        NativeMoEWrapper._load_call_count = 0
+            if layer_idx >= 0:
+                logger.info(
+                    "[KT] Released NativeMoEWrapper loader after layer %d: "
+                    "safetensors mmap handles freed.", layer_idx,
+                )
+            else:
+                logger.info(
+                    "[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed."
+                )
 
     @staticmethod
     def force_release_loader():
@@ -532,6 +542,23 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         import time
+
+        # Recreate loader if it was released by the previous layer's load_weights().
+        # This is expected: each layer releases the loader after loading to free mmap,
+        # and the next layer recreates it on demand.
+        if NativeMoEWrapper._native_loader_instance is None:
+            t_recreate_start = time.time()
+            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(
+                self.method, self.weight_path
+            )
+            self.loader = NativeMoEWrapper._native_loader_instance
+            t_recreate_elapsed = (time.time() - t_recreate_start) * 1000
+            logger.info(
+                "[KT] Recreated NativeMoEWrapper loader for layer %d (took %.1fms)",
+                self.layer_idx, t_recreate_elapsed,
+            )
+        else:
+            self.loader = NativeMoEWrapper._native_loader_instance
 
         t0 = time.time()
         base_key = f"model.layers.{self.layer_idx}"
@@ -677,11 +704,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
             del self.down_scales
         t6 = time.time()
 
-        # Auto-release loader when all layers have finished loading weights.
-        # This frees the safetensors mmap page cache since C++ engine already has a deep copy.
-        NativeMoEWrapper._load_call_count += 1
-        if NativeMoEWrapper._load_call_count >= NativeMoEWrapper._total_layer_count > 0:
-            NativeMoEWrapper._release_loader()
+        # Release loader after each layer to free mmap page cache.
+        # C++ engine already has a deep copy (cpu_infer.sync() guarantees this),
+        # so releasing the mmap handles is safe. Next layer will recreate the loader.
+        NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
 
         print(
             f"[NativeMoEWrapper Layer {self.layer_idx}] "
