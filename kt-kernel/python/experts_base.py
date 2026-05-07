@@ -158,6 +158,7 @@ class BaseMoEWrapper(ABC):
     _tiered_provider_signature: Optional[Tuple[int, int, str, str]] = None
     _prev_topk_ids_by_layer: Dict[int, np.ndarray] = {}
     _provider_unsupported_logged: set = set()
+    _cpu_infer_stream_fallback_logged: bool = False
     # Backends whose C++ MOE objects expose promote/demote hooks for Tier0 management.
     _provider_backends = frozenset({"LLAMAFILE", "BF16", "AMXINT4", "AMXINT8", "MOE_INT4", "MOE_INT8"})
     _debug_moe_layers: Optional[set] = None
@@ -683,6 +684,43 @@ class BaseMoEWrapper(ABC):
 
         return immediate_ids, deferred_ids
 
+    def _submit_cpuinfer_task(self, task, cuda_stream=None):
+        """Submit a CPUInfer task, tolerating CPU-only extension builds."""
+        if cuda_stream is None:
+            self.cpu_infer.submit(task)
+            return
+
+        submit_with_stream = getattr(self.cpu_infer, "submit_with_cuda_stream", None)
+        if submit_with_stream is not None:
+            submit_with_stream(cuda_stream, task)
+            return
+
+        self._sync_external_cuda_stream(cuda_stream)
+        self.cpu_infer.submit(task)
+
+    def _sync_cpuinfer(self, allow_pending: int = 0, cuda_stream=None):
+        """Synchronize CPUInfer, using stream-aware hooks when available."""
+        if cuda_stream is None:
+            self.cpu_infer.sync(allow_pending)
+            return
+
+        sync_with_stream = getattr(self.cpu_infer, "sync_with_cuda_stream", None)
+        if sync_with_stream is not None:
+            sync_with_stream(cuda_stream, allow_pending)
+            return
+
+        self.cpu_infer.sync(allow_pending)
+
+    @classmethod
+    def _sync_external_cuda_stream(cls, cuda_stream):
+        if not cls._cpu_infer_stream_fallback_logged:
+            print(
+                "[CPUInfer] submit_with_cuda_stream unavailable; "
+                "falling back to synchronous CUDA stream handoff"
+            )
+            cls._cpu_infer_stream_fallback_logged = True
+        torch.cuda.ExternalStream(cuda_stream).synchronize()
+
     def submit_forward(
         self,
         hidden_states: torch.Tensor,
@@ -750,10 +788,7 @@ class BaseMoEWrapper(ABC):
             output_cpu[current_slot].data_ptr(),
             incremental,
         )
-        if cuda_stream is None:
-            self.cpu_infer.submit(immediate_task)
-        else:
-            self.cpu_infer.submit_with_cuda_stream(cuda_stream, immediate_task)
+        self._submit_cpuinfer_task(immediate_task, cuda_stream)
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         if deferred_ids is not None:
@@ -767,10 +802,7 @@ class BaseMoEWrapper(ABC):
                 output_cpu[next_slot].data_ptr(),
                 False,
             )
-            if cuda_stream is None:
-                self.cpu_infer.submit(deferred_task)
-            else:
-                self.cpu_infer.submit_with_cuda_stream(cuda_stream, deferred_task)
+            self._submit_cpuinfer_task(deferred_task, cuda_stream)
             BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = True
 
     def sync_forward(self, hidden_states: torch.Tensor, topk_ids_or_stream=None, cuda_stream=None) -> torch.Tensor:
@@ -808,10 +840,7 @@ class BaseMoEWrapper(ABC):
 
         current_slot = self.layer_idx % KExpertsCPUBuffer.buffer_depth
         allow_pending = 1 if BaseMoEWrapper._layer_has_pending_deferred.get(self.layer_idx, False) else 0
-        if cuda_stream is None:
-            self.cpu_infer.sync(allow_pending)
-        else:
-            self.cpu_infer.sync_with_cuda_stream(cuda_stream, allow_pending)
+        self._sync_cpuinfer(allow_pending, cuda_stream)
         output_gpu[current_slot].copy_(output_cpu[current_slot], non_blocking=True)
         self._debug_log_moe_once(
             flat_hidden_states,
