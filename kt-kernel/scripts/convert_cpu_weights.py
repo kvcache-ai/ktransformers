@@ -347,7 +347,16 @@ class ConverterBase:
                 parts = key.split(".")
                 if len(parts) >= 6:
                     layer_idx = int(parts[2])
-                    expert_idx = int(parts[5])
+                    experts_positions = [idx for idx, part in enumerate(parts) if part == "experts"]
+                    if not experts_positions:
+                        continue
+                    expert_pos = experts_positions[-1] + 1
+                    if expert_pos >= len(parts):
+                        continue
+                    try:
+                        expert_idx = int(parts[expert_pos])
+                    except ValueError:
+                        continue
                     layers[layer_idx].add(expert_idx)
 
         # Convert to sorted lists
@@ -360,6 +369,16 @@ class ConverterBase:
             print(f"  Layer {layer_idx}: {len(experts)} experts (0-{max(experts)})")
 
         return result
+
+    def _expert_tensor_key(self, layer_idx: int, expert_id: int, proj_name: str, suffix: str) -> str:
+        candidates = (
+            f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.{suffix}",
+            f"model.layers.{layer_idx}.mlp.experts.experts.{expert_id}.{proj_name}.{suffix}",
+        )
+        for key in candidates:
+            if key in self.tensor_file_map:
+                return key
+        raise KeyError(f"Missing {proj_name}.{suffix} for layer {layer_idx}, expert {expert_id}")
 
     def _convert_layer_experts(self, layer_idx: int, expert_ids: List[int]) -> Dict[str, torch.Tensor]:
         """Subclasses must implement expert conversion for a given layer.
@@ -777,30 +796,39 @@ class OnlineQuantConverter(ConverterBase):
                 print(f"    [Fused] tensor {p} shape: {tuple(w.shape)}")
                 fused_tensors.append(w)
 
-            #   fused_tensors[0] : down-like, [E, I, H]
-            #   fused_tensors[1] : gate_up-like, [E, H, 2I]
+            # Qwen3.5 fused MoE layout:
+            #   fused_tensors[0] : down_proj,    [E, H, I]
+            #   fused_tensors[1] : gate_up_proj, [E, 2I, H]
+            #
+            # The previous code transposed both tensors as if they were laid out
+            # as [E, I, H] / [E, H, 2I]. That swaps hidden/intermediate axes and
+            # produces catastrophically wrong quantized expert weights while still
+            # keeping the service numerically "alive" enough to benchmark.
             down_fused = fused_tensors[0]
             gate_up_fused = fused_tensors[1]
 
-            #    gate_up_fused: [E, H, 2I] -> [E, 2I, H] -> gate / up
             if gate_up_fused.dim() != 3:
                 raise ValueError(
                     f"[Fused] Expect gate_up fused tensor to be 3D, got shape {tuple(gate_up_fused.shape)}"
                 )
-            E, H, twoI = gate_up_fused.shape
+            E, twoI, H = gate_up_fused.shape
             if twoI % 2 != 0:
                 raise ValueError(f"[Fused] gate_up last dim (2I) not even: {twoI}")
             I = twoI // 2
 
-            gate_up_T = gate_up_fused.transpose(1, 2).contiguous()  # [E, 2I, H]
-            gate_proj = gate_up_T[:, :I, :]  # [E, I, H]
-            up_proj = gate_up_T[:, I:, :]  # [E, I, H]
+            gate_proj = gate_up_fused[:, :I, :].contiguous()  # [E, I, H]
+            up_proj = gate_up_fused[:, I:, :].contiguous()  # [E, I, H]
 
             if down_fused.dim() != 3:
                 raise ValueError(f"[Fused] Expect down fused tensor to be 3D, got shape {tuple(down_fused.shape)}")
             if down_fused.shape[0] != E:
                 raise ValueError(f"[Fused] down_fused expert dim mismatch: {down_fused.shape[0]} vs gate_up {E}")
-            down_proj = down_fused.transpose(1, 2).contiguous()  # [E, H, I]
+            if down_fused.shape[1] != H or down_fused.shape[2] != I:
+                raise ValueError(
+                    f"[Fused] down fused shape mismatch: expected [E, H, I] = [{E}, {H}, {I}], "
+                    f"got {tuple(down_fused.shape)}"
+                )
+            down_proj = down_fused.contiguous()  # [E, H, I]
             del fused_tensors
             del gate_up_fused
             del down_fused
@@ -810,16 +838,9 @@ class OnlineQuantConverter(ConverterBase):
             down_weights = []
 
             for expert_id in expert_ids:
-                gate_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.gate_proj.weight"
-                up_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.up_proj.weight"
-                down_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.down_proj.weight"
-
-                if gate_key not in self.tensor_file_map:
-                    raise KeyError(f"Missing gate weight for layer {layer_idx}, expert {expert_id}")
-                if up_key not in self.tensor_file_map:
-                    raise KeyError(f"Missing up weight for layer {layer_idx}, expert {expert_id}")
-                if down_key not in self.tensor_file_map:
-                    raise KeyError(f"Missing down weight for layer {layer_idx}, expert {expert_id}")
+                gate_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight")
+                up_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight")
+                down_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight")
 
                 # Load weights based on input type
                 if self.input_type == "fp8":
@@ -858,19 +879,12 @@ class OnlineQuantConverter(ConverterBase):
                     down_scale_inv_batch = []
 
                     for expert_id in batch_expert_ids:
-                        gate_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.gate_proj.weight"
-                        up_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.up_proj.weight"
-                        down_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.down_proj.weight"
-                        gate_scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.gate_proj.weight_scale_inv"
-                        up_scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.up_proj.weight_scale_inv"
-                        down_scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.down_proj.weight_scale_inv"
-
-                        if gate_scale_key not in self.tensor_file_map:
-                            raise KeyError(f"Missing gate weight_scale_inv for layer {layer_idx}, expert {expert_id}")
-                        if up_scale_key not in self.tensor_file_map:
-                            raise KeyError(f"Missing up weight_scale_inv for layer {layer_idx}, expert {expert_id}")
-                        if down_scale_key not in self.tensor_file_map:
-                            raise KeyError(f"Missing down weight_scale_inv for layer {layer_idx}, expert {expert_id}")
+                        gate_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight")
+                        up_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight")
+                        down_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight")
+                        gate_scale_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight_scale_inv")
+                        up_scale_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight_scale_inv")
+                        down_scale_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight_scale_inv")
 
                         gate_fp8_batch.append(self._load_tensor(gate_key))
                         up_fp8_batch.append(self._load_tensor(up_key))
@@ -955,6 +969,10 @@ class OnlineQuantConverter(ConverterBase):
             weight_path=self.output_path,  # Output path for quantized weights
             chunked_prefill_size=512,  # Arbitrary value, not critical for conversion
             cpu_save=True,  # Enable saving quantized weights to output
+            # Conversion writes fresh quantized weights to disk. It must not try
+            # to enter tiered/mmap residency management against the destination
+            # path being produced by this very conversion job.
+            weight_strategy="legacy",
             method=amx_method,  # Specify quantization method (AMXINT4 or AMXINT8)
         )
 
