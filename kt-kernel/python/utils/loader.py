@@ -303,13 +303,12 @@ class SafeTensorLoader:
             for key in tensor_keys:
                 info = self.tensor_info_map[key]
                 if int(info["offset"]) % 512 != 0 or int(info["size"]) % 512 != 0:
-                    print(
-                        "[SafeTensorLoader] Disabling O_DIRECT for io_uring because "
-                        f"tensor {key} is not 512-byte aligned "
-                        f"(offset={info['offset']}, size={info['size']})."
+                    raise RuntimeError(
+                        "io_uring direct I/O requires 512-byte aligned safetensors entries; "
+                        f"tensor {key} is misaligned (offset={info['offset']}, size={info['size']}). "
+                        "Repack or repair the AMX safetensors with 512-byte data_offsets and sizes, "
+                        "or set KT_IOURING_DIRECT=0 to use buffered io_uring for debugging."
                     )
-                    direct_io = False
-                    break
 
         up_weights = [[] for _ in numa_ids]
         gate_weights = [[] for _ in numa_ids]

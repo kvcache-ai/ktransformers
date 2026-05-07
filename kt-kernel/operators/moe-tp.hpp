@@ -43,6 +43,11 @@ class TP_MOE_Common : public MoE_Interface {
   GeneralMOEConfig config;
   using input_t = typename T::input_t;
   TP_MOE_Common(GeneralMOEConfig config) : config(config) {
+    if (config.enable_cache_stats && config.cache_stats == nullptr) {
+      config.cache_stats_owner = std::make_shared<ExpertCacheStats>();
+      config.cache_stats = config.cache_stats_owner.get();
+      this->config = config;
+    }
     printf("TP MOE layer %d, pool: 0x%lx, expert num: %d, num_experts_per_tok: %d\n", config.layer_idx,
            (intptr_t)config.pool, config.expert_num, config.num_experts_per_tok);
     if (config.pool == nullptr) {
@@ -213,6 +218,38 @@ class TP_MOE_Common : public MoE_Interface {
   }
 
   virtual void load_weights() = 0;
+
+  std::map<std::string, double> cache_stats_snapshot() const {
+    const ExpertCacheStats* stats = config.cache_stats;
+    if (stats == nullptr) {
+      return {
+          {"enabled", 0.0},
+          {"promote_count", 0.0},
+          {"demote_count", 0.0},
+          {"hit_count", 0.0},
+          {"miss_count", 0.0},
+          {"eviction_count", 0.0},
+          {"total_access_count", 0.0},
+          {"hit_rate", 0.0},
+      };
+    }
+    return {
+        {"enabled", config.enable_cache_stats ? 1.0 : 0.0},
+        {"promote_count", static_cast<double>(stats->promote_count.load(std::memory_order_relaxed))},
+        {"demote_count", static_cast<double>(stats->demote_count.load(std::memory_order_relaxed))},
+        {"hit_count", static_cast<double>(stats->hit_count.load(std::memory_order_relaxed))},
+        {"miss_count", static_cast<double>(stats->miss_count.load(std::memory_order_relaxed))},
+        {"eviction_count", static_cast<double>(stats->eviction_count.load(std::memory_order_relaxed))},
+        {"total_access_count", static_cast<double>(stats->total_access_count.load(std::memory_order_relaxed))},
+        {"hit_rate", stats->hit_rate()},
+    };
+  }
+
+  void reset_cache_stats() {
+    if (config.cache_stats != nullptr) {
+      config.cache_stats->reset();
+    }
+  }
 
   virtual void merge_results(int qlen, void* output) = 0;
 

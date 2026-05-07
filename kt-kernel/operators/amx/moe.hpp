@@ -188,7 +188,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     this->derived_init();
   }
 
-  bool resident_io_enabled() const { return config_.use_mmap || config_.io_backend == IOBackend::IOURING; }
+  bool iouring_enabled() const { return config_.io_backend == IOBackend::IOURING; }
+  bool mmap_enabled() const { return config_.use_mmap && !iouring_enabled(); }
+  bool resident_io_enabled() const { return mmap_enabled() || iouring_enabled(); }
 
   void set_weight_buffers(void* gate_proj, void* up_proj, void* down_proj) {
     config_.gate_proj = gate_proj;
@@ -200,7 +202,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     printf("Creating AMX_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
 #ifndef _WIN32
     if (resident_io_enabled()) {
-      initialize_lazy_mmap_state();
+      initialize_resident_io_state();
     }
 #endif
     auto& load = config_.load;
@@ -232,7 +234,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   }
 
 #ifndef _WIN32
-  void initialize_lazy_mmap_state() {
+  void initialize_resident_io_state() {
     const int en = config_.expert_num;
     baseline_gate_weight_src_.assign(en, nullptr);
     baseline_up_weight_src_.assign(en, nullptr);
@@ -310,6 +312,28 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       gate_bb_[expert_id]->mins = baseline_gate_mins_src_[expert_id];
       up_bb_[expert_id]->mins = baseline_up_mins_src_[expert_id];
       down_bb_[expert_id]->mins = baseline_down_mins_src_[expert_id];
+    }
+  }
+
+  void clear_expert_ptrs(int expert_id) {
+    gate_bb_[expert_id]->b = nullptr;
+    up_bb_[expert_id]->b = nullptr;
+    down_bb_[expert_id]->b = nullptr;
+    gate_bb_[expert_id]->d = nullptr;
+    up_bb_[expert_id]->d = nullptr;
+    down_bb_[expert_id]->d = nullptr;
+    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
+      gate_bb_[expert_id]->mins = nullptr;
+      up_bb_[expert_id]->mins = nullptr;
+      down_bb_[expert_id]->mins = nullptr;
+    }
+  }
+
+  void apply_cold_ptrs(int expert_id) {
+    if (mmap_enabled()) {
+      apply_baseline_ptrs(expert_id);
+    } else {
+      clear_expert_ptrs(expert_id);
     }
   }
 
@@ -398,6 +422,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void drop_baseline_cache_for_expert(int expert_id) {
 #ifndef _WIN32
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    if (!mmap_enabled()) return;
     if (baseline_gate_weight_src_[expert_id] != nullptr) {
       madvise(baseline_gate_weight_src_[expert_id], gate_weight_bytes_, MADV_DONTNEED);
     }
@@ -429,6 +454,129 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
 #else
     (void)expert_id;
+#endif
+  }
+
+  int logical_expert_id_for_slot(int expert_id) const {
+    if (expert_id < 0 || expert_id >= config_.expert_num) {
+      throw std::runtime_error("Invalid expert id for io_uring slot lookup");
+    }
+    const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+    const int logical_expert_id =
+        physical_to_logical_map == nullptr ? expert_id : static_cast<int>(physical_to_logical_map[expert_id]);
+    if (logical_expert_id < 0 || logical_expert_id >= config_.expert_num) {
+      std::ostringstream oss;
+      oss << "Invalid physical_to_logical_map entry for layer=" << config_.layer_idx << " tp=" << tp_part_idx
+          << " expert=" << expert_id << " logical=" << logical_expert_id;
+      throw std::runtime_error(oss.str());
+    }
+    return logical_expert_id;
+  }
+
+  const ExpertFileSlot& iouring_slot_at(const std::vector<std::vector<ExpertFileSlot>>& slots,
+                                        const char* name,
+                                        int expert_id) const {
+    if (tp_part_idx < 0 || tp_part_idx >= static_cast<int>(slots.size())) {
+      std::ostringstream oss;
+      oss << "io_uring file slots for " << name << " do not contain tp=" << tp_part_idx
+          << " rows=" << slots.size();
+      throw std::runtime_error(oss.str());
+    }
+    const int logical_expert_id = logical_expert_id_for_slot(expert_id);
+    const auto& row = slots[tp_part_idx];
+    if (logical_expert_id >= static_cast<int>(row.size())) {
+      std::ostringstream oss;
+      oss << "io_uring file slots for " << name << " do not contain logical expert=" << logical_expert_id
+          << " row_size=" << row.size();
+      throw std::runtime_error(oss.str());
+    }
+    return row[logical_expert_id];
+  }
+
+  void validate_iouring_slot(const char* name, const ExpertFileSlot& slot, size_t expected_size) const {
+    if (slot.fd < 0 || slot.size == 0) {
+      std::ostringstream oss;
+      oss << "Invalid io_uring slot for " << name << " layer=" << config_.layer_idx << " tp=" << tp_part_idx
+          << " fd=" << slot.fd << " offset=" << slot.offset << " size=" << slot.size;
+      throw std::runtime_error(oss.str());
+    }
+    if (slot.size != expected_size) {
+      std::ostringstream oss;
+      oss << "Unexpected io_uring slot size for " << name << " layer=" << config_.layer_idx << " tp=" << tp_part_idx
+          << " expected=" << expected_size << " actual=" << slot.size << " offset=" << slot.offset;
+      throw std::runtime_error(oss.str());
+    }
+    if (config_.iouring_direct_io && ((slot.offset % 512) != 0 || (slot.size % 512) != 0)) {
+      std::ostringstream oss;
+      oss << "io_uring O_DIRECT slot for " << name << " is not 512-byte aligned layer=" << config_.layer_idx
+          << " tp=" << tp_part_idx << " offset=" << slot.offset << " size=" << slot.size;
+      throw std::runtime_error(oss.str());
+    }
+  }
+
+  void validate_iouring_slot_matrix(const char* name,
+                                    const std::vector<std::vector<ExpertFileSlot>>& slots,
+                                    size_t expected_size) const {
+    if (tp_part_idx < 0 || tp_part_idx >= static_cast<int>(slots.size())) {
+      std::ostringstream oss;
+      oss << "io_uring backend requires " << name << " slots for tp=" << tp_part_idx
+          << " rows=" << slots.size();
+      throw std::runtime_error(oss.str());
+    }
+    if (static_cast<int>(slots[tp_part_idx].size()) < config_.expert_num) {
+      std::ostringstream oss;
+      oss << "io_uring backend requires " << name << " slots for every expert layer=" << config_.layer_idx
+          << " tp=" << tp_part_idx << " experts=" << config_.expert_num
+          << " row_size=" << slots[tp_part_idx].size();
+      throw std::runtime_error(oss.str());
+    }
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      validate_iouring_slot(name, slots[tp_part_idx][expert_id], expected_size);
+    }
+  }
+
+  void validate_iouring_config() const {
+    if (!iouring_enabled()) return;
+#ifdef HAVE_LIBURING
+    if (config_.async_reader == nullptr) {
+      throw std::runtime_error("io_uring backend requires a non-null AsyncExpertReader");
+    }
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      (void)logical_expert_id_for_slot(expert_id);
+    }
+    validate_iouring_slot_matrix("gate.weight", config_.gate_file_slots, gate_weight_bytes_);
+    validate_iouring_slot_matrix("gate.scale", config_.gate_scale_file_slots, gate_scale_bytes_);
+    validate_iouring_slot_matrix("up.weight", config_.up_file_slots, up_weight_bytes_);
+    validate_iouring_slot_matrix("up.scale", config_.up_scale_file_slots, up_scale_bytes_);
+    validate_iouring_slot_matrix("down.weight", config_.down_file_slots, down_weight_bytes_);
+    validate_iouring_slot_matrix("down.scale", config_.down_scale_file_slots, down_scale_bytes_);
+    if constexpr (requires { gate_bb_[0]->mins; }) {
+      if (!config_.gate_mins_file_slots.empty()) {
+        validate_iouring_slot_matrix("gate.mins", config_.gate_mins_file_slots, gate_mins_bytes_);
+      }
+      if (!config_.up_mins_file_slots.empty()) {
+        validate_iouring_slot_matrix("up.mins", config_.up_mins_file_slots, up_mins_bytes_);
+      }
+      if (!config_.down_mins_file_slots.empty()) {
+        validate_iouring_slot_matrix("down.mins", config_.down_mins_file_slots, down_mins_bytes_);
+      }
+    }
+    std::fprintf(stderr,
+                 "[MESHIO] layer=%d tp=%d backend=iouring direct_io=%s mmap_baseline=false capacity=%d policy=%s "
+                 "gate=%zu+%zu up=%zu+%zu down=%zu+%zu\n",
+                 config_.layer_idx,
+                 tp_part_idx,
+                 config_.iouring_direct_io ? "true" : "false",
+                 cache_capacity_,
+                 config_.resident_cache_policy.c_str(),
+                 gate_weight_bytes_,
+                 gate_scale_bytes_,
+                 up_weight_bytes_,
+                 up_scale_bytes_,
+                 down_weight_bytes_,
+                 down_scale_bytes_);
+#else
+    throw std::runtime_error("io_uring backend requested but kt_kernel_ext was built without liburing support");
 #endif
   }
 
@@ -475,7 +623,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
 
       free_packed_expert(victim);
-      apply_baseline_ptrs(victim);
+      apply_cold_ptrs(victim);
       note_expert_demote(victim);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[victim].store(EXPERT_BASELINE, std::memory_order_release);
@@ -514,7 +662,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       return false;
     }
 
-    if (config_.io_backend != IOBackend::IOURING &&
+    if (!iouring_enabled() &&
         (baseline_gate_weight_src_[expert_id] == nullptr || baseline_up_weight_src_[expert_id] == nullptr ||
          baseline_down_weight_src_[expert_id] == nullptr || baseline_gate_scale_src_[expert_id] == nullptr ||
          baseline_up_scale_src_[expert_id] == nullptr || baseline_down_scale_src_[expert_id] == nullptr)) {
@@ -525,7 +673,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
 
     // Load expert weights: io_uring (direct I/O) or mmap (page cache)
-    if (config_.io_backend == IOBackend::IOURING) {
+    if (iouring_enabled()) {
 #ifdef HAVE_LIBURING
       // io_uring path: direct read from SSD to NUMA buffer
       if (config_.async_reader == nullptr) {
@@ -535,19 +683,24 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         return false;
       }
 
-      auto& gate_slot = config_.gate_file_slots[tp_part_idx][expert_id];
-      auto& up_slot = config_.up_file_slots[tp_part_idx][expert_id];
-      auto& down_slot = config_.down_file_slots[tp_part_idx][expert_id];
-      auto& gate_scale_slot = config_.gate_scale_file_slots[tp_part_idx][expert_id];
-      auto& up_scale_slot = config_.up_scale_file_slots[tp_part_idx][expert_id];
-      auto& down_scale_slot = config_.down_scale_file_slots[tp_part_idx][expert_id];
+      const auto& gate_slot = iouring_slot_at(config_.gate_file_slots, "gate.weight", expert_id);
+      const auto& up_slot = iouring_slot_at(config_.up_file_slots, "up.weight", expert_id);
+      const auto& down_slot = iouring_slot_at(config_.down_file_slots, "down.weight", expert_id);
+      const auto& gate_scale_slot = iouring_slot_at(config_.gate_scale_file_slots, "gate.scale", expert_id);
+      const auto& up_scale_slot = iouring_slot_at(config_.up_scale_file_slots, "up.scale", expert_id);
+      const auto& down_scale_slot = iouring_slot_at(config_.down_scale_file_slots, "down.scale", expert_id);
 
       if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0 || gate_scale_slot.fd < 0 ||
           up_scale_slot.fd < 0 || down_scale_slot.fd < 0) {
+        std::ostringstream oss;
+        oss << "AMX io_uring promotion found invalid fd layer=" << config_.layer_idx << " tp=" << tp_part_idx
+            << " expert=" << expert_id << " gate_fd=" << gate_slot.fd << " up_fd=" << up_slot.fd
+            << " down_fd=" << down_slot.fd << " gate_scale_fd=" << gate_scale_slot.fd
+            << " up_scale_fd=" << up_scale_slot.fd << " down_scale_fd=" << down_scale_slot.fd;
         numa_free(gate_owner, gate_total_bytes_);
         numa_free(up_owner, up_total_bytes_);
         numa_free(down_owner, down_total_bytes_);
-        return false;
+        throw std::runtime_error(oss.str());
       }
 
       std::vector<uint64_t> read_requests;
@@ -567,26 +720,33 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
       if constexpr (requires { gate_bb_[expert_id]->mins; }) {
         if (!config_.gate_mins_file_slots.empty()) {
-          submit_slot(config_.gate_mins_file_slots[tp_part_idx][expert_id],
+          submit_slot(iouring_slot_at(config_.gate_mins_file_slots, "gate.mins", expert_id),
                       reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_ + gate_scale_bytes_);
         }
         if (!config_.up_mins_file_slots.empty()) {
-          submit_slot(config_.up_mins_file_slots[tp_part_idx][expert_id],
+          submit_slot(iouring_slot_at(config_.up_mins_file_slots, "up.mins", expert_id),
                       reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
         }
         if (!config_.down_mins_file_slots.empty()) {
-          submit_slot(config_.down_mins_file_slots[tp_part_idx][expert_id],
+          submit_slot(iouring_slot_at(config_.down_mins_file_slots, "down.mins", expert_id),
                       reinterpret_cast<char*>(down_owner) + down_weight_bytes_ + down_scale_bytes_);
         }
       }
 
       // Wait for every tensor fragment (weight, scale, optional mins) to complete.
-      if (!config_.async_reader->wait_for_requests(read_requests, 5000)) {
-        // Timeout or error
+      const int timeout_ms = 60000;
+      if (!config_.async_reader->wait_for_requests(read_requests, timeout_ms)) {
+        std::ostringstream oss;
+        oss << "AMX io_uring promotion failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
+            << " expert=" << expert_id << " logical=" << logical_expert_id_for_slot(expert_id)
+            << " requests=" << read_requests.size() << " inflight=" << config_.async_reader->get_inflight_count()
+            << " timeout_ms=" << timeout_ms << " gate=(" << gate_slot.fd << "," << gate_slot.offset << ","
+            << gate_slot.size << ") up=(" << up_slot.fd << "," << up_slot.offset << "," << up_slot.size
+            << ") down=(" << down_slot.fd << "," << down_slot.offset << "," << down_slot.size << ")";
         numa_free(gate_owner, gate_total_bytes_);
         numa_free(up_owner, up_total_bytes_);
         numa_free(down_owner, down_total_bytes_);
-        return false;
+        throw std::runtime_error(oss.str());
       }
 #else
       // io_uring not available, fallback to error
@@ -764,12 +924,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void load_weights() {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
-    if (config_.io_backend == IOBackend::IOURING) {
-      if (config_.gate_file_slots.empty() || config_.up_file_slots.empty() || config_.down_file_slots.empty() ||
-          config_.gate_scale_file_slots.empty() || config_.up_scale_file_slots.empty() ||
-          config_.down_scale_file_slots.empty()) {
-        throw std::runtime_error("io_uring backend requires weight and scale file slots");
-      }
+    if (iouring_enabled()) {
+      validate_iouring_config();
       return;
     }
 
@@ -1012,7 +1168,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
 
       free_packed_expert(expert_id);
-      apply_baseline_ptrs(expert_id);
+      apply_cold_ptrs(expert_id);
       note_expert_demote(expert_id);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
@@ -1055,7 +1211,14 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
     auto& tp_count = this->tp_count;
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
-    if (config.gate_projs.empty() == false) {
+    if (config.io_backend == IOBackend::IOURING) {
+      printf("TP Load from io_uring file slots\n");
+      pool->dispense_backend()->do_numa_job([&, this](int i) {
+        this->tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+        this->tps[i]->load_weights();
+      });
+      this->weights_loaded = true;
+    } else if (config.gate_projs.empty() == false) {
       printf("TP Load from loader\n");
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto& tpc = this->tp_configs[i];

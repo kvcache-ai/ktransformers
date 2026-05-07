@@ -264,7 +264,9 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                &MoeBindings::ForwardBindings::cpuinfer_interface))
       .def("warm_up", &MoeClass::warm_up)
       .def("load_weights", &MoeClass::load_weights)
-      .def("forward", &MoeClass::forward_binding);
+      .def("forward", &MoeClass::forward_binding)
+      .def("cache_stats_snapshot", &MoeClass::cache_stats_snapshot)
+      .def("reset_cache_stats", &MoeClass::reset_cache_stats);
 
   if constexpr (requires(MoeClass moe, int expert_id) {
                   moe.promote_expert(expert_id);
@@ -581,6 +583,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("max_tier0_experts", &GeneralMOEConfig::max_tier0_experts)
       .def_readwrite("max_resident_experts", &GeneralMOEConfig::max_resident_experts)
       .def_readwrite("resident_cache_policy", &GeneralMOEConfig::resident_cache_policy)
+      .def_readwrite("enable_cache_stats", &GeneralMOEConfig::enable_cache_stats)
+      .def_readwrite("iouring_direct_io", &GeneralMOEConfig::iouring_direct_io)
       .def_readwrite("m_block", &GeneralMOEConfig::m_block)
       .def_readwrite("group_min_len", &GeneralMOEConfig::group_min_len)
       .def_readwrite("group_max_len", &GeneralMOEConfig::group_max_len)

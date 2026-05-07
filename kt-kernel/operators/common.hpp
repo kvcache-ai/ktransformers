@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -860,6 +861,7 @@ struct GeneralMOEConfig {
 
   // I/O backend selection (mmap vs io_uring)
   IOBackend io_backend = IOBackend::MMAP;
+  bool iouring_direct_io = true;
 
   // File slots for io_uring direct I/O: [numa_node][expert_id]
   std::vector<std::vector<ExpertFileSlot>> gate_file_slots;
@@ -877,6 +879,7 @@ struct GeneralMOEConfig {
 
   // Cache statistics (optional, disabled by default for performance)
   bool enable_cache_stats = false;
+  std::shared_ptr<ExpertCacheStats> cache_stats_owner;
   ExpertCacheStats* cache_stats = nullptr;
 
   // mmap baseline page reclaim parameters

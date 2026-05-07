@@ -10,6 +10,7 @@ import sys
 import types
 
 import numpy as np
+import pytest
 from safetensors.numpy import save_file
 
 
@@ -101,6 +102,40 @@ def test_load_experts_mmap_builds_dense_numa_expert_layout(tmp_path):
     assert np.array_equal(experts["gate"][1][1], expected_values[("gate", 1, 1, "weight")])
     assert np.array_equal(experts["up_scale"][0][1], expected_values[("up", 0, 1, "scale")])
     assert np.array_equal(experts["down"][1][0], expected_values[("down", 1, 0, "weight")])
+
+
+def _write_minimal_amx_expert_file(path):
+    tensors = {}
+    for proj in ("gate", "up", "down"):
+        tensors[f"blk.0.ffn_{proj}_exps.0.numa.0.weight"] = np.arange(3, dtype=np.uint8)
+        tensors[f"blk.0.ffn_{proj}_exps.0.numa.0.scale"] = np.arange(3, dtype=np.float32)
+    save_file(tensors, str(path))
+
+
+def test_load_experts_iouring_rejects_unaligned_direct_io(tmp_path):
+    """O_DIRECT mode must fail clearly instead of silently falling back to buffered reads."""
+    _write_minimal_amx_expert_file(tmp_path / "model.safetensors")
+
+    loader_module = _import_loader_module()
+    loader = loader_module.SafeTensorLoader(str(tmp_path))
+
+    with pytest.raises(RuntimeError, match="512-byte aligned"):
+        loader.load_experts_iouring("blk.0", use_direct_io=True)
+
+
+def test_load_experts_iouring_allows_buffered_debug_path(tmp_path):
+    """Buffered io_uring remains available only when direct I/O is explicitly disabled."""
+    _write_minimal_amx_expert_file(tmp_path / "model.safetensors")
+
+    loader_module = _import_loader_module()
+    loader = loader_module.SafeTensorLoader(str(tmp_path))
+    experts = loader.load_experts_iouring("blk.0", use_direct_io=False)
+
+    assert experts["direct_io"] is False
+    assert len(experts["gate"]) == 1
+    assert len(experts["gate"][0]) == 1
+    assert experts["gate"][0][0][0] >= 0
+    loader.close_all_handles()
 
 
 def test_bf16_loader_loads_packed_experts_as_mmap_views(tmp_path):

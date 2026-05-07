@@ -147,7 +147,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.down_scales = None
         self._mmap_keepalive = None
         self._uses_mmap_weights = False
-        self._uses_mmap_weights = False
+        self._uses_iouring_weights = False
 
     def load_weights_from_tensors(
         self,
@@ -247,14 +247,13 @@ class AMXMoEWrapper(BaseMoEWrapper):
             self.weight_strategy = "legacy"
 
         if use_iouring:
-            print(f"[AMXMoEWrapper] layer={self.layer_idx} using io_uring direct I/O backend")
-            # io_uring requires merged weight format
             if not self.load_merged_weight:
-                print(
-                    f"[AMXMoEWrapper] layer={self.layer_idx} io_uring requires merged safetensors; "
-                    "falling back to legacy loading"
+                raise RuntimeError(
+                    f"[AMXMoEWrapper] layer={self.layer_idx} io_uring requires merged AMX safetensors "
+                    f"under weight_path={self.weight_path!r}"
                 )
-                use_iouring = False
+            if self.cpu_save:
+                raise RuntimeError(f"[AMXMoEWrapper] layer={self.layer_idx} io_uring cannot be used during cpu_save")
 
         if self.load_merged_weight:
             base_key = f"blk.{self.layer_idx}"
@@ -263,9 +262,21 @@ class AMXMoEWrapper(BaseMoEWrapper):
                 # io_uring path: load file descriptors and offsets.
                 from .async_io_manager import get_global_async_reader
 
+                direct_io_requested = os.environ.get("KT_IOURING_DIRECT", "1") not in ("0", "false", "False")
                 file_slots = self.safetensor_loader.load_experts_iouring(
                     base_key,
-                    use_direct_io=os.environ.get("KT_IOURING_DIRECT", "1") not in ("0", "false", "False"),
+                    use_direct_io=direct_io_requested,
+                )
+                if direct_io_requested and not file_slots.get("direct_io", False):
+                    raise RuntimeError(
+                        f"[AMXMoEWrapper] layer={self.layer_idx} requested KT_IOURING_DIRECT=1 "
+                        "but SafeTensorLoader did not return direct I/O slots"
+                    )
+                print(
+                    "[AMXMoEWrapper] "
+                    f"layer={self.layer_idx} backend=IOURING direct_io={file_slots.get('direct_io', False)} "
+                    "mmap_baseline=false "
+                    f"policy={self.residency_policy} capacity={self.max_resident_experts or self.max_tier0_experts}"
                 )
 
                 # Store file slots for C++ consumption
@@ -333,8 +344,12 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.max_tier0_experts = self.max_tier0_experts
         moe_config.max_resident_experts = self.max_resident_experts
         moe_config.resident_cache_policy = self.residency_policy
+        if hasattr(moe_config, "enable_cache_stats"):
+            moe_config.enable_cache_stats = self.enable_cache_stats
+        if hasattr(moe_config, "iouring_direct_io"):
+            moe_config.iouring_direct_io = bool(file_slots.get("direct_io", False)) if use_iouring else False
         if use_iouring:
-            moe_config.use_mmap = True
+            moe_config.use_mmap = False
             moe_config.set_iouring_file_slots(
                 self.gate_file_slots,
                 self.gate_scale_file_slots,
@@ -381,6 +396,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
         self._uses_mmap_weights = use_mmap
+        self._uses_iouring_weights = use_iouring
 
         # Clean up temporary weight storage if using merged weights
         if self.load_merged_weight and not use_mmap and not use_iouring:
@@ -390,6 +406,11 @@ class AMXMoEWrapper(BaseMoEWrapper):
             del self.gate_scales
             del self.up_scales
             del self.down_scales
+
+    def cache_stats_snapshot(self):
+        if self.moe is None or not hasattr(self.moe, "cache_stats_snapshot"):
+            return {}
+        return dict(self.moe.cache_stats_snapshot())
 
     def _register_amx_mmap_regions(self):
         """Register AMX mmap source regions for provider prefetch."""

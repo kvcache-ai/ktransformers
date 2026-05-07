@@ -10,8 +10,6 @@
 #ifndef CPUINFER_OPERATOR_AMX_MOE_BASE_H
 #define CPUINFER_OPERATOR_AMX_MOE_BASE_H
 
-// #define FORWARD_TIME_PROFILE
-
 #include <immintrin.h>
 
 #include <algorithm>
@@ -24,7 +22,9 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -81,7 +81,6 @@ class AMX_MOE_BASE {
 
   AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
-    derived()->derived_init();
   }
 
   void init() {
@@ -112,7 +111,8 @@ class AMX_MOE_BASE {
 
     bool use_lazy_mmap_packing = false;
     if constexpr (requires { Derived::kUsesLazyMmapPacking; }) {
-      use_lazy_mmap_packing = config_.use_mmap && Derived::kUsesLazyMmapPacking;
+      use_lazy_mmap_packing =
+          (config_.use_mmap || config_.io_backend == IOBackend::IOURING) && Derived::kUsesLazyMmapPacking;
     }
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
 
@@ -158,9 +158,63 @@ class AMX_MOE_BASE {
     mem_requests.append_pointer(&down_bc_pool_, down_bc_pool_bytes_);
 
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
+    log_cpu_mem_breakdown_once();
   }
 
   ~AMX_MOE_BASE() = default;
+
+  void log_cpu_mem_breakdown_once() const {
+    const char* raw = std::getenv("KT_TRACE_CPU_MEM_BREAKDOWN");
+    if (raw == nullptr) return;
+    if (!(std::strcmp(raw, "1") == 0 || std::strcmp(raw, "true") == 0 || std::strcmp(raw, "TRUE") == 0)) return;
+    std::fprintf(stderr,
+                 "[KT_CPU_MEM_HOOK] layer=%d tp=%d trace=%s max_len=%d experts_per_tok=%d hidden=%d interm=%d\n",
+                 config_.layer_idx,
+                 tp_part_idx,
+                 raw,
+                 config_.max_len,
+                 config_.num_experts_per_tok,
+                 config_.hidden_size,
+                 config_.intermediate_size);
+    static std::mutex log_mu;
+    static std::set<std::tuple<int, int, int, int, int>> logged;
+    const auto key = std::make_tuple(
+        tp_part_idx, config_.layer_idx, config_.hidden_size, config_.intermediate_size, config_.max_len);
+    {
+      std::lock_guard<std::mutex> lock(log_mu);
+      if (!logged.insert(key).second) return;
+    }
+    const size_t local_input_bytes =
+        sizeof(ggml_bf16_t) * (size_t)config_.num_experts_per_tok * (size_t)config_.max_len * (size_t)config_.hidden_size;
+    const size_t local_gate_bytes =
+        sizeof(ggml_bf16_t) * (size_t)config_.num_experts_per_tok * (size_t)config_.max_len * (size_t)config_.intermediate_size;
+    const size_t local_up_bytes = local_gate_bytes;
+    const size_t local_down_bytes =
+        sizeof(ggml_bf16_t) * (size_t)config_.num_experts_per_tok * (size_t)config_.max_len * (size_t)config_.hidden_size;
+    const size_t local_total_bytes = local_input_bytes + local_gate_bytes + local_up_bytes + local_down_bytes;
+    const size_t pool_total_bytes =
+        gate_up_ba_pool_bytes_ + gate_bc_pool_bytes_ + up_bc_pool_bytes_ + down_ba_pool_bytes_ + down_bc_pool_bytes_;
+    std::fprintf(stderr,
+                 "[KT_CPU_MEM] layer=%d tp=%d local_input=%.3fGiB local_gate=%.3fGiB local_up=%.3fGiB local_down=%.3fGiB local_total=%.3fGiB pools_total=%.3fGiB gate_up_ba=%.3fGiB gate_bc=%.3fGiB up_bc=%.3fGiB down_ba=%.3fGiB down_bc=%.3fGiB pool_count=%zu max_len=%d experts_per_tok=%d hidden=%d interm=%d\n",
+                 config_.layer_idx,
+                 tp_part_idx,
+                 (double)local_input_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)local_gate_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)local_up_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)local_down_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)local_total_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)pool_total_bytes / (1024.0 * 1024.0 * 1024.0),
+                 (double)gate_up_ba_pool_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                 (double)gate_bc_pool_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                 (double)up_bc_pool_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                 (double)down_ba_pool_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                 (double)down_bc_pool_bytes_ / (1024.0 * 1024.0 * 1024.0),
+                 pool_count_,
+                 config_.max_len,
+                 config_.num_experts_per_tok,
+                 config_.hidden_size,
+                 config_.intermediate_size);
+  }
 
   void warm_up() {
     int qlen = config_.max_len;
@@ -175,7 +229,8 @@ class AMX_MOE_BASE {
     forward(qlen, config_.num_experts_per_tok, expert_ids.data(), weights.data(), input.data(), output.data());
   }
 
-  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
+  virtual void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
+                       void* output) {
     if (qlen > 1) {
       forward_prefill(qlen, k, expert_ids, weights, input, output);
     } else {
@@ -193,13 +248,15 @@ class AMX_MOE_BASE {
     derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
   }
 
+  void set_physical_to_logical_map(void* map) { config_.physical_to_logical_map = map; }
+
   // Optional mmap/tiered hooks. Backends that support expert promotion can
   // override these in their derived type; other native backends keep no-op
   // defaults so the shared TP wrapper still compiles.
-  void set_mmap_source_ptrs(int, const ggml_bf16_t*, const ggml_bf16_t*, const ggml_bf16_t*) {}
-  void promote_expert(int) {}
-  void demote_expert(int) {}
-  bool is_expert_promoted(int) const { return false; }
+  virtual void set_mmap_source_ptrs(int, const ggml_bf16_t*, const ggml_bf16_t*, const ggml_bf16_t*) {}
+  virtual void promote_expert(int) {}
+  virtual void demote_expert(int) {}
+  virtual bool is_expert_promoted(int) const { return false; }
 
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {
