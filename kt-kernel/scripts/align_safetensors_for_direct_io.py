@@ -45,9 +45,10 @@ def validate_tensor_sizes(path: Path, metadata: dict, alignment: int) -> None:
             )
 
 
-def align_file(path: Path, alignment: int, backup_suffix: str, dry_run: bool) -> str:
+def align_file(path: Path, alignment: int, backup_suffix: str, dry_run: bool, strict_all_tensors: bool) -> str:
     header_size, header, metadata = read_header(path)
-    validate_tensor_sizes(path, metadata, alignment)
+    if strict_all_tensors:
+        validate_tensor_sizes(path, metadata, alignment)
 
     current_base = 8 + header_size
     pad = (-current_base) % alignment
@@ -84,6 +85,12 @@ def main() -> int:
     parser.add_argument("--alignment", type=int, default=512)
     parser.add_argument("--backup-suffix", default=".unaligned")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--strict-all-tensors",
+        action="store_true",
+        help="Also require every tensor payload size to be aligned. By default only the data section base is aligned; "
+        "expert slot alignment is validated by SafeTensorLoader when io_uring direct I/O is used.",
+    )
     args = parser.parse_args()
 
     root = Path(args.path)
@@ -92,7 +99,7 @@ def main() -> int:
 
     changed = 0
     for file_path in iter_safetensors(root):
-        status = align_file(file_path, args.alignment, args.backup_suffix, args.dry_run)
+        status = align_file(file_path, args.alignment, args.backup_suffix, args.dry_run, args.strict_all_tensors)
         print(f"{file_path}: {status}")
         if status.startswith("padded") or status.startswith("would-pad"):
             changed += 1
