@@ -690,6 +690,7 @@ class BF16SafeTensorLoader(SafeTensorLoader):
     """Loader for native BF16 expert weights (no quantization, no scales).
 
     Supported formats:
+    - Qwen3.5 unfused style: {base}.mlp.experts.experts.{id}.{gate,up,down}_proj.weight
     - DeepSeek style: {base}.mlp.experts.{id}.{gate,up,down}_proj.weight
     - Mixtral/MiniMax style: {base}.block_sparse_moe.experts.{id}.{w1,w3,w2}.weight
     - Mistral style: {base}.experts.{id}.{w1,w3,w2}.weight
@@ -698,6 +699,7 @@ class BF16SafeTensorLoader(SafeTensorLoader):
     """
 
     MOE_FORMATS = {
+        "qwen35_unfused": ("{base}.mlp.experts.experts", "gate_proj", "up_proj", "down_proj"),
         "deepseek": ("{base}.mlp.experts", "gate_proj", "up_proj", "down_proj"),
         "mixtral": ("{base}.block_sparse_moe.experts", "w1", "w3", "w2"),
         "mistral": ("{base}.experts", "w1", "w3", "w2"),
@@ -717,6 +719,12 @@ class BF16SafeTensorLoader(SafeTensorLoader):
             if key.endswith(".mlp.experts.gate_up_proj"):
                 self._detected_format = "packed"
                 print("[BF16SafeTensorLoader] Detected format: packed (Qwen3.5 MoE style)")
+                return
+
+        for key in sample_keys:
+            if ".mlp.experts.experts." in key and ".gate_proj.weight" in key:
+                self._detected_format = "qwen35_unfused"
+                print("[BF16SafeTensorLoader] Detected format: qwen35_unfused")
                 return
 
         for fmt_name, (path_tpl, gate, up, down) in self.MOE_FORMATS.items():
