@@ -157,6 +157,7 @@ class BaseMoEWrapper(ABC):
     _tiered_provider = None  # Singleton TieredWeightProvider
     _tiered_provider_signature: Optional[Tuple[int, int, str, str]] = None
     _prev_topk_ids_by_layer: Dict[int, np.ndarray] = {}
+    _provider_unsupported_logged: set = set()
     # Backends whose C++ MOE objects expose promote/demote hooks for Tier0 management.
     _provider_backends = frozenset({"LLAMAFILE", "BF16", "AMXINT4", "AMXINT8", "MOE_INT4", "MOE_INT8"})
     _debug_moe_layers: Optional[set] = None
@@ -604,6 +605,18 @@ class BaseMoEWrapper(ABC):
         """
         provider = BaseMoEWrapper._tiered_provider
         if provider is not None and self.moe is not None:
+            required_hooks = ("promote_expert", "demote_expert", "is_expert_promoted")
+            missing_hooks = tuple(name for name in required_hooks if not hasattr(self.moe, name))
+            if missing_hooks:
+                moe_name = type(self.moe).__name__
+                log_key = (moe_name, missing_hooks)
+                if log_key not in BaseMoEWrapper._provider_unsupported_logged:
+                    print(
+                        f"[TieredWeightProvider] disabled for {moe_name}: "
+                        f"missing C++ hooks {', '.join(missing_hooks)}"
+                    )
+                    BaseMoEWrapper._provider_unsupported_logged.add(log_key)
+                return
             provider.register_moe(
                 self.layer_idx,
                 self.moe,
