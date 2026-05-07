@@ -16,11 +16,13 @@ This is essential when model_size >= physical_ram to avoid swap thrashing.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import threading
 import time
+from collections import OrderedDict, deque
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -509,6 +511,637 @@ def compute_max_tier0_experts(
     return max(0, min(max_experts, num_experts))
 
 
+RESIDENCY_POLICY_ALIASES = {
+    "baseline": "baseline",
+    "default": "baseline",
+    "current": "baseline",
+    "current_ema": "baseline",
+    "ema": "baseline",
+    "ema_hotset": "baseline",
+    "legacy": "baseline",
+    "lru": "lru",
+    "2q": "2q",
+    "twoq": "2q",
+    "two-q": "2q",
+    "slru": "slru",
+    "sieve": "sieve",
+    "s3fifo": "s3fifo",
+    "s3-fifo": "s3fifo",
+    "wtinylfu": "w_tinylfu",
+    "w-tinylfu": "w_tinylfu",
+    "w_tinylfu": "w_tinylfu",
+}
+
+
+def normalize_residency_policy_name(name: Optional[str]) -> str:
+    normalized = (name or "baseline").strip().lower()
+    try:
+        return RESIDENCY_POLICY_ALIASES[normalized]
+    except KeyError as exc:
+        choices = ", ".join(sorted(set(RESIDENCY_POLICY_ALIASES.values())))
+        raise ValueError(f"Unsupported residency policy {name!r}. Expected one of: {choices}") from exc
+
+
+def load_residency_policy_config(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid KT_RESIDENCY_POLICY_CONFIG JSON: {raw!r}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("KT_RESIDENCY_POLICY_CONFIG must decode to a JSON object")
+    return parsed
+
+
+def _filter_valid_expert_ids(expert_ids: Iterable[int], num_experts: int) -> List[int]:
+    valid: List[int] = []
+    for expert_id in expert_ids:
+        try:
+            value = int(expert_id)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= value < num_experts:
+            valid.append(value)
+    return valid
+
+
+class ResidencyPolicy:
+    """Common interface for provider-managed expert residency policies."""
+
+    policy_name = "base"
+
+    def __init__(self, num_experts: int, capacity: int):
+        self.num_experts = num_experts
+        self.capacity = max(0, min(int(capacity), int(num_experts)))
+        self._lock = threading.RLock()
+        self.stats: Dict[str, float] = {
+            "accesses": 0,
+            "unique_accesses": 0,
+            "hits": 0,
+            "misses": 0,
+            "promotions": 0,
+            "demotions": 0,
+            "prefetch_candidates": 0,
+        }
+
+    def record_accesses(self, expert_ids: Sequence[int]) -> Dict[str, Any]:
+        accesses = _filter_valid_expert_ids(expert_ids, self.num_experts)
+        with self._lock:
+            before = self._resident_order_locked()
+            hits, misses = self._record_accesses_locked(accesses)
+            after = self._resident_order_locked()
+            before_set = set(before)
+            after_set = set(after)
+            promotions = len(after_set - before_set)
+            demotions = len(before_set - after_set)
+            unique_accesses = len(set(accesses))
+            self.stats["accesses"] += len(accesses)
+            self.stats["unique_accesses"] += unique_accesses
+            self.stats["hits"] += hits
+            self.stats["misses"] += misses
+            self.stats["promotions"] += promotions
+            self.stats["demotions"] += demotions
+            self.stats["prefetch_candidates"] += sum(1 for eid in set(accesses) if eid not in before_set)
+            return {
+                "policy": self.policy_name,
+                "accesses": list(accesses),
+                "unique_accesses": unique_accesses,
+                "hits": hits,
+                "misses": misses,
+                "promotions": promotions,
+                "demotions": demotions,
+                "resident_before": before,
+                "resident_after": after,
+            }
+
+    def resident_ids(self) -> List[int]:
+        with self._lock:
+            return self._resident_order_locked()
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            hits = float(self.stats["hits"])
+            misses = float(self.stats["misses"])
+            accesses = hits + misses
+            return {
+                "policy": self.policy_name,
+                "capacity": self.capacity,
+                "resident": self._resident_order_locked(),
+                "stats": dict(self.stats),
+                "hit_rate": 0.0 if accesses <= 0 else hits / accesses,
+            }
+
+    def _resident_order_locked(self) -> List[int]:
+        raise NotImplementedError
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        raise NotImplementedError
+
+
+class BaselineHotsetPolicy(ResidencyPolicy):
+    """Current provider behavior: EMA hotness + top-k pinned experts."""
+
+    policy_name = "baseline"
+
+    def __init__(self, num_experts: int, capacity: int, ema_alpha: float = 0.01):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        self.ema_alpha = float(ema_alpha)
+        self.counts = np.zeros(num_experts, dtype=np.float64)
+        self._resident: List[int] = []
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._resident)
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        before = set(self._resident)
+        hits = sum(1 for expert_id in expert_ids if expert_id in before)
+        misses = len(expert_ids) - hits
+        if expert_ids:
+            self.counts *= 1 - self.ema_alpha
+            hits_vec = np.zeros(self.num_experts, dtype=np.float64)
+            np.add.at(hits_vec, np.asarray(expert_ids, dtype=np.int64), 1.0)
+            self.counts[hits_vec > 0] += self.ema_alpha
+        if self.capacity <= 0:
+            self._resident = []
+        elif not np.any(self.counts > 0):
+            self._resident = []
+        else:
+            top = np.argsort(self.counts)[-self.capacity :][::-1]
+            self._resident = [int(expert_id) for expert_id in top.tolist()]
+        return hits, misses
+
+
+class LRUPolicy(ResidencyPolicy):
+    policy_name = "lru"
+
+    def __init__(self, num_experts: int, capacity: int):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        self._cache: "OrderedDict[int, None]" = OrderedDict()
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._cache.keys())
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            if expert_id in self._cache:
+                hits += 1
+                self._cache.move_to_end(expert_id)
+                continue
+            misses += 1
+            if self.capacity <= 0:
+                continue
+            self._cache[expert_id] = None
+            self._cache.move_to_end(expert_id)
+            if len(self._cache) > self.capacity:
+                self._cache.popitem(last=False)
+        return hits, misses
+
+
+class TwoQPolicy(ResidencyPolicy):
+    policy_name = "2q"
+
+    def __init__(self, num_experts: int, capacity: int, a1_ratio: float = 0.25):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        if self.capacity <= 1:
+            self.a1_capacity = self.capacity
+            self.am_capacity = 0
+        else:
+            self.a1_capacity = max(1, min(self.capacity - 1, int(round(self.capacity * a1_ratio))))
+            self.am_capacity = self.capacity - self.a1_capacity
+        self._a1: "OrderedDict[int, None]" = OrderedDict()
+        self._am: "OrderedDict[int, None]" = OrderedDict()
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._a1.keys()) + list(self._am.keys())
+
+    def _ensure_limits_locked(self) -> None:
+        while len(self._a1) > self.a1_capacity:
+            self._a1.popitem(last=False)
+        while len(self._am) > self.am_capacity:
+            self._am.popitem(last=False)
+        while len(self._a1) + len(self._am) > self.capacity:
+            if self._a1:
+                self._a1.popitem(last=False)
+            elif self._am:
+                self._am.popitem(last=False)
+            else:
+                break
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            if expert_id in self._am:
+                hits += 1
+                self._am.move_to_end(expert_id)
+                continue
+            if expert_id in self._a1:
+                hits += 1
+                self._a1.pop(expert_id, None)
+                if self.am_capacity > 0:
+                    self._am[expert_id] = None
+                else:
+                    self._a1[expert_id] = None
+                self._ensure_limits_locked()
+                continue
+
+            misses += 1
+            if self.capacity <= 0:
+                continue
+            self._a1[expert_id] = None
+            self._ensure_limits_locked()
+        return hits, misses
+
+
+class SLRUPolicy(ResidencyPolicy):
+    policy_name = "slru"
+
+    def __init__(self, num_experts: int, capacity: int, protected_ratio: float = 0.8):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        if self.capacity <= 1:
+            self.protected_capacity = 0
+        else:
+            self.protected_capacity = max(1, min(self.capacity - 1, int(round(self.capacity * protected_ratio))))
+        self._probationary: "OrderedDict[int, None]" = OrderedDict()
+        self._protected: "OrderedDict[int, None]" = OrderedDict()
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._probationary.keys()) + list(self._protected.keys())
+
+    def _ensure_limits_locked(self) -> None:
+        while len(self._protected) > self.protected_capacity and self.protected_capacity >= 0:
+            demoted, _ = self._protected.popitem(last=False)
+            self._probationary[demoted] = None
+        while len(self._probationary) + len(self._protected) > self.capacity:
+            self._probationary.popitem(last=False)
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            if expert_id in self._protected:
+                hits += 1
+                self._protected.move_to_end(expert_id)
+                continue
+            if expert_id in self._probationary:
+                hits += 1
+                self._probationary.pop(expert_id, None)
+                if self.protected_capacity > 0:
+                    self._protected[expert_id] = None
+                else:
+                    self._probationary[expert_id] = None
+                self._ensure_limits_locked()
+                continue
+
+            misses += 1
+            if self.capacity <= 0:
+                continue
+            self._probationary[expert_id] = None
+            self._ensure_limits_locked()
+        return hits, misses
+
+
+class SIEVEPolicy(ResidencyPolicy):
+    """One-bit lazy promotion policy aligned with libCacheSim's Sieve."""
+
+    policy_name = "sieve"
+
+    def __init__(self, num_experts: int, capacity: int):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        self._queue: List[int] = []
+        self._present: Dict[int, bool] = {}
+        self._visited: Dict[int, bool] = {}
+        self._hand: Optional[int] = None
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._queue)
+
+    def _append_new_head_locked(self, expert_id: int) -> None:
+        # libCacheSim's Sieve prepends new objects to the queue head.
+        self._queue.insert(0, expert_id)
+        self._present[expert_id] = True
+        self._visited[expert_id] = False
+        if self._hand is None:
+            self._hand = len(self._queue) - 1
+        elif self._hand >= 0:
+            # Existing pointer should keep referring to the same logical victim
+            # candidate after a head insertion.
+            self._hand += 1
+
+    def _prev_index_locked(self, idx: int) -> int:
+        if not self._queue:
+            return 0
+        if idx <= 0:
+            return len(self._queue) - 1
+        return idx - 1
+
+    def _evict_one_locked(self) -> None:
+        if not self._queue:
+            return
+        if self._hand is None or self._hand >= len(self._queue):
+            self._hand = len(self._queue) - 1
+        while self._queue:
+            victim = self._queue[self._hand]
+            if self._visited.get(victim, False):
+                self._visited[victim] = False
+                self._hand = self._prev_index_locked(self._hand)
+                continue
+            self._queue.pop(self._hand)
+            self._present.pop(victim, None)
+            self._visited.pop(victim, None)
+            if self._queue:
+                if self._hand >= len(self._queue):
+                    self._hand = len(self._queue) - 1
+            else:
+                self._hand = None
+            return
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            if self._present.get(expert_id, False):
+                hits += 1
+                self._visited[expert_id] = True
+                continue
+            misses += 1
+            if self.capacity <= 0:
+                continue
+            if len(self._queue) >= self.capacity:
+                self._evict_one_locked()
+            self._append_new_head_locked(expert_id)
+        return hits, misses
+
+
+class S3FIFOPolicy(ResidencyPolicy):
+    """Count-based adaptation of libCacheSim's S3-FIFO."""
+
+    policy_name = "s3fifo"
+
+    def __init__(
+        self,
+        num_experts: int,
+        capacity: int,
+        small_ratio: float = 0.1,
+        ghost_ratio: float = 1.0,
+        move_to_main_threshold: int = 2,
+        main_freq_cap: int = 3,
+    ):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        if self.capacity <= 1:
+            self.small_capacity = self.capacity
+            self.main_capacity = 0
+        else:
+            self.small_capacity = max(1, min(self.capacity - 1, int(round(self.capacity * small_ratio))))
+            self.main_capacity = self.capacity - self.small_capacity
+        self.ghost_capacity = max(1, int(max(self.capacity, 1) * ghost_ratio))
+        self.move_to_main_threshold = max(1, int(move_to_main_threshold))
+        self.main_freq_cap = max(1, int(main_freq_cap))
+        self._small: Deque[int] = deque()
+        self._main: Deque[int] = deque()
+        self._resident_queue: Dict[int, str] = {}
+        self._ghost: "OrderedDict[int, None]" = OrderedDict()
+        self._freq: Dict[int, int] = {}
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._small) + list(self._main)
+
+    def _remember_ghost_locked(self, expert_id: int) -> None:
+        self._ghost.pop(expert_id, None)
+        self._ghost[expert_id] = None
+        while len(self._ghost) > self.ghost_capacity:
+            self._ghost.popitem(last=False)
+
+    def _insert_main_locked(self, expert_id: int, freq: int) -> None:
+        if self.main_capacity <= 0:
+            return
+        self._main.append(expert_id)
+        self._resident_queue[expert_id] = "main"
+        self._freq[expert_id] = min(self.main_freq_cap, max(0, int(freq)))
+
+    def _insert_small_locked(self, expert_id: int) -> None:
+        if self.small_capacity <= 0:
+            self._insert_main_locked(expert_id, 0)
+            return
+        self._small.append(expert_id)
+        self._resident_queue[expert_id] = "small"
+        self._freq[expert_id] = 0
+
+    def _evict_from_main_locked(self) -> bool:
+        while self._main:
+            victim = self._main.popleft()
+            freq = self._freq.get(victim, 0)
+            if freq >= 1:
+                self._freq[victim] = freq - 1
+                self._main.append(victim)
+                continue
+            self._resident_queue.pop(victim, None)
+            self._freq.pop(victim, None)
+            return True
+        return False
+
+    def _evict_from_small_locked(self) -> bool:
+        while self._small:
+            victim = self._small.popleft()
+            freq = self._freq.get(victim, 0)
+            self._resident_queue.pop(victim, None)
+            self._freq.pop(victim, None)
+            if freq >= self.move_to_main_threshold and self.main_capacity > 0:
+                self._insert_main_locked(victim, freq)
+                return self._ensure_capacity_locked()
+            self._remember_ghost_locked(victim)
+            return True
+        return False
+
+    def _ensure_capacity_locked(self) -> bool:
+        progress = True
+        while progress:
+            progress = False
+            if len(self._small) > self.small_capacity:
+                progress = self._evict_from_small_locked()
+                continue
+            if len(self._main) > self.main_capacity:
+                progress = self._evict_from_main_locked()
+                continue
+            if len(self._small) + len(self._main) > self.capacity:
+                if self._small:
+                    progress = self._evict_from_small_locked()
+                else:
+                    progress = self._evict_from_main_locked()
+        return len(self._small) <= self.small_capacity and len(self._main) <= self.main_capacity and (
+            len(self._small) + len(self._main) <= self.capacity
+        )
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            location = self._resident_queue.get(expert_id)
+            if location is not None:
+                hits += 1
+                self._freq[expert_id] = min(self.main_freq_cap, self._freq.get(expert_id, 0) + 1)
+                continue
+            misses += 1
+            if self.capacity <= 0:
+                continue
+            if expert_id in self._ghost:
+                self._ghost.pop(expert_id, None)
+                self._insert_main_locked(expert_id, self.move_to_main_threshold)
+            else:
+                self._insert_small_locked(expert_id)
+            self._ensure_capacity_locked()
+        return hits, misses
+
+
+class WTinyLFUPolicy(ResidencyPolicy):
+    """A small-cache W-TinyLFU variant aligned with Caffeine's queue structure."""
+
+    policy_name = "w_tinylfu"
+
+    def __init__(
+        self,
+        num_experts: int,
+        capacity: int,
+        window_ratio: float = 0.1,
+        protected_ratio: float = 0.8,
+        decay_interval: int = 1000,
+    ):
+        super().__init__(num_experts=num_experts, capacity=capacity)
+        if self.capacity <= 1:
+            self.window_capacity = self.capacity
+            self.main_capacity = 0
+        else:
+            self.window_capacity = max(1, min(self.capacity - 1, int(round(self.capacity * window_ratio))))
+            self.main_capacity = self.capacity - self.window_capacity
+        self.protected_capacity = max(0, min(self.main_capacity, int(self.main_capacity * protected_ratio)))
+        self.decay_interval = max(1, int(decay_interval))
+        self._window: "OrderedDict[int, None]" = OrderedDict()
+        self._probationary: "OrderedDict[int, None]" = OrderedDict()
+        self._protected: "OrderedDict[int, None]" = OrderedDict()
+        self._freq: Dict[int, int] = {}
+        self._total_accesses = 0
+
+    def _resident_order_locked(self) -> List[int]:
+        return list(self._window.keys()) + list(self._probationary.keys()) + list(self._protected.keys())
+
+    def _increment_freq_locked(self, expert_id: int) -> None:
+        self._total_accesses += 1
+        self._freq[expert_id] = self._freq.get(expert_id, 0) + 1
+        if self._total_accesses % self.decay_interval == 0:
+            for key in list(self._freq.keys()):
+                decayed = self._freq[key] // 2
+                if decayed <= 0:
+                    self._freq.pop(key, None)
+                else:
+                    self._freq[key] = decayed
+
+    def _ensure_main_limits_locked(self) -> None:
+        while len(self._protected) > self.protected_capacity and self.protected_capacity >= 0:
+            demoted, _ = self._protected.popitem(last=False)
+            self._probationary[demoted] = None
+
+    def _admit_candidate_locked(self, candidate: int) -> None:
+        if self.main_capacity <= 0:
+            return
+        self._probationary[candidate] = None
+        if len(self._window) + len(self._probationary) + len(self._protected) <= self.capacity:
+            return
+
+        victim = next(iter(self._probationary))
+        candidate_freq = self._freq.get(candidate, 0)
+        victim_freq = self._freq.get(victim, 0)
+        if candidate_freq >= victim_freq:
+            self._probationary.pop(victim, None)
+        else:
+            self._probationary.pop(candidate, None)
+
+    def _record_accesses_locked(self, expert_ids: Sequence[int]) -> Tuple[int, int]:
+        hits = 0
+        misses = 0
+        for expert_id in expert_ids:
+            self._increment_freq_locked(expert_id)
+
+            if expert_id in self._window:
+                hits += 1
+                self._window.move_to_end(expert_id)
+                continue
+            if expert_id in self._protected:
+                hits += 1
+                self._protected.move_to_end(expert_id)
+                continue
+            if expert_id in self._probationary:
+                hits += 1
+                self._probationary.pop(expert_id, None)
+                self._protected[expert_id] = None
+                self._ensure_main_limits_locked()
+                continue
+
+            misses += 1
+            if self.capacity <= 0:
+                continue
+
+            self._window[expert_id] = None
+            self._window.move_to_end(expert_id)
+            if len(self._window) > self.window_capacity:
+                candidate, _ = self._window.popitem(last=False)
+                self._admit_candidate_locked(candidate)
+        return hits, misses
+
+
+def create_residency_policy(
+    policy_name: Optional[str],
+    *,
+    num_experts: int,
+    capacity: int,
+    config: Optional[Dict[str, Any]] = None,
+) -> ResidencyPolicy:
+    config = dict(config or {})
+    normalized = normalize_residency_policy_name(policy_name)
+    if normalized == "baseline":
+        return BaselineHotsetPolicy(
+            num_experts=num_experts,
+            capacity=capacity,
+            ema_alpha=float(config.get("ema_alpha", 0.01)),
+        )
+    if normalized == "lru":
+        return LRUPolicy(num_experts=num_experts, capacity=capacity)
+    if normalized == "2q":
+        return TwoQPolicy(
+            num_experts=num_experts,
+            capacity=capacity,
+            a1_ratio=float(config.get("2q_a1_ratio", config.get("twoq_a1_ratio", 0.25))),
+        )
+    if normalized == "slru":
+        return SLRUPolicy(
+            num_experts=num_experts,
+            capacity=capacity,
+            protected_ratio=float(config.get("slru_protected_ratio", 0.8)),
+        )
+    if normalized == "sieve":
+        return SIEVEPolicy(num_experts=num_experts, capacity=capacity)
+    if normalized == "s3fifo":
+        return S3FIFOPolicy(
+            num_experts=num_experts,
+            capacity=capacity,
+            small_ratio=float(config.get("s3fifo_small_ratio", 0.1)),
+            ghost_ratio=float(config.get("s3fifo_ghost_ratio", 1.0)),
+            move_to_main_threshold=int(config.get("s3fifo_move_to_main_threshold", 2)),
+            main_freq_cap=int(config.get("s3fifo_main_freq_cap", 3)),
+        )
+    if normalized == "w_tinylfu":
+        return WTinyLFUPolicy(
+            num_experts=num_experts,
+            capacity=capacity,
+            window_ratio=float(config.get("wtinylfu_window_ratio", 0.1)),
+            protected_ratio=float(config.get("wtinylfu_protected_ratio", 0.8)),
+            decay_interval=int(config.get("wtinylfu_decay_interval", 1000)),
+        )
+    raise ValueError(f"Unhandled residency policy {policy_name!r}")
+
+
 class TieredWeightProvider:
     """
     Three-tier weight manager for MoE experts.
@@ -532,11 +1165,29 @@ class TieredWeightProvider:
         num_layers: int,
         max_tier0_experts: int = 30,
         promotion_interval_sec: float = 5.0,
+        residency_policy: Optional[str] = None,
+        policy_config: Optional[Dict[str, Any]] = None,
     ):
         self.num_experts = num_experts
         self.num_layers = num_layers
         self.max_tier0_experts = max_tier0_experts
+        env_policy = os.environ.get("KT_RESIDENCY_POLICY")
+        self.residency_policy_name = normalize_residency_policy_name(env_policy or residency_policy)
+        self.policy_config = dict(policy_config or load_residency_policy_config(os.environ.get("KT_RESIDENCY_POLICY_CONFIG")))
+        env_interval = os.environ.get("KT_PROMOTION_INTERVAL_SEC")
+        if env_interval is not None:
+            try:
+                promotion_interval_sec = float(env_interval)
+            except ValueError:
+                print(
+                    f"[TieredWeightProvider] ignoring invalid KT_PROMOTION_INTERVAL_SEC={env_interval!r}; "
+                    f"using default {promotion_interval_sec}"
+                )
         self.promotion_interval_sec = promotion_interval_sec
+        self.trace_enabled = os.environ.get("KT_PROVIDER_TRACE") == "1"
+        self.trace_hot_k = int(os.environ.get("KT_PROVIDER_TRACE_HOT_K", "16"))
+        self.trace_path = os.environ.get("KT_RESIDENCY_TRACE_PATH")
+        self._trace_lock = threading.Lock()
 
         # Per-layer mmap regions: layer_idx → proj_name → list[expert_id] → list[MmapWeightRegion]
         self.mmap_regions: Dict[int, Dict[str, List[List[MmapWeightRegion]]]] = {}
@@ -545,9 +1196,9 @@ class TieredWeightProvider:
         self.moe_refs: Dict[int, object] = {}
         self.layer_gpu_expert_masks: Dict[int, np.ndarray] = {}
 
-        # Hotness tracker (global across layers — experts that are hot in one layer
-        # tend to be hot in others due to token routing)
-        self.hotness = ExpertHotnessTracker(num_experts)
+        # Each layer gets its own policy instance so one layer's routing pattern
+        # does not bias another layer's pinned set.
+        self.policy_by_layer: Dict[int, ResidencyPolicy] = {}
 
         # Background promotion thread
         self._running = False
@@ -570,6 +1221,15 @@ class TieredWeightProvider:
                     f"gpu_experts_mask for layer {layer_idx} has size {mask.size}, expected {self.num_experts}"
                 )
             self.layer_gpu_expert_masks[layer_idx] = mask.copy()
+        self.policy_by_layer.setdefault(
+            layer_idx,
+            create_residency_policy(
+                self.residency_policy_name,
+                num_experts=self.num_experts,
+                capacity=self.max_tier0_experts,
+                config=self.policy_config,
+            ),
+        )
 
         # Lazy start: only launch promotion thread once at least one MOE is registered.
         # This avoids running the thread when no backends support promote/demote (e.g., AMX).
@@ -581,9 +1241,20 @@ class TieredWeightProvider:
         self.moe_refs.pop(layer_idx, None)
         self.layer_gpu_expert_masks.pop(layer_idx, None)
         self.mmap_regions.pop(layer_idx, None)
+        self.policy_by_layer.pop(layer_idx, None)
         if not self.moe_refs:
             self.stop_promotion_thread()
-            self.hotness.counts.fill(0.0)
+
+    def _get_policy(self, layer_idx: int) -> ResidencyPolicy:
+        return self.policy_by_layer.setdefault(
+            layer_idx,
+            create_residency_policy(
+                self.residency_policy_name,
+                num_experts=self.num_experts,
+                capacity=self.max_tier0_experts,
+                config=self.policy_config,
+            ),
+        )
 
     def clear_layer_regions(self, layer_idx: int):
         """Drop mmap-region metadata for a layer before re-registering fresh slices."""
@@ -615,11 +1286,22 @@ class TieredWeightProvider:
         return bool(gpu_mask[expert_id])
 
     def record_activations(self, layer_idx: int, topk_ids: np.ndarray):
-        """Record expert activations for hotness tracking."""
+        """Record expert activations into the layer's residency policy."""
         if self.max_tier0_experts <= 0:
             return
         flat = self._filter_cpu_expert_ids(layer_idx, topk_ids.flatten())
-        self.hotness.record(flat)
+        event = self._get_policy(layer_idx).record_accesses(flat.tolist())
+        if self.trace_path:
+            self._append_trace(
+                {
+                    "ts": time.time(),
+                    "layer_idx": int(layer_idx),
+                    "policy": self.residency_policy_name,
+                    "capacity": int(self.max_tier0_experts),
+                    "num_experts": int(self.num_experts),
+                    **event,
+                }
+            )
 
     def prefetch_layer(self, layer_idx: int, topk_ids: np.ndarray):
         """
@@ -667,9 +1349,18 @@ class TieredWeightProvider:
             time.sleep(self.promotion_interval_sec)
             try:
                 self._maybe_promote()
-                self.hotness.decay()
             except Exception as e:
                 print(f"[TieredWeightProvider] promotion error: {e}")
+
+    def _append_trace(self, payload: Dict[str, Any]) -> None:
+        trace_path = self.trace_path
+        if not trace_path:
+            return
+        path = Path(trace_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._trace_lock:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _maybe_promote(self):
         """
@@ -681,21 +1372,36 @@ class TieredWeightProvider:
         """
         if self.max_tier0_experts <= 0 or not self.moe_refs:
             return
-        hot_ids = set(self.hotness.get_top_k(self.max_tier0_experts))
-
         for layer_idx, moe in list(self.moe_refs.items()):
+            hot_ids = set(self._get_policy(layer_idx).resident_ids())
+            promoted = []
+            demoted = []
             # Promote hot experts not yet in Tier 0
             for eid in hot_ids:
                 if self._is_gpu_expert(layer_idx, eid):
                     continue
                 if not moe.is_expert_promoted(eid):
                     moe.promote_expert(eid)
+                    promoted.append(int(eid))
 
             # Demote cold experts back to baseline (mmap or legacy)
             for eid in range(self.num_experts):
                 if self._is_gpu_expert(layer_idx, eid):
                     if moe.is_expert_promoted(eid):
                         moe.demote_expert(eid)
+                        demoted.append(int(eid))
                     continue
                 if eid not in hot_ids and moe.is_expert_promoted(eid):
                     moe.demote_expert(eid)
+                    demoted.append(int(eid))
+
+            if self.trace_enabled:
+                hot_preview = sorted(int(x) for x in hot_ids)[: self.trace_hot_k]
+                if promoted or demoted or hot_preview:
+                    print(
+                        "[TieredWeightProviderTrace] "
+                        f"layer={layer_idx} policy={self.residency_policy_name} hot_count={len(hot_ids)} "
+                        f"hot_preview={hot_preview} "
+                        f"promote_count={len(promoted)} promote={promoted[:self.trace_hot_k]} "
+                        f"demote_count={len(demoted)} demote={demoted[:self.trace_hot_k]}"
+                    )

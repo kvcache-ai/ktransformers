@@ -16,6 +16,7 @@ SPEC.loader.exec_module(weight_provider)
 
 TieredWeightProvider = weight_provider.TieredWeightProvider
 backend_supports_tiered_strategy = weight_provider.backend_supports_tiered_strategy
+create_residency_policy = weight_provider.create_residency_policy
 resolve_backend_weight_strategy = weight_provider.resolve_backend_weight_strategy
 resolve_weight_strategy = weight_provider.resolve_weight_strategy
 compute_max_tier0_experts = weight_provider.compute_max_tier0_experts
@@ -24,6 +25,7 @@ get_cgroup_memory_limit_current_bytes = weight_provider.get_cgroup_memory_limit_
 get_available_ram_bytes = weight_provider.get_available_ram_bytes
 get_total_ram_bytes = weight_provider.get_total_ram_bytes
 constrain_tier0_memory_bytes = weight_provider.constrain_tier0_memory_bytes
+normalize_residency_policy_name = weight_provider.normalize_residency_policy_name
 
 
 class DummyMoe:
@@ -209,7 +211,12 @@ def test_explicit_tier0_budget_is_clamped_to_effective_scope():
 
 def test_provider_skips_gpu_experts_for_prefetch_and_promotion():
     """GPU-routed experts must not consume Tier0 promotion or mmap prefetch budget."""
-    provider = TieredWeightProvider(num_experts=4, num_layers=2, max_tier0_experts=2)
+    provider = TieredWeightProvider(
+        num_experts=4,
+        num_layers=2,
+        max_tier0_experts=2,
+        residency_policy="baseline",
+    )
     provider.start_promotion_thread = lambda: None
 
     moe0 = DummyMoe()
@@ -230,11 +237,16 @@ def test_provider_skips_gpu_experts_for_prefetch_and_promotion():
     assert regions[3].prefetch_calls == 0
 
     provider.record_activations(0, np.array([[1, 2, 2, 3]], dtype=np.int64))
-    assert provider.hotness.counts[1] == 0.0
-    assert provider.hotness.counts[2] > 0.0
-    assert provider.hotness.counts[3] > 0.0
+    policy0 = provider.policy_by_layer[0]
+    assert policy0.counts[1] == 0.0
+    assert policy0.counts[2] > 0.0
+    assert policy0.counts[3] > 0.0
 
-    provider.hotness.counts[:] = np.array([0.9, 0.8, 0.7, 0.1], dtype=np.float64)
+    policy1 = provider.policy_by_layer[1]
+    policy0.counts[:] = np.array([0.9, 0.8, 0.7, 0.1], dtype=np.float64)
+    policy0._resident = [0, 1]
+    policy1.counts[:] = np.array([0.9, 0.8, 0.1, 0.0], dtype=np.float64)
+    policy1._resident = [0, 1]
     provider._maybe_promote()
 
     assert moe0.promote_calls == [0]
@@ -275,9 +287,184 @@ def test_zero_tier0_budget_disables_background_promotion():
 
     moe = DummyMoe()
     provider.register_moe(0, moe, gpu_experts_mask=np.zeros(4, dtype=np.bool_))
-    provider.hotness.counts[:] = np.array([0.9, 0.8, 0.7, 0.6], dtype=np.float64)
     provider._maybe_promote()
 
     assert start_calls == []
     assert moe.promote_calls == []
     assert moe.demote_calls == []
+
+
+def test_policy_factory_supports_all_configured_algorithms():
+    expected = {
+        "baseline": "baseline",
+        "default": "baseline",
+        "current_ema": "baseline",
+        "current": "baseline",
+        "ema": "baseline",
+        "ema_hotset": "baseline",
+        "lru": "lru",
+        "2q": "2q",
+        "twoq": "2q",
+        "two-q": "2q",
+        "slru": "slru",
+        "sieve": "sieve",
+        "s3fifo": "s3fifo",
+        "s3-fifo": "s3fifo",
+        "w_tinylfu": "w_tinylfu",
+        "wtinylfu": "w_tinylfu",
+        "w-tinylfu": "w_tinylfu",
+    }
+
+    for raw_name, normalized in expected.items():
+        assert normalize_residency_policy_name(raw_name) == normalized
+        policy = create_residency_policy(raw_name, num_experts=8, capacity=3)
+        assert policy.policy_name == normalized
+
+
+def test_lru_policy_evicts_oldest_resident():
+    policy = create_residency_policy("lru", num_experts=8, capacity=2)
+    policy.record_accesses([0, 1])
+    policy.record_accesses([0])
+    policy.record_accesses([2])
+    snapshot = policy.snapshot()
+
+    assert snapshot["resident"] == [0, 2]
+    assert snapshot["stats"]["hits"] == 1
+    assert snapshot["stats"]["misses"] == 3
+
+
+def test_2q_policy_promotes_second_hit_into_am_queue():
+    policy = create_residency_policy("2q", num_experts=8, capacity=4, config={"2q_a1_ratio": 0.5})
+    policy.record_accesses([0, 1, 0])
+    snapshot = policy.snapshot()
+
+    assert list(policy._a1.keys()) == [1]
+    assert list(policy._am.keys()) == [0]
+    assert snapshot["resident"] == [1, 0]
+    assert snapshot["stats"]["hits"] == 1
+
+
+def test_2q_policy_evicts_a1_before_am():
+    policy = create_residency_policy("2q", num_experts=8, capacity=3, config={"2q_a1_ratio": 1 / 3})
+    policy.record_accesses([0, 0, 1, 2, 3])
+    snapshot = policy.snapshot()
+
+    assert list(policy._a1.keys()) == [3]
+    assert list(policy._am.keys()) == [0]
+    assert 0 in snapshot["resident"]
+    assert 3 in snapshot["resident"]
+    assert 1 not in snapshot["resident"]
+
+
+def test_slru_policy_promotes_second_hit_into_protected_segment():
+    policy = create_residency_policy("slru", num_experts=8, capacity=4, config={"slru_protected_ratio": 0.5})
+    policy.record_accesses([0, 1, 0])
+    snapshot = policy.snapshot()
+
+    assert 0 in snapshot["resident"]
+    assert 1 in snapshot["resident"]
+    assert snapshot["stats"]["hits"] == 1
+
+
+def test_slru_protected_overflow_demotes_oldest_protected_entry():
+    policy = create_residency_policy("slru", num_experts=8, capacity=3, config={"slru_protected_ratio": 2 / 3})
+    policy.record_accesses([0, 0, 1, 1])
+    policy.record_accesses([2, 2])
+    snapshot = policy.snapshot()
+
+    assert list(policy._protected.keys()) == [1, 2]
+    assert list(policy._probationary.keys()) == [0]
+    assert snapshot["resident"] == [0, 1, 2]
+
+
+def test_sieve_policy_gives_referenced_items_a_second_chance():
+    policy = create_residency_policy("sieve", num_experts=8, capacity=2)
+    policy.record_accesses([0, 1, 0, 2])
+    snapshot = policy.snapshot()
+
+    assert 0 in snapshot["resident"]
+    assert 2 in snapshot["resident"]
+    assert 1 not in snapshot["resident"]
+
+
+def test_sieve_policy_inserts_new_entries_at_head_like_reference_impl():
+    policy = create_residency_policy("sieve", num_experts=8, capacity=3)
+    policy.record_accesses([0, 1, 2])
+    snapshot = policy.snapshot()
+
+    # libCacheSim's Sieve prepends new objects to the queue head.
+    assert snapshot["resident"] == [2, 1, 0]
+
+
+def test_s3fifo_uses_ghost_references_to_bypass_small_queue():
+    policy = create_residency_policy(
+        "s3fifo",
+        num_experts=8,
+        capacity=2,
+        config={"s3fifo_small_ratio": 0.5, "s3fifo_ghost_ratio": 1.0, "s3fifo_move_to_main_threshold": 1},
+    )
+    policy.record_accesses([0, 1, 2, 0])
+
+    assert policy._resident_queue.get(0) == "main"
+    assert 0 in policy.snapshot()["resident"]
+
+
+def test_s3fifo_main_queue_entry_gets_second_chance_before_eviction():
+    policy = create_residency_policy(
+        "s3fifo",
+        num_experts=8,
+        capacity=2,
+        config={"s3fifo_small_ratio": 0.5, "s3fifo_ghost_ratio": 1.0, "s3fifo_move_to_main_threshold": 1},
+    )
+    policy.record_accesses([0, 0, 1, 2, 1])
+    snapshot = policy.snapshot()
+
+    assert policy._resident_queue.get(1) == "main"
+    assert 1 in snapshot["resident"]
+    assert 0 not in snapshot["resident"]
+
+
+def test_w_tinylfu_prefers_frequent_candidate_over_probationary_victim():
+    policy = create_residency_policy(
+        "w_tinylfu",
+        num_experts=8,
+        capacity=2,
+        config={"wtinylfu_window_ratio": 0.5, "wtinylfu_protected_ratio": 0.5, "wtinylfu_decay_interval": 100},
+    )
+    policy.record_accesses([0, 1, 1, 2])
+    snapshot = policy.snapshot()
+
+    assert 1 in snapshot["resident"]
+    assert 0 not in snapshot["resident"]
+
+
+def test_w_tinylfu_promotes_probation_hit_and_demotes_oldest_protected():
+    policy = create_residency_policy(
+        "w_tinylfu",
+        num_experts=8,
+        capacity=3,
+        config={"wtinylfu_window_ratio": 1 / 3, "wtinylfu_protected_ratio": 0.5, "wtinylfu_decay_interval": 100},
+    )
+    policy.record_accesses([0, 1, 0, 2, 1])
+    snapshot = policy.snapshot()
+
+    assert list(policy._window.keys()) == [2]
+    assert list(policy._probationary.keys()) == [0]
+    assert list(policy._protected.keys()) == [1]
+    assert snapshot["resident"] == [2, 0, 1]
+
+
+def test_provider_respects_residency_policy_env_override():
+    original = os.environ.get("KT_RESIDENCY_POLICY")
+    try:
+        os.environ["KT_RESIDENCY_POLICY"] = "sieve"
+        provider = TieredWeightProvider(num_experts=8, num_layers=1, max_tier0_experts=2, residency_policy="lru")
+        provider.start_promotion_thread = lambda: None
+        provider.register_moe(0, DummyMoe(), gpu_experts_mask=np.zeros(8, dtype=np.bool_))
+        assert provider.residency_policy_name == "sieve"
+        assert provider.policy_by_layer[0].policy_name == "sieve"
+    finally:
+        if original is None:
+            os.environ.pop("KT_RESIDENCY_POLICY", None)
+        else:
+            os.environ["KT_RESIDENCY_POLICY"] = original
