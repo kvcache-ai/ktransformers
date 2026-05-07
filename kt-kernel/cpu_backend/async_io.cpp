@@ -86,10 +86,13 @@ int AsyncExpertReader::wait_one_completion() {
     inflight_requests_.erase(it);
 
     if (result < 0) {
+        failed_requests_.insert(user_data);
         // Read error
         return -1;
     }
 
+    completed_experts_.insert(expert_id);
+    completed_requests_.insert(user_data);
     return expert_id;
 #else
     return -1;
@@ -113,12 +116,16 @@ std::vector<int> AsyncExpertReader::poll_completions() {
 
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = inflight_requests_.find(user_data);
-        if (it != inflight_requests_.end()) {
-            if (result >= 0) {
-                completed.push_back(it->second);
-            }
-            inflight_requests_.erase(it);
-        }
+    if (it != inflight_requests_.end()) {
+      if (result >= 0) {
+        completed.push_back(it->second);
+        completed_experts_.insert(it->second);
+        completed_requests_.insert(user_data);
+      } else {
+        failed_requests_.insert(user_data);
+      }
+      inflight_requests_.erase(it);
+    }
     }
 #endif
 
@@ -173,15 +180,101 @@ bool AsyncExpertReader::wait_for_expert(int expert_id, int timeout_ms) {
         if (it != inflight_requests_.end()) {
             int completed_id = it->second;
             inflight_requests_.erase(it);
-            completed_experts_.insert(completed_id);
 
-            if (result >= 0 && completed_id == expert_id) {
-                return true;  // Target expert completed
+            if (result >= 0) {
+                completed_experts_.insert(completed_id);
+                completed_requests_.insert(user_data);
+                if (completed_id == expert_id) {
+                    return true;  // Target expert completed
+                }
+            } else {
+                failed_requests_.insert(user_data);
+                if (completed_id == expert_id) {
+                    return false;
+                }
             }
         }
     }
 #else
     (void)expert_id;
+    (void)timeout_ms;
+    return false;
+#endif
+}
+
+bool AsyncExpertReader::wait_for_request(uint64_t request_id, int timeout_ms) {
+#ifdef HAVE_LIBURING
+    auto start = std::chrono::steady_clock::now();
+
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (completed_requests_.count(request_id) > 0) {
+                return true;
+            }
+            if (failed_requests_.count(request_id) > 0) {
+                return false;
+            }
+            if (inflight_requests_.count(request_id) == 0) {
+                return false;
+            }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        if (elapsed >= timeout_ms) {
+            return false;
+        }
+
+        int remaining_ms = timeout_ms - static_cast<int>(elapsed);
+        struct io_uring_cqe* cqe = nullptr;
+        int ret = wait_cqe_internal(&cqe, remaining_ms);
+        if (ret < 0) {
+            continue;
+        }
+
+        uint64_t user_data = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqe));
+        int result = cqe->res;
+        io_uring_cqe_seen(&ring_, cqe);
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = inflight_requests_.find(user_data);
+        if (it == inflight_requests_.end()) {
+            continue;
+        }
+        int completed_id = it->second;
+        inflight_requests_.erase(it);
+        if (result >= 0) {
+            completed_experts_.insert(completed_id);
+            completed_requests_.insert(user_data);
+        } else {
+            failed_requests_.insert(user_data);
+        }
+    }
+#else
+    (void)request_id;
+    (void)timeout_ms;
+    return false;
+#endif
+}
+
+bool AsyncExpertReader::wait_for_requests(const std::vector<uint64_t>& request_ids, int timeout_ms) {
+#ifdef HAVE_LIBURING
+    auto start = std::chrono::steady_clock::now();
+    for (uint64_t request_id : request_ids) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+        if (elapsed >= timeout_ms) {
+            return false;
+        }
+        int remaining_ms = timeout_ms - static_cast<int>(elapsed);
+        if (!wait_for_request(request_id, remaining_ms)) {
+            return false;
+        }
+    }
+    return true;
+#else
+    (void)request_ids;
     (void)timeout_ms;
     return false;
 #endif

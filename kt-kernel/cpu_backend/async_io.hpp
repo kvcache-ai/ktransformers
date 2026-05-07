@@ -11,10 +11,10 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
-#include <mutex>
+#include <vector>
 
 #ifdef HAVE_LIBURING
 #include <liburing.h>
@@ -86,6 +86,22 @@ public:
     bool wait_for_expert(int expert_id, int timeout_ms = 5000);
 
     /**
+     * @brief Wait for a specific request to complete (blocking with timeout)
+     * @param request_id Request ID returned by submit_read
+     * @param timeout_ms Timeout in milliseconds (default 5000)
+     * @return true if completed successfully, false if timeout or error
+     */
+    bool wait_for_request(uint64_t request_id, int timeout_ms = 5000);
+
+    /**
+     * @brief Wait for all requests in a batch to complete
+     * @param request_ids Request IDs returned by submit_read
+     * @param timeout_ms Timeout in milliseconds for the whole batch
+     * @return true if all completed successfully, false if any timeout or error
+     */
+    bool wait_for_requests(const std::vector<uint64_t>& request_ids, int timeout_ms = 5000);
+
+    /**
      * @brief Submit multiple read requests in batch
      * @param requests Vector of read requests
      */
@@ -105,6 +121,8 @@ private:
     // Track in-flight requests: user_data -> expert_id
     std::unordered_map<uint64_t, int> inflight_requests_;
     std::unordered_set<int> completed_experts_;  // Track completed expert IDs
+    std::unordered_set<uint64_t> completed_requests_;
+    std::unordered_set<uint64_t> failed_requests_;
     mutable std::mutex mutex_;
 
     // Helper: wait for completion events

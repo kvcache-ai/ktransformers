@@ -11,6 +11,7 @@
 #include <sys/types.h>
 
 #include <cstddef>
+#include <tuple>
 
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
@@ -588,6 +589,45 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("up_type", &GeneralMOEConfig::up_type)
       .def_readwrite("down_type", &GeneralMOEConfig::down_type)
       .def_readwrite("hidden_type", &GeneralMOEConfig::hidden_type)
+#ifdef HAVE_LIBURING
+      .def("set_io_backend", [](GeneralMOEConfig& self, int backend) {
+        self.io_backend = backend == static_cast<int>(IOBackend::IOURING) ? IOBackend::IOURING : IOBackend::MMAP;
+      })
+      .def("set_iouring_file_slots",
+           [](GeneralMOEConfig& self,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& gate,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& gate_scale,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& up,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& up_scale,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& down,
+              const std::vector<std::vector<std::tuple<int, long long, size_t>>>& down_scale,
+              ktransformers::AsyncExpertReader& reader) {
+             auto convert = [](const std::vector<std::vector<std::tuple<int, long long, size_t>>>& src) {
+               std::vector<std::vector<ExpertFileSlot>> dst;
+               dst.reserve(src.size());
+               for (const auto& row : src) {
+                 auto& out_row = dst.emplace_back();
+                 out_row.reserve(row.size());
+                 for (const auto& item : row) {
+                   ExpertFileSlot slot;
+                   slot.fd = std::get<0>(item);
+                   slot.offset = static_cast<off_t>(std::get<1>(item));
+                   slot.size = std::get<2>(item);
+                   out_row.push_back(slot);
+                 }
+               }
+               return dst;
+             };
+             self.io_backend = IOBackend::IOURING;
+             self.gate_file_slots = convert(gate);
+             self.gate_scale_file_slots = convert(gate_scale);
+             self.up_file_slots = convert(up);
+             self.up_scale_file_slots = convert(up_scale);
+             self.down_file_slots = convert(down);
+             self.down_scale_file_slots = convert(down_scale);
+             self.async_reader = &reader;
+           })
+#endif
 
       ;
 
@@ -780,11 +820,15 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
            "Create AsyncExpertReader with specified queue depth and worker threads")
       .def("submit_read",
            [](ktransformers::AsyncExpertReader& reader, int fd, intptr_t buffer, size_t size, off_t offset,
-              int expert_id) { reader.submit_read(fd, reinterpret_cast<void*>(buffer), size, offset, expert_id); },
+              int expert_id) { return reader.submit_read(fd, reinterpret_cast<void*>(buffer), size, offset, expert_id); },
            py::arg("fd"), py::arg("buffer"), py::arg("size"), py::arg("offset"), py::arg("expert_id"),
            "Submit an async read request")
       .def("wait_for_expert", &ktransformers::AsyncExpertReader::wait_for_expert, py::arg("expert_id"),
-           py::arg("timeout_ms") = 5000, "Wait for a specific expert to be loaded");
+           py::arg("timeout_ms") = 5000, "Wait for a specific expert to be loaded")
+      .def("wait_for_request", &ktransformers::AsyncExpertReader::wait_for_request, py::arg("request_id"),
+           py::arg("timeout_ms") = 5000, "Wait for a specific request to complete")
+      .def("wait_for_requests", &ktransformers::AsyncExpertReader::wait_for_requests, py::arg("request_ids"),
+           py::arg("timeout_ms") = 5000, "Wait for all listed requests to complete");
 
   // Bind IOBackend enum
   py::enum_<IOBackend>(m, "IOBackend")

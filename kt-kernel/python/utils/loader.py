@@ -127,6 +127,7 @@ class SafeTensorLoader:
         else:
             folder_path = file_path
         self.file_handle_map = {}
+        self.file_fd_map = {}
         self.file_memmap_map = {}
         self.tensor_file_map = {}
         self.tensor_type_map = {}
@@ -175,6 +176,7 @@ class SafeTensorLoader:
                 "dtype": info["dtype"],
                 "shape": tuple(info["shape"]),
                 "offset": data_base_offset + int(info["data_offsets"][0]),
+                "size": int(info["data_offsets"][1]) - int(info["data_offsets"][0]),
             }
 
     def _get_file_memmap(self, file_path: str) -> np.memmap:
@@ -245,6 +247,108 @@ class SafeTensorLoader:
         array.flags.writeable = False
         return array
 
+    def _get_file_fd(self, file_path: str, use_direct_io: bool = True) -> int:
+        fd_key = (file_path, bool(use_direct_io))
+        fd = self.file_fd_map.get(fd_key)
+        if fd is not None:
+            return fd
+
+        flags = os.O_RDONLY
+        if use_direct_io and hasattr(os, "O_DIRECT"):
+            flags |= os.O_DIRECT
+
+        fd = os.open(file_path, flags)
+        self.file_fd_map[fd_key] = fd
+        return fd
+
+    def get_file_slot(self, key: str, use_direct_io: bool = True) -> tuple[int, int, int]:
+        if key not in self.tensor_info_map:
+            raise KeyError(f"Key {key} not found in Safetensor files")
+        info = self.tensor_info_map[key]
+        fd = self._get_file_fd(info["file_path"], use_direct_io=use_direct_io)
+        return fd, int(info["offset"]), int(info["size"])
+
+    def load_experts_iouring(self, base_key: str, use_direct_io: bool = True):
+        """
+        Return file slots for AMX packed expert weights.
+
+        Expected format:
+        - blk.{layer_index}.ffn_[up, down, gate]_exps.{expert_id}.numa.{numa_id}.weight
+        - blk.{layer_index}.ffn_[up, down, gate]_exps.{expert_id}.numa.{numa_id}.scale
+
+        The return shape matches load_experts_mmap():
+        [numa_id][expert_id] -> (fd, offset, size)
+        """
+        up_base_key = f"{base_key}.ffn_up_exps"
+        gate_base_key = f"{base_key}.ffn_gate_exps"
+        down_base_key = f"{base_key}.ffn_down_exps"
+        numa_ids, expert_ids = self._get_dense_moe_layout(base_key)
+
+        tensor_keys = []
+        for numa_id in numa_ids:
+            for expert_id in expert_ids:
+                tensor_keys.extend(
+                    [
+                        f"{up_base_key}.{expert_id}.numa.{numa_id}.weight",
+                        f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight",
+                        f"{down_base_key}.{expert_id}.numa.{numa_id}.weight",
+                        f"{up_base_key}.{expert_id}.numa.{numa_id}.scale",
+                        f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale",
+                        f"{down_base_key}.{expert_id}.numa.{numa_id}.scale",
+                    ]
+                )
+
+        direct_io = use_direct_io
+        if use_direct_io:
+            for key in tensor_keys:
+                info = self.tensor_info_map[key]
+                if int(info["offset"]) % 512 != 0 or int(info["size"]) % 512 != 0:
+                    print(
+                        "[SafeTensorLoader] Disabling O_DIRECT for io_uring because "
+                        f"tensor {key} is not 512-byte aligned "
+                        f"(offset={info['offset']}, size={info['size']})."
+                    )
+                    direct_io = False
+                    break
+
+        up_weights = [[] for _ in numa_ids]
+        gate_weights = [[] for _ in numa_ids]
+        down_weights = [[] for _ in numa_ids]
+        up_scales = [[] for _ in numa_ids]
+        gate_scales = [[] for _ in numa_ids]
+        down_scales = [[] for _ in numa_ids]
+
+        for numa_id in numa_ids:
+            for expert_id in expert_ids:
+                up_weights[numa_id].append(
+                    self.get_file_slot(f"{up_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
+                )
+                gate_weights[numa_id].append(
+                    self.get_file_slot(f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
+                )
+                down_weights[numa_id].append(
+                    self.get_file_slot(f"{down_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
+                )
+                up_scales[numa_id].append(
+                    self.get_file_slot(f"{up_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
+                )
+                gate_scales[numa_id].append(
+                    self.get_file_slot(f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
+                )
+                down_scales[numa_id].append(
+                    self.get_file_slot(f"{down_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
+                )
+
+        return {
+            "up": up_weights,
+            "gate": gate_weights,
+            "down": down_weights,
+            "up_scale": up_scales,
+            "gate_scale": gate_scales,
+            "down_scale": down_scales,
+            "direct_io": direct_io,
+        }
+
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
             raise KeyError(f"Key {key} not found in Safetensor files")
@@ -256,6 +360,9 @@ class SafeTensorLoader:
         return tensor.to(device)
 
     def close_all_handles(self):
+        for fd in self.file_fd_map.values():
+            os.close(fd)
+        self.file_fd_map.clear()
         for handle in self.file_handle_map.values():
             handle.close()
         self.file_handle_map.clear()
@@ -1343,92 +1450,3 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
             "up_scale": up_scales,
             "down_scale": down_scales,
         }
-
-
-def load_experts_iouring(
-    safetensors_path: str, layer_idx: int, expert_ids: list, tensor_names: list = None, use_direct_io: bool = True
-):
-    """
-    Load expert weights as file descriptors and offsets for io_uring.
-
-    Args:
-        safetensors_path: Path to safetensors file
-        layer_idx: Layer index
-        expert_ids: List of expert IDs to load
-        tensor_names: List of tensor names (default: ["gate_proj", "up_proj", "down_proj"])
-        use_direct_io: Whether to use O_DIRECT for direct I/O
-
-    Returns:
-        dict: {
-            "gate_proj": [(fd, offset, size), ...],
-            "up_proj": [(fd, offset, size), ...],
-            "down_proj": [(fd, offset, size), ...],
-            "gate_scale": [(fd, offset, size), ...],
-            "up_scale": [(fd, offset, size), ...],
-            "down_scale": [(fd, offset, size), ...]
-        }
-    """
-    if tensor_names is None:
-        tensor_names = ["gate_proj", "up_proj", "down_proj"]
-
-    # Open file with O_DIRECT if requested
-    flags = os.O_RDONLY
-    if use_direct_io and hasattr(os, "O_DIRECT"):
-        flags |= os.O_DIRECT
-
-    fd = os.open(safetensors_path, flags)
-
-    # Read safetensors header
-    with open(safetensors_path, "rb") as f:
-        header_size_bytes = f.read(8)
-        header_size = int.from_bytes(header_size_bytes, "little")
-        header_json = f.read(header_size).decode("utf-8")
-        header = json.loads(header_json)
-
-    base_offset = 8 + header_size
-
-    # Build file slots for each tensor type
-    file_slots = {name: [] for name in tensor_names}
-    file_slots["gate_scale"] = []
-    file_slots["up_scale"] = []
-    file_slots["down_scale"] = []
-
-    for eid in expert_ids:
-        for tensor_name in tensor_names:
-            # Try different naming patterns
-            key_patterns = [
-                f"model.layers.{layer_idx}.mlp.experts.{eid}.{tensor_name}.weight",
-                f"model.layers.{layer_idx}.block_sparse_moe.experts.{eid}.{tensor_name}.weight",
-                f"model.layers.{layer_idx}.feed_forward.experts.{eid}.{tensor_name}.weight",
-            ]
-
-            tensor_info = None
-            for key in key_patterns:
-                if key in header:
-                    tensor_info = header[key]
-                    break
-
-            if tensor_info is not None:
-                offset = base_offset + tensor_info["data_offsets"][0]
-                size = tensor_info["data_offsets"][1] - tensor_info["data_offsets"][0]
-                file_slots[tensor_name].append((fd, offset, size))
-
-            # Load scale tensor
-            scale_key_patterns = [
-                f"model.layers.{layer_idx}.mlp.experts.{eid}.{tensor_name}.scale",
-                f"model.layers.{layer_idx}.block_sparse_moe.experts.{eid}.{tensor_name}.scale",
-                f"model.layers.{layer_idx}.feed_forward.experts.{eid}.{tensor_name}.scale",
-            ]
-
-            scale_info = None
-            for key in scale_key_patterns:
-                if key in header:
-                    scale_info = header[key]
-                    break
-
-            if scale_info is not None:
-                offset = base_offset + scale_info["data_offsets"][0]
-                size = scale_info["data_offsets"][1] - scale_info["data_offsets"][0]
-                file_slots[f"{tensor_name.replace('_proj', '_scale')}"].append((fd, offset, size))
-
-    return file_slots

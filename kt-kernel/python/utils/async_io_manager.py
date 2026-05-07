@@ -2,7 +2,7 @@
 Global AsyncExpertReader singleton manager for io_uring-based expert loading.
 """
 
-import ktransformers.ktransformers_ext as ext
+import kt_kernel_ext as ext
 
 _global_async_reader = None
 
@@ -25,9 +25,7 @@ def shutdown_async_reader():
     Shutdown the global AsyncExpertReader and release resources.
     """
     global _global_async_reader
-    if _global_async_reader is not None:
-        _global_async_reader.shutdown()
-        _global_async_reader = None
+    _global_async_reader = None
 
 
 def is_async_reader_initialized():

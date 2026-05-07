@@ -188,6 +188,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     this->derived_init();
   }
 
+  bool resident_io_enabled() const { return config_.use_mmap || config_.io_backend == IOBackend::IOURING; }
+
   void set_weight_buffers(void* gate_proj, void* up_proj, void* down_proj) {
     config_.gate_proj = gate_proj;
     config_.up_proj = up_proj;
@@ -197,7 +199,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void derived_init() {
     printf("Creating AMX_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
 #ifndef _WIN32
-    if (config_.use_mmap) {
+    if (resident_io_enabled()) {
       initialize_lazy_mmap_state();
     }
 #endif
@@ -221,7 +223,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
   ~AMX_MOE_TP() {
 #ifndef _WIN32
-    if (config_.use_mmap) {
+    if (resident_io_enabled()) {
       for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
         free_packed_expert(expert_id);
       }
@@ -512,9 +514,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       return false;
     }
 
-    if (baseline_gate_weight_src_[expert_id] == nullptr || baseline_up_weight_src_[expert_id] == nullptr ||
-        baseline_down_weight_src_[expert_id] == nullptr || baseline_gate_scale_src_[expert_id] == nullptr ||
-        baseline_up_scale_src_[expert_id] == nullptr || baseline_down_scale_src_[expert_id] == nullptr) {
+    if (config_.io_backend != IOBackend::IOURING &&
+        (baseline_gate_weight_src_[expert_id] == nullptr || baseline_up_weight_src_[expert_id] == nullptr ||
+         baseline_down_weight_src_[expert_id] == nullptr || baseline_gate_scale_src_[expert_id] == nullptr ||
+         baseline_up_scale_src_[expert_id] == nullptr || baseline_down_scale_src_[expert_id] == nullptr)) {
       numa_free(gate_owner, gate_total_bytes_);
       numa_free(up_owner, up_total_bytes_);
       numa_free(down_owner, down_total_bytes_);
@@ -535,21 +538,50 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       auto& gate_slot = config_.gate_file_slots[tp_part_idx][expert_id];
       auto& up_slot = config_.up_file_slots[tp_part_idx][expert_id];
       auto& down_slot = config_.down_file_slots[tp_part_idx][expert_id];
+      auto& gate_scale_slot = config_.gate_scale_file_slots[tp_part_idx][expert_id];
+      auto& up_scale_slot = config_.up_scale_file_slots[tp_part_idx][expert_id];
+      auto& down_scale_slot = config_.down_scale_file_slots[tp_part_idx][expert_id];
 
-      if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0) {
+      if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0 || gate_scale_slot.fd < 0 ||
+          up_scale_slot.fd < 0 || down_scale_slot.fd < 0) {
         numa_free(gate_owner, gate_total_bytes_);
         numa_free(up_owner, up_total_bytes_);
         numa_free(down_owner, down_total_bytes_);
         return false;
       }
 
-      // Submit async reads for gate, up, down (weights + scales + mins)
-      config_.async_reader->submit_read(gate_slot.fd, gate_owner, gate_slot.size, gate_slot.offset, expert_id);
-      config_.async_reader->submit_read(up_slot.fd, up_owner, up_slot.size, up_slot.offset, expert_id);
-      config_.async_reader->submit_read(down_slot.fd, down_owner, down_slot.size, down_slot.offset, expert_id);
+      std::vector<uint64_t> read_requests;
+      read_requests.reserve(9);
+      auto submit_slot = [&](const ExpertFileSlot& slot, void* dst) {
+        if (slot.fd >= 0 && slot.size > 0) {
+          read_requests.push_back(config_.async_reader->submit_read(slot.fd, dst, slot.size, slot.offset, expert_id));
+        }
+      };
 
-      // Wait for all three reads to complete
-      if (!config_.async_reader->wait_for_expert(expert_id, 5000)) {
+      submit_slot(gate_slot, gate_owner);
+      submit_slot(gate_scale_slot, reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_);
+      submit_slot(up_slot, up_owner);
+      submit_slot(up_scale_slot, reinterpret_cast<char*>(up_owner) + up_weight_bytes_);
+      submit_slot(down_slot, down_owner);
+      submit_slot(down_scale_slot, reinterpret_cast<char*>(down_owner) + down_weight_bytes_);
+
+      if constexpr (requires { gate_bb_[expert_id]->mins; }) {
+        if (!config_.gate_mins_file_slots.empty()) {
+          submit_slot(config_.gate_mins_file_slots[tp_part_idx][expert_id],
+                      reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_ + gate_scale_bytes_);
+        }
+        if (!config_.up_mins_file_slots.empty()) {
+          submit_slot(config_.up_mins_file_slots[tp_part_idx][expert_id],
+                      reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
+        }
+        if (!config_.down_mins_file_slots.empty()) {
+          submit_slot(config_.down_mins_file_slots[tp_part_idx][expert_id],
+                      reinterpret_cast<char*>(down_owner) + down_weight_bytes_ + down_scale_bytes_);
+        }
+      }
+
+      // Wait for every tensor fragment (weight, scale, optional mins) to complete.
+      if (!config_.async_reader->wait_for_requests(read_requests, 5000)) {
         // Timeout or error
         numa_free(gate_owner, gate_total_bytes_);
         numa_free(up_owner, up_total_bytes_);
@@ -732,6 +764,15 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void load_weights() {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+    if (config_.io_backend == IOBackend::IOURING) {
+      if (config_.gate_file_slots.empty() || config_.up_file_slots.empty() || config_.down_file_slots.empty() ||
+          config_.gate_scale_file_slots.empty() || config_.up_scale_file_slots.empty() ||
+          config_.down_scale_file_slots.empty()) {
+        throw std::runtime_error("io_uring backend requires weight and scale file slots");
+      }
+      return;
+    }
+
     if (config_.gate_projs.size()) {
       if (config_.use_mmap) {
         // mmap baseline mode: experts start on file-backed pointers and can be
@@ -903,7 +944,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #ifndef _WIN32
     std::unique_ptr<ExpertReadScope> expert_read_scope;
     std::vector<int> active_experts;
-    if (config_.use_mmap) {
+    if (resident_io_enabled()) {
       active_experts.reserve(qlen * k);
       std::vector<uint8_t> seen(config_.expert_num, 0);
 
@@ -926,7 +967,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
     Base::forward(qlen, k, expert_ids, weights, input, output);
 #ifndef _WIN32
-    if (config_.use_mmap && config_.max_tier0_experts <= 0 && !active_experts.empty()) {
+    if (resident_io_enabled() && config_.max_tier0_experts <= 0 && !active_experts.empty()) {
       expert_read_scope.reset();
       for (int expert_id : active_experts) {
         demote_expert(expert_id);

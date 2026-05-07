@@ -865,6 +865,12 @@ struct GeneralMOEConfig {
   std::vector<std::vector<ExpertFileSlot>> gate_file_slots;
   std::vector<std::vector<ExpertFileSlot>> up_file_slots;
   std::vector<std::vector<ExpertFileSlot>> down_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> gate_scale_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> up_scale_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> down_scale_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> gate_mins_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> up_mins_file_slots;
+  std::vector<std::vector<ExpertFileSlot>> down_mins_file_slots;
 
   // Shared io_uring reader instance (one per process)
   ktransformers::AsyncExpertReader* async_reader = nullptr;

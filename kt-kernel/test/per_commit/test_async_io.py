@@ -107,6 +107,27 @@ def test_async_reader_batch(temp_test_file):
                 os.remove(f)
 
 
+def test_async_reader_waits_for_multiple_requests_same_expert(temp_test_file):
+    """Test waiting for all tensor fragments belonging to one expert."""
+    test_file, test_data = temp_test_file
+    reader = ext.AsyncExpertReader(queue_depth=32)
+    fd = os.open(test_file, os.O_RDONLY)
+
+    first = np.empty((512, 1024), dtype=np.float32)
+    second = np.empty((512, 1024), dtype=np.float32)
+    split_bytes = first.nbytes
+
+    try:
+        req1 = reader.submit_read(fd, first.ctypes.data, first.nbytes, 0, expert_id=7)
+        req2 = reader.submit_read(fd, second.ctypes.data, second.nbytes, split_bytes, expert_id=7)
+
+        assert reader.wait_for_requests([req1, req2], timeout_ms=5000), "Fragment reads timed out"
+        np.testing.assert_array_almost_equal(first, test_data[:512], decimal=5)
+        np.testing.assert_array_almost_equal(second, test_data[512:], decimal=5)
+    finally:
+        os.close(fd)
+
+
 def test_async_reader_timeout():
     """Test timeout behavior."""
     reader = ext.AsyncExpertReader(queue_depth=32)
@@ -123,6 +144,16 @@ def test_io_backend_enum():
 
     # Check enum values
     assert ext.IOBackend.MMAP != ext.IOBackend.IOURING, "Enum values should be different"
+
+
+def test_moe_config_accepts_iouring_file_slots():
+    """Test Python-to-C++ conversion for nested io_uring file slots."""
+    cfg = ext.moe.MOEConfig(2, 1, 16, 16, 0)
+    reader = ext.AsyncExpertReader(queue_depth=8)
+    slots = [[(3, 0, 512), (3, 512, 512)]]
+
+    assert hasattr(cfg, "set_iouring_file_slots")
+    cfg.set_iouring_file_slots(slots, slots, slots, slots, slots, slots, reader)
 
 
 if __name__ == "__main__":
