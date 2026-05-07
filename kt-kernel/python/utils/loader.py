@@ -363,7 +363,8 @@ class SafeTensorLoader:
             os.close(fd)
         self.file_fd_map.clear()
         for handle in self.file_handle_map.values():
-            handle.close()
+            if hasattr(handle, "close"):
+                handle.close()
         self.file_handle_map.clear()
         self.file_memmap_map.clear()
 
