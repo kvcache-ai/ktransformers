@@ -62,11 +62,11 @@ class KTMoEWrapper:
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
+        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         weight_strategy: str = "tiered",
-        tier0_memory_gb: Optional[float] = None,
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -85,6 +85,8 @@ class KTMoEWrapper:
                               If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
+            numa_nodes: Explicit NUMA node IDs for the subpools. If None, use
+                        detected NUMA nodes in ascending order.
             weight_path: Path to weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
@@ -116,13 +118,13 @@ class KTMoEWrapper:
             gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
+            numa_nodes=numa_nodes,
             weight_path=weight_path,
             chunked_prefill_size=chunked_prefill_size,
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
             weight_strategy=weight_strategy,
-            tier0_memory_gb=tier0_memory_gb,
             max_tier0_experts=max_tier0_experts,
             num_moe_layers=num_moe_layers,
         )
