@@ -9,10 +9,11 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Hardware Requirements](#hardware-requirements)
   - [Prerequisites](#prerequisites)
   - [Step 1: Download Model Weights](#step-1-download-model-weights)
-  - [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
+  - [Step 2: Quantize CPU Weights (Optional, for AMXINT4 mode)](#step-2-quantize-cpu-weights-optional-for-amxint4-mode)
+  - [Step 3: Launch SGLang Server](#step-3-launch-sglang-server)
     - [Launch Command (8× RTX 5090 Example)](#launch-command-8-rtx-5090-example)
     - [Optional: Enable MTP (Multi-Token Prediction) Speculative Decoding](#optional-enable-mtp-multi-token-prediction-speculative-decoding)
-  - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
+  - [Step 4: Send Inference Requests](#step-4-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
 
@@ -77,7 +78,37 @@ huggingface-cli download deepseek-ai/DeepSeek-V4-Flash \
   --local-dir /path/to/models/DeepSeek-V4-Flash
 ```
 
-## Step 2: Launch SGLang Server
+## Step 2: Quantize CPU Weights (Optional, for AMXINT4 mode)
+
+This step is only needed if you want to run the CPU experts in **AMXINT4** mode instead (e.g., on Intel Xeon with AMX where INT4 is preferred over MXFP4).
+
+### Conversion Command
+
+For a 4-NUMA system with 64 physical cores assigned to CPU inference:
+
+```bash
+cd /path/to/ktransformers/kt-kernel
+
+python scripts/convert_cpu_weights_ds4.py \
+  --input-path /path/to/models/DeepSeek-V4-Flash \
+  --input-type fp4 \
+  --output /path/to/models/DeepSeek-V4-Flash-AMXINT4 \
+  --quant-method int4 \
+  --cpuinfer-threads 64 \
+  --threadpool-count 4 \
+  --no-merge-safetensor
+```
+
+The script auto-detects `model_type=deepseek_v4` and `expert_dtype=fp4` from `config.json`, dequantizes the MXFP4 routed experts (group size 32) on GPU, and re-quantizes them to AMX-INT4 layout on CPU. Both HF (`model.layers.{L}.mlp.experts.{E}.{proj}.weight`) and V4 inference (`layers.{L}.ffn.experts.{E}.{w1,w2,w3}.weight`) key formats are supported.
+
+To use the converted weights, replace the relevant flags in Step 3's launch command:
+
+```bash
+  --kt-weight-path /path/to/models/DeepSeek-V4-Flash-AMXINT4 \
+  --kt-method AMXINT4 \
+```
+
+## Step 3: Launch SGLang Server
 
 ### Launch Command (8× RTX 5090 Example)
 
@@ -124,7 +155,7 @@ Append the following flags to the launch command above:
   --speculative-moe-runner-backend auto \
 ```
 
-## Step 3: Send Inference Requests
+## Step 4: Send Inference Requests
 
 ### Decode
 
