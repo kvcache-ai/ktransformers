@@ -647,9 +647,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
           break;
         }
       }
-      if (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
-        return false;
-      }
+      // A single MoE forward can touch more unique experts than the steady-state
+      // cache capacity. Those experts are protected by ExpertReadScope while the
+      // AMX kernel is using them, so there may be no legal victim. Allow a
+      // transient overflow and trim back to cache_capacity_ after the forward.
     }
 
     void* gate_owner = numa_alloc_onnode(gate_total_bytes_, numa_node_);
@@ -742,7 +743,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             << " requests=" << read_requests.size() << " inflight=" << config_.async_reader->get_inflight_count()
             << " timeout_ms=" << timeout_ms << " gate=(" << gate_slot.fd << "," << gate_slot.offset << ","
             << gate_slot.size << ") up=(" << up_slot.fd << "," << up_slot.offset << "," << up_slot.size
-            << ") down=(" << down_slot.fd << "," << down_slot.offset << "," << down_slot.size << ")";
+            << ") down=(" << down_slot.fd << "," << down_slot.offset << "," << down_slot.size << ") detail="
+            << config_.async_reader->describe_requests(read_requests);
         numa_free(gate_owner, gate_total_bytes_);
         numa_free(up_owner, up_total_bytes_);
         numa_free(down_owner, down_total_bytes_);
@@ -812,6 +814,17 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     return true;
   }
 
+  void trim_cache_to_capacity() {
+    if (cache_capacity_ <= 0) return;
+    for (int attempt = 0; attempt < config_.expert_num * 2 &&
+                          resident_expert_count_.load(std::memory_order_acquire) > cache_capacity_;
+         ++attempt) {
+      if (!evict_one_cached_expert(-1)) {
+        break;
+      }
+    }
+  }
+
   void ensure_expert_ready(int expert_id, bool pin = false) {
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
 
@@ -858,7 +871,14 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         }
         if (!allocate_and_copy_expert(expert_id, pin)) {
           expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
-          throw std::runtime_error("AMX lazy-copy promotion failed");
+          std::ostringstream oss;
+          oss << "AMX lazy-copy promotion failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
+              << " expert=" << expert_id << " state=" << static_cast<int>(state)
+              << " resident=" << resident_expert_count_.load(std::memory_order_acquire)
+              << " capacity=" << cache_capacity_ << " gate_bytes=" << gate_total_bytes_
+              << " up_bytes=" << up_total_bytes_ << " down_bytes=" << down_total_bytes_
+              << " iouring=" << (iouring_enabled() ? "true" : "false");
+          throw std::runtime_error(oss.str());
         }
         // Record promote
         if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
@@ -1123,10 +1143,14 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
     Base::forward(qlen, k, expert_ids, weights, input, output);
 #ifndef _WIN32
-    if (resident_io_enabled() && config_.max_tier0_experts <= 0 && !active_experts.empty()) {
+    if (resident_io_enabled() && !active_experts.empty()) {
       expert_read_scope.reset();
-      for (int expert_id : active_experts) {
-        demote_expert(expert_id);
+      if (config_.max_tier0_experts <= 0) {
+        for (int expert_id : active_experts) {
+          demote_expert(expert_id);
+        }
+      } else {
+        trim_cache_to_capacity();
       }
     }
 #endif

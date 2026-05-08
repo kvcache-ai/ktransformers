@@ -832,7 +832,11 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def("wait_for_request", &ktransformers::AsyncExpertReader::wait_for_request, py::arg("request_id"),
            py::arg("timeout_ms") = 5000, "Wait for a specific request to complete")
       .def("wait_for_requests", &ktransformers::AsyncExpertReader::wait_for_requests, py::arg("request_ids"),
-           py::arg("timeout_ms") = 5000, "Wait for all listed requests to complete");
+           py::arg("timeout_ms") = 5000, "Wait for all listed requests to complete")
+      .def("get_request_result", &ktransformers::AsyncExpertReader::get_request_result, py::arg("request_id"),
+           "Return the io_uring result for a request, or INT_MIN if unknown")
+      .def("describe_requests", &ktransformers::AsyncExpertReader::describe_requests, py::arg("request_ids"),
+           "Return a compact status summary for request diagnostics");
 
   // Bind IOBackend enum
   py::enum_<IOBackend>(m, "IOBackend")

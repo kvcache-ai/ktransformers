@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -102,6 +103,20 @@ public:
     bool wait_for_requests(const std::vector<uint64_t>& request_ids, int timeout_ms = 5000);
 
     /**
+     * @brief Return the last io_uring result for a request.
+     *
+     * A successful full read returns the byte count. Failed requests return the
+     * negative errno reported by io_uring. Unknown or still-in-flight requests
+     * return INT_MIN.
+     */
+    int get_request_result(uint64_t request_id) const;
+
+    /**
+     * @brief Produce a compact status summary for diagnostics.
+     */
+    std::string describe_requests(const std::vector<uint64_t>& request_ids) const;
+
+    /**
      * @brief Submit multiple read requests in batch
      * @param requests Vector of read requests
      */
@@ -114,19 +129,27 @@ public:
 
 private:
 #ifdef HAVE_LIBURING
+    struct PendingRequest {
+        int expert_id;
+        size_t size;
+    };
+
     struct io_uring ring_;
     int queue_depth_;
     uint64_t next_user_data_;
 
-    // Track in-flight requests: user_data -> expert_id
-    std::unordered_map<uint64_t, int> inflight_requests_;
+    // Track in-flight requests: user_data -> metadata
+    std::unordered_map<uint64_t, PendingRequest> inflight_requests_;
     std::unordered_set<int> completed_experts_;  // Track completed expert IDs
     std::unordered_set<uint64_t> completed_requests_;
     std::unordered_set<uint64_t> failed_requests_;
+    std::unordered_map<uint64_t, int> request_results_;
     mutable std::mutex mutex_;
+    mutable std::mutex ring_mutex_;
 
     // Helper: wait for completion events
     int wait_cqe_internal(struct io_uring_cqe** cqe_out, int timeout_ms);
+    int wait_and_record_completion(int timeout_ms, uint64_t* request_id_out, int* expert_id_out, bool* ok_out);
 #else
     // Stub members for non-Linux platforms
     int queue_depth_;
