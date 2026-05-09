@@ -11,7 +11,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Step 1: Download Model Weights](#step-1-download-model-weights)
   - [Step 2: Quantize CPU Weights (Optional, for AMXINT4 mode)](#step-2-quantize-cpu-weights-optional-for-amxint4-mode)
   - [Step 3: Launch SGLang Server](#step-3-launch-sglang-server)
-    - [Launch Command (8× RTX 5090 Example)](#launch-command-8-rtx-5090-example)
+    - [Launch Command (Single RTX 5090 Example)](#launch-command-single-rtx-5090-example)
     - [Optional: Enable MTP (Multi-Token Prediction) Speculative Decoding](#optional-enable-mtp-multi-token-prediction-speculative-decoding)
   - [Step 4: Send Inference Requests](#step-4-send-inference-requests)
     - [Decode](#decode)
@@ -20,7 +20,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 ## Hardware Requirements
 
 **Validated Configuration (this tutorial):**
-- **GPU**: 8× NVIDIA RTX 5090 (32GB VRAM each, SM_120)
+- **GPU**: 1× NVIDIA RTX 5090 (32GB VRAM, SM_120)
 - **CPU**: x86 CPU with AVX512 support
 - **RAM**: ≥256GB system memory
 - **Storage**: ~340GB for model weights
@@ -32,7 +32,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 | Hopper (H100 / H200) | SM_90 | triton_kernels | flash_mla wheel | — |
 | Datacenter Blackwell (B100 / B200) | SM_100 | trtllm-fp4 | Triton fallback | — |
 | Consumer Blackwell (RTX 5090) | SM_120 | triton_kernels | Triton fallback | ✓ |
-| Ada Lovelace (RTX 4090 / L20 / L40) | SM_89 | triton_kernels | Triton fallback | — |
+| Ada Lovelace (RTX 4090 / L20 / L40) | SM_89 | triton_kernels | Triton fallback | ✓ |
 | Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | ✗ (not supported) |
 
 
@@ -110,32 +110,41 @@ To use the converted weights, replace the relevant flags in Step 3's launch comm
 
 ## Step 3: Launch SGLang Server
 
-### Launch Command (8× RTX 5090 Example)
+### Launch Command (Single RTX 5090 Example)
 
 ```bash
+export FLASHINFER_CUDA_ARCH_LIST=12.0a
+export TORCH_CUDA_ARCH_LIST="12.0+PTX"
+export SGLANG_DSV4_MODE=2604
+export SGLANG_DSV4_2604_SUBMODE=2604B
+
 numactl --interleave=all python -m sglang.launch_server \
-  --host 127.0.0.1 \
-  --port 30000 \
+  --host 0.0.0.0 --port 30000 \
   --model /path/to/models/DeepSeek-V4-Flash \
   --kt-weight-path /path/to/models/DeepSeek-V4-Flash \
   --kt-method MXFP4 \
-  --kt-num-gpu-experts 144 \
-  --kt-cpuinfer 8 \
+  --kt-num-gpu-experts 10 \
+  --kt-cpuinfer 60 \
   --kt-threadpool-count 2 \
   --kt-gpu-prefill-token-threshold 4096 \
   --kt-enable-dynamic-expert-update \
-  --tensor-parallel-size 8 \
+  --tensor-parallel-size 1 \
+  --context-length 16384 \
   --attention-backend flashinfer \
-  --mem-fraction-static 0.80 \
+  --mem-fraction-static 0.85 \
   --chunked-prefill-size 2048 \
-  --max-running-requests 4 \
-  --max-total-tokens 32768 \
-  --watchdog-timeout 3000 \
+  --max-prefill-tokens 2048 \
+  --max-running-requests 2 \
+  --watchdog-timeout 1200 \
   --disable-shared-experts-fusion \
-  --cuda-graph-bs 1 2 4 \
-  --cuda-graph-max-bs 4 \
-  --trust-remote-code
+  --trust-remote-code \
+  --cuda-graph-bs 1 \
+  --cuda-graph-max-bs 1 \
+  --disable-radix-cache \
+  --skip-server-warmup
 ```
+
+Decode throughput: **20+ tok/s** on a single RTX 5090.
 
 It takes about 4-5 minutes to start the server (weight load + CUDA Graph capture).
 
