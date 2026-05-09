@@ -8,14 +8,34 @@
 
 </p>
   <h3>一个用于体验尖端 LLM 推理/微调优化的灵活框架</h3>
-  <strong><a href="#-概览">🎯 概览</a> | <a href="#-推理---kt-kernel-高性能推理">🚀 推理</a> | <a href="#-sft---llama-factory-微调">🎓 SFT</a> | <a href="#-引用">🔥 引用</a> </strong>
+  <strong><a href="#-概览">🎯 概览</a> | <a href="#-从这里开始">从这里开始</a> | <a href="#-模型与精度支持矩阵">支持矩阵</a> | <a href="#-推理---kt-kernel-高性能推理">🚀 推理</a> | <a href="#-sft---llama-factory-微调">🎓 SFT</a> | <a href="#-引用">🔥 引用</a> </strong>
 </div>
 
 ## 🎯 概览
 
-KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。目前两个面向用户的能力都来自 kt-kernel 源码目录：[推理](./kt-kernel/README.md) 和 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)。
+KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型高效推理和微调的研究项目。当前公开入口按用户任务组织为两条主线：[推理](./kt-kernel/README.md) 使用 `kt-kernel + sglang-kt`，[SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) 使用 `ktransformers[sft] + LLaMA-Factory`。
+
+## 🧭 从这里开始
+
+| 目标 | 入口 | 安装命令 | 说明 |
+| --- | --- | --- | --- |
+| 用 CPU-GPU 异构方式服务大型 MoE 模型 | [KT-Kernel 推理文档](./kt-kernel/README.md) 或官网 [Document](https://ktransformers.net/zh/docs/inference) | `pip install kt-kernel sglang-kt` | 已注册模型可用 `kt run`，复杂场景用 `python -m sglang.launch_server` 和 `--kt-*` 参数。 |
+| 用 LoRA 和 KT CPU expert backend 微调 MoE 模型 | [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) 或官网 [Document](https://ktransformers.net/zh/docs/fine-tuning) | `pip install "ktransformers[sft]"` | 推荐流程是 LLaMA-Factory + Accelerate KT/FSDP2 配置。 |
+| 确认模型、精度、backend 或硬件组合是否属于当前支持 | [模型与精度支持矩阵](./doc/zh/support/supported-models-and-precision.md) | N/A | 不要只依据旧教程推断当前支持状态，应先看状态列。 |
+| 阅读面向用户的正式文档 | [KTransformers Document](https://ktransformers.net/zh/docs) | N/A | 官网文档由 `ktransformers-web` 维护，不会从本仓库自动同步。 |
+
+## ✅ 模型与精度支持矩阵
+
+维护中的支持矩阵见 [doc/zh/support/supported-models-and-precision.md](./doc/zh/support/supported-models-and-precision.md)。矩阵区分：
+
+- **Current**：当前代码入口存在，文档接口与仓库基本一致。
+- **Needs smoke**：代码或文档入口存在，但模型/硬件 runtime 验证需要复跑后才能作为生产支持。
+- **Legacy**：依赖 `local_chat.py`、`ktransformers/server/main.py`、`balance_serve`、旧 `kt_optimize_rule` 等归档或已移除路径。
+
+简要口径：当前推理使用 `kt-kernel + sglang-kt`，主要 method 包括 `BF16`、`FP8`、`RAWINT4`、`GPTQ_INT4`、`AMXINT4`、`AMXINT8`、`MXFP4` 和 `LLAMAFILE`。当前 SFT 支持是通过 LLaMA-Factory 进行 MoE LoRA SFT，KT backend 为 `AMXBF16`、`AMXINT8`、`AMXINT4`。
 
 ## 🔥 更新
+> 历史更新中的链接可能指向旧教程。作为当前支持使用前，请先查看[支持矩阵](./doc/zh/support/supported-models-and-precision.md)。
 
 * **2026 年 4 月 30 日**：KTransformers v0.6.1 更新 kt-kernel 推理和 SFT 文档，提供独立的[推理](./kt-kernel/README.md)和 [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)入口。
 * **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)）
@@ -61,8 +81,7 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 
 **快速开始：**
 ```bash
-cd kt-kernel
-pip install .
+pip install kt-kernel sglang-kt
 ```
 
 **使用场景：**

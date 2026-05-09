@@ -8,14 +8,35 @@
 
 </p>
   <h3>A Flexible Framework for Experiencing Cutting-edge LLM Inference/Fine-tune Optimizations</h3>
-  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-inference---high-performance-kt-kernel-serving">🚀 Inference</a> | <a href="#-sft---fine-tuning-with-llama-factory">🎓 SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
+  <strong><a href="#-overview">🎯 Overview</a> | <a href="#-start-here">Start Here</a> | <a href="#-supported-models-and-precision">Support Matrix</a> | <a href="#-inference---high-performance-kt-kernel-serving">🚀 Inference</a> | <a href="#-sft---fine-tuning-with-llama-factory">🎓 SFT</a> | <a href="#-citation">🔥 Citation</a> | <a href="https://github.com/kvcache-ai/ktransformers/issues/1921">🚀 Roadmap(2026Q2)</a>  </strong>
 </div>
 
 ## 🎯 Overview
 
-KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md).
+KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The current public surface is organized around two user tasks: [Inference](./kt-kernel/README.md) with `kt-kernel + sglang-kt`, and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) with `ktransformers[sft] + LLaMA-Factory`.
+
+## 🧭 Start Here
+
+| Goal | Start with | Install command | Notes |
+| --- | --- | --- | --- |
+| Serve large MoE models with CPU-GPU heterogeneous inference | [KT-Kernel inference docs](./kt-kernel/README.md) or the official [Document](https://ktransformers.net/en/docs/inference) | `pip install kt-kernel sglang-kt` | Use `kt run` for registered models or `python -m sglang.launch_server` with `--kt-*` arguments. |
+| Fine-tune MoE models with LoRA and KT CPU expert backends | [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) or the official [Document](https://ktransformers.net/en/docs/fine-tuning) | `pip install "ktransformers[sft]"` | The recommended workflow is LLaMA-Factory + Accelerate KT/FSDP2 configs. |
+| Check whether a model, precision, backend, or hardware tuple is current | [Supported models and precision](./doc/en/support/supported-models-and-precision.md) | N/A | Do not infer support from old tutorials alone; check the status column first. |
+| Browse user-facing documentation | [KTransformers Document](https://ktransformers.net/en/docs) | N/A | Website docs are maintained in `ktransformers-web` and are not auto-synced from this repository. |
+
+## ✅ Supported Models and Precision
+
+The maintained support matrix lives in [doc/en/support/supported-models-and-precision.md](./doc/en/support/supported-models-and-precision.md). It separates:
+
+- **Current**: code entry exists and the documented interface matches the current repo.
+- **Needs smoke**: code or documentation exists, but model/hardware runtime validation should be rerun before treating it as production support.
+- **Legacy**: depends on archived or removed paths such as `local_chat.py`, `ktransformers/server/main.py`, `balance_serve`, or old `kt_optimize_rule` workflows.
+
+Short version: current inference uses `kt-kernel + sglang-kt` with methods such as `BF16`, `FP8`, `RAWINT4`, `GPTQ_INT4`, `AMXINT4`, `AMXINT8`, `MXFP4`, and `LLAMAFILE`. Current SFT support is MoE LoRA SFT through LLaMA-Factory with `AMXBF16`, `AMXINT8`, and `AMXINT4` KT backends.
 
 ## 🔥 Updates
+> Historical update links may point to older tutorials. For current support, check the [support matrix](./doc/en/support/supported-models-and-precision.md) before using a model or precision path in production.
+
 * **May 6, 2026**: KTransformers at [GOSIM Paris 2026](https://paris2026.gosim.org/zh/schedule/) — "Agentic AI on Edge" track. We'll present KT's inference performance on consumer hardware.
 * **May 02, 2026**: DeepSeek-V4-Flash Support! ([Tutorial](./doc/en/DeepSeek-V4-Flash.md))
 * **Apr 30, 2026**: KTransformers v0.6.1 refreshes kt-kernel inference and SFT docs with separate [Inference](./kt-kernel/README.md) and [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) entry points.
@@ -70,8 +91,7 @@ CPU-optimized kernel operations for heterogeneous LLM inference.
 
 **Quick Start:**
 ```bash
-cd kt-kernel
-pip install .
+pip install kt-kernel sglang-kt
 ```
 
 **Use Cases:**
