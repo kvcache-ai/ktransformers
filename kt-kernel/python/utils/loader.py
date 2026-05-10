@@ -166,11 +166,15 @@ class SafeTensorLoader:
     def close_all_handles(self):
         """Close all file handles and clear the handle map.
 
-        Note: safetensors.safe_open doesn't have a close() method,
-        so we just clear the references and let garbage collection handle cleanup.
+        Note: safetensors.safe_open doesn't expose a close() method. Releasing
+        the mmap relies on reference counting: once file_handle_map is cleared
+        and no tensor holds a reference to the underlying mmap region, the OS
+        will reclaim the page cache. gc.collect() is called here to trigger
+        immediate reclamation rather than waiting for the next GC cycle.
         """
-        # safetensors.safe_open doesn't have close(), just clear references
+        import gc
         self.file_handle_map.clear()
+        gc.collect()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """
