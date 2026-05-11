@@ -822,6 +822,31 @@ class BaseMoEWrapper(ABC):
     def _mesh_full_gate_batched_enabled(self) -> bool:
         return os.environ.get("KT_MESH_FULL_GATE_BATCHED", "1") not in ("0", "false", "False", "FALSE")
 
+    @staticmethod
+    def _cuda_graph_capture_active() -> bool:
+        """Return True while SGLang is recording a CUDA graph warmup forward."""
+        if not torch.cuda.is_available():
+            return False
+        checker = getattr(torch.cuda, "is_current_stream_capturing", None)
+        if checker is None:
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _discard_full_gate_batch_slot(state: dict, slot: int) -> None:
+        try:
+            state["seen"][slot].clear()
+            state["gpu_seen"][slot].clear()
+            state["decode_seen"][slot] = False
+            state["transforms"][slot].clear()
+            state["keepalive"][slot] = None
+            state["write_slot"] = (slot + 1) % len(state["seen"])
+        except Exception:
+            return
+
     def _mesh_total_moe_layers(self) -> int:
         registered_layers = (
             max(BaseMoEWrapper._wrappers_by_layer.keys()) + 1 if BaseMoEWrapper._wrappers_by_layer else 0
@@ -1032,6 +1057,9 @@ class BaseMoEWrapper(ABC):
         seen = sorted(state["seen"][slot])
         if not seen:
             return
+        if self._cuda_graph_capture_active():
+            self._discard_full_gate_batch_slot(state, slot)
+            return
 
         gpu_seen = state["gpu_seen"][slot]
         needs_cuda_sync = bool(gpu_seen)
@@ -1132,6 +1160,9 @@ class BaseMoEWrapper(ABC):
         flush_on_last: bool = False,
         is_decode_token: bool = False,
     ) -> bool:
+        if self._cuda_graph_capture_active():
+            return True
+
         vector, cols, score_transform = self._prepare_router_score_vector(router_scores)
         if vector is None or cols <= 0:
             return True
@@ -1165,6 +1196,9 @@ class BaseMoEWrapper(ABC):
             return
         self._pending_full_gate_flush = None
         state, slot, total_layers, cols = pending
+        if self._cuda_graph_capture_active():
+            self._discard_full_gate_batch_slot(state, slot)
+            return
         self._flush_full_gate_batch(state, slot, total_layers, cols, cuda_stream)
 
     def observe_router_scores(self, router_scores: Optional[torch.Tensor], cuda_stream=None) -> None:
@@ -1177,6 +1211,8 @@ class BaseMoEWrapper(ABC):
         if router_scores is None or not torch.is_tensor(router_scores):
             return
         if not self._mesh_full_gate_observation_enabled():
+            return
+        if self._cuda_graph_capture_active():
             return
         if self._mesh_full_gate_batched_enabled():
             self._record_router_scores_for_token_batch(router_scores, cuda_stream, flush_on_last=True)
@@ -1239,6 +1275,8 @@ class BaseMoEWrapper(ABC):
         if router_scores is None or not torch.is_tensor(router_scores):
             return 0, 0, 0, 0
         if not self._mesh_full_gate_observation_enabled():
+            return 0, 0, 0, 0
+        if self._cuda_graph_capture_active():
             return 0, 0, 0, 0
         if self._mesh_full_gate_batched_enabled():
             self._record_router_scores_for_token_batch(
