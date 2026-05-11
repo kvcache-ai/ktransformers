@@ -1,7 +1,7 @@
 import os
 import torch
 import ctypes
-from typing import Optional
+from typing import List, Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -46,11 +46,11 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
+        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "MOE_INT8",
         weight_strategy: str = "tiered",
-        tier0_memory_gb: Optional[float] = None,
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -69,6 +69,8 @@ class GeneralMoEWrapper(BaseMoEWrapper):
                               If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools
+            numa_nodes: Explicit NUMA node IDs for the CPU subpools. If None,
+                        use detected NUMA nodes in ascending order.
             weight_path: Path to weights (SafeTensor format)
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory
@@ -96,13 +98,13 @@ class GeneralMoEWrapper(BaseMoEWrapper):
             gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
+            numa_nodes=numa_nodes,
             weight_path=weight_path,
             chunked_prefill_size=chunked_prefill_size,
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
             weight_strategy=weight_strategy,
-            tier0_memory_gb=tier0_memory_gb,
             max_tier0_experts=max_tier0_experts,
             num_moe_layers=num_moe_layers,
         )
@@ -162,6 +164,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        moe_config.resident_cache_policy = self.residency_policy
 
         # Enable save mode for online quantization
         moe_config.save = True
@@ -310,6 +313,8 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         moe_config.down_scales = down_scale_ptrs
         moe_config.use_mmap = use_mmap
         moe_config.max_tier0_experts = self.max_tier0_experts
+        moe_config.max_resident_experts = self.max_resident_experts
+        moe_config.resident_cache_policy = self.residency_policy
 
         if self.cpu_save:
             moe_config.save = True

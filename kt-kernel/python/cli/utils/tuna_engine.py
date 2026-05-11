@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from kt_kernel.cli.utils.console import console, print_error, print_info, print_warning
+from kt_kernel.cli.utils.cgroup import maybe_wrap_command_with_cgroup
 
 
 def get_num_experts(model_path: Path) -> int:
@@ -149,8 +150,6 @@ def test_config(
         ]
     )
 
-    if config.get("tier0_memory_gb") is not None:
-        cmd.extend(["--kt-tier0-memory-gb", str(config["tier0_memory_gb"])])
     if config.get("max_tier0_experts") is not None:
         cmd.extend(["--kt-max-tier0-experts", str(config["max_tier0_experts"])])
 
@@ -185,6 +184,12 @@ def test_config(
     if verbose:
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
+    env = dict(config.get("env", {}) or {})
+    if config.get("residency_policy"):
+        env["KT_RESIDENCY_POLICY"] = str(config["residency_policy"])
+
+    cmd, cgroup_wrapped = maybe_wrap_command_with_cgroup(cmd, env, config.get("memory_max_gb"))
+
     # Start process
     try:
         process = subprocess.Popen(
@@ -193,7 +198,7 @@ def test_config(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env=config.get("env"),
+            env=None if cgroup_wrapped else env,
         )
     except Exception as e:
         if verbose:

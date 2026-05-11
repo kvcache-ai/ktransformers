@@ -336,6 +336,8 @@ def _build_command_preview(model: Any, cfg: Dict[str, Any]) -> List[str]:
     lines.append(f"    --kt-gpu-prefill-token-threshold {gpu_prefill} \\")
     lines.append("    --kt-enable-dynamic-expert-update \\")
     lines.append(f"    --kt-weight-strategy {cfg.get('weight_strategy', 'tiered')} \\")
+    if cfg.get("residency_policy"):
+        lines.insert(0, f"export KT_RESIDENCY_POLICY={cfg.get('residency_policy')}")
 
     # Add attention backend
     lines.append("    --attention-backend flashinfer \\")

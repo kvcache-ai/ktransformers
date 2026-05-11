@@ -88,6 +88,7 @@ class MOE_KERNEL_TP
   std::atomic<int> eviction_cursor_{0};
   int numa_node_ = 0;
   int cache_capacity_ = 0;
+  ResidentCachePolicyState resident_policy_;
 
   size_t gate_total_bytes_ = 0;
   size_t up_total_bytes_ = 0;
@@ -303,9 +304,11 @@ class MOE_KERNEL_TP
     gate_weight_bytes_ = gate_total_bytes_ - gate_scale_bytes_;
     up_weight_bytes_ = up_total_bytes_ - up_scale_bytes_;
     down_weight_bytes_ = down_total_bytes_ - down_scale_bytes_;
-    cache_capacity_ = config_.max_tier0_experts <= 0
+    const int configured_resident = config_.max_resident_experts > 0 ? config_.max_resident_experts : config_.max_tier0_experts;
+    cache_capacity_ = configured_resident <= 0
                           ? 0
-                          : std::min(config_.expert_num, std::max(config_.max_tier0_experts, config_.num_experts_per_tok));
+                          : std::min(config_.expert_num, std::max(configured_resident, config_.num_experts_per_tok));
+    resident_policy_.reset(en, config_.resident_cache_policy);
 
     if (config_.pool != nullptr && tp_part_idx < (int)config_.pool->config.subpool_numa_map.size()) {
       numa_node_ = config_.pool->config.subpool_numa_map[tp_part_idx];
@@ -385,10 +388,13 @@ class MOE_KERNEL_TP
 
   class ExpertReadScope {
    public:
-    ExpertReadScope(MOE_KERNEL_TP* owner, std::vector<int> expert_ids) : owner_(owner), experts_(std::move(expert_ids)) {
-      for (int expert_id : experts_) {
-        owner_->acquire_expert_read(expert_id);
-      }
+    explicit ExpertReadScope(MOE_KERNEL_TP* owner, size_t reserve_count = 0) : owner_(owner) {
+      experts_.reserve(reserve_count);
+    }
+
+    void add_expert(int expert_id) {
+      owner_->acquire_expert_read(expert_id);
+      experts_.push_back(expert_id);
     }
 
     ~ExpertReadScope() {
@@ -402,11 +408,33 @@ class MOE_KERNEL_TP
     std::vector<int> experts_;
   };
 
+  void note_expert_access(int expert_id) {
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+    resident_policy_.note_access(expert_id, state == EXPERT_CACHED || state == EXPERT_PINNED);
+  }
+
+  void note_expert_insert(int expert_id, bool pinned) { resident_policy_.on_insert(expert_id, pinned); }
+
+  void note_expert_pin(int expert_id) { resident_policy_.on_pin(expert_id); }
+
+  void note_expert_demote(int expert_id) { resident_policy_.on_demote(expert_id); }
+
+  int select_eviction_victim(int exclude_expert_id) {
+    return resident_policy_.pick_victim(
+        config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
+        [this](int expert_id) { return expert_states_[expert_id].load(std::memory_order_acquire); },
+        [this](int expert_id) { return active_readers_[expert_id].load(std::memory_order_acquire); });
+  }
+
   bool evict_one_cached_expert(int exclude_expert_id) {
     if (config_.expert_num <= 1) return false;
 
     for (int attempt = 0; attempt < config_.expert_num; ++attempt) {
-      const int victim = (eviction_cursor_.fetch_add(1, std::memory_order_acq_rel) + attempt) % config_.expert_num;
+      const int victim = select_eviction_victim(exclude_expert_id);
+      if (victim < 0) {
+        return false;
+      }
       if (victim == exclude_expert_id) {
         continue;
       }
@@ -427,6 +455,7 @@ class MOE_KERNEL_TP
       gate_up_owner_ptr_[victim] = nullptr;
       down_owner_ptr_[victim] = nullptr;
       apply_baseline_ptrs(victim);
+      note_expert_demote(victim);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[victim].store(EXPERT_BASELINE, std::memory_order_release);
       return true;
@@ -435,12 +464,41 @@ class MOE_KERNEL_TP
     return false;
   }
 
+  void drop_baseline_cache_for_expert(int expert_id) {
+#ifndef _WIN32
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    if (baseline_gate_weight_src_[expert_id] != nullptr) {
+      madvise(baseline_gate_weight_src_[expert_id], gate_weight_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_up_weight_src_[expert_id] != nullptr) {
+      madvise(baseline_up_weight_src_[expert_id], up_weight_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_down_weight_src_[expert_id] != nullptr) {
+      madvise(baseline_down_weight_src_[expert_id], down_weight_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_gate_scale_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_gate_scale_src_[expert_id], gate_scale_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_up_scale_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_up_scale_src_[expert_id], up_scale_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_down_scale_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_down_scale_src_[expert_id], down_scale_bytes_, MADV_DONTNEED);
+    }
+#else
+    (void)expert_id;
+#endif
+  }
+
   bool allocate_and_copy_expert(int expert_id, bool pin_after_copy) {
     if (cache_capacity_ > 0) {
       while (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
         if (!evict_one_cached_expert(expert_id)) {
           break;
         }
+      }
+      if (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
+        return false;
       }
     }
 
@@ -480,6 +538,11 @@ class MOE_KERNEL_TP
     apply_owned_ptrs(expert_id);
     resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
     expert_states_[expert_id].store(pin_after_copy ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
+    note_expert_insert(expert_id, pin_after_copy);
+    // After creating the NUMA-local resident copy, immediately release the
+    // file-backed baseline pages for this expert. The mapping stays as the
+    // fallback source if the resident copy is later evicted.
+    drop_baseline_cache_for_expert(expert_id);
     return true;
   }
 
@@ -498,6 +561,8 @@ class MOE_KERNEL_TP
         uint8_t expected = EXPERT_CACHED;
         if (expert_states_[expert_id].compare_exchange_strong(
                 expected, EXPERT_PINNED, std::memory_order_acq_rel, std::memory_order_acquire)) {
+          note_expert_pin(expert_id);
+          drop_baseline_cache_for_expert(expert_id);
           return;
         }
         continue;
@@ -731,9 +796,11 @@ class MOE_KERNEL_TP
         active_experts.push_back(expert_id);
       }
 
-      expert_read_scope = std::make_unique<ExpertReadScope>(this, active_experts);
+      expert_read_scope = std::make_unique<ExpertReadScope>(this, active_experts.size());
       for (int expert_id : active_experts) {
+        note_expert_access(expert_id);
         ensure_expert_ready(expert_id, false);
+        expert_read_scope->add_expert(expert_id);
       }
     }
 #endif
@@ -790,6 +857,7 @@ class MOE_KERNEL_TP
       gate_up_owner_ptr_[expert_id] = nullptr;
       down_owner_ptr_[expert_id] = nullptr;
       apply_baseline_ptrs(expert_id);
+      note_expert_demote(expert_id);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
       return;

@@ -157,6 +157,11 @@ class BaseMoEWrapper(ABC):
     _tiered_provider = None  # Singleton TieredWeightProvider
     _tiered_provider_signature: Optional[Tuple[int, int, str, str]] = None
     _prev_topk_ids_by_layer: Dict[int, np.ndarray] = {}
+    _wrappers_by_layer: Dict[int, "BaseMoEWrapper"] = {}
+    _full_gate_batch_states: Dict[Tuple[str, int, int, int], dict] = {}
+    _full_gate_skip_logged: set = set()
+    _mesh_bootstrap_done: bool = False
+    _mesh_bootstrap_log_count: int = 0
     _provider_unsupported_logged: set = set()
     _cpu_infer_stream_fallback_logged: bool = False
     # Backends whose C++ MOE objects expose promote/demote hooks for Tier0 management.
@@ -303,6 +308,7 @@ class BaseMoEWrapper(ABC):
                             from registered layers.
         """
         self.layer_idx = layer_idx
+        self.num_moe_layers = int(num_moe_layers) if num_moe_layers is not None else None
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
         self.hidden_size = hidden_size
@@ -426,6 +432,9 @@ class BaseMoEWrapper(ABC):
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
+        if max_tier0_experts is not None:
+            parsed_max_tier0 = int(max_tier0_experts)
+            max_tier0_experts = None if parsed_max_tier0 <= 0 else parsed_max_tier0
         self.max_tier0_experts = int(max_tier0_experts) if max_tier0_experts is not None else 0
         self.max_resident_experts = (
             int(os.environ["KT_MAX_RESIDENT_EXPERTS"]) if "KT_MAX_RESIDENT_EXPERTS" in os.environ else 0
@@ -498,7 +507,12 @@ class BaseMoEWrapper(ABC):
 
             # Fallback to environment variables if parameters not provided
             if max_tier0_experts is None and "KT_MAX_TIER0_EXPERTS" in os.environ:
-                max_tier0_experts = int(os.environ["KT_MAX_TIER0_EXPERTS"])
+                raw_max_tier0 = os.environ["KT_MAX_TIER0_EXPERTS"].strip().lower()
+                if raw_max_tier0 in ("", "auto", "none", "0", "-1"):
+                    max_tier0_experts = None
+                else:
+                    parsed_max_tier0 = int(raw_max_tier0)
+                    max_tier0_experts = None if parsed_max_tier0 <= 0 else parsed_max_tier0
 
             # Auto-detect Tier0 budget from the effective memory scope when no
             # explicit expert cap is provided.
@@ -514,7 +528,21 @@ class BaseMoEWrapper(ABC):
                     intermediate_size=moe_intermediate_size,
                     bytes_per_element=method_bytes_per_element(method),
                 )
-                tier0_bytes = resolve_auto_tier0_budget_bytes(model_bytes=model_bytes)
+                safety_gb = float(
+                    os.environ.get("KT_TIER0_AUTO_SAFETY_GB", "3" if self.io_backend == "IOURING" else "4")
+                )
+                safety_bytes = int(safety_gb * 1024**3)
+                if self.io_backend == "IOURING":
+                    # io_uring + O_DIRECT has no mmap page-cache copy to reserve
+                    # for. Use the cgroup-visible headroom directly, keeping only
+                    # a KV-cache/runtime safety margin for SGLang, CUDA metadata,
+                    # and transient request buffers.
+                    tier0_bytes = max(0, get_available_ram_bytes() - safety_bytes)
+                else:
+                    tier0_bytes = resolve_auto_tier0_budget_bytes(
+                        model_bytes=model_bytes,
+                        safety_bytes=safety_bytes,
+                    )
                 effective_max_tier0 = compute_max_tier0_experts(
                     tier0_memory_bytes=tier0_bytes,
                     num_layers=effective_num_layers,
@@ -525,7 +553,8 @@ class BaseMoEWrapper(ABC):
                 )
                 print(
                     f"[TieredWeightProvider] Auto-adapted tier0 budget: "
-                    f"available_ram={available_gb:.1f}GB, tier0={tier0_bytes / (1024**3):.1f}GB"
+                    f"backend={self.io_backend}, available_ram={available_gb:.1f}GB, "
+                    f"safety={safety_gb:.1f}GB, tier0={tier0_bytes / (1024**3):.1f}GB"
                 )
                 print(
                     f"[TieredWeightProvider] auto max_tier0_experts={effective_max_tier0} "
@@ -591,6 +620,7 @@ class BaseMoEWrapper(ABC):
         # Backend-specific initialization happens in subclasses
         self.moe = None
         self._closed = False
+        BaseMoEWrapper._wrappers_by_layer[self.layer_idx] = self
         BaseMoEWrapper._active_wrapper_count += 1
 
     def _register_moe_with_provider(self):
@@ -714,12 +744,620 @@ class BaseMoEWrapper(ABC):
     @classmethod
     def _sync_external_cuda_stream(cls, cuda_stream):
         if not cls._cpu_infer_stream_fallback_logged:
-            print(
-                "[CPUInfer] submit_with_cuda_stream unavailable; "
-                "falling back to synchronous CUDA stream handoff"
-            )
+            print("[CPUInfer] submit_with_cuda_stream unavailable; " "falling back to synchronous CUDA stream handoff")
             cls._cpu_infer_stream_fallback_logged = True
         torch.cuda.ExternalStream(cuda_stream).synchronize()
+
+    def _mesh_score_transform_id(self) -> int:
+        raw = os.environ.get("KT_MESH_SCORE_TRANSFORM", "softmax").strip().lower()
+        if raw in ("none", "identity", "raw", "0"):
+            return 0
+        if raw in ("sigmoid", "2"):
+            return 2
+        return 1
+
+    def _mesh_resident_capacity(self) -> int:
+        if int(self.max_resident_experts) > 0:
+            return int(self.max_resident_experts)
+        return int(self.max_tier0_experts)
+
+    def _mesh_current_cpu_expert_count(self, cols: Optional[int] = None) -> int:
+        width = int(self.num_experts if cols is None else min(int(cols), int(self.num_experts)))
+        if width <= 0:
+            return 0
+        src = getattr(self, "gpu_experts_mask", None)
+        if src is None or src.numel() <= 0:
+            return width
+        n = min(width, int(src.numel()))
+        gpu_count = int(src[:n].sum().item()) if n > 0 else 0
+        return max(0, width - gpu_count)
+
+    def _mesh_cpu_expert_mask(self, cols: int) -> torch.Tensor:
+        """Return a CPU bool mask where True means MESH may manage this expert."""
+        width = max(0, int(cols))
+        mask = torch.zeros(width, dtype=torch.bool, device="cpu")
+        if width <= 0:
+            return mask
+        valid = min(width, int(self.num_experts))
+        if valid <= 0:
+            return mask
+
+        src = getattr(self, "gpu_experts_mask", None)
+        if src is None or src.numel() <= 0:
+            mask[:valid] = True
+            return mask
+
+        n = min(valid, int(src.numel()))
+        if n > 0:
+            mask[:n].copy_(~src[:n].to(dtype=torch.bool), non_blocking=False)
+        if valid > n:
+            mask[n:valid] = True
+        return mask
+
+    def _mesh_full_gate_observation_enabled(self) -> bool:
+        if os.environ.get("KT_MESH_FULL_GATE", "1") in ("0", "false", "False", "FALSE"):
+            return False
+        if os.environ.get("KT_MESH_LOOKAHEAD", "1") in ("0", "false", "False", "FALSE"):
+            return False
+        try:
+            if float(os.environ.get("KT_MESH_LOOKAHEAD_WEIGHT", "1.0")) <= 0.0:
+                return False
+        except ValueError:
+            pass
+        current_gpu_experts = int(self.gpu_experts_mask.sum().item())
+        cpu_expert_count = self._mesh_current_cpu_expert_count()
+        resident_capacity = self._mesh_resident_capacity()
+        if cpu_expert_count <= 0 or (resident_capacity > 0 and resident_capacity >= cpu_expert_count):
+            log_key = (int(self.num_experts), current_gpu_experts, int(resident_capacity))
+            if log_key not in BaseMoEWrapper._full_gate_skip_logged:
+                print(
+                    "[MESHFullGate] skip full-router Heat observe: "
+                    f"resident_capacity={resident_capacity} cpu_experts={cpu_expert_count} "
+                    f"num_experts={self.num_experts} gpu_experts={current_gpu_experts}"
+                )
+                BaseMoEWrapper._full_gate_skip_logged.add(log_key)
+            return False
+        return True
+
+    def _mesh_full_gate_batched_enabled(self) -> bool:
+        return os.environ.get("KT_MESH_FULL_GATE_BATCHED", "1") not in ("0", "false", "False", "FALSE")
+
+    def _mesh_total_moe_layers(self) -> int:
+        registered_layers = (
+            max(BaseMoEWrapper._wrappers_by_layer.keys()) + 1 if BaseMoEWrapper._wrappers_by_layer else 0
+        )
+        if self.num_moe_layers is not None and self.num_moe_layers > 0:
+            return max(self.num_moe_layers, registered_layers, self.layer_idx + 1)
+        if registered_layers > 0:
+            return max(registered_layers, self.layer_idx + 1)
+        return self.layer_idx + 1
+
+    def _mesh_last_registered_layer_idx(self) -> int:
+        if BaseMoEWrapper._wrappers_by_layer:
+            return max(BaseMoEWrapper._wrappers_by_layer.keys())
+        return self.layer_idx
+
+    def _mesh_last_full_gate_layer_idx(self) -> int:
+        last_enabled = -1
+        for layer_idx, wrapper in BaseMoEWrapper._wrappers_by_layer.items():
+            if wrapper._mesh_full_gate_observation_enabled():
+                last_enabled = max(last_enabled, layer_idx)
+        return last_enabled if last_enabled >= 0 else self._mesh_last_registered_layer_idx()
+
+    def _prepare_router_score_vector(self, router_scores: torch.Tensor) -> Tuple[Optional[torch.Tensor], int, int]:
+        scores = router_scores.detach()
+        if scores.dim() == 1:
+            scores = scores.view(1, -1)
+        elif scores.dim() > 2:
+            scores = scores.reshape(-1, scores.shape[-1])
+        rows = int(scores.shape[0])
+        cols = int(scores.shape[1])
+        if rows <= 0 or cols <= 0:
+            return None, 0, 0
+
+        max_elements = int(os.environ.get("KT_MESH_FULL_GATE_MAX_ELEMENTS", "65536"))
+        if max_elements > 0 and rows * cols > max_elements:
+            return None, 0, 0
+
+        if scores.dtype != torch.float32:
+            scores = scores.float()
+        if not scores.is_contiguous():
+            scores = scores.contiguous()
+
+        score_transform = self._mesh_score_transform_id()
+        if rows == 1:
+            return scores.view(-1), cols, score_transform
+
+        if score_transform == 1:
+            vector = torch.softmax(scores, dim=-1).amax(dim=0)
+            score_transform = 0
+        elif score_transform == 2:
+            vector = torch.sigmoid(scores).amax(dim=0)
+            score_transform = 0
+        else:
+            vector = scores.amax(dim=0)
+        if not vector.is_contiguous():
+            vector = vector.contiguous()
+        return vector, cols, score_transform
+
+    @classmethod
+    def _full_gate_batch_key(cls, device: torch.device, total_layers: int, cols: int) -> Tuple[str, int, int, int]:
+        return (device.type, -1 if device.index is None else int(device.index), int(total_layers), int(cols))
+
+    def _get_full_gate_batch_state(self, vector: torch.Tensor, total_layers: int, cols: int) -> dict:
+        key = BaseMoEWrapper._full_gate_batch_key(vector.device, total_layers, cols)
+        state = BaseMoEWrapper._full_gate_batch_states.get(key)
+        depth = max(4, KExpertsCPUBuffer.buffer_depth)
+        if state is None:
+            cpu = torch.empty((depth, total_layers, cols), dtype=torch.float32, device="cpu", pin_memory=_PIN_MEMORY)
+            gpu = None
+            if vector.device.type == "cuda":
+                gpu = torch.empty((depth, total_layers, cols), dtype=torch.float32, device=vector.device)
+            state = {
+                "cpu": cpu,
+                "gpu": gpu,
+                "write_slot": 0,
+                "seen": [set() for _ in range(depth)],
+                "gpu_seen": [set() for _ in range(depth)],
+                "decode_seen": [False for _ in range(depth)],
+                "transforms": [{} for _ in range(depth)],
+                "keepalive": [None for _ in range(depth)],
+            }
+            BaseMoEWrapper._full_gate_batch_states[key] = state
+        elif vector.device.type == "cuda" and state.get("gpu") is None:
+            state["gpu"] = torch.empty((depth, total_layers, cols), dtype=torch.float32, device=vector.device)
+        if "decode_seen" not in state:
+            state["decode_seen"] = [False for _ in range(len(state["seen"]))]
+        return state
+
+    def _mesh_full_gate_mask_batch(self, seen: List[int], cols: int) -> torch.Tensor:
+        masks = torch.empty((len(seen), cols), dtype=torch.uint8, device="cpu", pin_memory=_PIN_MEMORY)
+        for row, layer_idx in enumerate(seen):
+            masks[row].zero_()
+            wrapper = BaseMoEWrapper._wrappers_by_layer.get(layer_idx)
+            if wrapper is None:
+                continue
+            src = getattr(wrapper, "gpu_experts_mask", None)
+            if src is None:
+                continue
+            n = min(cols, int(src.numel()))
+            if n > 0:
+                masks[row, :n].copy_(src[:n].to(dtype=torch.uint8), non_blocking=False)
+        return masks
+
+    def _mesh_full_gate_batch_owner(self, seen: List[int]):
+        if self.layer_idx in seen and self.moe is not None and hasattr(self.moe, "observe_router_scores_batch_task"):
+            return self
+        for layer_idx in reversed(seen):
+            wrapper = BaseMoEWrapper._wrappers_by_layer.get(layer_idx)
+            if (
+                wrapper is not None
+                and wrapper.moe is not None
+                and hasattr(wrapper.moe, "observe_router_scores_batch_task")
+            ):
+                return wrapper
+        return None
+
+    def _mesh_bootstrap_prefetch_enabled(self) -> bool:
+        return (
+            self.io_backend == "IOURING"
+            and self._env_flag("KT_MESH_BOOTSTRAP_PREFETCH", True)
+            and self._mesh_resident_capacity() > 0
+        )
+
+    def _mesh_bootstrap_prefetch_budget(self, cpu_expert_count: int) -> int:
+        if cpu_expert_count <= 0:
+            return 0
+        explicit = self._env_int("KT_MESH_BOOTSTRAP_PREFETCH_LIMIT", 0)
+        capacity = self._mesh_resident_capacity()
+        if capacity <= 0:
+            return 0
+        if explicit > 0:
+            return min(explicit, cpu_expert_count)
+        return min(capacity, cpu_expert_count)
+
+    def _maybe_submit_mesh_bootstrap_from_full_gate_batch(
+        self,
+        state: dict,
+        slot: int,
+        seen: List[int],
+        cols: int,
+        cuda_stream,
+        *,
+        needs_cuda_sync: bool,
+    ) -> None:
+        if BaseMoEWrapper._mesh_bootstrap_done:
+            return
+        if not state.get("decode_seen", [False])[slot]:
+            return
+        if not self._env_flag("KT_MESH_BOOTSTRAP_PREFETCH", True):
+            BaseMoEWrapper._mesh_bootstrap_done = True
+            return
+
+        if needs_cuda_sync and torch.cuda.is_available():
+            if cuda_stream is not None:
+                self._sync_external_cuda_stream(cuda_stream)
+            else:
+                torch.cuda.current_stream().synchronize()
+
+        submitted_layers = 0
+        candidate_total = 0
+        for layer_idx in seen:
+            wrapper = BaseMoEWrapper._wrappers_by_layer.get(layer_idx)
+            if wrapper is None or wrapper.moe is None:
+                continue
+            if not wrapper._mesh_bootstrap_prefetch_enabled():
+                continue
+
+            cpu_mask = wrapper._mesh_cpu_expert_mask(cols)
+            cpu_expert_count = int(cpu_mask.sum().item())
+            budget = wrapper._mesh_bootstrap_prefetch_budget(cpu_expert_count)
+            if budget <= 0:
+                continue
+
+            scores = state["cpu"][slot, layer_idx, :cols].detach().clone()
+            scores[~cpu_mask] = float("-inf")
+            candidate_scores, candidate_ids = torch.topk(scores, k=budget, largest=True, sorted=True)
+            finite = torch.isfinite(candidate_scores)
+            if not bool(finite.any().item()):
+                continue
+            candidate_ids = candidate_ids[finite].to(torch.long).contiguous()
+            candidate_count = int(candidate_ids.numel())
+            if candidate_count <= 0:
+                continue
+
+            protect_count = min(int(wrapper.num_experts_per_tok), candidate_count)
+            protect_ids = candidate_ids[:protect_count].contiguous() if protect_count > 0 else None
+            if wrapper._submit_iouring_prefetch(
+                candidate_ids,
+                candidate_count,
+                protect_ids_cpu=protect_ids,
+                protect_count=protect_count,
+                max_to_submit=candidate_count,
+                cuda_stream=cuda_stream,
+                prefetch_kind=1,
+            ):
+                submitted_layers += 1
+                candidate_total += candidate_count
+
+        BaseMoEWrapper._mesh_bootstrap_done = True
+        if submitted_layers > 0 and BaseMoEWrapper._mesh_bootstrap_log_count < 3:
+            print(
+                "[MESHBootstrap] submitted first-token CPU expert warm fill: "
+                f"layers={submitted_layers} candidates={candidate_total} cols={cols}"
+            )
+            BaseMoEWrapper._mesh_bootstrap_log_count += 1
+
+    def _flush_full_gate_batch(self, state: dict, slot: int, total_layers: int, cols: int, cuda_stream) -> None:
+        seen = sorted(state["seen"][slot])
+        if not seen:
+            return
+
+        gpu_seen = state["gpu_seen"][slot]
+        needs_cuda_sync = bool(gpu_seen)
+        if state.get("gpu") is not None and gpu_seen:
+            if len(gpu_seen) == len(seen):
+                state["cpu"][slot].copy_(state["gpu"][slot], non_blocking=True)
+            else:
+                for layer_idx in sorted(gpu_seen):
+                    state["cpu"][slot, layer_idx].copy_(state["gpu"][slot, layer_idx], non_blocking=True)
+
+        batch_owner = self._mesh_full_gate_batch_owner(seen)
+        if batch_owner is not None:
+            batch_task = getattr(batch_owner.moe, "observe_router_scores_batch_task", None)
+            batch_direct = getattr(batch_owner.moe, "observe_router_scores_batch", None)
+            if batch_task is not None or batch_direct is not None:
+                layer_indices = torch.tensor(seen, dtype=torch.int32, device="cpu")
+                score_transforms = torch.tensor(
+                    [
+                        int(state["transforms"][slot].get(layer_idx, self._mesh_score_transform_id()))
+                        for layer_idx in seen
+                    ],
+                    dtype=torch.int32,
+                    device="cpu",
+                )
+                gpu_masks = self._mesh_full_gate_mask_batch(seen, cols)
+                state["keepalive"][slot] = (layer_indices, score_transforms, gpu_masks)
+                scores_ptr = int(state["cpu"][slot].data_ptr())
+                if batch_task is not None:
+                    task = batch_task(
+                        scores_ptr,
+                        cols,
+                        cols,
+                        int(layer_indices.data_ptr()),
+                        int(score_transforms.data_ptr()),
+                        int(gpu_masks.data_ptr()),
+                        len(seen),
+                    )
+                    batch_owner._submit_cpuinfer_task(task, cuda_stream)
+                else:
+                    batch_owner._sync_external_cuda_stream(cuda_stream or torch.cuda.current_stream().cuda_stream)
+                    batch_direct(
+                        scores_ptr,
+                        cols,
+                        cols,
+                        int(layer_indices.data_ptr()),
+                        int(score_transforms.data_ptr()),
+                        int(gpu_masks.data_ptr()),
+                        len(seen),
+                    )
+                state["seen"][slot].clear()
+                state["gpu_seen"][slot].clear()
+                self._maybe_submit_mesh_bootstrap_from_full_gate_batch(
+                    state,
+                    slot,
+                    seen,
+                    cols,
+                    cuda_stream,
+                    needs_cuda_sync=needs_cuda_sync,
+                )
+                state["decode_seen"][slot] = False
+                state["transforms"][slot].clear()
+                state["write_slot"] = (slot + 1) % len(state["seen"])
+                return
+
+        for layer_idx in seen:
+            wrapper = BaseMoEWrapper._wrappers_by_layer.get(layer_idx)
+            if wrapper is None or wrapper.moe is None:
+                continue
+            observe_task = getattr(wrapper.moe, "observe_router_scores_task", None)
+            observe_direct = getattr(wrapper.moe, "observe_router_scores", None)
+            score_transform = int(state["transforms"][slot].get(layer_idx, self._mesh_score_transform_id()))
+            scores_ptr = int(state["cpu"][slot, layer_idx].data_ptr())
+            if observe_task is not None:
+                task = observe_task(scores_ptr, 1, cols, score_transform)
+                wrapper._submit_cpuinfer_task(task, cuda_stream)
+            elif observe_direct is not None:
+                wrapper._sync_external_cuda_stream(cuda_stream or torch.cuda.current_stream().cuda_stream)
+                observe_direct(scores_ptr, 1, cols, score_transform)
+
+        state["seen"][slot].clear()
+        state["gpu_seen"][slot].clear()
+        self._maybe_submit_mesh_bootstrap_from_full_gate_batch(
+            state,
+            slot,
+            seen,
+            cols,
+            cuda_stream,
+            needs_cuda_sync=needs_cuda_sync,
+        )
+        state["decode_seen"][slot] = False
+        state["transforms"][slot].clear()
+        state["write_slot"] = (slot + 1) % len(state["seen"])
+
+    def _record_router_scores_for_token_batch(
+        self,
+        router_scores: torch.Tensor,
+        cuda_stream,
+        flush_on_last: bool = False,
+        is_decode_token: bool = False,
+    ) -> bool:
+        vector, cols, score_transform = self._prepare_router_score_vector(router_scores)
+        if vector is None or cols <= 0:
+            return True
+
+        total_layers = max(self._mesh_total_moe_layers(), self.layer_idx + 1)
+        state = self._get_full_gate_batch_state(vector, total_layers, cols)
+        slot = int(state["write_slot"])
+        if self.layer_idx >= total_layers:
+            return True
+
+        if vector.device.type == "cuda":
+            state["gpu"][slot, self.layer_idx].copy_(vector, non_blocking=True)
+            state["gpu_seen"][slot].add(self.layer_idx)
+        else:
+            state["cpu"][slot, self.layer_idx].copy_(vector, non_blocking=True)
+        state["seen"][slot].add(self.layer_idx)
+        if is_decode_token:
+            state["decode_seen"][slot] = True
+        state["transforms"][slot][self.layer_idx] = int(score_transform)
+
+        if self.layer_idx == self._mesh_last_full_gate_layer_idx():
+            if flush_on_last:
+                self._flush_full_gate_batch(state, slot, total_layers, cols, cuda_stream)
+            else:
+                self._pending_full_gate_flush = (state, slot, total_layers, cols)
+        return True
+
+    def _flush_pending_full_gate_batch(self, cuda_stream) -> None:
+        pending = getattr(self, "_pending_full_gate_flush", None)
+        if pending is None:
+            return
+        self._pending_full_gate_flush = None
+        state, slot, total_layers, cols = pending
+        self._flush_full_gate_batch(state, slot, total_layers, cols, cuda_stream)
+
+    def observe_router_scores(self, router_scores: Optional[torch.Tensor], cuda_stream=None) -> None:
+        """Feed the full per-token router score vector into the MESH Heat registry.
+
+        The AMX MoE compute API only needs top-k ids/weights. MESH eviction can
+        use the richer all-expert router vector when the caller provides it
+        through this side channel.
+        """
+        if router_scores is None or not torch.is_tensor(router_scores):
+            return
+        if not self._mesh_full_gate_observation_enabled():
+            return
+        if self._mesh_full_gate_batched_enabled():
+            self._record_router_scores_for_token_batch(router_scores, cuda_stream, flush_on_last=True)
+            return
+        observe_task = getattr(self.moe, "observe_router_scores_task", None)
+        observe_direct = getattr(self.moe, "observe_router_scores", None)
+        if observe_task is None and observe_direct is None:
+            return
+
+        scores = router_scores.detach()
+        if scores.dim() == 1:
+            scores = scores.view(1, -1)
+        elif scores.dim() > 2:
+            scores = scores.reshape(-1, scores.shape[-1])
+        rows = int(scores.shape[0])
+        cols = int(scores.shape[1])
+        if rows <= 0 or cols <= 0:
+            return
+
+        max_elements = int(os.environ.get("KT_MESH_FULL_GATE_MAX_ELEMENTS", "65536"))
+        if max_elements > 0 and rows * cols > max_elements:
+            return
+
+        if scores.dtype != torch.float32:
+            scores = scores.float()
+        if not scores.is_contiguous():
+            scores = scores.contiguous()
+
+        score_transform = self._mesh_score_transform_id()
+        if scores.device.type == "cuda":
+            flat = scores.view(-1)
+            needed = flat.numel()
+            buf = getattr(self, "_router_scores_cpu", None)
+            if buf is None or buf.numel() < needed:
+                buf = torch.empty(needed, dtype=torch.float32, device="cpu", pin_memory=_PIN_MEMORY)
+                self._router_scores_cpu = buf
+            dst = buf[:needed]
+            dst.copy_(flat, non_blocking=True)
+            if observe_task is not None:
+                task = observe_task(dst.data_ptr(), rows, cols, score_transform)
+                self._submit_cpuinfer_task(task, cuda_stream)
+            else:
+                self._sync_external_cuda_stream(cuda_stream or torch.cuda.current_stream(scores.device).cuda_stream)
+                observe_direct(dst.data_ptr(), rows, cols, score_transform)
+            return
+
+        scores_cpu = scores.cpu() if scores.device.type != "cpu" else scores
+        observe = observe_direct
+        if observe is not None:
+            observe(scores_cpu.data_ptr(), rows, cols, score_transform)
+
+    def _prepare_router_scores_for_forward(
+        self,
+        router_scores: Optional[torch.Tensor],
+        current_slot: int,
+        cuda_stream=None,
+        is_decode_token: bool = False,
+    ) -> Tuple[int, int, int, int]:
+        """Prepare full router scores for piggyback Heat update in forward_task."""
+        if router_scores is None or not torch.is_tensor(router_scores):
+            return 0, 0, 0, 0
+        if not self._mesh_full_gate_observation_enabled():
+            return 0, 0, 0, 0
+        if self._mesh_full_gate_batched_enabled():
+            self._record_router_scores_for_token_batch(
+                router_scores,
+                cuda_stream,
+                flush_on_last=False,
+                is_decode_token=is_decode_token,
+            )
+            return 0, 0, 0, 0
+
+        scores = router_scores.detach()
+        if scores.dim() == 1:
+            scores = scores.view(1, -1)
+        elif scores.dim() > 2:
+            scores = scores.reshape(-1, scores.shape[-1])
+        rows = int(scores.shape[0])
+        cols = int(scores.shape[1])
+        if rows <= 0 or cols <= 0:
+            return 0, 0, 0, 0
+
+        max_elements = int(os.environ.get("KT_MESH_FULL_GATE_MAX_ELEMENTS", "65536"))
+        if max_elements > 0 and rows * cols > max_elements:
+            return 0, 0, 0, 0
+
+        if scores.dtype != torch.float32:
+            scores = scores.float()
+        if not scores.is_contiguous():
+            scores = scores.contiguous()
+
+        score_transform = self._mesh_score_transform_id()
+        if scores.device.type == "cuda":
+            flat = scores.view(-1)
+            needed = flat.numel()
+            buffers = getattr(self, "_router_scores_cpu_slots", None)
+            if buffers is None:
+                buffers = {}
+                self._router_scores_cpu_slots = buffers
+            buf = buffers.get(current_slot)
+            if buf is None or buf.numel() < needed:
+                buf = torch.empty(needed, dtype=torch.float32, device="cpu", pin_memory=_PIN_MEMORY)
+                buffers[current_slot] = buf
+            dst = buf[:needed]
+            dst.copy_(flat, non_blocking=True)
+            return int(dst.data_ptr()), rows, cols, score_transform
+
+        scores_cpu = scores.cpu() if scores.device.type != "cpu" else scores
+        self._router_scores_cpu_direct = scores_cpu
+        return int(scores_cpu.data_ptr()), rows, cols, score_transform
+
+    @staticmethod
+    def _env_flag(name: str, default: bool) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw not in ("0", "false", "False", "FALSE", "no", "No", "NO")
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+
+    def _submit_iouring_prefetch(
+        self,
+        expert_ids_cpu: torch.Tensor,
+        count: int,
+        *,
+        protect_ids_cpu: Optional[torch.Tensor] = None,
+        protect_count: int = 0,
+        max_to_submit: int = 0,
+        cuda_stream=None,
+        prefetch_kind: int = 0,
+    ) -> bool:
+        if self.io_backend != "IOURING" or self.moe is None or count <= 0:
+            return False
+        task_factory = getattr(self.moe, "prefetch_experts_task", None)
+        if task_factory is None:
+            return False
+
+        expert_ids_cpu = expert_ids_cpu[:count]
+        if expert_ids_cpu.dtype != torch.long:
+            expert_ids_cpu = expert_ids_cpu.to(torch.long)
+        if not expert_ids_cpu.is_contiguous():
+            expert_ids_cpu = expert_ids_cpu.contiguous()
+
+        protect_ptr = 0
+        if protect_ids_cpu is not None and protect_count > 0:
+            protect_ids_cpu = protect_ids_cpu[:protect_count]
+            if protect_ids_cpu.dtype != torch.long:
+                protect_ids_cpu = protect_ids_cpu.to(torch.long)
+            if not protect_ids_cpu.is_contiguous():
+                protect_ids_cpu = protect_ids_cpu.contiguous()
+            self._mesh_prefetch_protect_keepalive = protect_ids_cpu
+            protect_ptr = int(protect_ids_cpu.data_ptr())
+
+        self._mesh_prefetch_ids_keepalive = expert_ids_cpu
+        try:
+            task = task_factory(
+                int(expert_ids_cpu.data_ptr()),
+                int(count),
+                protect_ptr,
+                int(protect_count),
+                int(max_to_submit),
+                int(prefetch_kind),
+            )
+        except TypeError:
+            task = task_factory(
+                int(expert_ids_cpu.data_ptr()),
+                int(count),
+                protect_ptr,
+                int(protect_count),
+                int(max_to_submit),
+            )
+        self._submit_cpuinfer_task(task, cuda_stream)
+        return True
 
     def submit_forward(
         self,
@@ -727,6 +1365,7 @@ class BaseMoEWrapper(ABC):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         cuda_stream,
+        router_scores: Optional[torch.Tensor] = None,
     ):
         """
         Submit forward inference task to CPU (non-blocking).
@@ -777,6 +1416,29 @@ class BaseMoEWrapper(ABC):
         input_tensor_cpu[current_slot].copy_(flat_hidden_states, non_blocking=True)
         weights_cpu[current_slot].copy_(topk_weights, non_blocking=True)
         immediate_experts_ids_cpu[current_slot].copy_(immediate_ids, non_blocking=True)
+        if deferred_ids is not None:
+            deferred_experts_ids_cpu[current_slot].copy_(deferred_ids, non_blocking=True)
+
+            if self._env_flag("KT_MESH_DEFER_PREFETCH", True):
+                defer_prefetch_limit = self._env_int(
+                    "KT_MESH_DEFER_PREFETCH_LIMIT",
+                    max(1, int(self.max_deferred_experts_per_token)),
+                )
+                self._submit_iouring_prefetch(
+                    deferred_experts_ids_cpu[current_slot],
+                    int(deferred_experts_ids_cpu[current_slot].numel()),
+                    protect_ids_cpu=immediate_experts_ids_cpu[current_slot],
+                    protect_count=int(immediate_experts_ids_cpu[current_slot].numel()),
+                    max_to_submit=defer_prefetch_limit,
+                    cuda_stream=cuda_stream,
+                )
+
+        router_scores_ptr, score_rows, score_cols, score_transform = self._prepare_router_scores_for_forward(
+            router_scores,
+            current_slot,
+            cuda_stream,
+            is_decode_token=int(flat_hidden_states.shape[0]) == 1,
+        )
 
         incremental = BaseMoEWrapper._layer_has_pending_deferred.get(self.layer_idx - 1, False)
         immediate_task = self.moe.forward_task(
@@ -787,12 +1449,15 @@ class BaseMoEWrapper(ABC):
             input_tensor_cpu[current_slot].data_ptr(),
             output_cpu[current_slot].data_ptr(),
             incremental,
+            router_scores_ptr,
+            score_rows,
+            score_cols,
+            score_transform,
         )
         self._submit_cpuinfer_task(immediate_task, cuda_stream)
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         if deferred_ids is not None:
-            deferred_experts_ids_cpu[current_slot].copy_(deferred_ids, non_blocking=True)
             deferred_task = self.moe.forward_task(
                 bsz_slot_tensor.data_ptr(),
                 deferred_experts_ids_cpu[current_slot].size(-1),
@@ -848,6 +1513,8 @@ class BaseMoEWrapper(ABC):
             _weights_cpu[current_slot],
             output_cpu[current_slot],
         )
+        if self._mesh_full_gate_batched_enabled():
+            self._flush_pending_full_gate_batch(cuda_stream)
 
         # Record activations for hotness tracking AFTER sync (not in hot path).
         # The .cpu().numpy() transfer is acceptable here because we've already
@@ -866,6 +1533,7 @@ class BaseMoEWrapper(ABC):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         cuda_stream,
+        router_scores: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Execute forward inference synchronously (submit + sync).
@@ -879,7 +1547,7 @@ class BaseMoEWrapper(ABC):
         Returns:
             Output tensor on GPU
         """
-        self.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+        self.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream, router_scores=router_scores)
         return self.sync_forward(hidden_states, topk_ids, cuda_stream)
 
     @staticmethod
@@ -939,6 +1607,11 @@ class BaseMoEWrapper(ABC):
         BaseMoEWrapper._cpu_infer_signature = None
         BaseMoEWrapper._layer_has_pending_deferred.clear()
         BaseMoEWrapper._prev_topk_ids_by_layer.clear()
+        BaseMoEWrapper._wrappers_by_layer.clear()
+        BaseMoEWrapper._full_gate_batch_states.clear()
+        BaseMoEWrapper._full_gate_skip_logged.clear()
+        BaseMoEWrapper._mesh_bootstrap_done = False
+        BaseMoEWrapper._mesh_bootstrap_log_count = 0
         BaseMoEWrapper.clear_buffer_cache()
 
     def close(self):
@@ -960,6 +1633,8 @@ class BaseMoEWrapper(ABC):
 
         BaseMoEWrapper._layer_has_pending_deferred.pop(self.layer_idx, None)
         BaseMoEWrapper._prev_topk_ids_by_layer.pop(self.layer_idx, None)
+        if BaseMoEWrapper._wrappers_by_layer.get(self.layer_idx) is self:
+            BaseMoEWrapper._wrappers_by_layer.pop(self.layer_idx, None)
 
         self._provider = None
         self.moe = None

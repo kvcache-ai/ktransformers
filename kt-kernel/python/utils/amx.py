@@ -280,7 +280,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
                 )
 
                 # Store file slots for C++ consumption
-                # Format: [numa_node][expert_id] -> (fd, offset, size)
+                # Format: [tp_part_idx][expert_id] -> (fd, offset, size)
                 self.gate_file_slots = file_slots["gate"]
                 self.up_file_slots = file_slots["up"]
                 self.down_file_slots = file_slots["down"]
@@ -346,6 +346,36 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.resident_cache_policy = self.residency_policy
         if hasattr(moe_config, "enable_cache_stats"):
             moe_config.enable_cache_stats = self.enable_cache_stats
+        if hasattr(moe_config, "mesh_lookahead_enabled"):
+            lookahead_env = os.environ.get("KT_MESH_LOOKAHEAD")
+            moe_config.mesh_lookahead_enabled = use_iouring and lookahead_env not in ("0", "false", "False", "FALSE")
+            if hasattr(moe_config, "mesh_topk_fallback_enabled"):
+                full_gate_enabled = os.environ.get("KT_MESH_FULL_GATE", "1") not in ("0", "false", "False", "FALSE")
+                topk_fallback_default = "0" if full_gate_enabled else "1"
+                moe_config.mesh_topk_fallback_enabled = os.environ.get(
+                    "KT_MESH_TOPK_FALLBACK", topk_fallback_default
+                ) not in ("0", "false", "False", "FALSE")
+            moe_config.mesh_lookahead_weight = float(os.environ.get("KT_MESH_LOOKAHEAD_WEIGHT", "1.0"))
+            moe_config.mesh_heat_gamma = float(os.environ.get("KT_MESH_HEAT_GAMMA", "0.7"))
+            moe_config.mesh_heat_beta = float(os.environ.get("KT_MESH_HEAT_BETA", "0.5"))
+            moe_config.mesh_transition_alpha = float(os.environ.get("KT_MESH_TRANSITION_ALPHA", "0.5"))
+            # Heat is an eviction signal in the paper path. It must not trigger
+            # proactive expert reads; only deferred experts are prefetched.
+            moe_config.mesh_prefetch_budget = 0
+            moe_config.mesh_coldstart_prefill_enabled = False
+            moe_config.mesh_coldstart_prefill_limit = 0
+            if hasattr(moe_config, "mesh_memory_guard_enabled"):
+                moe_config.mesh_memory_guard_enabled = use_iouring and os.environ.get(
+                    "KT_MESH_MEMORY_GUARD", "1"
+                ) not in ("0", "false", "False", "FALSE")
+                moe_config.mesh_memory_high_watermark = float(os.environ.get("KT_MESH_MEMORY_HIGH_WATERMARK", "0.95"))
+                moe_config.mesh_memory_target_watermark = float(
+                    os.environ.get("KT_MESH_MEMORY_TARGET_WATERMARK", "0.90")
+                )
+                moe_config.mesh_memory_check_interval = int(os.environ.get("KT_MESH_MEMORY_CHECK_INTERVAL", "64"))
+                moe_config.mesh_memory_max_demotes_per_check = int(
+                    os.environ.get("KT_MESH_MEMORY_MAX_DEMOTES_PER_CHECK", "8")
+                )
         if hasattr(moe_config, "iouring_direct_io"):
             moe_config.iouring_direct_io = bool(file_slots.get("direct_io", False)) if use_iouring else False
         if use_iouring:

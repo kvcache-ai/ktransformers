@@ -220,22 +220,175 @@ class MOEBindings {
       intptr_t input;
       intptr_t output;
       bool incremental;
+      intptr_t router_scores;
+      int score_rows;
+      int score_cols;
+      int score_transform;
     };
     static void inner(void* args) {
       Args* args_ = (Args*)args;
-      args_->cpuinfer->enqueue(&TP_MOE<T>::forward_binding, args_->moe, args_->qlen, args_->k, args_->expert_ids,
-                               args_->weights, args_->input, args_->output, args_->incremental);
+      if (args_->router_scores != 0 && args_->score_rows > 0 && args_->score_cols > 0) {
+        args_->cpuinfer->enqueue(&TP_MOE<T>::forward_binding_with_scores,
+                                 args_->moe,
+                                 args_->qlen,
+                                 args_->k,
+                                 args_->expert_ids,
+                                 args_->weights,
+                                 args_->input,
+                                 args_->output,
+                                 args_->incremental,
+                                 args_->router_scores,
+                                 args_->score_rows,
+                                 args_->score_cols,
+                                 args_->score_transform);
+      } else {
+        args_->cpuinfer->enqueue(&TP_MOE<T>::forward_binding, args_->moe, args_->qlen, args_->k, args_->expert_ids,
+                                 args_->weights, args_->input, args_->output, args_->incremental);
+      }
     }
     static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe, intptr_t qlen, int k,
                                                             intptr_t expert_ids, intptr_t weights, intptr_t input,
                                                             intptr_t output, bool incremental = false) {
-      Args* args = new Args{nullptr, moe.get(), qlen, k, expert_ids, weights, input, output, incremental};
+      Args* args = new Args{nullptr, moe.get(), qlen, k, expert_ids, weights, input, output, incremental, 0, 0, 0, 0};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe, intptr_t qlen, int k,
+                                                            intptr_t expert_ids, intptr_t weights, intptr_t input,
+                                                            intptr_t output, bool incremental, intptr_t router_scores,
+                                                            int score_rows, int score_cols, int score_transform) {
+      Args* args = new Args{nullptr,
+                            moe.get(),
+                            qlen,
+                            k,
+                            expert_ids,
+                            weights,
+                            input,
+                            output,
+                            incremental,
+                            router_scores,
+                            score_rows,
+                            score_cols,
+                            score_transform};
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
     static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe, intptr_t qlen, int k,
                                                             intptr_t expert_ids, intptr_t weights, intptr_t input,
                                                             intptr_t output) {
       return cpuinfer_interface(moe, qlen, k, expert_ids, weights, input, output, false);
+    }
+  };
+  class ObserveRouterScoresBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+      intptr_t scores;
+      int rows;
+      int cols;
+      int score_transform;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::observe_router_scores_binding,
+                               args_->moe,
+                               args_->scores,
+                               args_->rows,
+                               args_->cols,
+                               args_->score_transform);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
+                                                            intptr_t scores,
+                                                            int rows,
+                                                            int cols,
+                                                            int score_transform) {
+      Args* args = new Args{nullptr, moe.get(), scores, rows, cols, score_transform};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+  class ObserveRouterScoresBatchBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+      intptr_t scores;
+      int score_stride;
+      int cols;
+      intptr_t layer_indices;
+      intptr_t score_transforms;
+      intptr_t gpu_experts_masks;
+      int layer_count;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::observe_router_scores_batch_binding,
+                               args_->moe,
+                               args_->scores,
+                               args_->score_stride,
+                               args_->cols,
+                               args_->layer_indices,
+                               args_->score_transforms,
+                               args_->gpu_experts_masks,
+                               args_->layer_count);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
+                                                            intptr_t scores,
+                                                            int score_stride,
+                                                            int cols,
+                                                            intptr_t layer_indices,
+                                                            intptr_t score_transforms,
+                                                            intptr_t gpu_experts_masks,
+                                                            int layer_count) {
+      Args* args = new Args{nullptr,
+                            moe.get(),
+                            scores,
+                            score_stride,
+                            cols,
+                            layer_indices,
+                            score_transforms,
+                            gpu_experts_masks,
+                            layer_count};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+  class PrefetchExpertsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+      intptr_t expert_ids;
+      int count;
+      intptr_t protect_ids;
+      int protect_count;
+      int max_to_submit;
+      int prefetch_kind;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::prefetch_experts_binding,
+                               args_->moe,
+                               args_->expert_ids,
+                               args_->count,
+                               args_->protect_ids,
+                               args_->protect_count,
+                               args_->max_to_submit,
+                               args_->prefetch_kind);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
+                                                            intptr_t expert_ids,
+                                                            int count,
+                                                            intptr_t protect_ids = 0,
+                                                            int protect_count = 0,
+                                                            int max_to_submit = 0,
+                                                            int prefetch_kind = 0) {
+      Args* args = new Args{nullptr,
+                            moe.get(),
+                            expert_ids,
+                            count,
+                            protect_ids,
+                            protect_count,
+                            max_to_submit,
+                            prefetch_kind};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
   };
 };
@@ -262,6 +415,13 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("forward_task",
            py::overload_cast<std::shared_ptr<MoeClass>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t, bool>(
                &MoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("forward_task",
+           py::overload_cast<std::shared_ptr<MoeClass>, intptr_t, int, intptr_t, intptr_t, intptr_t, intptr_t, bool,
+                             intptr_t, int, int, int>(&MoeBindings::ForwardBindings::cpuinfer_interface))
+      .def("observe_router_scores_task", &MoeBindings::ObserveRouterScoresBindings::cpuinfer_interface)
+      .def("observe_router_scores", &MoeClass::observe_router_scores_binding)
+      .def("observe_router_scores_batch_task", &MoeBindings::ObserveRouterScoresBatchBindings::cpuinfer_interface)
+      .def("observe_router_scores_batch", &MoeClass::observe_router_scores_batch_binding)
       .def("warm_up", &MoeClass::warm_up)
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding)
@@ -279,6 +439,30 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 "Demote an expert back to baseline (mmap or legacy storage)");
     moe_cls.def("is_expert_promoted", &MoeClass::is_expert_promoted, py::arg("expert_id"),
                 "Check if an expert is currently in Tier 0");
+  }
+  if constexpr (requires(MoeClass moe, intptr_t expert_ids, int count, intptr_t protect_ids, int protect_count,
+                         int max_to_submit, int prefetch_kind) {
+                  moe.prefetch_experts_binding(expert_ids, count, protect_ids, protect_count, max_to_submit,
+                                               prefetch_kind);
+                }) {
+    moe_cls.def("prefetch_experts_task",
+                &MoeBindings::PrefetchExpertsBindings::cpuinfer_interface,
+                py::arg("expert_ids"),
+                py::arg("count"),
+                py::arg("protect_ids") = 0,
+                py::arg("protect_count") = 0,
+                py::arg("max_to_submit") = 0,
+                py::arg("prefetch_kind") = 0,
+                "Submit non-blocking io_uring reads for selected experts without running AMX compute");
+    moe_cls.def("prefetch_experts",
+                &MoeClass::prefetch_experts_binding,
+                py::arg("expert_ids"),
+                py::arg("count"),
+                py::arg("protect_ids") = 0,
+                py::arg("protect_count") = 0,
+                py::arg("max_to_submit") = 0,
+                py::arg("prefetch_kind") = 0,
+                "Submit non-blocking io_uring reads for selected experts without running AMX compute");
   }
 
   // Bind write_weight_scale_to_buffer_task for MoE types that support it
@@ -585,6 +769,20 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("resident_cache_policy", &GeneralMOEConfig::resident_cache_policy)
       .def_readwrite("enable_cache_stats", &GeneralMOEConfig::enable_cache_stats)
       .def_readwrite("iouring_direct_io", &GeneralMOEConfig::iouring_direct_io)
+      .def_readwrite("mesh_lookahead_enabled", &GeneralMOEConfig::mesh_lookahead_enabled)
+      .def_readwrite("mesh_topk_fallback_enabled", &GeneralMOEConfig::mesh_topk_fallback_enabled)
+      .def_readwrite("mesh_lookahead_weight", &GeneralMOEConfig::mesh_lookahead_weight)
+      .def_readwrite("mesh_heat_gamma", &GeneralMOEConfig::mesh_heat_gamma)
+      .def_readwrite("mesh_heat_beta", &GeneralMOEConfig::mesh_heat_beta)
+      .def_readwrite("mesh_transition_alpha", &GeneralMOEConfig::mesh_transition_alpha)
+      .def_readwrite("mesh_prefetch_budget", &GeneralMOEConfig::mesh_prefetch_budget)
+      .def_readwrite("mesh_coldstart_prefill_enabled", &GeneralMOEConfig::mesh_coldstart_prefill_enabled)
+      .def_readwrite("mesh_coldstart_prefill_limit", &GeneralMOEConfig::mesh_coldstart_prefill_limit)
+      .def_readwrite("mesh_memory_guard_enabled", &GeneralMOEConfig::mesh_memory_guard_enabled)
+      .def_readwrite("mesh_memory_high_watermark", &GeneralMOEConfig::mesh_memory_high_watermark)
+      .def_readwrite("mesh_memory_target_watermark", &GeneralMOEConfig::mesh_memory_target_watermark)
+      .def_readwrite("mesh_memory_check_interval", &GeneralMOEConfig::mesh_memory_check_interval)
+      .def_readwrite("mesh_memory_max_demotes_per_check", &GeneralMOEConfig::mesh_memory_max_demotes_per_check)
       .def_readwrite("m_block", &GeneralMOEConfig::m_block)
       .def_readwrite("group_min_len", &GeneralMOEConfig::group_min_len)
       .def_readwrite("group_max_len", &GeneralMOEConfig::group_max_len)

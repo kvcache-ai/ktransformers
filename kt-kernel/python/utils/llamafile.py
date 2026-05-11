@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import List, Optional
 import os
 
 # Use relative imports for package structure
@@ -38,11 +38,11 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
+        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "LLAMAFILE",
         weight_strategy: str = "tiered",
-        tier0_memory_gb: Optional[float] = None,
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -61,6 +61,8 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
                               If None, all experts are on CPU.
             cpuinfer_threads: Number of CPU inference threads
             threadpool_count: Number of NUMA subpools (TP count)
+            numa_nodes: Explicit NUMA node IDs for the CPU subpools. If None,
+                        use detected NUMA nodes in ascending order.
             weight_path: Path to GGUF weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Not supported for Llamafile backend
@@ -132,13 +134,13 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
+            numa_nodes=numa_nodes,
             weight_path=weight_path,
             chunked_prefill_size=chunked_prefill_size,
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
             weight_strategy=weight_strategy,
-            tier0_memory_gb=tier0_memory_gb,
             max_tier0_experts=max_tier0_experts,
             num_moe_layers=num_moe_layers,
         )
@@ -210,6 +212,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             _provider = BaseMoEWrapper._tiered_provider
             if _provider is not None:
                 from .weight_provider import MmapWeightRegion
+
                 expert_gate_bytes = gate_nbytes // self.num_experts
                 expert_up_bytes = up_nbytes // self.num_experts
                 expert_down_bytes = down_nbytes // self.num_experts
@@ -229,9 +232,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
                 f"{base_key}.ffn_gate_exps.weight"
             )
-            up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-                f"{base_key}.ffn_up_exps.weight"
-            )
+            up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
             down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
                 f"{base_key}.ffn_down_exps.weight"
             )
@@ -256,6 +257,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         moe_config.group_min_len = 10  # Use forward_one when qlen < 10
         moe_config.max_len = self.chunked_prefill_size
         moe_config.group_max_len = max(1, int(self.chunked_prefill_size))
+        moe_config.resident_cache_policy = self.residency_policy
 
         # Set weight pointers
         if use_mmap:

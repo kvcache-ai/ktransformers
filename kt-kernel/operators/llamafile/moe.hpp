@@ -1140,19 +1140,27 @@ class LLAMA_MOE_TP {
     }
 
     // Copy data from current live pointers (mmap or legacy)
-    memcpy(gate_tier0, gate_expert_ptrs_[expert_id].load(std::memory_order_acquire), gate_expert_bytes_);
-    memcpy(up_tier0, up_expert_ptrs_[expert_id].load(std::memory_order_acquire), up_expert_bytes_);
-    memcpy(down_tier0, down_expert_ptrs_[expert_id].load(std::memory_order_acquire), down_expert_bytes_);
+	    memcpy(gate_tier0, gate_expert_ptrs_[expert_id].load(std::memory_order_acquire), gate_expert_bytes_);
+	    memcpy(up_tier0, up_expert_ptrs_[expert_id].load(std::memory_order_acquire), up_expert_bytes_);
+	    memcpy(down_tier0, down_expert_ptrs_[expert_id].load(std::memory_order_acquire), down_expert_bytes_);
 
     tier0_gate_[expert_id].store(gate_tier0, std::memory_order_release);
     tier0_up_[expert_id].store(up_tier0, std::memory_order_release);
     tier0_down_[expert_id].store(down_tier0, std::memory_order_release);
 
     // Publish live pointers to NUMA-local buffers without serializing the hot path.
-    gate_expert_ptrs_[expert_id].store(gate_tier0, std::memory_order_release);
-    up_expert_ptrs_[expert_id].store(up_tier0, std::memory_order_release);
-    down_expert_ptrs_[expert_id].store(down_tier0, std::memory_order_release);
-    expert_states_[expert_id].store(EXPERT_PROMOTED, std::memory_order_release);
+	    gate_expert_ptrs_[expert_id].store(gate_tier0, std::memory_order_release);
+	    up_expert_ptrs_[expert_id].store(up_tier0, std::memory_order_release);
+	    down_expert_ptrs_[expert_id].store(down_tier0, std::memory_order_release);
+	    expert_states_[expert_id].store(EXPERT_PROMOTED, std::memory_order_release);
+
+    if (config_.use_mmap) {
+      madvise(baseline_gate_ptrs_[expert_id], gate_expert_bytes_, MADV_DONTNEED);
+      madvise(baseline_up_ptrs_[expert_id], up_expert_bytes_, MADV_DONTNEED);
+      if (down_baseline_is_mmap_) {
+        madvise(baseline_down_ptrs_[expert_id], down_expert_bytes_, MADV_DONTNEED);
+      }
+    }
 #endif
   }
 

@@ -48,6 +48,18 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     EXPERT_CACHED = 2,
     EXPERT_PINNED = 3,
     EXPERT_DEMOTING = 4,
+    EXPERT_PREFETCHING = 5,
+  };
+
+  enum SlotState : uint8_t {
+    SLOT_EMPTY = 0,
+    SLOT_LOADING = 1,
+    SLOT_READY = 2,
+  };
+
+  struct PendingPrefetch {
+    int slot_index = -1;
+    std::vector<uint64_t> requests;
   };
 
   std::vector<void*> baseline_gate_weight_src_;
@@ -63,15 +75,28 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   std::vector<void*> packed_gate_owner_;
   std::vector<void*> packed_up_owner_;
   std::vector<void*> packed_down_owner_;
+  std::vector<void*> slot_gate_owner_;
+  std::vector<void*> slot_up_owner_;
+  std::vector<void*> slot_down_owner_;
+  std::vector<int> slot_to_expert_;
+  std::vector<int> expert_to_slot_;
 
   std::unique_ptr<std::atomic<uint8_t>[]> expert_states_;
   std::unique_ptr<std::atomic<uint32_t>[]> active_readers_;
+  std::unique_ptr<std::atomic<uint8_t>[]> slot_states_;
+  std::unique_ptr<std::atomic<uint32_t>[]> slot_active_readers_;
+  std::vector<PendingPrefetch> pending_prefetches_;
 
   std::atomic<int> resident_expert_count_{0};
   std::atomic<int> eviction_cursor_{0};
   int numa_node_ = 0;
   int cache_capacity_ = 0;
+  uint64_t memory_guard_tick_ = 0;
+  std::string cgroup_memory_current_path_;
+  std::string cgroup_memory_max_path_;
   ResidentCachePolicyState resident_policy_;
+  const std::vector<uint8_t>* eviction_protected_mask_ = nullptr;
+  bool prefill_streaming_active_ = false;
   size_t gate_total_bytes_ = 0;
   size_t up_total_bytes_ = 0;
   size_t down_total_bytes_ = 0;
@@ -84,6 +109,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   size_t gate_mins_bytes_ = 0;
   size_t up_mins_bytes_ = 0;
   size_t down_mins_bytes_ = 0;
+  std::vector<float> lookahead_heat_;
 #endif
 
 #ifdef CHECK
@@ -227,8 +253,14 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #ifndef _WIN32
     if (resident_io_enabled()) {
       for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+        if (iouring_enabled() && config_.async_reader != nullptr && !pending_prefetches_[expert_id].requests.empty()) {
+          (void)config_.async_reader->wait_for_requests(pending_prefetches_[expert_id].requests, 1000);
+        }
+        pending_prefetches_[expert_id].requests.clear();
+        pending_prefetches_[expert_id].slot_index = -1;
         free_packed_expert(expert_id);
       }
+      release_resident_slot_pool();
     }
 #endif
   }
@@ -248,6 +280,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     packed_gate_owner_.assign(en, nullptr);
     packed_up_owner_.assign(en, nullptr);
     packed_down_owner_.assign(en, nullptr);
+    pending_prefetches_.assign(en, PendingPrefetch{});
     expert_states_ = std::make_unique<std::atomic<uint8_t>[]>(en);
     active_readers_ = std::make_unique<std::atomic<uint32_t>[]>(en);
     resident_expert_count_.store(0, std::memory_order_relaxed);
@@ -275,10 +308,33 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     cache_capacity_ = configured_resident <= 0
                           ? 0
                           : std::min(config_.expert_num, std::max(configured_resident, config_.num_experts_per_tok));
+    if (cache_capacity_ > 0) {
+      slot_gate_owner_.assign(cache_capacity_, nullptr);
+      slot_up_owner_.assign(cache_capacity_, nullptr);
+      slot_down_owner_.assign(cache_capacity_, nullptr);
+      slot_to_expert_.assign(cache_capacity_, -1);
+      expert_to_slot_.assign(en, -1);
+      slot_states_ = std::make_unique<std::atomic<uint8_t>[]>(cache_capacity_);
+      slot_active_readers_ = std::make_unique<std::atomic<uint32_t>[]>(cache_capacity_);
+    } else {
+      slot_gate_owner_.clear();
+      slot_up_owner_.clear();
+      slot_down_owner_.clear();
+      slot_to_expert_.clear();
+      expert_to_slot_.assign(en, -1);
+      slot_states_.reset();
+      slot_active_readers_.reset();
+    }
     resident_policy_.reset(en, config_.resident_cache_policy);
+    lookahead_heat_.assign(en, 0.0f);
 
     if (config_.pool != nullptr && tp_part_idx < (int)config_.pool->config.subpool_numa_map.size()) {
       numa_node_ = config_.pool->config.subpool_numa_map[tp_part_idx];
+    }
+
+    for (int slot = 0; slot < cache_capacity_; ++slot) {
+      slot_states_[slot].store(SLOT_EMPTY, std::memory_order_relaxed);
+      slot_active_readers_[slot].store(0, std::memory_order_relaxed);
     }
 
     for (int expert_id = 0; expert_id < en; ++expert_id) {
@@ -298,6 +354,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         up_bb_[expert_id]->mins = nullptr;
         down_bb_[expert_id]->mins = nullptr;
       }
+    }
+
+    if (cache_capacity_ > 0 && !allocate_resident_slot_pool()) {
+      throw std::runtime_error("Failed to allocate MESH resident slot pool");
     }
   }
 
@@ -371,11 +431,23 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void acquire_expert_read(int expert_id) {
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
     active_readers_[expert_id].fetch_add(1, std::memory_order_acq_rel);
+    if (cache_capacity_ > 0 && expert_id < static_cast<int>(expert_to_slot_.size())) {
+      const int slot = expert_to_slot_[expert_id];
+      if (slot >= 0 && slot < cache_capacity_) {
+        slot_active_readers_[slot].fetch_add(1, std::memory_order_acq_rel);
+      }
+    }
   }
 
   void release_expert_read(int expert_id) {
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
     active_readers_[expert_id].fetch_sub(1, std::memory_order_acq_rel);
+    if (cache_capacity_ > 0 && expert_id < static_cast<int>(expert_to_slot_.size())) {
+      const int slot = expert_to_slot_[expert_id];
+      if (slot >= 0 && slot < cache_capacity_) {
+        slot_active_readers_[slot].fetch_sub(1, std::memory_order_acq_rel);
+      }
+    }
   }
 
   class ExpertReadScope {
@@ -400,7 +472,195 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     std::vector<int> experts_;
   };
 
+  bool slot_pool_enabled() const {
+    return cache_capacity_ > 0 && static_cast<int>(slot_to_expert_.size()) == cache_capacity_ &&
+           static_cast<int>(expert_to_slot_.size()) >= config_.expert_num;
+  }
+
+  void release_expert_buffers(void* gate_owner, void* up_owner, void* down_owner) {
+    if (gate_owner != nullptr) numa_free(gate_owner, gate_total_bytes_);
+    if (up_owner != nullptr) numa_free(up_owner, up_total_bytes_);
+    if (down_owner != nullptr) numa_free(down_owner, down_total_bytes_);
+  }
+
+  bool allocate_expert_buffers(void** gate_owner, void** up_owner, void** down_owner) {
+    *gate_owner = numa_alloc_onnode(gate_total_bytes_, numa_node_);
+    *up_owner = numa_alloc_onnode(up_total_bytes_, numa_node_);
+    *down_owner = numa_alloc_onnode(down_total_bytes_, numa_node_);
+    if (*gate_owner == nullptr || *up_owner == nullptr || *down_owner == nullptr) {
+      release_expert_buffers(*gate_owner, *up_owner, *down_owner);
+      *gate_owner = nullptr;
+      *up_owner = nullptr;
+      *down_owner = nullptr;
+      return false;
+    }
+    return true;
+  }
+
+  bool allocate_resident_slot_pool() {
+    for (int slot = 0; slot < cache_capacity_; ++slot) {
+      if (!allocate_expert_buffers(&slot_gate_owner_[slot], &slot_up_owner_[slot], &slot_down_owner_[slot])) {
+        release_resident_slot_pool();
+        return false;
+      }
+      slot_states_[slot].store(SLOT_EMPTY, std::memory_order_release);
+    }
+    return true;
+  }
+
+  void release_resident_slot_pool() {
+    for (int slot = 0; slot < static_cast<int>(slot_gate_owner_.size()); ++slot) {
+      release_expert_buffers(slot_gate_owner_[slot], slot_up_owner_[slot], slot_down_owner_[slot]);
+      slot_gate_owner_[slot] = nullptr;
+      slot_up_owner_[slot] = nullptr;
+      slot_down_owner_[slot] = nullptr;
+      if (slot < static_cast<int>(slot_to_expert_.size())) slot_to_expert_[slot] = -1;
+    }
+  }
+
+  void bind_slot_to_expert(int slot, int expert_id, bool pin_after_copy) {
+    if (slot < 0 || slot >= cache_capacity_ || expert_id < 0 || expert_id >= config_.expert_num) {
+      throw std::runtime_error("Invalid MESH slot bind");
+    }
+    const int old_expert = slot_to_expert_[slot];
+    if (old_expert >= 0 && old_expert != expert_id) {
+      throw std::runtime_error("MESH slot bind attempted on an occupied slot");
+    }
+    slot_to_expert_[slot] = expert_id;
+    expert_to_slot_[expert_id] = slot;
+    packed_gate_owner_[expert_id] = slot_gate_owner_[slot];
+    packed_up_owner_[expert_id] = slot_up_owner_[slot];
+    packed_down_owner_[expert_id] = slot_down_owner_[slot];
+    apply_owned_ptrs(expert_id, slot_gate_owner_[slot], slot_up_owner_[slot], slot_down_owner_[slot]);
+    const bool hard_pin = pin_after_copy && !slot_pool_enabled();
+    slot_states_[slot].store(SLOT_READY, std::memory_order_release);
+    expert_states_[expert_id].store(hard_pin ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
+    note_expert_insert(expert_id, hard_pin);
+    drop_baseline_cache_for_expert(expert_id);
+  }
+
+  bool unbind_slot(int slot, bool release_occupancy, bool count_stats = true) {
+    if (slot < 0 || slot >= cache_capacity_) return false;
+    const int old_expert = slot_to_expert_[slot];
+    if (old_expert >= 0) {
+      if (active_readers_[old_expert].load(std::memory_order_acquire) != 0 ||
+          slot_active_readers_[slot].load(std::memory_order_acquire) != 0) {
+        return false;
+      }
+      packed_gate_owner_[old_expert] = nullptr;
+      packed_up_owner_[old_expert] = nullptr;
+      packed_down_owner_[old_expert] = nullptr;
+      expert_to_slot_[old_expert] = -1;
+      apply_cold_ptrs(old_expert);
+      if (count_stats) {
+        note_expert_demote(old_expert);
+      }
+      expert_states_[old_expert].store(EXPERT_BASELINE, std::memory_order_release);
+      slot_to_expert_[slot] = -1;
+    }
+    if (release_occupancy) {
+      const uint8_t prev = slot_states_[slot].exchange(SLOT_EMPTY, std::memory_order_acq_rel);
+      if (prev != SLOT_EMPTY) {
+        resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
+      }
+    }
+    return true;
+  }
+
+  int find_empty_slot() const {
+    if (!slot_pool_enabled()) return -1;
+    for (int slot = 0; slot < cache_capacity_; ++slot) {
+      if (slot_states_[slot].load(std::memory_order_acquire) == SLOT_EMPTY && slot_to_expert_[slot] < 0) {
+        return slot;
+      }
+    }
+    return -1;
+  }
+
+  bool reserve_slot_for_loading(int slot, int expert_id) {
+    if (slot < 0 || slot >= cache_capacity_ || expert_id < 0 || expert_id >= config_.expert_num) return false;
+    const uint8_t state = slot_states_[slot].load(std::memory_order_acquire);
+    if (state == SLOT_READY && !unbind_slot(slot, false)) {
+      return false;
+    }
+    if (slot_states_[slot].load(std::memory_order_acquire) == SLOT_EMPTY) {
+      resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    slot_states_[slot].store(SLOT_LOADING, std::memory_order_release);
+    return true;
+  }
+
+  int slot_for_expert_or_empty(int expert_id) const {
+    if (!slot_pool_enabled() || expert_id < 0 || expert_id >= static_cast<int>(expert_to_slot_.size())) return -1;
+    const int slot = expert_to_slot_[expert_id];
+    if (slot >= 0 && slot < cache_capacity_) return slot;
+    return find_empty_slot();
+  }
+
+  std::string resident_debug_summary() const {
+    std::ostringstream oss;
+    int base = 0, packing = 0, cached = 0, pinned = 0, demoting = 0, prefetching = 0, other = 0;
+    int readers = 0;
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      switch (expert_states_[expert_id].load(std::memory_order_acquire)) {
+        case EXPERT_BASELINE:
+          base++;
+          break;
+        case EXPERT_PACKING:
+          packing++;
+          break;
+        case EXPERT_CACHED:
+          cached++;
+          break;
+        case EXPERT_PINNED:
+          pinned++;
+          break;
+        case EXPERT_DEMOTING:
+          demoting++;
+          break;
+        case EXPERT_PREFETCHING:
+          prefetching++;
+          break;
+        default:
+          other++;
+          break;
+      }
+      if (active_readers_[expert_id].load(std::memory_order_acquire) != 0) readers++;
+    }
+    oss << " states={base:" << base << ",packing:" << packing << ",cached:" << cached
+        << ",pinned:" << pinned << ",demoting:" << demoting << ",prefetching:" << prefetching
+        << ",other:" << other << ",readers:" << readers << "}";
+    if (slot_pool_enabled()) {
+      int empty = 0, loading = 0, ready = 0, slot_readers = 0;
+      oss << " slots=[";
+      for (int slot = 0; slot < cache_capacity_; ++slot) {
+        const uint8_t ss = slot_states_[slot].load(std::memory_order_acquire);
+        if (ss == SLOT_EMPTY) empty++;
+        else if (ss == SLOT_LOADING) loading++;
+        else if (ss == SLOT_READY) ready++;
+        if (slot_active_readers_[slot].load(std::memory_order_acquire) != 0) slot_readers++;
+        if (slot < 16) {
+          if (slot > 0) oss << ",";
+          const int expert_id = slot_to_expert_[slot];
+          const int estate = expert_id >= 0 ? static_cast<int>(expert_states_[expert_id].load(std::memory_order_acquire)) : -1;
+          oss << slot << ":" << expert_id << ":s" << static_cast<int>(ss) << ":e" << estate
+              << ":r" << slot_active_readers_[slot].load(std::memory_order_acquire);
+        }
+      }
+      oss << "] slot_counts={empty:" << empty << ",loading:" << loading << ",ready:" << ready
+          << ",readers:" << slot_readers << "}";
+    }
+    return oss.str();
+  }
+
   void free_packed_expert(int expert_id) {
+    if (slot_pool_enabled() && expert_id >= 0 && expert_id < static_cast<int>(expert_to_slot_.size())) {
+      const int slot = expert_to_slot_[expert_id];
+      if (slot >= 0) {
+        (void)unbind_slot(slot, true, false);
+        return;
+      }
+    }
     void* gate_owner = packed_gate_owner_[expert_id];
     void* up_owner = packed_up_owner_[expert_id];
     void* down_owner = packed_down_owner_[expert_id];
@@ -563,12 +823,29 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
     std::fprintf(stderr,
                  "[MESHIO] layer=%d tp=%d backend=iouring direct_io=%s mmap_baseline=false capacity=%d policy=%s "
+                 "lookahead=%s topk_fallback=%s w=%.3f gamma=%.3f beta=%.3f transition=%.3f "
+                 "prefetch=%d coldstart=%s coldstart_limit=%d "
+                 "mem_guard=%s high=%.3f target=%.3f interval=%d demotes=%d "
                  "gate=%zu+%zu up=%zu+%zu down=%zu+%zu\n",
                  config_.layer_idx,
                  tp_part_idx,
                  config_.iouring_direct_io ? "true" : "false",
                  cache_capacity_,
                  config_.resident_cache_policy.c_str(),
+                 config_.mesh_lookahead_enabled ? "true" : "false",
+                 config_.mesh_topk_fallback_enabled ? "true" : "false",
+                 config_.mesh_lookahead_weight,
+                 config_.mesh_heat_gamma,
+                 config_.mesh_heat_beta,
+                 config_.mesh_transition_alpha,
+                 config_.mesh_prefetch_budget,
+                 config_.mesh_coldstart_prefill_enabled ? "true" : "false",
+                 config_.mesh_coldstart_prefill_limit,
+                 config_.mesh_memory_guard_enabled ? "true" : "false",
+                 config_.mesh_memory_high_watermark,
+                 config_.mesh_memory_target_watermark,
+                 config_.mesh_memory_check_interval,
+                 config_.mesh_memory_max_demotes_per_check,
                  gate_weight_bytes_,
                  gate_scale_bytes_,
                  up_weight_bytes_,
@@ -592,22 +869,88 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
   void note_expert_demote(int expert_id) { resident_policy_.on_demote(expert_id); }
 
-  int select_eviction_victim(int exclude_expert_id) {
+  bool mesh_lookahead_active() const {
+    return resident_io_enabled() && config_.mesh_lookahead_enabled && config_.mesh_lookahead_weight > 0.0f &&
+           static_cast<int>(lookahead_heat_.size()) >= config_.expert_num;
+  }
+
+  bool is_eviction_protected(int expert_id, const std::vector<uint8_t>* protected_mask) const {
+    return protected_mask != nullptr && expert_id >= 0 && expert_id < static_cast<int>(protected_mask->size()) &&
+           (*protected_mask)[expert_id] != 0;
+  }
+
+  int select_eviction_victim(int exclude_expert_id, const std::vector<uint8_t>* protected_mask = nullptr) {
+    const std::vector<uint8_t>* effective_protected_mask =
+        protected_mask != nullptr ? protected_mask : eviction_protected_mask_;
+    auto is_legal_prefetch_victim = [this, protected_mask](int expert_id) {
+      const std::vector<uint8_t>* effective_mask =
+          protected_mask != nullptr ? protected_mask : eviction_protected_mask_;
+      return expert_id >= 0 && expert_id < config_.expert_num && !is_eviction_protected(expert_id, effective_mask) &&
+             expert_states_[expert_id].load(std::memory_order_acquire) == EXPERT_CACHED &&
+             active_readers_[expert_id].load(std::memory_order_acquire) == 0;
+    };
+
+    if (!prefill_streaming_active_ && mesh_lookahead_active()) {
+      std::vector<int> order = resident_policy_.build_reclaim_order(
+          config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
+          static_cast<uint8_t>(EXPERT_CACHED),
+          [this](int expert_id) { return expert_states_[expert_id].load(std::memory_order_acquire); });
+      double best_score = std::numeric_limits<double>::infinity();
+      int best = -1;
+      const double denom = order.empty() ? 1.0 : static_cast<double>(order.size());
+      for (size_t rank = 0; rank < order.size(); ++rank) {
+        const int candidate = order[rank];
+        if (candidate < 0 || candidate >= config_.expert_num) continue;
+        if (candidate == exclude_expert_id) continue;
+        if (is_eviction_protected(candidate, effective_protected_mask)) continue;
+        if (expert_states_[candidate].load(std::memory_order_acquire) != EXPERT_CACHED) continue;
+        if (active_readers_[candidate].load(std::memory_order_acquire) != 0) continue;
+        const double policy_score = static_cast<double>(rank) / denom;
+        const double heat = std::max(0.0f, lookahead_heat_[candidate]);
+        const double score = policy_score + static_cast<double>(config_.mesh_lookahead_weight) * heat;
+        if (score < best_score) {
+          best_score = score;
+          best = candidate;
+        }
+      }
+      if (best >= 0) {
+        return best;
+      }
+    }
+    if (effective_protected_mask != nullptr) {
+      std::vector<int> order = resident_policy_.build_reclaim_order(
+          config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
+          static_cast<uint8_t>(EXPERT_CACHED),
+          [this](int expert_id) { return expert_states_[expert_id].load(std::memory_order_acquire); });
+      for (int candidate : order) {
+        if (candidate == exclude_expert_id) continue;
+        if (is_legal_prefetch_victim(candidate)) return candidate;
+      }
+      if (protected_mask != nullptr || !prefill_streaming_active_) {
+        return -1;
+      }
+    }
     return resident_policy_.pick_victim(
         config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
         [this](int expert_id) { return expert_states_[expert_id].load(std::memory_order_acquire); },
         [this](int expert_id) { return active_readers_[expert_id].load(std::memory_order_acquire); });
   }
 
-  bool evict_one_cached_expert(int exclude_expert_id) {
+  bool evict_one_cached_expert(int exclude_expert_id, const std::vector<uint8_t>* protected_mask = nullptr) {
     if (config_.expert_num <= 1) return false;
+    const std::vector<uint8_t>* effective_protected_mask =
+        protected_mask != nullptr ? protected_mask : eviction_protected_mask_;
 
     for (int attempt = 0; attempt < config_.expert_num; ++attempt) {
-      const int victim = select_eviction_victim(exclude_expert_id);
+      const int victim = select_eviction_victim(exclude_expert_id, protected_mask);
       if (victim < 0) {
         return false;
       }
       if (victim == exclude_expert_id) {
+        continue;
+      }
+      if (!(prefill_streaming_active_ && protected_mask == nullptr) &&
+          is_eviction_protected(victim, effective_protected_mask)) {
         continue;
       }
 
@@ -625,8 +968,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       free_packed_expert(victim);
       apply_cold_ptrs(victim);
       note_expert_demote(victim);
-      resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
-      expert_states_[victim].store(EXPERT_BASELINE, std::memory_order_release);
+      if (!slot_pool_enabled()) {
+        resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
+        expert_states_[victim].store(EXPERT_BASELINE, std::memory_order_release);
+      }
 
       // Record eviction and demote
       if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
@@ -640,8 +985,156 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     return false;
   }
 
+  bool evict_one_slot_fallback(int exclude_expert_id) {
+    if (!slot_pool_enabled()) return false;
+    for (int slot = 0; slot < cache_capacity_; ++slot) {
+      if (slot_states_[slot].load(std::memory_order_acquire) != SLOT_READY) continue;
+      const int victim = slot_to_expert_[slot];
+      if (victim < 0 || victim == exclude_expert_id) continue;
+      if (active_readers_[victim].load(std::memory_order_acquire) != 0 ||
+          slot_active_readers_[slot].load(std::memory_order_acquire) != 0) {
+        continue;
+      }
+      uint8_t state = expert_states_[victim].load(std::memory_order_acquire);
+      if (state != EXPERT_CACHED && state != EXPERT_PINNED) continue;
+      if (!expert_states_[victim].compare_exchange_strong(
+              state, EXPERT_DEMOTING, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        continue;
+      }
+      if (!unbind_slot(slot, true, false)) {
+        expert_states_[victim].store(state, std::memory_order_release);
+        continue;
+      }
+      note_expert_demote(victim);
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->eviction_count.fetch_add(1, std::memory_order_relaxed);
+        config_.cache_stats->demote_count.fetch_add(1, std::memory_order_relaxed);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  void finalize_expert_buffers(int expert_id, void* gate_owner, void* up_owner, void* down_owner, bool pin_after_copy) {
+    if (slot_pool_enabled()) {
+      int slot = -1;
+      for (int i = 0; i < cache_capacity_; ++i) {
+        if (slot_gate_owner_[i] == gate_owner && slot_up_owner_[i] == up_owner && slot_down_owner_[i] == down_owner) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) {
+        throw std::runtime_error("MESH finalize could not map owner buffers to a resident slot");
+      }
+      bind_slot_to_expert(slot, expert_id, pin_after_copy);
+      return;
+    }
+    packed_gate_owner_[expert_id] = gate_owner;
+    packed_up_owner_[expert_id] = up_owner;
+    packed_down_owner_[expert_id] = down_owner;
+    apply_owned_ptrs(expert_id, gate_owner, up_owner, down_owner);
+    expert_states_[expert_id].store(pin_after_copy ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
+    note_expert_insert(expert_id, pin_after_copy);
+    // Keep the newly materialized NUMA-local copy as the authoritative hot
+    // representation for this expert and immediately drop the mmap-backed
+    // baseline pages. They can fault back in later if this expert is demoted.
+    drop_baseline_cache_for_expert(expert_id);
+  }
+
+#ifdef HAVE_LIBURING
+  std::vector<uint64_t> submit_iouring_reads_for_expert(int expert_id, void* gate_owner, void* up_owner, void* down_owner) {
+    if (config_.async_reader == nullptr) {
+      return {};
+    }
+
+    const auto& gate_slot = iouring_slot_at(config_.gate_file_slots, "gate.weight", expert_id);
+    const auto& up_slot = iouring_slot_at(config_.up_file_slots, "up.weight", expert_id);
+    const auto& down_slot = iouring_slot_at(config_.down_file_slots, "down.weight", expert_id);
+    const auto& gate_scale_slot = iouring_slot_at(config_.gate_scale_file_slots, "gate.scale", expert_id);
+    const auto& up_scale_slot = iouring_slot_at(config_.up_scale_file_slots, "up.scale", expert_id);
+    const auto& down_scale_slot = iouring_slot_at(config_.down_scale_file_slots, "down.scale", expert_id);
+
+    if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0 || gate_scale_slot.fd < 0 ||
+        up_scale_slot.fd < 0 || down_scale_slot.fd < 0) {
+      std::ostringstream oss;
+      oss << "AMX io_uring promotion found invalid fd layer=" << config_.layer_idx << " tp=" << tp_part_idx
+          << " expert=" << expert_id << " gate_fd=" << gate_slot.fd << " up_fd=" << up_slot.fd
+          << " down_fd=" << down_slot.fd << " gate_scale_fd=" << gate_scale_slot.fd
+          << " up_scale_fd=" << up_scale_slot.fd << " down_scale_fd=" << down_scale_slot.fd;
+      throw std::runtime_error(oss.str());
+    }
+
+    std::vector<uint64_t> read_requests;
+    read_requests.reserve(9);
+    auto submit_slot = [&](const ExpertFileSlot& slot, void* dst) {
+      if (slot.fd >= 0 && slot.size > 0) {
+        read_requests.push_back(config_.async_reader->submit_read(slot.fd, dst, slot.size, slot.offset, expert_id));
+        if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+          config_.cache_stats->iouring_read_request_count.fetch_add(1, std::memory_order_relaxed);
+          config_.cache_stats->iouring_read_bytes.fetch_add(static_cast<uint64_t>(slot.size), std::memory_order_relaxed);
+        }
+      }
+    };
+
+    submit_slot(gate_slot, gate_owner);
+    submit_slot(gate_scale_slot, reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_);
+    submit_slot(up_slot, up_owner);
+    submit_slot(up_scale_slot, reinterpret_cast<char*>(up_owner) + up_weight_bytes_);
+    submit_slot(down_slot, down_owner);
+    submit_slot(down_scale_slot, reinterpret_cast<char*>(down_owner) + down_weight_bytes_);
+
+    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
+      if (!config_.gate_mins_file_slots.empty()) {
+        submit_slot(iouring_slot_at(config_.gate_mins_file_slots, "gate.mins", expert_id),
+                    reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_ + gate_scale_bytes_);
+      }
+      if (!config_.up_mins_file_slots.empty()) {
+        submit_slot(iouring_slot_at(config_.up_mins_file_slots, "up.mins", expert_id),
+                    reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
+      }
+      if (!config_.down_mins_file_slots.empty()) {
+        submit_slot(iouring_slot_at(config_.down_mins_file_slots, "down.mins", expert_id),
+                    reinterpret_cast<char*>(down_owner) + down_weight_bytes_ + down_scale_bytes_);
+      }
+    }
+    return read_requests;
+  }
+#endif
+
   bool allocate_and_copy_expert(int expert_id, bool pin_after_copy) {
-    if (cache_capacity_ > 0) {
+    const bool use_slot_pool = slot_pool_enabled();
+    int slot = -1;
+    void* gate_owner = nullptr;
+    void* up_owner = nullptr;
+    void* down_owner = nullptr;
+
+    if (use_slot_pool) {
+      int wait_attempts = 0;
+      while ((slot = find_empty_slot()) < 0) {
+        complete_ready_prefetches();
+        if ((slot = find_empty_slot()) >= 0) {
+          break;
+        }
+        if (!evict_one_cached_expert(expert_id) && !evict_one_slot_fallback(expert_id)) {
+          if (++wait_attempts > 2000000) {
+            return false;
+          }
+          if ((wait_attempts & 1023) == 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+          }
+          std::this_thread::yield();
+          continue;
+        }
+        wait_attempts = 0;
+      }
+      if (!reserve_slot_for_loading(slot, expert_id)) {
+        return false;
+      }
+      gate_owner = slot_gate_owner_[slot];
+      up_owner = slot_up_owner_[slot];
+      down_owner = slot_down_owner_[slot];
+    } else if (cache_capacity_ > 0) {
       while (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
         if (!evict_one_cached_expert(expert_id)) {
           break;
@@ -653,23 +1146,25 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       // transient overflow and trim back to cache_capacity_ after the forward.
     }
 
-    void* gate_owner = numa_alloc_onnode(gate_total_bytes_, numa_node_);
-    void* up_owner = numa_alloc_onnode(up_total_bytes_, numa_node_);
-    void* down_owner = numa_alloc_onnode(down_total_bytes_, numa_node_);
-    if (gate_owner == nullptr || up_owner == nullptr || down_owner == nullptr) {
-      if (gate_owner) numa_free(gate_owner, gate_total_bytes_);
-      if (up_owner) numa_free(up_owner, up_total_bytes_);
-      if (down_owner) numa_free(down_owner, down_total_bytes_);
+    if (!use_slot_pool && !allocate_expert_buffers(&gate_owner, &up_owner, &down_owner)) {
       return false;
     }
+
+    auto release_on_failure = [&]() {
+      if (use_slot_pool) {
+        if (slot >= 0) {
+          (void)unbind_slot(slot, true, false);
+        }
+      } else {
+        release_expert_buffers(gate_owner, up_owner, down_owner);
+      }
+    };
 
     if (!iouring_enabled() &&
         (baseline_gate_weight_src_[expert_id] == nullptr || baseline_up_weight_src_[expert_id] == nullptr ||
          baseline_down_weight_src_[expert_id] == nullptr || baseline_gate_scale_src_[expert_id] == nullptr ||
          baseline_up_scale_src_[expert_id] == nullptr || baseline_down_scale_src_[expert_id] == nullptr)) {
-      numa_free(gate_owner, gate_total_bytes_);
-      numa_free(up_owner, up_total_bytes_);
-      numa_free(down_owner, down_total_bytes_);
+      release_on_failure();
       return false;
     }
 
@@ -678,65 +1173,18 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #ifdef HAVE_LIBURING
       // io_uring path: direct read from SSD to NUMA buffer
       if (config_.async_reader == nullptr) {
-        numa_free(gate_owner, gate_total_bytes_);
-        numa_free(up_owner, up_total_bytes_);
-        numa_free(down_owner, down_total_bytes_);
+        release_on_failure();
         return false;
       }
 
-      const auto& gate_slot = iouring_slot_at(config_.gate_file_slots, "gate.weight", expert_id);
-      const auto& up_slot = iouring_slot_at(config_.up_file_slots, "up.weight", expert_id);
-      const auto& down_slot = iouring_slot_at(config_.down_file_slots, "down.weight", expert_id);
-      const auto& gate_scale_slot = iouring_slot_at(config_.gate_scale_file_slots, "gate.scale", expert_id);
-      const auto& up_scale_slot = iouring_slot_at(config_.up_scale_file_slots, "up.scale", expert_id);
-      const auto& down_scale_slot = iouring_slot_at(config_.down_scale_file_slots, "down.scale", expert_id);
-
-      if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0 || gate_scale_slot.fd < 0 ||
-          up_scale_slot.fd < 0 || down_scale_slot.fd < 0) {
-        std::ostringstream oss;
-        oss << "AMX io_uring promotion found invalid fd layer=" << config_.layer_idx << " tp=" << tp_part_idx
-            << " expert=" << expert_id << " gate_fd=" << gate_slot.fd << " up_fd=" << up_slot.fd
-            << " down_fd=" << down_slot.fd << " gate_scale_fd=" << gate_scale_slot.fd
-            << " up_scale_fd=" << up_scale_slot.fd << " down_scale_fd=" << down_scale_slot.fd;
-        numa_free(gate_owner, gate_total_bytes_);
-        numa_free(up_owner, up_total_bytes_);
-        numa_free(down_owner, down_total_bytes_);
-        throw std::runtime_error(oss.str());
-      }
-
-      std::vector<uint64_t> read_requests;
-      read_requests.reserve(9);
-      auto submit_slot = [&](const ExpertFileSlot& slot, void* dst) {
-        if (slot.fd >= 0 && slot.size > 0) {
-          read_requests.push_back(config_.async_reader->submit_read(slot.fd, dst, slot.size, slot.offset, expert_id));
-        }
-      };
-
-      submit_slot(gate_slot, gate_owner);
-      submit_slot(gate_scale_slot, reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_);
-      submit_slot(up_slot, up_owner);
-      submit_slot(up_scale_slot, reinterpret_cast<char*>(up_owner) + up_weight_bytes_);
-      submit_slot(down_slot, down_owner);
-      submit_slot(down_scale_slot, reinterpret_cast<char*>(down_owner) + down_weight_bytes_);
-
-      if constexpr (requires { gate_bb_[expert_id]->mins; }) {
-        if (!config_.gate_mins_file_slots.empty()) {
-          submit_slot(iouring_slot_at(config_.gate_mins_file_slots, "gate.mins", expert_id),
-                      reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_ + gate_scale_bytes_);
-        }
-        if (!config_.up_mins_file_slots.empty()) {
-          submit_slot(iouring_slot_at(config_.up_mins_file_slots, "up.mins", expert_id),
-                      reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
-        }
-        if (!config_.down_mins_file_slots.empty()) {
-          submit_slot(iouring_slot_at(config_.down_mins_file_slots, "down.mins", expert_id),
-                      reinterpret_cast<char*>(down_owner) + down_weight_bytes_ + down_scale_bytes_);
-        }
-      }
+      std::vector<uint64_t> read_requests = submit_iouring_reads_for_expert(expert_id, gate_owner, up_owner, down_owner);
 
       // Wait for every tensor fragment (weight, scale, optional mins) to complete.
       const int timeout_ms = 60000;
       if (!config_.async_reader->wait_for_requests(read_requests, timeout_ms)) {
+        const auto& gate_slot = iouring_slot_at(config_.gate_file_slots, "gate.weight", expert_id);
+        const auto& up_slot = iouring_slot_at(config_.up_file_slots, "up.weight", expert_id);
+        const auto& down_slot = iouring_slot_at(config_.down_file_slots, "down.weight", expert_id);
         std::ostringstream oss;
         oss << "AMX io_uring promotion failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
             << " expert=" << expert_id << " logical=" << logical_expert_id_for_slot(expert_id)
@@ -745,16 +1193,12 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             << gate_slot.size << ") up=(" << up_slot.fd << "," << up_slot.offset << "," << up_slot.size
             << ") down=(" << down_slot.fd << "," << down_slot.offset << "," << down_slot.size << ") detail="
             << config_.async_reader->describe_requests(read_requests);
-        numa_free(gate_owner, gate_total_bytes_);
-        numa_free(up_owner, up_total_bytes_);
-        numa_free(down_owner, down_total_bytes_);
+        release_on_failure();
         throw std::runtime_error(oss.str());
       }
 #else
       // io_uring not available, fallback to error
-      numa_free(gate_owner, gate_total_bytes_);
-      numa_free(up_owner, up_total_bytes_);
-      numa_free(down_owner, down_total_bytes_);
+      release_on_failure();
       return false;
 #endif
     } else {
@@ -800,17 +1244,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
     }
 
-    packed_gate_owner_[expert_id] = gate_owner;
-    packed_up_owner_[expert_id] = up_owner;
-    packed_down_owner_[expert_id] = down_owner;
-    apply_owned_ptrs(expert_id, gate_owner, up_owner, down_owner);
-    resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
-    expert_states_[expert_id].store(pin_after_copy ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
-    note_expert_insert(expert_id, pin_after_copy);
-    // Keep the newly materialized NUMA-local copy as the authoritative hot
-    // representation for this expert and immediately drop the mmap-backed
-    // baseline pages. They can fault back in later if this expert is demoted.
-    drop_baseline_cache_for_expert(expert_id);
+    if (!use_slot_pool) {
+      resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    finalize_expert_buffers(expert_id, gate_owner, up_owner, down_owner, pin_after_copy);
     return true;
   }
 
@@ -825,29 +1262,264 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
+  bool init_cgroup_memory_paths() {
+    if (!cgroup_memory_current_path_.empty() && !cgroup_memory_max_path_.empty()) return true;
+
+    std::ifstream cgroup_file("/proc/self/cgroup");
+    std::string line;
+    while (std::getline(cgroup_file, line)) {
+      const std::string marker = "0::";
+      if (line.rfind(marker, 0) != 0) continue;
+      std::string rel = line.substr(marker.size());
+      if (rel.empty() || rel[0] != '/') rel = "/" + rel;
+      const std::string base = "/sys/fs/cgroup" + rel;
+      cgroup_memory_current_path_ = base + "/memory.current";
+      cgroup_memory_max_path_ = base + "/memory.max";
+      return true;
+    }
+    return false;
+  }
+
+  bool read_uint64_file(const std::string& path, uint64_t* value, bool allow_max = false) {
+    if (value == nullptr || path.empty()) return false;
+    std::ifstream in(path);
+    std::string text;
+    if (!(in >> text)) return false;
+    if (allow_max && text == "max") {
+      *value = 0;
+      return true;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(text.c_str(), &end, 10);
+    if (errno != 0 || end == text.c_str() || parsed == 0ULL) return false;
+    *value = static_cast<uint64_t>(parsed);
+    return true;
+  }
+
+  bool read_cgroup_memory_scope(uint64_t* current, uint64_t* limit) {
+    if (!init_cgroup_memory_paths()) return false;
+    uint64_t cur = 0;
+    uint64_t max = 0;
+    if (!read_uint64_file(cgroup_memory_current_path_, &cur)) return false;
+    if (!read_uint64_file(cgroup_memory_max_path_, &max, true)) return false;
+    if (max == 0) return false;
+    if (current != nullptr) *current = cur;
+    if (limit != nullptr) *limit = max;
+    return true;
+  }
+
+  bool memory_guard_pressure_active() {
+    if (!config_.mesh_memory_guard_enabled || cache_capacity_ <= 0) return false;
+    uint64_t current = 0;
+    uint64_t limit = 0;
+    if (!read_cgroup_memory_scope(&current, &limit)) return false;
+    const double high = std::max(0.0, std::min(1.0, static_cast<double>(config_.mesh_memory_high_watermark)));
+    return static_cast<double>(current) >= static_cast<double>(limit) * high;
+  }
+
+  void trim_cache_for_memory_pressure() {
+    if (!config_.mesh_memory_guard_enabled || cache_capacity_ <= 0) return;
+    const int interval = std::max(1, config_.mesh_memory_check_interval);
+    memory_guard_tick_ += 1;
+    if ((memory_guard_tick_ % static_cast<uint64_t>(interval)) != 0) return;
+
+    uint64_t current = 0;
+    uint64_t limit = 0;
+    if (!read_cgroup_memory_scope(&current, &limit)) return;
+
+    const double high = std::max(0.0, std::min(1.0, static_cast<double>(config_.mesh_memory_high_watermark)));
+    const double target = std::max(0.0, std::min(high, static_cast<double>(config_.mesh_memory_target_watermark)));
+    if (static_cast<double>(current) < static_cast<double>(limit) * high) return;
+
+    const int max_demotes = std::max(1, config_.mesh_memory_max_demotes_per_check);
+    int demoted = 0;
+    for (int attempt = 0; attempt < max_demotes; ++attempt) {
+      if (!evict_one_cached_expert(-1)) break;
+      demoted += 1;
+      if ((attempt & 3) == 3) {
+        if (!read_cgroup_memory_scope(&current, &limit)) break;
+        if (static_cast<double>(current) <= static_cast<double>(limit) * target) break;
+      }
+    }
+    if (demoted > 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->memory_guard_demote_count.fetch_add(static_cast<uint64_t>(demoted),
+                                                               std::memory_order_relaxed);
+    }
+  }
+
+  bool pending_prefetch_finished(int expert_id, bool* failed) const {
+    if (failed != nullptr) *failed = false;
+    const auto& pending = pending_prefetches_[expert_id];
+    if (pending.requests.empty() || config_.async_reader == nullptr) return false;
+    for (uint64_t request_id : pending.requests) {
+      const int result = config_.async_reader->get_request_result(request_id);
+      if (result == std::numeric_limits<int>::min()) {
+        return false;
+      }
+      if (result < 0) {
+        if (failed != nullptr) *failed = true;
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void clear_pending_prefetch(int expert_id, bool release_buffers) {
+    auto& pending = pending_prefetches_[expert_id];
+    if (release_buffers && pending.slot_index >= 0) {
+      (void)unbind_slot(pending.slot_index, true, false);
+    }
+    pending.slot_index = -1;
+    pending.requests.clear();
+  }
+
+  bool finalize_pending_prefetch(int expert_id, bool pin_after_wait) {
+    auto& pending = pending_prefetches_[expert_id];
+    const int slot = pending.slot_index;
+    if (slot < 0 || slot >= cache_capacity_) {
+      clear_pending_prefetch(expert_id, true);
+      expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      return false;
+    }
+    void* gate_owner = slot_gate_owner_[slot];
+    void* up_owner = slot_up_owner_[slot];
+    void* down_owner = slot_down_owner_[slot];
+    pending.slot_index = -1;
+    pending.requests.clear();
+    finalize_expert_buffers(expert_id, gate_owner, up_owner, down_owner, pin_after_wait);
+    return true;
+  }
+
+  bool wait_for_pending_prefetch(int expert_id, bool pin_after_wait) {
+    if (!iouring_enabled() || config_.async_reader == nullptr) return false;
+    const auto& requests = pending_prefetches_[expert_id].requests;
+    if (requests.empty()) return false;
+    const int timeout_ms = 60000;
+    if (!config_.async_reader->wait_for_requests(requests, timeout_ms)) {
+      std::ostringstream oss;
+      oss << "AMX io_uring prefetch wait failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
+          << " expert=" << expert_id << " requests=" << requests.size()
+          << " detail=" << config_.async_reader->describe_requests(requests);
+      clear_pending_prefetch(expert_id, true);
+      expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      throw std::runtime_error(oss.str());
+    }
+    if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->prefetch_hit_count.fetch_add(1, std::memory_order_relaxed);
+      if (tp_part_idx == 0) {
+        config_.cache_stats->note_expert_prefetch_hit(expert_id);
+      }
+    }
+    return finalize_pending_prefetch(expert_id, pin_after_wait);
+  }
+
+  void complete_ready_prefetches() {
+    if (!iouring_enabled() || config_.async_reader == nullptr) return;
+#ifdef HAVE_LIBURING
+    (void)config_.async_reader->poll_completions();
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      if (expert_states_[expert_id].load(std::memory_order_acquire) != EXPERT_PREFETCHING) continue;
+      bool failed = false;
+      if (pending_prefetch_finished(expert_id, &failed)) {
+        finalize_pending_prefetch(expert_id, false);
+      } else if (failed) {
+        clear_pending_prefetch(expert_id, true);
+        expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      }
+    }
+#endif
+  }
+
+  bool submit_async_prefetch(int expert_id, const std::vector<uint8_t>* protected_mask = nullptr) {
+    if (!iouring_enabled() || config_.async_reader == nullptr || !slot_pool_enabled()) return false;
+#ifndef HAVE_LIBURING
+    return false;
+#else
+    if (expert_id < 0 || expert_id >= config_.expert_num || config_.should_skip_expert(expert_id)) return false;
+    // Leave queue headroom for demand promotions. Each AMXINT4 expert uses six
+    // reads, plus optional mins tensors for some formats.
+    if (config_.async_reader->get_inflight_count() > 96) return false;
+    int slot = find_empty_slot();
+    while (slot < 0) {
+      if (!evict_one_cached_expert(expert_id, protected_mask)) {
+        return false;
+      }
+      slot = find_empty_slot();
+    }
+
+    uint8_t expected = EXPERT_BASELINE;
+    if (!expert_states_[expert_id].compare_exchange_strong(
+            expected, EXPERT_PREFETCHING, std::memory_order_acq_rel, std::memory_order_acquire)) {
+      return false;
+    }
+
+    if (!reserve_slot_for_loading(slot, expert_id)) {
+      expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      return false;
+    }
+    void* gate_owner = slot_gate_owner_[slot];
+    void* up_owner = slot_up_owner_[slot];
+    void* down_owner = slot_down_owner_[slot];
+
+    try {
+      std::vector<uint64_t> requests = submit_iouring_reads_for_expert(expert_id, gate_owner, up_owner, down_owner);
+      if (requests.empty()) {
+        (void)unbind_slot(slot, true, false);
+        expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+        return false;
+      }
+      auto& pending = pending_prefetches_[expert_id];
+      pending.slot_index = slot;
+      pending.requests = std::move(requests);
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->async_prefetch_count.fetch_add(1, std::memory_order_relaxed);
+      }
+      return true;
+    } catch (...) {
+      (void)unbind_slot(slot, true, false);
+      expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      throw;
+    }
+#endif
+  }
+
   void ensure_expert_ready(int expert_id, bool pin = false) {
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
 
     // Record total access
     if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
       config_.cache_stats->total_access_count.fetch_add(1, std::memory_order_relaxed);
+      if (tp_part_idx == 0) {
+        config_.cache_stats->note_expert_access(expert_id);
+      }
     }
 
+    bool counted_miss_for_this_access = false;
     for (;;) {
       uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
       if (state == EXPERT_PINNED) {
         // Cache hit
-        if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        if (!counted_miss_for_this_access && config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->hit_count.fetch_add(1, std::memory_order_relaxed);
+          if (tp_part_idx == 0) {
+            config_.cache_stats->note_expert_hit(expert_id);
+          }
         }
         return;
       }
       if (state == EXPERT_CACHED) {
         // Cache hit
-        if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        if (!counted_miss_for_this_access && config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->hit_count.fetch_add(1, std::memory_order_relaxed);
+          if (tp_part_idx == 0) {
+            config_.cache_stats->note_expert_hit(expert_id);
+          }
         }
         if (!pin) {
+          return;
+        }
+        if (slot_pool_enabled()) {
           return;
         }
         uint8_t expected = EXPERT_CACHED;
@@ -863,7 +1535,11 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         // Cache miss - need to promote
         if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+          if (tp_part_idx == 0) {
+            config_.cache_stats->note_expert_miss(expert_id);
+          }
         }
+        counted_miss_for_this_access = true;
         uint8_t expected = EXPERT_BASELINE;
         if (!expert_states_[expert_id].compare_exchange_strong(
                 expected, EXPERT_PACKING, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -877,13 +1553,28 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
               << " resident=" << resident_expert_count_.load(std::memory_order_acquire)
               << " capacity=" << cache_capacity_ << " gate_bytes=" << gate_total_bytes_
               << " up_bytes=" << up_total_bytes_ << " down_bytes=" << down_total_bytes_
-              << " iouring=" << (iouring_enabled() ? "true" : "false");
+              << " iouring=" << (iouring_enabled() ? "true" : "false")
+              << resident_debug_summary();
           throw std::runtime_error(oss.str());
         }
         // Record promote
         if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->promote_count.fetch_add(1, std::memory_order_relaxed);
+          if (tp_part_idx == 0) {
+            config_.cache_stats->note_expert_promote(expert_id);
+          }
         }
+        continue;
+      }
+      if (state == EXPERT_PREFETCHING) {
+        if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+          config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+          if (tp_part_idx == 0) {
+            config_.cache_stats->note_expert_miss(expert_id);
+          }
+        }
+        counted_miss_for_this_access = true;
+        wait_for_pending_prefetch(expert_id, pin);
         continue;
       }
       if (state == EXPERT_PACKING || state == EXPERT_DEMOTING) {
@@ -891,6 +1582,121 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         continue;
       }
     }
+  }
+
+  void refresh_lookahead_heat() {
+    if (!resident_io_enabled() || !config_.mesh_lookahead_enabled) return;
+    lookahead_heat_ = mesh_lookahead_registry().snapshot_for_layer(config_.layer_idx, config_.expert_num);
+  }
+
+  void update_lookahead_heat_from_forward(int qlen, int k, const int64_t* expert_ids, const float* weights) {
+    if (!resident_io_enabled() || !config_.mesh_lookahead_enabled) return;
+    if (!config_.mesh_topk_fallback_enabled) return;
+    if (tp_part_idx != 0) return;
+    mesh_lookahead_registry().observe_topk(config_.layer_idx,
+                                           config_.expert_num,
+                                           expert_ids,
+                                           weights,
+                                           qlen * k,
+                                           config_.gpu_experts_mask,
+                                           config_.mesh_heat_gamma,
+                                           config_.mesh_heat_beta,
+                                           config_.mesh_transition_alpha);
+    if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->lookahead_update_count.fetch_add(1, std::memory_order_relaxed);
+      if (config_.mesh_transition_alpha > 0.0f) {
+        config_.cache_stats->transition_update_count.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+
+	  int prefetch_experts(int count,
+                       const int64_t* expert_ids,
+                       int protect_count = 0,
+                       const int64_t* protect_ids = nullptr,
+                       int max_to_submit = 0,
+                       int prefetch_kind = 0) {
+    if (!resident_io_enabled() || !iouring_enabled() || expert_ids == nullptr || count <= 0 || cache_capacity_ <= 0) {
+      return 0;
+    }
+    complete_ready_prefetches();
+    const bool is_bootstrap_prefetch = prefetch_kind == 1;
+    uint64_t bootstrap_candidate_count = 0;
+    uint64_t bootstrap_skip_gpu_count = 0;
+    uint64_t bootstrap_skip_resident_count = 0;
+
+    std::vector<uint8_t> protected_mask(config_.expert_num, 0);
+    auto mark_protected = [&](const int64_t* ids, int n) {
+      if (ids == nullptr || n <= 0) return;
+      for (int i = 0; i < n; ++i) {
+        const int expert_id = static_cast<int>(ids[i]);
+        if (expert_id >= 0 && expert_id < config_.expert_num && !config_.should_skip_expert(expert_id)) {
+          protected_mask[expert_id] = 1;
+        }
+      }
+    };
+    mark_protected(expert_ids, count);
+    mark_protected(protect_ids, protect_count);
+
+    std::vector<uint8_t> seen(config_.expert_num, 0);
+    const int limit = max_to_submit > 0 ? max_to_submit : count;
+    int submitted = 0;
+    for (int i = 0; i < count && submitted < limit; ++i) {
+      const int expert_id = static_cast<int>(expert_ids[i]);
+      if (expert_id < 0 || expert_id >= config_.expert_num) continue;
+      if (config_.should_skip_expert(expert_id)) {
+        if (is_bootstrap_prefetch && tp_part_idx == 0) {
+          bootstrap_skip_gpu_count += 1;
+        }
+        continue;
+      }
+      if (seen[expert_id]) continue;
+      seen[expert_id] = 1;
+      if (is_bootstrap_prefetch && tp_part_idx == 0) {
+        bootstrap_candidate_count += 1;
+      }
+
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state != EXPERT_BASELINE) {
+        if (is_bootstrap_prefetch && tp_part_idx == 0) {
+          bootstrap_skip_resident_count += 1;
+        }
+        continue;
+      }
+      if (submit_async_prefetch(expert_id, &protected_mask)) {
+        submitted += 1;
+      }
+    }
+    if (submitted > 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->prefetch_count.fetch_add(static_cast<uint64_t>(submitted), std::memory_order_relaxed);
+    }
+    if (is_bootstrap_prefetch && tp_part_idx == 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->bootstrap_prefetch_candidate_count.fetch_add(bootstrap_candidate_count,
+                                                                        std::memory_order_relaxed);
+      config_.cache_stats->bootstrap_prefetch_submit_count.fetch_add(static_cast<uint64_t>(submitted),
+                                                                     std::memory_order_relaxed);
+      config_.cache_stats->bootstrap_prefetch_skip_gpu_count.fetch_add(bootstrap_skip_gpu_count,
+                                                                       std::memory_order_relaxed);
+      config_.cache_stats->bootstrap_prefetch_skip_resident_count.fetch_add(bootstrap_skip_resident_count,
+                                                                            std::memory_order_relaxed);
+      config_.cache_stats->coldstart_prefill_count.fetch_add(static_cast<uint64_t>(submitted),
+                                                             std::memory_order_relaxed);
+    }
+    return submitted;
+  }
+
+  void prefetch_experts_binding(intptr_t expert_ids,
+                                int count,
+                                intptr_t protect_ids,
+                                int protect_count,
+                                int max_to_submit,
+                                int prefetch_kind = 0) {
+    prefetch_experts(count,
+                     reinterpret_cast<const int64_t*>(expert_ids),
+                     protect_count,
+                     reinterpret_cast<const int64_t*>(protect_ids),
+                     max_to_submit,
+                     prefetch_kind);
   }
 #endif
 
@@ -1115,12 +1921,277 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
+  bool forward_prefill_streaming_slots(int qlen, int k, const int64_t* expert_ids, const float* weights,
+                                       const void* input, void* output) {
+#ifndef _WIN32
+    if (!resident_io_enabled() || !slot_pool_enabled() || qlen <= 1) return false;
+
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+    int activated_expert = 0;
+    std::fill(this->m_local_num_.begin(), this->m_local_num_.end(), 0);
+    for (int i = 0; i < qlen; i++) {
+      for (int j = 0; j < k; j++) {
+        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+        if (config_.should_skip_expert(expert_id)) {
+          continue;
+        }
+        this->m_local_pos_[i][j] = this->m_local_num_[expert_id]++;
+      }
+    }
+
+    std::vector<int> active_experts;
+    active_experts.reserve(config_.expert_num);
+    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
+      if (this->m_local_num_[expert_id] > 0) {
+        this->m_expert_id_map_[activated_expert] = expert_id;
+        active_experts.push_back(expert_id);
+        activated_expert++;
+      }
+    }
+
+    if (activated_expert == 0) {
+      std::memset(output, 0, sizeof(float) * static_cast<size_t>(qlen) * config_.hidden_size);
+      return true;
+    }
+
+    size_t offset = 0;
+    void* gate_up_ba_pool_ptr = this->gate_up_ba_pool_;
+    void* gate_bc_pool_ptr = this->gate_bc_pool_;
+    void* up_bc_pool_ptr = this->up_bc_pool_;
+    void* down_ba_pool_ptr = this->down_ba_pool_;
+    void* down_bc_pool_ptr = this->down_bc_pool_;
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+    size_t used_pool_m = 0;
+    size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0,
+           used_pool_bytes_ba_down = 0, used_pool_bytes_bc_down = 0;
+
+    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
+      this->m_local_input_ptr_[expert_id] = this->m_local_input_ + offset * config_.hidden_size;
+      this->m_local_gate_output_ptr_[expert_id] = this->m_local_gate_output_ + offset * config_.intermediate_size;
+      this->m_local_up_output_ptr_[expert_id] = this->m_local_up_output_ + offset * config_.intermediate_size;
+      this->m_local_down_output_ptr_[expert_id] = this->m_local_down_output_ + offset * config_.hidden_size;
+      offset += this->m_local_num_[expert_id];
+
+      if (this->m_local_num_[expert_id] == 0) {
+        continue;
+      }
+
+      size_t max_m = (this->m_local_num_[expert_id] + M_STEP - 1) / M_STEP * M_STEP;
+      this->gate_up_ba_[expert_id]->max_m = max_m;
+      this->gate_up_ba_[expert_id]->set_data(gate_up_ba_pool_ptr);
+      size_t ba_size = align64(this->buffer_a_required_size(max_m, config_.hidden_size));
+      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
+
+      this->gate_bc_[expert_id]->max_m = max_m;
+      this->gate_bc_[expert_id]->set_data(gate_bc_pool_ptr);
+      size_t bc_gate_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
+      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
+
+      this->up_bc_[expert_id]->max_m = max_m;
+      this->up_bc_[expert_id]->set_data(up_bc_pool_ptr);
+      size_t bc_up_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
+      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
+
+      this->down_ba_[expert_id]->max_m = max_m;
+      this->down_ba_[expert_id]->set_data(down_ba_pool_ptr);
+      size_t ba_down_size = align64(this->buffer_a_required_size(max_m, config_.intermediate_size));
+      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
+
+      this->down_bc_[expert_id]->max_m = max_m;
+      this->down_bc_[expert_id]->set_data(down_bc_pool_ptr);
+      size_t bc_down_size = align64(this->buffer_c_required_size(max_m, config_.hidden_size));
+      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
+
+      used_pool_m += max_m;
+      used_pool_bytes_a += ba_size;
+      used_pool_bytes_bc_gate += bc_gate_size;
+      used_pool_bytes_bc_up += bc_up_size;
+      used_pool_bytes_ba_down += ba_down_size;
+      used_pool_bytes_bc_down += bc_down_size;
+    }
+
+    assert(used_pool_m <= this->pool_count_);
+    assert(used_pool_bytes_a <= this->gate_up_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_gate <= this->gate_bc_pool_bytes_);
+    assert(used_pool_bytes_bc_up <= this->up_bc_pool_bytes_);
+    assert(used_pool_bytes_ba_down <= this->down_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_down <= this->down_bc_pool_bytes_);
+
+    auto direct_or_pool = [&](int count, auto&& fn) {
+      if (qlen < 10) {
+        for (int i = 0; i < count; i++) {
+          fn(i);
+        }
+      } else {
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
+      }
+    };
+
+    direct_or_pool(qlen, [&](int i) {
+      for (int j = 0; j < k; j++) {
+        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+        if (config_.should_skip_expert(expert_id)) {
+          continue;
+        }
+        std::memcpy(this->m_local_input_ptr_[expert_id] + this->m_local_pos_[i][j] * config_.hidden_size,
+                    (ggml_bf16_t*)input + i * config_.hidden_size,
+                    sizeof(ggml_bf16_t) * config_.hidden_size);
+      }
+    });
+
+    std::vector<int> ordered_experts;
+    ordered_experts.reserve(active_experts.size());
+    for (int expert_id : active_experts) {
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state == EXPERT_CACHED || state == EXPERT_PINNED) {
+        ordered_experts.push_back(expert_id);
+      }
+    }
+    for (int expert_id : active_experts) {
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state != EXPERT_CACHED && state != EXPERT_PINNED) {
+        ordered_experts.push_back(expert_id);
+      }
+    }
+
+    const int window = std::max(1, std::min(cache_capacity_, activated_expert));
+    std::vector<uint8_t> protected_mask(config_.expert_num, 0);
+    prefill_streaming_active_ = true;
+    struct PrefillEvictionGuard {
+      AMX_MOE_TP* owner;
+      ~PrefillEvictionGuard() {
+        owner->eviction_protected_mask_ = nullptr;
+        owner->prefill_streaming_active_ = false;
+      }
+    } prefill_guard{this};
+
+    for (int start = 0; start < activated_expert; start += window) {
+      const int count = std::min(window, activated_expert - start);
+      std::fill(protected_mask.begin(), protected_mask.end(), 0);
+      for (int i = start; i < activated_expert; ++i) {
+        protected_mask[ordered_experts[i]] = 1;
+      }
+      eviction_protected_mask_ = &protected_mask;
+
+      ExpertReadScope expert_read_scope(this, count);
+      for (int i = 0; i < count; ++i) {
+        const int expert_id = ordered_experts[start + i];
+        this->m_expert_id_map_[i] = expert_id;
+        note_expert_access(expert_id);
+        ensure_expert_ready(expert_id, false);
+        expert_read_scope.add_expert(expert_id);
+      }
+
+      direct_or_pool(count, [this](int task_id) {
+        int expert_idx = this->m_expert_id_map_[task_id];
+        this->gate_up_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
+                                                this->m_local_input_ptr_[expert_idx], 0, 1);
+      });
+
+      int nth = T::recommended_nth(config_.intermediate_size);
+      pool->do_work_stealing_job(
+          nth * count * 2, [](int _) { T::config(); },
+          [this, nth, qlen](int task_id2) {
+            int task_id = task_id2 / 2;
+            bool do_up = task_id2 % 2;
+            int expert_idx = this->m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
+            if (do_up) {
+              this->up_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                               this->m_local_up_output_ptr_[expert_idx], ith, nth);
+            } else {
+              this->gate_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                                 this->m_local_gate_output_ptr_[expert_idx], ith, nth);
+            }
+          },
+          nullptr);
+
+      this->apply_activation(count, nth, qlen);
+
+      pool->do_work_stealing_job(
+          count, nullptr,
+          [this](int task_id) {
+            int expert_idx = this->m_expert_id_map_[task_id];
+            this->down_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
+                                                 this->m_local_gate_output_ptr_[expert_idx], 0, 1);
+          },
+          nullptr);
+
+      nth = T::recommended_nth(config_.hidden_size);
+      pool->do_work_stealing_job(
+          nth * count, [](int _) { T::config(); },
+          [this, nth, qlen](int task_id) {
+            int expert_idx = this->m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            this->do_down_gemm(expert_idx, ith, nth, qlen);
+            this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                               this->m_local_down_output_ptr_[expert_idx], ith, nth);
+          },
+          nullptr);
+    }
+
+    eviction_protected_mask_ = nullptr;
+    prefill_streaming_active_ = false;
+
+    pool->do_work_stealing_job(
+        qlen, nullptr,
+        [this, output, k, expert_ids, weights](int i) {
+          for (int e = 0; e < config_.hidden_size; e += 32) {
+            __m512 x0 = _mm512_setzero_ps();
+            __m512 x1 = _mm512_setzero_ps();
+            for (int j = 0; j < k; j++) {
+              const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+              if (config_.should_skip_expert(expert_id)) {
+                continue;
+              }
+              __m512 weight = _mm512_set1_ps(weights[i * k + j]);
+              __m512 down_output0, down_output1;
+              avx512_32xbf16_to_32xfp32(
+                  (__m512i*)(this->m_local_down_output_ptr_[expert_id] +
+                             this->m_local_pos_[i][j] * config_.hidden_size + e),
+                  &down_output0, &down_output1);
+              x0 = _mm512_fmadd_ps(down_output0, weight, x0);
+              x1 = _mm512_fmadd_ps(down_output1, weight, x1);
+            }
+            auto f32out = (__m512*)((float*)output + i * config_.hidden_size + e);
+            f32out[0] = x0;
+            f32out[1] = x1;
+          }
+        },
+        nullptr);
+
+    update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
+    refresh_lookahead_heat();
+    trim_cache_to_capacity();
+    trim_cache_for_memory_pressure();
+    if (tp_part_idx == 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->maybe_dump_jsonl();
+    }
+    return true;
+#else
+    (void)qlen;
+    (void)k;
+    (void)expert_ids;
+    (void)weights;
+    (void)input;
+    (void)output;
+    return false;
+#endif
+  }
+
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                void* output) override {
 #ifndef _WIN32
     std::unique_ptr<ExpertReadScope> expert_read_scope;
     std::vector<int> active_experts;
     if (resident_io_enabled()) {
+      complete_ready_prefetches();
+      refresh_lookahead_heat();
+      if (qlen > 1 && forward_prefill_streaming_slots(qlen, k, expert_ids, weights, input, output)) {
+        return;
+      }
       active_experts.reserve(qlen * k);
       std::vector<uint8_t> seen(config_.expert_num, 0);
 
@@ -1143,14 +2214,20 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
     Base::forward(qlen, k, expert_ids, weights, input, output);
 #ifndef _WIN32
-    if (resident_io_enabled() && !active_experts.empty()) {
-      expert_read_scope.reset();
-      if (config_.max_tier0_experts <= 0) {
-        for (int expert_id : active_experts) {
-          demote_expert(expert_id);
+	    if (resident_io_enabled() && !active_experts.empty()) {
+	      update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
+	      refresh_lookahead_heat();
+	      expert_read_scope.reset();
+	      if (config_.max_tier0_experts <= 0) {
+	        for (int expert_id : active_experts) {
+	          demote_expert(expert_id);
         }
       } else {
         trim_cache_to_capacity();
+        trim_cache_for_memory_pressure();
+      }
+      if (tp_part_idx == 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->maybe_dump_jsonl();
       }
     }
 #endif
@@ -1194,8 +2271,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       free_packed_expert(expert_id);
       apply_cold_ptrs(expert_id);
       note_expert_demote(expert_id);
-      resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
-      expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      if (!slot_pool_enabled()) {
+        resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
+        expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+      }
       return;
     }
 #else
@@ -1206,7 +2285,11 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   bool is_expert_promoted(int expert_id) const override {
 #ifndef _WIN32
     if (expert_id < 0 || expert_id >= config_.expert_num) return false;
-    return expert_states_[expert_id].load(std::memory_order_acquire) == EXPERT_PINNED;
+    const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+    if (slot_pool_enabled()) {
+      return state == EXPERT_CACHED || state == EXPERT_PINNED || state == EXPERT_PREFETCHING;
+    }
+    return state == EXPERT_PINNED;
 #else
     (void)expert_id;
     return false;
@@ -1328,6 +2411,38 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
 
   bool is_expert_promoted(int expert_id) const {
     return !this->tps.empty() && this->tps[0]->is_expert_promoted(expert_id);
+  }
+
+  void prefetch_experts_binding(intptr_t expert_ids,
+                                int count,
+                                intptr_t protect_ids,
+                                int protect_count,
+                                int max_to_submit,
+                                int prefetch_kind = 0) {
+    prefetch_experts(count,
+                     reinterpret_cast<const int64_t*>(expert_ids),
+                     protect_count,
+                     reinterpret_cast<const int64_t*>(protect_ids),
+                     max_to_submit,
+                     prefetch_kind);
+  }
+
+  void prefetch_experts(int count,
+                        const int64_t* expert_ids,
+                        int protect_count = 0,
+                        const int64_t* protect_ids = nullptr,
+                        int max_to_submit = 0,
+                        int prefetch_kind = 0) {
+    if (!this->weights_loaded || expert_ids == nullptr || count <= 0) return;
+    if (this->tp_count <= 1) {
+      this->tps[0]->prefetch_experts(count, expert_ids, protect_count, protect_ids, max_to_submit, prefetch_kind);
+      return;
+    }
+    this->config.pool->dispense_backend()->do_numa_job(
+        [this, count, expert_ids, protect_count, protect_ids, max_to_submit, prefetch_kind](int tp_id) {
+          this->tps[tp_id]->prefetch_experts(count, expert_ids, protect_count, protect_ids, max_to_submit,
+                                             prefetch_kind);
+        });
   }
 
   void merge_results(int qlen, void* output, bool incremental) override {

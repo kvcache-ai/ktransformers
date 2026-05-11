@@ -129,22 +129,26 @@ public:
 
 private:
 #ifdef HAVE_LIBURING
-    struct PendingRequest {
+    enum class RequestState : uint8_t {
+        Inflight,
+        Completed,
+        Failed
+    };
+
+    struct RequestInfo {
         int expert_id;
-        size_t size;
+        size_t expected_size;
+        RequestState state;
+        int result;  // errno or byte count
     };
 
     struct io_uring ring_;
     int queue_depth_;
     uint64_t next_user_data_;
 
-    // Track in-flight requests: user_data -> metadata
-    std::unordered_map<uint64_t, PendingRequest> inflight_requests_;
+    // Unified request tracking
+    std::unordered_map<uint64_t, RequestInfo> requests_;
     std::unordered_set<int> completed_experts_;  // Track completed expert IDs
-    std::unordered_set<uint64_t> completed_requests_;
-    std::unordered_set<uint64_t> failed_requests_;
-    std::unordered_map<uint64_t, int> request_results_;
-    mutable std::mutex mutex_;
     mutable std::mutex ring_mutex_;
 
     // Helper: wait for completion events

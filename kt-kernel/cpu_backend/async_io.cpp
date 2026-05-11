@@ -29,8 +29,7 @@ AsyncExpertReader::AsyncExpertReader(int queue_depth)
         throw std::runtime_error("Failed to initialize io_uring: " + std::string(strerror(-ret)));
     }
 #else
-    // Non-Linux platforms: no-op constructor
-    (void)queue_depth_;
+    [[maybe_unused]] int unused_queue_depth = queue_depth_;
 #endif
 }
 
@@ -53,19 +52,12 @@ uint64_t AsyncExpertReader::submit_read(int fd, void* buf, size_t size, off_t of
     io_uring_prep_read(sqe, fd, buf, size, offset);
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(user_data));
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        inflight_requests_[user_data] = PendingRequest{expert_id, size};
-        completed_requests_.erase(user_data);
-        failed_requests_.erase(user_data);
-        request_results_.erase(user_data);
-    }
+    requests_[user_data] = {expert_id, size, RequestState::Inflight, 0};
 
     int ret = io_uring_submit(&ring_);
     if (ret < 0) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        inflight_requests_.erase(user_data);
-        request_results_[user_data] = ret;
+        requests_[user_data].state = RequestState::Failed;
+        requests_[user_data].result = ret;
         throw std::runtime_error("io_uring_submit failed: " + std::string(strerror(-ret)));
     }
 
@@ -120,10 +112,10 @@ bool AsyncExpertReader::wait_for_expert(int expert_id, int timeout_ms) {
     while (true) {
         // Check if already completed
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::lock_guard<std::mutex> lock(ring_mutex_);
             bool found = false;
-            for (const auto& pair : inflight_requests_) {
-                if (pair.second.expert_id == expert_id) {
+            for (const auto& pair : requests_) {
+                if (pair.second.state == RequestState::Inflight && pair.second.expert_id == expert_id) {
                     found = true;
                     break;
                 }
@@ -155,14 +147,13 @@ bool AsyncExpertReader::wait_for_expert(int expert_id, int timeout_ms) {
             continue;  // Timeout or error, retry
         }
 
-        (void)request_id;
         if (completed_id == expert_id) {
             return ok;
         }
     }
 #else
-    (void)expert_id;
-    (void)timeout_ms;
+    [[maybe_unused]] int unused_expert_id = expert_id;
+    [[maybe_unused]] int unused_timeout_ms = timeout_ms;
     return false;
 #endif
 }
@@ -173,14 +164,15 @@ bool AsyncExpertReader::wait_for_request(uint64_t request_id, int timeout_ms) {
 
     while (true) {
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (completed_requests_.count(request_id) > 0) {
+            std::lock_guard<std::mutex> lock(ring_mutex_);
+            auto it = requests_.find(request_id);
+            if (it == requests_.end()) {
+                return false;  // Never submitted
+            }
+            if (it->second.state == RequestState::Completed) {
                 return true;
             }
-            if (failed_requests_.count(request_id) > 0) {
-                return false;
-            }
-            if (inflight_requests_.count(request_id) == 0) {
+            if (it->second.state == RequestState::Failed) {
                 return false;
             }
         }
@@ -200,13 +192,10 @@ bool AsyncExpertReader::wait_for_request(uint64_t request_id, int timeout_ms) {
         if (ret < 0) {
             continue;
         }
-        (void)completed_request_id;
-        (void)expert_id;
-        (void)ok;
     }
 #else
-    (void)request_id;
-    (void)timeout_ms;
+    [[maybe_unused]] uint64_t unused_request_id = request_id;
+    [[maybe_unused]] int unused_timeout_ms = timeout_ms;
     return false;
 #endif
 }
@@ -216,19 +205,19 @@ bool AsyncExpertReader::wait_for_requests(const std::vector<uint64_t>& request_i
     auto start = std::chrono::steady_clock::now();
     while (true) {
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::lock_guard<std::mutex> lock(ring_mutex_);
             bool all_completed = true;
             for (uint64_t request_id : request_ids) {
-                if (completed_requests_.count(request_id) > 0) {
-                    continue;
+                auto it = requests_.find(request_id);
+                if (it == requests_.end()) {
+                    return false;  // Never submitted
                 }
-                if (failed_requests_.count(request_id) > 0) {
+                if (it->second.state == RequestState::Failed) {
                     return false;
                 }
-                if (inflight_requests_.count(request_id) == 0) {
-                    return false;
+                if (it->second.state == RequestState::Inflight) {
+                    all_completed = false;
                 }
-                all_completed = false;
             }
             if (all_completed) {
                 return true;
@@ -247,16 +236,13 @@ bool AsyncExpertReader::wait_for_requests(const std::vector<uint64_t>& request_i
         int expert_id = -1;
         bool ok = false;
         int ret = wait_and_record_completion(wait_ms, &completed_request_id, &expert_id, &ok);
-        (void)completed_request_id;
-        (void)expert_id;
-        (void)ok;
         if (ret < 0) {
             continue;
         }
     }
 #else
-    (void)request_ids;
-    (void)timeout_ms;
+    [[maybe_unused]] const std::vector<uint64_t>& unused_request_ids = request_ids;
+    [[maybe_unused]] int unused_timeout_ms = timeout_ms;
     return false;
 #endif
 }
@@ -275,13 +261,7 @@ void AsyncExpertReader::submit_batch(const std::vector<ReadRequest>& requests) {
         io_uring_prep_read(sqe, req.fd, req.buffer, req.size, req.offset);
         io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(user_data));
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            inflight_requests_[user_data] = PendingRequest{req.expert_id, req.size};
-            completed_requests_.erase(user_data);
-            failed_requests_.erase(user_data);
-            request_results_.erase(user_data);
-        }
+        requests_[user_data] = {req.expert_id, req.size, RequestState::Inflight, 0};
     }
 
     int ret = io_uring_submit(&ring_);
@@ -289,18 +269,18 @@ void AsyncExpertReader::submit_batch(const std::vector<ReadRequest>& requests) {
         throw std::runtime_error("io_uring_submit failed in batch: " + std::string(strerror(-ret)));
     }
 #else
-    (void)requests;
+    [[maybe_unused]] const std::vector<ReadRequest>& unused_requests = requests;
     throw std::runtime_error("io_uring not available on this platform");
 #endif
 }
 
 int AsyncExpertReader::get_request_result(uint64_t request_id) const {
 #ifdef HAVE_LIBURING
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = request_results_.find(request_id);
-    return it == request_results_.end() ? INT_MIN : it->second;
+    std::lock_guard<std::mutex> lock(ring_mutex_);
+    auto it = requests_.find(request_id);
+    return it == requests_.end() ? INT_MIN : it->second.result;
 #else
-    (void)request_id;
+    [[maybe_unused]] uint64_t unused_request_id = request_id;
     return INT_MIN;
 #endif
 }
@@ -308,7 +288,7 @@ int AsyncExpertReader::get_request_result(uint64_t request_id) const {
 std::string AsyncExpertReader::describe_requests(const std::vector<uint64_t>& request_ids) const {
 #ifdef HAVE_LIBURING
     std::ostringstream oss;
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(ring_mutex_);
     oss << "[";
     bool first = true;
     for (uint64_t request_id : request_ids) {
@@ -317,36 +297,41 @@ std::string AsyncExpertReader::describe_requests(const std::vector<uint64_t>& re
         }
         first = false;
         oss << request_id << ":";
-        if (completed_requests_.count(request_id) > 0) {
-            oss << "ok";
-        } else if (failed_requests_.count(request_id) > 0) {
-            oss << "fail";
-        } else if (inflight_requests_.count(request_id) > 0) {
-            oss << "inflight";
-        } else {
+        auto it = requests_.find(request_id);
+        if (it == requests_.end()) {
             oss << "missing";
-        }
-        auto result_it = request_results_.find(request_id);
-        if (result_it != request_results_.end()) {
-            const int result = result_it->second;
-            oss << "/res=" << result;
-            if (result < 0) {
-                oss << "(" << std::strerror(-result) << ")";
+        } else {
+            if (it->second.state == RequestState::Completed) {
+                oss << "ok";
+            } else if (it->second.state == RequestState::Failed) {
+                oss << "fail";
+            } else {
+                oss << "inflight";
+            }
+            oss << "/res=" << it->second.result;
+            if (it->second.result < 0) {
+                oss << "(" << std::strerror(-it->second.result) << ")";
             }
         }
     }
     oss << "]";
     return oss.str();
 #else
-    (void)request_ids;
+    [[maybe_unused]] const std::vector<uint64_t>& unused_request_ids = request_ids;
     return "[]";
 #endif
 }
 
 int AsyncExpertReader::get_inflight_count() const {
 #ifdef HAVE_LIBURING
-    std::lock_guard<std::mutex> lock(mutex_);
-    return static_cast<int>(inflight_requests_.size());
+    std::lock_guard<std::mutex> lock(ring_mutex_);
+    int count = 0;
+    for (const auto& pair : requests_) {
+        if (pair.second.state == RequestState::Inflight) {
+            count++;
+        }
+    }
+    return count;
 #else
     return 0;
 #endif
@@ -370,40 +355,36 @@ int AsyncExpertReader::wait_and_record_completion(int timeout_ms,
         user_data = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqe));
         result = cqe->res;
         io_uring_cqe_seen(&ring_, cqe);
-    }
 
-    int expert_id = -1;
-    bool ok = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = inflight_requests_.find(user_data);
-        if (it != inflight_requests_.end()) {
-            expert_id = it->second.expert_id;
-            const size_t expected_size = it->second.size;
-            inflight_requests_.erase(it);
-            request_results_[user_data] = result;
+        // Update request state
+        auto it = requests_.find(user_data);
+        if (it != requests_.end()) {
+            const size_t expected_size = it->second.expected_size;
+            it->second.result = result;
 
-            ok = result >= 0 && static_cast<size_t>(result) == expected_size;
+            bool ok = result >= 0 && static_cast<size_t>(result) == expected_size;
             if (ok) {
-                completed_experts_.insert(expert_id);
-                completed_requests_.insert(user_data);
+                it->second.state = RequestState::Completed;
+                completed_experts_.insert(it->second.expert_id);
             } else {
-                failed_requests_.insert(user_data);
+                it->second.state = RequestState::Failed;
+            }
+
+            if (request_id_out != nullptr) {
+                *request_id_out = user_data;
+            }
+            if (expert_id_out != nullptr) {
+                *expert_id_out = it->second.expert_id;
+            }
+            if (ok_out != nullptr) {
+                *ok_out = ok;
             }
         } else {
-            request_results_[user_data] = result;
+            // Orphaned completion
+            requests_[user_data] = {-1, 0, RequestState::Failed, result};
         }
     }
 
-    if (request_id_out != nullptr) {
-        *request_id_out = user_data;
-    }
-    if (expert_id_out != nullptr) {
-        *expert_id_out = expert_id;
-    }
-    if (ok_out != nullptr) {
-        *ok_out = ok;
-    }
     return 0;
 }
 

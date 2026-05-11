@@ -19,6 +19,9 @@
 #endif
 
 #include <atomic>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 
 #include "la/amx_kernels.hpp"  // For vec_mul/mat_mul
@@ -63,13 +66,13 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     EXPERT_DEMOTING = 4,
   };
 
-  std::vector<const ggml_bf16_t*> baseline_gate_src_;
-  std::vector<const ggml_bf16_t*> baseline_up_src_;
-  std::vector<const ggml_bf16_t*> baseline_down_src_;
+  std::unique_ptr<const ggml_bf16_t*[]> baseline_gate_src_;
+  std::unique_ptr<const ggml_bf16_t*[]> baseline_up_src_;
+  std::unique_ptr<const ggml_bf16_t*[]> baseline_down_src_;
 
-  std::vector<void*> packed_gate_owner_;
-  std::vector<void*> packed_up_owner_;
-  std::vector<void*> packed_down_owner_;
+  std::unique_ptr<void*[]> packed_gate_owner_;
+  std::unique_ptr<void*[]> packed_up_owner_;
+  std::unique_ptr<void*[]> packed_down_owner_;
 
   std::unique_ptr<std::atomic<uint8_t>[]> expert_states_;
   std::unique_ptr<std::atomic<uint32_t>[]> active_readers_;
@@ -78,6 +81,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   std::atomic<int> eviction_cursor_{0};
   int numa_node_ = 0;
   int cache_capacity_ = 0;
+  ResidentCachePolicyState resident_policy_;
   size_t gate_weight_bytes_ = 0;
   size_t up_weight_bytes_ = 0;
   size_t down_weight_bytes_ = 0;
@@ -91,7 +95,13 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   AMX_BF16_MOE_TP() = default;
 
   AMX_BF16_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
-    // Initialization now happens in derived_init() which is called by base constructor
+    this->derived_init();
+  }
+
+  void set_weight_buffers(void* gate_proj, void* up_proj, void* down_proj) {
+    config_.gate_proj = gate_proj;
+    config_.up_proj = up_proj;
+    config_.down_proj = down_proj;
   }
 
   void derived_init() {
@@ -180,12 +190,18 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 #ifndef _WIN32
   void initialize_lazy_mmap_state() {
     const int en = config_.expert_num;
-    baseline_gate_src_.assign(en, nullptr);
-    baseline_up_src_.assign(en, nullptr);
-    baseline_down_src_.assign(en, nullptr);
-    packed_gate_owner_.assign(en, nullptr);
-    packed_up_owner_.assign(en, nullptr);
-    packed_down_owner_.assign(en, nullptr);
+    baseline_gate_src_ = std::make_unique<const ggml_bf16_t*[]>(en);
+    std::fill_n(baseline_gate_src_.get(), en, nullptr);
+    baseline_up_src_ = std::make_unique<const ggml_bf16_t*[]>(en);
+    std::fill_n(baseline_up_src_.get(), en, nullptr);
+    baseline_down_src_ = std::make_unique<const ggml_bf16_t*[]>(en);
+    std::fill_n(baseline_down_src_.get(), en, nullptr);
+    packed_gate_owner_ = std::make_unique<void*[]>(en);
+    std::fill_n(packed_gate_owner_.get(), en, nullptr);
+    packed_up_owner_ = std::make_unique<void*[]>(en);
+    std::fill_n(packed_up_owner_.get(), en, nullptr);
+    packed_down_owner_ = std::make_unique<void*[]>(en);
+    std::fill_n(packed_down_owner_.get(), en, nullptr);
     expert_states_ = std::make_unique<std::atomic<uint8_t>[]>(en);
     active_readers_ = std::make_unique<std::atomic<uint32_t>[]>(en);
     resident_expert_count_.store(0, std::memory_order_relaxed);
@@ -193,9 +209,11 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     gate_weight_bytes_ = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
     up_weight_bytes_ = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
     down_weight_bytes_ = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
-    cache_capacity_ = config_.max_tier0_experts <= 0
+    const int configured_resident = config_.max_resident_experts > 0 ? config_.max_resident_experts : config_.max_tier0_experts;
+    cache_capacity_ = configured_resident <= 0
                           ? 0
-                          : std::min(config_.expert_num, std::max(config_.max_tier0_experts, config_.num_experts_per_tok));
+                          : std::min(config_.expert_num, std::max(configured_resident, config_.num_experts_per_tok));
+    resident_policy_.reset(en, config_.resident_cache_policy);
     full_intermediate_size_ =
         config_.intermediate_size * std::max(1, config_.pool != nullptr ? config_.pool->config.subpool_count : 1);
 
@@ -218,7 +236,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   void set_mmap_source_ptrs(int expert_id,
                             const ggml_bf16_t* gate_src,
                             const ggml_bf16_t* up_src,
-                            const ggml_bf16_t* down_src) {
+                            const ggml_bf16_t* down_src) override {
     baseline_gate_src_[expert_id] = gate_src;
     baseline_up_src_[expert_id] = up_src;
     baseline_down_src_[expert_id] = down_src;
@@ -237,10 +255,13 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 
   class ExpertReadScope {
    public:
-    ExpertReadScope(AMX_BF16_MOE_TP* owner, std::vector<int> expert_ids) : owner_(owner), experts_(std::move(expert_ids)) {
-      for (int expert_id : experts_) {
-        owner_->acquire_expert_read(expert_id);
-      }
+    explicit ExpertReadScope(AMX_BF16_MOE_TP* owner, size_t reserve_count = 0) : owner_(owner) {
+      experts_.reserve(reserve_count);
+    }
+
+    void add_expert(int expert_id) {
+      owner_->acquire_expert_read(expert_id);
+      experts_.push_back(expert_id);
     }
 
     ~ExpertReadScope() {
@@ -276,11 +297,51 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     }
   }
 
+  void drop_baseline_cache_for_expert(int expert_id) {
+#ifndef _WIN32
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    if (baseline_gate_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_gate_src_[expert_id], gate_weight_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_up_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_up_src_[expert_id], up_weight_bytes_, MADV_DONTNEED);
+    }
+    if (baseline_down_src_[expert_id] != nullptr) {
+      madvise((void*)baseline_down_src_[expert_id],
+              sizeof(ggml_bf16_t) * (size_t)config_.hidden_size * (size_t)full_intermediate_size_, MADV_DONTNEED);
+    }
+#else
+    (void)expert_id;
+#endif
+  }
+
+  void note_expert_access(int expert_id) {
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+    resident_policy_.note_access(expert_id, state == EXPERT_CACHED || state == EXPERT_PINNED);
+  }
+
+  void note_expert_insert(int expert_id, bool pinned) { resident_policy_.on_insert(expert_id, pinned); }
+
+  void note_expert_pin(int expert_id) { resident_policy_.on_pin(expert_id); }
+
+  void note_expert_demote(int expert_id) { resident_policy_.on_demote(expert_id); }
+
+  int select_eviction_victim(int exclude_expert_id) {
+    return resident_policy_.pick_victim(
+        config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
+        [this](int expert_id) { return expert_states_[expert_id].load(std::memory_order_acquire); },
+        [this](int expert_id) { return active_readers_[expert_id].load(std::memory_order_acquire); });
+  }
+
   bool evict_one_cached_expert(int exclude_expert_id) {
     if (config_.expert_num <= 1) return false;
 
     for (int attempt = 0; attempt < config_.expert_num; ++attempt) {
-      const int victim = (eviction_cursor_.fetch_add(1, std::memory_order_acq_rel) + attempt) % config_.expert_num;
+      const int victim = select_eviction_victim(exclude_expert_id);
+      if (victim < 0) {
+        return false;
+      }
       if (victim == exclude_expert_id) {
         continue;
       }
@@ -297,6 +358,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
       }
 
       free_packed_expert(victim);
+      note_expert_demote(victim);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[victim].store(EXPERT_BASELINE, std::memory_order_release);
       return true;
@@ -306,11 +368,49 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   }
 
   bool allocate_and_pack_expert(int expert_id, bool pin_after_pack) {
+    const size_t resident_bytes_per_expert = gate_weight_bytes_ + up_weight_bytes_ + down_weight_bytes_;
+    const size_t promotion_temp_bytes =
+        sizeof(ggml_bf16_t) * (size_t)config_.hidden_size * (size_t)config_.intermediate_size;
     if (cache_capacity_ > 0) {
       while (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
         if (!evict_one_cached_expert(expert_id)) {
           break;
         }
+      }
+      if (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
+        int cached_count = 0;
+        int pinned_count = 0;
+        int packing_count = 0;
+        int demoting_count = 0;
+        int busy_count = 0;
+        for (int i = 0; i < config_.expert_num; ++i) {
+          const uint8_t state = expert_states_[i].load(std::memory_order_acquire);
+          if (state == EXPERT_CACHED) {
+            ++cached_count;
+            if (active_readers_[i].load(std::memory_order_acquire) != 0) ++busy_count;
+          } else if (state == EXPERT_PINNED) {
+            ++pinned_count;
+          } else if (state == EXPERT_PACKING) {
+            ++packing_count;
+          } else if (state == EXPERT_DEMOTING) {
+            ++demoting_count;
+          }
+        }
+        std::fprintf(stderr,
+                     "[BF16_PROMOTION_FAIL] reason=cache_full expert=%d resident=%d capacity=%d cached=%d pinned=%d packing=%d demoting=%d busy_cached=%d resident_bytes_per_expert=%.3fMiB resident_total_est=%.3fGiB promotion_temp=%.3fMiB\n",
+                     expert_id,
+                     (int)resident_expert_count_.load(std::memory_order_acquire),
+                     cache_capacity_,
+                     cached_count,
+                     pinned_count,
+                     packing_count,
+                     demoting_count,
+                     busy_count,
+                     (double)resident_bytes_per_expert / (1024.0 * 1024.0),
+                     (double)(resident_bytes_per_expert * (size_t)resident_expert_count_.load(std::memory_order_acquire)) /
+                         (1024.0 * 1024.0 * 1024.0),
+                     (double)promotion_temp_bytes / (1024.0 * 1024.0));
+        return false;
       }
     }
 
@@ -318,6 +418,16 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     void* up_owner = numa_alloc_onnode(up_weight_bytes_, numa_node_);
     void* down_owner = numa_alloc_onnode(down_weight_bytes_, numa_node_);
     if (gate_owner == nullptr || up_owner == nullptr || down_owner == nullptr) {
+      std::fprintf(stderr,
+                   "[BF16_PROMOTION_FAIL] reason=numa_alloc expert=%d gate_bytes=%zu up_bytes=%zu down_bytes=%zu gate_ptr=%p up_ptr=%p down_ptr=%p numa=%d\n",
+                   expert_id,
+                   gate_weight_bytes_,
+                   up_weight_bytes_,
+                   down_weight_bytes_,
+                   gate_owner,
+                   up_owner,
+                   down_owner,
+                   numa_node_);
       if (gate_owner) numa_free(gate_owner, gate_weight_bytes_);
       if (up_owner) numa_free(up_owner, up_weight_bytes_);
       if (down_owner) numa_free(down_owner, down_weight_bytes_);
@@ -326,6 +436,12 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 
     if (baseline_gate_src_[expert_id] == nullptr || baseline_up_src_[expert_id] == nullptr ||
         baseline_down_src_[expert_id] == nullptr) {
+      std::fprintf(stderr,
+                   "[BF16_PROMOTION_FAIL] reason=missing_baseline expert=%d gate_src=%p up_src=%p down_src=%p\n",
+                   expert_id,
+                   baseline_gate_src_[expert_id],
+                   baseline_up_src_[expert_id],
+                   baseline_down_src_[expert_id]);
       numa_free(gate_owner, gate_weight_bytes_);
       numa_free(up_owner, up_weight_bytes_);
       numa_free(down_owner, down_weight_bytes_);
@@ -341,22 +457,12 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     up_bb_[expert_id]->set_data(up_owner);
     down_bb_[expert_id]->set_data(down_owner);
 
-    auto pool = config_.pool->get_subpool(tp_part_idx);
-    int nth = T::recommended_nth(config_.intermediate_size);
-    pool->do_work_stealing_job(
-        nth * 2, nullptr,
-        [this, expert_id, nth](int task_id) {
-          const bool is_up = task_id >= nth;
-          const int ith = task_id % nth;
-          if (is_up) {
-            up_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(baseline_up_src_[expert_id]), ith, nth);
-          } else {
-            gate_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(baseline_gate_src_[expert_id]), ith, nth);
-          }
-        },
-        nullptr);
+    // Tiered BF16 currently runs during early scheduler warmup/capture where nested
+    // work-stealing dispatch has shown to be brittle. Pack the expert
+    // synchronously here and keep parallelism in the hot GEMM path.
+    gate_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(baseline_gate_src_[expert_id]), 0, 1);
+    up_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(baseline_up_src_[expert_id]), 0, 1);
 
-    nth = T::recommended_nth(config_.hidden_size);
     std::vector<ggml_bf16_t> down_contiguous((size_t)config_.hidden_size * (size_t)config_.intermediate_size);
     const size_t down_col_offset = (size_t)tp_part_idx * (size_t)config_.intermediate_size;
     for (int row = 0; row < config_.hidden_size; ++row) {
@@ -364,18 +470,35 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
       ggml_bf16_t* dst_row = down_contiguous.data() + (size_t)row * (size_t)config_.intermediate_size;
       std::memcpy(dst_row, src_row, sizeof(ggml_bf16_t) * (size_t)config_.intermediate_size);
     }
-    pool->do_work_stealing_job(
-        nth, nullptr,
-        [this, expert_id, nth, &down_contiguous](int ith) {
-          down_bb_[expert_id]->from_mat(down_contiguous.data(), ith, nth);
-        },
-        nullptr);
+    down_bb_[expert_id]->from_mat(down_contiguous.data(), 0, 1);
 
     packed_gate_owner_[expert_id] = gate_owner;
     packed_up_owner_[expert_id] = up_owner;
     packed_down_owner_[expert_id] = down_owner;
     resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
     expert_states_[expert_id].store(pin_after_pack ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
+    note_expert_insert(expert_id, pin_after_pack);
+    const char* trace = std::getenv("KT_TRACE_CPU_MEM_BREAKDOWN");
+    if (trace != nullptr &&
+        (std::strcmp(trace, "1") == 0 || std::strcmp(trace, "true") == 0 || std::strcmp(trace, "TRUE") == 0)) {
+      std::fprintf(stderr,
+                   "[KT_CPU_MEM_RESIDENT] layer=%d tp=%d expert=%d resident_count=%d capacity=%d resident_bytes_per_expert=%.3fMiB resident_total_est=%.3fGiB promotion_temp=%.3fMiB state=%s\n",
+                   config_.layer_idx,
+                   tp_part_idx,
+                   expert_id,
+                   (int)resident_expert_count_.load(std::memory_order_acquire),
+                   cache_capacity_,
+                   (double)resident_bytes_per_expert / (1024.0 * 1024.0),
+                   (double)(resident_bytes_per_expert * (size_t)resident_expert_count_.load(std::memory_order_acquire)) /
+                       (1024.0 * 1024.0 * 1024.0),
+                   (double)promotion_temp_bytes / (1024.0 * 1024.0),
+                   pin_after_pack ? "PINNED" : "CACHED");
+    }
+    // Once the NUMA-local packed copy is ready, immediately drop the
+    // file-backed baseline pages for this expert instead of waiting for
+    // global pressure reclaim. The mmap mapping remains valid and can fault
+    // back in later if the resident copy is demoted.
+    drop_baseline_cache_for_expert(expert_id);
     return true;
   }
 
@@ -394,6 +517,8 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
         uint8_t expected = EXPERT_CACHED;
         if (expert_states_[expert_id].compare_exchange_strong(
                 expected, EXPERT_PINNED, std::memory_order_acq_rel, std::memory_order_acquire)) {
+          note_expert_pin(expert_id);
+          drop_baseline_cache_for_expert(expert_id);
           return;
         }
         continue;
@@ -463,6 +588,31 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
    */
   void load_weights() {
     if (config_.use_mmap) {
+      const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+      const bool use_per_expert_ptrs = !config_.gate_projs.empty();
+      const size_t tp_weight_elems = (size_t)config_.intermediate_size * config_.hidden_size;
+      const size_t gate_up_weight_src_offset = (size_t)tp_part_idx * tp_weight_elems;
+      const size_t full_weight_elems = (size_t)full_intermediate_size_ * (size_t)config_.hidden_size;
+
+      for (int expert_idx = 0; expert_idx < config_.expert_num; ++expert_idx) {
+        const size_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+        const ggml_bf16_t* gate_src;
+        const ggml_bf16_t* up_src;
+        const ggml_bf16_t* down_src;
+
+        if (use_per_expert_ptrs) {
+          gate_src = (const ggml_bf16_t*)config_.gate_projs[0][logical_expert_id] + gate_up_weight_src_offset;
+          up_src = (const ggml_bf16_t*)config_.up_projs[0][logical_expert_id] + gate_up_weight_src_offset;
+          down_src = (const ggml_bf16_t*)config_.down_projs[0][logical_expert_id];
+        } else {
+          gate_src = (const ggml_bf16_t*)config_.gate_proj + logical_expert_id * full_weight_elems +
+                     gate_up_weight_src_offset;
+          up_src = (const ggml_bf16_t*)config_.up_proj + logical_expert_id * full_weight_elems + gate_up_weight_src_offset;
+          down_src = (const ggml_bf16_t*)config_.down_proj + logical_expert_id * full_weight_elems;
+        }
+
+        set_mmap_source_ptrs(expert_idx, gate_src, up_src, down_src);
+      }
       return;
     }
 
@@ -516,44 +666,149 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 #endif
   }
 
-  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
+  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
+               void* output) override {
 #ifndef _WIN32
-    std::unique_ptr<ExpertReadScope> expert_read_scope;
     std::vector<int> active_experts;
+    std::vector<int> expert_counts;
     if (config_.use_mmap) {
       active_experts.reserve(qlen * k);
+      expert_counts.assign(config_.expert_num, 0);
       std::vector<uint8_t> seen(config_.expert_num, 0);
 
       for (int i = 0; i < qlen * k; ++i) {
         const int expert_id = (int)expert_ids[i];
-        if (config_.should_skip_expert(expert_id) || seen[expert_id]) {
+        if (config_.should_skip_expert(expert_id)) {
           continue;
         }
-        seen[expert_id] = 1;
-        active_experts.push_back(expert_id);
+        ++expert_counts[expert_id];
+        if (!seen[expert_id]) {
+          seen[expert_id] = 1;
+          active_experts.push_back(expert_id);
+        }
       }
 
-      expert_read_scope = std::make_unique<ExpertReadScope>(this, active_experts);
-      for (int expert_id : active_experts) {
-        ensure_expert_ready(expert_id, false);
+      const bool enable_wave_mode = []() {
+        const char* raw = std::getenv("KT_ENABLE_BF16_WAVE_RESIDENT");
+        if (raw == nullptr) return false;
+        return std::strcmp(raw, "1") == 0 || std::strcmp(raw, "true") == 0 || std::strcmp(raw, "TRUE") == 0;
+      }();
+      const int wave_capacity = cache_capacity_ > 0 ? cache_capacity_ : (int)active_experts.size();
+      if (enable_wave_mode && qlen > 1 && wave_capacity > 0 && (int)active_experts.size() > wave_capacity) {
+        auto resident_rank = [this](int expert_id) {
+          const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+          if (state == EXPERT_PINNED) return 2;
+          if (state == EXPERT_CACHED) return 1;
+          return 0;
+        };
+        std::stable_sort(active_experts.begin(), active_experts.end(), [&](int lhs, int rhs) {
+          const int lhs_rank = resident_rank(lhs);
+          const int rhs_rank = resident_rank(rhs);
+          if (lhs_rank != rhs_rank) {
+            return lhs_rank > rhs_rank;
+          }
+          if (expert_counts[lhs] != expert_counts[rhs]) {
+            return expert_counts[lhs] > expert_counts[rhs];
+          }
+          return lhs < rhs;
+        });
+
+        const size_t output_elems = (size_t)qlen * (size_t)config_.hidden_size;
+        auto free_aligned_f32 = [](void* ptr) {
+#ifdef _WIN32
+          _aligned_free(ptr);
+#else
+          std::free(ptr);
+#endif
+        };
+        auto alloc_aligned_f32 = [&](size_t elem_count) {
+          void* ptr = nullptr;
+#ifdef _WIN32
+          ptr = _aligned_malloc(sizeof(float) * elem_count, 64);
+          if (ptr == nullptr) {
+            throw std::bad_alloc();
+          }
+#else
+          if (posix_memalign(&ptr, 64, sizeof(float) * elem_count) != 0 || ptr == nullptr) {
+            throw std::bad_alloc();
+          }
+#endif
+          return std::unique_ptr<float, decltype(free_aligned_f32)>(static_cast<float*>(ptr), free_aligned_f32);
+        };
+
+        auto accum_output_holder = alloc_aligned_f32(output_elems);
+        auto wave_output_holder = alloc_aligned_f32(output_elems);
+        float* accum_output = accum_output_holder.get();
+        float* wave_output = wave_output_holder.get();
+        std::fill(accum_output, accum_output + output_elems, 0.0f);
+        std::vector<int64_t> wave_expert_ids((size_t)qlen * (size_t)k, -1);
+        std::vector<uint8_t> in_wave(config_.expert_num, 0);
+
+        for (int wave_begin = 0; wave_begin < (int)active_experts.size(); wave_begin += wave_capacity) {
+          const int wave_end = std::min<int>(wave_begin + wave_capacity, (int)active_experts.size());
+          std::fill(in_wave.begin(), in_wave.end(), 0);
+          for (int idx = wave_begin; idx < wave_end; ++idx) {
+            in_wave[active_experts[idx]] = 1;
+          }
+
+          std::fill(wave_expert_ids.begin(), wave_expert_ids.end(), static_cast<int64_t>(-1));
+          for (int i = 0; i < qlen * k; ++i) {
+            const int expert_id = (int)expert_ids[i];
+            if (!config_.should_skip_expert(expert_id) && in_wave[expert_id]) {
+              wave_expert_ids[i] = expert_id;
+            }
+          }
+
+          auto expert_read_scope = std::make_unique<ExpertReadScope>(this, wave_end - wave_begin);
+          for (int idx = wave_begin; idx < wave_end; ++idx) {
+            const int expert_id = active_experts[idx];
+            note_expert_access(expert_id);
+            ensure_expert_ready(expert_id, false);
+            expert_read_scope->add_expert(expert_id);
+          }
+
+          std::fill(wave_output, wave_output + output_elems, 0.0f);
+          Base::forward(qlen, k, wave_expert_ids.data(), weights, input, wave_output);
+          for (size_t i = 0; i < output_elems; ++i) {
+            accum_output[i] += wave_output[i];
+          }
+
+          if (config_.max_tier0_experts <= 0) {
+            expert_read_scope.reset();
+            for (int idx = wave_begin; idx < wave_end; ++idx) {
+              demote_expert(active_experts[idx]);
+            }
+          }
+        }
+
+        std::memcpy(output, accum_output, sizeof(float) * output_elems);
+        return;
       }
+
+      auto expert_read_scope = std::make_unique<ExpertReadScope>(this, active_experts.size());
+      for (int expert_id : active_experts) {
+        note_expert_access(expert_id);
+        ensure_expert_ready(expert_id, false);
+        expert_read_scope->add_expert(expert_id);
+      }
+
+      Base::forward(qlen, k, expert_ids, weights, input, output);
+      if (config_.max_tier0_experts <= 0 && !active_experts.empty()) {
+        // With zero Tier0 budget, keep mmap-backed experts only for the current
+        // forward pass and drop them immediately afterwards instead of retaining
+        // a cross-token resident cache.
+        expert_read_scope.reset();
+        for (int expert_id : active_experts) {
+          demote_expert(expert_id);
+        }
+      }
+      return;
     }
 #endif
     Base::forward(qlen, k, expert_ids, weights, input, output);
-#ifndef _WIN32
-    if (config_.use_mmap && config_.max_tier0_experts <= 0 && !active_experts.empty()) {
-      // With zero Tier0 budget, keep mmap-backed experts only for the current
-      // forward pass and drop them immediately afterwards instead of retaining
-      // a cross-token resident cache.
-      expert_read_scope.reset();
-      for (int expert_id : active_experts) {
-        demote_expert(expert_id);
-      }
-    }
-#endif
   }
 
-  void promote_expert(int expert_id) {
+  void promote_expert(int expert_id) override {
 #ifndef _WIN32
     ensure_expert_ready(expert_id, true);
 #else
@@ -561,7 +816,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 #endif
   }
 
-  void demote_expert(int expert_id) {
+  void demote_expert(int expert_id) override {
 #ifndef _WIN32
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
 
@@ -589,6 +844,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
       }
 
       free_packed_expert(expert_id);
+      note_expert_demote(expert_id);
       resident_expert_count_.fetch_sub(1, std::memory_order_acq_rel);
       expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
       return;
@@ -598,7 +854,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 #endif
   }
 
-  bool is_expert_promoted(int expert_id) const {
+  bool is_expert_promoted(int expert_id) const override {
 #ifndef _WIN32
     if (expert_id < 0 || expert_id >= config_.expert_num) return false;
     return expert_states_[expert_id].load(std::memory_order_acquire) == EXPERT_PINNED;
@@ -830,9 +1086,9 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
 };
 
 template <typename K>
-class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP<K>>> {
+class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE_Common<AMX_BF16_MOE_TP<K>> {
  public:
-  using Base = TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP<K>>>;
+  using Base = TP_MOE_Common<AMX_BF16_MOE_TP<K>>;
   using Base::Base;
 
   void load_weights() override {
@@ -852,41 +1108,14 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP
 
     if (config.use_mmap) {
       pool->dispense_backend()->do_numa_job([&, this](int i) {
-        auto& tpc = tps[i]->config_;
-        const size_t tp_weight_elems = (size_t)tpc.intermediate_size * tpc.hidden_size;
-        const size_t gate_up_weight_src_offset = (size_t)i * tp_weight_elems;
-        const size_t down_weight_src_col_offset = (size_t)i * (size_t)tpc.intermediate_size;
-        auto* tp = tps[i].get();
-
-        pool->get_subpool(i)->do_work_stealing_job(
-            tpc.expert_num, nullptr,
-            [&, tp](int expert_id) {
-              const size_t logical_expert_id = expert_map(physical_to_logical_map, expert_id);
-
-              const ggml_bf16_t* gate_src;
-              const ggml_bf16_t* up_src;
-              const ggml_bf16_t* down_src;
-
-              if (use_per_expert_ptrs) {
-                gate_src = (const ggml_bf16_t*)config.gate_projs[0][logical_expert_id] + gate_up_weight_src_offset;
-                up_src = (const ggml_bf16_t*)config.up_projs[0][logical_expert_id] + gate_up_weight_src_offset;
-                down_src = (const ggml_bf16_t*)config.down_projs[0][logical_expert_id];
-              } else {
-                gate_src = (const ggml_bf16_t*)config.gate_proj + logical_expert_id * full_weight_elems +
-                           gate_up_weight_src_offset;
-                up_src =
-                    (const ggml_bf16_t*)config.up_proj + logical_expert_id * full_weight_elems + gate_up_weight_src_offset;
-                down_src = (const ggml_bf16_t*)config.down_proj + logical_expert_id * full_weight_elems;
-              }
-
-              (void)down_weight_src_col_offset;
-              tp->set_mmap_source_ptrs(expert_id, gate_src, up_src, down_src);
-            },
-            nullptr);
+        auto& tpc = this->tp_configs[i];
+        this->tps[i]->set_weight_buffers(tpc.gate_proj, tpc.up_proj, tpc.down_proj);
+        this->tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+        this->tps[i]->load_weights();
       });
     } else {
       pool->dispense_backend()->do_numa_job([&, this](int i) {
-        auto& tpc = tps[i]->config_;
+        auto& tpc = this->tp_configs[i];
         const size_t tp_weight_elems = (size_t)tpc.intermediate_size * tpc.hidden_size;
 
         // Allocate BF16 weights (2 bytes/element)
@@ -936,10 +1165,15 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP
             nullptr);
       });
 
-      DO_TPS_LOAD_WEIGHTS(pool);
+      pool->dispense_backend()->do_numa_job([&, this](int i) {
+        auto& tpc = this->tp_configs[i];
+        this->tps[i]->set_weight_buffers(tpc.gate_proj, tpc.up_proj, tpc.down_proj);
+        this->tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+        this->tps[i]->load_weights();
+      });
 
       pool->dispense_backend()->do_numa_job([&, this](int i) {
-        auto& tpc = tps[i]->config_;
+        auto& tpc = this->tp_configs[i];
         delete[] (ggml_bf16_t*)tpc.gate_proj;
         delete[] (ggml_bf16_t*)tpc.up_proj;
         delete[] (ggml_bf16_t*)tpc.down_proj;
@@ -992,6 +1226,51 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP
   bool is_expert_promoted(int expert_id) const {
     return !this->tps.empty() && this->tps[0]->is_expert_promoted(expert_id);
   }
+
+  void merge_results(int qlen, void* output, bool incremental) override {
+    auto& config = this->config;
+    auto& tp_count = this->tp_count;
+    auto& local_output_numa = this->local_output_numa;
+    auto& tp_configs = this->tp_configs;
+
+    auto merge_fn = [this, output, incremental, &config, &tp_count, &local_output_numa, &tp_configs](int token_nth) {
+      float* merge_to = local_output_numa[0] + token_nth * tp_configs[0].hidden_size;
+      if (incremental) {
+        for (int e = 0; e < config.hidden_size; e += 32) {
+          __m512 x0, x1;
+          avx512_32xbf16_to_32xfp32((__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e), &x0, &x1);
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), x0);
+          *((__m512*)(merge_to + e + 16)) = _mm512_add_ps(*((__m512*)(merge_to + e + 16)), x1);
+        }
+      }
+      for (int i = 1; i < tp_count; i++) {
+        float* merge_from = local_output_numa[i] + token_nth * tp_configs[i].hidden_size;
+        for (int e = 0; e < tp_configs[i].hidden_size; e += 16) {
+          *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), *((__m512*)(merge_from + e)));
+        }
+      }
+      for (int e = 0; e < config.hidden_size; e += 32) {
+        __m512 x0 = *(__m512*)(merge_to + e);
+        __m512 x1 = *(__m512*)(merge_to + e + 16);
+        avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
+      }
+    };
+
+    auto pool = config.pool;
+    auto direct_or_pool = [&](int count, auto&& fn) {
+      if (qlen < 10) {
+        for (int i = 0; i < count; i++) {
+          fn(i);
+        }
+      } else {
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
+      }
+    };
+
+    direct_or_pool(qlen, merge_fn);
+  }
+
+  void merge_results(int qlen, void* output) override { merge_results(qlen, output, false); }
 };
 
 #endif  // CPUINFER_OPERATOR_AMX_BF16_MOE_H
