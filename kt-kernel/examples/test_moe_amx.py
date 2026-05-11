@@ -6,6 +6,7 @@ print("sys.path:", sys.path)
 import torch
 from kt_kernel import kt_kernel_ext
 
+# Model configuration
 expert_num = 256
 hidden_size = 7168
 intermediate_size = 2048
@@ -14,12 +15,20 @@ num_experts_per_tok = 8
 qlen = 1
 # qlen = 640
 layer_num = 1
-CPUInfer = kt_kernel_ext.CPUInfer(90)
+
+# Test configuration
+num_threads = 90
+CPUInfer = kt_kernel_ext.CPUInfer(num_threads)
 # validation_iter = 10000
 validation_iter = 2
 k_group_size = 64
 debug_print_count = 16  # Number of values to print in debug output
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
+
+# Performance test configuration
+perf_warmup_iter = 5  # Number of warmup iterations for performance test
+perf_test_iter = 20  # Number of iterations for performance measurement
+perf_qlen = 128  # Sequence length for performance testing
 
 
 def act_fn(x):
@@ -250,19 +259,304 @@ def test_moe(quant_mode: str):
                 assert diff < 0.05
 
 
-# only turn on 1 at a time
+def test_moe_performance(quant_mode: str):
+    """
+    Test MOE inference performance (forward latency and throughput).
 
-# Debug mode is enabled for the first 2 iterations to compare intermediate results
-# between torch implementation and AWQ-MoE implementation.
-# The debug output shows:
-# 1. Input values and expert assignments
-# 2. Gate and up projection results
-# 3. Intermediate values after activation function
-# 4. Down projection results
-# 5. Final output comparison
+    Measures:
+    - Forward pass latency (ms)
+    - Throughput (tokens/second)
 
-# test_moe("bf16")
-test_moe("int8")
-test_moe("int4")
-test_moe("int4_1")
-test_moe("int4_1k")
+    Args:
+        quant_mode: Quantization mode, "bf16" or "int8"
+    """
+    import time
+
+    assert quant_mode in ("bf16", "int8"), f"Performance test only supports bf16 and int8, got {quant_mode}"
+
+    print(f"\n{'='*60}")
+    print(f"Performance Test - {quant_mode.upper()} mode (Inference)")
+    print(f"{'='*60}")
+    print(f"Configuration:")
+    print(f"  qlen (batch size): {perf_qlen}")
+    print(f"  warmup iterations: {perf_warmup_iter}")
+    print(f"  test iterations: {perf_test_iter}")
+    print(f"  num_threads: {num_threads}")
+    print(f"{'='*60}")
+
+    with torch.inference_mode(mode=True):
+        # Initialize weights
+        gate_proj = (
+            torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+            .to("cpu")
+            .contiguous()
+        )
+        up_proj = (
+            torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.bfloat16, device="cuda")
+            .to("cpu")
+            .contiguous()
+        )
+        down_proj = (
+            torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.bfloat16, device="cuda")
+            .to("cpu")
+            .contiguous()
+        )
+
+        # Create MOE config
+        config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+        config.max_len = max_len
+        config.gate_proj = gate_proj.data_ptr()
+        config.up_proj = up_proj.data_ptr()
+        config.down_proj = down_proj.data_ptr()
+        config.gate_scale = 0
+        config.pool = CPUInfer.backend_
+
+        # Create MOE instance based on quant_mode
+        if quant_mode == "bf16":
+            moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
+        elif quant_mode == "int8":
+            moe = kt_kernel_ext.moe.AMXInt8_MOE(config)
+        else:
+            raise ValueError(f"Unsupported quant_mode for performance test: {quant_mode}")
+
+        print(f"[INFO] Using {quant_mode.upper()} MOE class")
+
+        # Load weights
+        CPUInfer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
+        CPUInfer.sync()
+
+        # Warm up task
+        if quant_mode == "bf16":
+            CPUInfer.submit(moe.warm_up_task())
+            CPUInfer.sync()
+
+        # Prepare test data
+        bsz_tensor = torch.tensor([perf_qlen], device="cpu")
+        expert_ids = torch.stack(
+            [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(perf_qlen)]
+        ).contiguous()
+        weights = torch.rand((perf_qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
+        input_data = torch.randn((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous() / 100
+        output = torch.empty((perf_qlen, hidden_size), dtype=torch.bfloat16).contiguous()
+
+        # =========================================================================
+        # Warmup Phase
+        # =========================================================================
+        print(f"\n[INFO] Warmup phase ({perf_warmup_iter} iterations)...")
+        for _ in range(perf_warmup_iter):
+            CPUInfer.submit(
+                moe.forward_task(
+                    bsz_tensor.data_ptr(),
+                    num_experts_per_tok,
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_data.data_ptr(),
+                    output.data_ptr(),
+                    False,
+                )
+            )
+            CPUInfer.sync()
+
+        # =========================================================================
+        # Forward Performance Test
+        # =========================================================================
+        print(f"[INFO] Testing forward pass performance ({perf_test_iter} iterations)...")
+        forward_times = []
+        for _ in range(perf_test_iter):
+            start_time = time.perf_counter()
+            CPUInfer.submit(
+                moe.forward_task(
+                    bsz_tensor.data_ptr(),
+                    num_experts_per_tok,
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_data.data_ptr(),
+                    output.data_ptr(),
+                    False,
+                )
+            )
+            CPUInfer.sync()
+            end_time = time.perf_counter()
+            forward_times.append((end_time - start_time) * 1000)  # Convert to ms
+
+        # =========================================================================
+        # Results Summary
+        # =========================================================================
+        import statistics
+
+        avg_forward = statistics.mean(forward_times)
+        std_forward = statistics.stdev(forward_times) if len(forward_times) > 1 else 0
+        min_forward = min(forward_times)
+        max_forward = max(forward_times)
+
+        # Calculate throughput (tokens per second)
+        forward_throughput = perf_qlen / (avg_forward / 1000)  # tokens/second
+
+        print(f"\n{'='*60}")
+        print(f"Performance Results - {quant_mode.upper()} mode (Inference)")
+        print(f"{'='*60}")
+        print(f"\nForward Pass:")
+        print(f"  Average latency: {avg_forward:.3f} ms (±{std_forward:.3f})")
+        print(f"  Min latency:     {min_forward:.3f} ms")
+        print(f"  Max latency:     {max_forward:.3f} ms")
+        print(f"  Throughput:      {forward_throughput:.1f} tokens/s")
+
+        print(f"\n[OK] Performance Test - {quant_mode.upper()} mode completed")
+
+        return {
+            "quant_mode": quant_mode,
+            "forward_avg_ms": avg_forward,
+            "forward_std_ms": std_forward,
+            "forward_throughput": forward_throughput,
+        }
+
+
+def run_performance_tests():
+    """Run performance tests for AMXBF16 and AMXINT8 modes (Inference)."""
+    print("\n" + "=" * 70)
+    print(" MOE AMX Inference Performance Test Suite")
+    print("=" * 70)
+    print(f"Configuration:")
+    print(f"  expert_num: {expert_num}")
+    print(f"  hidden_size: {hidden_size}")
+    print(f"  intermediate_size: {intermediate_size}")
+    print(f"  num_experts_per_tok: {num_experts_per_tok}")
+    print(f"  perf_qlen: {perf_qlen}")
+    print(f"  num_threads: {num_threads}")
+    print("=" * 70)
+
+    # Only test BF16 and INT8 as requested
+    quant_modes = ["bf16", "int8"]
+
+    results = []
+    try:
+        for quant_mode in quant_modes:
+            result = test_moe_performance(quant_mode)
+            results.append(result)
+
+        # Print comparison table
+        print("\n" + "=" * 70)
+        print(" Performance Comparison Summary (Inference)")
+        print("=" * 70)
+        print(f"\n{'Mode':<10} {'Forward(ms)':<15} {'Throughput(tok/s)':<20}")
+        print("-" * 45)
+        for r in results:
+            print(
+                f"{r['quant_mode'].upper():<10} " f"{r['forward_avg_ms']:<15.3f} " f"{r['forward_throughput']:<20.1f}"
+            )
+        print("-" * 45)
+
+        # Calculate speedup if we have both results
+        if len(results) == 2:
+            bf16_forward = results[0]["forward_avg_ms"]
+            int8_forward = results[1]["forward_avg_ms"]
+            speedup = bf16_forward / int8_forward
+            print(f"\nINT8 vs BF16 speedup: {speedup:.2f}x")
+
+        print("\n" + "=" * 70)
+        print(" PERFORMANCE TESTS COMPLETED!")
+        print("=" * 70)
+
+    except Exception as e:
+        print(f"\n[FAILED] Performance test failed with error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        import sys
+
+        sys.exit(1)
+
+    return results
+
+
+def run_all_tests():
+    """Run all MOE accuracy tests for bf16 and int8 modes."""
+    print("\n" + "=" * 70)
+    print(" MOE AMX Inference Accuracy Test Suite")
+    print("=" * 70)
+    print(f"Configuration:")
+    print(f"  expert_num: {expert_num}")
+    print(f"  hidden_size: {hidden_size}")
+    print(f"  intermediate_size: {intermediate_size}")
+    print(f"  num_experts_per_tok: {num_experts_per_tok}")
+    print(f"  qlen: {qlen}")
+    print(f"  num_threads: {num_threads}")
+    print("=" * 70)
+
+    # Only test BF16 and INT8 as requested
+    quant_modes = ["bf16", "int8"]
+
+    try:
+        for quant_mode in quant_modes:
+            print(f"\n{'='*70}")
+            print(f" Testing MOE AMX - {quant_mode.upper()} Mode")
+            print(f"{'='*70}")
+            test_moe(quant_mode)
+
+        print("\n" + "=" * 70)
+        print(" ALL ACCURACY TESTS PASSED!")
+        print(f" Tested quantization modes: {', '.join(m.upper() for m in quant_modes)}")
+        print("=" * 70)
+
+    except Exception as e:
+        print(f"\n[FAILED] Test failed with error: {e}")
+        import traceback
+
+        traceback.print_exc()
+        import sys
+
+        sys.exit(1)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="MOE AMX Inference Test Suite")
+    parser.add_argument(
+        "--mode",
+        choices=["all", "accuracy", "perf"],
+        default="perf",
+        help="Test mode: 'all' runs both, 'accuracy' runs correctness tests, 'perf' runs performance tests",
+    )
+    parser.add_argument(
+        "--qlen",
+        type=int,
+        default=None,
+        help=f"Override perf_qlen for performance tests (default: {perf_qlen})",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=None,
+        help=f"Override warmup iterations for performance tests (default: {perf_warmup_iter})",
+    )
+    parser.add_argument(
+        "--iter",
+        type=int,
+        default=None,
+        help=f"Override test iterations for performance tests (default: {perf_test_iter})",
+    )
+    args = parser.parse_args()
+
+    # Override performance test parameters if specified
+    if args.qlen is not None or args.warmup is not None or args.iter is not None:
+        # Need to use global to modify module-level variables
+        if args.qlen is not None:
+            globals()["perf_qlen"] = args.qlen
+        if args.warmup is not None:
+            globals()["perf_warmup_iter"] = args.warmup
+        if args.iter is not None:
+            globals()["perf_test_iter"] = args.iter
+
+    if args.mode == "all":
+        run_all_tests()
+        run_performance_tests()
+    elif args.mode == "accuracy":
+        run_all_tests()
+    elif args.mode == "perf":
+        run_performance_tests()

@@ -9,38 +9,80 @@ LastEditors  : chenht2022
 LastEditTime : 2024-08-06 10:41:28
 Copyright (c) 2024 by KVCache.AI, All Rights Reserved.
 """
-import os, sys, time, json, subprocess, platform
+import argparse
+import os
+import sys
+import time
+import json
+import subprocess
+import platform
 
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "build"))
 import torch
 from kt_kernel import kt_kernel_ext
-import numpy as np
 
 # 测试参数设置
-expert_num = 16
+expert_num = 256
 hidden_size = 7168
 intermediate_size = 2048
 max_len = 25600
 num_experts_per_tok = 8
-layer_num = 2
+layer_num = 5
 
-qlen = 2048
+qlen = 1
 warm_up_iter = 1000
-test_iter = 2000
+test_iter = 10000
+gen_iter = 3000
+show_progress = True
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
-# 将 CPUInfer 参数设为变量
-# CPUINFER_PARAM = 257
-# CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
+# 线程/NUMA 参数
+CPUINFER_PARAM = 64
+subpool_count = 2
+interop_threads = 1
+subpool_thread_count = []
 
-worker_config = kt_kernel_ext.WorkerPoolConfig()
-worker_config.subpool_count = 2
-worker_config.subpool_numa_map = [0, 1]
-worker_config.subpool_thread_count = [80, 80]
-CPUINFER_PARAM = 160
-CPUInfer = kt_kernel_ext.CPUInfer(worker_config)
+
+def parse_csv(value: str):
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def refresh_physical_to_logical_map():
+    global physical_to_logical_map
+    physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
+
+
+def configure_torch_threads(threads: int, interop: int):
+    os.environ["OMP_NUM_THREADS"] = str(threads)
+    os.environ["MKL_NUM_THREADS"] = str(threads)
+    torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(interop)
+    except RuntimeError:
+        # set_num_interop_threads can only be called before parallel work starts.
+        pass
+
+
+def build_cpuinfer(total_threads: int, num_subpools: int):
+    global subpool_thread_count
+    if num_subpools <= 0:
+        raise ValueError("subpool_count must be positive")
+    if total_threads < num_subpools:
+        raise ValueError("threads must be >= subpool_count")
+    base = total_threads // num_subpools
+    remain = total_threads % num_subpools
+    subpool_thread_count = [base + (1 if i < remain else 0) for i in range(num_subpools)]
+    worker_config = kt_kernel_ext.WorkerPoolConfig()
+    worker_config.subpool_count = num_subpools
+    worker_config.subpool_numa_map = list(range(num_subpools))
+    worker_config.subpool_thread_count = subpool_thread_count
+    return kt_kernel_ext.CPUInfer(worker_config)
+
+
+configure_torch_threads(CPUINFER_PARAM, interop_threads)
+CPUInfer = build_cpuinfer(CPUINFER_PARAM, subpool_count)
 
 
 def get_git_commit():
@@ -156,27 +198,22 @@ def bench_moe(quant_mode: str):
         up_projs = []
         down_projs = []
         for layer_index in range(layer_num):
-            gate_proj = (
-                torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
-                .to("cpu")
-                .contiguous()
-            )
-            up_proj = (
-                torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cuda")
-                .to("cpu")
-                .contiguous()
-            )
-            down_proj = (
-                torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cuda")
-                .to("cpu")
-                .contiguous()
-            )
+            gate_proj = torch.randn(
+                (expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cpu"
+            ).contiguous()
+            up_proj = torch.randn(
+                (expert_num, intermediate_size, hidden_size), dtype=torch.float32, device="cpu"
+            ).contiguous()
+            down_proj = torch.randn(
+                (expert_num, hidden_size, intermediate_size), dtype=torch.float32, device="cpu"
+            ).contiguous()
             config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
             config.max_len = max_len
             config.gate_proj = gate_proj.data_ptr()
             config.up_proj = up_proj.data_ptr()
             config.down_proj = down_proj.data_ptr()
             config.pool = CPUInfer.backend_
+            config.physical_to_logical_map = physical_to_logical_map.data_ptr()
             if quant_mode == "bf16":
                 moe = kt_kernel_ext.moe.AMXBF16_MOE(config)
             elif quant_mode == "int8":
@@ -189,7 +226,6 @@ def bench_moe(quant_mode: str):
             up_projs.append(up_proj)
             down_projs.append(down_proj)
             moes.append(moe)
-        gen_iter = 3000
         expert_ids = (
             torch.rand(gen_iter * qlen, expert_num, device="cpu")
             .argsort(dim=-1)[:, :num_experts_per_tok]
@@ -200,16 +236,12 @@ def bench_moe(quant_mode: str):
         weights = (
             torch.rand((gen_iter, qlen, num_experts_per_tok), dtype=torch.float32, device="cpu").to("cpu").contiguous()
         )
-        input_tensor = (
-            torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
-        )
-        output_tensor = (
-            torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cuda").to("cpu").contiguous()
-        )
-        bsz_tensor = torch.tensor([qlen], device="cpu")
+        input_tensor = torch.randn((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").contiguous()
+        output_tensor = torch.empty((layer_num, qlen, hidden_size), dtype=torch.bfloat16, device="cpu").contiguous()
+        bsz_tensor = torch.tensor([qlen], dtype=torch.int32, device="cpu")
 
         # 预热迭代
-        for i in tqdm(range(warm_up_iter), desc="Warm-up"):
+        for i in tqdm(range(warm_up_iter), desc="Warm-up", disable=not show_progress):
             # start_it = time.time_ns()
             CPUInfer.submit(
                 moes[i % layer_num].forward_task(
@@ -228,7 +260,7 @@ def bench_moe(quant_mode: str):
 
         # 测试迭代
         start = time.perf_counter()
-        for i in tqdm(range(test_iter), desc="Testing"):
+        for i in tqdm(range(test_iter), desc="Testing", disable=not show_progress):
             # print(f'test iteration {i}')
             # start_it = time.time_ns()
             CPUInfer.submit(
@@ -250,20 +282,9 @@ def bench_moe(quant_mode: str):
 
         # 计算性能指标
         time_per_iter_us = total_time / test_iter * 1e6
-        bandwidth = (
-            hidden_size
-            * intermediate_size
-            * 3
-            * num_experts_per_tok
-            * (1 / 8 * 256 * (1 - (31 / 32) ** qlen))
-            * bytes_per_elem
-            * test_iter
-            / total_time
-            / 1e9
-        )  # 单位：GB/s
-        flops = (
-            hidden_size * intermediate_size * qlen * 3 * num_experts_per_tok * 2 * test_iter / total_time / 1e12
-        )  # 单位：TFLOPS
+        work_elems = hidden_size * intermediate_size * qlen * 3 * num_experts_per_tok
+        bandwidth = work_elems * bytes_per_elem * test_iter / total_time / 1e9  # 单位：GB/s
+        flops = work_elems * 2 * test_iter / total_time / 1e12  # 单位：TFLOPS
 
         print("Quant mode: ", quant_mode)
         print("Time(s): ", total_time)
@@ -293,6 +314,8 @@ def bench_moe(quant_mode: str):
                 "warm_up_iter": warm_up_iter,
                 "test_iter": test_iter,
                 "CPUInfer_parameter": CPUINFER_PARAM,
+                "subpool_count": subpool_count,
+                "subpool_thread_count": subpool_thread_count,
             },
         }
         # 添加 git 提交记录信息
@@ -303,8 +326,75 @@ def bench_moe(quant_mode: str):
         record_results(result)
 
 
+def main():
+    global expert_num
+    global hidden_size
+    global intermediate_size
+    global max_len
+    global num_experts_per_tok
+    global layer_num
+    global qlen
+    global warm_up_iter
+    global test_iter
+    global gen_iter
+    global CPUINFER_PARAM
+    global subpool_count
+    global interop_threads
+    global show_progress
+    global CPUInfer
+
+    parser = argparse.ArgumentParser(description="AMX MoE benchmark")
+    parser.add_argument("--expert-num", type=int, default=expert_num)
+    parser.add_argument("--hidden-size", type=int, default=hidden_size)
+    parser.add_argument("--intermediate-size", type=int, default=intermediate_size)
+    parser.add_argument("--max-len", type=int, default=max_len)
+    parser.add_argument("--num-experts-per-tok", type=int, default=num_experts_per_tok)
+    parser.add_argument("--layer-num", type=int, default=layer_num)
+    parser.add_argument("--qlen", type=int, default=qlen)
+    parser.add_argument("--warm-up-iter", type=int, default=warm_up_iter)
+    parser.add_argument("--test-iter", type=int, default=test_iter)
+    parser.add_argument("--gen-iter", type=int, default=gen_iter)
+    parser.add_argument("--threads", type=int, default=CPUINFER_PARAM)
+    parser.add_argument("--subpool-count", type=int, default=subpool_count)
+    parser.add_argument("--interop-threads", type=int, default=interop_threads)
+    parser.add_argument("--quant-modes", type=str, default="int8")
+    parser.add_argument("--no-progress", action="store_true", default=False)
+    args = parser.parse_args()
+
+    expert_num = args.expert_num
+    hidden_size = args.hidden_size
+    intermediate_size = args.intermediate_size
+    max_len = args.max_len
+    num_experts_per_tok = args.num_experts_per_tok
+    layer_num = args.layer_num
+    qlen = args.qlen
+    warm_up_iter = args.warm_up_iter
+    test_iter = args.test_iter
+    gen_iter = args.gen_iter
+    CPUINFER_PARAM = args.threads
+    subpool_count = args.subpool_count
+    interop_threads = args.interop_threads
+    show_progress = not args.no_progress
+
+    refresh_physical_to_logical_map()
+    configure_torch_threads(CPUINFER_PARAM, interop_threads)
+    CPUInfer = build_cpuinfer(CPUINFER_PARAM, subpool_count)
+
+    quant_modes = parse_csv(args.quant_modes)
+
+    print("[config] amx bench")
+    print(
+        f"[config] E={expert_num}, H={hidden_size}, I={intermediate_size}, topk={num_experts_per_tok}, "
+        f"layers={layer_num}, qlen={qlen}"
+    )
+    print(f"[config] warmup={warm_up_iter}, test={test_iter}, gen_iter={gen_iter}")
+    print(f"[config] threads={CPUINFER_PARAM}, interop_threads={interop_threads}")
+    print(f"[config] subpool_count={subpool_count}, subpool_thread_count={subpool_thread_count}")
+    print(f"[config] quant_modes={quant_modes}, show_progress={show_progress}")
+
+    for mode in quant_modes:
+        bench_moe(mode)
+
+
 if __name__ == "__main__":
-    # 选择需要测试的量化模式
-    # bench_moe("bf16")
-    bench_moe("int8")
-    # bench_moe("int4")
+    main()

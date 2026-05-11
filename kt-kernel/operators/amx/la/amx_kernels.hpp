@@ -86,14 +86,14 @@ inline void dpb133<uint8_t, uint8_t>::run() {
 
 template <int TILE_K = 32>
 struct GemmKernel133 {
-  static const int TILE_M = 16;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
-  static const int OUTPUT_T_SIZE = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
+  static constexpr int OUTPUT_T_SIZE = 4;
 
-  static const int M_STEP = TILE_M * 3;
-  static const int N_STEP = TILE_N;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 3;
+  static constexpr int N_STEP = TILE_N;
+  static constexpr int K_STEP = TILE_K;
 
   static int recommended_nth(int m) { return (m + M_STEP - 1) / M_STEP; }
 
@@ -429,14 +429,14 @@ struct GemmKernel133 {
 struct GemmKernel133BF {
   using dt = ggml_bf16_t;
   using output_t = float;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 3;
-  static const int N_STEP = TILE_N;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 3;
+  static constexpr int N_STEP = TILE_N;
+  static constexpr int K_STEP = TILE_K;
 
   static int recommended_nth(int m) { return (m + M_STEP - 1) / M_STEP; }
   static void config() {
@@ -565,14 +565,14 @@ struct GemmKernel224BF {
   using dt = ggml_bf16_t;
   using output_t = float;
   static constexpr double ELEMENT_SIZE = 2;
-  static const int TILE_M = 16;
-  static const int TILE_K = 32;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 2;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 32;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 2;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   static inline const int K_BLOCK = 1792;
@@ -725,16 +725,13 @@ struct GemmKernel224BF {
 
     void set_data(void* new_ptr) { b = reinterpret_cast<ggml_bf16_t*>(new_ptr); }
 
-    void from_mat(ggml_bf16_t* src, int ith, int nth) {
-      auto [n_start, n_end] = split_range_n(n, ith, nth);
-      int n_block_begin = n_start;
-      int n_block_size = n_end - n_block_begin;
+    void _pack_block(ggml_bf16_t* src, int src_stride, int n_block_begin, int n_block_size) {
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
           for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
             for (int i = 0; i < N_STEP; i++) {
-              __m512i* s = (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin);
+              __m512i* s = (__m512i*)(src + (n_begin + i) * src_stride + k_block_begin + k_begin);
               __m512i* d = (__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                                       k_begin * N_STEP + i * K_STEP);
               avx512_copy_32xbf16(s, d);
@@ -743,6 +740,151 @@ struct GemmKernel224BF {
                                              n_begin * k_block_size + k_begin * N_STEP));
             transpose_16x16_32bit((__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size +
                                              n_begin * k_block_size + k_begin * N_STEP + TILE_N * K_STEP));
+          }
+        }
+      }
+    }
+
+    void from_mat(ggml_bf16_t* src, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      _pack_block(src + n_block_begin * k, k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Pack a transposed matrix into BufferB format.
+     *
+     * src is a row-major (src_n, src_k) matrix. The target BufferB has shape (n=src_k, k=src_n),
+     * i.e., the logical transpose. Each call processes one N_BLOCK of the target (selected by ith/nth).
+     *
+     * Uses a thread-local strip buffer for tiled transpose, then reuses the same packing logic as from_mat.
+     */
+    void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local strip buffer: n_block_size × k BF16 values
+      thread_local std::vector<ggml_bf16_t> strip;
+      strip.resize(n_block_size * k);
+
+      // Tiled transpose from source into strip
+      // Target row r (in N_BLOCK) corresponds to source column (n_block_begin + r)
+      // Target col c corresponds to source row c
+      // strip[r * k + c] = src[c * src_k + (n_block_begin + r)]
+      constexpr int TILE = 32;
+      for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+        int c_end = std::min(c_tile + TILE, k);
+        for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+          int r_end = std::min(r_tile + TILE, n_block_size);
+          for (int c = c_tile; c < c_end; c++) {
+            for (int r = r_tile; r < r_end; r++) {
+              strip[r * k + c] = src[c * src_k + (n_block_begin + r)];
+            }
+          }
+        }
+      }
+
+      // Reuse existing packing logic on the transposed strip buffer
+      _pack_block(strip.data(), k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Unpack BF16 BufferB back to row-major BF16 matrix (lossless).
+     *
+     * Reverses _pack_block(): un-VNNI-transpose each tile, then copy BF16
+     * values back to row-major dst[n, k].
+     */
+    void to_mat(ggml_bf16_t* dst, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local tile buffer for un-VNNI (N_STEP * K_STEP * sizeof(bf16) = 32*32*2 = 2048 bytes)
+      alignas(64) ggml_bf16_t tile_copy[N_STEP * K_STEP];
+
+      for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+        for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+          int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+          for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+            ggml_bf16_t* tile_src = b + n_block_begin * k + k_block_begin * n_block_size +
+                                    n_begin * k_block_size + k_begin * N_STEP;
+
+            // Copy tile and reverse VNNI transpose (self-inverse)
+            memcpy(tile_copy, tile_src, N_STEP * K_STEP * sizeof(ggml_bf16_t));
+            transpose_16x16_32bit((__m512i*)tile_copy);
+            transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * K_STEP));
+
+            // Copy rows back to row-major dst
+            for (int i = 0; i < N_STEP; i++) {
+              __m512i* s = (__m512i*)(tile_copy + i * K_STEP);
+              __m512i* d = (__m512i*)(dst + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin);
+              avx512_copy_32xbf16(s, d);
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * @brief Direct BufferB → transposed BufferB repack (no BF16 workspace).
+     *
+     * src has shape (src.n, src.k), this (dest) has shape (n=src.k, k=src.n).
+     * For each dest tile: un-VNNI source tile → transpose 32×32 BF16 → re-VNNI → store.
+     * BF16 is lossless, so this produces bit-identical results to to_mat + from_mat_transposed.
+     */
+    void from_bb_transposed(const BufferB& src, int ith, int nth) {
+      assert(n == src.k && k == src.n);
+
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int dst_nb_begin = n_start;
+      int dst_nb_size = n_end - dst_nb_begin;
+      if (dst_nb_size <= 0) return;
+
+      // Helper: compute tile pointer in a packed BF16 BB
+      auto tile_ptr = [](ggml_bf16_t* base, int total_n, int total_k,
+                         int abs_n, int abs_k) -> ggml_bf16_t* {
+        int nb_begin = abs_n / N_BLOCK * N_BLOCK;
+        int n_within = abs_n - nb_begin;
+        int nb_size = std::min(N_BLOCK, total_n - nb_begin);
+        int kb_begin = abs_k / K_BLOCK * K_BLOCK;
+        int k_within = abs_k - kb_begin;
+        return base + nb_begin * total_k + kb_begin * nb_size +
+               n_within * std::min(K_BLOCK, total_k - kb_begin) + k_within * N_STEP;
+      };
+
+      alignas(64) ggml_bf16_t src_tile[N_STEP * K_STEP];
+      alignas(64) ggml_bf16_t dst_tile[N_STEP * K_STEP];
+
+      for (int dn = 0; dn < dst_nb_size; dn += N_STEP) {
+        for (int dk_block = 0; dk_block < k; dk_block += K_BLOCK) {
+          int dk_block_size = std::min(K_BLOCK, k - dk_block);
+          for (int dk = 0; dk < dk_block_size; dk += K_STEP) {
+            int abs_dn = dst_nb_begin + dn;
+            int abs_dk = dk_block + dk;
+
+            // Source tile at (abs_dk, abs_dn): src rows [abs_dk..+32), cols [abs_dn..+32)
+            ggml_bf16_t* sp = tile_ptr(src.b, src.n, src.k, abs_dk, abs_dn);
+            memcpy(src_tile, sp, N_STEP * K_STEP * sizeof(ggml_bf16_t));
+            transpose_16x16_32bit((__m512i*)src_tile);
+            transpose_16x16_32bit((__m512i*)(src_tile + TILE_N * K_STEP));
+
+            // Transpose 32×32 BF16: dst_tile[j][i] = src_tile[i][j]
+            for (int i = 0; i < N_STEP; i++) {
+              for (int j = 0; j < K_STEP; j++) {
+                dst_tile[j * K_STEP + i] = src_tile[i * K_STEP + j];
+              }
+            }
+
+            // Re-VNNI and store to dest tile at (abs_dn, abs_dk)
+            transpose_16x16_32bit((__m512i*)dst_tile);
+            transpose_16x16_32bit((__m512i*)(dst_tile + TILE_N * K_STEP));
+
+            ggml_bf16_t* dp = tile_ptr(b, n, k, abs_dn, abs_dk);
+            memcpy(dp, dst_tile, N_STEP * K_STEP * sizeof(ggml_bf16_t));
           }
         }
       }
@@ -817,14 +959,14 @@ struct GemmKernel224Int8 {
   using dt = int8_t;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 1;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   // static inline const int N_BLOCK = 256;
   static inline const int N_BLOCK = 64;
@@ -943,22 +1085,21 @@ struct GemmKernel224Int8 {
       d = reinterpret_cast<float*>(b + n * k);
     }
 
-    void from_mat(ggml_bf16_t* src, int ith, int nth) {  // CHECK: nth has no usage
-      auto [n_start, n_end] = split_range_n(n, ith, nth);
-      int n_block_begin = n_start;
-      int n_block_size = n_end - n_block_begin;
+    void _pack_block(ggml_bf16_t* src_data, int src_stride, int n_block_begin, int n_block_size) {
+      // Phase 1: compute per-row scales
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int i = 0; i < N_STEP; i++) {
           float amax = 0.0f;
           for (int j = 0; j < k; j += 32) {
             __m512 f0, f1;
-            avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + j), &f0, &f1);
+            avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + j), &f0, &f1);
             amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
             amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
           }
           d[n_block_begin + n_begin + i] = amax / ((1 << 7) - 1);
         }
       }
+      // Phase 2: quantize and pack
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
@@ -968,10 +1109,10 @@ struct GemmKernel224Int8 {
               int8_t* dst = b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                             k_begin * N_STEP + i * K_STEP;
               __m512 f0, f1, f2, f3;
-              avx512_32xbf16_to_32xfp32((__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin),
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin),
                                         &f0, &f1);
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin) + 1, &f2, &f3);
+              avx512_32xbf16_to_32xfp32((__m512i*)(src_data + (n_begin + i) * src_stride + k_block_begin + k_begin) + 1,
+                                        &f2, &f3);
               __m512i i0 = _mm512_cvtps_epi32(_mm512_mul_ps(f0, id));
               __m512i i1 = _mm512_cvtps_epi32(_mm512_mul_ps(f1, id));
               __m512i i2 = _mm512_cvtps_epi32(_mm512_mul_ps(f2, id));
@@ -989,6 +1130,238 @@ struct GemmKernel224Int8 {
                                              n_begin * k_block_size + k_begin * N_STEP));
             transpose_16x16_32bit((__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size +
                                              n_begin * k_block_size + k_begin * N_STEP + TILE_N * K_STEP));
+          }
+        }
+      }
+    }
+
+    void from_mat(ggml_bf16_t* src, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      _pack_block(src + (size_t)n_block_begin * k, k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Pack a transposed matrix into INT8 BufferB format.
+     *
+     * src is a row-major (src_n, src_k) BF16 matrix. The target BufferB has shape (n=src_k, k=src_n).
+     * Each call processes one N_BLOCK of the target (selected by ith/nth).
+     */
+    void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local strip buffer: n_block_size × k BF16 values
+      thread_local std::vector<ggml_bf16_t> strip;
+      strip.resize(n_block_size * k);
+
+      // Tiled transpose from source into strip
+      constexpr int TILE = 32;
+      for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+        int c_end = std::min(c_tile + TILE, k);
+        for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+          int r_end = std::min(r_tile + TILE, n_block_size);
+          for (int c = c_tile; c < c_end; c++) {
+            for (int r = r_tile; r < r_end; r++) {
+              strip[r * k + c] = src[c * src_k + (n_block_begin + r)];
+            }
+          }
+        }
+      }
+
+      // Reuse existing packing logic (scale computation + quantization) on the transposed strip buffer
+      _pack_block(strip.data(), k, n_block_begin, n_block_size);
+    }
+
+    /**
+     * @brief Dequantize INT8 BufferB back to BF16 row-major matrix.
+     *
+     * Reverses _pack_block(): un-VNNI-transpose each tile, then dequantize
+     * int8 * per-row-scale -> float -> BF16.
+     *
+     * dst is a row-major (n, k) BF16 matrix. Each call processes one N_BLOCK
+     * partition (selected by ith/nth).
+     */
+    void to_mat(ggml_bf16_t* dst, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+
+      // Thread-local tile buffer for un-VNNI (N_STEP * K_STEP = 32 * 64 = 2048 bytes)
+      alignas(64) int8_t tile_copy[N_STEP * K_STEP];
+
+      for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+        for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+          int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+          for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+            int8_t* tile_src = b + n_block_begin * k + k_block_begin * n_block_size +
+                               n_begin * k_block_size + k_begin * N_STEP;
+
+            // Copy tile and reverse VNNI transpose (transpose_16x16_32bit is self-inverse)
+            memcpy(tile_copy, tile_src, N_STEP * K_STEP);
+            transpose_16x16_32bit((__m512i*)tile_copy);
+            transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * K_STEP));
+
+            // tile_copy is now in original row-major int8 order:
+            // tile_copy[i * K_STEP + j] = quantized value at logical row (n_begin+i), col (k_begin+j)
+            // SIMD dequant: 16 int8 -> 16 fp32 (* scale) -> 16 bf16, 4 iterations per row (K_STEP=64)
+            for (int i = 0; i < N_STEP; i++) {
+              __m512 vs = _mm512_set1_ps(d[n_block_begin + n_begin + i]);
+              ggml_bf16_t* dst_ptr = dst + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin;
+              int8_t* src_ptr = tile_copy + i * K_STEP;
+              for (int j = 0; j < K_STEP; j += 32) {
+                // Convert 16 int8 -> 16 int32 -> 16 fp32, multiply scale, convert to bf16
+                __m128i i8_0 = _mm_load_si128((__m128i*)(src_ptr + j));
+                __m128i i8_1 = _mm_load_si128((__m128i*)(src_ptr + j + 16));
+                __m512i i32_0 = _mm512_cvtepi8_epi32(i8_0);
+                __m512i i32_1 = _mm512_cvtepi8_epi32(i8_1);
+                __m512 f0 = _mm512_mul_ps(_mm512_cvtepi32_ps(i32_0), vs);
+                __m512 f1 = _mm512_mul_ps(_mm512_cvtepi32_ps(i32_1), vs);
+                avx512_32xfp32_to_32xbf16(&f0, &f1, (__m512i*)(dst_ptr + j));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * @brief Direct INT8 BufferB → transposed INT8 BufferB (no BF16 workspace).
+     *
+     * src has shape (src.n, src.k), this (dest) has shape (n=src.k, k=src.n).
+     * Two-pass algorithm with register-based 16×16 sub-block transposes:
+     *   Pass 1: SIMD absmax scan → per-dest-row scales d[j]
+     *   Pass 2: 8 sub-blocks of 16×16: dequant → register transpose → quantize → VNNI-pack
+     */
+    void from_bb_transposed(const BufferB& src, int ith, int nth) {
+      assert(n == src.k && k == src.n);
+
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int dst_nb_begin = n_start;
+      int dst_nb_size = n_end - dst_nb_begin;
+      if (dst_nb_size <= 0) return;
+
+      auto tile_ptr = [](int8_t* base, int total_n, int total_k,
+                         int abs_n, int abs_k) -> int8_t* {
+        int nb_begin = abs_n / N_BLOCK * N_BLOCK;
+        int n_within = abs_n - nb_begin;
+        int nb_size = std::min(N_BLOCK, total_n - nb_begin);
+        int kb_begin = abs_k / K_BLOCK * K_BLOCK;
+        int k_within = abs_k - kb_begin;
+        return base + nb_begin * total_k + kb_begin * nb_size +
+               n_within * std::min(K_BLOCK, total_k - kb_begin) + k_within * N_STEP;
+      };
+
+      alignas(64) int8_t tile_copy[N_STEP * K_STEP];  // 2KB un-VNNI workspace
+
+      // === Pass 1: SIMD per-dest-row absmax ===
+      alignas(64) float absmax_arr[N_BLOCK];
+      memset(absmax_arr, 0, dst_nb_size * sizeof(float));
+
+      int c_start = (dst_nb_begin / K_STEP) * K_STEP;
+      int c_end_limit = dst_nb_begin + dst_nb_size;
+
+      for (int src_c = c_start; src_c < c_end_limit; src_c += K_STEP) {
+        int col_lo = std::max(dst_nb_begin, src_c);
+        int local_lo = col_lo - src_c;
+        int buf_offset = col_lo - dst_nb_begin;
+        int ncols = std::min(c_end_limit, src_c + K_STEP) - col_lo;
+        int nchunks = ncols / 16;
+
+        __m512 amax[4];
+        for (int c = 0; c < nchunks; c++)
+          amax[c] = _mm512_setzero_ps();
+
+        for (int src_r = 0; src_r < src.n; src_r += N_STEP) {
+          int8_t* sp = tile_ptr(src.b, src.n, src.k, src_r, src_c);
+          memcpy(tile_copy, sp, N_STEP * K_STEP);
+          transpose_16x16_32bit((__m512i*)tile_copy);
+          transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * K_STEP));
+
+          for (int i = 0; i < N_STEP; i++) {
+            float abs_scale = src.d[src_r + i];
+            abs_scale = abs_scale >= 0 ? abs_scale : -abs_scale;
+            __m512 vs = _mm512_set1_ps(abs_scale);
+            int8_t* row = tile_copy + i * K_STEP + local_lo;
+
+            for (int c = 0; c < nchunks; c++) {
+              __m128i i8_16 = _mm_load_si128((__m128i*)(row + c * 16));
+              __m512i abs_i32 = _mm512_abs_epi32(_mm512_cvtepi8_epi32(i8_16));
+              amax[c] = _mm512_max_ps(amax[c],
+                _mm512_mul_ps(_mm512_cvtepi32_ps(abs_i32), vs));
+            }
+          }
+        }
+
+        for (int c = 0; c < nchunks; c++)
+          _mm512_store_ps(absmax_arr + buf_offset + c * 16, amax[c]);
+      }
+
+      for (int j = 0; j < dst_nb_size; j++)
+        d[dst_nb_begin + j] = absmax_arr[j] / 127.0f;
+
+      // === Pass 2: register-based 16×16 sub-block transpose ===
+      alignas(64) int8_t quant_tile[N_STEP * K_STEP];  // 2KB
+
+      for (int dn = 0; dn < dst_nb_size; dn += N_STEP) {
+        for (int dk_block = 0; dk_block < k; dk_block += K_BLOCK) {
+          int dk_block_size = std::min(K_BLOCK, k - dk_block);
+          for (int dk = 0; dk < dk_block_size; dk += K_STEP) {
+            int abs_dn = dst_nb_begin + dn;
+            int abs_dk = dk_block + dk;
+            int c_align = (abs_dn / K_STEP) * K_STEP;
+            int c_offset = abs_dn - c_align;
+
+            for (int half = 0; half < 2; half++) {
+              int src_r = abs_dk + half * N_STEP;
+              int8_t* sp = tile_ptr(src.b, src.n, src.k, src_r, c_align);
+              memcpy(tile_copy, sp, N_STEP * K_STEP);
+              transpose_16x16_32bit((__m512i*)tile_copy);
+              transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * K_STEP));
+
+              for (int src_rb = 0; src_rb < N_STEP; src_rb += 16) {
+                for (int src_cb = 0; src_cb < N_STEP; src_cb += 16) {
+                  // Load 16×16 int8 sub-block, dequant to float in registers
+                  __m512i regs[16];
+                  for (int i = 0; i < 16; i++) {
+                    int8_t* addr = tile_copy + (src_rb + i) * K_STEP + c_offset + src_cb;
+                    float scale = src.d[src_r + src_rb + i];
+                    __m512i i32 = _mm512_cvtepi8_epi32(_mm_load_si128((__m128i*)addr));
+                    regs[i] = _mm512_castps_si512(
+                      _mm512_mul_ps(_mm512_cvtepi32_ps(i32), _mm512_set1_ps(scale)));
+                  }
+
+                  // Transpose 16×16 in registers (32-bit element shuffle)
+                  transpose_16x16_32bit(regs);
+
+                  // Quantize transposed floats and store to quant_tile
+                  int dest_rb = src_cb;              // 0 or 16
+                  int dest_cb = half * 32 + src_rb;  // 0, 16, 32, or 48
+                  for (int i = 0; i < 16; i++) {
+                    float sv = d[abs_dn + dest_rb + i];
+                    float id = sv ? 1.0f / sv : 0.0f;
+                    __m512i q = _mm512_cvtps_epi32(
+                      _mm512_mul_ps(_mm512_castsi512_ps(regs[i]), _mm512_set1_ps(id)));
+                    _mm_store_si128(
+                      (__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb),
+                      _mm512_cvtsepi32_epi8(q));
+                  }
+                }
+              }
+            }
+
+            // VNNI pack
+            transpose_16x16_32bit((__m512i*)quant_tile);
+            transpose_16x16_32bit((__m512i*)(quant_tile + TILE_N * K_STEP));
+
+            // Write to dest BB
+            int8_t* dp = b + dst_nb_begin * k + dk_block * dst_nb_size +
+                         dn * dk_block_size + dk * N_STEP;
+            memcpy(dp, quant_tile, N_STEP * K_STEP);
           }
         }
       }
@@ -1074,14 +1447,14 @@ struct GemmKernel224Int4 {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   // static inline const int N_BLOCK = 256;
   static inline const int N_BLOCK = 128;
@@ -1365,14 +1738,14 @@ struct GemmKernel224Int4_1 {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2075,13 +2448,13 @@ struct GemmKernel224Int4KGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
   static inline const int N_BLOCK = 256;
   // K_BLOCK should match k_group_size for proper scaling
   static inline const int K_BLOCK = 7168;  // Will be overridden by k_group_size
@@ -2305,14 +2678,14 @@ struct GemmKernel224Int4_1KGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2581,14 +2954,14 @@ struct GemmKernel224Int4_1_LowKGroup {
   using dt = void;
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int TILE_M = 16;
-  static const int TILE_K = 64;
-  static const int TILE_N = 16;
-  static const int VNNI_BLK = 4;
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_K = 64;
+  static constexpr int TILE_N = 16;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = TILE_M * 2;
-  static const int N_STEP = TILE_N * 2;
-  static const int K_STEP = TILE_K;
+  static constexpr int M_STEP = TILE_M * 2;
+  static constexpr int N_STEP = TILE_N * 2;
+  static constexpr int K_STEP = TILE_K;
 
   static inline const int N_BLOCK = 256;
   // static inline const int K_BLOCK = 7168;
@@ -2859,11 +3232,11 @@ struct GemmKernel224Int4SmallKGroup {
   using dt = uint8_t;  // packed int4 type
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
-  static const int VNNI_BLK = 4;
+  static constexpr int VNNI_BLK = 4;
 
-  static const int M_STEP = 1;
-  static const int N_STEP = 32;
-  static const int K_STEP = 32;
+  static constexpr int M_STEP = 1;
+  static constexpr int N_STEP = 32;
+  static constexpr int K_STEP = 32;
 
   static inline const int N_BLOCK = 256;
   // K_BLOCK should match k_group_size for proper scaling

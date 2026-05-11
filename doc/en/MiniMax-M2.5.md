@@ -37,7 +37,7 @@ cd kt-kernel && ./install.sh
 ./install.sh
 
 # Option B: pip install
-pip install sglang-kt
+pip install kt-kernel sglang-kt
 ```
 
 > Note: You may need to reinstall cudnn: `pip install nvidia-cudnn-cu12==9.16.0.29`

@@ -12,6 +12,7 @@
   - [示例：Qwen3-30B-A3B (BF16)](#示例qwen3-30b-a3b-bf16)
   - [示例：Qwen3.5-35B-A3B-FP8 (FP8)](#示例qwen35-35b-a3b-fp8-fp8)
   - [示例：Qwen3-30B-A3B-GPTQ-Int4 (GPTQ_INT4)](#示例qwen3-30b-a3b-gptq-int4-gptq_int4)
+  - [示例：Kimi-K2.5 (RAWINT4)](#示例kimi-k25-rawint4)
   - [发送请求](#发送请求)
 - [性能调优](#性能调优)
 - [常见问题](#常见问题)
@@ -23,6 +24,7 @@
 | `BF16` | BF16 原精度 | 零精度损失，直接使用 BF16 权重 |
 | `FP8` | FP8 分块量化 |  |
 | `GPTQ_INT4` | INT4 GPTQ |  |
+| `RAWINT4` | Raw INT4 + BF16 缩放因子 | Kimi-K2.5 专用；权重以压缩 SafeTensor 格式存储 |
 
 
 ## 硬件要求
@@ -48,6 +50,7 @@ git submodule update --init --recursive
 在AVX512， AMX机器上， 也可以手动强制 AVX2 编译：
 
 ```bash
+export KT_RAWINT4_BACKEND=avx2
 export CPUINFER_CPU_INSTRUCT=AVX2
 export CPUINFER_ENABLE_AMX=OFF
 ./install.sh kt-kernel --manual
@@ -71,7 +74,7 @@ kt doctor
 
 ## 启动推理服务
 
-使用 `--kt-method BF16`、`FP8` 或 `GPTQ_INT4`，KT-Kernel 会**自动检测** CPU 并在缺少 AVX512/AMX 时回退到 AVX2 后端。
+使用 `--kt-method BF16`、`FP8`、`GPTQ_INT4` 或 `RAWINT4`，KT-Kernel 会**自动检测** CPU 并在缺少 AVX512/AMX 时回退到 AVX2 后端。
 
 ### 示例：Qwen3-30B-A3B (BF16)
 
@@ -155,6 +158,37 @@ python -m sglang.launch_server \
   --tensor-parallel-size 1 \
   --disable-shared-experts-fusion
 ```
+
+### 示例：Kimi-K2.5 (RAWINT4)
+
+> **说明**：以下命令针对 4x RTX PRO 6000 Blackwell（各 96GB）+ AMD Threadripper PRO 5995WX（64 核，1 NUMA 节点）+ 256GB RAM 优化。
+
+```bash
+# 下载模型
+huggingface-cli download moonshotai/Kimi-K2.5 --local-dir /path/to/Kimi-K2.5
+
+# 启动服务
+python -m sglang.launch_server \
+  --host 0.0.0.0 --port 30000 \
+  --model /path/to/Kimi-K2.5 \
+  --kt-weight-path /path/to/Kimi-K2.5 \
+  --kt-cpuinfer 64 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 228 \
+  --kt-enable-dynamic-expert-update \
+  --kt-method RAWINT4 \
+  --attention-backend flashinfer \
+  --trust-remote-code \
+  --mem-fraction-static 0.95 \
+  --chunked-prefill-size 8192 \
+  --max-running-requests 4 \
+  --context-length 262144 \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 4 \
+  --enable-p2p-check \
+  --disable-shared-experts-fusion
+```
+
 
 ### 发送请求
 

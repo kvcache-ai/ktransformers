@@ -21,7 +21,6 @@ from kt_kernel import KTMoEWrapper
 import triton
 import triton.language as tl
 
-
 Q_BITS = 4
 STORAGE_BITS = 32
 PACK_NUM = STORAGE_BITS // Q_BITS
@@ -347,16 +346,7 @@ class ConverterBase:
                 parts = key.split(".")
                 if len(parts) >= 6:
                     layer_idx = int(parts[2])
-                    experts_positions = [idx for idx, part in enumerate(parts) if part == "experts"]
-                    if not experts_positions:
-                        continue
-                    expert_pos = experts_positions[-1] + 1
-                    if expert_pos >= len(parts):
-                        continue
-                    try:
-                        expert_idx = int(parts[expert_pos])
-                    except ValueError:
-                        continue
+                    expert_idx = int(parts[5])
                     layers[layer_idx].add(expert_idx)
 
         # Convert to sorted lists
@@ -370,16 +360,6 @@ class ConverterBase:
 
         return result
 
-    def _expert_tensor_key(self, layer_idx: int, expert_id: int, proj_name: str, suffix: str) -> str:
-        candidates = (
-            f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj_name}.{suffix}",
-            f"model.layers.{layer_idx}.mlp.experts.experts.{expert_id}.{proj_name}.{suffix}",
-        )
-        for key in candidates:
-            if key in self.tensor_file_map:
-                return key
-        raise KeyError(f"Missing {proj_name}.{suffix} for layer {layer_idx}, expert {expert_id}")
-
     def _convert_layer_experts(self, layer_idx: int, expert_ids: List[int]) -> Dict[str, torch.Tensor]:
         """Subclasses must implement expert conversion for a given layer.
 
@@ -389,6 +369,9 @@ class ConverterBase:
 
     def convert(self, resume_layer: int = 0):
         """Convert all expert layers using subclass-specific logic.
+
+        Writes each layer to a separate safetensors shard immediately after conversion
+        to keep peak memory usage proportional to one layer, not all layers.
 
         Args:
             resume_layer (int, optional): The layer index to resume conversion from.
@@ -410,61 +393,82 @@ class ConverterBase:
             print("No MoE expert layers found in input!")
             return
 
-        # Convert each layer with memory management
-        all_tensors: Dict[str, torch.Tensor] = {}
-
         # Enable memory optimization
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # Process layers with memory cleanup
+        # weight_map: tensor_key -> filename (for safetensors index)
+        weight_map: Dict[str, str] = {}
+        shard_idx = 0
+
+        # Process and write each layer immediately
         for i, (layer_idx, expert_ids) in enumerate(sorted(expert_layers.items())):
             if layer_idx < resume_layer:
                 continue
             print(f"Processing layer {layer_idx} ({i+1}/{len(expert_layers)})...")
 
             layer_tensors = self._convert_layer_experts(layer_idx, expert_ids)
-            all_tensors.update(layer_tensors)
 
-            # Periodic garbage collection to free memory
-            if (i + 1) % 5 == 0:  # Every 5 layers
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                print(f"  Memory cleanup after layer {layer_idx}")
+            if self.merge_to_safetensor and layer_tensors:
+                # Write this layer's tensors to its own shard immediately
+                shard_idx += 1
+                shard_name = f"model-{shard_idx:05d}-of-PLACEHOLDER.safetensors"
+                shard_path = os.path.join(self.output_path, shard_name)
+                save_file(layer_tensors, shard_path)
+                for key in layer_tensors:
+                    weight_map[key] = shard_name
+                print(f"  Wrote {len(layer_tensors)} tensors to {shard_name}")
+
+            # Free layer tensors and collect garbage
+            del layer_tensors
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if self.merge_to_safetensor:
-            # Copy non-expert tensors (embeddings, norms, etc.)
+            # Write non-expert tensors (embeddings, norms, etc.) to a final shard
+            non_expert_tensors: Dict[str, torch.Tensor] = {}
             print("Copying non-expert tensors...")
             for key in self.tensor_file_map.keys():
-                if not (".mlp.experts." in key):
-                    # Convert key format for consistency
+                if ".mlp.experts." not in key:
                     if key.startswith("model."):
-                        # Convert model.layers.X -> blk.X for non-expert layers
                         new_key = key.replace("model.layers.", "blk.").replace("model.", "")
-                        all_tensors[new_key] = self._load_tensor(key)
+                        non_expert_tensors[new_key] = self._load_tensor(key)
                     else:
-                        all_tensors[key] = self._load_tensor(key)
+                        non_expert_tensors[key] = self._load_tensor(key)
 
-            # Save all tensors
-            print(f"Saving {len(all_tensors)} tensors...")
+            if non_expert_tensors:
+                shard_idx += 1
+                shard_name = f"model-{shard_idx:05d}-of-PLACEHOLDER.safetensors"
+                shard_path = os.path.join(self.output_path, shard_name)
+                save_file(non_expert_tensors, shard_path)
+                for key in non_expert_tensors:
+                    weight_map[key] = shard_name
+                print(f"  Wrote {len(non_expert_tensors)} non-expert tensors to {shard_name}")
+                del non_expert_tensors
+                gc.collect()
 
-            # Split into multiple files if too large
-            max_tensors_per_file = 3000  # Adjust based on memory constraints
-            tensor_items = list(all_tensors.items())
+            # Rename shards with correct total count and write index
+            total_shards = shard_idx
+            final_weight_map: Dict[str, str] = {}
+            for key, old_name in weight_map.items():
+                new_name = old_name.replace("PLACEHOLDER", f"{total_shards:05d}")
+                final_weight_map[key] = new_name
 
-            if len(tensor_items) <= max_tensors_per_file:
-                # Single file
-                output_file = os.path.join(self.output_path, "model.safetensors")
-                save_file(dict(tensor_items), output_file)
-                print(f"Saved to: {output_file}")
-            else:
-                # Multiple files
-                for i in range(0, len(tensor_items), max_tensors_per_file):
-                    batch = dict(tensor_items[i : i + max_tensors_per_file])
-                    output_file = os.path.join(self.output_path, f"model-{i//max_tensors_per_file + 1:05d}.safetensors")
-                    save_file(batch, output_file)
-                    print(f"Saved batch to: {output_file}")
+            # Rename files on disk
+            for old_name in set(weight_map.values()):
+                new_name = old_name.replace("PLACEHOLDER", f"{total_shards:05d}")
+                old_path = os.path.join(self.output_path, old_name)
+                new_path = os.path.join(self.output_path, new_name)
+                if old_path != new_path and os.path.exists(old_path):
+                    os.rename(old_path, new_path)
+
+            # Write safetensors index
+            index = {"metadata": {"total_size": 0}, "weight_map": final_weight_map}
+            index_path = os.path.join(self.output_path, "model.safetensors.index.json")
+            with open(index_path, "w") as f:
+                json.dump(index, f, indent=2)
+            print(f"  Wrote index: {index_path} ({len(final_weight_map)} tensors across {total_shards} shards)")
 
             # Copy config files
             self._copy_config_files()
@@ -582,19 +586,36 @@ class OnlineQuantConverter(ConverterBase):
         input_type: str = None,
         quant_method: str = "int4",
         merge_to_safetensor: bool = True,
-        fp8_expert_batch: int = 16,
+        save_backward_weights: bool = False,
     ):
         super().__init__(
             input_path, output_path, model_config, cpuinfer_threads, threadpool_count, input_type, merge_to_safetensor
         )
         self.quant_method = quant_method
-        self.fp8_expert_batch = max(1, int(fp8_expert_batch))
+        self.save_backward_weights = save_backward_weights
+
+        # Use tmpfs for intermediate .kt files when merging to safetensor
+        if merge_to_safetensor and os.path.isdir("/dev/shm"):
+            self._scratch_path = os.path.join("/dev/shm", f"kt_convert_{os.getpid()}")
+            os.makedirs(self._scratch_path, exist_ok=True)
+            print(f"Using tmpfs scratch: {self._scratch_path}")
+        else:
+            self._scratch_path = output_path
 
         # For FP8, get block size from model_config
         if input_type == "fp8":
             self.fp8_block_size = model_config.get("fp8_weight_block_size", [128, 128])
         else:
             self.fp8_block_size = None
+
+    def close(self):
+        """Close file handles and clean up tmpfs scratch directory"""
+        super().close()
+        if self._scratch_path != self.output_path and os.path.isdir(self._scratch_path):
+            import shutil
+
+            shutil.rmtree(self._scratch_path, ignore_errors=True)
+            print(f"Cleaned up tmpfs scratch: {self._scratch_path}")
 
     def _dequantize_fp8_blockwise(self, fp8_weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
         """Dequantize FP8 weight with block-wise scaling.
@@ -626,31 +647,6 @@ class OnlineQuantConverter(ConverterBase):
         dequantized = dequantized.view(H, W).contiguous()
 
         return dequantized
-
-    def _dequantize_fp8_blockwise_batched(self, fp8_weight: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
-        """Dequantize FP8 weights with block-wise scaling for a batch of experts.
-
-        Args:
-            fp8_weight: FP8 tensor of shape [B, H, W]
-            scale_inv: Scale inverse tensor of shape [B, H_blocks, W_blocks]
-
-        Returns:
-            Dequantized tensor of shape [B, H, W]
-        """
-        if fp8_weight.dim() != 3 or scale_inv.dim() != 3:
-            raise ValueError(
-                f"Expected batched FP8 tensors with rank 3, got {tuple(fp8_weight.shape)} and {tuple(scale_inv.shape)}"
-            )
-
-        batch, H, W = fp8_weight.shape
-        batch_s, H_blocks, W_blocks = scale_inv.shape
-        if batch != batch_s:
-            raise ValueError(f"Batch mismatch: fp8 batch={batch}, scale batch={batch_s}")
-
-        flat_weight = fp8_weight.reshape(batch * H, W).contiguous()
-        flat_scale = scale_inv.reshape(batch * H_blocks, W_blocks).contiguous()
-        dequantized = weight_dequant(flat_weight, flat_scale)
-        return dequantized.reshape(batch, H, W).contiguous()
 
     def _load_binary_tensor(self, file_path: str) -> torch.Tensor:
         """Load .kt format binary tensor file
@@ -688,7 +684,7 @@ class OnlineQuantConverter(ConverterBase):
             Dict[str, torch.Tensor]: Dictionary with keys in format:
                 'blk.{layer}.ffn_{proj}_exps.{expert}.numa.{numa_idx}.{weight|scale}'
         """
-        layer_path = os.path.join(self.output_path, f"_layer_{layer_idx}")
+        layer_path = os.path.join(self._scratch_path, f"_layer_{layer_idx}")
         if not os.path.exists(layer_path):
             raise FileNotFoundError(f"Layer folder not found: {layer_path}")
 
@@ -741,6 +737,32 @@ class OnlineQuantConverter(ConverterBase):
                             raise ValueError(f"Multiple scale files found: {scale_files}")
                         tensors[scale_key] = self._load_binary_tensor(scale_files[0])
 
+                # Also load backward weight files if they exist
+                bwd_proj_mappings = [
+                    ("gate_bwd", "ffn_gate_bwd_exps"),
+                    ("up_bwd", "ffn_up_bwd_exps"),
+                    ("down_bwd", "ffn_down_bwd_exps"),
+                ]
+                for proj_name, proj_key in bwd_proj_mappings:
+                    quant_pattern = os.path.join(numa_folder, f"{amx_method}_{proj_name}_{expert_id}_*Byte_quant_.kt")
+                    scale_pattern = os.path.join(numa_folder, f"{amx_method}_{proj_name}_{expert_id}_*Byte_scale_.kt")
+
+                    quant_files = glob.glob(quant_pattern)
+                    scale_files = glob.glob(scale_pattern)
+
+                    weight_key = f"blk.{layer_idx}.{proj_key}.{expert_id}.numa.{numa_idx}.weight"
+                    scale_key = f"blk.{layer_idx}.{proj_key}.{expert_id}.numa.{numa_idx}.scale"
+
+                    if quant_files:
+                        if len(quant_files) > 1:
+                            raise ValueError(f"Multiple bwd quant files found: {quant_files}")
+                        tensors[weight_key] = self._load_binary_tensor(quant_files[0])
+
+                    if scale_files:
+                        if len(scale_files) > 1:
+                            raise ValueError(f"Multiple bwd scale files found: {scale_files}")
+                        tensors[scale_key] = self._load_binary_tensor(scale_files[0])
+
         return tensors
 
     def _remove_layer_folder(self, layer_idx: int):
@@ -751,7 +773,7 @@ class OnlineQuantConverter(ConverterBase):
         """
         import shutil
 
-        layer_path = os.path.join(self.output_path, f"_layer_{layer_idx}")
+        layer_path = os.path.join(self._scratch_path, f"_layer_{layer_idx}")
         if os.path.exists(layer_path):
             shutil.rmtree(layer_path)
             print(f"  Removed temporary folder: {layer_path}")
@@ -796,146 +818,149 @@ class OnlineQuantConverter(ConverterBase):
                 print(f"    [Fused] tensor {p} shape: {tuple(w.shape)}")
                 fused_tensors.append(w)
 
-            # Qwen3.5 fused MoE layout:
-            #   fused_tensors[0] : down_proj,    [E, H, I]
-            #   fused_tensors[1] : gate_up_proj, [E, 2I, H]
-            #
-            # The previous code transposed both tensors as if they were laid out
-            # as [E, I, H] / [E, H, 2I]. That swaps hidden/intermediate axes and
-            # produces catastrophically wrong quantized expert weights while still
-            # keeping the service numerically "alive" enough to benchmark.
+            #   fused_tensors[0] : down-like, [E, I, H]
+            #   fused_tensors[1] : gate_up-like, [E, H, 2I]
             down_fused = fused_tensors[0]
             gate_up_fused = fused_tensors[1]
 
+            #    gate_up_fused: [E, H, 2I] -> [E, 2I, H] -> gate / up
             if gate_up_fused.dim() != 3:
                 raise ValueError(
                     f"[Fused] Expect gate_up fused tensor to be 3D, got shape {tuple(gate_up_fused.shape)}"
                 )
-            E, twoI, H = gate_up_fused.shape
+            E, H, twoI = gate_up_fused.shape
             if twoI % 2 != 0:
                 raise ValueError(f"[Fused] gate_up last dim (2I) not even: {twoI}")
             I = twoI // 2
 
-            gate_proj = gate_up_fused[:, :I, :].contiguous()  # [E, I, H]
-            up_proj = gate_up_fused[:, I:, :].contiguous()  # [E, I, H]
+            gate_up_T = gate_up_fused.transpose(1, 2).contiguous()  # [E, 2I, H]
+            gate_proj = gate_up_T[:, :I, :]  # [E, I, H]
+            up_proj = gate_up_T[:, I:, :]  # [E, I, H]
 
             if down_fused.dim() != 3:
                 raise ValueError(f"[Fused] Expect down fused tensor to be 3D, got shape {tuple(down_fused.shape)}")
             if down_fused.shape[0] != E:
                 raise ValueError(f"[Fused] down_fused expert dim mismatch: {down_fused.shape[0]} vs gate_up {E}")
-            if down_fused.shape[1] != H or down_fused.shape[2] != I:
-                raise ValueError(
-                    f"[Fused] down fused shape mismatch: expected [E, H, I] = [{E}, {H}, {I}], "
-                    f"got {tuple(down_fused.shape)}"
-                )
-            down_proj = down_fused.contiguous()  # [E, H, I]
+            down_proj = down_fused.transpose(1, 2).contiguous()  # [E, H, I]
             del fused_tensors
             del gate_up_fused
             del down_fused
         else:
-            gate_weights = []
-            up_weights = []
-            down_weights = []
-
+            # Validate all keys upfront
             for expert_id in expert_ids:
-                gate_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight")
-                up_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight")
-                down_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight")
+                gate_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.gate_proj.weight"
+                up_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.up_proj.weight"
+                down_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.down_proj.weight"
 
-                # Load weights based on input type
+                if gate_key not in self.tensor_file_map:
+                    raise KeyError(f"Missing gate weight for layer {layer_idx}, expert {expert_id}")
+                if up_key not in self.tensor_file_map:
+                    raise KeyError(f"Missing up weight for layer {layer_idx}, expert {expert_id}")
+                if down_key not in self.tensor_file_map:
+                    raise KeyError(f"Missing down weight for layer {layer_idx}, expert {expert_id}")
+
                 if self.input_type == "fp8":
-                    # FP8 path is handled in expert batches below to make better use of GPU memory.
-                    pass
+                    for proj in ["gate_proj", "up_proj", "down_proj"]:
+                        scale_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.{proj}.weight_scale_inv"
+                        if scale_key not in self.tensor_file_map:
+                            raise KeyError(f"Missing {proj} weight_scale_inv for layer {layer_idx}, expert {expert_id}")
 
-                elif self.input_type == "fp16":
-                    # Load FP16 and convert to BF16
-                    gate_weight = self._load_tensor(gate_key).to(torch.bfloat16)
-                    up_weight = self._load_tensor(up_key).to(torch.bfloat16)
-                    down_weight = self._load_tensor(down_key).to(torch.bfloat16)
+            if self.input_type == "fp8":
+                # Batched FP8 dequantization: load all to CPU, then chunked GPU dequant
+                # This reduces GPU transfers from O(experts*6) to O(chunks*2) per projection
+                FP8_CHUNK = 64  # experts per GPU chunk
 
-                elif self.input_type == "bf16":
-                    # Load BF16 directly
-                    gate_weight = self._load_tensor(gate_key)
-                    up_weight = self._load_tensor(up_key)
-                    down_weight = self._load_tensor(down_key)
+                def _batch_dequant(proj_name):
+                    from torch.profiler import record_function
 
-                else:
-                    raise ValueError(f"Unsupported input_type for INT4 conversion: {self.input_type}")
+                    fp8_list = []
+                    scale_list = []
+                    t_load = time.time()
+                    with record_function(f"fp8_load_cpu_{proj_name}"):
+                        for eid in expert_ids:
+                            fp8_list.append(
+                                self._load_tensor(f"model.layers.{layer_idx}.mlp.experts.{eid}.{proj_name}.weight")
+                            )
+                            scale_list.append(
+                                self._load_tensor(
+                                    f"model.layers.{layer_idx}.mlp.experts.{eid}.{proj_name}.weight_scale_inv"
+                                )
+                            )
+                    load_elapsed = time.time() - t_load
+                    total_bytes = sum(t.nelement() * t.element_size() for t in fp8_list) + sum(
+                        t.nelement() * t.element_size() for t in scale_list
+                    )
+                    speed_gbs = total_bytes / load_elapsed / 1e9 if load_elapsed > 0 else float("inf")
+                    print(
+                        f"    {proj_name}: loaded {len(fp8_list)} experts "
+                        f"({total_bytes / 1e6:.1f} MB) in {load_elapsed:.3f}s "
+                        f"= {speed_gbs:.2f} GB/s disk read"
+                    )
 
-                if self.input_type != "fp8":
+                    bf16_chunks = []
+                    t_dequant = time.time()
+                    for i in range(0, len(fp8_list), FP8_CHUNK):
+                        chunk_idx = i // FP8_CHUNK
+                        with record_function(f"fp8_stack_{proj_name}_chunk{chunk_idx}"):
+                            chunk_fp8 = torch.stack(fp8_list[i : i + FP8_CHUNK])  # [C, M, N]
+                            chunk_scale = torch.stack(scale_list[i : i + FP8_CHUNK])  # [C, sm, sn]
+                            C, M, N = chunk_fp8.shape
+                            _, sm, sn = chunk_scale.shape
+
+                        with record_function(f"fp8_to_cuda_{proj_name}_chunk{chunk_idx}"):
+                            flat_fp8 = chunk_fp8.reshape(C * M, N).contiguous().cuda()
+                            flat_scale = chunk_scale.reshape(C * sm, sn).contiguous().cuda()
+                            del chunk_fp8, chunk_scale
+
+                        with record_function(f"fp8_dequant_{proj_name}_chunk{chunk_idx}"):
+                            flat_bf16 = weight_dequant(flat_fp8, flat_scale).to(torch.bfloat16)
+                            del flat_fp8, flat_scale
+
+                        with record_function(f"fp8_to_cpu_{proj_name}_chunk{chunk_idx}"):
+                            bf16_cpu = flat_bf16.cpu()
+                            del flat_bf16
+
+                        bf16_chunks.append(bf16_cpu.reshape(C, M, N))
+                    dequant_elapsed = time.time() - t_dequant
+
+                    with record_function(f"fp8_cat_{proj_name}"):
+                        result = torch.cat(bf16_chunks, dim=0).contiguous()
+                    print(f"    {proj_name}: dequant+transfer in {dequant_elapsed:.3f}s")
+                    return result
+
+                gate_proj = _batch_dequant("gate_proj")
+                up_proj = _batch_dequant("up_proj")
+                down_proj = _batch_dequant("down_proj")
+
+            else:
+                gate_weights = []
+                up_weights = []
+                down_weights = []
+
+                for expert_id in expert_ids:
+                    gate_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.gate_proj.weight"
+                    up_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.up_proj.weight"
+                    down_key = f"model.layers.{layer_idx}.mlp.experts.{expert_id}.down_proj.weight"
+
+                    if self.input_type == "fp16":
+                        gate_weight = self._load_tensor(gate_key).to(torch.bfloat16)
+                        up_weight = self._load_tensor(up_key).to(torch.bfloat16)
+                        down_weight = self._load_tensor(down_key).to(torch.bfloat16)
+                    elif self.input_type == "bf16":
+                        gate_weight = self._load_tensor(gate_key)
+                        up_weight = self._load_tensor(up_key)
+                        down_weight = self._load_tensor(down_key)
+                    else:
+                        raise ValueError(f"Unsupported input_type: {self.input_type}")
+
                     gate_weights.append(gate_weight)
                     up_weights.append(up_weight)
                     down_weights.append(down_weight)
 
-            if self.input_type == "fp8":
-                for batch_start in range(0, len(expert_ids), self.fp8_expert_batch):
-                    batch_expert_ids = expert_ids[batch_start : batch_start + self.fp8_expert_batch]
-
-                    gate_fp8_batch = []
-                    up_fp8_batch = []
-                    down_fp8_batch = []
-                    gate_scale_inv_batch = []
-                    up_scale_inv_batch = []
-                    down_scale_inv_batch = []
-
-                    for expert_id in batch_expert_ids:
-                        gate_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight")
-                        up_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight")
-                        down_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight")
-                        gate_scale_key = self._expert_tensor_key(layer_idx, expert_id, "gate_proj", "weight_scale_inv")
-                        up_scale_key = self._expert_tensor_key(layer_idx, expert_id, "up_proj", "weight_scale_inv")
-                        down_scale_key = self._expert_tensor_key(layer_idx, expert_id, "down_proj", "weight_scale_inv")
-
-                        gate_fp8_batch.append(self._load_tensor(gate_key))
-                        up_fp8_batch.append(self._load_tensor(up_key))
-                        down_fp8_batch.append(self._load_tensor(down_key))
-                        gate_scale_inv_batch.append(self._load_tensor(gate_scale_key))
-                        up_scale_inv_batch.append(self._load_tensor(up_scale_key))
-                        down_scale_inv_batch.append(self._load_tensor(down_scale_key))
-
-                    gate_fp8 = torch.stack(gate_fp8_batch, dim=0).to("cuda", non_blocking=True)
-                    up_fp8 = torch.stack(up_fp8_batch, dim=0).to("cuda", non_blocking=True)
-                    down_fp8 = torch.stack(down_fp8_batch, dim=0).to("cuda", non_blocking=True)
-                    gate_scale_inv = torch.stack(gate_scale_inv_batch, dim=0).to("cuda", non_blocking=True)
-                    up_scale_inv = torch.stack(up_scale_inv_batch, dim=0).to("cuda", non_blocking=True)
-                    down_scale_inv = torch.stack(down_scale_inv_batch, dim=0).to("cuda", non_blocking=True)
-
-                    gate_weight_batch = (
-                        self._dequantize_fp8_blockwise_batched(gate_fp8, gate_scale_inv)
-                        .to(torch.bfloat16)
-                        .cpu()
-                        .contiguous()
-                    )
-                    up_weight_batch = (
-                        self._dequantize_fp8_blockwise_batched(up_fp8, up_scale_inv)
-                        .to(torch.bfloat16)
-                        .cpu()
-                        .contiguous()
-                    )
-                    down_weight_batch = (
-                        self._dequantize_fp8_blockwise_batched(down_fp8, down_scale_inv)
-                        .to(torch.bfloat16)
-                        .cpu()
-                        .contiguous()
-                    )
-
-                    gate_weights.extend(gate_weight_batch.unbind(0))
-                    up_weights.extend(up_weight_batch.unbind(0))
-                    down_weights.extend(down_weight_batch.unbind(0))
-
-                    del gate_fp8, up_fp8, down_fp8
-                    del gate_scale_inv, up_scale_inv, down_scale_inv
-                    del gate_weight_batch, up_weight_batch, down_weight_batch
-                    del gate_fp8_batch, up_fp8_batch, down_fp8_batch
-                    del gate_scale_inv_batch, up_scale_inv_batch, down_scale_inv_batch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-            # Stack weights into single tensors: [num_experts, ...]
-            gate_proj = torch.stack(gate_weights, dim=0).contiguous()
-            up_proj = torch.stack(up_weights, dim=0).contiguous()
-            down_proj = torch.stack(down_weights, dim=0).contiguous()
-            del gate_weights, up_weights, down_weights
+                gate_proj = torch.stack(gate_weights, dim=0).contiguous()
+                up_proj = torch.stack(up_weights, dim=0).contiguous()
+                down_proj = torch.stack(down_weights, dim=0).contiguous()
+                del gate_weights, up_weights, down_weights
 
         print(f"  Loaded weights shapes:")
         print(f"    gate_proj: {gate_proj.shape}")
@@ -966,30 +991,72 @@ class OnlineQuantConverter(ConverterBase):
             gpu_experts_mask=gpu_experts_mask,  # All experts on CPU for conversion
             cpuinfer_threads=self.cpuinfer_threads,
             threadpool_count=self.threadpool_count,
-            weight_path=self.output_path,  # Output path for quantized weights
+            weight_path=self._scratch_path,  # Scratch path for intermediate .kt files
             chunked_prefill_size=512,  # Arbitrary value, not critical for conversion
             cpu_save=True,  # Enable saving quantized weights to output
-            # Conversion writes fresh quantized weights to disk. It must not try
-            # to enter tiered/mmap residency management against the destination
-            # path being produced by this very conversion job.
-            weight_strategy="legacy",
             method=amx_method,  # Specify quantization method (AMXINT4 or AMXINT8)
         )
 
         # Load and quantize weights from tensors
         # This triggers the quantization process and saves to disk
-        wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+        from torch.profiler import record_function
+
+        with record_function("fwd_quant_and_save"):
+            wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+
+        # Optionally save backward weights (transposed + quantized for backward pass)
+        if self.save_backward_weights:
+            print(f"  Saving backward weights for layer {layer_idx}...")
+            from kt_kernel import AMXSFTMoEWrapper
+
+            # Map forward quant method to SFT method
+            quant_to_sft_map = {
+                "AMXINT4": "AMXINT4_SFT_SkipLoRA",
+                "AMXINT8": "AMXINT8_SFT_SkipLoRA",
+                "AMXBF16": "AMXBF16_SFT_SkipLoRA",
+            }
+            sft_method = quant_to_sft_map.get(amx_method)
+            if sft_method is not None:
+                sft_wrapper = AMXSFTMoEWrapper(
+                    layer_idx=layer_idx,
+                    num_experts=self.num_experts,
+                    num_experts_per_tok=self.num_experts_per_tok,
+                    hidden_size=self.hidden_size,
+                    moe_intermediate_size=self.moe_intermediate_size,
+                    num_gpu_experts=0,
+                    cpuinfer_threads=self.cpuinfer_threads,
+                    threadpool_count=self.threadpool_count,
+                    weight_path=self._scratch_path,
+                    chunked_prefill_size=512,
+                    lora_rank=1,  # dummy, SkipLoRA doesn't use LoRA
+                    lora_alpha=1.0,  # dummy, SkipLoRA doesn't use LoRA
+                    max_cache_depth=1,
+                    method=sft_method,
+                )
+                with record_function("bwd_sft_load_weights"):
+                    sft_wrapper.load_weights_from_tensors(gate_proj, up_proj, down_proj, physical_to_logical_map)
+                with record_function("bwd_save_weights"):
+                    sft_wrapper.save_backward_weights_from_tensors(
+                        gate_proj, up_proj, down_proj, physical_to_logical_map, self._scratch_path
+                    )
+                del sft_wrapper
+            else:
+                print(f"  Warning: No SFT method for {amx_method}, skipping backward weights")
 
         # Clean up to free memory
+        del wrapper
         del gate_proj, up_proj, down_proj
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         elapsed = time.time() - start_time
 
         if self.merge_to_safetensor:
             # Load quantized tensors from disk
             print(f"  Loading quantized tensors from disk...")
-            layer_tensors = self._load_layer_tensors_from_disk(layer_idx)
+            with record_function("load_kt_from_disk"):
+                layer_tensors = self._load_layer_tensors_from_disk(layer_idx)
             print(f"  Loaded {len(layer_tensors)} tensors")
 
             # Remove temporary layer folder
@@ -1056,10 +1123,16 @@ def main():
         help="Resume conversion starting at this layer index (default: 0)",
     )
     parser.add_argument(
-        "--fp8-expert-batch",
-        type=int,
-        default=16,
-        help="Number of experts to dequantize on GPU at once for fp8 input (default: 16)",
+        "--save-backward-weights",
+        action="store_true",
+        default=False,
+        help="Also save pre-quantized backward weights (transposed) for SFT training (default: False)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable torch profiler and print a summary table after conversion",
     )
 
     args = parser.parse_args()
@@ -1107,7 +1180,7 @@ def main():
                 args.input_type,
                 quant_method,
                 merge_to_safetensor,
-                args.fp8_expert_batch,
+                save_backward_weights=args.save_backward_weights,
             )
         else:
             raise ValueError(
@@ -1115,7 +1188,37 @@ def main():
             )
 
         # Run conversion
-        converter.convert(resume_layer=args.resume_layer)
+        if args.profile:
+            from torch.profiler import profile, ProfilerActivity, record_function
+
+            def _dump_profile(prof, output_dir):
+                print("\n" + "=" * 80)
+                print("TORCH PROFILER SUMMARY (sorted by CUDA total)")
+                print("=" * 80)
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
+                print("\n" + "=" * 80)
+                print("TORCH PROFILER SUMMARY (sorted by CPU total)")
+                print("=" * 80)
+                print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+                trace_path = os.path.join(output_dir, "profile_trace.json")
+                prof.export_chrome_trace(trace_path)
+                print(f"\nChrome trace saved to {trace_path}")
+
+            prof = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                record_shapes=True,
+                with_stack=False,
+            )
+            prof.__enter__()
+            try:
+                converter.convert(resume_layer=args.resume_layer)
+            except KeyboardInterrupt:
+                print("\n\nInterrupted! Saving profiler data...")
+            finally:
+                prof.__exit__(None, None, None)
+                _dump_profile(prof, args.output)
+        else:
+            converter.convert(resume_layer=args.resume_layer)
 
         # Cleanup
         converter.close()

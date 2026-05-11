@@ -1,2 +1,4 @@
 *.jsonl
 *.json
+__pycache__/
+moe_*_run_*.log

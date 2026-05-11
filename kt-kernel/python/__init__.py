@@ -44,6 +44,7 @@ _kt_kernel_ext, __cpu_variant__ = _initialize_cpu()
 import sys
 
 sys.modules["kt_kernel_ext"] = _kt_kernel_ext
+sys.modules[f"{__name__}.kt_kernel_ext"] = _kt_kernel_ext
 
 # Also expose kt_kernel_ext as an attribute for backward compatibility
 kt_kernel_ext = _kt_kernel_ext
@@ -51,6 +52,18 @@ kt_kernel_ext = _kt_kernel_ext
 # Import main API
 from .experts import KTMoEWrapper
 from .experts_base import generate_gpu_experts_masks
+
+
+def __getattr__(name):
+    if name == "AMXSFTMoEWrapper":
+        try:
+            from .sft.amx import AMXSFTMoEWrapper
+
+            return AMXSFTMoEWrapper
+        except (ImportError, AttributeError):
+            return None
+    raise AttributeError(f"module 'kt_kernel' has no attribute {name!r}")
+
 
 # Read version from package metadata (preferred) or fallback to project root
 try:
@@ -68,9 +81,9 @@ try:
             _version_ns = {}
             with open(_root_version_file, "r", encoding="utf-8") as f:
                 exec(f.read(), _version_ns)
-            __version__ = _version_ns.get("__version__", "0.4.3")
+            __version__ = _version_ns.get("__version__", "0.6.1")
         else:
-            __version__ = "0.4.3"
+            __version__ = "0.6.1"
 except ImportError:
     # Python < 3.8, fallback to pkg_resources or hardcoded version
     try:
@@ -79,8 +92,15 @@ except ImportError:
         try:
             __version__ = get_distribution("kt-kernel").version
         except DistributionNotFound:
-            __version__ = "0.4.3"
+            __version__ = "0.6.1"
     except ImportError:
-        __version__ = "0.4.3"
+        __version__ = "0.6.1"
 
-__all__ = ["KTMoEWrapper", "generate_gpu_experts_masks", "kt_kernel_ext", "__cpu_variant__", "__version__"]
+__all__ = [
+    "KTMoEWrapper",
+    "AMXSFTMoEWrapper",
+    "generate_gpu_experts_masks",
+    "kt_kernel_ext",
+    "__cpu_variant__",
+    "__version__",
+]

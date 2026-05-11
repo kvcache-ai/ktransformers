@@ -14,6 +14,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
 import os
+import ctypes
 import numpy as np
 from pathlib import Path
 
@@ -94,33 +95,35 @@ class KExpertsCPUBuffer:
         hidden_size = hidden_states.shape[-1]
         batch_size = hidden_states.shape[0]
 
+        pin_memory = True
+
         if batch_size in cls.capture_buffers:
             return cls.capture_buffers[batch_size]
         if batch_size == cls.temp_bs:
             return cls.temp_buffer
 
         input_tensor_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=_PIN_MEMORY, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         immediate_experts_ids_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=_PIN_MEMORY)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         deferred_experts_ids_cpu = [
-            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=_PIN_MEMORY)
+            torch.full((batch_size, num_experts_per_tok), -1, device="cpu", dtype=torch.long, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         weights_cpu = [
-            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=_PIN_MEMORY)
+            torch.zeros((batch_size, num_experts_per_tok), device="cpu", dtype=torch.float32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_cpu = [
-            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=_PIN_MEMORY, dtype=torch.bfloat16)
+            torch.zeros((batch_size, hidden_size), device="cpu", pin_memory=pin_memory, dtype=torch.bfloat16)
             for _ in range(cls.buffer_depth)
         ]
         bsz_tensor_cpu = [
-            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=_PIN_MEMORY)
+            torch.full((1,), batch_size, device="cpu", dtype=torch.int32, pin_memory=pin_memory)
             for _ in range(cls.buffer_depth)
         ]
         output_gpu = [
@@ -144,7 +147,88 @@ class KExpertsCPUBuffer:
         return cur_buffer
 
 
-class BaseMoEWrapper(ABC):
+class _MoEBase:
+    """
+    Shared base class for inference and SFT MoE wrappers.
+
+    Provides:
+    - CPUInfer singleton management
+    - Basic configuration validation
+
+    This class is shared between BaseMoEWrapper (inference) and BaseSFTMoEWrapper (SFT).
+    """
+
+    _cpu_infer_instance = None
+
+    @classmethod
+    def _get_cpu_infer(
+        cls,
+        cpuinfer_threads: int,
+        threadpool_count: int,
+        numa_nodes=None,
+    ):
+        """
+        Get or create the CPUInfer singleton instance.
+
+        Args:
+            cpuinfer_threads: Total number of CPU inference threads
+            threadpool_count: Number of NUMA subpools (TP count)
+            numa_nodes: Explicit list of NUMA node IDs. If None, defaults to sequential.
+
+        Returns:
+            CPUInfer singleton instance
+        """
+        if cls._cpu_infer_instance is None:
+            worker_config = kt_kernel_ext.WorkerPoolConfig()
+
+            if numa_nodes is not None:
+                if len(numa_nodes) != threadpool_count:
+                    raise ValueError(
+                        f"numa_nodes length ({len(numa_nodes)}) must match " f"threadpool_count ({threadpool_count})"
+                    )
+                subpool_numa_map = list(numa_nodes)
+            else:
+                subpool_numa_map = list(range(threadpool_count))
+            subpool_thread_count = [
+                cpuinfer_threads // threadpool_count + (1 if i < cpuinfer_threads % threadpool_count else 0)
+                for i in range(threadpool_count)
+            ]
+
+            worker_config.subpool_count = threadpool_count
+            worker_config.subpool_numa_map = subpool_numa_map
+            worker_config.subpool_thread_count = subpool_thread_count
+            cls._cpu_infer_instance = kt_kernel_ext.CPUInfer(worker_config)
+
+        return cls._cpu_infer_instance
+
+    @staticmethod
+    def _validate_base_config(
+        num_experts: int,
+        hidden_size: int,
+        moe_intermediate_size: int,
+        num_experts_per_tok: int,
+    ) -> None:
+        """
+        Validate basic configuration parameters.
+
+        Raises:
+            ValueError: If parameters are invalid
+        """
+        if num_experts <= 0:
+            raise ValueError(f"num_experts must be positive, got {num_experts}")
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if moe_intermediate_size <= 0:
+            raise ValueError(f"moe_intermediate_size must be positive, got {moe_intermediate_size}")
+        if num_experts_per_tok <= 0:
+            raise ValueError(f"num_experts_per_tok must be positive, got {num_experts_per_tok}")
+        if num_experts_per_tok > num_experts:
+            raise ValueError(
+                f"num_experts_per_tok ({num_experts_per_tok}) cannot exceed " f"num_experts ({num_experts})"
+            )
+
+
+class BaseMoEWrapper(_MoEBase, ABC):
     """
     Base class for MoE CPU inference operations.
     Provides common functionality for all backend implementations.
@@ -273,6 +357,7 @@ class BaseMoEWrapper(ABC):
         weight_strategy: str = "auto",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
+        swiglu_limit: float = 0.0,
     ):
         """
         Initialize base MoE Wrapper.
@@ -306,6 +391,7 @@ class BaseMoEWrapper(ABC):
             num_moe_layers: Total number of MoE layers in the model. Used when
                             auto Tier0 sizing is enabled. If None, estimated
                             from registered layers.
+            swiglu_limit: MXFP4 SwiGLU clamp limit. 0.0 disables the clamp.
         """
         self.layer_idx = layer_idx
         self.num_moe_layers = int(num_moe_layers) if num_moe_layers is not None else None
@@ -432,6 +518,11 @@ class BaseMoEWrapper(ABC):
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         self.method = method
+        # V4-Flash 2604B SwiGLU clamp limit; 0.0 = disabled. NativeMoEWrapper
+        # (MXFP4 path) reads this in load_weights() and writes it into
+        # MOEConfig.swiglu_limit. Other backends ignore it.
+        self.swiglu_limit = float(swiglu_limit)
+
         if max_tier0_experts is not None:
             parsed_max_tier0 = int(max_tier0_experts)
             max_tier0_experts = None if parsed_max_tier0 <= 0 else parsed_max_tier0

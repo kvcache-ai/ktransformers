@@ -137,13 +137,13 @@ OUTPUT:
       {registry}/{repository}:sglang-v{ver}_ktransformers-v{ver}_{cpu}_{gpu}_{func}_{timestamp}
 
     Example:
-      docker.io/kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
+      docker.io/kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
 
     Simplified tag (if --also-push-simplified):
       {registry}/{repository}:v{ktransformers-ver}-{cuda}
 
     Example:
-      docker.io/kvcache/ktransformers:v0.4.3-cu128
+      docker.io/kvcache/ktransformers:v0.5.3-cu128
 
 EOF
     exit 0
@@ -372,7 +372,7 @@ generate_tags() {
         log_warning "DRY RUN: Using placeholder versions"
         # Use placeholder versions for dry run
         local versions="SGLANG_VERSION=0.5.6
-KTRANSFORMERS_VERSION=0.4.3
+KTRANSFORMERS_VERSION=0.5.3
 LLAMAFACTORY_VERSION=0.9.3"
     else
         # Extract versions from image
@@ -709,13 +709,13 @@ OUTPUT:
       {registry}/{repository}:sglang-v{ver}_ktransformers-v{ver}_{cpu}_{gpu}_{func}_{timestamp}
 
     Example:
-      docker.io/kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
+      docker.io/kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
 
     Simplified tag (if --also-push-simplified):
       {registry}/{repository}:v{ktransformers-ver}-{cuda}
 
     Example:
-      docker.io/kvcache/ktransformers:v0.4.3-cu128
+      docker.io/kvcache/ktransformers:v0.5.3-cu128
 
 EOF
     exit 0
@@ -944,7 +944,7 @@ generate_tags() {
         log_warning "DRY RUN: Using placeholder versions"
         # Use placeholder versions for dry run
         local versions="SGLANG_VERSION=0.5.6
-KTRANSFORMERS_VERSION=0.4.3
+KTRANSFORMERS_VERSION=0.5.3
 LLAMAFACTORY_VERSION=0.9.3"
     else
         # Extract versions from image

@@ -44,7 +44,23 @@ static inline __m512 exp_avx512(__m512 x) {
   return _mm512_mul_ps(two_pow_i, frac_exp);
 }
 
-static inline __m512 act_fn(__m512 gate_val, __m512 up_val) {
+static inline __m512 act_fn(__m512 gate_val, __m512 up_val, float swiglu_limit = 0.0f) {
+  // DeepSeek V4-Flash 2604B asymmetric SwiGLU clamp. swiglu_limit > 0
+  // applies the same clamp the trtllm `gemm1_clamp_limit` and the sglang
+  // deep_gemm `_apply_swiglu_limit` use:
+  //   gate = clamp(gate, max=limit)            // one-sided (pre-silu)
+  //   up   = clamp(up, min=-limit, max=limit)  // symmetric
+  // The branch is on a runtime float; for swiglu_limit==0.0f (every non-
+  // MXFP4 dtype today) the predictor stays on the fall-through path and
+  // adds at most one cmp+jmp per 32-lane tile.
+  // Origin: kt-sglang 耦合.
+  if (swiglu_limit > 0.0f) {
+    const __m512 pos_lim = _mm512_set1_ps(swiglu_limit);
+    const __m512 neg_lim = _mm512_set1_ps(-swiglu_limit);
+    gate_val = _mm512_min_ps(gate_val, pos_lim);
+    up_val = _mm512_min_ps(up_val, pos_lim);
+    up_val = _mm512_max_ps(up_val, neg_lim);
+  }
   __m512 neg_gate_val = _mm512_sub_ps(_mm512_setzero_ps(), gate_val);
   // Clamp neg_gate_val to avoid exp overflow (exp(88) overflows for float32)
   const __m512 max_exp_input = _mm512_set1_ps(88.0f);

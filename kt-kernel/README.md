@@ -75,7 +75,7 @@ pip install kt-kernel
 For NVIDIA GPU-accelerated inference:
 
 ```bash
-pip install kt-kernel-cuda
+pip install kt-kernel
 ```
 
 **Features:**
@@ -269,7 +269,7 @@ Install the kvcache-ai fork of SGLang (required for kt-kernel support):
 ./install.sh
 
 # Option B: pip install
-pip install sglang-kt
+pip install kt-kernel sglang-kt
 
 # Option C: From source (editable mode)
 git clone --recursive https://github.com/kvcache-ai/ktransformers.git
@@ -512,7 +512,7 @@ python -m sglang.launch_server \
 - **`kt-method`**: Choose based on your CPU and weight format:
   - `AMXINT4`: Best performance on AMX CPUs with INT4 quantized weights (May cause huge accuracy drop for some models, e.g., Qwen3-30B-A3B)
   - `AMXINT8`: Higher accuracy with INT8 quantized weights on AMX CPUs
-  - `RAWINT4`: Native INT4 weights shared by CPU and GPU (currently supports Kimi-K2-Thinking model). See [Kimi-K2-Thinking Native Tutorial](../doc/en/Kimi-K2-Thinking-Native.md) for details.
+  - `RAWINT4`: Native INT4 weights shared by CPU and GPU (currently supports Kimi-K2-Thinking model). See [Kimi-K2-Thinking Native Tutorial](../doc/en/kt-kernel/Kimi-K2-Thinking-Native.md) for details.
   - `FP8`, `FP8_PERCHANNEL`: FP8 weights shared by CPU and GPU
   - `BF16`: BF16 weights shared by CPU and GPU
   - `LLAMAFILE`: GGUF-based backend

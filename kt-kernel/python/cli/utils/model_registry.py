@@ -82,6 +82,26 @@ BUILTIN_MODELS: list[ModelInfo] = [
         description_zh="DeepSeek R1-0528 推理模型（2025年5月，改进的推理深度）",
     ),
     ModelInfo(
+        name="DeepSeek-V4-Flash",
+        hf_repo="deepseek-ai/DeepSeek-V4-Flash",
+        aliases=["deepseek-v4-flash", "deepseek-v4", "dsv4", "v4-flash", "v4"],
+        type="moe",
+        default_params={
+            "kt-method": "MXFP4",
+            "kt-gpu-prefill-token-threshold": 4096,
+            "attention-backend": "flashinfer",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "DeepSeek-V4-Flash",
+            "disable-shared-experts-fusion": True,
+        },
+        description="DeepSeek V4-Flash MoE model (native MXFP4 experts, MQA + sparse index attention)",
+        description_zh="DeepSeek V4-Flash MoE 模型（原生 MXFP4 专家，MQA + 稀疏索引注意力）",
+    ),
+    ModelInfo(
         name="Kimi-K2-Thinking",
         hf_repo="moonshotai/Kimi-K2-Thinking",
         aliases=["kimi-k2-thinking", "kimi-thinking", "k2-thinking", "kimi", "k2"],
@@ -368,6 +388,19 @@ def compute_deepseek_v3_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: 
     return total_vram // 3
 
 
+def compute_deepseek_v4_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
+    """Compute kt-num-gpu-experts for DeepSeek-V4-Flash.
+
+    V4 uses MXFP4 experts (~0.5 bytes/param vs V3 FP8's 1 byte/param) so each GPU
+    can hold ~2x more experts per VRAM unit than V3 at the same fragmentation.
+    """
+    per_gpu_gb = 16
+    if vram_per_gpu_gb < per_gpu_gb:
+        return 0
+    total_vram = int(tensor_parallel_size * (vram_per_gpu_gb - per_gpu_gb))
+    return total_vram * 2 // 3
+
+
 def compute_kimi_k2_thinking_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
     """Compute kt-num-gpu-experts for Kimi K2 Thinking."""
     per_gpu_gb = 16
@@ -393,6 +426,7 @@ MODEL_COMPUTE_FUNCTIONS: dict[str, Callable[[int, float], int]] = {
     "DeepSeek-V3-0324": compute_deepseek_v3_gpu_experts,
     "DeepSeek-V3.2": compute_deepseek_v3_gpu_experts,  # Same as V3-0324
     "DeepSeek-R1-0528": compute_deepseek_v3_gpu_experts,  # Same as V3-0324
+    "DeepSeek-V4-Flash": compute_deepseek_v4_gpu_experts,
     "Kimi-K2-Thinking": compute_kimi_k2_thinking_gpu_experts,
     "MiniMax-M2": compute_minimax_m2_gpu_experts,
     "MiniMax-M2.1": compute_minimax_m2_gpu_experts,  # Same as M2

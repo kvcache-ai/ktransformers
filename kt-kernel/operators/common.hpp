@@ -1256,17 +1256,17 @@ struct GeneralMOEConfig {
     return expert_id < 0 || expert_id >= expert_num || (gpu_experts_mask && gpu_experts_mask[expert_id]);
   }
 
-  void* gate_proj;
-  void* up_proj;
-  void* down_proj;
+  void* gate_proj = nullptr;
+  void* up_proj = nullptr;
+  void* down_proj = nullptr;
 
-  void* gate_scale;
-  void* up_scale;
-  void* down_scale;
+  void* gate_scale = nullptr;
+  void* up_scale = nullptr;
+  void* down_scale = nullptr;
 
-  void* gate_zero;
-  void* up_zero;
-  void* down_zero;
+  void* gate_zero = nullptr;
+  void* up_zero = nullptr;
+  void* down_zero = nullptr;
 
   QuantConfig quant_config;
 
@@ -1282,9 +1282,19 @@ struct GeneralMOEConfig {
   std::vector<std::vector<void*>> up_zeros;
   std::vector<std::vector<void*>> down_zeros;
 
+  // Pre-quantized backward weights (transposed, in BufferB format) [tp_count][expert_id]
+  std::vector<std::vector<void*>> gate_bwd_projs;
+  std::vector<std::vector<void*>> up_bwd_projs;
+  std::vector<std::vector<void*>> down_bwd_projs;
+  std::vector<std::vector<void*>> gate_bwd_scales;
+  std::vector<std::vector<void*>> up_bwd_scales;
+  std::vector<std::vector<void*>> down_bwd_scales;
+
   std::string path;
   bool save = false;
   bool load = false;
+  bool share_backward_bb = false;
+  bool share_cache_pool = false;
 
   // mmap mode: when true, weight pointers point directly into mmap'd regions.
   // load_weights() should skip memcpy and use the pointers as-is.
@@ -1351,6 +1361,19 @@ struct GeneralMOEConfig {
   int down_type;
   int hidden_type;
 
+  int max_cache_depth = 1;
+
+  // SwiGLU asymmetric clamp applied to gate/up before silu*up. 0.0f =
+  // disabled (default for all non-MXFP4 paths). Set to e.g. 10.0f for
+  // DeepSeek V4-Flash 2604B routed experts, matching the trtllm
+  // `gemm1_clamp_limit` and the sglang deep_gemm path's
+  // `_apply_swiglu_limit`:
+  //   gate = clamp(gate, max=limit)            // one-sided (silu input)
+  //   up   = clamp(up, min=-limit, max=limit)  // symmetric
+  // Read by `act_fn` in la/amx.hpp; non-zero only for MXFP4 today.
+  // Origin: kt-sglang 耦合 (carries the V4-2604B limit set by sglang side).
+  float swiglu_limit = 0.0f;
+
   GeneralMOEConfig() {}
 
   GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
@@ -1360,6 +1383,33 @@ struct GeneralMOEConfig {
         intermediate_size(intermediate_size) {}
 
   int max_possible_qlen() { return std::max(max_len, group_max_len); }
+};
+
+// SFT (Supervised Fine-Tuning) configuration for MoE with LoRA
+struct MOESFTConfig : public GeneralMOEConfig {
+  // LoRA configuration
+  int lora_rank = 16;
+  float lora_alpha = 32.0f;
+  float lora_scaling() const { return lora_alpha / lora_rank; }
+
+  // LoRA weight pointers (directly pointing to Python tensor memory, zero-copy)
+  // Layout: [expert_num, lora_rank, in_dim] for A, [expert_num, out_dim, lora_rank] for B
+  void* gate_lora_a = nullptr;  // [expert_num, lora_rank, hidden_size]
+  void* gate_lora_b = nullptr;  // [expert_num, intermediate_size, lora_rank]
+  void* up_lora_a = nullptr;    // [expert_num, lora_rank, hidden_size]
+  void* up_lora_b = nullptr;    // [expert_num, intermediate_size, lora_rank]
+  void* down_lora_a = nullptr;  // [expert_num, lora_rank, intermediate_size]
+  void* down_lora_b = nullptr;  // [expert_num, hidden_size, lora_rank]
+
+  MOESFTConfig() : GeneralMOEConfig() {}
+
+  MOESFTConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
+      : GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size) {}
+
+  // Conversion constructor from GeneralMOEConfig (for MOE_TP_PART concept satisfaction)
+  explicit MOESFTConfig(const GeneralMOEConfig& base) : GeneralMOEConfig(base) {
+    // LoRA fields use default values (already initialized in struct definition)
+  }
 };
 
 struct GeneralGateConfig {

@@ -42,14 +42,13 @@ class TP_MOE_Common : public MoE_Interface {
  public:
   GeneralMOEConfig config;
   using input_t = typename T::input_t;
-  TP_MOE_Common(GeneralMOEConfig config) : config(config) {
-    if (config.enable_cache_stats && config.cache_stats == nullptr) {
-      config.cache_stats_owner = std::make_shared<ExpertCacheStats>();
-      config.cache_stats = config.cache_stats_owner.get();
-      this->config = config;
+  TP_MOE_Common(const GeneralMOEConfig& config) : config(config) {
+    if (this->config.enable_cache_stats && this->config.cache_stats == nullptr) {
+      this->config.cache_stats_owner = std::make_shared<ExpertCacheStats>();
+      this->config.cache_stats = this->config.cache_stats_owner.get();
     }
-    if (config.enable_cache_stats && config.cache_stats != nullptr) {
-      config.cache_stats->configure_experts(config.layer_idx, config.expert_num);
+    if (this->config.enable_cache_stats && this->config.cache_stats != nullptr) {
+      this->config.cache_stats->configure_experts(this->config.layer_idx, this->config.expert_num);
     }
     printf("TP MOE layer %d, pool: 0x%lx, expert num: %d, num_experts_per_tok: %d\n", config.layer_idx,
            (intptr_t)config.pool, config.expert_num, config.num_experts_per_tok);
@@ -58,7 +57,6 @@ class TP_MOE_Common : public MoE_Interface {
       throw std::runtime_error("no worker pool");
     }
 
-    this->config = config;
     tp_count = config.pool->config.subpool_count;
     if (config.intermediate_size % tp_count != 0) {
       printf("intermediate_size %d, tp count %d\n", config.intermediate_size, tp_count);

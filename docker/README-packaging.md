@@ -25,16 +25,16 @@ sglang-v{sglang版本}_ktransformers-v{ktransformers版本}_{cpu信息}_{gpu信�
 
 **Tar file:**
 ```
-sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022.tar
+sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022.tar
 ```
 
 **DockerHub tags:**
 ```
 Full tag:
-kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
+kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
 
 Simplified tag:
-kvcache/ktransformers:v0.4.3-cu128
+kvcache/ktransformers:v0.5.3-cu128
 ```
 
 ### Name Components
@@ -42,7 +42,7 @@ kvcache/ktransformers:v0.4.3-cu128
 | Component | Description | Example |
 |-----------|-------------|---------|
 | sglang version | SGLang package version | `v0.5.6` |
-| ktransformers version | KTransformers version | `v0.4.3` |
+| ktransformers version | KTransformers version | `v0.5.3` |
 | cpu info | CPU instruction set support | `x86-intel-multi` (includes AMX/AVX512/AVX2) |
 | gpu info | CUDA version | `cu128` (CUDA 12.8) |
 | functionality | Feature mode | `sft_llamafactory-v0.9.3` or `infer` |
@@ -197,8 +197,8 @@ docker login
 ```
 
 This creates two tags:
-- Full: `kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022`
-- Simplified: `kvcache/ktransformers:v0.4.3-cu128`
+- Full: `kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022`
+- Simplified: `kvcache/ktransformers:v0.5.3-cu128`
 
 ### Example 4: Dry Run
 
@@ -225,12 +225,12 @@ Pass additional Docker build arguments:
 
 ```bash
 # Load the image
-docker load -i sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022.tar
+docker load -i sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022.tar
 
 # Run the container
 docker run -it --rm \
   --gpus all \
-  sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022 \
+  sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022 \
   /bin/bash
 ```
 
@@ -238,15 +238,15 @@ docker run -it --rm \
 
 ```bash
 # Pull with full tag
-docker pull kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.4.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
+docker pull kvcache/ktransformers:sglang-v0.5.6_ktransformers-v0.5.3_x86-intel-multi_cu128_sft_llamafactory-v0.9.3_20241212143022
 
 # Or pull with simplified tag
-docker pull kvcache/ktransformers:v0.4.3-cu128
+docker pull kvcache/ktransformers:v0.5.3-cu128
 
 # Run the container
 docker run -it --rm \
   --gpus all \
-  kvcache/ktransformers:v0.4.3-cu128 \
+  kvcache/ktransformers:v0.5.3-cu128 \
   /bin/bash
 ```
 
@@ -301,7 +301,7 @@ cat /workspace/versions.env
 
 # Output:
 SGLANG_VERSION=0.5.6
-KTRANSFORMERS_VERSION=0.4.3
+KTRANSFORMERS_VERSION=0.5.3
 LLAMAFACTORY_VERSION=0.9.3
 ```
 

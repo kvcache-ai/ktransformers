@@ -114,7 +114,11 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
 
 InNumaPool::~InNumaPool() {
   for (int i = 0; i < total_worker_count; i++) {
-    thread_state_[i].status.store(ThreadStatus::EXIT, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(thread_state_[i].mutex);
+      thread_state_[i].status.store(ThreadStatus::EXIT, std::memory_order_release);
+    }
+    thread_state_[i].cv.notify_one();
   }
   for (int i = 0; i < total_worker_count; i++) {
     if (workers_[i].joinable()) {
@@ -171,7 +175,11 @@ void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int
   curr_.store(0, std::memory_order_release);
   end_ = task_num;
   for (int i = 0; i < worker_count; i++) {
-    thread_state_[i].status.store(ThreadStatus::WORKING, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(thread_state_[i].mutex);
+      thread_state_[i].status.store(ThreadStatus::WORKING, std::memory_order_release);
+    }
+    thread_state_[i].cv.notify_one();
   }
   WorkerPool::thread_local_id = 0;
   process_tasks(0);
@@ -235,7 +243,10 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (duration > 50) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::unique_lock<std::mutex> lock(thread_state_[thread_id].mutex);
+        thread_state_[thread_id].cv.wait(lock, [&] {
+          return thread_state_[thread_id].status.load(std::memory_order_acquire) != ThreadStatus::WAITING;
+        });
       }
     } else if (status == ThreadStatus::EXIT) {
       return;
@@ -262,6 +273,8 @@ void NumaJobDistributor::init(std::vector<int> numa_ids) {
   this->numa_ids = numa_ids;
   for (size_t i = 0; i < numa_count; i++) {
     status.push_back(nullptr);
+    mutexes.push_back(std::make_unique<std::mutex>());
+    cvs.push_back(std::make_unique<std::condition_variable>());
   }
 
   workers.resize(numa_count);
@@ -283,6 +296,8 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
   this->numa_ids = numa_ids;
   for (size_t i = 0; i < numa_count; i++) {
     status.push_back(nullptr);
+    mutexes.push_back(std::make_unique<std::mutex>());
+    cvs.push_back(std::make_unique<std::condition_variable>());
   }
 
   workers.resize(numa_count);
@@ -336,7 +351,11 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
 
 NumaJobDistributor::~NumaJobDistributor() {
   for (int i = 0; i < numa_count; i++) {
-    status[i]->store(ThreadStatus::EXIT, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(*mutexes[i]);
+      status[i]->store(ThreadStatus::EXIT, std::memory_order_release);
+    }
+    cvs[i]->notify_one();
   }
   for (int i = 0; i < numa_count; i++) {
     if (workers[i].joinable()) {
@@ -353,7 +372,11 @@ void NumaJobDistributor::do_numa_job(std::function<void(int)> compute_func) {
   for (int i = 0; i < numa_count; i++) {
     if (i == me_numa) continue;
 
-    status[i]->store(ThreadStatus::WORKING, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(*mutexes[i]);
+      status[i]->store(ThreadStatus::WORKING, std::memory_order_release);
+    }
+    cvs[i]->notify_one();
   }
   compute_func(me_numa);
   for (int i = 0; i < numa_count; i++) {
@@ -367,7 +390,11 @@ void NumaJobDistributor::do_numa_job(std::function<void(int)> compute_func) {
 void NumaJobDistributor::do_numa_job(std::function<void(int)> compute_func) {
   this->compute_func = compute_func;
   for (int i = 0; i < numa_count; i++) {
-    status[i]->store(ThreadStatus::WORKING, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(*mutexes[i]);
+      status[i]->store(ThreadStatus::WORKING, std::memory_order_release);
+    }
+    cvs[i]->notify_one();
   }
   for (int i = 0; i < numa_count; i++) {
     while (status[i]->load(std::memory_order_acquire) == ThreadStatus::WORKING) {
@@ -394,7 +421,10 @@ void NumaJobDistributor::worker_thread(int numa_id) {
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (duration > 50) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::unique_lock<std::mutex> lock(*mutexes[numa_id]);
+        cvs[numa_id]->wait(lock, [&] {
+          return status[numa_id]->load(std::memory_order_acquire) != ThreadStatus::WAITING;
+        });
       }
     } else if (stat == ThreadStatus::EXIT) {
       return;
