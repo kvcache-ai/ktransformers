@@ -587,12 +587,14 @@ class OnlineQuantConverter(ConverterBase):
         quant_method: str = "int4",
         merge_to_safetensor: bool = True,
         save_backward_weights: bool = False,
+        fp8_expert_batch: int = 64,
     ):
         super().__init__(
             input_path, output_path, model_config, cpuinfer_threads, threadpool_count, input_type, merge_to_safetensor
         )
         self.quant_method = quant_method
         self.save_backward_weights = save_backward_weights
+        self.fp8_expert_batch = max(1, int(fp8_expert_batch))
 
         # Use tmpfs for intermediate .kt files when merging to safetensor
         if merge_to_safetensor and os.path.isdir("/dev/shm"):
@@ -868,7 +870,7 @@ class OnlineQuantConverter(ConverterBase):
             if self.input_type == "fp8":
                 # Batched FP8 dequantization: load all to CPU, then chunked GPU dequant
                 # This reduces GPU transfers from O(experts*6) to O(chunks*2) per projection
-                FP8_CHUNK = 64  # experts per GPU chunk
+                FP8_CHUNK = self.fp8_expert_batch  # experts per GPU chunk
 
                 def _batch_dequant(proj_name):
                     from torch.profiler import record_function
@@ -1134,6 +1136,12 @@ def main():
         default=False,
         help="Enable torch profiler and print a summary table after conversion",
     )
+    parser.add_argument(
+        "--fp8-expert-batch",
+        type=int,
+        default=64,
+        help="Number of experts to dequantize on GPU at once for fp8 input (default: 64)",
+    )
 
     args = parser.parse_args()
 
@@ -1181,6 +1189,7 @@ def main():
                 quant_method,
                 merge_to_safetensor,
                 save_backward_weights=args.save_backward_weights,
+                fp8_expert_batch=args.fp8_expert_batch,
             )
         else:
             raise ValueError(

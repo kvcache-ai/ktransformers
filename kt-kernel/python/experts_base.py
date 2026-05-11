@@ -1534,18 +1534,48 @@ class BaseMoEWrapper(_MoEBase, ABC):
 
         immediate_ids: torch.Tensor
         deferred_ids: Optional[torch.Tensor]
+        state_defer_used = False
         if self.max_deferred_experts_per_token > 0:
-            protected_k = self.num_experts_per_tok - self.max_deferred_experts_per_token
-
-            immediate_ids, deferred_ids = self.select_deferred_experts(topk_ids_long, topk_weights, protected_k)
+            split_task_factory = getattr(self.moe, "split_deferred_experts_task", None)
+            state_defer_enabled = self.io_backend == "IOURING" and self._env_flag("KT_MESH_STATE_DEFER", True)
+            is_decode_token = int(flat_hidden_states.shape[0]) == 1
+            allow_prefill_state_defer = self._env_flag("KT_MESH_STATE_DEFER_PREFILL", False)
+            if (
+                split_task_factory is not None
+                and state_defer_enabled
+                and (is_decode_token or allow_prefill_state_defer)
+            ):
+                # MESH state defer only runs on io_uring resident-cache paths:
+                # ready experts stay immediate; cold/in-flight experts use the
+                # defer window and trigger prefetch. Non-io_uring KT paths keep
+                # the original score-based split below.
+                immediate_experts_ids_cpu[current_slot].copy_(topk_ids_long, non_blocking=True)
+                deferred_experts_ids_cpu[current_slot].fill_(-1)
+                output_cpu[next_slot].zero_()
+                task = split_task_factory(
+                    int(immediate_experts_ids_cpu[current_slot].data_ptr()),
+                    int(immediate_experts_ids_cpu[current_slot].data_ptr()),
+                    int(deferred_experts_ids_cpu[current_slot].data_ptr()),
+                    int(immediate_experts_ids_cpu[current_slot].numel()),
+                    int(self.num_experts_per_tok),
+                    int(self.max_deferred_experts_per_token),
+                )
+                self._submit_cpuinfer_task(task, cuda_stream)
+                immediate_ids = immediate_experts_ids_cpu[current_slot]
+                deferred_ids = deferred_experts_ids_cpu[current_slot]
+                state_defer_used = True
+            else:
+                protected_k = self.num_experts_per_tok - self.max_deferred_experts_per_token
+                immediate_ids, deferred_ids = self.select_deferred_experts(topk_ids_long, topk_weights, protected_k)
         else:
             immediate_ids = topk_ids_long
             deferred_ids = None
 
         input_tensor_cpu[current_slot].copy_(flat_hidden_states, non_blocking=True)
         weights_cpu[current_slot].copy_(topk_weights, non_blocking=True)
-        immediate_experts_ids_cpu[current_slot].copy_(immediate_ids, non_blocking=True)
-        if deferred_ids is not None:
+        if not state_defer_used:
+            immediate_experts_ids_cpu[current_slot].copy_(immediate_ids, non_blocking=True)
+        if deferred_ids is not None and not state_defer_used:
             deferred_experts_ids_cpu[current_slot].copy_(deferred_ids, non_blocking=True)
 
             if self._env_flag("KT_MESH_DEFER_PREFETCH", True):

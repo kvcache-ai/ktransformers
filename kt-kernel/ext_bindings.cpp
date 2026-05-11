@@ -402,6 +402,47 @@ class MOEBindings {
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
   };
+  class SplitDeferredExpertsBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+      intptr_t source_ids;
+      intptr_t immediate_ids;
+      intptr_t deferred_ids;
+      int count;
+      int k;
+      int max_deferred_per_token;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::split_deferred_experts_binding,
+                               args_->moe,
+                               args_->source_ids,
+                               args_->immediate_ids,
+                               args_->deferred_ids,
+                               args_->count,
+                               args_->k,
+                               args_->max_deferred_per_token);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
+                                                            intptr_t source_ids,
+                                                            intptr_t immediate_ids,
+                                                            intptr_t deferred_ids,
+                                                            int count,
+                                                            int k,
+                                                            int max_deferred_per_token) {
+      Args* args = new Args{nullptr,
+                            moe.get(),
+                            source_ids,
+                            immediate_ids,
+                            deferred_ids,
+                            count,
+                            k,
+                            max_deferred_per_token};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
 };
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
@@ -633,6 +674,34 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("max_to_submit") = 0,
                 py::arg("prefetch_kind") = 0,
                 "Submit non-blocking io_uring reads for selected experts without running AMX compute");
+  }
+  if constexpr (requires(MoeClass moe, intptr_t source_ids, intptr_t immediate_ids, intptr_t deferred_ids, int count,
+                         int k, int max_deferred_per_token) {
+                  moe.split_deferred_experts_binding(source_ids,
+                                                     immediate_ids,
+                                                     deferred_ids,
+                                                     count,
+                                                     k,
+                                                     max_deferred_per_token);
+                }) {
+    moe_cls.def("split_deferred_experts_task",
+                &MoeBindings::SplitDeferredExpertsBindings::cpuinfer_interface,
+                py::arg("source_ids"),
+                py::arg("immediate_ids"),
+                py::arg("deferred_ids"),
+                py::arg("count"),
+                py::arg("k"),
+                py::arg("max_deferred_per_token"),
+                "Split top-k experts by current CPU residency state and prefetch deferred cold misses");
+    moe_cls.def("split_deferred_experts",
+                &MoeClass::split_deferred_experts_binding,
+                py::arg("source_ids"),
+                py::arg("immediate_ids"),
+                py::arg("deferred_ids"),
+                py::arg("count"),
+                py::arg("k"),
+                py::arg("max_deferred_per_token"),
+                "Split top-k experts by current CPU residency state and prefetch deferred cold misses");
   }
 
   // Bind write_weight_scale_to_buffer_task for MoE types that support it

@@ -125,6 +125,8 @@ struct ExpertCacheStats {
   std::unique_ptr<std::atomic<uint64_t>[]> expert_access_count;
   std::unique_ptr<std::atomic<uint64_t>[]> expert_hit_count;
   std::unique_ptr<std::atomic<uint64_t>[]> expert_miss_count;
+  std::unique_ptr<std::atomic<uint64_t>[]> expert_cold_miss_count;
+  std::unique_ptr<std::atomic<uint64_t>[]> expert_in_flight_miss_count;
   std::unique_ptr<std::atomic<uint64_t>[]> expert_promote_count;
   std::unique_ptr<std::atomic<uint64_t>[]> expert_prefetch_hit_count;
   std::atomic<uint64_t> dump_tick{0};
@@ -133,6 +135,8 @@ struct ExpertCacheStats {
   std::atomic<uint64_t> demote_count{0};       // Number of demote operations
   std::atomic<uint64_t> hit_count{0};          // Cache hit (expert already in NUMA)
   std::atomic<uint64_t> miss_count{0};         // Cache miss (need to promote)
+  std::atomic<uint64_t> cold_miss_count{0};    // Demand access found expert fully cold
+  std::atomic<uint64_t> in_flight_miss_count{0}; // Demand access waited on pending async read
   std::atomic<uint64_t> eviction_count{0};     // Number of evictions
   std::atomic<uint64_t> total_access_count{0}; // Total access count
   std::atomic<uint64_t> lookahead_update_count{0}; // Online Heat updates
@@ -166,12 +170,16 @@ struct ExpertCacheStats {
     expert_access_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_hit_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_miss_count = std::make_unique<std::atomic<uint64_t>[]>(n);
+    expert_cold_miss_count = std::make_unique<std::atomic<uint64_t>[]>(n);
+    expert_in_flight_miss_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_promote_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_prefetch_hit_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     for (int i = 0; i < n; ++i) {
       expert_access_count[i].store(0, std::memory_order_relaxed);
       expert_hit_count[i].store(0, std::memory_order_relaxed);
       expert_miss_count[i].store(0, std::memory_order_relaxed);
+      expert_cold_miss_count[i].store(0, std::memory_order_relaxed);
+      expert_in_flight_miss_count[i].store(0, std::memory_order_relaxed);
       expert_promote_count[i].store(0, std::memory_order_relaxed);
       expert_prefetch_hit_count[i].store(0, std::memory_order_relaxed);
     }
@@ -192,6 +200,16 @@ struct ExpertCacheStats {
     expert_miss_count[expert_id].fetch_add(1, std::memory_order_relaxed);
   }
 
+  void note_expert_cold_miss(int expert_id) {
+    if (expert_id < 0 || expert_id >= expert_num || expert_cold_miss_count == nullptr) return;
+    expert_cold_miss_count[expert_id].fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void note_expert_in_flight_miss(int expert_id) {
+    if (expert_id < 0 || expert_id >= expert_num || expert_in_flight_miss_count == nullptr) return;
+    expert_in_flight_miss_count[expert_id].fetch_add(1, std::memory_order_relaxed);
+  }
+
   void note_expert_promote(int expert_id) {
     if (expert_id < 0 || expert_id >= expert_num || expert_promote_count == nullptr) return;
     expert_promote_count[expert_id].fetch_add(1, std::memory_order_relaxed);
@@ -207,6 +225,8 @@ struct ExpertCacheStats {
     demote_count.store(0);
     hit_count.store(0);
     miss_count.store(0);
+    cold_miss_count.store(0);
+    in_flight_miss_count.store(0);
     eviction_count.store(0);
     total_access_count.store(0);
     lookahead_update_count.store(0);
@@ -229,6 +249,8 @@ struct ExpertCacheStats {
       if (expert_access_count != nullptr) expert_access_count[i].store(0, std::memory_order_relaxed);
       if (expert_hit_count != nullptr) expert_hit_count[i].store(0, std::memory_order_relaxed);
       if (expert_miss_count != nullptr) expert_miss_count[i].store(0, std::memory_order_relaxed);
+      if (expert_cold_miss_count != nullptr) expert_cold_miss_count[i].store(0, std::memory_order_relaxed);
+      if (expert_in_flight_miss_count != nullptr) expert_in_flight_miss_count[i].store(0, std::memory_order_relaxed);
       if (expert_promote_count != nullptr) expert_promote_count[i].store(0, std::memory_order_relaxed);
       if (expert_prefetch_hit_count != nullptr) expert_prefetch_hit_count[i].store(0, std::memory_order_relaxed);
     }
@@ -268,6 +290,8 @@ struct ExpertCacheStats {
         << ",\"demote_count\":" << demote_count.load(std::memory_order_relaxed)
         << ",\"hit_count\":" << hit_count.load(std::memory_order_relaxed)
         << ",\"miss_count\":" << miss_count.load(std::memory_order_relaxed)
+        << ",\"cold_miss_count\":" << cold_miss_count.load(std::memory_order_relaxed)
+        << ",\"in_flight_miss_count\":" << in_flight_miss_count.load(std::memory_order_relaxed)
         << ",\"eviction_count\":" << eviction_count.load(std::memory_order_relaxed)
         << ",\"total_access_count\":" << total_access_count.load(std::memory_order_relaxed)
         << ",\"lookahead_update_count\":" << lookahead_update_count.load(std::memory_order_relaxed)
@@ -291,6 +315,8 @@ struct ExpertCacheStats {
     append_counter_array("expert_access", expert_access_count);
     append_counter_array("expert_hit", expert_hit_count);
     append_counter_array("expert_miss", expert_miss_count);
+    append_counter_array("expert_cold_miss", expert_cold_miss_count);
+    append_counter_array("expert_in_flight_miss", expert_in_flight_miss_count);
     append_counter_array("expert_promote", expert_promote_count);
     append_counter_array("expert_prefetch_hit", expert_prefetch_hit_count);
     out << "}\n";

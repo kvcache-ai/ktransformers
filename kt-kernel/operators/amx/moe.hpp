@@ -1535,8 +1535,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         // Cache miss - need to promote
         if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+          config_.cache_stats->cold_miss_count.fetch_add(1, std::memory_order_relaxed);
           if (tp_part_idx == 0) {
             config_.cache_stats->note_expert_miss(expert_id);
+            config_.cache_stats->note_expert_cold_miss(expert_id);
           }
         }
         counted_miss_for_this_access = true;
@@ -1569,8 +1571,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (state == EXPERT_PREFETCHING) {
         if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
           config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+          config_.cache_stats->in_flight_miss_count.fetch_add(1, std::memory_order_relaxed);
           if (tp_part_idx == 0) {
             config_.cache_stats->note_expert_miss(expert_id);
+            config_.cache_stats->note_expert_in_flight_miss(expert_id);
           }
         }
         counted_miss_for_this_access = true;
@@ -2298,6 +2302,40 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
   }
 
+  int expert_state_code(int expert_id) const {
+#ifndef _WIN32
+    if (expert_id < 0 || expert_id >= config_.expert_num) return static_cast<int>(EXPERT_BASELINE);
+    if (!resident_io_enabled() || expert_states_ == nullptr) return static_cast<int>(EXPERT_CACHED);
+    return static_cast<int>(expert_states_[expert_id].load(std::memory_order_acquire));
+#else
+    (void)expert_id;
+    return 0;
+#endif
+  }
+
+  bool is_expert_ready_resident(int expert_id) const {
+#ifndef _WIN32
+    if (expert_id < 0 || expert_id >= config_.expert_num) return false;
+    if (!resident_io_enabled() || expert_states_ == nullptr) return true;
+    const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+    return state == EXPERT_CACHED || state == EXPERT_PINNED;
+#else
+    (void)expert_id;
+    return false;
+#endif
+  }
+
+  bool is_expert_cold_baseline(int expert_id) const {
+#ifndef _WIN32
+    if (expert_id < 0 || expert_id >= config_.expert_num) return false;
+    if (!resident_io_enabled() || expert_states_ == nullptr) return false;
+    return expert_states_[expert_id].load(std::memory_order_acquire) == EXPERT_BASELINE;
+#else
+    (void)expert_id;
+    return false;
+#endif
+  }
+
   // forward, forward_prefill, forward_decode, warm_up are inherited from Base
 };
 
@@ -2413,6 +2451,97 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
 
   bool is_expert_promoted(int expert_id) const {
     return !this->tps.empty() && this->tps[0]->is_expert_promoted(expert_id);
+  }
+
+  int expert_state_code(int expert_id) const {
+    return !this->tps.empty() ? this->tps[0]->expert_state_code(expert_id) : 0;
+  }
+
+  void split_deferred_experts_binding(intptr_t source_ids,
+                                      intptr_t immediate_ids,
+                                      intptr_t deferred_ids,
+                                      int count,
+                                      int k,
+                                      int max_deferred_per_token) {
+    split_deferred_experts(reinterpret_cast<const int64_t*>(source_ids),
+                           reinterpret_cast<int64_t*>(immediate_ids),
+                           reinterpret_cast<int64_t*>(deferred_ids),
+                           count,
+                           k,
+                           max_deferred_per_token);
+  }
+
+  void split_deferred_experts(const int64_t* source_ids,
+                              int64_t* immediate_ids,
+                              int64_t* deferred_ids,
+                              int count,
+                              int k,
+                              int max_deferred_per_token) {
+    if (source_ids == nullptr || immediate_ids == nullptr || deferred_ids == nullptr || count <= 0 || k <= 0) return;
+
+    const int defer_limit = std::max(0, std::min(max_deferred_per_token, k));
+    std::vector<int64_t> ids(count);
+    for (int i = 0; i < count; ++i) {
+      ids[i] = source_ids[i];
+      immediate_ids[i] = -1;
+      deferred_ids[i] = -1;
+    }
+
+    if (!this->weights_loaded || this->tps.empty()) {
+      for (int i = 0; i < count; ++i) {
+        if (!this->config.should_skip_expert(ids[i])) {
+          immediate_ids[i] = ids[i];
+        }
+      }
+      return;
+    }
+
+    if (this->tp_count <= 1) {
+      this->tps[0]->complete_ready_prefetches();
+    } else {
+      this->config.pool->dispense_backend()->do_numa_job(
+          [this](int tp_id) { this->tps[tp_id]->complete_ready_prefetches(); });
+    }
+
+    std::vector<int64_t> cold_deferred;
+    std::vector<int64_t> protected_immediate;
+    cold_deferred.reserve(count);
+    protected_immediate.reserve(count);
+
+    const int rows = (count + k - 1) / k;
+    for (int row = 0; row < rows; ++row) {
+      int deferred_in_row = 0;
+      const int row_begin = row * k;
+      const int row_end = std::min(count, row_begin + k);
+      for (int idx = row_begin; idx < row_end; ++idx) {
+        const int expert_id = static_cast<int>(ids[idx]);
+        if (this->config.should_skip_expert(expert_id)) {
+          continue;
+        }
+
+        const bool ready = this->tps[0]->is_expert_ready_resident(expert_id);
+        if (!ready && deferred_in_row < defer_limit) {
+          deferred_ids[idx] = expert_id;
+          deferred_in_row += 1;
+          if (this->tps[0]->is_expert_cold_baseline(expert_id)) {
+            cold_deferred.push_back(expert_id);
+          }
+          continue;
+        }
+
+        immediate_ids[idx] = expert_id;
+        protected_immediate.push_back(expert_id);
+      }
+    }
+
+    if (!cold_deferred.empty()) {
+      prefetch_experts(static_cast<int>(cold_deferred.size()),
+                       cold_deferred.data(),
+                       static_cast<int>(protected_immediate.size()),
+                       protected_immediate.empty() ? nullptr : protected_immediate.data(),
+                       static_cast<int>(cold_deferred.size()),
+                       0);
+    }
   }
 
   void prefetch_experts_binding(intptr_t expert_ids,
