@@ -214,9 +214,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     this->derived_init();
   }
 
+  static constexpr bool buffer_b_has_scale_ptr() {
+    return requires(typename T::BufferB* bb) { bb->d; };
+  }
+
   bool iouring_enabled() const { return config_.io_backend == IOBackend::IOURING; }
   bool mmap_enabled() const { return config_.use_mmap && !iouring_enabled(); }
-  bool resident_io_enabled() const { return mmap_enabled() || iouring_enabled(); }
+  bool resident_io_enabled() const { return buffer_b_has_scale_ptr() && (mmap_enabled() || iouring_enabled()); }
 
   void set_weight_buffers(void* gate_proj, void* up_proj, void* down_proj) {
     config_.gate_proj = gate_proj;
@@ -267,6 +271,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
 #ifndef _WIN32
   void initialize_resident_io_state() {
+    if constexpr (!buffer_b_has_scale_ptr()) {
+      cache_capacity_ = 0;
+      return;
+    } else {
     const int en = config_.expert_num;
     baseline_gate_weight_src_.assign(en, nullptr);
     baseline_up_weight_src_.assign(en, nullptr);
@@ -359,15 +367,18 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     if (cache_capacity_ > 0 && !allocate_resident_slot_pool()) {
       throw std::runtime_error("Failed to allocate MESH resident slot pool");
     }
+    }
   }
 
   void apply_baseline_ptrs(int expert_id) {
     gate_bb_[expert_id]->b = reinterpret_cast<decltype(gate_bb_[expert_id]->b)>(baseline_gate_weight_src_[expert_id]);
     up_bb_[expert_id]->b = reinterpret_cast<decltype(up_bb_[expert_id]->b)>(baseline_up_weight_src_[expert_id]);
     down_bb_[expert_id]->b = reinterpret_cast<decltype(down_bb_[expert_id]->b)>(baseline_down_weight_src_[expert_id]);
+    if constexpr (buffer_b_has_scale_ptr()) {
     gate_bb_[expert_id]->d = baseline_gate_scale_src_[expert_id];
     up_bb_[expert_id]->d = baseline_up_scale_src_[expert_id];
     down_bb_[expert_id]->d = baseline_down_scale_src_[expert_id];
+    }
     if constexpr (requires { gate_bb_[expert_id]->mins; }) {
       gate_bb_[expert_id]->mins = baseline_gate_mins_src_[expert_id];
       up_bb_[expert_id]->mins = baseline_up_mins_src_[expert_id];
@@ -379,9 +390,11 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     gate_bb_[expert_id]->b = nullptr;
     up_bb_[expert_id]->b = nullptr;
     down_bb_[expert_id]->b = nullptr;
+    if constexpr (buffer_b_has_scale_ptr()) {
     gate_bb_[expert_id]->d = nullptr;
     up_bb_[expert_id]->d = nullptr;
     down_bb_[expert_id]->d = nullptr;
+    }
     if constexpr (requires { gate_bb_[expert_id]->mins; }) {
       gate_bb_[expert_id]->mins = nullptr;
       up_bb_[expert_id]->mins = nullptr;
@@ -401,9 +414,11 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     gate_bb_[expert_id]->b = reinterpret_cast<decltype(gate_bb_[expert_id]->b)>(gate_owner);
     up_bb_[expert_id]->b = reinterpret_cast<decltype(up_bb_[expert_id]->b)>(up_owner);
     down_bb_[expert_id]->b = reinterpret_cast<decltype(down_bb_[expert_id]->b)>(down_owner);
+    if constexpr (buffer_b_has_scale_ptr()) {
     gate_bb_[expert_id]->d = reinterpret_cast<float*>(reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_);
     up_bb_[expert_id]->d = reinterpret_cast<float*>(reinterpret_cast<char*>(up_owner) + up_weight_bytes_);
     down_bb_[expert_id]->d = reinterpret_cast<float*>(reinterpret_cast<char*>(down_owner) + down_weight_bytes_);
+    }
     if constexpr (requires { gate_bb_[expert_id]->mins; }) {
       gate_bb_[expert_id]->mins = reinterpret_cast<float*>(reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_ + gate_scale_bytes_);
       up_bb_[expert_id]->mins = reinterpret_cast<float*>(reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
@@ -2024,7 +2039,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     assert(used_pool_bytes_ba_down <= this->down_ba_pool_bytes_);
     assert(used_pool_bytes_bc_down <= this->down_bc_pool_bytes_);
 
-    auto direct_or_pool = [&](int count, auto&& fn) {
+    auto direct_or_pool = [&](int count, std::function<void(int)> fn) {
       if (qlen < 10) {
         for (int i = 0; i < count; i++) {
           fn(i);
