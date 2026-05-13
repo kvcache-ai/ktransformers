@@ -19,7 +19,11 @@
 #include <sys/mman.h>
 #endif
 
+#include <cstdio>
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <memory>
 #include <thread>
 
 #include "moe_base.hpp"
@@ -57,8 +61,22 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     SLOT_READY = 2,
   };
 
+  enum MeshSlotMode : uint8_t {
+    MESH_SLOT_DECODE_CACHE = 0,
+    MESH_SLOT_PREFILL_LAYER = 1,
+  };
+
   struct PendingPrefetch {
     int slot_index = -1;
+    std::vector<uint64_t> requests;
+  };
+
+  struct BatchPromotion {
+    int expert_id = -1;
+    int slot = -1;
+    void* gate_owner = nullptr;
+    void* up_owner = nullptr;
+    void* down_owner = nullptr;
     std::vector<uint64_t> requests;
   };
 
@@ -91,12 +109,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   std::atomic<int> eviction_cursor_{0};
   int numa_node_ = 0;
   int cache_capacity_ = 0;
+  bool resident_slot_pool_allocated_ = false;
+  MeshSlotMode mesh_slot_mode_ = MESH_SLOT_DECODE_CACHE;
   uint64_t memory_guard_tick_ = 0;
   std::string cgroup_memory_current_path_;
   std::string cgroup_memory_max_path_;
   ResidentCachePolicyState resident_policy_;
   const std::vector<uint8_t>* eviction_protected_mask_ = nullptr;
-  bool prefill_streaming_active_ = false;
   size_t gate_total_bytes_ = 0;
   size_t up_total_bytes_ = 0;
   size_t down_total_bytes_ = 0;
@@ -264,7 +283,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         pending_prefetches_[expert_id].slot_index = -1;
         free_packed_expert(expert_id);
       }
-      release_resident_slot_pool();
+      (void)release_resident_slot_pool(false);
     }
 #endif
   }
@@ -293,6 +312,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     active_readers_ = std::make_unique<std::atomic<uint32_t>[]>(en);
     resident_expert_count_.store(0, std::memory_order_relaxed);
     eviction_cursor_.store(0, std::memory_order_relaxed);
+    resident_slot_pool_allocated_ = false;
+    mesh_slot_mode_ = MESH_SLOT_DECODE_CACHE;
 
     gate_total_bytes_ = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
     up_total_bytes_ = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
@@ -316,6 +337,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     cache_capacity_ = configured_resident <= 0
                           ? 0
                           : std::min(config_.expert_num, std::max(configured_resident, config_.num_experts_per_tok));
+    if (config_.mesh_prefill_layer_mode_enabled && cache_capacity_ > 0) {
+      cache_capacity_ = config_.expert_num;
+    }
     if (cache_capacity_ > 0) {
       slot_gate_owner_.assign(cache_capacity_, nullptr);
       slot_up_owner_.assign(cache_capacity_, nullptr);
@@ -487,9 +511,30 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     std::vector<int> experts_;
   };
 
-  bool slot_pool_enabled() const {
+  bool slot_pool_configured() const {
     return cache_capacity_ > 0 && static_cast<int>(slot_to_expert_.size()) == cache_capacity_ &&
            static_cast<int>(expert_to_slot_.size()) >= config_.expert_num;
+  }
+
+  bool slot_pool_enabled() const {
+    return slot_pool_configured() && resident_slot_pool_allocated_;
+  }
+
+  bool lazy_slot_buffers_enabled() const {
+    return config_.mesh_prefill_layer_mode_enabled && iouring_enabled();
+  }
+
+  bool slot_has_buffers(int slot) const {
+    return slot >= 0 && slot < cache_capacity_ && slot_gate_owner_[slot] != nullptr &&
+           slot_up_owner_[slot] != nullptr && slot_down_owner_[slot] != nullptr;
+  }
+
+  int allocated_slot_count() const {
+    int count = 0;
+    for (int slot = 0; slot < cache_capacity_; ++slot) {
+      if (slot_has_buffers(slot)) count += 1;
+    }
+    return count;
   }
 
   void release_expert_buffers(void* gate_owner, void* up_owner, void* down_owner) {
@@ -512,25 +557,78 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     return true;
   }
 
+  bool allocate_slot_buffers(int slot) {
+    if (slot < 0 || slot >= cache_capacity_) return false;
+    if (slot_has_buffers(slot)) return true;
+    return allocate_expert_buffers(&slot_gate_owner_[slot], &slot_up_owner_[slot], &slot_down_owner_[slot]);
+  }
+
+  void release_slot_buffers(int slot) {
+    if (slot < 0 || slot >= cache_capacity_) return;
+    release_expert_buffers(slot_gate_owner_[slot], slot_up_owner_[slot], slot_down_owner_[slot]);
+    slot_gate_owner_[slot] = nullptr;
+    slot_up_owner_[slot] = nullptr;
+    slot_down_owner_[slot] = nullptr;
+  }
+
   bool allocate_resident_slot_pool() {
+    if (!slot_pool_configured()) return false;
+    if (resident_slot_pool_allocated_) return true;
+    resident_expert_count_.store(0, std::memory_order_release);
     for (int slot = 0; slot < cache_capacity_; ++slot) {
-      if (!allocate_expert_buffers(&slot_gate_owner_[slot], &slot_up_owner_[slot], &slot_down_owner_[slot])) {
-        release_resident_slot_pool();
-        return false;
+      if (!lazy_slot_buffers_enabled()) {
+        if (!allocate_slot_buffers(slot)) {
+          (void)release_resident_slot_pool(false);
+          return false;
+        }
       }
+      slot_to_expert_[slot] = -1;
       slot_states_[slot].store(SLOT_EMPTY, std::memory_order_release);
+      slot_active_readers_[slot].store(0, std::memory_order_release);
     }
+    resident_slot_pool_allocated_ = true;
     return true;
   }
 
-  void release_resident_slot_pool() {
+  bool ensure_resident_slot_pool_allocated() {
+    if (!slot_pool_configured()) return false;
+    return allocate_resident_slot_pool();
+  }
+
+  bool release_resident_slot_pool(bool count_stats = false) {
+    if (!slot_pool_configured()) return true;
     for (int slot = 0; slot < static_cast<int>(slot_gate_owner_.size()); ++slot) {
-      release_expert_buffers(slot_gate_owner_[slot], slot_up_owner_[slot], slot_down_owner_[slot]);
-      slot_gate_owner_[slot] = nullptr;
-      slot_up_owner_[slot] = nullptr;
-      slot_down_owner_[slot] = nullptr;
+      const int old_expert = slot < static_cast<int>(slot_to_expert_.size()) ? slot_to_expert_[slot] : -1;
+      if (old_expert >= 0) {
+        const uint8_t old_state = expert_states_[old_expert].load(std::memory_order_acquire);
+        if (old_state == EXPERT_PREFETCHING || old_state == EXPERT_PACKING || old_state == EXPERT_DEMOTING) {
+          return false;
+        }
+        if (active_readers_[old_expert].load(std::memory_order_acquire) != 0 ||
+            slot_active_readers_[slot].load(std::memory_order_acquire) != 0) {
+          return false;
+        }
+        packed_gate_owner_[old_expert] = nullptr;
+        packed_up_owner_[old_expert] = nullptr;
+        packed_down_owner_[old_expert] = nullptr;
+        expert_to_slot_[old_expert] = -1;
+        apply_cold_ptrs(old_expert);
+        if (count_stats) {
+          note_expert_demote(old_expert);
+        }
+        expert_states_[old_expert].store(EXPERT_BASELINE, std::memory_order_release);
+      }
+      release_slot_buffers(slot);
       if (slot < static_cast<int>(slot_to_expert_.size())) slot_to_expert_[slot] = -1;
+      slot_states_[slot].store(SLOT_EMPTY, std::memory_order_release);
     }
+    for (int expert_id = 0; expert_id < static_cast<int>(expert_to_slot_.size()); ++expert_id) {
+      expert_to_slot_[expert_id] = -1;
+    }
+    resident_expert_count_.store(0, std::memory_order_release);
+    resident_slot_pool_allocated_ = false;
+    mesh_slot_mode_ = MESH_SLOT_DECODE_CACHE;
+    return true;
   }
 
   void bind_slot_to_expert(int slot, int expert_id, bool pin_after_copy) {
@@ -599,6 +697,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       return false;
     }
     if (slot_states_[slot].load(std::memory_order_acquire) == SLOT_EMPTY) {
+      if (!allocate_slot_buffers(slot)) {
+        return false;
+      }
       resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
     }
     slot_states_[slot].store(SLOT_LOADING, std::memory_order_release);
@@ -838,7 +939,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
     std::fprintf(stderr,
                  "[MESHIO] layer=%d tp=%d backend=iouring direct_io=%s mmap_baseline=false capacity=%d policy=%s "
-                 "lookahead=%s topk_fallback=%s w=%.3f gamma=%.3f beta=%.3f transition=%.3f "
+                 "decode_capacity=%d prefill_layer_mode=%s lookahead=%s topk_fallback=%s "
+                 "w=%.3f gamma=%.3f beta=%.3f transition=%.3f "
                  "prefetch=%d coldstart=%s coldstart_limit=%d "
                  "mem_guard=%s high=%.3f target=%.3f interval=%d demotes=%d "
                  "gate=%zu+%zu up=%zu+%zu down=%zu+%zu\n",
@@ -847,6 +949,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
                  config_.iouring_direct_io ? "true" : "false",
                  cache_capacity_,
                  config_.resident_cache_policy.c_str(),
+                 config_.mesh_decode_resident_experts,
+                 config_.mesh_prefill_layer_mode_enabled ? "true" : "false",
                  config_.mesh_lookahead_enabled ? "true" : "false",
                  config_.mesh_topk_fallback_enabled ? "true" : "false",
                  config_.mesh_lookahead_weight,
@@ -905,7 +1009,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
              active_readers_[expert_id].load(std::memory_order_acquire) == 0;
     };
 
-    if (!prefill_streaming_active_ && mesh_lookahead_active()) {
+    if (mesh_lookahead_active()) {
       std::vector<int> order = resident_policy_.build_reclaim_order(
           config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
           static_cast<uint8_t>(EXPERT_CACHED),
@@ -941,7 +1045,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         if (candidate == exclude_expert_id) continue;
         if (is_legal_prefetch_victim(candidate)) return candidate;
       }
-      if (protected_mask != nullptr || !prefill_streaming_active_) {
+      if (protected_mask != nullptr) {
         return -1;
       }
     }
@@ -964,8 +1068,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (victim == exclude_expert_id) {
         continue;
       }
-      if (!(prefill_streaming_active_ && protected_mask == nullptr) &&
-          is_eviction_protected(victim, effective_protected_mask)) {
+      if (is_eviction_protected(victim, effective_protected_mask)) {
         continue;
       }
 
@@ -1000,12 +1103,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     return false;
   }
 
-  bool evict_one_slot_fallback(int exclude_expert_id) {
+  bool evict_one_slot_fallback(int exclude_expert_id, const std::vector<uint8_t>* protected_mask = nullptr) {
     if (!slot_pool_enabled()) return false;
     for (int slot = 0; slot < cache_capacity_; ++slot) {
       if (slot_states_[slot].load(std::memory_order_acquire) != SLOT_READY) continue;
       const int victim = slot_to_expert_[slot];
       if (victim < 0 || victim == exclude_expert_id) continue;
+      if (is_eviction_protected(victim, protected_mask)) continue;
       if (active_readers_[victim].load(std::memory_order_acquire) != 0 ||
           slot_active_readers_[slot].load(std::memory_order_acquire) != 0) {
         continue;
@@ -1028,6 +1132,36 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       return true;
     }
     return false;
+  }
+
+  bool reserve_loading_slot_for_expert(int expert_id, int* slot_out,
+                                       const std::vector<uint8_t>* protected_mask = nullptr) {
+    if (slot_out == nullptr || !slot_pool_enabled()) return false;
+    int slot = -1;
+    int wait_attempts = 0;
+    while ((slot = find_empty_slot()) < 0) {
+      complete_ready_prefetches();
+      if ((slot = find_empty_slot()) >= 0) {
+        break;
+      }
+      if (!evict_one_cached_expert(expert_id, protected_mask) &&
+          !evict_one_slot_fallback(expert_id, protected_mask)) {
+        if (++wait_attempts > 2000000) {
+          return false;
+        }
+        if ((wait_attempts & 1023) == 0) {
+          std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        std::this_thread::yield();
+        continue;
+      }
+      wait_attempts = 0;
+    }
+    if (!reserve_slot_for_loading(slot, expert_id)) {
+      return false;
+    }
+    *slot_out = slot;
+    return true;
   }
 
   void finalize_expert_buffers(int expert_id, void* gate_owner, void* up_owner, void* down_owner, bool pin_after_copy) {
@@ -1118,6 +1252,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
 
   bool allocate_and_copy_expert(int expert_id, bool pin_after_copy) {
+    if (cache_capacity_ > 0 && !slot_pool_enabled()) {
+      (void)ensure_resident_slot_pool_allocated();
+    }
     const bool use_slot_pool = slot_pool_enabled();
     int slot = -1;
     void* gate_owner = nullptr;
@@ -1157,8 +1294,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
       // A single MoE forward can touch more unique experts than the steady-state
       // cache capacity. Those experts are protected by ExpertReadScope while the
-      // AMX kernel is using them, so there may be no legal victim. Allow a
-      // transient overflow and trim back to cache_capacity_ after the forward.
+      // AMX kernel is using them, so there may be no legal victim. Allow
+      // temporary over-capacity residency and trim after the forward.
     }
 
     if (!use_slot_pool && !allocate_expert_buffers(&gate_owner, &up_owner, &down_owner)) {
@@ -1266,15 +1403,341 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     return true;
   }
 
+  bool batch_ensure_experts_ready(const std::vector<int>& expert_ids,
+                                  bool pin = false,
+                                  const std::vector<uint8_t>* protected_mask = nullptr) {
+    if (expert_ids.empty()) return true;
+    if (cache_capacity_ > 0 && !slot_pool_enabled()) {
+      (void)ensure_resident_slot_pool_allocated();
+    }
+    if (!resident_io_enabled() || !iouring_enabled() || config_.async_reader == nullptr || !slot_pool_enabled()) {
+      for (int expert_id : expert_ids) {
+        ensure_expert_ready(expert_id, pin);
+      }
+      return true;
+    }
+
+#ifndef HAVE_LIBURING
+    for (int expert_id : expert_ids) {
+      ensure_expert_ready(expert_id, pin);
+    }
+    return true;
+#else
+    complete_ready_prefetches();
+
+    std::vector<uint8_t> local_protected_mask;
+    const std::vector<uint8_t>* effective_protected_mask = protected_mask;
+    if (effective_protected_mask == nullptr) {
+      local_protected_mask.assign(config_.expert_num, 0);
+      for (int expert_id : expert_ids) {
+        if (expert_id >= 0 && expert_id < config_.expert_num && !config_.should_skip_expert(expert_id)) {
+          local_protected_mask[expert_id] = 1;
+        }
+      }
+      effective_protected_mask = &local_protected_mask;
+    }
+
+    std::vector<uint8_t> seen(config_.expert_num, 0);
+    std::vector<BatchPromotion> cold_promotions;
+    std::vector<int> pending_prefetch_experts;
+    std::vector<uint64_t> all_requests;
+
+    auto record_total_access = [&](int expert_id) {
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->total_access_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_access(expert_id);
+        }
+      }
+    };
+    auto record_hit = [&](int expert_id) {
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->hit_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_hit(expert_id);
+        }
+      }
+    };
+    auto record_cold_miss = [&](int expert_id) {
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+        config_.cache_stats->cold_miss_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_miss(expert_id);
+          config_.cache_stats->note_expert_cold_miss(expert_id);
+        }
+      }
+    };
+    auto record_inflight_miss = [&](int expert_id) {
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
+        config_.cache_stats->in_flight_miss_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_miss(expert_id);
+          config_.cache_stats->note_expert_in_flight_miss(expert_id);
+        }
+      }
+    };
+
+    for (int expert_id : expert_ids) {
+      if (expert_id < 0 || expert_id >= config_.expert_num || config_.should_skip_expert(expert_id)) {
+        continue;
+      }
+      if (seen[expert_id]) {
+        continue;
+      }
+      seen[expert_id] = 1;
+      record_total_access(expert_id);
+
+      for (;;) {
+        const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+        if (state == EXPERT_CACHED || state == EXPERT_PINNED) {
+          record_hit(expert_id);
+          break;
+        }
+        if (state == EXPERT_PREFETCHING) {
+          record_inflight_miss(expert_id);
+          if (!pending_prefetches_[expert_id].requests.empty()) {
+            pending_prefetch_experts.push_back(expert_id);
+            all_requests.insert(all_requests.end(),
+                                pending_prefetches_[expert_id].requests.begin(),
+                                pending_prefetches_[expert_id].requests.end());
+            break;
+          }
+          complete_ready_prefetches();
+          std::this_thread::yield();
+          continue;
+        }
+        if (state == EXPERT_BASELINE) {
+          uint8_t expected = EXPERT_BASELINE;
+          if (!expert_states_[expert_id].compare_exchange_strong(
+                  expected, EXPERT_PACKING, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            continue;
+          }
+
+          record_cold_miss(expert_id);
+          BatchPromotion promotion;
+          promotion.expert_id = expert_id;
+          if (!reserve_loading_slot_for_expert(expert_id, &promotion.slot, effective_protected_mask)) {
+            expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+            std::ostringstream oss;
+            oss << "AMX batch promotion could not reserve slot layer=" << config_.layer_idx
+                << " tp=" << tp_part_idx << " expert=" << expert_id
+                << " resident=" << resident_expert_count_.load(std::memory_order_acquire)
+                << " capacity=" << cache_capacity_ << resident_debug_summary();
+            throw std::runtime_error(oss.str());
+          }
+          promotion.gate_owner = slot_gate_owner_[promotion.slot];
+          promotion.up_owner = slot_up_owner_[promotion.slot];
+          promotion.down_owner = slot_down_owner_[promotion.slot];
+          try {
+            promotion.requests = submit_iouring_reads_for_expert(expert_id,
+                                                                 promotion.gate_owner,
+                                                                 promotion.up_owner,
+                                                                 promotion.down_owner);
+          } catch (...) {
+            (void)unbind_slot(promotion.slot, true, false);
+            expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+            throw;
+          }
+          if (promotion.requests.empty()) {
+            (void)unbind_slot(promotion.slot, true, false);
+            expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+            std::ostringstream oss;
+            oss << "AMX batch promotion submitted no io_uring reads layer=" << config_.layer_idx
+                << " tp=" << tp_part_idx << " expert=" << expert_id;
+            throw std::runtime_error(oss.str());
+          }
+          all_requests.insert(all_requests.end(), promotion.requests.begin(), promotion.requests.end());
+          cold_promotions.push_back(std::move(promotion));
+          break;
+        }
+        if (state == EXPERT_PACKING || state == EXPERT_DEMOTING) {
+          std::this_thread::yield();
+          continue;
+        }
+      }
+    }
+
+    if (!all_requests.empty()) {
+      const int timeout_ms = 60000;
+      if (!config_.async_reader->wait_for_requests(all_requests, timeout_ms)) {
+        std::ostringstream oss;
+        oss << "AMX io_uring batch promotion failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
+            << " experts=" << cold_promotions.size() << " pending=" << pending_prefetch_experts.size()
+            << " requests=" << all_requests.size() << " inflight=" << config_.async_reader->get_inflight_count()
+            << " timeout_ms=" << timeout_ms << " detail="
+            << config_.async_reader->describe_requests(all_requests);
+        for (auto& promotion : cold_promotions) {
+          if (promotion.slot >= 0) {
+            (void)unbind_slot(promotion.slot, true, false);
+          }
+          if (promotion.expert_id >= 0 && promotion.expert_id < config_.expert_num) {
+            expert_states_[promotion.expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+          }
+        }
+        for (int expert_id : pending_prefetch_experts) {
+          clear_pending_prefetch(expert_id, true);
+          expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
+        }
+        throw std::runtime_error(oss.str());
+      }
+    }
+
+    for (auto& promotion : cold_promotions) {
+      finalize_expert_buffers(promotion.expert_id,
+                              promotion.gate_owner,
+                              promotion.up_owner,
+                              promotion.down_owner,
+                              pin);
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->promote_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_promote(promotion.expert_id);
+        }
+      }
+    }
+
+    for (int expert_id : pending_prefetch_experts) {
+      if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
+        config_.cache_stats->prefetch_hit_count.fetch_add(1, std::memory_order_relaxed);
+        if (tp_part_idx == 0) {
+          config_.cache_stats->note_expert_prefetch_hit(expert_id);
+        }
+      }
+      finalize_pending_prefetch(expert_id, pin);
+    }
+
+    return true;
+#endif
+  }
+
   void trim_cache_to_capacity() {
     if (cache_capacity_ <= 0) return;
+    const int target_capacity =
+        mesh_slot_mode_ == MESH_SLOT_DECODE_CACHE ? decode_cache_capacity() : cache_capacity_;
     for (int attempt = 0; attempt < config_.expert_num * 2 &&
-                          resident_expert_count_.load(std::memory_order_acquire) > cache_capacity_;
+                          resident_expert_count_.load(std::memory_order_acquire) > target_capacity;
          ++attempt) {
       if (!evict_one_cached_expert(-1)) {
         break;
       }
     }
+  }
+
+  int cpu_managed_expert_count() const {
+    int count = 0;
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      if (!config_.should_skip_expert(expert_id)) count += 1;
+    }
+    return count;
+  }
+
+  int decode_cache_capacity() const {
+    const int configured =
+        config_.mesh_decode_resident_experts > 0 ? config_.mesh_decode_resident_experts : cache_capacity_;
+    if (configured <= 0) return 0;
+    return std::min(cpu_managed_expert_count(), std::min(config_.expert_num, std::max(configured, 0)));
+  }
+
+  void release_empty_slot_buffers_to_limit(int allocated_limit) {
+    if (!lazy_slot_buffers_enabled()) return;
+    allocated_limit = std::max(0, std::min(allocated_limit, cache_capacity_));
+    int allocated = allocated_slot_count();
+    if (allocated <= allocated_limit) return;
+    for (int slot = cache_capacity_ - 1; slot >= 0 && allocated > allocated_limit; --slot) {
+      if (slot_states_[slot].load(std::memory_order_acquire) != SLOT_EMPTY) continue;
+      if (slot_to_expert_[slot] >= 0) continue;
+      if (!slot_has_buffers(slot)) continue;
+      release_slot_buffers(slot);
+      allocated -= 1;
+    }
+  }
+
+  std::vector<int> cpu_managed_experts_by_heat() {
+    refresh_lookahead_heat();
+    std::vector<int> experts;
+    experts.reserve(config_.expert_num);
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      if (!config_.should_skip_expert(expert_id)) {
+        experts.push_back(expert_id);
+      }
+    }
+    std::sort(experts.begin(), experts.end(), [this](int lhs, int rhs) {
+      const float lh = lhs < static_cast<int>(lookahead_heat_.size()) ? lookahead_heat_[lhs] : 0.0f;
+      const float rh = rhs < static_cast<int>(lookahead_heat_.size()) ? lookahead_heat_[rhs] : 0.0f;
+      if (lh != rh) return lh > rh;
+      return lhs < rhs;
+    });
+    return experts;
+  }
+
+  int submit_decode_heat_prefetches(int target_capacity, int fill_limit) {
+    if (!iouring_enabled() || config_.async_reader == nullptr || target_capacity <= 0) return 0;
+    if (!slot_pool_enabled() && !ensure_resident_slot_pool_allocated()) return 0;
+    const int resident_now = resident_expert_count_.load(std::memory_order_acquire);
+    int remaining = std::max(0, target_capacity - resident_now);
+    if (fill_limit > 0) {
+      remaining = std::min(remaining, fill_limit);
+    }
+    if (remaining <= 0) return 0;
+
+    std::vector<int> ranked = cpu_managed_experts_by_heat();
+    std::vector<uint8_t> protected_mask(config_.expert_num, 0);
+    for (int i = 0; i < static_cast<int>(ranked.size()) && i < target_capacity; ++i) {
+      protected_mask[ranked[i]] = 1;
+    }
+
+    int submitted = 0;
+    for (int expert_id : ranked) {
+      if (submitted >= remaining) break;
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state != EXPERT_BASELINE) continue;
+      if (submit_async_prefetch(expert_id, &protected_mask)) {
+        submitted += 1;
+      }
+    }
+    if (submitted > 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->prefetch_count.fetch_add(static_cast<uint64_t>(submitted), std::memory_order_relaxed);
+    }
+    return submitted;
+  }
+
+  int prepare_prefill_layer_window() {
+    if (!config_.mesh_prefill_layer_mode_enabled || !resident_io_enabled() || cache_capacity_ <= 0) return 0;
+    if (!slot_pool_enabled() && !ensure_resident_slot_pool_allocated()) return 0;
+    mesh_slot_mode_ = MESH_SLOT_PREFILL_LAYER;
+
+    std::vector<int> cpu_experts;
+    cpu_experts.reserve(config_.expert_num);
+    for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+      if (!config_.should_skip_expert(expert_id)) {
+        cpu_experts.push_back(expert_id);
+      }
+    }
+    batch_ensure_experts_ready(cpu_experts, false);
+    return static_cast<int>(cpu_experts.size());
+  }
+
+  bool release_prefill_layer_window() {
+    if (!config_.mesh_prefill_layer_mode_enabled || !resident_io_enabled()) return true;
+    complete_ready_prefetches();
+    return release_resident_slot_pool(true);
+  }
+
+  int transition_to_decode_cache(int requested_decode_capacity, int fill_limit) {
+    if (!resident_io_enabled() || cache_capacity_ <= 0) return 0;
+    if (!slot_pool_enabled() && !ensure_resident_slot_pool_allocated()) return 0;
+    complete_ready_prefetches();
+    mesh_slot_mode_ = MESH_SLOT_DECODE_CACHE;
+    if (requested_decode_capacity > 0) {
+      config_.mesh_decode_resident_experts = requested_decode_capacity;
+    }
+    const int target_capacity = decode_cache_capacity();
+    trim_cache_to_capacity();
+    release_empty_slot_buffers_to_limit(target_capacity);
+    const int submitted = submit_decode_heat_prefetches(target_capacity, fill_limit);
+    return submitted;
   }
 
   bool init_cgroup_memory_paths() {
@@ -1372,7 +1835,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (result == std::numeric_limits<int>::min()) {
         return false;
       }
-      if (result < 0) {
+      if (!config_.async_reader->request_succeeded(request_id)) {
         if (failed != nullptr) *failed = true;
         return false;
       }
@@ -1447,14 +1910,15 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   }
 
   bool submit_async_prefetch(int expert_id, const std::vector<uint8_t>* protected_mask = nullptr) {
-    if (!iouring_enabled() || config_.async_reader == nullptr || !slot_pool_enabled()) return false;
+    if (!iouring_enabled() || config_.async_reader == nullptr) return false;
+    if (cache_capacity_ > 0 && !slot_pool_enabled()) {
+      if (!ensure_resident_slot_pool_allocated()) return false;
+    }
+    if (!slot_pool_enabled()) return false;
 #ifndef HAVE_LIBURING
     return false;
 #else
     if (expert_id < 0 || expert_id >= config_.expert_num || config_.should_skip_expert(expert_id)) return false;
-    // Leave queue headroom for demand promotions. Each AMXINT4 expert uses six
-    // reads, plus optional mins tensors for some formats.
-    if (config_.async_reader->get_inflight_count() > 96) return false;
     int slot = find_empty_slot();
     while (slot < 0) {
       if (!evict_one_cached_expert(expert_id, protected_mask)) {
@@ -1942,266 +2406,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
-  bool forward_prefill_streaming_slots(int qlen, int k, const int64_t* expert_ids, const float* weights,
-                                       const void* input, void* output) {
-#ifndef _WIN32
-    if (!resident_io_enabled() || !slot_pool_enabled() || qlen <= 1) return false;
-
-    auto pool = config_.pool->get_subpool(tp_part_idx);
-    int activated_expert = 0;
-    std::fill(this->m_local_num_.begin(), this->m_local_num_.end(), 0);
-    for (int i = 0; i < qlen; i++) {
-      for (int j = 0; j < k; j++) {
-        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
-        if (config_.should_skip_expert(expert_id)) {
-          continue;
-        }
-        this->m_local_pos_[i][j] = this->m_local_num_[expert_id]++;
-      }
-    }
-
-    std::vector<int> active_experts;
-    active_experts.reserve(config_.expert_num);
-    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
-      if (this->m_local_num_[expert_id] > 0) {
-        this->m_expert_id_map_[activated_expert] = expert_id;
-        active_experts.push_back(expert_id);
-        activated_expert++;
-      }
-    }
-
-    if (activated_expert == 0) {
-      std::memset(output, 0, sizeof(float) * static_cast<size_t>(qlen) * config_.hidden_size);
-      return true;
-    }
-
-    size_t offset = 0;
-    void* gate_up_ba_pool_ptr = this->gate_up_ba_pool_;
-    void* gate_bc_pool_ptr = this->gate_bc_pool_;
-    void* up_bc_pool_ptr = this->up_bc_pool_;
-    void* down_ba_pool_ptr = this->down_ba_pool_;
-    void* down_bc_pool_ptr = this->down_bc_pool_;
-    constexpr size_t M_STEP = T::M_STEP;
-    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
-    size_t used_pool_m = 0;
-    size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0,
-           used_pool_bytes_ba_down = 0, used_pool_bytes_bc_down = 0;
-
-    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
-      this->m_local_input_ptr_[expert_id] = this->m_local_input_ + offset * config_.hidden_size;
-      this->m_local_gate_output_ptr_[expert_id] = this->m_local_gate_output_ + offset * config_.intermediate_size;
-      this->m_local_up_output_ptr_[expert_id] = this->m_local_up_output_ + offset * config_.intermediate_size;
-      this->m_local_down_output_ptr_[expert_id] = this->m_local_down_output_ + offset * config_.hidden_size;
-      offset += this->m_local_num_[expert_id];
-
-      if (this->m_local_num_[expert_id] == 0) {
-        continue;
-      }
-
-      size_t max_m = (this->m_local_num_[expert_id] + M_STEP - 1) / M_STEP * M_STEP;
-      this->gate_up_ba_[expert_id]->max_m = max_m;
-      this->gate_up_ba_[expert_id]->set_data(gate_up_ba_pool_ptr);
-      size_t ba_size = align64(this->buffer_a_required_size(max_m, config_.hidden_size));
-      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
-
-      this->gate_bc_[expert_id]->max_m = max_m;
-      this->gate_bc_[expert_id]->set_data(gate_bc_pool_ptr);
-      size_t bc_gate_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
-      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
-
-      this->up_bc_[expert_id]->max_m = max_m;
-      this->up_bc_[expert_id]->set_data(up_bc_pool_ptr);
-      size_t bc_up_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
-      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
-
-      this->down_ba_[expert_id]->max_m = max_m;
-      this->down_ba_[expert_id]->set_data(down_ba_pool_ptr);
-      size_t ba_down_size = align64(this->buffer_a_required_size(max_m, config_.intermediate_size));
-      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
-
-      this->down_bc_[expert_id]->max_m = max_m;
-      this->down_bc_[expert_id]->set_data(down_bc_pool_ptr);
-      size_t bc_down_size = align64(this->buffer_c_required_size(max_m, config_.hidden_size));
-      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
-
-      used_pool_m += max_m;
-      used_pool_bytes_a += ba_size;
-      used_pool_bytes_bc_gate += bc_gate_size;
-      used_pool_bytes_bc_up += bc_up_size;
-      used_pool_bytes_ba_down += ba_down_size;
-      used_pool_bytes_bc_down += bc_down_size;
-    }
-
-    assert(used_pool_m <= this->pool_count_);
-    assert(used_pool_bytes_a <= this->gate_up_ba_pool_bytes_);
-    assert(used_pool_bytes_bc_gate <= this->gate_bc_pool_bytes_);
-    assert(used_pool_bytes_bc_up <= this->up_bc_pool_bytes_);
-    assert(used_pool_bytes_ba_down <= this->down_ba_pool_bytes_);
-    assert(used_pool_bytes_bc_down <= this->down_bc_pool_bytes_);
-
-    auto direct_or_pool = [&](int count, std::function<void(int)> fn) {
-      if (qlen < 10) {
-        for (int i = 0; i < count; i++) {
-          fn(i);
-        }
-      } else {
-        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
-      }
-    };
-
-    direct_or_pool(qlen, [&](int i) {
-      for (int j = 0; j < k; j++) {
-        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
-        if (config_.should_skip_expert(expert_id)) {
-          continue;
-        }
-        std::memcpy(this->m_local_input_ptr_[expert_id] + this->m_local_pos_[i][j] * config_.hidden_size,
-                    (ggml_bf16_t*)input + i * config_.hidden_size,
-                    sizeof(ggml_bf16_t) * config_.hidden_size);
-      }
-    });
-
-    std::vector<int> ordered_experts;
-    ordered_experts.reserve(active_experts.size());
-    for (int expert_id : active_experts) {
-      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
-      if (state == EXPERT_CACHED || state == EXPERT_PINNED) {
-        ordered_experts.push_back(expert_id);
-      }
-    }
-    for (int expert_id : active_experts) {
-      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
-      if (state != EXPERT_CACHED && state != EXPERT_PINNED) {
-        ordered_experts.push_back(expert_id);
-      }
-    }
-
-    const int window = std::max(1, std::min(cache_capacity_, activated_expert));
-    std::vector<uint8_t> protected_mask(config_.expert_num, 0);
-    prefill_streaming_active_ = true;
-    struct PrefillEvictionGuard {
-      AMX_MOE_TP* owner;
-      ~PrefillEvictionGuard() {
-        owner->eviction_protected_mask_ = nullptr;
-        owner->prefill_streaming_active_ = false;
-      }
-    } prefill_guard{this};
-
-    for (int start = 0; start < activated_expert; start += window) {
-      const int count = std::min(window, activated_expert - start);
-      std::fill(protected_mask.begin(), protected_mask.end(), 0);
-      for (int i = start; i < activated_expert; ++i) {
-        protected_mask[ordered_experts[i]] = 1;
-      }
-      eviction_protected_mask_ = &protected_mask;
-
-      ExpertReadScope expert_read_scope(this, count);
-      for (int i = 0; i < count; ++i) {
-        const int expert_id = ordered_experts[start + i];
-        this->m_expert_id_map_[i] = expert_id;
-        note_expert_access(expert_id);
-        ensure_expert_ready(expert_id, false);
-        expert_read_scope.add_expert(expert_id);
-      }
-
-      direct_or_pool(count, [this](int task_id) {
-        int expert_idx = this->m_expert_id_map_[task_id];
-        this->gate_up_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
-                                                this->m_local_input_ptr_[expert_idx], 0, 1);
-      });
-
-      int nth = T::recommended_nth(config_.intermediate_size);
-      pool->do_work_stealing_job(
-          nth * count * 2, [](int _) { T::config(); },
-          [this, nth, qlen](int task_id2) {
-            int task_id = task_id2 / 2;
-            bool do_up = task_id2 % 2;
-            int expert_idx = this->m_expert_id_map_[task_id / nth];
-            int ith = task_id % nth;
-            this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
-            if (do_up) {
-              this->up_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
-                                               this->m_local_up_output_ptr_[expert_idx], ith, nth);
-            } else {
-              this->gate_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
-                                                 this->m_local_gate_output_ptr_[expert_idx], ith, nth);
-            }
-          },
-          nullptr);
-
-      this->apply_activation(count, nth, qlen);
-
-      pool->do_work_stealing_job(
-          count, nullptr,
-          [this](int task_id) {
-            int expert_idx = this->m_expert_id_map_[task_id];
-            this->down_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
-                                                 this->m_local_gate_output_ptr_[expert_idx], 0, 1);
-          },
-          nullptr);
-
-      nth = T::recommended_nth(config_.hidden_size);
-      pool->do_work_stealing_job(
-          nth * count, [](int _) { T::config(); },
-          [this, nth, qlen](int task_id) {
-            int expert_idx = this->m_expert_id_map_[task_id / nth];
-            int ith = task_id % nth;
-            this->do_down_gemm(expert_idx, ith, nth, qlen);
-            this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
-                                               this->m_local_down_output_ptr_[expert_idx], ith, nth);
-          },
-          nullptr);
-    }
-
-    eviction_protected_mask_ = nullptr;
-    prefill_streaming_active_ = false;
-
-    pool->do_work_stealing_job(
-        qlen, nullptr,
-        [this, output, k, expert_ids, weights](int i) {
-          for (int e = 0; e < config_.hidden_size; e += 32) {
-            __m512 x0 = _mm512_setzero_ps();
-            __m512 x1 = _mm512_setzero_ps();
-            for (int j = 0; j < k; j++) {
-              const int expert_id = static_cast<int>(expert_ids[i * k + j]);
-              if (config_.should_skip_expert(expert_id)) {
-                continue;
-              }
-              __m512 weight = _mm512_set1_ps(weights[i * k + j]);
-              __m512 down_output0, down_output1;
-              avx512_32xbf16_to_32xfp32(
-                  (__m512i*)(this->m_local_down_output_ptr_[expert_id] +
-                             this->m_local_pos_[i][j] * config_.hidden_size + e),
-                  &down_output0, &down_output1);
-              x0 = _mm512_fmadd_ps(down_output0, weight, x0);
-              x1 = _mm512_fmadd_ps(down_output1, weight, x1);
-            }
-            auto f32out = (__m512*)((float*)output + i * config_.hidden_size + e);
-            f32out[0] = x0;
-            f32out[1] = x1;
-          }
-        },
-        nullptr);
-
-    update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
-    refresh_lookahead_heat();
-    trim_cache_to_capacity();
-    trim_cache_for_memory_pressure();
-    if (tp_part_idx == 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
-      config_.cache_stats->maybe_dump_jsonl();
-    }
-    return true;
-#else
-    (void)qlen;
-    (void)k;
-    (void)expert_ids;
-    (void)weights;
-    (void)input;
-    (void)output;
-    return false;
-#endif
-  }
-
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                void* output) override {
 #ifndef _WIN32
@@ -2210,9 +2414,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     if (resident_io_enabled()) {
       complete_ready_prefetches();
       refresh_lookahead_heat();
-      if (qlen > 1 && forward_prefill_streaming_slots(qlen, k, expert_ids, weights, input, output)) {
-        return;
-      }
       active_experts.reserve(qlen * k);
       std::vector<uint8_t> seen(config_.expert_num, 0);
 
@@ -2228,20 +2429,22 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       expert_read_scope = std::make_unique<ExpertReadScope>(this, active_experts.size());
       for (int expert_id : active_experts) {
         note_expert_access(expert_id);
-        ensure_expert_ready(expert_id, false);
+      }
+      batch_ensure_experts_ready(active_experts, false);
+      for (int expert_id : active_experts) {
         expert_read_scope->add_expert(expert_id);
       }
     }
 #endif
     Base::forward(qlen, k, expert_ids, weights, input, output);
 #ifndef _WIN32
-	    if (resident_io_enabled() && !active_experts.empty()) {
-	      update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
-	      refresh_lookahead_heat();
-	      expert_read_scope.reset();
-	      if (config_.max_tier0_experts <= 0) {
-	        for (int expert_id : active_experts) {
-	          demote_expert(expert_id);
+    if (resident_io_enabled() && !active_experts.empty()) {
+      update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
+      refresh_lookahead_heat();
+      expert_read_scope.reset();
+      if (config_.max_tier0_experts <= 0) {
+        for (int expert_id : active_experts) {
+          demote_expert(expert_id);
         }
       } else {
         trim_cache_to_capacity();
@@ -2524,20 +2727,33 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
     protected_immediate.reserve(count);
 
     const int rows = (count + k - 1) / k;
+    uint64_t cpu_topk_count = 0;
+    uint64_t gpu_skip_count = 0;
+    uint64_t nonready_count = 0;
+    uint64_t deferred_count = 0;
+    uint64_t overflow_immediate_count = 0;
+    uint64_t overflow_token_count = 0;
     for (int row = 0; row < rows; ++row) {
       int deferred_in_row = 0;
+      int overflow_in_row = 0;
       const int row_begin = row * k;
       const int row_end = std::min(count, row_begin + k);
       for (int idx = row_begin; idx < row_end; ++idx) {
         const int expert_id = static_cast<int>(ids[idx]);
         if (this->config.should_skip_expert(expert_id)) {
+          gpu_skip_count += 1;
           continue;
         }
+        cpu_topk_count += 1;
 
         const bool ready = this->tps[0]->is_expert_ready_resident(expert_id);
+        if (!ready) {
+          nonready_count += 1;
+        }
         if (!ready && deferred_in_row < defer_limit) {
           deferred_ids[idx] = expert_id;
           deferred_in_row += 1;
+          deferred_count += 1;
           if (this->tps[0]->is_expert_cold_baseline(expert_id)) {
             cold_deferred.push_back(expert_id);
           }
@@ -2546,7 +2762,32 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
 
         immediate_ids[idx] = expert_id;
         protected_immediate.push_back(expert_id);
+        if (!ready) {
+          overflow_immediate_count += 1;
+          overflow_in_row += 1;
+        }
       }
+      if (overflow_in_row > 0) {
+        overflow_token_count += 1;
+      }
+    }
+
+    if (this->config.enable_cache_stats && this->config.cache_stats != nullptr) {
+      this->config.cache_stats->state_defer_token_count.fetch_add(static_cast<uint64_t>(rows),
+                                                                  std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_cpu_topk_count.fetch_add(cpu_topk_count,
+                                                                     std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_gpu_skip_count.fetch_add(gpu_skip_count,
+                                                                    std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_nonready_count.fetch_add(nonready_count,
+                                                                     std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_deferred_count.fetch_add(deferred_count,
+                                                                    std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_overflow_immediate_count.fetch_add(
+          overflow_immediate_count, std::memory_order_relaxed);
+      this->config.cache_stats->state_defer_overflow_token_count.fetch_add(overflow_token_count,
+                                                                          std::memory_order_relaxed);
+      this->config.cache_stats->maybe_dump_jsonl();
     }
 
     if (!cold_deferred.empty()) {
@@ -2588,6 +2829,38 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE_Common<AMX_MOE_TP<K>> {
         [this, count, expert_ids, protect_count, protect_ids, max_to_submit, prefetch_kind](int tp_id) {
           this->tps[tp_id]->prefetch_experts(count, expert_ids, protect_count, protect_ids, max_to_submit,
                                              prefetch_kind);
+        });
+  }
+
+  void mesh_prepare_prefill_layer_binding() {
+    if (!this->weights_loaded) return;
+    if (this->tp_count <= 1) {
+      this->tps[0]->prepare_prefill_layer_window();
+      return;
+    }
+    this->config.pool->dispense_backend()->do_numa_job(
+        [this](int tp_id) { this->tps[tp_id]->prepare_prefill_layer_window(); });
+  }
+
+  void mesh_release_prefill_layer_binding() {
+    if (!this->weights_loaded) return;
+    if (this->tp_count <= 1) {
+      (void)this->tps[0]->release_prefill_layer_window();
+      return;
+    }
+    this->config.pool->dispense_backend()->do_numa_job(
+        [this](int tp_id) { (void)this->tps[tp_id]->release_prefill_layer_window(); });
+  }
+
+  void mesh_transition_decode_cache_binding(int decode_capacity, int fill_limit) {
+    if (!this->weights_loaded) return;
+    if (this->tp_count <= 1) {
+      this->tps[0]->transition_to_decode_cache(decode_capacity, fill_limit);
+      return;
+    }
+    this->config.pool->dispense_backend()->do_numa_job(
+        [this, decode_capacity, fill_limit](int tp_id) {
+          this->tps[tp_id]->transition_to_decode_cache(decode_capacity, fill_limit);
         });
   }
 

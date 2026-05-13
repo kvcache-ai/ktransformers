@@ -313,7 +313,11 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         moe_config.down_scales = down_scale_ptrs
         moe_config.use_mmap = use_mmap
         moe_config.max_tier0_experts = self.max_tier0_experts
-        moe_config.max_resident_experts = self.max_resident_experts
+        moe_config.max_resident_experts = self._mesh_slot_pool_capacity()
+        if hasattr(moe_config, "mesh_prefill_layer_mode_enabled"):
+            moe_config.mesh_prefill_layer_mode_enabled = self._mesh_prefill_layer_mode_enabled()
+        if hasattr(moe_config, "mesh_decode_resident_experts"):
+            moe_config.mesh_decode_resident_experts = self._mesh_config_resident_experts()
         moe_config.resident_cache_policy = self.residency_policy
 
         if self.cpu_save:

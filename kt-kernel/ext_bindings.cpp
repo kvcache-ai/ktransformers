@@ -443,6 +443,58 @@ class MOEBindings {
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
   };
+  class PreparePrefillLayerBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::mesh_prepare_prefill_layer_binding, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+  class ReleasePrefillLayerBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::mesh_release_prefill_layer_binding, args_->moe);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe) {
+      Args* args = new Args{nullptr, moe.get()};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
+  class TransitionDecodeCacheBindings {
+   public:
+    struct Args {
+      CPUInfer* cpuinfer;
+      TP_MOE<T>* moe;
+      int decode_capacity;
+      int fill_limit;
+    };
+    static void inner(void* args) {
+      Args* args_ = (Args*)args;
+      args_->cpuinfer->enqueue(&TP_MOE<T>::mesh_transition_decode_cache_binding,
+                               args_->moe,
+                               args_->decode_capacity,
+                               args_->fill_limit);
+    }
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE<T>> moe,
+                                                            int decode_capacity,
+                                                            int fill_limit) {
+      Args* args = new Args{nullptr, moe.get(), decode_capacity, fill_limit};
+      return std::make_pair((intptr_t)&inner, (intptr_t)args);
+    }
+  };
 };
 
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
@@ -702,6 +754,34 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
                 py::arg("k"),
                 py::arg("max_deferred_per_token"),
                 "Split top-k experts by current CPU residency state and prefetch deferred cold misses");
+  }
+  if constexpr (requires(MoeClass moe) {
+                  moe.mesh_prepare_prefill_layer_binding();
+                  moe.mesh_release_prefill_layer_binding();
+                  moe.mesh_transition_decode_cache_binding(0, 0);
+                }) {
+    moe_cls.def("mesh_prepare_prefill_layer_task",
+                &MoeBindings::PreparePrefillLayerBindings::cpuinfer_interface,
+                "Enter MESH prefill layer mode and synchronously load this layer's CPU-managed experts");
+    moe_cls.def("mesh_release_prefill_layer_task",
+                &MoeBindings::ReleasePrefillLayerBindings::cpuinfer_interface,
+                "Release this layer's prefill layer-window slot buffers");
+    moe_cls.def("mesh_transition_decode_cache_task",
+                &MoeBindings::TransitionDecodeCacheBindings::cpuinfer_interface,
+                py::arg("decode_capacity"),
+                py::arg("fill_limit"),
+                "Trim this layer to decode hot-cache capacity and submit Heat-based refill prefetches");
+    moe_cls.def("mesh_prepare_prefill_layer",
+                &MoeClass::mesh_prepare_prefill_layer_binding,
+                "Enter MESH prefill layer mode and synchronously load this layer's CPU-managed experts");
+    moe_cls.def("mesh_release_prefill_layer",
+                &MoeClass::mesh_release_prefill_layer_binding,
+                "Release this layer's prefill layer-window slot buffers");
+    moe_cls.def("mesh_transition_decode_cache",
+                &MoeClass::mesh_transition_decode_cache_binding,
+                py::arg("decode_capacity"),
+                py::arg("fill_limit"),
+                "Trim this layer to decode hot-cache capacity and submit Heat-based refill prefetches");
   }
 
   // Bind write_weight_scale_to_buffer_task for MoE types that support it
@@ -1035,6 +1115,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("mesh_prefetch_budget", &GeneralMOEConfig::mesh_prefetch_budget)
       .def_readwrite("mesh_coldstart_prefill_enabled", &GeneralMOEConfig::mesh_coldstart_prefill_enabled)
       .def_readwrite("mesh_coldstart_prefill_limit", &GeneralMOEConfig::mesh_coldstart_prefill_limit)
+      .def_readwrite("mesh_prefill_layer_mode_enabled", &GeneralMOEConfig::mesh_prefill_layer_mode_enabled)
+      .def_readwrite("mesh_decode_resident_experts", &GeneralMOEConfig::mesh_decode_resident_experts)
       .def_readwrite("mesh_memory_guard_enabled", &GeneralMOEConfig::mesh_memory_guard_enabled)
       .def_readwrite("mesh_memory_high_watermark", &GeneralMOEConfig::mesh_memory_high_watermark)
       .def_readwrite("mesh_memory_target_watermark", &GeneralMOEConfig::mesh_memory_target_watermark)
@@ -1337,6 +1419,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
            py::arg("timeout_ms") = 5000, "Wait for all listed requests to complete")
       .def("get_request_result", &ktransformers::AsyncExpertReader::get_request_result, py::arg("request_id"),
            "Return the io_uring result for a request, or INT_MIN if unknown")
+      .def("request_succeeded", &ktransformers::AsyncExpertReader::request_succeeded, py::arg("request_id"),
+           "Return true only when the request completed as a full-size read")
       .def("describe_requests", &ktransformers::AsyncExpertReader::describe_requests, py::arg("request_ids"),
            "Return a compact status summary for request diagnostics");
 

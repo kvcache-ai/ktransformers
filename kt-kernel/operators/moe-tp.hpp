@@ -255,6 +255,13 @@ class TP_MOE_Common : public MoE_Interface {
           {"bootstrap_prefetch_skip_gpu_count", 0.0},
           {"bootstrap_prefetch_skip_resident_count", 0.0},
           {"memory_guard_demote_count", 0.0},
+          {"state_defer_token_count", 0.0},
+          {"state_defer_cpu_topk_count", 0.0},
+          {"state_defer_gpu_skip_count", 0.0},
+          {"state_defer_nonready_count", 0.0},
+          {"state_defer_deferred_count", 0.0},
+          {"state_defer_overflow_immediate_count", 0.0},
+          {"state_defer_overflow_token_count", 0.0},
           {"hit_rate", 0.0},
       };
     }
@@ -282,6 +289,13 @@ class TP_MOE_Common : public MoE_Interface {
         {"bootstrap_prefetch_skip_gpu_count", static_cast<double>(stats->bootstrap_prefetch_skip_gpu_count.load(std::memory_order_relaxed))},
         {"bootstrap_prefetch_skip_resident_count", static_cast<double>(stats->bootstrap_prefetch_skip_resident_count.load(std::memory_order_relaxed))},
         {"memory_guard_demote_count", static_cast<double>(stats->memory_guard_demote_count.load(std::memory_order_relaxed))},
+        {"state_defer_token_count", static_cast<double>(stats->state_defer_token_count.load(std::memory_order_relaxed))},
+        {"state_defer_cpu_topk_count", static_cast<double>(stats->state_defer_cpu_topk_count.load(std::memory_order_relaxed))},
+        {"state_defer_gpu_skip_count", static_cast<double>(stats->state_defer_gpu_skip_count.load(std::memory_order_relaxed))},
+        {"state_defer_nonready_count", static_cast<double>(stats->state_defer_nonready_count.load(std::memory_order_relaxed))},
+        {"state_defer_deferred_count", static_cast<double>(stats->state_defer_deferred_count.load(std::memory_order_relaxed))},
+        {"state_defer_overflow_immediate_count", static_cast<double>(stats->state_defer_overflow_immediate_count.load(std::memory_order_relaxed))},
+        {"state_defer_overflow_token_count", static_cast<double>(stats->state_defer_overflow_token_count.load(std::memory_order_relaxed))},
         {"hit_rate", stats->hit_rate()},
     };
   }

@@ -130,6 +130,8 @@ struct ExpertCacheStats {
   std::unique_ptr<std::atomic<uint64_t>[]> expert_promote_count;
   std::unique_ptr<std::atomic<uint64_t>[]> expert_prefetch_hit_count;
   std::atomic<uint64_t> dump_tick{0};
+  std::string dump_path;
+  uint64_t dump_every = 1;
 
   std::atomic<uint64_t> promote_count{0};      // Number of promote operations
   std::atomic<uint64_t> demote_count{0};       // Number of demote operations
@@ -153,6 +155,13 @@ struct ExpertCacheStats {
   std::atomic<uint64_t> bootstrap_prefetch_skip_gpu_count{0};  // Warm-fill candidates skipped by GPU mask
   std::atomic<uint64_t> bootstrap_prefetch_skip_resident_count{0}; // Warm-fill candidates already resident/pending
   std::atomic<uint64_t> memory_guard_demote_count{0};   // Memory-pressure demotions
+  std::atomic<uint64_t> state_defer_token_count{0};      // Decode rows split by resident-state defer
+  std::atomic<uint64_t> state_defer_cpu_topk_count{0};   // CPU-managed top-k entries seen by state defer
+  std::atomic<uint64_t> state_defer_gpu_skip_count{0};   // GPU experts skipped by state defer
+  std::atomic<uint64_t> state_defer_nonready_count{0};   // CPU top-k entries not resident at split time
+  std::atomic<uint64_t> state_defer_deferred_count{0};   // Non-ready entries absorbed by defer window
+  std::atomic<uint64_t> state_defer_overflow_immediate_count{0}; // Non-ready entries left immediate
+  std::atomic<uint64_t> state_defer_overflow_token_count{0};     // Rows with any immediate overflow
 
   double hit_rate() const {
     uint64_t total = hit_count.load() + miss_count.load();
@@ -167,6 +176,18 @@ struct ExpertCacheStats {
     }
     layer_idx = layer;
     expert_num = n;
+    dump_path.clear();
+    if (const char* path = std::getenv("KT_EXPERT_STATS_PATH")) {
+      dump_path = path;
+    }
+    dump_every = 1;
+    if (const char* raw_every = std::getenv("KT_EXPERT_STATS_DUMP_EVERY")) {
+      char* end = nullptr;
+      const unsigned long long parsed = std::strtoull(raw_every, &end, 10);
+      if (end != raw_every && parsed > 0) {
+        dump_every = static_cast<uint64_t>(parsed);
+      }
+    }
     expert_access_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_hit_count = std::make_unique<std::atomic<uint64_t>[]>(n);
     expert_miss_count = std::make_unique<std::atomic<uint64_t>[]>(n);
@@ -243,6 +264,13 @@ struct ExpertCacheStats {
     bootstrap_prefetch_skip_gpu_count.store(0);
     bootstrap_prefetch_skip_resident_count.store(0);
     memory_guard_demote_count.store(0);
+    state_defer_token_count.store(0);
+    state_defer_cpu_topk_count.store(0);
+    state_defer_gpu_skip_count.store(0);
+    state_defer_nonready_count.store(0);
+    state_defer_deferred_count.store(0);
+    state_defer_overflow_immediate_count.store(0);
+    state_defer_overflow_token_count.store(0);
     dump_tick.store(0);
     std::lock_guard<std::mutex> guard(expert_mu);
     for (int i = 0; i < expert_num; ++i) {
@@ -257,23 +285,13 @@ struct ExpertCacheStats {
   }
 
   void maybe_dump_jsonl() {
-    const char* path = std::getenv("KT_EXPERT_STATS_PATH");
-    if (path == nullptr || path[0] == '\0' || expert_num <= 0 || expert_access_count == nullptr) return;
-
-    uint64_t every = 1;
-    if (const char* raw_every = std::getenv("KT_EXPERT_STATS_DUMP_EVERY")) {
-      char* end = nullptr;
-      const unsigned long long parsed = std::strtoull(raw_every, &end, 10);
-      if (end != raw_every && parsed > 0) {
-        every = static_cast<uint64_t>(parsed);
-      }
-    }
+    if (dump_path.empty() || expert_num <= 0 || expert_access_count == nullptr) return;
     const uint64_t tick = dump_tick.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (tick % every != 0) return;
+    if (tick % dump_every != 0) return;
 
     static std::mutex dump_mu;
     std::lock_guard<std::mutex> dump_guard(dump_mu);
-    std::ofstream out(path, std::ios::app);
+    std::ofstream out(dump_path, std::ios::app);
     if (!out.good()) return;
 
     auto append_counter_array = [&](const char* name, const std::unique_ptr<std::atomic<uint64_t>[]>& counters) {
@@ -311,7 +329,16 @@ struct ExpertCacheStats {
         << bootstrap_prefetch_skip_gpu_count.load(std::memory_order_relaxed)
         << ",\"bootstrap_prefetch_skip_resident_count\":"
         << bootstrap_prefetch_skip_resident_count.load(std::memory_order_relaxed)
-        << ",\"memory_guard_demote_count\":" << memory_guard_demote_count.load(std::memory_order_relaxed);
+        << ",\"memory_guard_demote_count\":" << memory_guard_demote_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_token_count\":" << state_defer_token_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_cpu_topk_count\":" << state_defer_cpu_topk_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_gpu_skip_count\":" << state_defer_gpu_skip_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_nonready_count\":" << state_defer_nonready_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_deferred_count\":" << state_defer_deferred_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_overflow_immediate_count\":"
+        << state_defer_overflow_immediate_count.load(std::memory_order_relaxed)
+        << ",\"state_defer_overflow_token_count\":"
+        << state_defer_overflow_token_count.load(std::memory_order_relaxed);
     append_counter_array("expert_access", expert_access_count);
     append_counter_array("expert_hit", expert_hit_count);
     append_counter_array("expert_miss", expert_miss_count);
@@ -1368,6 +1395,8 @@ struct GeneralMOEConfig {
   int mesh_prefetch_budget = 0;
   bool mesh_coldstart_prefill_enabled = false;
   int mesh_coldstart_prefill_limit = 0;
+  bool mesh_prefill_layer_mode_enabled = false;
+  int mesh_decode_resident_experts = 0;
   bool mesh_memory_guard_enabled = false;
   float mesh_memory_high_watermark = 0.95f;
   float mesh_memory_target_watermark = 0.90f;

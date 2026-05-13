@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <sys/types.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -112,6 +113,11 @@ public:
     int get_request_result(uint64_t request_id) const;
 
     /**
+     * @brief Return true only when a request completed as a full-size read.
+     */
+    bool request_succeeded(uint64_t request_id) const;
+
+    /**
      * @brief Produce a compact status summary for diagnostics.
      */
     std::string describe_requests(const std::vector<uint64_t>& request_ids) const;
@@ -136,15 +142,20 @@ private:
     };
 
     struct RequestInfo {
-        int expert_id;
-        size_t expected_size;
-        RequestState state;
-        int result;  // errno or byte count
+        int expert_id = -1;
+        int fd = -1;
+        void* buffer = nullptr;
+        size_t expected_size = 0;
+        off_t offset = 0;
+        RequestState state = RequestState::Inflight;
+        int result = 0;  // errno or byte count
+        int retry_count = 0;
     };
 
     struct io_uring ring_;
     int queue_depth_;
     uint64_t next_user_data_;
+    int max_read_retries_;
 
     // Unified request tracking
     std::unordered_map<uint64_t, RequestInfo> requests_;
@@ -154,10 +165,12 @@ private:
     // Helper: wait for completion events
     int wait_cqe_internal(struct io_uring_cqe** cqe_out, int timeout_ms);
     int wait_and_record_completion(int timeout_ms, uint64_t* request_id_out, int* expert_id_out, bool* ok_out);
+    bool resubmit_read_locked(uint64_t request_id, RequestInfo& info, int failed_result);
 #else
     // Stub members for non-Linux platforms
     int queue_depth_;
     uint64_t next_user_data_;
+    int max_read_retries_;
 #endif
 };
 

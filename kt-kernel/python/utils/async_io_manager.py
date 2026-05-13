@@ -2,6 +2,8 @@
 Global AsyncExpertReader singleton manager for io_uring-based expert loading.
 """
 
+import os
+
 import kt_kernel_ext as ext
 
 _global_async_reader = None
@@ -16,7 +18,8 @@ def get_global_async_reader():
     """
     global _global_async_reader
     if _global_async_reader is None:
-        _global_async_reader = ext.AsyncExpertReader(queue_depth=128)
+        queue_depth = int(os.environ.get("KT_IOURING_QUEUE_DEPTH", "1024"))
+        _global_async_reader = ext.AsyncExpertReader(queue_depth=queue_depth)
     return _global_async_reader
 
 

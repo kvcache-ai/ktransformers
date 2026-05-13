@@ -128,6 +128,22 @@ def test_async_reader_waits_for_multiple_requests_same_expert(temp_test_file):
         os.close(fd)
 
 
+def test_async_reader_rejects_short_read(temp_test_file):
+    """A completed-but-short read must not be accepted as a valid request."""
+    test_file, test_data = temp_test_file
+    reader = ext.AsyncExpertReader(queue_depth=32)
+    fd = os.open(test_file, os.O_RDONLY)
+    buffer = np.empty(test_data.size + 16, dtype=test_data.dtype)
+
+    try:
+        req = reader.submit_read(fd, buffer.ctypes.data, buffer.nbytes, 0, expert_id=11)
+        assert not reader.wait_for_request(req, timeout_ms=5000), "Short read should fail"
+        assert not reader.request_succeeded(req), "Short read must not be marked successful"
+        assert reader.get_request_result(req) == test_data.nbytes
+    finally:
+        os.close(fd)
+
+
 def test_async_reader_timeout():
     """Test timeout behavior."""
     reader = ext.AsyncExpertReader(queue_depth=32)

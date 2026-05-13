@@ -9,6 +9,8 @@
 #include "async_io.hpp"
 #include <algorithm>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
@@ -21,8 +23,65 @@
 
 namespace ktransformers {
 
+namespace {
+
+int configured_max_read_retries() {
+    constexpr int kDefaultMaxReadRetries = 3;
+    const char* raw = std::getenv("KT_IOURING_MAX_READ_RETRIES");
+    if (raw == nullptr || raw[0] == '\0') {
+        return kDefaultMaxReadRetries;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(raw, &end, 10);
+    if (end == raw) {
+        return kDefaultMaxReadRetries;
+    }
+    return static_cast<int>(std::max<long>(0, std::min<long>(parsed, 16)));
+}
+
+void log_read_status(const char* tag,
+                     uint64_t request_id,
+                     int expert_id,
+                     int retry_count,
+                     int max_retries,
+                     int fd,
+                     off_t offset,
+                     size_t expected_size,
+                     int result) {
+    if (result < 0) {
+        std::fprintf(stderr,
+                     "[MESHIO][%s] request=%llu expert=%d retry=%d/%d fd=%d offset=%lld size=%zu "
+                     "result=%d(%s)\n",
+                     tag,
+                     static_cast<unsigned long long>(request_id),
+                     expert_id,
+                     retry_count,
+                     max_retries,
+                     fd,
+                     static_cast<long long>(offset),
+                     expected_size,
+                     result,
+                     std::strerror(-result));
+    } else {
+        std::fprintf(stderr,
+                     "[MESHIO][%s] request=%llu expert=%d retry=%d/%d fd=%d offset=%lld size=%zu "
+                     "result=%d(short-read)\n",
+                     tag,
+                     static_cast<unsigned long long>(request_id),
+                     expert_id,
+                     retry_count,
+                     max_retries,
+                     fd,
+                     static_cast<long long>(offset),
+                     expected_size,
+                     result);
+    }
+}
+
+}  // namespace
+
 AsyncExpertReader::AsyncExpertReader(int queue_depth)
-    : queue_depth_(queue_depth), next_user_data_(1) {
+    : queue_depth_(queue_depth), next_user_data_(1), max_read_retries_(configured_max_read_retries()) {
 #ifdef HAVE_LIBURING
     int ret = io_uring_queue_init(queue_depth_, &ring_, 0);
     if (ret < 0) {
@@ -45,6 +104,14 @@ uint64_t AsyncExpertReader::submit_read(int fd, void* buf, size_t size, off_t of
 
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {
+        int ret = io_uring_submit(&ring_);
+        if (ret < 0) {
+            throw std::runtime_error("io_uring_submit failed while flushing full submission queue: " +
+                                     std::string(strerror(-ret)));
+        }
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (!sqe) {
         throw std::runtime_error("io_uring submission queue full");
     }
 
@@ -52,7 +119,15 @@ uint64_t AsyncExpertReader::submit_read(int fd, void* buf, size_t size, off_t of
     io_uring_prep_read(sqe, fd, buf, size, offset);
     io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(user_data));
 
-    requests_[user_data] = {expert_id, size, RequestState::Inflight, 0};
+    RequestInfo info;
+    info.expert_id = expert_id;
+    info.fd = fd;
+    info.buffer = buf;
+    info.expected_size = size;
+    info.offset = offset;
+    info.state = RequestState::Inflight;
+    info.result = 0;
+    requests_[user_data] = info;
 
     int ret = io_uring_submit(&ring_);
     if (ret < 0) {
@@ -254,6 +329,14 @@ void AsyncExpertReader::submit_batch(const std::vector<ReadRequest>& requests) {
     for (const auto& req : requests) {
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
+            int ret = io_uring_submit(&ring_);
+            if (ret < 0) {
+                throw std::runtime_error("io_uring_submit failed while flushing full batch submission queue: " +
+                                         std::string(strerror(-ret)));
+            }
+            sqe = io_uring_get_sqe(&ring_);
+        }
+        if (!sqe) {
             throw std::runtime_error("io_uring submission queue full during batch submit");
         }
 
@@ -261,7 +344,15 @@ void AsyncExpertReader::submit_batch(const std::vector<ReadRequest>& requests) {
         io_uring_prep_read(sqe, req.fd, req.buffer, req.size, req.offset);
         io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(user_data));
 
-        requests_[user_data] = {req.expert_id, req.size, RequestState::Inflight, 0};
+        RequestInfo info;
+        info.expert_id = req.expert_id;
+        info.fd = req.fd;
+        info.buffer = req.buffer;
+        info.expected_size = req.size;
+        info.offset = req.offset;
+        info.state = RequestState::Inflight;
+        info.result = 0;
+        requests_[user_data] = info;
     }
 
     int ret = io_uring_submit(&ring_);
@@ -278,10 +369,24 @@ int AsyncExpertReader::get_request_result(uint64_t request_id) const {
 #ifdef HAVE_LIBURING
     std::lock_guard<std::mutex> lock(ring_mutex_);
     auto it = requests_.find(request_id);
-    return it == requests_.end() ? INT_MIN : it->second.result;
+    if (it == requests_.end() || it->second.state == RequestState::Inflight) {
+        return INT_MIN;
+    }
+    return it->second.result;
 #else
     [[maybe_unused]] uint64_t unused_request_id = request_id;
     return INT_MIN;
+#endif
+}
+
+bool AsyncExpertReader::request_succeeded(uint64_t request_id) const {
+#ifdef HAVE_LIBURING
+    std::lock_guard<std::mutex> lock(ring_mutex_);
+    auto it = requests_.find(request_id);
+    return it != requests_.end() && it->second.state == RequestState::Completed;
+#else
+    [[maybe_unused]] uint64_t unused_request_id = request_id;
+    return false;
 #endif
 }
 
@@ -309,6 +414,8 @@ std::string AsyncExpertReader::describe_requests(const std::vector<uint64_t>& re
                 oss << "inflight";
             }
             oss << "/res=" << it->second.result;
+            oss << "/expected=" << it->second.expected_size;
+            oss << "/retry=" << it->second.retry_count << "/" << max_read_retries_;
             if (it->second.result < 0) {
                 oss << "(" << std::strerror(-it->second.result) << ")";
             }
@@ -367,7 +474,28 @@ int AsyncExpertReader::wait_and_record_completion(int timeout_ms,
                 it->second.state = RequestState::Completed;
                 completed_experts_.insert(it->second.expert_id);
             } else {
+                if (resubmit_read_locked(user_data, it->second, result)) {
+                    if (request_id_out != nullptr) {
+                        *request_id_out = user_data;
+                    }
+                    if (expert_id_out != nullptr) {
+                        *expert_id_out = -1;
+                    }
+                    if (ok_out != nullptr) {
+                        *ok_out = false;
+                    }
+                    return 0;
+                }
                 it->second.state = RequestState::Failed;
+                log_read_status("read_failed",
+                                user_data,
+                                it->second.expert_id,
+                                it->second.retry_count,
+                                max_read_retries_,
+                                it->second.fd,
+                                it->second.offset,
+                                it->second.expected_size,
+                                it->second.result);
             }
 
             if (request_id_out != nullptr) {
@@ -381,11 +509,58 @@ int AsyncExpertReader::wait_and_record_completion(int timeout_ms,
             }
         } else {
             // Orphaned completion
-            requests_[user_data] = {-1, 0, RequestState::Failed, result};
+            RequestInfo info;
+            info.state = RequestState::Failed;
+            info.result = result;
+            requests_[user_data] = info;
         }
     }
 
     return 0;
+}
+
+bool AsyncExpertReader::resubmit_read_locked(uint64_t request_id, RequestInfo& info, int failed_result) {
+    if (info.retry_count >= max_read_retries_) {
+        return false;
+    }
+
+    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    if (sqe == nullptr) {
+        int ret = io_uring_submit(&ring_);
+        if (ret < 0) {
+            info.result = ret;
+            return false;
+        }
+        sqe = io_uring_get_sqe(&ring_);
+    }
+    if (sqe == nullptr) {
+        info.result = -EBUSY;
+        return false;
+    }
+
+    info.retry_count += 1;
+    log_read_status("read_retry",
+                    request_id,
+                    info.expert_id,
+                    info.retry_count,
+                    max_read_retries_,
+                    info.fd,
+                    info.offset,
+                    info.expected_size,
+                    failed_result);
+
+    io_uring_prep_read(sqe, info.fd, info.buffer, info.expected_size, info.offset);
+    io_uring_sqe_set_data(sqe, reinterpret_cast<void*>(request_id));
+    info.state = RequestState::Inflight;
+    info.result = 0;
+
+    int ret = io_uring_submit(&ring_);
+    if (ret < 0) {
+        info.state = RequestState::Failed;
+        info.result = ret;
+        return false;
+    }
+    return true;
 }
 
 int AsyncExpertReader::wait_cqe_internal(struct io_uring_cqe** cqe_out, int timeout_ms) {
