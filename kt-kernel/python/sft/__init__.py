@@ -14,8 +14,15 @@ from .config import KTConfig
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 from .amx import AMXSFTMoEWrapper
 from .arch import (
-    MOEArchConfig, get_moe_arch_config, get_moe_module, move_non_experts_to_gpu, get_expert_device,
-    KTAMXError, KTAMXNotAvailableError, KTAMXModelNotSupportedError, KTAMXConfigError,
+    MOEArchConfig,
+    get_moe_arch_config,
+    get_moe_module,
+    move_non_experts_to_gpu,
+    get_expert_device,
+    KTAMXError,
+    KTAMXNotAvailableError,
+    KTAMXModelNotSupportedError,
+    KTAMXConfigError,
 )
 from .autograd import KTMoEFunction
 from .layer import KTMoELayerWrapper
@@ -28,6 +35,7 @@ from .weights import (
 from .lora import (
     kt_adapt_peft_lora,
     get_kt_lora_params,
+    get_kt_trainable_params,
     update_kt_lora_pointers,
     sync_kt_lora_gradients,
     save_lora_experts_to_adapter,
@@ -67,6 +75,7 @@ __all__ = [
     "INT8ExpertWeights",
     "kt_adapt_peft_lora",
     "get_kt_lora_params",
+    "get_kt_trainable_params",
     "update_kt_lora_pointers",
     "sync_kt_lora_gradients",
     "save_lora_experts_to_adapter",

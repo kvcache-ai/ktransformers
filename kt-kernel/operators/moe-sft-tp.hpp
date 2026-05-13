@@ -548,7 +548,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
-                void* grad_weights) {
+                void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
+                void* grad_down_proj = nullptr) {
     auto pool = config.pool;
 
 
@@ -694,7 +695,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              tp_down_a_ptr[numa_id], /* copy-type: direct write */
                              nullptr,                /* grad_down_lora_b — unused, FP32 path below */
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
-                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id]);
+                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id],
+                             grad_gate_proj, grad_up_proj, grad_down_proj);
     });
 
     // // Collect per-thread timing from all NUMA subpools
@@ -891,10 +893,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void backward_binding(intptr_t grad_output, intptr_t grad_input, intptr_t grad_gate_lora_a, intptr_t grad_gate_lora_b,
                         intptr_t grad_up_lora_a, intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
-                        intptr_t grad_down_lora_b, intptr_t grad_weights) {
+                        intptr_t grad_down_lora_b, intptr_t grad_weights, intptr_t grad_gate_proj,
+                        intptr_t grad_up_proj, intptr_t grad_down_proj) {
     backward((const void*)grad_output, (void*)grad_input, (void*)grad_gate_lora_a, (void*)grad_gate_lora_b,
              (void*)grad_up_lora_a, (void*)grad_up_lora_b, (void*)grad_down_lora_a, (void*)grad_down_lora_b,
-             (void*)grad_weights);
+             (void*)grad_weights, (void*)grad_gate_proj, (void*)grad_up_proj, (void*)grad_down_proj);
   }
 
   /**

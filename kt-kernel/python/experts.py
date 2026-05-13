@@ -143,6 +143,8 @@ class KTMoEWrapper:
         # Quantization config (for K-Group SFT methods)
         group_size: int = 128,
         zero_point: bool = True,
+        # Full weight gradient mode (for full fine-tuning without LoRA)
+        full_weight_grad: bool = False,
         # V4-Flash 2604B SwiGLU clamp limit. 0.0 = disabled (default for
         # every dtype except DSV4-2604B routed experts, which set this to
         # 10.0 to match trtllm gemm1_clamp_limit / deep_gemm
@@ -247,6 +249,7 @@ class KTMoEWrapper:
                 max_cache_depth=max_cache_depth,
                 group_size=group_size,
                 zero_point=zero_point,
+                full_weight_grad=full_weight_grad,
             )
 
     # Forward static methods to the base class
@@ -292,6 +295,7 @@ class KTMoEWrapper:
         to reset the buffer state or free memory during SFT.
         """
         from .sft.base import KExpertsSFTBuffer
+
         KExpertsSFTBuffer.clear_cache()
 
 
@@ -393,6 +397,7 @@ def _create_sft_wrapper(
     max_cache_depth: int,
     group_size: int,
     zero_point: bool,
+    full_weight_grad: bool = False,
 ):
     """
     Create an SFT wrapper based on the method.
@@ -423,4 +428,5 @@ def _create_sft_wrapper(
         method=method,
         group_size=group_size,
         zero_point=zero_point,
+        full_weight_grad=full_weight_grad,
     )
