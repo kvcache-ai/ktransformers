@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <thread>
@@ -116,6 +117,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   std::string cgroup_memory_max_path_;
   ResidentCachePolicyState resident_policy_;
   const std::vector<uint8_t>* eviction_protected_mask_ = nullptr;
+  bool prefill_streaming_active_ = false;
   size_t gate_total_bytes_ = 0;
   size_t up_total_bytes_ = 0;
   size_t down_total_bytes_ = 0;
@@ -993,6 +995,41 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
            static_cast<int>(lookahead_heat_.size()) >= config_.expert_num;
   }
 
+  bool mesh_prefill_stream_trace_enabled() const {
+    const char* trace = std::getenv("KT_MESH_PREFILL_STREAM_TRACE");
+    return trace != nullptr && trace[0] != '\0' && trace[0] != '0';
+  }
+
+  static uint64_t elapsed_us(std::chrono::steady_clock::time_point start,
+                             std::chrono::steady_clock::time_point end) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+  }
+
+  uint64_t iouring_read_bytes_for_expert(int expert_id) const {
+    if (!iouring_enabled() || expert_id < 0 || expert_id >= config_.expert_num) return 0;
+    uint64_t total = 0;
+    auto add_slot = [&](const std::vector<std::vector<ExpertFileSlot>>& slots, const char* name) {
+      if (!slots.empty()) {
+        const auto& slot = iouring_slot_at(slots, name, expert_id);
+        if (slot.fd >= 0 && slot.size > 0) {
+          total += static_cast<uint64_t>(slot.size);
+        }
+      }
+    };
+    add_slot(config_.gate_file_slots, "gate.weight");
+    add_slot(config_.gate_scale_file_slots, "gate.scale");
+    add_slot(config_.up_file_slots, "up.weight");
+    add_slot(config_.up_scale_file_slots, "up.scale");
+    add_slot(config_.down_file_slots, "down.weight");
+    add_slot(config_.down_scale_file_slots, "down.scale");
+    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
+      add_slot(config_.gate_mins_file_slots, "gate.mins");
+      add_slot(config_.up_mins_file_slots, "up.mins");
+      add_slot(config_.down_mins_file_slots, "down.mins");
+    }
+    return total;
+  }
+
   bool is_eviction_protected(int expert_id, const std::vector<uint8_t>* protected_mask) const {
     return protected_mask != nullptr && expert_id >= 0 && expert_id < static_cast<int>(protected_mask->size()) &&
            (*protected_mask)[expert_id] != 0;
@@ -1009,7 +1046,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
              active_readers_[expert_id].load(std::memory_order_acquire) == 0;
     };
 
-    if (mesh_lookahead_active()) {
+    if (!prefill_streaming_active_ && mesh_lookahead_active()) {
       std::vector<int> order = resident_policy_.build_reclaim_order(
           config_.expert_num, exclude_expert_id, static_cast<uint8_t>(EXPERT_CACHED),
           static_cast<uint8_t>(EXPERT_CACHED),
@@ -1045,7 +1082,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         if (candidate == exclude_expert_id) continue;
         if (is_legal_prefetch_victim(candidate)) return candidate;
       }
-      if (protected_mask != nullptr) {
+      if (protected_mask != nullptr || !prefill_streaming_active_) {
         return -1;
       }
     }
@@ -1068,7 +1105,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       if (victim == exclude_expert_id) {
         continue;
       }
-      if (is_eviction_protected(victim, effective_protected_mask)) {
+      if (!(prefill_streaming_active_ && protected_mask == nullptr) &&
+          is_eviction_protected(victim, effective_protected_mask)) {
         continue;
       }
 
@@ -1423,6 +1461,23 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
     return true;
 #else
+    const bool batch_trace = mesh_prefill_stream_trace_enabled();
+    const auto batch_start = std::chrono::steady_clock::now();
+    const uint64_t trace_read_reqs_before =
+        config_.cache_stats != nullptr
+            ? config_.cache_stats->iouring_read_request_count.load(std::memory_order_relaxed)
+            : 0;
+    const uint64_t trace_read_bytes_before =
+        config_.cache_stats != nullptr
+            ? config_.cache_stats->iouring_read_bytes.load(std::memory_order_relaxed)
+            : 0;
+    int trace_hits = 0;
+    int trace_cold = 0;
+    int trace_inflight = 0;
+    int trace_unique = 0;
+    uint64_t trace_expected_cold_read_bytes = 0;
+    uint64_t trace_wait_us = 0;
+
     complete_ready_prefetches();
 
     std::vector<uint8_t> local_protected_mask;
@@ -1451,6 +1506,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
     };
     auto record_hit = [&](int expert_id) {
+      trace_hits += 1;
       if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
         config_.cache_stats->hit_count.fetch_add(1, std::memory_order_relaxed);
         if (tp_part_idx == 0) {
@@ -1459,6 +1515,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
     };
     auto record_cold_miss = [&](int expert_id) {
+      trace_cold += 1;
+      trace_expected_cold_read_bytes += iouring_read_bytes_for_expert(expert_id);
       if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
         config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
         config_.cache_stats->cold_miss_count.fetch_add(1, std::memory_order_relaxed);
@@ -1469,6 +1527,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       }
     };
     auto record_inflight_miss = [&](int expert_id) {
+      trace_inflight += 1;
       if (config_.enable_cache_stats && config_.cache_stats != nullptr) {
         config_.cache_stats->miss_count.fetch_add(1, std::memory_order_relaxed);
         config_.cache_stats->in_flight_miss_count.fetch_add(1, std::memory_order_relaxed);
@@ -1487,6 +1546,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         continue;
       }
       seen[expert_id] = 1;
+      trace_unique += 1;
       record_total_access(expert_id);
 
       for (;;) {
@@ -1561,7 +1621,11 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
     if (!all_requests.empty()) {
       const int timeout_ms = 60000;
-      if (!config_.async_reader->wait_for_requests(all_requests, timeout_ms)) {
+      const auto wait_start = std::chrono::steady_clock::now();
+      const bool wait_ok = config_.async_reader->wait_for_requests(all_requests, timeout_ms);
+      const auto wait_end = std::chrono::steady_clock::now();
+      trace_wait_us = elapsed_us(wait_start, wait_end);
+      if (!wait_ok) {
         std::ostringstream oss;
         oss << "AMX io_uring batch promotion failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
             << " experts=" << cold_promotions.size() << " pending=" << pending_prefetch_experts.size()
@@ -1606,6 +1670,38 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
         }
       }
       finalize_pending_prefetch(expert_id, pin);
+    }
+
+    if (batch_trace) {
+      const auto batch_end = std::chrono::steady_clock::now();
+      const uint64_t trace_read_reqs_after =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_request_count.load(std::memory_order_relaxed)
+              : trace_read_reqs_before;
+      const uint64_t trace_read_bytes_after =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_bytes.load(std::memory_order_relaxed)
+              : trace_read_bytes_before;
+      std::fprintf(stderr,
+                   "[MESH_BATCH_ENSURE_TRACE] layer=%d tp=%d requested=%zu unique=%d hits=%d cold=%d inflight=%d "
+                   "cold_promotions=%zu pending_prefetch=%zu wait_us=%llu total_us=%llu "
+                   "read_req_delta=%llu read_bytes_delta=%llu expected_cold_read_bytes=%llu resident=%d capacity=%d\n",
+                   config_.layer_idx,
+                   tp_part_idx,
+                   expert_ids.size(),
+                   trace_unique,
+                   trace_hits,
+                   trace_cold,
+                   trace_inflight,
+                   cold_promotions.size(),
+                   pending_prefetch_experts.size(),
+                   static_cast<unsigned long long>(trace_wait_us),
+                   static_cast<unsigned long long>(elapsed_us(batch_start, batch_end)),
+                   static_cast<unsigned long long>(trace_read_reqs_after - trace_read_reqs_before),
+                   static_cast<unsigned long long>(trace_read_bytes_after - trace_read_bytes_before),
+                   static_cast<unsigned long long>(trace_expected_cold_read_bytes),
+                   resident_expert_count_.load(std::memory_order_acquire),
+                   cache_capacity_);
     }
 
     return true;
@@ -2406,6 +2502,361 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
+  bool forward_prefill_streaming_slots(int qlen, int k, const int64_t* expert_ids, const float* weights,
+                                       const void* input, void* output) {
+#ifndef _WIN32
+    if (!resident_io_enabled() || !slot_pool_enabled() || qlen <= 1) return false;
+
+    const bool stream_trace = mesh_prefill_stream_trace_enabled();
+    const auto forward_start = std::chrono::steady_clock::now();
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+    int activated_expert = 0;
+    std::fill(this->m_local_num_.begin(), this->m_local_num_.end(), 0);
+    for (int i = 0; i < qlen; i++) {
+      for (int j = 0; j < k; j++) {
+        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+        if (config_.should_skip_expert(expert_id)) {
+          continue;
+        }
+        this->m_local_pos_[i][j] = this->m_local_num_[expert_id]++;
+      }
+    }
+
+    std::vector<int> active_experts;
+    active_experts.reserve(config_.expert_num);
+    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
+      if (this->m_local_num_[expert_id] > 0) {
+        this->m_expert_id_map_[activated_expert] = expert_id;
+        active_experts.push_back(expert_id);
+        activated_expert++;
+      }
+    }
+
+    if (activated_expert == 0) {
+      std::memset(output, 0, sizeof(float) * static_cast<size_t>(qlen) * config_.hidden_size);
+      return true;
+    }
+
+    size_t offset = 0;
+    void* gate_up_ba_pool_ptr = this->gate_up_ba_pool_;
+    void* gate_bc_pool_ptr = this->gate_bc_pool_;
+    void* up_bc_pool_ptr = this->up_bc_pool_;
+    void* down_ba_pool_ptr = this->down_ba_pool_;
+    void* down_bc_pool_ptr = this->down_bc_pool_;
+    constexpr size_t M_STEP = T::M_STEP;
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+    size_t used_pool_m = 0;
+    size_t used_pool_bytes_a = 0, used_pool_bytes_bc_gate = 0, used_pool_bytes_bc_up = 0,
+           used_pool_bytes_ba_down = 0, used_pool_bytes_bc_down = 0;
+
+    for (int expert_id = 0; expert_id < config_.expert_num; expert_id++) {
+      this->m_local_input_ptr_[expert_id] = this->m_local_input_ + offset * config_.hidden_size;
+      this->m_local_gate_output_ptr_[expert_id] = this->m_local_gate_output_ + offset * config_.intermediate_size;
+      this->m_local_up_output_ptr_[expert_id] = this->m_local_up_output_ + offset * config_.intermediate_size;
+      this->m_local_down_output_ptr_[expert_id] = this->m_local_down_output_ + offset * config_.hidden_size;
+      offset += this->m_local_num_[expert_id];
+
+      if (this->m_local_num_[expert_id] == 0) {
+        continue;
+      }
+
+      size_t max_m = (this->m_local_num_[expert_id] + M_STEP - 1) / M_STEP * M_STEP;
+      this->gate_up_ba_[expert_id]->max_m = max_m;
+      this->gate_up_ba_[expert_id]->set_data(gate_up_ba_pool_ptr);
+      size_t ba_size = align64(this->buffer_a_required_size(max_m, config_.hidden_size));
+      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + ba_size);
+
+      this->gate_bc_[expert_id]->max_m = max_m;
+      this->gate_bc_[expert_id]->set_data(gate_bc_pool_ptr);
+      size_t bc_gate_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
+      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + bc_gate_size);
+
+      this->up_bc_[expert_id]->max_m = max_m;
+      this->up_bc_[expert_id]->set_data(up_bc_pool_ptr);
+      size_t bc_up_size = align64(this->buffer_c_required_size(max_m, config_.intermediate_size));
+      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + bc_up_size);
+
+      this->down_ba_[expert_id]->max_m = max_m;
+      this->down_ba_[expert_id]->set_data(down_ba_pool_ptr);
+      size_t ba_down_size = align64(this->buffer_a_required_size(max_m, config_.intermediate_size));
+      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + ba_down_size);
+
+      this->down_bc_[expert_id]->max_m = max_m;
+      this->down_bc_[expert_id]->set_data(down_bc_pool_ptr);
+      size_t bc_down_size = align64(this->buffer_c_required_size(max_m, config_.hidden_size));
+      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + bc_down_size);
+
+      used_pool_m += max_m;
+      used_pool_bytes_a += ba_size;
+      used_pool_bytes_bc_gate += bc_gate_size;
+      used_pool_bytes_bc_up += bc_up_size;
+      used_pool_bytes_ba_down += ba_down_size;
+      used_pool_bytes_bc_down += bc_down_size;
+    }
+
+    assert(used_pool_m <= this->pool_count_);
+    assert(used_pool_bytes_a <= this->gate_up_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_gate <= this->gate_bc_pool_bytes_);
+    assert(used_pool_bytes_bc_up <= this->up_bc_pool_bytes_);
+    assert(used_pool_bytes_ba_down <= this->down_ba_pool_bytes_);
+    assert(used_pool_bytes_bc_down <= this->down_bc_pool_bytes_);
+
+    auto direct_or_pool = [&](int count, auto&& fn) {
+      if (qlen < 10) {
+        for (int i = 0; i < count; i++) {
+          fn(i);
+        }
+      } else {
+        pool->do_work_stealing_job(count, nullptr, fn, nullptr);
+      }
+    };
+
+    const auto copy_input_start = std::chrono::steady_clock::now();
+    direct_or_pool(qlen, [&](int i) {
+      for (int j = 0; j < k; j++) {
+        const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+        if (config_.should_skip_expert(expert_id)) {
+          continue;
+        }
+        std::memcpy(this->m_local_input_ptr_[expert_id] + this->m_local_pos_[i][j] * config_.hidden_size,
+                    (ggml_bf16_t*)input + i * config_.hidden_size,
+                    sizeof(ggml_bf16_t) * config_.hidden_size);
+      }
+    });
+    const auto copy_input_end = std::chrono::steady_clock::now();
+
+    std::vector<int> ordered_experts;
+    ordered_experts.reserve(active_experts.size());
+    for (int expert_id : active_experts) {
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state == EXPERT_CACHED || state == EXPERT_PINNED) {
+        ordered_experts.push_back(expert_id);
+      }
+    }
+    for (int expert_id : active_experts) {
+      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state != EXPERT_CACHED && state != EXPERT_PINNED) {
+        ordered_experts.push_back(expert_id);
+      }
+    }
+
+    const int window = std::max(1, std::min(cache_capacity_, activated_expert));
+    const int total_windows = (activated_expert + window - 1) / window;
+    std::vector<uint8_t> protected_mask(config_.expert_num, 0);
+    prefill_streaming_active_ = true;
+    struct PrefillEvictionGuard {
+      AMX_MOE_TP* owner;
+      ~PrefillEvictionGuard() {
+        owner->eviction_protected_mask_ = nullptr;
+        owner->prefill_streaming_active_ = false;
+      }
+    } prefill_guard{this};
+
+    for (int start = 0; start < activated_expert; start += window) {
+      const int count = std::min(window, activated_expert - start);
+      const int window_index = start / window;
+      std::fill(protected_mask.begin(), protected_mask.end(), 0);
+      for (int i = start; i < activated_expert; ++i) {
+        protected_mask[ordered_experts[i]] = 1;
+      }
+      eviction_protected_mask_ = &protected_mask;
+
+      int hit_before = 0;
+      int cold_before = 0;
+      int inflight_before = 0;
+      int other_before = 0;
+      uint64_t expected_cold_read_bytes = 0;
+      for (int i = 0; i < count; ++i) {
+        const int expert_id = ordered_experts[start + i];
+        const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+        if (state == EXPERT_CACHED || state == EXPERT_PINNED) {
+          hit_before += 1;
+        } else if (state == EXPERT_BASELINE) {
+          cold_before += 1;
+          expected_cold_read_bytes += iouring_read_bytes_for_expert(expert_id);
+        } else if (state == EXPERT_PREFETCHING) {
+          inflight_before += 1;
+        } else {
+          other_before += 1;
+        }
+      }
+
+      const uint64_t read_reqs_before =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_request_count.load(std::memory_order_relaxed)
+              : 0;
+      const uint64_t read_bytes_before =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_bytes.load(std::memory_order_relaxed)
+              : 0;
+      const int resident_before = resident_expert_count_.load(std::memory_order_acquire);
+      const auto ensure_start = std::chrono::steady_clock::now();
+      ExpertReadScope expert_read_scope(this, count);
+      for (int i = 0; i < count; ++i) {
+        const int expert_id = ordered_experts[start + i];
+        this->m_expert_id_map_[i] = expert_id;
+        note_expert_access(expert_id);
+        ensure_expert_ready(expert_id, false);
+        expert_read_scope.add_expert(expert_id);
+      }
+      const auto ensure_end = std::chrono::steady_clock::now();
+      const uint64_t read_reqs_after =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_request_count.load(std::memory_order_relaxed)
+              : read_reqs_before;
+      const uint64_t read_bytes_after =
+          config_.cache_stats != nullptr
+              ? config_.cache_stats->iouring_read_bytes.load(std::memory_order_relaxed)
+              : read_bytes_before;
+      const int resident_after_ensure = resident_expert_count_.load(std::memory_order_acquire);
+
+      const auto compute_start = std::chrono::steady_clock::now();
+      direct_or_pool(count, [this](int task_id) {
+        int expert_idx = this->m_expert_id_map_[task_id];
+        this->gate_up_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
+                                                this->m_local_input_ptr_[expert_idx], 0, 1);
+      });
+
+      int nth = T::recommended_nth(config_.intermediate_size);
+      pool->do_work_stealing_job(
+          nth * count * 2, [](int _) { T::config(); },
+          [this, nth, qlen](int task_id2) {
+            int task_id = task_id2 / 2;
+            bool do_up = task_id2 % 2;
+            int expert_idx = this->m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
+            if (do_up) {
+              this->up_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                               this->m_local_up_output_ptr_[expert_idx], ith, nth);
+            } else {
+              this->gate_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                                 this->m_local_gate_output_ptr_[expert_idx], ith, nth);
+            }
+          },
+          nullptr);
+
+      this->apply_activation(count, nth, qlen);
+
+      pool->do_work_stealing_job(
+          count, nullptr,
+          [this](int task_id) {
+            int expert_idx = this->m_expert_id_map_[task_id];
+            this->down_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx],
+                                                 this->m_local_gate_output_ptr_[expert_idx], 0, 1);
+          },
+          nullptr);
+
+      nth = T::recommended_nth(config_.hidden_size);
+      pool->do_work_stealing_job(
+          nth * count, [](int _) { T::config(); },
+          [this, nth, qlen](int task_id) {
+            int expert_idx = this->m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            this->do_down_gemm(expert_idx, ith, nth, qlen);
+            this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                               this->m_local_down_output_ptr_[expert_idx], ith, nth);
+          },
+          nullptr);
+      const auto compute_end = std::chrono::steady_clock::now();
+
+      if (stream_trace) {
+        std::fprintf(stderr,
+                     "[MESH_PREFILL_STREAM_TRACE] layer=%d tp=%d qlen=%d active=%d window=%d windows=%d "
+                     "start=%d count=%d hit_before=%d cold_before=%d inflight_before=%d other_before=%d "
+                     "ensure_us=%llu compute_us=%llu read_req_delta=%llu read_bytes_delta=%llu "
+                     "expected_cold_read_bytes=%llu resident_before=%d resident_after_ensure=%d resident_after_compute=%d\n",
+                     config_.layer_idx,
+                     tp_part_idx,
+                     qlen,
+                     activated_expert,
+                     window_index,
+                     total_windows,
+                     start,
+                     count,
+                     hit_before,
+                     cold_before,
+                     inflight_before,
+                     other_before,
+                     static_cast<unsigned long long>(elapsed_us(ensure_start, ensure_end)),
+                     static_cast<unsigned long long>(elapsed_us(compute_start, compute_end)),
+                     static_cast<unsigned long long>(read_reqs_after - read_reqs_before),
+                     static_cast<unsigned long long>(read_bytes_after - read_bytes_before),
+                     static_cast<unsigned long long>(expected_cold_read_bytes),
+                     resident_before,
+                     resident_after_ensure,
+                     resident_expert_count_.load(std::memory_order_acquire));
+      }
+    }
+
+    eviction_protected_mask_ = nullptr;
+    prefill_streaming_active_ = false;
+
+    const auto merge_start = std::chrono::steady_clock::now();
+    pool->do_work_stealing_job(
+        qlen, nullptr,
+        [this, output, k, expert_ids, weights](int i) {
+          for (int e = 0; e < config_.hidden_size; e += 32) {
+            __m512 x0 = _mm512_setzero_ps();
+            __m512 x1 = _mm512_setzero_ps();
+            for (int j = 0; j < k; j++) {
+              const int expert_id = static_cast<int>(expert_ids[i * k + j]);
+              if (config_.should_skip_expert(expert_id)) {
+                continue;
+              }
+              __m512 weight = _mm512_set1_ps(weights[i * k + j]);
+              __m512 down_output0, down_output1;
+              avx512_32xbf16_to_32xfp32(
+                  (__m512i*)(this->m_local_down_output_ptr_[expert_id] +
+                             this->m_local_pos_[i][j] * config_.hidden_size + e),
+                  &down_output0, &down_output1);
+              x0 = _mm512_fmadd_ps(down_output0, weight, x0);
+              x1 = _mm512_fmadd_ps(down_output1, weight, x1);
+            }
+            auto f32out = (__m512*)((float*)output + i * config_.hidden_size + e);
+            f32out[0] = x0;
+            f32out[1] = x1;
+          }
+        },
+        nullptr);
+    const auto merge_end = std::chrono::steady_clock::now();
+
+    update_lookahead_heat_from_forward(qlen, k, expert_ids, weights);
+    refresh_lookahead_heat();
+    trim_cache_to_capacity();
+    trim_cache_for_memory_pressure();
+    if (tp_part_idx == 0 && config_.enable_cache_stats && config_.cache_stats != nullptr) {
+      config_.cache_stats->maybe_dump_jsonl();
+    }
+    if (stream_trace) {
+      const auto forward_end = std::chrono::steady_clock::now();
+      std::fprintf(stderr,
+                   "[MESH_PREFILL_STREAM_SUMMARY] layer=%d tp=%d qlen=%d active=%d window_size=%d windows=%d "
+                   "copy_input_us=%llu merge_us=%llu total_us=%llu resident_final=%d allocated_slots=%d\n",
+                   config_.layer_idx,
+                   tp_part_idx,
+                   qlen,
+                   activated_expert,
+                   window,
+                   total_windows,
+                   static_cast<unsigned long long>(elapsed_us(copy_input_start, copy_input_end)),
+                   static_cast<unsigned long long>(elapsed_us(merge_start, merge_end)),
+                   static_cast<unsigned long long>(elapsed_us(forward_start, forward_end)),
+                   resident_expert_count_.load(std::memory_order_acquire),
+                   allocated_slot_count());
+    }
+    return true;
+#else
+    (void)qlen;
+    (void)k;
+    (void)expert_ids;
+    (void)weights;
+    (void)input;
+    (void)output;
+    return false;
+#endif
+  }
+
   void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                void* output) override {
 #ifndef _WIN32
@@ -2414,6 +2865,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     if (resident_io_enabled()) {
       complete_ready_prefetches();
       refresh_lookahead_heat();
+      if (qlen > 1 && forward_prefill_streaming_slots(qlen, k, expert_ids, weights, input, output)) {
+        return;
+      }
       active_experts.reserve(qlen * k);
       std::vector<uint8_t> seen(config_.expert_num, 0);
 

@@ -858,7 +858,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
         return int(self.max_tier0_experts)
 
     def _mesh_prefill_layer_mode_enabled(self) -> bool:
-        return self.io_backend == "IOURING" and self._env_flag("KT_MESH_PREFILL_LAYER_MODE", True)
+        return self.io_backend == "IOURING" and self._env_flag("KT_MESH_PREFILL_LAYER_MODE", False)
 
     def _mesh_prefill_full_layer_count(self) -> int:
         if not self._mesh_prefill_layer_mode_enabled():
