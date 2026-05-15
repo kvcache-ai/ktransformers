@@ -90,12 +90,13 @@ struct GemmKernel224MXFP4SmallKGroup {
 #if !defined(__AVX512BF16__)
     __m512 a_even;
     __m512 a_odd;
+    inline static const __m512i odd_mask = _mm512_set1_epi32(0xFFFF0000);
 #endif
 
     __attribute__((always_inline)) ActivationBF16(__m512bh a_) : a(a_) {
 #if !defined(__AVX512BF16__)
       a_even = _mm512_castsi512_ps(_mm512_slli_epi32((__m512i)a_, 16));
-      a_odd = _mm512_castsi512_ps(_mm512_and_si512((__m512i)a_, _mm512_set1_epi32(0xFFFF0000)));
+      a_odd = _mm512_castsi512_ps(_mm512_and_si512((__m512i)a_, odd_mask));
 #endif
     }
   };
@@ -106,21 +107,21 @@ struct GemmKernel224MXFP4SmallKGroup {
 #else
     __m512 w_even;
     __m512 w_odd;
+    inline static const __m128i lo_mask = _mm_set1_epi8(0x0F);
+    inline static const __m512 lut = _mm512_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f,
+                                                    -1.5f, -2.0f, -3.0f, -4.0f, -6.0f);
 #endif
 
     __attribute__((always_inline)) DequantizedWeight(__m128i w) {
 #if defined(__AVX512BF16__)
       d = (__m512bh)mxfp4_to_bf16_32(w);
 #else
-      __m128i lo_mask = _mm_set1_epi8(0x0F);
       __m128i lo = _mm_and_si128(w, lo_mask);
       __m128i hi = _mm_and_si128(_mm_srli_epi16(w, 4), lo_mask);
 
       __m512i lo_32 = _mm512_cvtepu8_epi32(lo);
       __m512i hi_32 = _mm512_cvtepu8_epi32(hi);
 
-      __m512 lut = _mm512_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f, -1.5f, -2.0f,
-                                  -3.0f, -4.0f, -6.0f);
       w_even = _mm512_permutexvar_ps(lo_32, lut);
       w_odd = _mm512_permutexvar_ps(hi_32, lut);
 #endif
