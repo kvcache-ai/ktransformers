@@ -938,6 +938,9 @@ def _mesh_select_forward_experts(
         self._submit_cpuinfer_task(task, cuda_stream)
         return immediate_experts_ids_cpu, deferred_experts_ids_cpu, True
 
+    if not is_decode_token:
+        return topk_ids_long, None, False
+
     protected_k = self.num_experts_per_tok - self.max_deferred_experts_per_token
     immediate_ids, deferred_ids = self.select_deferred_experts(topk_ids_long, topk_weights, protected_k)
     return immediate_ids, deferred_ids, False
