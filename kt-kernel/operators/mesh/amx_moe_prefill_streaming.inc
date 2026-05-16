@@ -379,4 +379,3 @@
     return false;
 #endif
   }
-

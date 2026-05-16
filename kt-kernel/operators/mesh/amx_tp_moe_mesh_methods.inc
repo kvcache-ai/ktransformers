@@ -9,7 +9,6 @@
     this->config.pool->dispense_backend()->do_numa_job(
         [this, expert_id](int tp_id) { this->tps[tp_id]->promote_expert(expert_id); });
   }
-
   void demote_expert(int expert_id) {
     for (int i = 0; i < this->tp_count; ++i) {
       this->tps[i]->demote_expert(expert_id);
@@ -192,4 +191,3 @@
           this->tps[tp_id]->transition_to_decode_cache(decode_capacity, fill_limit);
         });
   }
-

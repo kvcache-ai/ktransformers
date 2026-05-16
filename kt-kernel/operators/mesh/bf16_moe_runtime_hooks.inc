@@ -132,7 +132,6 @@
     (void)expert_id;
 #endif
   }
-
   void demote_expert(int expert_id) override {
 #ifndef _WIN32
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
@@ -180,4 +179,3 @@
     return false;
 #endif
   }
-

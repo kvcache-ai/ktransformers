@@ -44,7 +44,6 @@
     }
 #endif
   }
-
   void promote_expert(int expert_id) override {
 #ifndef _WIN32
     ensure_expert_ready(expert_id, true);
@@ -141,4 +140,3 @@
     return false;
 #endif
   }
-
