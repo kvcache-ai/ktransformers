@@ -9,10 +9,8 @@
  **/
 #include "task_queue.h"
 
-#ifndef _WIN32
 #include <pthread.h>
 #include <sched.h>
-#endif
 
 #include <chrono>
 #include <iostream>

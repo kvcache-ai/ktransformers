@@ -11,9 +11,7 @@
 #define CPUINFER_BACKEND_H
 
 #include <hwloc.h>
-#ifndef _WIN32
 #include <numa.h>
-#endif
 
 #include <atomic>
 #include <barrier>
@@ -28,23 +26,10 @@
 // #define PROFILE_BALANCE
 
 inline void set_to_numa(int this_numa) {
-#ifdef _WIN32
-  // On Windows, no libnuma; use hwloc for memory binding
-  hwloc_topology_t topology;
-  hwloc_topology_init(&topology);
-  hwloc_topology_load(topology);
-  hwloc_obj_t obj = hwloc_get_obj_by_type(topology, HWLOC_OBJ_NUMANODE, this_numa);
-  if (obj) {
-    hwloc_set_membind(topology, obj->nodeset, HWLOC_MEMBIND_BIND,
-                       HWLOC_MEMBIND_THREAD | HWLOC_MEMBIND_STRICT | HWLOC_MEMBIND_BYNODESET);
-  }
-  hwloc_topology_destroy(topology);
-#else
   struct bitmask* mask = numa_bitmask_alloc(numa_num_configured_nodes());
   numa_bitmask_setbit(mask, this_numa);
   numa_bind(mask);
   numa_bitmask_free(mask);
-#endif
 }
 
 inline void set_memory_to_numa(int this_numa) {

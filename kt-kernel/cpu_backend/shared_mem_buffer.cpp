@@ -10,19 +10,7 @@
 #include "shared_mem_buffer.h"
 
 #include <errno.h>
-#ifndef _WIN32
 #include <numa.h>
-#include <sched.h>
-#else
-#include <windows.h>
-#include <malloc.h>
-static inline int sched_getcpu() { return (int)GetCurrentProcessorNumber(); }
-static inline int numa_node_of_cpu(int cpu) {
-  UCHAR node = 0;
-  GetNumaProcessorNode((UCHAR)cpu, &node);
-  return (int)node;
-}
-#endif
 
 #include <cstdio>
 
@@ -54,11 +42,7 @@ SharedMemBuffer::SharedMemBuffer() {
 
 SharedMemBuffer::~SharedMemBuffer() {
   if (buffer) {
-#ifdef _WIN32
-    _aligned_free(buffer);
-#else
     free(buffer);
-#endif
   }
 }
 
@@ -68,21 +52,9 @@ void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
 
   if (total_size > size) {
     if (buffer) {
-#ifdef _WIN32
-      _aligned_free(buffer);
-#else
       free(buffer);
-#endif
     }
     void* newbuf = nullptr;
-#ifdef _WIN32
-    newbuf = _aligned_malloc(total_size, 64);
-    if (!newbuf) {
-      printf("cannot aligned alloc %zu bytes (align=%d)\n", (size_t)total_size, 64);
-      perror("_aligned_malloc");
-      exit(1);
-    }
-#else
     int rc = posix_memalign(&newbuf, 64, total_size);
     if (rc != 0 || !newbuf) {
       errno = rc;  // posix_memalign returns error code instead of setting errno
@@ -90,7 +62,6 @@ void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
       perror("posix_memalign");  // ENOMEM/EINVAL
       exit(1);
     }
-#endif
     buffer = newbuf;
     size = total_size;
     for (auto& req : object_requests) {

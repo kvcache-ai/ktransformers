@@ -49,10 +49,8 @@ if(USE_CONDA_TOOLCHAIN)
     set(CMAKE_C_COMPILER   ${CONDA_CC}  CACHE FILEPATH "C compiler" FORCE)
     set(CMAKE_CXX_COMPILER ${CONDA_CXX} CACHE FILEPATH "C++ compiler" FORCE)
 else()
-    # Prefer system compilers explicitly only when the caller hasn't already
-    # selected a compiler via CC/CXX or -DCMAKE_<LANG>_COMPILER.
-    if(NOT DEFINED ENV{CC} AND NOT DEFINED ENV{CXX} AND
-       EXISTS "/usr/bin/gcc" AND EXISTS "/usr/bin/g++")
+    # Prefer system compilers explicitly to avoid accidentally picking conda wrappers from PATH
+    if(EXISTS "/usr/bin/gcc" AND EXISTS "/usr/bin/g++")
         set(CMAKE_C_COMPILER   "/usr/bin/gcc" CACHE FILEPATH "C compiler" FORCE)
         set(CMAKE_CXX_COMPILER "/usr/bin/g++" CACHE FILEPATH "C++ compiler" FORCE)
     endif()
@@ -101,17 +99,10 @@ if(GIT_BIN)
         ERROR_QUIET
     )
     if(_GIT_RV EQUAL 0 AND EXISTS "${_GIT_TOP}/.git" AND IS_DIRECTORY "${_GIT_TOP}/.git")
-        message(STATUS "Detected git worktree at ${_GIT_TOP}; installing hooks from kt-kernel/.githooks")
-        if(WIN32)
-            set(_HOOKS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.bat")
-            set(_HOOKS_CMD cmd /c "${_HOOKS_SCRIPT}")
-        else()
-            set(_HOOKS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
-            set(_HOOKS_CMD sh "${_HOOKS_SCRIPT}")
-        endif()
-        if(EXISTS "${_HOOKS_SCRIPT}")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh")
+            message(STATUS "Detected git worktree at ${_GIT_TOP}; installing hooks from kt-kernel/.githooks")
             execute_process(
-                COMMAND ${_HOOKS_CMD}
+                COMMAND sh "${CMAKE_SOURCE_DIR}/scripts/install-git-hooks.sh"
                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
                 RESULT_VARIABLE _INSTALL_GIT_HOOKS_RESULT
                 OUTPUT_VARIABLE _INSTALL_GIT_HOOKS_OUT
@@ -121,7 +112,7 @@ if(GIT_BIN)
                 message(FATAL_ERROR "Installing git hooks failed (exit ${_INSTALL_GIT_HOOKS_RESULT}).\nOutput:\n${_INSTALL_GIT_HOOKS_OUT}\nError:\n${_INSTALL_GIT_HOOKS_ERR}")
             endif()
         else()
-            message(WARNING "Hook install script not found at ${_HOOKS_SCRIPT}; skipping.")
+            message(FATAL_ERROR "Required script 'scripts/install-git-hooks.sh' not found in kt-kernel; cannot install hooks.")
         endif()
     else()
         message(STATUS "No git worktree detected; skipping git hooks installation")
@@ -598,41 +589,11 @@ else()
 endif()
 
 include(FindPkgConfig)
-if(WIN32 AND NOT PKG_CONFIG_FOUND)
-    # Auto-download pre-built hwloc on Windows when pkg-config is not available
-    set(HWLOC_VERSION "2.11.2")
-    set(HWLOC_ZIP "hwloc-win64-build-${HWLOC_VERSION}.zip")
-    set(HWLOC_URL "https://download.open-mpi.org/release/hwloc/v2.11/${HWLOC_ZIP}")
-    set(HWLOC_DIR "${CMAKE_BINARY_DIR}/_deps/hwloc")
-
-    if(NOT EXISTS "${HWLOC_DIR}/lib/libhwloc.lib")
-        message(STATUS "Downloading hwloc ${HWLOC_VERSION} for Windows...")
-        file(DOWNLOAD "${HWLOC_URL}" "${CMAKE_BINARY_DIR}/${HWLOC_ZIP}"
-             STATUS HWLOC_DL_STATUS SHOW_PROGRESS)
-        list(GET HWLOC_DL_STATUS 0 HWLOC_DL_RC)
-        if(NOT HWLOC_DL_RC EQUAL 0)
-            message(FATAL_ERROR "Failed to download hwloc: ${HWLOC_DL_STATUS}")
-        endif()
-        file(ARCHIVE_EXTRACT INPUT "${CMAKE_BINARY_DIR}/${HWLOC_ZIP}"
-             DESTINATION "${CMAKE_BINARY_DIR}/_deps")
-        file(RENAME "${CMAKE_BINARY_DIR}/_deps/hwloc-win64-build-${HWLOC_VERSION}" "${HWLOC_DIR}")
-        file(REMOVE "${CMAKE_BINARY_DIR}/${HWLOC_ZIP}")
-    endif()
-
-    add_library(PkgConfig::HWLOC SHARED IMPORTED)
-    set_target_properties(PkgConfig::HWLOC PROPERTIES
-        IMPORTED_IMPLIB "${HWLOC_DIR}/lib/libhwloc.lib"
-        IMPORTED_LOCATION "${HWLOC_DIR}/bin/libhwloc-15.dll"
-        INTERFACE_INCLUDE_DIRECTORIES "${HWLOC_DIR}/include"
-    )
-    # Copy DLL to output directory so it can be found at runtime
-    file(COPY "${HWLOC_DIR}/bin/libhwloc-15.dll" DESTINATION "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
-    message(STATUS "Using auto-downloaded hwloc ${HWLOC_VERSION}")
-elseif(PKG_CONFIG_FOUND)
+if(PKG_CONFIG_FOUND)
     pkg_search_module(HWLOC REQUIRED IMPORTED_TARGET hwloc)
-else()
+else(PKG_CONFIG_FOUND)
     message(FATAL_ERROR "FindHWLOC needs pkg-config program and PKG_CONFIG_PATH must contain the path to hwloc.pc file.")
-endif()
+endif(PKG_CONFIG_FOUND)
 
 
 add_library(llamafile STATIC ${SOURCE_DIR4})
@@ -764,17 +725,10 @@ endif()
 
 
 
-if(WIN32)
-    # Prevent windows.h from defining min/max macros that conflict with std::min/std::max
-    target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX)
-    # Windows has built-in NUMA support via Windows API (kernel32.dll), no libnuma needed
-    message(STATUS "Windows detected - using built-in NUMA support (kernel32)")
+find_library(NUMA_LIBRARY NAMES numa)
+if(NUMA_LIBRARY)
+    message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
 else()
-    find_library(NUMA_LIBRARY NAMES numa)
-    if(NUMA_LIBRARY)
-        message(STATUS "NUMA library found: ${NUMA_LIBRARY} - enabling NUMA support")
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${NUMA_LIBRARY})
-    else()
-        message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
-    endif()
+    message(FATAL_ERROR "NUMA library not found, please install NUMA, sudo apt install libnuma-dev")
 endif()

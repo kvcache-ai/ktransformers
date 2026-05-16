@@ -8,7 +8,6 @@ import glob
 import os
 import platform
 import shutil
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -53,13 +52,10 @@ def _get_kt_kernel_info() -> dict:
         # Get installation path
         info["install_path"] = os.path.dirname(kt_kernel.__file__)
 
-        # Find available extension files (.pyd on Windows, .so on Linux/macOS)
+        # Find available .so files
         kt_kernel_dir = info["install_path"]
-        _ext_suffixes = [".pyd", ".so"] if sys.platform == "win32" else [".so"]
-        so_files = []
-        for _ext in _ext_suffixes:
-            so_files.extend(glob.glob(os.path.join(kt_kernel_dir, f"_kt_kernel_ext_*{_ext}")))
-            so_files.extend(glob.glob(os.path.join(kt_kernel_dir, f"kt_kernel_ext*{_ext}")))
+        so_files = glob.glob(os.path.join(kt_kernel_dir, "_kt_kernel_ext_*.so"))
+        so_files.extend(glob.glob(os.path.join(kt_kernel_dir, "kt_kernel_ext*.so")))
 
         # Parse variant names from filenames
         variants = set()

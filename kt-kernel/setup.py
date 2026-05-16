@@ -390,22 +390,15 @@ class CMakeBuild(build_ext):
             # Build this variant
             self._build_single_variant_impl(ext, extdir, build_temp, cfg)
 
-            # Rename the built extension file to include variant suffix
-            # Original name: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so  (Linux)
-            #                kt_kernel_ext.cp311-win_amd64.pyd              (Windows)
-            # New name: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so  (Linux)
-            #           _kt_kernel_ext_avx2.cp311-win_amd64.pyd             (Windows)
-            ext_base_name = ext.name.split(".")[-1]
-            built_ext_files = list(extdir.glob(f"{ext_base_name}.*{_ext_suffix}"))
-            if not built_ext_files:
-                # Fallback: try both suffixes
-                for sfx in (".pyd", ".so"):
-                    built_ext_files = list(extdir.glob(f"{ext_base_name}.*{sfx}"))
-                    if built_ext_files:
-                        break
-            if built_ext_files:
-                original_ext = built_ext_files[0]
-                suffix = original_ext.name.replace(ext_base_name, "")
+            # Rename the built .so file to include variant suffix
+            # Original name: kt_kernel_ext.cpython-311-x86_64-linux-gnu.so
+            # New name: _kt_kernel_ext_amx.cpython-311-x86_64-linux-gnu.so
+            built_so_files = list(extdir.glob(f"{ext.name.split('.')[-1]}.*.so"))
+            if built_so_files:
+                original_so = built_so_files[0]
+                # Extract the suffix after the module name
+                # e.g., "kt_kernel_ext.cpython-311-x86_64-linux-gnu.so" -> ".cpython-311-x86_64-linux-gnu.so"
+                suffix = original_so.name.replace(ext.name.split(".")[-1], "")
                 new_name = f"_kt_kernel_ext_{variant_name}{suffix}"
                 new_path = extdir / new_name
 
@@ -414,11 +407,11 @@ class CMakeBuild(build_ext):
                     new_path.unlink()
 
                 # Rename
-                original_ext.rename(new_path)
-                print(f"  Built and renamed to: {new_name}")
+                original_so.rename(new_path)
+                print(f"✓ Built and renamed to: {new_name}")
                 print()
             else:
-                print(f"  Warning: Could not find built extension file for {variant_name} variant")
+                print(f"⚠ Warning: Could not find built .so file for {variant_name} variant")
                 print()
 
         # Restore original env vars
@@ -429,13 +422,12 @@ class CMakeBuild(build_ext):
                 del os.environ[key]
 
         print("=" * 70)
-        print("All 6 variants built successfully!")
+        print("✓ All 6 variants built successfully!")
         print("=" * 70)
         print()
         print("The wheel now contains 6 CPU variants:")
-        for ext_file in sorted(extdir.glob("_kt_kernel_ext_*.*")):
-            if ext_file.suffix in (".so", ".pyd"):
-                print(f"  - {ext_file.name}")
+        for so_file in sorted(extdir.glob("_kt_kernel_ext_*.so")):
+            print(f"  - {so_file.name}")
         print()
 
     def _build_single_variant(self, ext: CMakeExtension):
@@ -509,23 +501,12 @@ class CMakeBuild(build_ext):
             os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
             print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
 
-        # Extension suffix: .pyd on Windows, .so on Linux/macOS
-        _ext_suffix = ".pyd" if sys.platform == "win32" else ".so"
-
         # Base CMake args
         cmake_args = [
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}/",
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={cfg}",
         ]
-
-        # MSVC multi-config generators (Visual Studio) ignore CMAKE_LIBRARY_OUTPUT_DIRECTORY
-        # and instead use per-config directories like Release/, Debug/, etc.
-        # Set per-config output directories to ensure the .pyd ends up in extdir directly.
-        if sys.platform == "win32":
-            for config_name in ("Release", "Debug", "RelWithDebInfo", "MinSizeRel"):
-                cmake_args.append(f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{config_name.upper()}={extdir}/")
-                cmake_args.append(f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{config_name.upper()}={extdir}/")
 
         # CPU feature flags mapping: if user specified CPUINFER_CPU_INSTRUCT, honor it;
         # else auto-pick based on detection (x86 only)
@@ -693,17 +674,16 @@ class CMakeBuild(build_ext):
         print("-- CMake build args:", " ".join(build_args))
         subprocess.run(["cmake", *build_args], cwd=build_temp, check=True)
 
-        # On some systems LTO + CMake + pybind may place the built extension inside build tree; move if needed
-        for ext_pat in [f"{ext.name}*{_ext_suffix}", f"{ext.name}*.so", f"{ext.name}*.pyd"]:
-            built_candidates = list(build_temp.rglob(ext_pat))
-            for cand in built_candidates:
-                if cand.parent != extdir:
-                    target = extdir / cand.name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    # Overwrite stale
-                    if not target.exists() or target.stat().st_mtime < cand.stat().st_mtime:
-                        print(f"-- Copying {cand} -> {target}")
-                        target.write_bytes(cand.read_bytes())
+        # On some systems LTO + CMake + pybind may place the built .so inside build tree; move if needed
+        built_candidates = list(build_temp.rglob(f"{ext.name}*.so"))
+        for cand in built_candidates:
+            if cand.parent != extdir:
+                target = extdir / cand.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Overwrite stale
+                if not target.exists() or target.stat().st_mtime < cand.stat().st_mtime:
+                    print(f"-- Copying {cand} -> {target}")
+                    target.write_bytes(cand.read_bytes())
 
 
 ################################################################################

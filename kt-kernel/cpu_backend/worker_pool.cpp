@@ -11,25 +11,8 @@
 #include "worker_pool.h"
 
 #include <hwloc/bitmap.h>
-#ifndef _WIN32
 #include <numa.h>
 #include <numaif.h>
-#endif
-
-#ifdef _WIN32
-#include <windows.h>
-static inline int sched_getcpu() { return (int)GetCurrentProcessorNumber(); }
-static inline int numa_node_of_cpu(int cpu) {
-  UCHAR node = 0;
-  GetNumaProcessorNode((UCHAR)cpu, &node);
-  return (int)node;
-}
-static inline int numa_num_configured_nodes() {
-  ULONG highest = 0;
-  GetNumaHighestNodeNumber(&highest);
-  return (int)(highest + 1);
-}
-#endif
 
 #include <algorithm>
 #include <cassert>
@@ -72,7 +55,6 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
   workers_.resize(total_worker_count);
   for (int i = 1; i < total_worker_count; i++) {
     workers_[i] = std::thread(&InNumaPool::worker_thread, this, i, numa_id);
-#ifndef _WIN32
     // set the thread name as: "numa_(numa_id)_t_(i+threads_id_start)"
     std::string thread_name = "numa_" + std::to_string(numa_id) + "_t_" + std::to_string(i + threads_id_start);
     pthread_t native_handle = workers_[i].native_handle();
@@ -88,7 +70,6 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
     } else {
       // printf("Failed to set thread name: %s\n", name);
     }
-#endif
     // Set the thread affinity to the specified NUMA node's CPU
     numa_obj = hwloc_get_obj_by_type(topology, HWLOC_OBJ_NUMANODE, numa_id);
     if (!numa_obj) {
@@ -105,7 +86,7 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
     cpuset = hwloc_bitmap_alloc();
     hwloc_bitmap_copy(cpuset, core_obj->cpuset);
     hwloc_bitmap_singlify(cpuset);
-    auto res = hwloc_set_thread_cpubind(topology, workers_[i].native_handle(), cpuset, HWLOC_CPUBIND_STRICT);
+    auto res = hwloc_set_thread_cpubind(topology, native_handle, cpuset, HWLOC_CPUBIND_STRICT);
     if (res != 0) {
       fprintf(stderr, "Failed to set thread CPU binding: %s\n", strerror(errno));
     }
@@ -306,13 +287,11 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
     workers[i] = std::thread(&NumaJobDistributor::worker_thread, this, i);
     auto this_numa = numa_ids[i];
     auto start_id = numa_threads_count[this_numa];
-#ifndef _WIN32
     // set the thread name as: "worker_numa_(numa_id)_main_start_id(0)"
     // printf("nuam_id %d, start_id %d\n", this_numa, start_id);
     std::string thread_name = "numa_" + std::to_string(numa_ids[i]) + "_m_" + std::to_string(start_id);
     pthread_t native_handle = workers[i].native_handle();
     pthread_setname_np(native_handle, thread_name.c_str());
-#endif
     // Set the thread affinity to the specified NUMA node's CPU (0)
     numa_obj = hwloc_get_obj_by_type(topology, HWLOC_OBJ_NUMANODE, this_numa);
     if (!numa_obj) {
@@ -334,13 +313,13 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
     unsigned long i_in;
     // hwloc_bitmap_foreach_begin(i_in, cpuset_simple) { printf("Thread %d bound to CPU %ld\n", start_id, i_in); }
     // hwloc_bitmap_foreach_end();
-    auto res = hwloc_set_thread_cpubind(topology, workers[i].native_handle(), cpuset_simple, HWLOC_CPUBIND_STRICT);
+    auto res = hwloc_set_thread_cpubind(topology, native_handle, cpuset_simple, HWLOC_CPUBIND_STRICT);
     if (res != 0) {
       fprintf(stderr, "Failed to set thread CPU binding: %s\n", strerror(errno));
     }
     // 检查线程是否绑定到指定的 核上了
     hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
-    hwloc_get_thread_cpubind(topology, workers[i].native_handle(), cpuset, HWLOC_CPUBIND_THREAD);
+    hwloc_get_thread_cpubind(topology, native_handle, cpuset, HWLOC_CPUBIND_THREAD);
     // hwloc_bitmap_foreach_begin(i_in, cpuset) { printf("Thread %d is bound to CPU %ld\n", start_id, i_in); }
     // hwloc_bitmap_foreach_end();
 
