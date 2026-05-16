@@ -14,7 +14,17 @@ import torch
 from enum import IntEnum
 from safetensors import safe_open
 from gguf.gguf_reader import GGUFReader
-from .mesh import loader as mesh_loader
+try:
+    from .mesh import loader as mesh_loader
+except ImportError:
+    import importlib.util
+
+    _mesh_loader_path = os.path.join(os.path.dirname(__file__), "mesh", "loader.py")
+    _mesh_loader_spec = importlib.util.spec_from_file_location("_kt_mesh_loader", _mesh_loader_path)
+    if _mesh_loader_spec is None or _mesh_loader_spec.loader is None:
+        raise
+    mesh_loader = importlib.util.module_from_spec(_mesh_loader_spec)
+    _mesh_loader_spec.loader.exec_module(mesh_loader)
 
 
 class GGMLQuantizationType(IntEnum):
@@ -110,7 +120,6 @@ class SafeTensorLoader:
     tensor_file_map: dict
     tensor_type_map: dict
     file_handle_map: dict
-    file_memmap_map: dict
     tensor_device_map: dict
     tensor_info_map: dict
 
@@ -126,7 +135,6 @@ class SafeTensorLoader:
             folder_path = file_path
         self.file_handle_map = {}
         self.file_fd_map = {}
-        self.file_memmap_map = {}
         self.tensor_file_map = {}
         self.tensor_type_map = {}
         self.tensor_device_map = {}
@@ -163,18 +171,8 @@ class SafeTensorLoader:
     def _index_safetensor_file(self, file_path: str):
         mesh_loader.index_safetensor_file(self, file_path)
 
-    def _get_file_memmap(self, file_path: str) -> np.memmap:
-        return mesh_loader.get_file_memmap(self, file_path)
-
     def _get_dense_moe_layout(self, base_key: str) -> tuple[list[int], list[int]]:
         return mesh_loader.get_dense_moe_layout(self, base_key)
-
-    @staticmethod
-    def _dtype_for_mmap(dtype_name: str) -> np.dtype:
-        return mesh_loader.dtype_for_mmap(dtype_name)
-
-    def get_mmap_tensor(self, key: str) -> np.ndarray:
-        return mesh_loader.get_mmap_tensor(self, key)
 
     def _get_file_fd(self, file_path: str, use_direct_io: bool = True) -> int:
         return mesh_loader.get_file_fd(self, file_path, use_direct_io=use_direct_io)
@@ -196,7 +194,7 @@ class SafeTensorLoader:
         return tensor.to(device)
 
     def close_all_handles(self):
-        """Close all file handles and clear mmap/direct-I/O state."""
+        """Close all file handles and clear direct-I/O state."""
         import gc
 
         mesh_loader.close_mesh_handles(self)
@@ -307,9 +305,6 @@ class SafeTensorLoader:
             result["up_bwd_scale"] = up_bwd_scales
             result["down_bwd_scale"] = down_bwd_scales
         return result
-
-    def load_experts_mmap(self, base_key: str):
-        return mesh_loader.load_amx_experts_mmap(self, base_key)
 
     def has_tensor(self, name: str):
         return name in self.tensor_file_map
@@ -892,7 +887,7 @@ class GGUFLoader:
         else:
             raise ValueError(f"Path must be a .gguf file or a directory: {gguf_path}")
 
-        print("[GGUFLoader] Summary:")
+        print(f"[GGUFLoader] Summary:")
         print(f"  Files loaded: {len(self.file_data_map)}")
         print(f"  Total tensors: {len(self.tensor_info)}")
         print(f"  Metadata keys: {len(self.metadata)}")
@@ -913,7 +908,7 @@ class GGUFLoader:
             elif isinstance(value, np.ndarray) and value.dtype == np.uint8:
                 try:
                     value = bytes(value).decode("utf-8")
-                except Exception:
+                except:
                     pass
             self.metadata[key] = value
 
@@ -947,7 +942,7 @@ class GGUFLoader:
                     elif isinstance(value, np.ndarray) and value.dtype == np.uint8:
                         try:
                             value = bytes(value).decode("utf-8")
-                        except Exception:
+                        except:
                             pass
                     self.metadata[key] = value
 
@@ -1060,7 +1055,7 @@ class GGUFLoader:
         Args:
             filter_keywords: Optional list of keywords to filter metadata keys
         """
-        print("\n[GGUFLoader] GGUF Metadata:")
+        print(f"\n[GGUFLoader] GGUF Metadata:")
         print(f"  Total metadata entries: {len(self.metadata)}")
 
         if filter_keywords:
@@ -1148,10 +1143,6 @@ class GGUFLoader:
 
         return data, ggml_type
 
-    def get_mmap_tensor_and_ggml_type(self, name: str):
-        return mesh_loader.get_gguf_mmap_tensor_and_ggml_type(self, name, translate_name_to_gguf, GGMLQuantizationType)
-
-
 class GPTQSafeTensorLoader(FP8SafeTensorLoader):
     """Loader for symmetric GPTQ-Int4 expert weights (qweight + scales, no qzeros).
 
@@ -1218,10 +1209,8 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
                     raise NotImplementedError(
                         "GPTQ sym=false (asymmetric) is not supported. Only sym=true models are supported."
                     )
-                print(
-                    f"[GPTQSafeTensorLoader] Verified: sym={qc.get('sym')}, desc_act={qc.get('desc_act')}, "
-                    f"bits={qc.get('bits')}, group_size={qc.get('group_size')}"
-                )
+                print(f"[GPTQSafeTensorLoader] Verified: sym={qc.get('sym')}, desc_act={qc.get('desc_act')}, "
+                      f"bits={qc.get('bits')}, group_size={qc.get('group_size')}")
 
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load GPTQ expert qweight and scales.
@@ -1252,23 +1241,13 @@ class GPTQSafeTensorLoader(FP8SafeTensorLoader):
         down_scales = [None] * expert_count
 
         for exp_id in range(expert_count):
-            gate_weights[exp_id] = self.load_tensor(
-                f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device
-            ).contiguous()
+            gate_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.qweight", device).contiguous()
             up_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.qweight", device).contiguous()
-            down_weights[exp_id] = self.load_tensor(
-                f"{experts_prefix}.{exp_id}.{down_name}.qweight", device
-            ).contiguous()
+            down_weights[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.qweight", device).contiguous()
 
-            gate_scales[exp_id] = (
-                self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
-            )
-            up_scales[exp_id] = (
-                self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
-            )
-            down_scales[exp_id] = (
-                self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
-            )
+            gate_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.scales", device).float().contiguous()
+            up_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{up_name}.scales", device).float().contiguous()
+            down_scales[exp_id] = self.load_tensor(f"{experts_prefix}.{exp_id}.{down_name}.scales", device).float().contiguous()
 
         print(f"[GPTQSafeTensorLoader] Loaded {expert_count} experts from {experts_prefix}")
         return {
@@ -1328,7 +1307,9 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
                 prefix = cand
                 break
         if prefix is None:
-            raise ValueError(f"No MXFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}")
+            raise ValueError(
+                f"No MXFP4 experts found under any of: {self._experts_prefix_candidates(base_key)}"
+            )
 
         gate_weights = [None] * expert_count
         up_weights = [None] * expert_count

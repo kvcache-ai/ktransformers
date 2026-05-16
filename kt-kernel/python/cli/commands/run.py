@@ -27,7 +27,6 @@ from kt_kernel.cli.utils.console import (
     print_warning,
     prompt_choice,
 )
-from kt_kernel.cli.utils.cgroup import maybe_wrap_command_with_cgroup
 from kt_kernel.cli.utils.environment import detect_cpu_info, detect_gpus, detect_ram_gb
 from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 
@@ -87,14 +86,7 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
     "weight_strategy",
     type=click.Choice(["auto", "tiered", "legacy"]),
     default=None,
-    help="Weight loading strategy: tiered (mmap, default), legacy (malloc+copy)",
-)
-@click.option(
-    "--memory-max-gb",
-    "memory_max_gb",
-    type=float,
-    default=None,
-    help="Wrap the launched service in a MemoryMax cgroup budget (GB)",
+    help="Weight loading strategy. Defaults to legacy unless config or env enables MESH.",
 )
 @click.option(
     "--max-tier0-experts",
@@ -108,14 +100,14 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
     "residency_policy",
     type=click.Choice(["baseline", "current_ema", "lru", "2q", "slru", "sieve", "s3fifo", "w_tinylfu"]),
     default=None,
-    help="Tier0 expert residency policy when weight_strategy=tiered",
+    help="MESH resident-cache eviction policy",
 )
 @click.option(
     "--io-backend",
     "io_backend",
-    type=click.Choice(["mmap", "iouring"], case_sensitive=False),
-    default="mmap",
-    help="I/O backend for expert weight loading (mmap: OS page cache, iouring: direct I/O)",
+    type=click.Choice(["legacy", "mmap", "iouring"], case_sensitive=False),
+    default=None,
+    help="I/O backend for expert weight loading (legacy/mmap: ordinary KT loading, iouring: direct I/O)",
 )
 @click.option(
     "--enable-cache-stats",
@@ -151,10 +143,9 @@ def run(
     advanced: bool,
     dry_run: bool,
     weight_strategy: Optional[str],
-    memory_max_gb: Optional[float],
     max_tier0_experts: Optional[int],
     residency_policy: Optional[str],
-    io_backend: str,
+    io_backend: Optional[str],
     enable_cache_stats: bool,
 ) -> None:
     """Start model inference server.
@@ -214,9 +205,10 @@ def run(
         dry_run=dry_run,
         extra_cli_args=extra_cli_args,
         weight_strategy=weight_strategy,
-        memory_max_gb=memory_max_gb,
         max_tier0_experts=max_tier0_experts,
         residency_policy=residency_policy,
+        io_backend=io_backend,
+        enable_cache_stats=enable_cache_stats,
     )
 
 
@@ -245,9 +237,10 @@ def _run_impl(
     dry_run: bool,
     extra_cli_args: list[str],
     weight_strategy: Optional[str] = None,
-    memory_max_gb: Optional[float] = None,
     max_tier0_experts: Optional[int] = None,
     residency_policy: Optional[str] = None,
+    io_backend: Optional[str] = None,
+    enable_cache_stats: bool = False,
 ) -> None:
     """Actual implementation of run command."""
     # Check if SGLang is installed before proceeding
@@ -502,10 +495,10 @@ def _run_impl(
     # KT-kernel options
     final_kt_method = resolve(kt_method, "inference.kt_method", "AMXINT4")
     final_kt_gpu_prefill_threshold = resolve(kt_gpu_prefill_threshold, "inference.kt_gpu_prefill_token_threshold", 4096)
-    final_weight_strategy = resolve(weight_strategy, "inference.weight_strategy", "tiered")
-    final_memory_max_gb = resolve(memory_max_gb, "inference.memory_max_gb", None)
+    final_weight_strategy = resolve(weight_strategy, "inference.weight_strategy", None)
     final_max_tier0_experts = resolve(max_tier0_experts, "inference.max_tier0_experts", None)
-    final_residency_policy = resolve(residency_policy, "inference.residency_policy", "baseline")
+    final_residency_policy = resolve(residency_policy, "inference.residency_policy", None)
+    final_io_backend = resolve(io_backend, "inference.io_backend", None)
     # SGLang options
     final_attention_backend = resolve(attention_backend, "inference.attention_backend", "flashinfer")
     final_max_total_tokens = resolve(max_total_tokens, "inference.max_total_tokens", 40000)
@@ -552,7 +545,6 @@ def _run_impl(
         kt_numa_nodes=final_kt_numa_nodes,
         tool_call_parser=final_tool_call_parser,
         reasoning_parser=final_reasoning_parser,
-        weight_strategy=final_weight_strategy,
         settings=settings,
         extra_model_params=extra_params,
         extra_cli_args=extra_cli_args,
@@ -567,19 +559,17 @@ def _run_impl(
     if isinstance(inference_env, dict):
         env.update({k: str(v) for k, v in inference_env.items()})
 
-    # Add tiered residency parameters as environment variables (fallback for SGLang)
+    # Add MESH residency parameters as environment variables (fallback for SGLang)
     if final_weight_strategy:
         env["KT_WEIGHT_STRATEGY"] = final_weight_strategy
     if final_max_tier0_experts is not None:
         env["KT_MAX_TIER0_EXPERTS"] = str(final_max_tier0_experts)
     if final_residency_policy:
         env["KT_RESIDENCY_POLICY"] = str(final_residency_policy)
-    if io_backend:
-        env["KT_IO_BACKEND"] = io_backend.upper()
+    if final_io_backend:
+        env["KT_IO_BACKEND"] = str(final_io_backend).upper()
     if enable_cache_stats:
         env["KT_ENABLE_CACHE_STATS"] = "1"
-
-    cmd, cgroup_wrapped = maybe_wrap_command_with_cgroup(cmd, env, final_memory_max_gb)
 
     # Step 5: Show configuration summary
     console.print()
@@ -600,12 +590,10 @@ def _run_impl(
         console.print(f"  NUMA Nodes (binding): [cyan]{', '.join(map(str, final_kt_numa_nodes))}[/cyan]")
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
-    console.print(f"  Weight Strategy: [cyan]{final_weight_strategy}[/cyan]")
-    console.print(f"  Residency Policy: [cyan]{final_residency_policy}[/cyan]")
+    console.print(f"  Weight Strategy: [cyan]{final_weight_strategy or 'legacy'}[/cyan]")
+    console.print(f"  Residency Policy: [cyan]{final_residency_policy or 'baseline'}[/cyan]")
     if final_max_tier0_experts is not None:
         console.print(f"  Max Tier0 Experts: [cyan]{final_max_tier0_experts}[/cyan]")
-    if cgroup_wrapped:
-        console.print(f"  CGroup MemoryMax: [cyan]{final_memory_max_gb:g} GB[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
 
     # Weights info
@@ -640,7 +628,7 @@ def _run_impl(
     try:
         # Execute directly without intercepting output or signals
         # This allows direct output to terminal and Ctrl+C to work naturally
-        process = subprocess.run(cmd, env=None if cgroup_wrapped else env)
+        process = subprocess.run(cmd, env=env)
         sys.exit(process.returncode)
 
     except FileNotFoundError:
@@ -681,7 +669,6 @@ def _build_sglang_command(
     kt_numa_nodes: Optional[list[int]],
     tool_call_parser: Optional[str],
     reasoning_parser: Optional[str],
-    weight_strategy: str,
     settings,
     extra_model_params: Optional[dict] = None,  # New parameter for additional params
     extra_cli_args: Optional[list[str]] = None,  # Extra args from CLI to pass to sglang
@@ -798,7 +785,6 @@ def _build_sglang_command(
             "watchdog-timeout",
             "served-model-name",
             "disable-shared-experts-fusion",
-            "kt-weight-strategy",
         }
 
         for key, value in extra_model_params.items():

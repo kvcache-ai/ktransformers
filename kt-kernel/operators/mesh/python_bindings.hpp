@@ -412,11 +412,11 @@ void bind_moe_residency_methods(PyClass& moe_cls) {
                   { moe.is_expert_promoted(expert_id) } -> std::convertible_to<bool>;
                 }) {
     moe_cls.def("promote_expert", &MoeClass::promote_expert, pybind11::arg("expert_id"),
-                "Promote an expert to Tier 0 (NUMA-local malloc) for ~80ns access latency");
+                "Materialize an expert into the MESH resident CPU cache");
     moe_cls.def("demote_expert", &MoeClass::demote_expert, pybind11::arg("expert_id"),
-                "Demote an expert back to baseline (mmap or legacy storage)");
+                "Demote an expert out of the MESH resident CPU cache");
     moe_cls.def("is_expert_promoted", &MoeClass::is_expert_promoted, pybind11::arg("expert_id"),
-                "Check if an expert is currently in Tier 0");
+                "Check if an expert is currently resident in the MESH CPU cache");
   }
 
   if constexpr (requires(MoeClass moe, intptr_t expert_ids, int count, intptr_t protect_ids, int protect_count,
@@ -505,8 +505,7 @@ void bind_moe_residency_methods(PyClass& moe_cls) {
 
 template <class PyClass>
 void bind_moe_config_extension(PyClass& cls) {
-  cls.def_readwrite("use_mmap", &GeneralMOEConfig::use_mmap)
-      .def_readwrite("max_tier0_experts", &GeneralMOEConfig::max_tier0_experts)
+  cls.def_readwrite("max_tier0_experts", &GeneralMOEConfig::max_tier0_experts)
       .def_readwrite("max_resident_experts", &GeneralMOEConfig::max_resident_experts)
       .def_readwrite("resident_cache_policy", &GeneralMOEConfig::resident_cache_policy)
       .def_readwrite("enable_cache_stats", &GeneralMOEConfig::enable_cache_stats)
@@ -605,7 +604,7 @@ inline void bind_async_io_python(pybind11::module_& m) {
            "Return a compact status summary for request diagnostics");
 
   pybind11::enum_<IOBackend>(m, "IOBackend")
-      .value("MMAP", IOBackend::MMAP, "Memory-mapped I/O (OS page cache)")
+      .value("MMAP", IOBackend::MMAP, "Compatibility value for ordinary KT resident loading")
       .value("IOURING", IOBackend::IOURING, "io_uring direct I/O (bypass page cache)")
       .export_values();
 #endif

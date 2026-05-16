@@ -7,6 +7,7 @@ by testing actual server launches with different configurations.
 
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -15,7 +16,6 @@ from pathlib import Path
 from typing import Optional
 
 from kt_kernel.cli.utils.console import console, print_error, print_info, print_warning
-from kt_kernel.cli.utils.cgroup import maybe_wrap_command_with_cgroup
 
 
 def get_num_experts(model_path: Path) -> int:
@@ -145,13 +145,8 @@ def test_config(
             config.get("kt_method", "AMXINT4"),
             "--kt-gpu-prefill-token-threshold",
             str(config.get("kt_gpu_prefill_threshold", 4096)),
-            "--kt-weight-strategy",
-            config.get("weight_strategy", "tiered"),
         ]
     )
-
-    if config.get("max_tier0_experts") is not None:
-        cmd.extend(["--kt-max-tier0-experts", str(config["max_tier0_experts"])])
 
     # Add other SGLang options
     if config.get("attention_backend"):
@@ -184,11 +179,14 @@ def test_config(
     if verbose:
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
-    env = dict(config.get("env", {}) or {})
+    env = os.environ.copy()
+    env.update(config.get("env", {}) or {})
+    if config.get("weight_strategy"):
+        env["KT_WEIGHT_STRATEGY"] = str(config["weight_strategy"])
+    if config.get("max_tier0_experts") is not None:
+        env["KT_MAX_TIER0_EXPERTS"] = str(config["max_tier0_experts"])
     if config.get("residency_policy"):
         env["KT_RESIDENCY_POLICY"] = str(config["residency_policy"])
-
-    cmd, cgroup_wrapped = maybe_wrap_command_with_cgroup(cmd, env, config.get("memory_max_gb"))
 
     # Start process
     try:
@@ -198,7 +196,7 @@ def test_config(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env=None if cgroup_wrapped else env,
+            env=env,
         )
     except Exception as e:
         if verbose:

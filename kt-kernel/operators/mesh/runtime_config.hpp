@@ -34,8 +34,8 @@ enum class ResidentCachePolicyKind : uint8_t {
 
 // I/O backend for expert weight loading
 enum class IOBackend : uint8_t {
-  MMAP = 0,      // mmap-based loading (current default, uses OS page cache)
-  IOURING = 1,   // io_uring-based async I/O (Linux 5.1+, zero page cache dependency)
+  MMAP = 0,      // Compatibility name for ordinary KT resident loading.
+  IOURING = 1,   // io_uring-based async I/O (Linux 5.1+, direct I/O capable)
 };
 
 // File slot for io_uring direct I/O
@@ -48,10 +48,6 @@ struct ExpertFileSlot {
 struct ExpertCacheStats;
 
 struct MeshMOEConfigExtension {
-  // mmap mode: when true, weight pointers point directly into mmap'd regions.
-  // load_weights() should skip memcpy and use the pointers as-is.
-  // This avoids double-buffering when model size approaches physical RAM.
-  bool use_mmap = false;
   int max_tier0_experts = 0;
   // Optional resident cache limit for request-path on-demand expert copies.
   // When 0, backends fall back to max_tier0_experts-compatible behavior.
@@ -60,7 +56,8 @@ struct MeshMOEConfigExtension {
   // baseline maps to the historical round-robin resident eviction behavior.
   std::string resident_cache_policy = "baseline";
 
-  // I/O backend selection (mmap vs io_uring)
+  // I/O backend selection. MMAP is retained as a compatibility enum value for
+  // normal KT resident loading; MESH's lazy path is io_uring-only.
   IOBackend io_backend = IOBackend::MMAP;
   bool iouring_direct_io = true;
 
@@ -105,9 +102,6 @@ struct MeshMOEConfigExtension {
   int mesh_memory_check_interval = 64;
   int mesh_memory_max_demotes_per_check = 8;
 
-  // mmap baseline page reclaim parameters
-  float mmap_file_reclaim_trigger_ratio = 0.90f;
-  float mmap_file_target_file_ratio = 0.15f;
 };
 
 // Expert cache statistics for hit rate analysis

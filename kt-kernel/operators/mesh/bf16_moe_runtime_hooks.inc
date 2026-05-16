@@ -111,9 +111,8 @@
 
       Base::forward(qlen, k, expert_ids, weights, input, output);
       if (config_.max_tier0_experts <= 0 && !active_experts.empty()) {
-        // With zero Tier0 budget, keep mmap-backed experts only for the current
-        // forward pass and drop them immediately afterwards instead of retaining
-        // a cross-token resident cache.
+        // With zero resident-cache budget, keep MESH-loaded experts only for
+        // the current forward pass.
         expert_read_scope.reset();
         for (int expert_id : active_experts) {
           demote_expert(expert_id);
@@ -127,6 +126,7 @@
 
   void promote_expert(int expert_id) override {
 #ifndef _WIN32
+    if (!lazy_weight_enabled()) return;
     ensure_expert_ready(expert_id, true);
 #else
     (void)expert_id;
@@ -134,6 +134,7 @@
   }
   void demote_expert(int expert_id) override {
 #ifndef _WIN32
+    if (!lazy_weight_enabled()) return;
     if (expert_id < 0 || expert_id >= config_.expert_num) return;
 
     for (;;) {
@@ -172,6 +173,7 @@
 
   bool is_expert_promoted(int expert_id) const override {
 #ifndef _WIN32
+    if (!lazy_weight_enabled()) return false;
     if (expert_id < 0 || expert_id >= config_.expert_num) return false;
     return expert_states_[expert_id].load(std::memory_order_acquire) == EXPERT_PINNED;
 #else

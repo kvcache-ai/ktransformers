@@ -179,7 +179,8 @@ class _MoEBase:
             if numa_nodes is not None:
                 if len(numa_nodes) != threadpool_count:
                     raise ValueError(
-                        f"numa_nodes length ({len(numa_nodes)}) must match " f"threadpool_count ({threadpool_count})"
+                        f"numa_nodes length ({len(numa_nodes)}) must match "
+                        f"threadpool_count ({threadpool_count})"
                     )
                 subpool_numa_map = list(numa_nodes)
             else:
@@ -248,7 +249,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
-        weight_strategy: str = "auto",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
         swiglu_limit: float = 0.0,
@@ -275,10 +276,10 @@ class BaseMoEWrapper(_MoEBase, ABC):
             cpu_save: Whether to save weights to CPU memory
             max_deferred_experts_per_token: Number of experts per token to defer on this layer. Defaults to 0 (no defer).
             method: Backend method string
-            weight_strategy: Weight residency strategy. "auto" chooses between
-                             full-resident legacy mode and mmap+tier0 adaptive mode,
-                             "legacy" forces malloc+copy, "tiered" forces mmap baseline
-                             with hot experts promoted into Tier0 NUMA buffers.
+            weight_strategy: Compatibility option for older configs. MESH no longer
+                             enables the old adaptive weight loader from this flag;
+                             use KT_IO_BACKEND=IOURING plus resident-cache settings
+                             for on-demand expert loading.
             max_tier0_experts: Maximum number of expert IDs promoted to Tier 0.
                                Defaults to an auto-derived value based on the
                                current cgroup/host memory scope when omitted.
@@ -336,9 +337,6 @@ class BaseMoEWrapper(_MoEBase, ABC):
                 )
         self.max_deferred_experts_per_token = (
             int(max_deferred_experts_per_token) if max_deferred_experts_per_token is not None else 0
-        )
-        print(
-            f"[KTDeferredExperts] layer={layer_idx} max_deferred_experts_per_token={self.max_deferred_experts_per_token}"
         )
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False

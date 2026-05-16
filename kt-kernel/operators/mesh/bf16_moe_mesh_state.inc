@@ -2,14 +2,10 @@
 // Keep declarations free of namespace wrappers and include guards.
 
  public:
-  static constexpr bool kUsesLazyMmapPacking = true;
+  static constexpr bool kUsesLazyWeightPacking = true;
 
 #ifndef _WIN32
  private:
-  std::unique_ptr<const ggml_bf16_t*[]> baseline_gate_src_;
-  std::unique_ptr<const ggml_bf16_t*[]> baseline_up_src_;
-  std::unique_ptr<const ggml_bf16_t*[]> baseline_down_src_;
-
   std::unique_ptr<void*[]> packed_gate_owner_;
   std::unique_ptr<void*[]> packed_up_owner_;
   std::unique_ptr<void*[]> packed_down_owner_;

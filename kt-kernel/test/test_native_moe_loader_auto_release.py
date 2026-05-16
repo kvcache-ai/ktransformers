@@ -1,4 +1,4 @@
-"""Tests for NativeMoEWrapper layerwise mmap-release mechanism.
+"""Tests for NativeMoEWrapper layerwise loader-release mechanism.
 
 Verifies that the SafeTensor loader singleton (_native_loader_instance) is
 released after EACH layer's load_weights() completes (not just after all layers),
@@ -80,7 +80,6 @@ def _reset_state():
 # Test cases
 # ---------------------------------------------------------------------------
 
-
 class TestLayerwiseRelease(unittest.TestCase):
     """Each layer's load_weights() should release the loader afterwards."""
 
@@ -90,9 +89,8 @@ class TestLayerwiseRelease(unittest.TestCase):
     def test_single_layer_released_after_load(self):
         w = FakeNativeMoEWrapper(layer_idx=0)
         w.load_weights()
-        self.assertIsNone(
-            FakeNativeMoEWrapper._native_loader_instance, "Loader should be None after single layer loads"
-        )
+        self.assertIsNone(FakeNativeMoEWrapper._native_loader_instance,
+                          "Loader should be None after single layer loads")
 
     def test_each_layer_releases_loader(self):
         """After every layer's load_weights(), the loader should be None."""
@@ -115,9 +113,9 @@ class TestLayerwiseRelease(unittest.TestCase):
         # Total recreations = N - 1 (layer 0 doesn't recreate if loader pre-existed,
         # but in this test the loader starts as None so all N layers recreate)
         self.assertEqual(
-            FakeNativeMoEWrapper._create_loader_calls,
-            N,
-            f"Expected {N} loader recreations for {N} layers, " f"got {FakeNativeMoEWrapper._create_loader_calls}",
+            FakeNativeMoEWrapper._create_loader_calls, N,
+            f"Expected {N} loader recreations for {N} layers, "
+            f"got {FakeNativeMoEWrapper._create_loader_calls}",
         )
 
 
@@ -141,7 +139,8 @@ class TestLoaderRecreate(unittest.TestCase):
         w1 = FakeNativeMoEWrapper(layer_idx=1)
         w1.load_weights()
         # Second layer should have recreated the loader
-        self.assertEqual(FakeNativeMoEWrapper._create_loader_calls, 2, "Both layers should recreate the loader")
+        self.assertEqual(FakeNativeMoEWrapper._create_loader_calls, 2,
+                         "Both layers should recreate the loader")
 
     def test_pre_existing_loader_not_recreated(self):
         """If loader already exists (e.g., from __init__), it should not be recreated."""

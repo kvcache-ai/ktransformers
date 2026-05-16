@@ -376,7 +376,6 @@ void bind_slot_to_expert(ResidentSlotPoolView view,
   view.slot_states[slot].store(SLOT_READY, std::memory_order_release);
   view.expert_states[expert_id].store(hard_pin ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
   hooks.note_expert_insert(expert_id, hard_pin);
-  hooks.drop_baseline_cache_for_expert(expert_id);
 }
 
 template <class Hooks>

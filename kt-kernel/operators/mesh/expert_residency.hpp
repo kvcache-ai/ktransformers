@@ -4,16 +4,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#ifndef _WIN32
-#include <sys/mman.h>
-#endif
 
 #include "async_io.hpp"
 #include "../common.hpp"
@@ -105,7 +100,7 @@ inline bool iouring_enabled(const GeneralMOEConfig& config) {
 }
 
 inline bool lazy_weight_enabled(const GeneralMOEConfig& config) {
-  return config.use_mmap || iouring_enabled(config);
+  return iouring_enabled(config);
 }
 
 inline int logical_expert_id_for_slot(const GeneralMOEConfig& config, int tp_part_idx, int expert_id) {
@@ -460,138 +455,6 @@ inline std::string amx_iouring_prefetch_wait_failure_message(
       << " expert=" << expert_id << " requests=" << requests.size()
       << " detail=" << async_reader->describe_requests(requests);
   return oss.str();
-}
-
-inline void madvise_amx_baseline_expert(int expert_id,
-                                        int advice,
-                                        bool include_mins,
-                                        const std::vector<void*>& gate_weight_src,
-                                        const std::vector<void*>& up_weight_src,
-                                        const std::vector<void*>& down_weight_src,
-                                        const std::vector<float*>& gate_scale_src,
-                                        const std::vector<float*>& up_scale_src,
-                                        const std::vector<float*>& down_scale_src,
-                                        const std::vector<float*>& gate_mins_src,
-                                        const std::vector<float*>& up_mins_src,
-                                        const std::vector<float*>& down_mins_src,
-                                        size_t gate_weight_bytes,
-                                        size_t up_weight_bytes,
-                                        size_t down_weight_bytes,
-                                        size_t gate_scale_bytes,
-                                        size_t up_scale_bytes,
-                                        size_t down_scale_bytes,
-                                        size_t gate_mins_bytes,
-                                        size_t up_mins_bytes,
-                                        size_t down_mins_bytes) {
-  if (expert_id < 0) return;
-  const auto advise_ptr = [&](void* ptr, size_t size) {
-    if (ptr != nullptr && size > 0) {
-      (void)madvise(ptr, size, advice);
-    }
-  };
-  const auto weight_ptr = [&](const std::vector<void*>& src) -> void* {
-    return expert_id < static_cast<int>(src.size()) ? src[expert_id] : nullptr;
-  };
-  const auto scale_ptr = [&](const std::vector<float*>& src) -> void* {
-    return expert_id < static_cast<int>(src.size()) ? static_cast<void*>(src[expert_id]) : nullptr;
-  };
-
-  advise_ptr(weight_ptr(gate_weight_src), gate_weight_bytes);
-  advise_ptr(weight_ptr(up_weight_src), up_weight_bytes);
-  advise_ptr(weight_ptr(down_weight_src), down_weight_bytes);
-  advise_ptr(scale_ptr(gate_scale_src), gate_scale_bytes);
-  advise_ptr(scale_ptr(up_scale_src), up_scale_bytes);
-  advise_ptr(scale_ptr(down_scale_src), down_scale_bytes);
-  if (include_mins) {
-    advise_ptr(scale_ptr(gate_mins_src), gate_mins_bytes);
-    advise_ptr(scale_ptr(up_mins_src), up_mins_bytes);
-    advise_ptr(scale_ptr(down_mins_src), down_mins_bytes);
-  }
-}
-
-template <class PtrArray>
-inline void madvise_bf16_baseline_expert(int expert_id,
-                                         int advice,
-                                         const PtrArray& gate_src,
-                                         const PtrArray& up_src,
-                                         const PtrArray& down_src,
-                                         size_t gate_weight_bytes,
-                                         size_t up_weight_bytes,
-                                         size_t down_full_weight_bytes) {
-  if (expert_id < 0) return;
-  const auto advise_ptr = [&](const auto* ptr, size_t size) {
-    if (ptr != nullptr && size > 0) {
-      (void)madvise(const_cast<void*>(static_cast<const void*>(ptr)), size, advice);
-    }
-  };
-  advise_ptr(gate_src[expert_id], gate_weight_bytes);
-  advise_ptr(up_src[expert_id], up_weight_bytes);
-  advise_ptr(down_src[expert_id], down_full_weight_bytes);
-}
-
-inline bool amx_baseline_expert_available(int expert_id,
-                                          const std::vector<void*>& gate_weight_src,
-                                          const std::vector<void*>& up_weight_src,
-                                          const std::vector<void*>& down_weight_src,
-                                          const std::vector<float*>& gate_scale_src,
-                                          const std::vector<float*>& up_scale_src,
-                                          const std::vector<float*>& down_scale_src) {
-  if (expert_id < 0 || expert_id >= static_cast<int>(gate_weight_src.size()) ||
-      expert_id >= static_cast<int>(up_weight_src.size()) || expert_id >= static_cast<int>(down_weight_src.size()) ||
-      expert_id >= static_cast<int>(gate_scale_src.size()) || expert_id >= static_cast<int>(up_scale_src.size()) ||
-      expert_id >= static_cast<int>(down_scale_src.size())) {
-    return false;
-  }
-  return gate_weight_src[expert_id] != nullptr && up_weight_src[expert_id] != nullptr &&
-         down_weight_src[expert_id] != nullptr && gate_scale_src[expert_id] != nullptr &&
-         up_scale_src[expert_id] != nullptr && down_scale_src[expert_id] != nullptr;
-}
-
-inline void copy_amx_baseline_expert_to_owners(int expert_id,
-                                               bool include_mins,
-                                               void* gate_owner,
-                                               void* up_owner,
-                                               void* down_owner,
-                                               const std::vector<void*>& gate_weight_src,
-                                               const std::vector<void*>& up_weight_src,
-                                               const std::vector<void*>& down_weight_src,
-                                               const std::vector<float*>& gate_scale_src,
-                                               const std::vector<float*>& up_scale_src,
-                                               const std::vector<float*>& down_scale_src,
-                                               const std::vector<float*>& gate_mins_src,
-                                               const std::vector<float*>& up_mins_src,
-                                               const std::vector<float*>& down_mins_src,
-                                               size_t gate_weight_bytes,
-                                               size_t up_weight_bytes,
-                                               size_t down_weight_bytes,
-                                               size_t gate_scale_bytes,
-                                               size_t up_scale_bytes,
-                                               size_t down_scale_bytes,
-                                               size_t gate_mins_bytes,
-                                               size_t up_mins_bytes,
-                                               size_t down_mins_bytes) {
-  std::memcpy(gate_owner, gate_weight_src[expert_id], gate_weight_bytes);
-  std::memcpy(reinterpret_cast<char*>(gate_owner) + gate_weight_bytes, gate_scale_src[expert_id], gate_scale_bytes);
-  std::memcpy(up_owner, up_weight_src[expert_id], up_weight_bytes);
-  std::memcpy(reinterpret_cast<char*>(up_owner) + up_weight_bytes, up_scale_src[expert_id], up_scale_bytes);
-  std::memcpy(down_owner, down_weight_src[expert_id], down_weight_bytes);
-  std::memcpy(reinterpret_cast<char*>(down_owner) + down_weight_bytes, down_scale_src[expert_id], down_scale_bytes);
-
-  if (!include_mins) return;
-  if (gate_mins_bytes > 0 && expert_id < static_cast<int>(gate_mins_src.size()) &&
-      gate_mins_src[expert_id] != nullptr) {
-    std::memcpy(reinterpret_cast<char*>(gate_owner) + gate_weight_bytes + gate_scale_bytes,
-                gate_mins_src[expert_id], gate_mins_bytes);
-  }
-  if (up_mins_bytes > 0 && expert_id < static_cast<int>(up_mins_src.size()) && up_mins_src[expert_id] != nullptr) {
-    std::memcpy(reinterpret_cast<char*>(up_owner) + up_weight_bytes + up_scale_bytes,
-                up_mins_src[expert_id], up_mins_bytes);
-  }
-  if (down_mins_bytes > 0 && expert_id < static_cast<int>(down_mins_src.size()) &&
-      down_mins_src[expert_id] != nullptr) {
-    std::memcpy(reinterpret_cast<char*>(down_owner) + down_weight_bytes + down_scale_bytes,
-                down_mins_src[expert_id], down_mins_bytes);
-  }
 }
 
 }  // namespace mesh

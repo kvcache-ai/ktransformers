@@ -16,7 +16,6 @@
 
 #ifndef _WIN32
 #include <numa.h>
-#include <sys/mman.h>
 #endif
 
 #include <cstdio>
@@ -357,7 +356,6 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
       // save process
       if (config_.save) {
-        std::filesystem::create_directories(prefix);
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
             [this, physical_to_logical_map, prefix](int task_id) {

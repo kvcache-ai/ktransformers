@@ -13,16 +13,12 @@
   }
 
   bool iouring_enabled() const { return mesh::iouring_enabled(config_); }
-  bool mmap_enabled() const { return config_.use_mmap && !iouring_enabled(); }
-  bool resident_io_enabled() const { return buffer_b_has_scale_ptr() && (mmap_enabled() || iouring_enabled()); }
+  bool resident_io_enabled() const { return buffer_b_has_scale_ptr() && iouring_enabled(); }
 
   bool mesh_load_weights_from_resident_sources(const uint64_t* physical_to_logical_map) {
+    (void)physical_to_logical_map;
     if (iouring_enabled()) {
       validate_iouring_config();
-      return true;
-    }
-    if (config_.gate_projs.size() && config_.use_mmap) {
-      set_all_mmap_source_ptrs_quantized(physical_to_logical_map);
       return true;
     }
     return false;
@@ -41,49 +37,12 @@
     (void)release_resident_slot_pool(false);
   }
 
-  void set_all_mmap_source_ptrs_quantized(const uint64_t* physical_to_logical_map) {
-    auto pool = config_.pool->get_subpool(tp_part_idx);
-    pool->do_work_stealing_job(
-        config_.expert_num, nullptr,
-        [this, physical_to_logical_map](int expert_id) {
-          uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_id);
-          float* gate_mins = nullptr;
-          float* up_mins = nullptr;
-          float* down_mins = nullptr;
-          if constexpr (requires { gate_bb_[expert_id]->mins; }) {
-            if (!config_.gate_zeros.empty()) gate_mins = (float*)(config_.gate_zeros[tp_part_idx][logical_expert_id]);
-            if (!config_.up_zeros.empty()) up_mins = (float*)(config_.up_zeros[tp_part_idx][logical_expert_id]);
-            if (!config_.down_zeros.empty()) down_mins = (float*)(config_.down_zeros[tp_part_idx][logical_expert_id]);
-          }
-          set_mmap_source_ptrs_quantized(expert_id,
-                                         config_.gate_projs[tp_part_idx][logical_expert_id],
-                                         config_.up_projs[tp_part_idx][logical_expert_id],
-                                         config_.down_projs[tp_part_idx][logical_expert_id],
-                                         (float*)config_.gate_scales[tp_part_idx][logical_expert_id],
-                                         (float*)config_.up_scales[tp_part_idx][logical_expert_id],
-                                         (float*)config_.down_scales[tp_part_idx][logical_expert_id],
-                                         gate_mins,
-                                         up_mins,
-                                         down_mins);
-        },
-        nullptr);
-  }
-
   void initialize_resident_io_state() {
     if constexpr (!buffer_b_has_scale_ptr()) {
       cache_capacity_ = 0;
       return;
     } else {
     const int en = config_.expert_num;
-    baseline_gate_weight_src_.assign(en, nullptr);
-    baseline_up_weight_src_.assign(en, nullptr);
-    baseline_down_weight_src_.assign(en, nullptr);
-    baseline_gate_scale_src_.assign(en, nullptr);
-    baseline_up_scale_src_.assign(en, nullptr);
-    baseline_down_scale_src_.assign(en, nullptr);
-    baseline_gate_mins_src_.assign(en, nullptr);
-    baseline_up_mins_src_.assign(en, nullptr);
-    baseline_down_mins_src_.assign(en, nullptr);
     packed_gate_owner_.assign(en, nullptr);
     packed_up_owner_.assign(en, nullptr);
     packed_down_owner_.assign(en, nullptr);
@@ -166,22 +125,6 @@
     }
   }
 
-  void apply_baseline_ptrs(int expert_id) {
-    gate_bb_[expert_id]->b = reinterpret_cast<decltype(gate_bb_[expert_id]->b)>(baseline_gate_weight_src_[expert_id]);
-    up_bb_[expert_id]->b = reinterpret_cast<decltype(up_bb_[expert_id]->b)>(baseline_up_weight_src_[expert_id]);
-    down_bb_[expert_id]->b = reinterpret_cast<decltype(down_bb_[expert_id]->b)>(baseline_down_weight_src_[expert_id]);
-    if constexpr (buffer_b_has_scale_ptr()) {
-    gate_bb_[expert_id]->d = baseline_gate_scale_src_[expert_id];
-    up_bb_[expert_id]->d = baseline_up_scale_src_[expert_id];
-    down_bb_[expert_id]->d = baseline_down_scale_src_[expert_id];
-    }
-    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
-      gate_bb_[expert_id]->mins = baseline_gate_mins_src_[expert_id];
-      up_bb_[expert_id]->mins = baseline_up_mins_src_[expert_id];
-      down_bb_[expert_id]->mins = baseline_down_mins_src_[expert_id];
-    }
-  }
-
   void clear_expert_ptrs(int expert_id) {
     gate_bb_[expert_id]->b = nullptr;
     up_bb_[expert_id]->b = nullptr;
@@ -199,11 +142,7 @@
   }
 
   void apply_cold_ptrs(int expert_id) {
-    if (mmap_enabled()) {
-      apply_baseline_ptrs(expert_id);
-    } else {
-      clear_expert_ptrs(expert_id);
-    }
+    clear_expert_ptrs(expert_id);
   }
 
   void apply_owned_ptrs(int expert_id, void* gate_owner, void* up_owner, void* down_owner) {
@@ -220,23 +159,6 @@
       up_bb_[expert_id]->mins = reinterpret_cast<float*>(reinterpret_cast<char*>(up_owner) + up_weight_bytes_ + up_scale_bytes_);
       down_bb_[expert_id]->mins = reinterpret_cast<float*>(reinterpret_cast<char*>(down_owner) + down_weight_bytes_ + down_scale_bytes_);
     }
-  }
-
-  void set_mmap_source_ptrs_quantized(int expert_id, void* gate_weight_src, void* up_weight_src, void* down_weight_src,
-                                      float* gate_scale_src, float* up_scale_src, float* down_scale_src,
-                                      float* gate_mins_src = nullptr, float* up_mins_src = nullptr,
-                                      float* down_mins_src = nullptr) {
-    baseline_gate_weight_src_[expert_id] = gate_weight_src;
-    baseline_up_weight_src_[expert_id] = up_weight_src;
-    baseline_down_weight_src_[expert_id] = down_weight_src;
-    baseline_gate_scale_src_[expert_id] = gate_scale_src;
-    baseline_up_scale_src_[expert_id] = up_scale_src;
-    baseline_down_scale_src_[expert_id] = down_scale_src;
-    baseline_gate_mins_src_[expert_id] = gate_mins_src;
-    baseline_up_mins_src_[expert_id] = up_mins_src;
-    baseline_down_mins_src_[expert_id] = down_mins_src;
-    apply_baseline_ptrs(expert_id);
-    expert_states_[expert_id].store(EXPERT_BASELINE, std::memory_order_release);
   }
 
   void acquire_expert_read(int expert_id) {
@@ -310,8 +232,6 @@
     void note_expert_insert(int expert_id, bool hard_pin) { owner->note_expert_insert(expert_id, hard_pin); }
 
     void note_expert_demote(int expert_id) { owner->note_expert_demote(expert_id); }
-
-    void drop_baseline_cache_for_expert(int expert_id) { owner->drop_baseline_cache_for_expert(expert_id); }
 
     std::string make_slot_bind_error(int slot, int old_expert, int new_expert) const {
       return mesh::slot_bind_error_message(owner->config_,
@@ -453,90 +373,6 @@
     if (down_owner) {
       numa_free(down_owner, down_total_bytes_);
     }
-  }
-
-  void madvise_baseline_expert(int expert_id, int advice) {
-#ifndef _WIN32
-    if (expert_id < 0 || expert_id >= config_.expert_num) return;
-    bool include_mins = false;
-    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
-      include_mins = true;
-    }
-    mesh::madvise_amx_baseline_expert(expert_id,
-                                      advice,
-                                      include_mins,
-                                      baseline_gate_weight_src_,
-                                      baseline_up_weight_src_,
-                                      baseline_down_weight_src_,
-                                      baseline_gate_scale_src_,
-                                      baseline_up_scale_src_,
-                                      baseline_down_scale_src_,
-                                      baseline_gate_mins_src_,
-                                      baseline_up_mins_src_,
-                                      baseline_down_mins_src_,
-                                      gate_weight_bytes_,
-                                      up_weight_bytes_,
-                                      down_weight_bytes_,
-                                      gate_scale_bytes_,
-                                      up_scale_bytes_,
-                                      down_scale_bytes_,
-                                      gate_mins_bytes_,
-                                      up_mins_bytes_,
-                                      down_mins_bytes_);
-#else
-    (void)expert_id;
-    (void)advice;
-#endif
-  }
-
-  void drop_baseline_cache_for_expert(int expert_id) {
-#ifndef _WIN32
-    if (expert_id < 0 || expert_id >= config_.expert_num) return;
-    if (!mmap_enabled()) return;
-    madvise_baseline_expert(expert_id, MADV_DONTNEED);
-#else
-    (void)expert_id;
-#endif
-  }
-
-  bool baseline_expert_available(int expert_id) const {
-    return mesh::amx_baseline_expert_available(expert_id,
-                                               baseline_gate_weight_src_,
-                                               baseline_up_weight_src_,
-                                               baseline_down_weight_src_,
-                                               baseline_gate_scale_src_,
-                                               baseline_up_scale_src_,
-                                               baseline_down_scale_src_);
-  }
-
-  void copy_baseline_expert_to_owners(int expert_id, void* gate_owner, void* up_owner, void* down_owner) {
-    bool include_mins = false;
-    if constexpr (requires { gate_bb_[expert_id]->mins; }) {
-      include_mins = true;
-    }
-    mesh::copy_amx_baseline_expert_to_owners(expert_id,
-                                             include_mins,
-                                             gate_owner,
-                                             up_owner,
-                                             down_owner,
-                                             baseline_gate_weight_src_,
-                                             baseline_up_weight_src_,
-                                             baseline_down_weight_src_,
-                                             baseline_gate_scale_src_,
-                                             baseline_up_scale_src_,
-                                             baseline_down_scale_src_,
-                                             baseline_gate_mins_src_,
-                                             baseline_up_mins_src_,
-                                             baseline_down_mins_src_,
-                                             gate_weight_bytes_,
-                                             up_weight_bytes_,
-                                             down_weight_bytes_,
-                                             gate_scale_bytes_,
-                                             up_scale_bytes_,
-                                             down_scale_bytes_,
-                                             gate_mins_bytes_,
-                                             up_mins_bytes_,
-                                             down_mins_bytes_);
   }
 
   void validate_iouring_config() const {
@@ -811,9 +647,7 @@
     expert_states_[expert_id].store(pin_after_copy ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
     note_expert_insert(expert_id, pin_after_copy);
     // Keep the newly materialized NUMA-local copy as the authoritative hot
-    // representation for this expert and immediately drop the mmap-backed
-    // baseline pages. They can fault back in later if this expert is demoted.
-    drop_baseline_cache_for_expert(expert_id);
+    // representation for this expert.
   }
 
 #ifdef HAVE_LIBURING
@@ -921,15 +755,13 @@
       }
     };
 
-    if (!iouring_enabled() && !baseline_expert_available(expert_id)) {
+    if (!iouring_enabled()) {
       release_on_failure();
       return false;
     }
 
-    // Load expert weights: io_uring (direct I/O) or mmap (page cache)
-    if (iouring_enabled()) {
+    // Load expert weights through io_uring direct I/O.
 #ifdef HAVE_LIBURING
-      // io_uring path: direct read from SSD to NUMA buffer
       if (config_.async_reader == nullptr) {
         release_on_failure();
         return false;
@@ -950,11 +782,6 @@
       release_on_failure();
       return false;
 #endif
-    } else {
-      // mmap path: prefetch + memcpy from page cache
-      madvise_baseline_expert(expert_id, MADV_WILLNEED);
-      copy_baseline_expert_to_owners(expert_id, gate_owner, up_owner, down_owner);
-    }
 
     if (!use_slot_pool) {
       resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
@@ -1920,7 +1747,6 @@
         if (expert_states_[expert_id].compare_exchange_strong(
                 expected, EXPERT_PINNED, std::memory_order_acq_rel, std::memory_order_acquire)) {
           note_expert_pin(expert_id);
-          drop_baseline_cache_for_expert(expert_id);
           return;
         }
         continue;

@@ -168,7 +168,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
-        weight_strategy: str = "auto",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -252,8 +252,6 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
-        self._mmap_keepalive = None
-        self._uses_mmap_weights = False
         self._uses_iouring_weights = False
 
     def load_weights_from_tensors(
@@ -333,7 +331,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         up_scale_ptrs = []
         down_scale_ptrs = []
 
-        use_iouring, use_mmap = mesh_amx.resolve_amx_weight_mode(self)
+        use_iouring = mesh_amx.resolve_amx_weight_mode(self)
         file_slots = None
 
         if self.load_merged_weight:
@@ -341,8 +339,6 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
             if use_iouring:
                 file_slots = mesh_amx.load_amx_iouring_file_slots(self, base_key)
-            elif use_mmap:
-                w = self.safetensor_loader.load_experts_mmap(base_key)
             else:
                 w = self.safetensor_loader.load_experts(base_key)
 
@@ -372,9 +368,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        mesh_amx.apply_mesh_moe_config(
-            self, moe_config, use_iouring=use_iouring, use_mmap=use_mmap, file_slots=file_slots
-        )
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=use_iouring, file_slots=file_slots)
 
         if self.cpu_save:
             moe_config.save = True
@@ -407,18 +401,13 @@ class AMXMoEWrapper(BaseMoEWrapper):
         else:
             raise NotImplementedError(f"Unsupported AMX method: {self.method}")
 
-        if use_mmap:
-            self._register_moe_with_provider()
-            mesh_amx.register_amx_mmap_regions(self)
-
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
-        self._uses_mmap_weights = use_mmap
         self._uses_iouring_weights = use_iouring
 
         # Clean up temporary weight storage if using merged weights
-        if self.load_merged_weight and not use_mmap and not use_iouring:
+        if self.load_merged_weight and not use_iouring:
             del self.gate_weights
             del self.up_weights
             del self.down_weights
@@ -433,7 +422,6 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
     def close(self):
         super().close()
-        self._mmap_keepalive = None
         self.gate_weights = None
         self.up_weights = None
         self.down_weights = None
@@ -476,7 +464,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
         numa_nodes: Optional[List[int]] = None,
-        weight_strategy: str = "auto",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
         swiglu_limit: float = 0.0,
@@ -570,8 +558,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
-        self._mmap_keepalive = None
-        self._uses_mmap_weights = False
 
     @staticmethod
     def _create_loader(method: str, weight_path: str):
@@ -598,11 +584,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             NativeMoEWrapper._native_loader_signature = None
             if layer_idx >= 0:
                 logger.info(
-                    "[KT] Released NativeMoEWrapper loader after layer %d: " "safetensors mmap handles freed.",
-                    layer_idx,
+                    "[KT] Released NativeMoEWrapper loader after layer %d: "
+                    "safetensors file handles freed.", layer_idx,
                 )
             else:
-                logger.info("[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed.")
+                logger.info(
+                    "[KT] Released NativeMoEWrapper loader: safetensors file handles freed."
+                )
 
     @staticmethod
     def force_release_loader():
@@ -622,34 +610,26 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         if NativeMoEWrapper._native_loader_instance is None:
             t_recreate_start = time.time()
-            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(self.method, self.weight_path)
+            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(
+                self.method, self.weight_path
+            )
             self.loader = NativeMoEWrapper._native_loader_instance
             t_recreate_elapsed = (time.time() - t_recreate_start) * 1000
             logger.info(
                 "[KT] Recreated NativeMoEWrapper loader for layer %d (took %.1fms)",
-                self.layer_idx,
-                t_recreate_elapsed,
+                self.layer_idx, t_recreate_elapsed,
             )
         else:
             self.loader = NativeMoEWrapper._native_loader_instance
 
         t0 = time.time()
         base_key = f"model.layers.{self.layer_idx}"
-        use_mmap = self.weight_strategy == "tiered" and self.method == "BF16"
-        if use_mmap and self.cpu_save:
-            print(
-                f"[NativeMoEWrapper] layer={self.layer_idx} requested tiered mmap loading during cpu_save, "
-                "which requires resident buffers; falling back to legacy loading"
-            )
-            use_mmap = False
-            self.weight_strategy = "legacy"
-
         try:
-            weights = self.loader.load_experts_mmap(base_key) if use_mmap else self.loader.load_experts(base_key)
+            weights = self.loader.load_experts(base_key)
         except (ValueError, KeyError):
-            # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix.
+            # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix
             base_key = f"model.language_model.layers.{self.layer_idx}"
-            weights = self.loader.load_experts_mmap(base_key) if use_mmap else self.loader.load_experts(base_key)
+            weights = self.loader.load_experts(base_key)
         t1 = time.time()
 
         # Keep individual tensors instead of stacking - avoid expensive memory copy
@@ -742,7 +722,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False, use_mmap=use_mmap)
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False)
 
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size
@@ -808,31 +788,18 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 self.moe = AVX2BF16_MOE(moe_config)
         t4 = time.time()
 
-        if use_mmap and self.method == "BF16":
-            self._uses_mmap_weights = True
-            self._register_moe_with_provider()
-            mesh_amx.register_bf16_mmap_regions(self)
-
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
         t5 = time.time()
 
-        if use_mmap:
-            self._mmap_keepalive = (
-                self.gate_weights,
-                self.up_weights,
-                self.down_weights,
-            )
-            self._uses_mmap_weights = True
-        else:
-            del self.gate_weights
-            del self.up_weights
-            del self.down_weights
-            if self.gate_scales is not None:
-                del self.gate_scales
-                del self.up_scales
-                del self.down_scales
-            NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
+        del self.gate_weights
+        del self.up_weights
+        del self.down_weights
+        if self.gate_scales is not None:
+            del self.gate_scales
+            del self.up_scales
+            del self.down_scales
+        NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
         t6 = time.time()
 
         print(
@@ -890,7 +857,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
     def close(self):
         super().close()
-        self._mmap_keepalive = None
         if BaseMoEWrapper._active_wrapper_count == 0:
             if NativeMoEWrapper._native_loader_instance is not None:
                 NativeMoEWrapper._native_loader_instance.close_all_handles()

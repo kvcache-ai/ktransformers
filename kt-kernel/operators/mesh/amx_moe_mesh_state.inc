@@ -2,16 +2,6 @@
 // Keep declarations free of namespace wrappers and include guards.
 
 #ifndef _WIN32
-  std::vector<void*> baseline_gate_weight_src_;
-  std::vector<void*> baseline_up_weight_src_;
-  std::vector<void*> baseline_down_weight_src_;
-  std::vector<float*> baseline_gate_scale_src_;
-  std::vector<float*> baseline_up_scale_src_;
-  std::vector<float*> baseline_down_scale_src_;
-  std::vector<float*> baseline_gate_mins_src_;
-  std::vector<float*> baseline_up_mins_src_;
-  std::vector<float*> baseline_down_mins_src_;
-
   std::vector<void*> packed_gate_owner_;
   std::vector<void*> packed_up_owner_;
   std::vector<void*> packed_down_owner_;

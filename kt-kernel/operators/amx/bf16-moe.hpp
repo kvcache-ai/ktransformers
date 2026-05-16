@@ -15,7 +15,6 @@
 
 #ifndef _WIN32
 #include <numa.h>
-#include <sys/mman.h>
 #endif
 
 #include <atomic>
@@ -73,7 +72,7 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     printf("Created AMX_BF16_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
 #ifndef _WIN32
     if (lazy_weight_enabled()) {
-      initialize_lazy_mmap_state();
+      initialize_lazy_weight_state();
     }
 #endif
   }

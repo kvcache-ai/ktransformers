@@ -20,7 +20,7 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE_Common<AMX_BF16_MOE_TP<K>> {
     const bool use_per_expert_ptrs = !config.gate_projs.empty();
     const size_t full_weight_elems = (size_t)config.intermediate_size * config.hidden_size;
 
-    if (config.use_mmap || use_iouring) {
+    if (use_iouring) {
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto& tpc = this->tp_configs[i];
         this->tps[i]->set_weight_buffers(tpc.gate_proj, tpc.up_proj, tpc.down_proj);

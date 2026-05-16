@@ -42,7 +42,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "LLAMAFILE",
-        weight_strategy: str = "tiered",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -167,10 +167,6 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         """
         Load weights for this layer from GGUF files and initialize the MoE module.
 
-        Supports two modes:
-          - "legacy": Copies GGUF data into malloc'd buffers (current behavior)
-          - "tiered": Uses mmap zero-copy, weight pointers go directly into mmap region
-
         Args:
             physical_to_logical_map_cpu: Optional mapping from physical to logical expert IDs
                                          Shape: [num_experts], dtype: int32
@@ -188,56 +184,14 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
         base_key = f"blk.{self.layer_idx}"
 
-        use_mmap = self.weight_strategy == "tiered"
-
-        if use_mmap:
-            # Tiered mode: get raw mmap pointers (zero-copy, no .copy())
-            gate_ptr, gate_nbytes, gate_type = self.gguf_loader.get_mmap_tensor_and_ggml_type(
-                f"{base_key}.ffn_gate_exps.weight"
-            )
-            up_ptr, up_nbytes, up_type = self.gguf_loader.get_mmap_tensor_and_ggml_type(
-                f"{base_key}.ffn_up_exps.weight"
-            )
-            down_ptr, down_nbytes, down_type = self.gguf_loader.get_mmap_tensor_and_ggml_type(
-                f"{base_key}.ffn_down_exps.weight"
-            )
-            print(f"  [tiered] Layer {self.layer_idx}: mmap zero-copy mode, no weight buffer allocation")
-            # Keep explicit reference to GGUFLoader to prevent GC of mmap handles.
-            # The mmap pointers passed to C++ are only valid while file_data_map lives.
-            self._mmap_keepalive = self.gguf_loader
-
-            # Register per-expert mmap regions with TieredWeightProvider for prefetch/promotion.
-            # NOTE: self._provider is not set yet (set by _register_moe_with_provider below),
-            # so we access the class-level singleton directly.
-            _provider = BaseMoEWrapper._tiered_provider
-            if _provider is not None:
-                from .weight_provider import MmapWeightRegion
-
-                expert_gate_bytes = gate_nbytes // self.num_experts
-                expert_up_bytes = up_nbytes // self.num_experts
-                expert_down_bytes = down_nbytes // self.num_experts
-                for eid in range(self.num_experts):
-                    for proj, base_ptr, ebytes in [
-                        ("gate", gate_ptr, expert_gate_bytes),
-                        ("up", up_ptr, expert_up_bytes),
-                        ("down", down_ptr, expert_down_bytes),
-                    ]:
-                        region = MmapWeightRegion.__new__(MmapWeightRegion)
-                        region.ptr = base_ptr + eid * ebytes
-                        region.n_bytes = ebytes
-                        region._view = None  # Lifetime managed by self._mmap_keepalive
-                        _provider.register_mmap_region(self.layer_idx, proj, eid, region)
-        else:
-            # Legacy mode: load quantized tensors from GGUF (with .copy())
-            gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-                f"{base_key}.ffn_gate_exps.weight"
-            )
-            up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
-            down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
-                f"{base_key}.ffn_down_exps.weight"
-            )
-            # Keep tensors alive (they own the malloc'd memory)
-            self.weights_to_keep = (gate_data, up_data, down_data)
+        gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
+            f"{base_key}.ffn_gate_exps.weight"
+        )
+        up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
+        down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(
+            f"{base_key}.ffn_down_exps.weight"
+        )
+        self.weights_to_keep = (gate_data, up_data, down_data)
 
         hidden_type = ggml_type.BF16
 
@@ -260,15 +214,9 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         moe_config.resident_cache_policy = self.residency_policy
 
         # Set weight pointers
-        if use_mmap:
-            moe_config.gate_proj = gate_ptr
-            moe_config.up_proj = up_ptr
-            moe_config.down_proj = down_ptr
-            moe_config.use_mmap = True
-        else:
-            moe_config.gate_proj = gate_data.data_ptr()
-            moe_config.up_proj = up_data.data_ptr()
-            moe_config.down_proj = down_data.data_ptr()
+        moe_config.gate_proj = gate_data.data_ptr()
+        moe_config.up_proj = up_data.data_ptr()
+        moe_config.down_proj = down_data.data_ptr()
 
         # Set quantization types
         moe_config.gate_type = gate_type
@@ -279,16 +227,9 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         # Create MoE module
         self.moe = MOE(moe_config)
 
-        # Register MOE with tiered weight provider for promote/demote support.
-        # This enables prefetch_layer() and record_activations() in the base class,
-        # and starts the background promotion thread on first registration.
-        self._register_moe_with_provider()
-
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
 
-        if not use_mmap:
-            # Drop original weights after loading (they've been copied into C++ buffers)
-            self.weights_to_keep = None
-        # else: mmap mode -- pointers remain valid via self._mmap_keepalive
+        # Drop original weights after loading
+        self.weights_to_keep = None

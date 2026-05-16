@@ -205,7 +205,7 @@ inline void log_amx_iouring_config(const GeneralMOEConfig& config,
                                    size_t down_weight_bytes,
                                    size_t down_scale_bytes) {
   std::fprintf(stderr,
-               "[MESHIO] layer=%d tp=%d backend=iouring direct_io=%s mmap_baseline=false capacity=%d policy=%s "
+               "[MESHIO] layer=%d tp=%d backend=iouring direct_io=%s source=file_slots capacity=%d policy=%s "
                "decode_capacity=%d prefill_static=%d prefill_layer_mode=%s lookahead=%s topk_fallback=%s "
                "w=%.3f gamma=%.3f beta=%.3f transition=%.3f "
                "prefetch=%d coldstart=%s coldstart_limit=%d "
@@ -397,18 +397,6 @@ inline void log_bf16_numa_alloc_failure(int expert_id,
                up_owner,
                down_owner,
                numa_node);
-}
-
-inline void log_bf16_missing_baseline_failure(int expert_id,
-                                              const void* gate_src,
-                                              const void* up_src,
-                                              const void* down_src) {
-  std::fprintf(stderr,
-               "[BF16_PROMOTION_FAIL] reason=missing_baseline expert=%d gate_src=%p up_src=%p down_src=%p\n",
-               expert_id,
-               gate_src,
-               up_src,
-               down_src);
 }
 
 inline bool trace_cpu_mem_breakdown_enabled() {

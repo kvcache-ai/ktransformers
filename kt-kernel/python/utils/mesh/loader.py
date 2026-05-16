@@ -26,14 +26,6 @@ def index_safetensor_file(loader, file_path: str):
         }
 
 
-def get_file_memmap(loader, file_path: str) -> np.memmap:
-    mm = loader.file_memmap_map.get(file_path)
-    if mm is None:
-        mm = np.memmap(file_path, mode="r", dtype=np.uint8)
-        loader.file_memmap_map[file_path] = mm
-    return mm
-
-
 def get_dense_moe_layout(loader, base_key: str) -> tuple[list[int], list[int]]:
     up_base_key = re.escape(f"{base_key}.ffn_up_exps")
     pattern = re.compile(rf"^{up_base_key}\.(\d+)\.numa\.(\d+)\.weight$")
@@ -56,45 +48,6 @@ def get_dense_moe_layout(loader, base_key: str) -> tuple[list[int], list[int]]:
     if sorted_numa_ids != list(range(len(sorted_numa_ids))):
         raise ValueError(f"NUMA ids for {base_key} must be dense and start at 0, got {sorted_numa_ids}")
     return sorted_numa_ids, sorted_expert_ids
-
-
-def dtype_for_mmap(dtype_name: str) -> np.dtype:
-    dtype_map = {
-        "BOOL": np.dtype(np.bool_),
-        "U8": np.dtype(np.uint8),
-        "I8": np.dtype(np.int8),
-        "U16": np.dtype(np.uint16),
-        "I16": np.dtype(np.int16),
-        "U32": np.dtype(np.uint32),
-        "I32": np.dtype(np.int32),
-        "U64": np.dtype(np.uint64),
-        "I64": np.dtype(np.int64),
-        "F16": np.dtype(np.float16),
-        "BF16": np.dtype(np.uint16),
-        "F32": np.dtype(np.float32),
-        "F64": np.dtype(np.float64),
-        "F8_E4M3FN": np.dtype(np.uint8),
-        "F8_E5M2": np.dtype(np.uint8),
-    }
-    try:
-        return dtype_map[dtype_name]
-    except KeyError as exc:
-        raise NotImplementedError(f"Unsupported safetensors dtype for mmap: {dtype_name}") from exc
-
-
-def get_mmap_tensor(loader, key: str) -> np.ndarray:
-    if key not in loader.tensor_info_map:
-        raise KeyError(f"Key {key} not found in Safetensor files")
-    info = loader.tensor_info_map[key]
-    backing = get_file_memmap(loader, info["file_path"])
-    array = np.ndarray(
-        shape=info["shape"],
-        dtype=dtype_for_mmap(info["dtype"]),
-        buffer=backing,
-        offset=info["offset"],
-    )
-    array.flags.writeable = False
-    return array
 
 
 def get_file_fd(loader, file_path: str, use_direct_io: bool = True) -> int:
@@ -191,78 +144,10 @@ def load_amx_experts_iouring(loader, base_key: str, use_direct_io: bool = True):
     }
 
 
-def load_amx_experts_mmap(loader, base_key: str):
-    up_base_key = f"{base_key}.ffn_up_exps"
-    gate_base_key = f"{base_key}.ffn_gate_exps"
-    down_base_key = f"{base_key}.ffn_down_exps"
-    numa_ids, expert_ids = get_dense_moe_layout(loader, base_key)
-
-    up_weights = [[] for _ in numa_ids]
-    gate_weights = [[] for _ in numa_ids]
-    down_weights = [[] for _ in numa_ids]
-    up_scales = [[] for _ in numa_ids]
-    gate_scales = [[] for _ in numa_ids]
-    down_scales = [[] for _ in numa_ids]
-
-    for numa_id in numa_ids:
-        for expert_id in expert_ids:
-            up_weights[numa_id].append(get_mmap_tensor(loader, f"{up_base_key}.{expert_id}.numa.{numa_id}.weight"))
-            gate_weights[numa_id].append(get_mmap_tensor(loader, f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight"))
-            down_weights[numa_id].append(get_mmap_tensor(loader, f"{down_base_key}.{expert_id}.numa.{numa_id}.weight"))
-            up_scales[numa_id].append(get_mmap_tensor(loader, f"{up_base_key}.{expert_id}.numa.{numa_id}.scale"))
-            gate_scales[numa_id].append(get_mmap_tensor(loader, f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale"))
-            down_scales[numa_id].append(get_mmap_tensor(loader, f"{down_base_key}.{expert_id}.numa.{numa_id}.scale"))
-
-    return {
-        "up": up_weights,
-        "gate": gate_weights,
-        "down": down_weights,
-        "up_scale": up_scales,
-        "gate_scale": gate_scales,
-        "down_scale": down_scales,
-    }
-
-
 def close_mesh_handles(loader):
     for fd in loader.file_fd_map.values():
         os.close(fd)
     loader.file_fd_map.clear()
-    loader.file_memmap_map.clear()
-
-
-def load_bf16_experts_mmap(loader, base_key: str):
-    if loader._detected_format == "packed":
-        return load_bf16_packed_mmap(loader, base_key)
-
-    experts_prefix_candidates = loader._get_experts_prefix_candidates(base_key)
-    gate_name, up_name, down_name = loader._get_proj_names()
-    expert_count = 0
-    experts_prefix = None
-    for prefix in experts_prefix_candidates:
-        expert_count = 0
-        while loader.has_tensor(f"{prefix}.{expert_count}.{gate_name}.weight"):
-            expert_count += 1
-        if expert_count > 0:
-            experts_prefix = prefix
-            break
-
-    if expert_count == 0 or experts_prefix is None:
-        raise ValueError(f"No experts found for keys: {experts_prefix_candidates}")
-
-    gate_weights = [None] * expert_count
-    up_weights = [None] * expert_count
-    down_weights = [None] * expert_count
-
-    for exp_id in range(expert_count):
-        gate_weights[exp_id] = get_mmap_tensor(loader, f"{experts_prefix}.{exp_id}.{gate_name}.weight")
-        up_weights[exp_id] = get_mmap_tensor(loader, f"{experts_prefix}.{exp_id}.{up_name}.weight")
-        down_weights[exp_id] = get_mmap_tensor(loader, f"{experts_prefix}.{exp_id}.{down_name}.weight")
-
-    return {
-        "gate": gate_weights,
-        "up": up_weights,
-        "down": down_weights,
-    }
 
 
 BF16_MOE_FORMATS = {
@@ -390,29 +275,9 @@ def patch_bf16_loader(loader_cls) -> None:
     loader_cls.load_experts = bf16_load_experts
     loader_cls._resolve_packed_experts_prefix = bf16_resolve_packed_experts_prefix
     loader_cls._load_experts_packed = bf16_load_experts_packed
-    loader_cls.load_experts_mmap = lambda self, base_key: load_bf16_experts_mmap(self, base_key)
-    loader_cls._load_experts_packed_mmap = lambda self, base_key: load_bf16_packed_mmap(self, base_key)
     loader_cls.load_experts_iouring = lambda self, base_key, tp_count, use_direct_io=True: load_bf16_experts_iouring(
         self, base_key, tp_count=tp_count, use_direct_io=use_direct_io
     )
-
-
-def load_bf16_packed_mmap(loader, base_key: str):
-    experts_prefix = loader._resolve_packed_experts_prefix(base_key)
-
-    gate_up = get_mmap_tensor(loader, f"{experts_prefix}.gate_up_proj")
-    down = get_mmap_tensor(loader, f"{experts_prefix}.down_proj")
-
-    mid = gate_up.shape[1] // 2
-    gate_list = [gate_up[i, :mid, :] for i in range(gate_up.shape[0])]
-    up_list = [gate_up[i, mid:, :] for i in range(gate_up.shape[0])]
-    down_list = [down[i] for i in range(down.shape[0])]
-
-    return {
-        "gate": gate_list,
-        "up": up_list,
-        "down": down_list,
-    }
 
 
 def load_bf16_experts_iouring(loader, base_key: str, tp_count: int, use_direct_io: bool = True):
@@ -491,55 +356,3 @@ def load_bf16_experts_iouring(loader, base_key: str, tp_count: int, use_direct_i
         "direct_io": direct_io,
         "packed_bf16": True,
     }
-
-
-def get_gguf_mmap_tensor_and_ggml_type(loader, name: str, translate_name_to_gguf, quant_type):
-    name = translate_name_to_gguf(name)
-
-    if name not in loader.tensor_info:
-        raise KeyError(f"Tensor '{name}' not found in GGUF files")
-
-    info = loader.tensor_info[name]
-    file_path = loader.tensor_file_map[name]
-    mmap_data = loader.file_data_map[file_path]
-
-    offset = info["offset"]
-    n_elements = info["n_elements"]
-    ggml_type = info["dtype"]
-
-    quant_sizes = {
-        quant_type.F32: (1, 4),
-        quant_type.F16: (1, 2),
-        quant_type.BF16: (1, 2),
-        quant_type.Q4_0: (32, 2 + 16),
-        quant_type.Q4_1: (32, 2 + 2 + 16),
-        quant_type.Q5_0: (32, 2 + 4 + 16),
-        quant_type.Q5_1: (32, 2 + 2 + 4 + 16),
-        quant_type.Q8_0: (32, 2 + 32),
-        quant_type.Q8_1: (32, 4 + 4 + 32),
-        quant_type.Q2_K: (256, 2 + 2 + 256 // 16 + 256 // 4),
-        quant_type.Q3_K: (256, 2 + 256 // 4 + 256 // 8 + 12),
-        quant_type.Q4_K: (256, 2 + 2 + 256 // 2 + 12),
-        quant_type.Q5_K: (256, 2 + 2 + 256 // 2 + 256 // 8 + 12),
-        quant_type.Q6_K: (256, 2 + 256 // 2 + 256 // 4 + 256 // 16),
-        quant_type.Q8_K: (256, 4 + 256 + 256 // 8),
-        quant_type.IQ2_XXS: (256, 2 + 256 // 4),
-        quant_type.IQ2_XS: (256, 2 + 256 // 4 + 256 // 32),
-        quant_type.IQ3_XXS: (256, 2 + 256 // 4 + 256 // 8),
-        quant_type.IQ1_S: (256, 2 + 256 // 8 + 256 // 16),
-        quant_type.IQ4_NL: (32, 2 + 16),
-        quant_type.IQ3_S: (256, 2 + 256 // 4 + 256 // 8 + 256 // 32 + 4),
-        quant_type.IQ2_S: (256, 2 + 256 // 4 + 256 // 16),
-        quant_type.IQ4_XS: (256, 2 + 2 + 256 // 2 + 256 // 64),
-        quant_type.I8: (1, 1),
-        quant_type.I16: (1, 2),
-        quant_type.I32: (1, 4),
-        quant_type.I64: (1, 8),
-        quant_type.F64: (1, 8),
-        quant_type.IQ1_M: (256, 256 // 8 + 256 // 16 + 256 // 32),
-    }
-
-    block_size, type_size = quant_sizes[ggml_type]
-    n_bytes = n_elements * type_size // block_size
-    data_view = np.frombuffer(mmap_data[offset : offset + n_bytes], dtype=np.uint8)
-    return data_view.ctypes.data, n_bytes, ggml_type

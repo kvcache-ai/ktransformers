@@ -11,25 +11,8 @@ def tensor_data_ptr(weight) -> int:
     return int(weight.data_ptr())
 
 
-def resolve_amx_weight_mode(wrapper) -> tuple[bool, bool]:
+def resolve_amx_weight_mode(wrapper) -> bool:
     use_iouring = getattr(wrapper, "io_backend", None) == "IOURING"
-    use_mmap = wrapper.weight_strategy == "tiered" and not use_iouring
-
-    if use_mmap and not wrapper.load_merged_weight:
-        print(
-            f"[AMXMoEWrapper] layer={wrapper.layer_idx} requested tiered mmap loading, "
-            "but merged safetensors were not found; falling back to legacy resident loading"
-        )
-        use_mmap = False
-        wrapper.weight_strategy = "legacy"
-
-    if use_mmap and wrapper.cpu_save:
-        print(
-            f"[AMXMoEWrapper] layer={wrapper.layer_idx} requested tiered mmap loading during cpu_save, "
-            "which requires resident buffers; falling back to legacy loading"
-        )
-        use_mmap = False
-        wrapper.weight_strategy = "legacy"
 
     if use_iouring:
         if not wrapper.load_merged_weight:
@@ -40,11 +23,11 @@ def resolve_amx_weight_mode(wrapper) -> tuple[bool, bool]:
         if wrapper.cpu_save:
             raise RuntimeError(f"[AMXMoEWrapper] layer={wrapper.layer_idx} io_uring cannot be used during cpu_save")
 
-    return use_iouring, use_mmap
+    return use_iouring
 
 
 def load_amx_iouring_file_slots(wrapper, base_key: str):
-    from ..async_io_manager import get_async_readers
+    from .async_io_manager import get_async_readers
 
     direct_io_requested = os.environ.get("KT_IOURING_DIRECT", "1") not in ("0", "false", "False")
     file_slots = wrapper.safetensor_loader.load_experts_iouring(
@@ -59,7 +42,7 @@ def load_amx_iouring_file_slots(wrapper, base_key: str):
     print(
         "[AMXMoEWrapper] "
         f"layer={wrapper.layer_idx} backend=IOURING direct_io={file_slots.get('direct_io', False)} "
-        "mmap_baseline=false "
+        "source=file_slots "
         f"policy={wrapper.residency_policy} capacity={wrapper.max_resident_experts or wrapper.max_tier0_experts}"
     )
 
@@ -92,8 +75,7 @@ def assign_amx_weight_views(wrapper, weights: dict) -> tuple[list, list, list, l
     return gate_ptrs, up_ptrs, down_ptrs, gate_scale_ptrs, up_scale_ptrs, down_scale_ptrs
 
 
-def apply_mesh_moe_config(wrapper, moe_config, *, use_iouring: bool, use_mmap: bool, file_slots=None) -> None:
-    moe_config.use_mmap = use_mmap
+def apply_mesh_moe_config(wrapper, moe_config, *, use_iouring: bool, file_slots=None) -> None:
     moe_config.max_tier0_experts = wrapper.max_tier0_experts
     moe_config.max_resident_experts = wrapper._mesh_slot_pool_capacity()
     if hasattr(moe_config, "mesh_prefill_layer_mode_enabled"):
@@ -137,7 +119,6 @@ def apply_mesh_moe_config(wrapper, moe_config, *, use_iouring: bool, use_mmap: b
     if hasattr(moe_config, "iouring_direct_io"):
         moe_config.iouring_direct_io = bool(file_slots.get("direct_io", False)) if use_iouring and file_slots else False
     if use_iouring:
-        moe_config.use_mmap = False
         if not hasattr(moe_config, "set_iouring_file_slots_for_readers"):
             raise RuntimeError("io_uring TP reader binding is unavailable in kt_kernel_ext")
         moe_config.set_iouring_file_slots_for_readers(
@@ -150,58 +131,3 @@ def apply_mesh_moe_config(wrapper, moe_config, *, use_iouring: bool, use_mmap: b
             wrapper.async_readers,
         )
         wrapper._async_reader_keepalive = wrapper.async_readers
-
-
-def register_amx_mmap_regions(wrapper) -> None:
-    if wrapper._provider is None:
-        return
-
-    from ..weight_provider import MmapWeightRegion
-
-    wrapper._provider.clear_layer_regions(wrapper.layer_idx)
-
-    for proj_name, weights, scales in (
-        ("gate", wrapper.gate_weights, wrapper.gate_scales),
-        ("up", wrapper.up_weights, wrapper.up_scales),
-        ("down", wrapper.down_weights, wrapper.down_scales),
-    ):
-        for numa_idx, numa_weights in enumerate(weights):
-            for expert_id, weight in enumerate(numa_weights):
-                weight_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                weight_region.ptr = int(weight.ctypes.data)
-                weight_region.n_bytes = int(weight.nbytes)
-                weight_region._view = weight
-                wrapper._provider.register_mmap_region(
-                    wrapper.layer_idx, f"{proj_name}_weight", expert_id, weight_region
-                )
-
-                if scales is not None:
-                    scale = scales[numa_idx][expert_id]
-                    scale_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                    scale_region.ptr = int(scale.ctypes.data)
-                    scale_region.n_bytes = int(scale.nbytes)
-                    scale_region._view = scale
-                    wrapper._provider.register_mmap_region(
-                        wrapper.layer_idx, f"{proj_name}_scale", expert_id, scale_region
-                    )
-
-
-def register_bf16_mmap_regions(wrapper) -> None:
-    if wrapper._provider is None:
-        return
-
-    from ..weight_provider import MmapWeightRegion
-
-    wrapper._provider.clear_layer_regions(wrapper.layer_idx)
-
-    for proj_name, weights in (
-        ("gate", wrapper.gate_weights),
-        ("up", wrapper.up_weights),
-        ("down", wrapper.down_weights),
-    ):
-        for expert_id, weight in enumerate(weights):
-            region = MmapWeightRegion.__new__(MmapWeightRegion)
-            region.ptr = int(weight.ctypes.data)
-            region.n_bytes = int(weight.nbytes)
-            region._view = weight
-            wrapper._provider.register_mmap_region(wrapper.layer_idx, proj_name, expert_id, region)

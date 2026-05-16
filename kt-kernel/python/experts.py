@@ -134,7 +134,7 @@ class KTMoEWrapper:
         max_deferred_experts_per_token: Optional[int] = None,
         # Mode and method selection
         method: str = "AMXINT4",
-        weight_strategy: str = "tiered",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
         mode: str = "inference",
@@ -303,7 +303,6 @@ class KTMoEWrapper:
         to reset the buffer state or free memory during SFT.
         """
         from .sft.base import KExpertsSFTBuffer
-
         KExpertsSFTBuffer.clear_cache()
 
 
@@ -327,7 +326,7 @@ def _create_inference_wrapper(
     max_deferred_experts_per_token: Optional[int],
     method: str,
     numa_nodes: Optional[List[int]] = None,
-    weight_strategy: str = "tiered",
+    weight_strategy: str = "legacy",
     max_tier0_experts: Optional[int] = None,
     num_moe_layers: Optional[int] = None,
     swiglu_limit: float = 0.0,

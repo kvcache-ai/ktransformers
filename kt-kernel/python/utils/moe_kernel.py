@@ -49,7 +49,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "MOE_INT8",
         numa_nodes: Optional[List[int]] = None,
-        weight_strategy: str = "tiered",
+        weight_strategy: str = "legacy",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
     ):
@@ -133,8 +133,6 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
-        self._mmap_keepalive = None
-        self._uses_mmap_weights = False
 
     def load_weights_from_tensors(
         self,
@@ -213,30 +211,9 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         up_scale_ptrs = []
         down_scale_ptrs = []
 
-        use_mmap = self.weight_strategy == "tiered"
-        if use_mmap and not self.load_merged_weight:
-            print(
-                f"[GeneralMoEWrapper] layer={self.layer_idx} requested tiered mmap loading, "
-                "but merged safetensors were not found; falling back to legacy resident loading"
-            )
-            use_mmap = False
-            self.weight_strategy = "legacy"
-
-        if use_mmap and self.cpu_save:
-            print(
-                f"[GeneralMoEWrapper] layer={self.layer_idx} requested tiered mmap loading during cpu_save, "
-                "which requires resident buffers; falling back to legacy loading"
-            )
-            use_mmap = False
-            self.weight_strategy = "legacy"
-
         if self.load_merged_weight:
             base_key = f"blk.{self.layer_idx}"
-            w = (
-                self.safetensor_loader.load_experts_mmap(base_key)
-                if use_mmap
-                else self.safetensor_loader.load_experts(base_key)
-            )
+            w = self.safetensor_loader.load_experts(base_key)
 
             gate_ptrs, up_ptrs, down_ptrs, gate_scale_ptrs, up_scale_ptrs, down_scale_ptrs = (
                 mesh_amx.assign_amx_weight_views(self, w)
@@ -263,7 +240,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False, use_mmap=use_mmap)
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False)
 
         if self.cpu_save:
             moe_config.save = True
@@ -292,36 +269,21 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         else:
             raise NotImplementedError(f"Unsupported MoE method: {self.method}")
 
-        if use_mmap:
-            self._register_moe_with_provider()
-            mesh_amx.register_amx_mmap_regions(self)
-
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
-        self._uses_mmap_weights = use_mmap
 
         # Clean up temporary weight storage if using merged weights
-        if self.load_merged_weight and not use_mmap:
+        if self.load_merged_weight:
             del self.gate_weights
             del self.up_weights
             del self.down_weights
             del self.gate_scales
             del self.up_scales
             del self.down_scales
-        elif use_mmap:
-            self._mmap_keepalive = (
-                self.gate_weights,
-                self.up_weights,
-                self.down_weights,
-                self.gate_scales,
-                self.up_scales,
-                self.down_scales,
-            )
 
     def close(self):
         super().close()
-        self._mmap_keepalive = None
         self.gate_weights = None
         self.up_weights = None
         self.down_weights = None
