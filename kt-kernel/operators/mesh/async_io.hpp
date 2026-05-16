@@ -11,9 +11,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <sys/types.h>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -44,6 +49,16 @@ public:
         uint64_t user_data;  // For completion matching
     };
 
+    struct SubmitStats {
+        uint64_t total_us = 0;
+        uint64_t lock_wait_us = 0;
+        uint64_t sqe_prep_us = 0;
+        uint64_t request_bookkeeping_us = 0;
+        uint64_t ring_submit_us = 0;
+        uint64_t request_count = 0;
+        uint64_t flush_count = 0;
+    };
+
     /**
      * @brief Construct AsyncExpertReader
      * @param queue_depth Maximum number of in-flight requests (default 128)
@@ -66,6 +81,12 @@ public:
      * @return Request ID for later querying
      */
     uint64_t submit_read(int fd, void* buf, size_t size, off_t offset, int expert_id);
+
+    /**
+     * @brief Submit multiple async read requests with one batched ring flush.
+     * @return Request IDs in the same order as the input requests.
+     */
+    std::vector<uint64_t> submit_reads(const std::vector<ReadRequest>& requests, SubmitStats* stats = nullptr);
 
     /**
      * @brief Wait for at least one request to complete (blocking)
@@ -147,25 +168,53 @@ private:
         void* buffer = nullptr;
         size_t expected_size = 0;
         off_t offset = 0;
-        RequestState state = RequestState::Inflight;
-        int result = 0;  // errno or byte count
-        int retry_count = 0;
+        std::atomic<RequestState> state{RequestState::Inflight};
+        std::atomic<int> result{0};  // errno or byte count
+        std::atomic<int> retry_count{0};
+        mutable std::mutex mutex;
+        std::condition_variable cv;
+    };
+
+    struct ReadJob {
+        uint64_t request_id = 0;
+        std::shared_ptr<RequestInfo> request;
+    };
+
+    struct CompletionEvent {
+        int expert_id = -1;
+        bool ok = false;
     };
 
     struct io_uring ring_;
     int queue_depth_;
-    uint64_t next_user_data_;
+    std::atomic<uint64_t> next_user_data_;
     int max_read_retries_;
 
-    // Unified request tracking
-    std::unordered_map<uint64_t, RequestInfo> requests_;
+    std::unordered_map<uint64_t, std::shared_ptr<RequestInfo>> requests_;
     std::unordered_set<int> completed_experts_;  // Track completed expert IDs
-    mutable std::mutex ring_mutex_;
+    mutable std::mutex request_map_mutex_;
 
-    // Helper: wait for completion events
-    int wait_cqe_internal(struct io_uring_cqe** cqe_out, int timeout_ms);
-    int wait_and_record_completion(int timeout_ms, uint64_t* request_id_out, int* expert_id_out, bool* ok_out);
-    bool resubmit_read_locked(uint64_t request_id, RequestInfo& info, int failed_result);
+    std::deque<ReadJob> pending_jobs_;
+    mutable std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+
+    std::deque<CompletionEvent> completion_events_;
+    mutable std::mutex completion_events_mutex_;
+    std::condition_variable completion_events_cv_;
+
+    std::thread io_thread_;
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<int> inflight_count_{0};
+
+    std::shared_ptr<RequestInfo> get_request(uint64_t request_id) const;
+    void io_thread_main();
+    bool prep_read(uint64_t request_id, const std::shared_ptr<RequestInfo>& request);
+    bool flush_submissions();
+    bool process_one_completion(int timeout_ms);
+    bool resubmit_read(uint64_t request_id, const std::shared_ptr<RequestInfo>& request, int failed_result);
+    void complete_request(uint64_t request_id, const std::shared_ptr<RequestInfo>& request, bool ok, int result);
+    void fail_queued_jobs();
+    void push_completion_event(int expert_id, bool ok);
 #else
     // Stub members for non-Linux platforms
     int queue_depth_;

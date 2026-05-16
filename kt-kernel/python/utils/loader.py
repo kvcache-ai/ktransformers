@@ -8,15 +8,13 @@ This module provides loaders for:
 
 from __future__ import annotations
 
-import json
 import os
-import re
-import struct
 import numpy as np
 import torch
 from enum import IntEnum
 from safetensors import safe_open
 from gguf.gguf_reader import GGUFReader
+from .mesh import loader as mesh_loader
 
 
 class GGMLQuantizationType(IntEnum):
@@ -163,190 +161,29 @@ class SafeTensorLoader:
             raise FileNotFoundError(f"No Safetensor files found in {folder_path}")
 
     def _index_safetensor_file(self, file_path: str):
-        with open(file_path, "rb") as f:
-            header_size = struct.unpack("<Q", f.read(8))[0]
-            header = json.loads(f.read(header_size))
-
-        data_base_offset = 8 + header_size
-        for key, info in header.items():
-            if key == "__metadata__":
-                continue
-            self.tensor_info_map[key] = {
-                "file_path": file_path,
-                "dtype": info["dtype"],
-                "shape": tuple(info["shape"]),
-                "offset": data_base_offset + int(info["data_offsets"][0]),
-                "size": int(info["data_offsets"][1]) - int(info["data_offsets"][0]),
-            }
+        mesh_loader.index_safetensor_file(self, file_path)
 
     def _get_file_memmap(self, file_path: str) -> np.memmap:
-        mm = self.file_memmap_map.get(file_path)
-        if mm is None:
-            mm = np.memmap(file_path, mode="r", dtype=np.uint8)
-            self.file_memmap_map[file_path] = mm
-        return mm
+        return mesh_loader.get_file_memmap(self, file_path)
 
     def _get_dense_moe_layout(self, base_key: str) -> tuple[list[int], list[int]]:
-        up_base_key = re.escape(f"{base_key}.ffn_up_exps")
-        pattern = re.compile(rf"^{up_base_key}\.(\d+)\.numa\.(\d+)\.weight$")
-        expert_ids = set()
-        numa_ids = set()
-        for key in self.tensor_file_map:
-            match = pattern.match(key)
-            if match is None:
-                continue
-            expert_ids.add(int(match.group(1)))
-            numa_ids.add(int(match.group(2)))
-
-        if not expert_ids:
-            raise ValueError(f"No experts found for key {base_key}")
-
-        sorted_expert_ids = sorted(expert_ids)
-        sorted_numa_ids = sorted(numa_ids)
-        if sorted_expert_ids != list(range(len(sorted_expert_ids))):
-            raise ValueError(f"Expert ids for {base_key} must be dense and start at 0, got {sorted_expert_ids}")
-        if sorted_numa_ids != list(range(len(sorted_numa_ids))):
-            raise ValueError(f"NUMA ids for {base_key} must be dense and start at 0, got {sorted_numa_ids}")
-        return sorted_numa_ids, sorted_expert_ids
+        return mesh_loader.get_dense_moe_layout(self, base_key)
 
     @staticmethod
     def _dtype_for_mmap(dtype_name: str) -> np.dtype:
-        dtype_map = {
-            "BOOL": np.dtype(np.bool_),
-            "U8": np.dtype(np.uint8),
-            "I8": np.dtype(np.int8),
-            "U16": np.dtype(np.uint16),
-            "I16": np.dtype(np.int16),
-            "U32": np.dtype(np.uint32),
-            "I32": np.dtype(np.int32),
-            "U64": np.dtype(np.uint64),
-            "I64": np.dtype(np.int64),
-            "F16": np.dtype(np.float16),
-            "BF16": np.dtype(np.uint16),
-            "F32": np.dtype(np.float32),
-            "F64": np.dtype(np.float64),
-            "F8_E4M3FN": np.dtype(np.uint8),
-            "F8_E5M2": np.dtype(np.uint8),
-        }
-        try:
-            return dtype_map[dtype_name]
-        except KeyError as exc:
-            raise NotImplementedError(f"Unsupported safetensors dtype for mmap: {dtype_name}") from exc
+        return mesh_loader.dtype_for_mmap(dtype_name)
 
     def get_mmap_tensor(self, key: str) -> np.ndarray:
-        if key not in self.tensor_info_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        info = self.tensor_info_map[key]
-        backing = self._get_file_memmap(info["file_path"])
-        array = np.ndarray(
-            shape=info["shape"],
-            dtype=self._dtype_for_mmap(info["dtype"]),
-            buffer=backing,
-            offset=info["offset"],
-        )
-        array.flags.writeable = False
-        return array
+        return mesh_loader.get_mmap_tensor(self, key)
 
     def _get_file_fd(self, file_path: str, use_direct_io: bool = True) -> int:
-        fd_key = (file_path, bool(use_direct_io))
-        fd = self.file_fd_map.get(fd_key)
-        if fd is not None:
-            return fd
-
-        flags = os.O_RDONLY
-        if use_direct_io and hasattr(os, "O_DIRECT"):
-            flags |= os.O_DIRECT
-
-        fd = os.open(file_path, flags)
-        self.file_fd_map[fd_key] = fd
-        return fd
+        return mesh_loader.get_file_fd(self, file_path, use_direct_io=use_direct_io)
 
     def get_file_slot(self, key: str, use_direct_io: bool = True) -> tuple[int, int, int]:
-        if key not in self.tensor_info_map:
-            raise KeyError(f"Key {key} not found in Safetensor files")
-        info = self.tensor_info_map[key]
-        fd = self._get_file_fd(info["file_path"], use_direct_io=use_direct_io)
-        return fd, int(info["offset"]), int(info["size"])
+        return mesh_loader.get_file_slot(self, key, use_direct_io=use_direct_io)
 
     def load_experts_iouring(self, base_key: str, use_direct_io: bool = True):
-        """
-        Return file slots for AMX packed expert weights.
-
-        Expected format:
-        - blk.{layer_index}.ffn_[up, down, gate]_exps.{expert_id}.numa.{numa_id}.weight
-        - blk.{layer_index}.ffn_[up, down, gate]_exps.{expert_id}.numa.{numa_id}.scale
-
-        The return shape matches load_experts_mmap():
-        [numa_id][expert_id] -> (fd, offset, size)
-        """
-        up_base_key = f"{base_key}.ffn_up_exps"
-        gate_base_key = f"{base_key}.ffn_gate_exps"
-        down_base_key = f"{base_key}.ffn_down_exps"
-        numa_ids, expert_ids = self._get_dense_moe_layout(base_key)
-
-        tensor_keys = []
-        for numa_id in numa_ids:
-            for expert_id in expert_ids:
-                tensor_keys.extend(
-                    [
-                        f"{up_base_key}.{expert_id}.numa.{numa_id}.weight",
-                        f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight",
-                        f"{down_base_key}.{expert_id}.numa.{numa_id}.weight",
-                        f"{up_base_key}.{expert_id}.numa.{numa_id}.scale",
-                        f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale",
-                        f"{down_base_key}.{expert_id}.numa.{numa_id}.scale",
-                    ]
-                )
-
-        direct_io = use_direct_io
-        if use_direct_io:
-            for key in tensor_keys:
-                info = self.tensor_info_map[key]
-                if int(info["offset"]) % 512 != 0 or int(info["size"]) % 512 != 0:
-                    raise RuntimeError(
-                        "io_uring direct I/O requires 512-byte aligned safetensors entries; "
-                        f"tensor {key} is misaligned (offset={info['offset']}, size={info['size']}). "
-                        "Repack or repair the AMX safetensors with 512-byte data_offsets and sizes, "
-                        "or set KT_IOURING_DIRECT=0 to use buffered io_uring for debugging."
-                    )
-
-        up_weights = [[] for _ in numa_ids]
-        gate_weights = [[] for _ in numa_ids]
-        down_weights = [[] for _ in numa_ids]
-        up_scales = [[] for _ in numa_ids]
-        gate_scales = [[] for _ in numa_ids]
-        down_scales = [[] for _ in numa_ids]
-
-        for numa_id in numa_ids:
-            for expert_id in expert_ids:
-                up_weights[numa_id].append(
-                    self.get_file_slot(f"{up_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
-                )
-                gate_weights[numa_id].append(
-                    self.get_file_slot(f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
-                )
-                down_weights[numa_id].append(
-                    self.get_file_slot(f"{down_base_key}.{expert_id}.numa.{numa_id}.weight", direct_io)
-                )
-                up_scales[numa_id].append(
-                    self.get_file_slot(f"{up_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
-                )
-                gate_scales[numa_id].append(
-                    self.get_file_slot(f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
-                )
-                down_scales[numa_id].append(
-                    self.get_file_slot(f"{down_base_key}.{expert_id}.numa.{numa_id}.scale", direct_io)
-                )
-
-        return {
-            "up": up_weights,
-            "gate": gate_weights,
-            "down": down_weights,
-            "up_scale": up_scales,
-            "gate_scale": gate_scales,
-            "down_scale": down_scales,
-            "direct_io": direct_io,
-        }
+        return mesh_loader.load_amx_experts_iouring(self, base_key, use_direct_io=use_direct_io)
 
     def load_tensor(self, key: str, device: str = "cpu"):
         if key not in self.tensor_file_map:
@@ -362,11 +199,8 @@ class SafeTensorLoader:
         """Close all file handles and clear mmap/direct-I/O state."""
         import gc
 
-        for fd in self.file_fd_map.values():
-            os.close(fd)
-        self.file_fd_map.clear()
+        mesh_loader.close_mesh_handles(self)
         self.file_handle_map.clear()
-        self.file_memmap_map.clear()
         gc.collect()
 
     def load_experts(self, base_key: str, device: str = "cpu"):
@@ -475,41 +309,7 @@ class SafeTensorLoader:
         return result
 
     def load_experts_mmap(self, base_key: str):
-        """
-        Load expert weights as file-backed numpy views.
-
-        This keeps quantized data in the safetensors mmap baseline and lets C++
-        point directly into the mapped file when `use_mmap=True`.
-        """
-        up_base_key = f"{base_key}.ffn_up_exps"
-        gate_base_key = f"{base_key}.ffn_gate_exps"
-        down_base_key = f"{base_key}.ffn_down_exps"
-        numa_ids, expert_ids = self._get_dense_moe_layout(base_key)
-
-        up_weights = [[] for _ in numa_ids]
-        gate_weights = [[] for _ in numa_ids]
-        down_weights = [[] for _ in numa_ids]
-        up_scales = [[] for _ in numa_ids]
-        gate_scales = [[] for _ in numa_ids]
-        down_scales = [[] for _ in numa_ids]
-
-        for numa_id in numa_ids:
-            for expert_id in expert_ids:
-                up_weights[numa_id].append(self.get_mmap_tensor(f"{up_base_key}.{expert_id}.numa.{numa_id}.weight"))
-                gate_weights[numa_id].append(self.get_mmap_tensor(f"{gate_base_key}.{expert_id}.numa.{numa_id}.weight"))
-                down_weights[numa_id].append(self.get_mmap_tensor(f"{down_base_key}.{expert_id}.numa.{numa_id}.weight"))
-                up_scales[numa_id].append(self.get_mmap_tensor(f"{up_base_key}.{expert_id}.numa.{numa_id}.scale"))
-                gate_scales[numa_id].append(self.get_mmap_tensor(f"{gate_base_key}.{expert_id}.numa.{numa_id}.scale"))
-                down_scales[numa_id].append(self.get_mmap_tensor(f"{down_base_key}.{expert_id}.numa.{numa_id}.scale"))
-
-        return {
-            "up": up_weights,
-            "gate": gate_weights,
-            "down": down_weights,
-            "up_scale": up_scales,
-            "gate_scale": gate_scales,
-            "down_scale": down_scales,
-        }
+        return mesh_loader.load_amx_experts_mmap(self, base_key)
 
     def has_tensor(self, name: str):
         return name in self.tensor_file_map
@@ -738,7 +538,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
     """Loader for native BF16 expert weights (no quantization, no scales).
 
     Supported formats:
-    - Qwen3.5 unfused style: {base}.mlp.experts.experts.{id}.{gate,up,down}_proj.weight
     - DeepSeek style: {base}.mlp.experts.{id}.{gate,up,down}_proj.weight
     - Mixtral/MiniMax style: {base}.block_sparse_moe.experts.{id}.{w1,w3,w2}.weight
     - Mistral style: {base}.experts.{id}.{w1,w3,w2}.weight
@@ -747,7 +546,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
     """
 
     MOE_FORMATS = {
-        "qwen35_unfused": ("{base}.mlp.experts.experts", "gate_proj", "up_proj", "down_proj"),
         "deepseek": ("{base}.mlp.experts", "gate_proj", "up_proj", "down_proj"),
         "mixtral": ("{base}.block_sparse_moe.experts", "w1", "w3", "w2"),
         "mistral": ("{base}.experts", "w1", "w3", "w2"),
@@ -767,12 +565,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
             if key.endswith(".mlp.experts.gate_up_proj"):
                 self._detected_format = "packed"
                 print("[BF16SafeTensorLoader] Detected format: packed (Qwen3.5 MoE style)")
-                return
-
-        for key in sample_keys:
-            if ".mlp.experts.experts." in key and ".gate_proj.weight" in key:
-                self._detected_format = "qwen35_unfused"
-                print("[BF16SafeTensorLoader] Detected format: qwen35_unfused")
                 return
 
         for fmt_name, (path_tpl, gate, up, down) in self.MOE_FORMATS.items():
@@ -898,60 +690,6 @@ class BF16SafeTensorLoader(SafeTensorLoader):
         gate_list = [gate_up[i, :mid, :].contiguous() for i in range(gate_up.shape[0])]
         up_list = [gate_up[i, mid:, :].contiguous() for i in range(gate_up.shape[0])]
         down_list = [down[i].contiguous() for i in range(down.shape[0])]
-
-        return {
-            "gate": gate_list,
-            "up": up_list,
-            "down": down_list,
-        }
-
-    def load_experts_mmap(self, base_key: str):
-        """Load BF16 expert weights as zero-copy mmap views."""
-        if self._detected_format == "packed":
-            return self._load_experts_packed_mmap(base_key)
-
-        experts_prefix_candidates = self._get_experts_prefix_candidates(base_key)
-        gate_name, up_name, down_name = self._get_proj_names()
-
-        expert_count = 0
-        experts_prefix = None
-        for prefix in experts_prefix_candidates:
-            expert_count = 0
-            while self.has_tensor(f"{prefix}.{expert_count}.{gate_name}.weight"):
-                expert_count += 1
-            if expert_count > 0:
-                experts_prefix = prefix
-                break
-
-        if expert_count == 0 or experts_prefix is None:
-            raise ValueError(f"No experts found for keys: {experts_prefix_candidates}")
-
-        gate_weights = [None] * expert_count
-        up_weights = [None] * expert_count
-        down_weights = [None] * expert_count
-
-        for exp_id in range(expert_count):
-            gate_weights[exp_id] = self.get_mmap_tensor(f"{experts_prefix}.{exp_id}.{gate_name}.weight")
-            up_weights[exp_id] = self.get_mmap_tensor(f"{experts_prefix}.{exp_id}.{up_name}.weight")
-            down_weights[exp_id] = self.get_mmap_tensor(f"{experts_prefix}.{exp_id}.{down_name}.weight")
-
-        return {
-            "gate": gate_weights,
-            "up": up_weights,
-            "down": down_weights,
-        }
-
-    def _load_experts_packed_mmap(self, base_key: str):
-        """Load packed BF16 expert weights as zero-copy mmap views."""
-        experts_prefix = self._resolve_packed_experts_prefix(base_key)
-
-        gate_up = self.get_mmap_tensor(f"{experts_prefix}.gate_up_proj")
-        down = self.get_mmap_tensor(f"{experts_prefix}.down_proj")
-
-        mid = gate_up.shape[1] // 2
-        gate_list = [gate_up[i, :mid, :] for i in range(gate_up.shape[0])]
-        up_list = [gate_up[i, mid:, :] for i in range(gate_up.shape[0])]
-        down_list = [down[i] for i in range(down.shape[0])]
 
         return {
             "gate": gate_list,
@@ -1118,6 +856,9 @@ class BF16SafeTensorLoader(SafeTensorLoader):
             "up_scale": None,
             "down_scale": None,
         }
+
+
+mesh_loader.patch_bf16_loader(BF16SafeTensorLoader)
 
 
 class GGUFLoader:
@@ -1408,80 +1149,7 @@ class GGUFLoader:
         return data, ggml_type
 
     def get_mmap_tensor_and_ggml_type(self, name: str):
-        """
-        Get tensor data as a zero-copy view into the mmap'd file region.
-
-        Unlike get_undequanted_tensor_and_ggml_type(), this does NOT copy the data.
-        The returned numpy array points directly into the mmap'd file, so:
-        - No additional memory is allocated
-        - The OS manages which pages are resident via Page Cache LRU
-        - Pages can be evicted under memory pressure without writing to swap
-
-        This is essential when model size approaches physical RAM to avoid swap thrashing.
-
-        The caller must keep a reference to the GGUFLoader (and thus the mmap handle)
-        for as long as the returned array is in use.
-
-        Args:
-            name: Tensor name (in PyTorch format, will be translated to GGUF format)
-
-        Returns:
-            (data_ptr, n_bytes, ggml_type): Tuple of raw pointer (int), byte count, and GGML type
-        """
-        name = translate_name_to_gguf(name)
-
-        if name not in self.tensor_info:
-            raise KeyError(f"Tensor '{name}' not found in GGUF files")
-
-        info = self.tensor_info[name]
-        file_path = self.tensor_file_map[name]
-        mmap_data = self.file_data_map[file_path]
-
-        offset = info["offset"]
-        n_elements = info["n_elements"]
-        ggml_type = info["dtype"]
-
-        GGML_QUANT_SIZES = {
-            GGMLQuantizationType.F32: (1, 4),
-            GGMLQuantizationType.F16: (1, 2),
-            GGMLQuantizationType.BF16: (1, 2),
-            GGMLQuantizationType.Q4_0: (32, 2 + 16),
-            GGMLQuantizationType.Q4_1: (32, 2 + 2 + 16),
-            GGMLQuantizationType.Q5_0: (32, 2 + 4 + 16),
-            GGMLQuantizationType.Q5_1: (32, 2 + 2 + 4 + 16),
-            GGMLQuantizationType.Q8_0: (32, 2 + 32),
-            GGMLQuantizationType.Q8_1: (32, 4 + 4 + 32),
-            GGMLQuantizationType.Q2_K: (256, 2 + 2 + 256 // 16 + 256 // 4),
-            GGMLQuantizationType.Q3_K: (256, 2 + 256 // 4 + 256 // 8 + 12),
-            GGMLQuantizationType.Q4_K: (256, 2 + 2 + 256 // 2 + 12),
-            GGMLQuantizationType.Q5_K: (256, 2 + 2 + 256 // 2 + 256 // 8 + 12),
-            GGMLQuantizationType.Q6_K: (256, 2 + 256 // 2 + 256 // 4 + 256 // 16),
-            GGMLQuantizationType.Q8_K: (256, 4 + 256 + 256 // 8),
-            GGMLQuantizationType.IQ2_XXS: (256, 2 + 256 // 4),
-            GGMLQuantizationType.IQ2_XS: (256, 2 + 256 // 4 + 256 // 32),
-            GGMLQuantizationType.IQ3_XXS: (256, 2 + 256 // 4 + 256 // 8),
-            GGMLQuantizationType.IQ1_S: (256, 2 + 256 // 8 + 256 // 16),
-            GGMLQuantizationType.IQ4_NL: (32, 2 + 16),
-            GGMLQuantizationType.IQ3_S: (256, 2 + 256 // 4 + 256 // 8 + 256 // 32 + 4),
-            GGMLQuantizationType.IQ2_S: (256, 2 + 256 // 4 + 256 // 16),
-            GGMLQuantizationType.IQ4_XS: (256, 2 + 2 + 256 // 2 + 256 // 64),
-            GGMLQuantizationType.I8: (1, 1),
-            GGMLQuantizationType.I16: (1, 2),
-            GGMLQuantizationType.I32: (1, 4),
-            GGMLQuantizationType.I64: (1, 8),
-            GGMLQuantizationType.F64: (1, 8),
-            GGMLQuantizationType.IQ1_M: (256, 256 // 8 + 256 // 16 + 256 // 32),
-        }
-
-        block_size, type_size = GGML_QUANT_SIZES[ggml_type]
-        n_bytes = n_elements * type_size // block_size
-
-        # Zero-copy: return a numpy view directly into the mmap region
-        data_view = np.frombuffer(mmap_data[offset : offset + n_bytes], dtype=np.uint8)
-        # data_view.ctypes.data is the raw pointer into the mmap'd file
-        data_ptr = data_view.ctypes.data
-
-        return data_ptr, n_bytes, ggml_type
+        return mesh_loader.get_gguf_mmap_tensor_and_ggml_type(self, name, translate_name_to_gguf, GGMLQuantizationType)
 
 
 class GPTQSafeTensorLoader(FP8SafeTensorLoader):

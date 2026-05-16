@@ -2,9 +2,7 @@ import gc
 import logging
 import os
 import torch
-import ctypes
 from typing import List, Optional
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +18,7 @@ from .loader import (
 )
 from kt_kernel_ext.moe import MOEConfig
 import kt_kernel_ext.moe as _moe_mod
+from .mesh import amx_helpers as mesh_amx
 
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
 AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
@@ -165,10 +164,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
-        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
+        numa_nodes: Optional[List[int]] = None,
         weight_strategy: str = "auto",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
@@ -334,98 +333,23 @@ class AMXMoEWrapper(BaseMoEWrapper):
         up_scale_ptrs = []
         down_scale_ptrs = []
 
-        # Determine I/O backend: io_uring or mmap
-        use_iouring = hasattr(self, "io_backend") and self.io_backend == "IOURING"
-        use_mmap = self.weight_strategy == "tiered" and not use_iouring
-
-        if use_mmap and not self.load_merged_weight:
-            print(
-                f"[AMXMoEWrapper] layer={self.layer_idx} requested tiered mmap loading, "
-                "but merged safetensors were not found; falling back to legacy resident loading"
-            )
-            use_mmap = False
-            self.weight_strategy = "legacy"
-
-        if use_mmap and self.cpu_save:
-            print(
-                f"[AMXMoEWrapper] layer={self.layer_idx} requested tiered mmap loading during cpu_save, "
-                "which requires resident buffers; falling back to legacy loading"
-            )
-            use_mmap = False
-            self.weight_strategy = "legacy"
-
-        if use_iouring:
-            if not self.load_merged_weight:
-                raise RuntimeError(
-                    f"[AMXMoEWrapper] layer={self.layer_idx} io_uring requires merged AMX safetensors "
-                    f"under weight_path={self.weight_path!r}"
-                )
-            if self.cpu_save:
-                raise RuntimeError(f"[AMXMoEWrapper] layer={self.layer_idx} io_uring cannot be used during cpu_save")
+        use_iouring, use_mmap = mesh_amx.resolve_amx_weight_mode(self)
+        file_slots = None
 
         if self.load_merged_weight:
             base_key = f"blk.{self.layer_idx}"
 
             if use_iouring:
-                # io_uring path: load file descriptors and offsets.
-                from .async_io_manager import get_global_async_reader
-
-                direct_io_requested = os.environ.get("KT_IOURING_DIRECT", "1") not in ("0", "false", "False")
-                file_slots = self.safetensor_loader.load_experts_iouring(
-                    base_key,
-                    use_direct_io=direct_io_requested,
-                )
-                if direct_io_requested and not file_slots.get("direct_io", False):
-                    raise RuntimeError(
-                        f"[AMXMoEWrapper] layer={self.layer_idx} requested KT_IOURING_DIRECT=1 "
-                        "but SafeTensorLoader did not return direct I/O slots"
-                    )
-                print(
-                    "[AMXMoEWrapper] "
-                    f"layer={self.layer_idx} backend=IOURING direct_io={file_slots.get('direct_io', False)} "
-                    "mmap_baseline=false "
-                    f"policy={self.residency_policy} capacity={self.max_resident_experts or self.max_tier0_experts}"
-                )
-
-                # Store file slots for C++ consumption
-                # Format: [tp_part_idx][expert_id] -> (fd, offset, size)
-                self.gate_file_slots = file_slots["gate"]
-                self.up_file_slots = file_slots["up"]
-                self.down_file_slots = file_slots["down"]
-                self.gate_scale_file_slots = file_slots["gate_scale"]
-                self.up_scale_file_slots = file_slots["up_scale"]
-                self.down_scale_file_slots = file_slots["down_scale"]
-
-                # Get global async reader
-                self.async_reader = get_global_async_reader()
-
+                file_slots = mesh_amx.load_amx_iouring_file_slots(self, base_key)
             elif use_mmap:
-                # mmap path: load as memory-mapped views
                 w = self.safetensor_loader.load_experts_mmap(base_key)
             else:
-                # legacy path: load into malloc buffers
                 w = self.safetensor_loader.load_experts(base_key)
 
             if not use_iouring:
-                self.gate_weights = w["gate"]
-                self.up_weights = w["up"]
-                self.down_weights = w["down"]
-                self.gate_scales = w["gate_scale"]
-                self.up_scales = w["up_scale"]
-                self.down_scales = w["down_scale"]
-
-                # Get pointers to weight arrays
-                gate_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.gate_weights]
-
-                up_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.up_weights]
-
-                down_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.down_weights]
-
-                gate_scale_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.gate_scales]
-
-                up_scale_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.up_scales]
-
-                down_scale_ptrs = [[int(et.ctypes.data) for et in numa_array] for numa_array in self.down_scales]
+                gate_ptrs, up_ptrs, down_ptrs, gate_scale_ptrs, up_scale_ptrs, down_scale_ptrs = (
+                    mesh_amx.assign_amx_weight_views(self, w)
+                )
 
         # Configure MoE
         moe_config = MOEConfig(
@@ -448,60 +372,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        moe_config.use_mmap = use_mmap
-        moe_config.max_tier0_experts = self.max_tier0_experts
-        moe_config.max_resident_experts = self._mesh_slot_pool_capacity()
-        if hasattr(moe_config, "mesh_prefill_layer_mode_enabled"):
-            moe_config.mesh_prefill_layer_mode_enabled = self._mesh_prefill_layer_mode_enabled()
-        if hasattr(moe_config, "mesh_decode_resident_experts"):
-            moe_config.mesh_decode_resident_experts = self._mesh_config_resident_experts()
-        moe_config.resident_cache_policy = self.residency_policy
-        if hasattr(moe_config, "enable_cache_stats"):
-            moe_config.enable_cache_stats = self.enable_cache_stats
-        if hasattr(moe_config, "mesh_lookahead_enabled"):
-            lookahead_env = os.environ.get("KT_MESH_LOOKAHEAD")
-            moe_config.mesh_lookahead_enabled = use_iouring and lookahead_env not in ("0", "false", "False", "FALSE")
-            if hasattr(moe_config, "mesh_topk_fallback_enabled"):
-                full_gate_enabled = os.environ.get("KT_MESH_FULL_GATE", "1") not in ("0", "false", "False", "FALSE")
-                topk_fallback_default = "0" if full_gate_enabled else "1"
-                moe_config.mesh_topk_fallback_enabled = os.environ.get(
-                    "KT_MESH_TOPK_FALLBACK", topk_fallback_default
-                ) not in ("0", "false", "False", "FALSE")
-            moe_config.mesh_lookahead_weight = float(os.environ.get("KT_MESH_LOOKAHEAD_WEIGHT", "1.0"))
-            moe_config.mesh_heat_gamma = float(os.environ.get("KT_MESH_HEAT_GAMMA", "0.7"))
-            moe_config.mesh_heat_beta = float(os.environ.get("KT_MESH_HEAT_BETA", "0.5"))
-            moe_config.mesh_transition_alpha = float(os.environ.get("KT_MESH_TRANSITION_ALPHA", "0.5"))
-            # Heat is an eviction signal in the paper path. It must not trigger
-            # proactive expert reads; only deferred experts are prefetched.
-            moe_config.mesh_prefetch_budget = 0
-            moe_config.mesh_coldstart_prefill_enabled = False
-            moe_config.mesh_coldstart_prefill_limit = 0
-            if hasattr(moe_config, "mesh_memory_guard_enabled"):
-                moe_config.mesh_memory_guard_enabled = use_iouring and os.environ.get(
-                    "KT_MESH_MEMORY_GUARD", "1"
-                ) not in ("0", "false", "False", "FALSE")
-                moe_config.mesh_memory_high_watermark = float(os.environ.get("KT_MESH_MEMORY_HIGH_WATERMARK", "0.95"))
-                moe_config.mesh_memory_target_watermark = float(
-                    os.environ.get("KT_MESH_MEMORY_TARGET_WATERMARK", "0.90")
-                )
-                moe_config.mesh_memory_check_interval = int(os.environ.get("KT_MESH_MEMORY_CHECK_INTERVAL", "64"))
-                moe_config.mesh_memory_max_demotes_per_check = int(
-                    os.environ.get("KT_MESH_MEMORY_MAX_DEMOTES_PER_CHECK", "8")
-                )
-        if hasattr(moe_config, "iouring_direct_io"):
-            moe_config.iouring_direct_io = bool(file_slots.get("direct_io", False)) if use_iouring else False
-        if use_iouring:
-            moe_config.use_mmap = False
-            moe_config.set_iouring_file_slots(
-                self.gate_file_slots,
-                self.gate_scale_file_slots,
-                self.up_file_slots,
-                self.up_scale_file_slots,
-                self.down_file_slots,
-                self.down_scale_file_slots,
-                self.async_reader,
-            )
-            self._async_reader_keepalive = self.async_reader
+        mesh_amx.apply_mesh_moe_config(
+            self, moe_config, use_iouring=use_iouring, use_mmap=use_mmap, file_slots=file_slots
+        )
 
         if self.cpu_save:
             moe_config.save = True
@@ -536,7 +409,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
         if use_mmap:
             self._register_moe_with_provider()
-            self._register_amx_mmap_regions()
+            mesh_amx.register_amx_mmap_regions(self)
 
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
@@ -558,41 +431,27 @@ class AMXMoEWrapper(BaseMoEWrapper):
             return {}
         return dict(self.moe.cache_stats_snapshot())
 
-    def _register_amx_mmap_regions(self):
-        """Register AMX mmap source regions for provider prefetch."""
-        if self._provider is None:
-            return
-
-        from .weight_provider import MmapWeightRegion
-
-        self._provider.clear_layer_regions(self.layer_idx)
-
-        for proj_name, weights, scales in (
-            ("gate", self.gate_weights, self.gate_scales),
-            ("up", self.up_weights, self.up_scales),
-            ("down", self.down_weights, self.down_scales),
-        ):
-            # AMX INT4/INT8 expert tensors are sharded by NUMA node:
-            #   weights[numa_idx][expert_id]
-            # Register every NUMA slice for the same logical expert so provider
-            # prefetch can warm all mmap regions backing that expert.
-            for numa_idx, numa_weights in enumerate(weights):
-                for expert_id, weight in enumerate(numa_weights):
-                    weight_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                    weight_region.ptr = int(weight.ctypes.data)
-                    weight_region.n_bytes = int(weight.nbytes)
-                    weight_region._view = weight
-                    self._provider.register_mmap_region(self.layer_idx, f"{proj_name}_weight", expert_id, weight_region)
-
-                    if scales is not None:
-                        scale = scales[numa_idx][expert_id]
-                        scale_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                        scale_region.ptr = int(scale.ctypes.data)
-                        scale_region.n_bytes = int(scale.nbytes)
-                        scale_region._view = scale
-                        self._provider.register_mmap_region(
-                            self.layer_idx, f"{proj_name}_scale", expert_id, scale_region
-                        )
+    def close(self):
+        super().close()
+        self._mmap_keepalive = None
+        self.gate_weights = None
+        self.up_weights = None
+        self.down_weights = None
+        self.gate_scales = None
+        self.up_scales = None
+        self.down_scales = None
+        self.gate_file_slots = None
+        self.up_file_slots = None
+        self.down_file_slots = None
+        self.gate_scale_file_slots = None
+        self.up_scale_file_slots = None
+        self.down_scale_file_slots = None
+        self._async_reader_keepalive = None
+        if BaseMoEWrapper._active_wrapper_count == 0:
+            if AMXMoEWrapper._safetensor_loader_instance is not None:
+                AMXMoEWrapper._safetensor_loader_instance.close_all_handles()
+            AMXMoEWrapper._safetensor_loader_instance = None
+            AMXMoEWrapper._safetensor_loader_path = None
 
 
 class NativeMoEWrapper(BaseMoEWrapper):
@@ -613,10 +472,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
-        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
+        numa_nodes: Optional[List[int]] = None,
         weight_strategy: str = "auto",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
@@ -711,6 +570,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
+        self._mmap_keepalive = None
+        self._uses_mmap_weights = False
 
     @staticmethod
     def _create_loader(method: str, weight_path: str):
@@ -734,6 +595,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         if NativeMoEWrapper._native_loader_instance is not None:
             NativeMoEWrapper._native_loader_instance.close_all_handles()
             NativeMoEWrapper._native_loader_instance = None
+            NativeMoEWrapper._native_loader_signature = None
             if layer_idx >= 0:
                 logger.info(
                     "[KT] Released NativeMoEWrapper loader after layer %d: " "safetensors mmap handles freed.",
@@ -833,14 +695,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         # Build pointer lists: [numa_id][expert_id] -> pointer
         # Since RAWINT4/FP8/BF16 has no numa sharding, numa dimension is 1
-        def _ptr(weight):
-            if isinstance(weight, np.ndarray):
-                return int(weight.ctypes.data)
-            return weight.data_ptr()
-
-        gate_ptrs = [[_ptr(t) for t in self.gate_weights]]
-        up_ptrs = [[_ptr(t) for t in self.up_weights]]
-        down_ptrs = [[_ptr(t) for t in self.down_weights]]
+        gate_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.gate_weights]]
+        up_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.up_weights]]
+        down_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.down_weights]]
 
         # BF16 has no scales, pass empty lists (will use 0/nullptr for consistency)
         if self.method == "BF16":
@@ -885,14 +742,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        moe_config.use_mmap = use_mmap
-        moe_config.max_tier0_experts = self.max_tier0_experts
-        moe_config.max_resident_experts = self._mesh_slot_pool_capacity()
-        if hasattr(moe_config, "mesh_prefill_layer_mode_enabled"):
-            moe_config.mesh_prefill_layer_mode_enabled = self._mesh_prefill_layer_mode_enabled()
-        if hasattr(moe_config, "mesh_decode_resident_experts"):
-            moe_config.mesh_decode_resident_experts = self._mesh_config_resident_experts()
-        moe_config.resident_cache_policy = self.residency_policy
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False, use_mmap=use_mmap)
 
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size
@@ -961,7 +811,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         if use_mmap and self.method == "BF16":
             self._uses_mmap_weights = True
             self._register_moe_with_provider()
-            self._register_bf16_mmap_regions()
+            mesh_amx.register_bf16_mmap_regions(self)
 
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
@@ -995,27 +845,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
             f"cleanup: {(t6-t5)*1000:.1f}ms, "
             f"total: {(t6-t0)*1000:.1f}ms"
         )
-
-    def _register_bf16_mmap_regions(self):
-        """Register BF16 mmap source regions for provider prefetch."""
-        if self._provider is None:
-            return
-
-        from .weight_provider import MmapWeightRegion
-
-        self._provider.clear_layer_regions(self.layer_idx)
-
-        for proj_name, weights in (
-            ("gate", self.gate_weights),
-            ("up", self.up_weights),
-            ("down", self.down_weights),
-        ):
-            for expert_id, weight in enumerate(weights):
-                region = MmapWeightRegion.__new__(MmapWeightRegion)
-                region.ptr = int(weight.ctypes.data)
-                region.n_bytes = int(weight.nbytes)
-                region._view = weight
-                self._provider.register_mmap_region(self.layer_idx, proj_name, expert_id, region)
 
     def submit_write_weight_scale_to_buffer(
         self,
@@ -1063,5 +892,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         super().close()
         self._mmap_keepalive = None
         if BaseMoEWrapper._active_wrapper_count == 0:
+            if NativeMoEWrapper._native_loader_instance is not None:
+                NativeMoEWrapper._native_loader_instance.close_all_handles()
             NativeMoEWrapper._native_loader_instance = None
             NativeMoEWrapper._native_loader_signature = None

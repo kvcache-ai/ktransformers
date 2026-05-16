@@ -1,12 +1,12 @@
 import os
 import torch
-import ctypes
 from typing import List, Optional
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
 from .loader import SafeTensorLoader
 from kt_kernel_ext.moe import MOEConfig
+from .mesh import amx_helpers as mesh_amx
 
 try:
     from kt_kernel_ext.moe import Int8_KERNEL_MOE
@@ -23,8 +23,6 @@ except (ImportError, AttributeError):
     Int4_KERNEL_MOE = None
     _HAS_INT4_SUPPORT = False
 
-from typing import Optional
-
 
 class GeneralMoEWrapper(BaseMoEWrapper):
     """
@@ -33,6 +31,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
     """
 
     _safetensor_loader_instance = None  # Singleton SafeTensorLoader
+    _safetensor_loader_path = None
 
     def __init__(
         self,
@@ -46,10 +45,10 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
-        numa_nodes: Optional[List[int]] = None,
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "MOE_INT8",
+        numa_nodes: Optional[List[int]] = None,
         weight_strategy: str = "tiered",
         max_tier0_experts: Optional[int] = None,
         num_moe_layers: Optional[int] = None,
@@ -118,8 +117,13 @@ class GeneralMoEWrapper(BaseMoEWrapper):
 
         # Initialize SafeTensor loader (singleton)
         if self.load_merged_weight:
-            if GeneralMoEWrapper._safetensor_loader_instance is None:
+            resolved_weight_path = os.path.abspath(weight_path)
+            if (
+                GeneralMoEWrapper._safetensor_loader_instance is None
+                or GeneralMoEWrapper._safetensor_loader_path != resolved_weight_path
+            ):
                 GeneralMoEWrapper._safetensor_loader_instance = SafeTensorLoader(weight_path)
+                GeneralMoEWrapper._safetensor_loader_path = resolved_weight_path
             self.safetensor_loader = GeneralMoEWrapper._safetensor_loader_instance
 
         # moe-specific weight storage
@@ -234,61 +238,9 @@ class GeneralMoEWrapper(BaseMoEWrapper):
                 else self.safetensor_loader.load_experts(base_key)
             )
 
-            self.gate_weights = w["gate"]
-            self.up_weights = w["up"]
-            self.down_weights = w["down"]
-            self.gate_scales = w["gate_scale"]
-            self.up_scales = w["up_scale"]
-            self.down_scales = w["down_scale"]
-
-            # Get pointers to weight arrays
-            gate_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.gate_weights
-            ]
-
-            up_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.up_weights
-            ]
-
-            down_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.down_weights
-            ]
-
-            gate_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.gate_scales
-            ]
-
-            up_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.up_scales
-            ]
-
-            down_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.down_scales
-            ]
+            gate_ptrs, up_ptrs, down_ptrs, gate_scale_ptrs, up_scale_ptrs, down_scale_ptrs = (
+                mesh_amx.assign_amx_weight_views(self, w)
+            )
 
         # Configure MoE
         moe_config = MOEConfig(
@@ -311,14 +263,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        moe_config.use_mmap = use_mmap
-        moe_config.max_tier0_experts = self.max_tier0_experts
-        moe_config.max_resident_experts = self._mesh_slot_pool_capacity()
-        if hasattr(moe_config, "mesh_prefill_layer_mode_enabled"):
-            moe_config.mesh_prefill_layer_mode_enabled = self._mesh_prefill_layer_mode_enabled()
-        if hasattr(moe_config, "mesh_decode_resident_experts"):
-            moe_config.mesh_decode_resident_experts = self._mesh_config_resident_experts()
-        moe_config.resident_cache_policy = self.residency_policy
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False, use_mmap=use_mmap)
 
         if self.cpu_save:
             moe_config.save = True
@@ -349,7 +294,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
 
         if use_mmap:
             self._register_moe_with_provider()
-            self._register_moe_kernel_mmap_regions()
+            mesh_amx.register_amx_mmap_regions(self)
 
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
@@ -374,32 +319,17 @@ class GeneralMoEWrapper(BaseMoEWrapper):
                 self.down_scales,
             )
 
-    def _register_moe_kernel_mmap_regions(self):
-        """Register moe-kernel mmap source regions for provider prefetch."""
-        if self._provider is None:
-            return
-
-        from .weight_provider import MmapWeightRegion
-
-        self._provider.clear_layer_regions(self.layer_idx)
-
-        for proj_name, weights, scales in (
-            ("gate", self.gate_weights, self.gate_scales),
-            ("up", self.up_weights, self.up_scales),
-            ("down", self.down_weights, self.down_scales),
-        ):
-            for numa_array in weights:
-                for expert_id, weight in enumerate(numa_array):
-                    weight_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                    weight_region.ptr = int(weight.ctypes.data)
-                    weight_region.n_bytes = int(weight.nbytes)
-                    weight_region._view = weight
-                    self._provider.register_mmap_region(self.layer_idx, f"{proj_name}_weight", expert_id, weight_region)
-
-            for numa_array in scales:
-                for expert_id, scale in enumerate(numa_array):
-                    scale_region = MmapWeightRegion.__new__(MmapWeightRegion)
-                    scale_region.ptr = int(scale.ctypes.data)
-                    scale_region.n_bytes = int(scale.nbytes)
-                    scale_region._view = scale
-                    self._provider.register_mmap_region(self.layer_idx, f"{proj_name}_scale", expert_id, scale_region)
+    def close(self):
+        super().close()
+        self._mmap_keepalive = None
+        self.gate_weights = None
+        self.up_weights = None
+        self.down_weights = None
+        self.gate_scales = None
+        self.up_scales = None
+        self.down_scales = None
+        if BaseMoEWrapper._active_wrapper_count == 0:
+            if GeneralMoEWrapper._safetensor_loader_instance is not None:
+                GeneralMoEWrapper._safetensor_loader_instance.close_all_handles()
+            GeneralMoEWrapper._safetensor_loader_instance = None
+            GeneralMoEWrapper._safetensor_loader_path = None

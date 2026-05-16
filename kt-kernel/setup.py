@@ -753,6 +753,7 @@ setup(
     packages=[
         "kt_kernel",
         "kt_kernel.utils",
+        "kt_kernel.utils.mesh",
         "kt_kernel.sft",
         "kt_kernel.cli",
         "kt_kernel.cli.commands",
@@ -763,6 +764,7 @@ setup(
     package_dir={
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
+        "kt_kernel.utils.mesh": "python/utils/mesh",
         "kt_kernel.sft": "python/sft",
         "kt_kernel.cli": "python/cli",
         "kt_kernel.cli.commands": "python/cli/commands",
