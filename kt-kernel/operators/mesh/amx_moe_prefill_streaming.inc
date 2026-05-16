@@ -171,44 +171,79 @@
     std::vector<BatchPromotion> scratch_promotions;
     std::vector<ktransformers::AsyncExpertReader::ReadRequest> scratch_read_batch;
     std::vector<uint64_t> scratch_requests;
-    scratch_promotions.reserve(scratch_active_experts.size());
-    scratch_read_batch.reserve(scratch_active_experts.size() * 9);
-    int next_scratch_slot = std::max(0, std::min(prefill_static_slot_count_, cache_capacity_));
-    PrefillPromotionTiming scratch_timing;
-    const auto scratch_submit_start = std::chrono::steady_clock::now();
-    for (int expert_id : scratch_active_experts) {
-      const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
-      if (state != EXPERT_CACHED && state != EXPERT_PINNED && state != EXPERT_PREFETCHING) {
-        if (next_scratch_slot >= cache_capacity_) {
-          std::ostringstream oss;
-          oss << "AMX prefill scratch has no free slot layer=" << config_.layer_idx
-              << " tp=" << tp_part_idx << " expert=" << expert_id
-              << " static_slots=" << prefill_static_slot_count_
-              << " scratch_active=" << scratch_active_experts.size()
-              << " capacity=" << cache_capacity_ << resident_debug_summary();
-          throw std::runtime_error(oss.str());
-        }
-        if (!submit_prefill_promotion_to_slot(
-                expert_id, next_scratch_slot, &scratch_promotions, &scratch_read_batch, &scratch_timing)) {
-          std::ostringstream oss;
-          oss << "AMX prefill scratch promotion could not reserve slot layer=" << config_.layer_idx
-              << " tp=" << tp_part_idx << " expert=" << expert_id
-              << " slot=" << next_scratch_slot
-              << " static_slots=" << prefill_static_slot_count_
-              << " resident=" << resident_expert_count_.load(std::memory_order_acquire)
-              << " capacity=" << cache_capacity_ << resident_debug_summary();
-          throw std::runtime_error(oss.str());
-        }
-        next_scratch_slot += 1;
-      }
+    const int scratch_begin_slot = std::max(0, std::min(prefill_static_slot_count_, cache_capacity_));
+    const int scratch_slot_capacity = cache_capacity_ - scratch_begin_slot;
+    if (!scratch_active_experts.empty() && scratch_slot_capacity <= 0) {
+      std::ostringstream oss;
+      oss << "AMX prefill scratch has no slot capacity layer=" << config_.layer_idx
+          << " tp=" << tp_part_idx
+          << " static_slots=" << prefill_static_slot_count_
+          << " scratch_active=" << scratch_active_experts.size()
+          << " capacity=" << cache_capacity_ << resident_debug_summary();
+      throw std::runtime_error(oss.str());
     }
-    try {
-      submit_prefill_promotion_reads(&scratch_promotions, scratch_read_batch, &scratch_requests, &scratch_timing);
-    } catch (...) {
-      rollback_prefill_promotions(&scratch_promotions);
-      throw;
+    scratch_promotions.reserve(std::min<size_t>(scratch_active_experts.size(), scratch_slot_capacity));
+    scratch_read_batch.reserve(std::min<size_t>(scratch_active_experts.size(), scratch_slot_capacity) * 9);
+    PrefillPromotionTiming scratch_timing;
+    uint64_t scratch_submit_us = 0;
+    auto submit_scratch_chunk = [&](size_t begin,
+                                    size_t end,
+                                    std::vector<BatchPromotion>* promotions,
+                                    std::vector<ktransformers::AsyncExpertReader::ReadRequest>* read_batch,
+                                    std::vector<uint64_t>* requests) {
+      promotions->clear();
+      read_batch->clear();
+      requests->clear();
+      int next_scratch_slot = scratch_begin_slot;
+      for (size_t idx = begin; idx < end; ++idx) {
+        const int expert_id = scratch_active_experts[idx];
+        const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+        if (state != EXPERT_CACHED && state != EXPERT_PINNED && state != EXPERT_PREFETCHING) {
+          if (next_scratch_slot >= cache_capacity_) {
+            std::ostringstream oss;
+            oss << "AMX prefill scratch has no free slot layer=" << config_.layer_idx
+                << " tp=" << tp_part_idx << " expert=" << expert_id
+                << " static_slots=" << prefill_static_slot_count_
+                << " scratch_active=" << scratch_active_experts.size()
+                << " chunk_begin=" << begin
+                << " chunk_end=" << end
+                << " capacity=" << cache_capacity_ << resident_debug_summary();
+            throw std::runtime_error(oss.str());
+          }
+          if (!submit_prefill_promotion_to_slot(
+                  expert_id, next_scratch_slot, promotions, read_batch, &scratch_timing)) {
+            std::ostringstream oss;
+            oss << "AMX prefill scratch promotion could not reserve slot layer=" << config_.layer_idx
+                << " tp=" << tp_part_idx << " expert=" << expert_id
+                << " slot=" << next_scratch_slot
+                << " static_slots=" << prefill_static_slot_count_
+                << " resident=" << resident_expert_count_.load(std::memory_order_acquire)
+                << " capacity=" << cache_capacity_ << resident_debug_summary();
+            throw std::runtime_error(oss.str());
+          }
+          next_scratch_slot += 1;
+        }
+      }
+      try {
+        submit_prefill_promotion_reads(promotions, *read_batch, requests, &scratch_timing);
+      } catch (...) {
+        rollback_prefill_promotions(promotions);
+        throw;
+      }
+    };
+
+    const auto scratch_submit_start = std::chrono::steady_clock::now();
+    size_t scratch_next = 0;
+    const size_t first_scratch_end =
+        std::min(scratch_active_experts.size(), static_cast<size_t>(std::max(0, scratch_slot_capacity)));
+    std::vector<int> scratch_compute_group;
+    if (first_scratch_end > 0) {
+      scratch_compute_group.assign(scratch_active_experts.begin(), scratch_active_experts.begin() + first_scratch_end);
+      submit_scratch_chunk(0, first_scratch_end, &scratch_promotions, &scratch_read_batch, &scratch_requests);
+      scratch_next = first_scratch_end;
     }
     const auto scratch_submit_end = std::chrono::steady_clock::now();
+    scratch_submit_us += elapsed_us(scratch_submit_start, scratch_submit_end);
 
     auto compute_expert_group = [&](const std::vector<int>& group) -> uint64_t {
       if (group.empty()) return 0;
@@ -274,12 +309,33 @@
     };
 
     const uint64_t static_compute_us = compute_expert_group(static_active_experts);
-    const auto scratch_wait_start = std::chrono::steady_clock::now();
-    wait_and_finalize_prefill_promotions(&scratch_promotions, scratch_requests, "scratch");
-    const auto scratch_wait_end = std::chrono::steady_clock::now();
-    const uint64_t scratch_wait_us = elapsed_us(scratch_wait_start, scratch_wait_end);
-    const uint64_t scratch_compute_us = compute_expert_group(scratch_active_experts);
-    release_prefill_scratch_slots(true);
+    uint64_t scratch_wait_us = 0;
+    uint64_t scratch_compute_us = 0;
+    auto finish_scratch_chunk = [&](const std::vector<int>& group,
+                                    std::vector<BatchPromotion>* promotions,
+                                    const std::vector<uint64_t>& requests) {
+      if (group.empty()) return;
+      const auto scratch_wait_start = std::chrono::steady_clock::now();
+      wait_and_finalize_prefill_promotions(promotions, requests, "scratch");
+      const auto scratch_wait_end = std::chrono::steady_clock::now();
+      scratch_wait_us += elapsed_us(scratch_wait_start, scratch_wait_end);
+      scratch_compute_us += compute_expert_group(group);
+      release_prefill_scratch_slots(true);
+    };
+
+    finish_scratch_chunk(scratch_compute_group, &scratch_promotions, scratch_requests);
+    while (scratch_next < scratch_active_experts.size()) {
+      const size_t chunk_end =
+          std::min(scratch_active_experts.size(), scratch_next + static_cast<size_t>(scratch_slot_capacity));
+      scratch_compute_group.assign(scratch_active_experts.begin() + scratch_next,
+                                   scratch_active_experts.begin() + chunk_end);
+      const auto chunk_submit_start = std::chrono::steady_clock::now();
+      submit_scratch_chunk(scratch_next, chunk_end, &scratch_promotions, &scratch_read_batch, &scratch_requests);
+      const auto chunk_submit_end = std::chrono::steady_clock::now();
+      scratch_submit_us += elapsed_us(chunk_submit_start, chunk_submit_end);
+      finish_scratch_chunk(scratch_compute_group, &scratch_promotions, scratch_requests);
+      scratch_next = chunk_end;
+    }
 
     const uint64_t read_reqs_after =
         config_.cache_stats != nullptr
@@ -299,7 +355,7 @@
       trace_data.scratch_state = scratch_state_before;
       trace_data.static_slots = prefill_static_slot_count_;
       trace_data.scratch_slots = cache_capacity_ - prefill_static_slot_count_;
-      trace_data.scratch_submit_us = elapsed_us(scratch_submit_start, scratch_submit_end);
+      trace_data.scratch_submit_us = scratch_submit_us;
       trace_data.scratch_wait_us = scratch_wait_us;
       trace_data.static_compute_us = static_compute_us;
       trace_data.scratch_compute_us = scratch_compute_us;
