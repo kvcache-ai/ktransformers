@@ -291,6 +291,14 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
         if(LLAMA_AVX512_BF16)
             list(APPEND ARCH_FLAGS -mavx512bf16)
         endif()
+        # AVX512_VL+BW is required by operators/amx/la/avx_kernels.hpp
+        # (_mm256_maskz_loadu_epi16 family). BW is already in LLAMA_AVX512;
+        # VL is only added by LLAMA_AVX512_FANCY_SIMD, which the
+        # multi-variant build path never enables. Pull it in here whenever
+        # a variant that uses this code path is active.
+        if(LLAMA_AVX512_VBMI OR LLAMA_AVX512_BF16)
+            list(APPEND ARCH_FLAGS -mavx512vl)
+        endif()
     endif()
 elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
     message(STATUS "PowerPC detected")
