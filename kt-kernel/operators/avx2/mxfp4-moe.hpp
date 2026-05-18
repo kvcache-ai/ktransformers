@@ -680,6 +680,9 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
       int group_size = config.quant_config.group_size;
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto& tpc = tps[i]->config_;
+        if (tpc.intermediate_size % 2 != 0)
+          throw std::runtime_error("MXFP4 TP flat-buffer: intermediate_size must be even for nibble-aligned addressing, got " +
+                                   std::to_string(tpc.intermediate_size));
         size_t weight_elem_count = (size_t)tpc.intermediate_size * tpc.hidden_size;
         size_t scales_elem_count = ((size_t)tpc.hidden_size / group_size) * tpc.intermediate_size;
         tpc.gate_proj = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
