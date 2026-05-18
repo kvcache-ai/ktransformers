@@ -187,24 +187,27 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         ...
 
     @abstractmethod
-    def load_weights(self, physical_to_logical_map_cpu: torch.Tensor) -> None:
-        ...
+    def load_weights(self, physical_to_logical_map_cpu: torch.Tensor) -> None: ...
 
     @abstractmethod
     def init_lora_weights(
         self,
-        gate_lora_a: torch.Tensor, gate_lora_b: torch.Tensor,
-        up_lora_a: torch.Tensor, up_lora_b: torch.Tensor,
-        down_lora_a: torch.Tensor, down_lora_b: torch.Tensor,
-        grad_gate_lora_a: torch.Tensor, grad_gate_lora_b: torch.Tensor,
-        grad_up_lora_a: torch.Tensor, grad_up_lora_b: torch.Tensor,
-        grad_down_lora_a: torch.Tensor, grad_down_lora_b: torch.Tensor,
-    ) -> None:
-        ...
+        gate_lora_a: torch.Tensor,
+        gate_lora_b: torch.Tensor,
+        up_lora_a: torch.Tensor,
+        up_lora_b: torch.Tensor,
+        down_lora_a: torch.Tensor,
+        down_lora_b: torch.Tensor,
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
+    ) -> None: ...
 
     @abstractmethod
-    def update_lora_weights(self) -> None:
-        ...
+    def update_lora_weights(self) -> None: ...
 
     # ========== Buffer helpers ==========
 
@@ -235,12 +238,16 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 f"expert_ids shape {tuple(expert_ids.shape)} must be ({qlen}, {self.num_experts_per_tok})."
             )
         if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
-            raise ValueError(
-                f"weights shape {tuple(weights.shape)} must be ({qlen}, {self.num_experts_per_tok})."
-            )
+            raise ValueError(f"weights shape {tuple(weights.shape)} must be ({qlen}, {self.num_experts_per_tok}).")
 
-    def _copy_inputs_to_buffer(self, buffer: KExpertsSFTBuffer, hidden_states: torch.Tensor,
-                               expert_ids: torch.Tensor, weights: torch.Tensor, qlen: int) -> torch.device:
+    def _copy_inputs_to_buffer(
+        self,
+        buffer: KExpertsSFTBuffer,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        qlen: int,
+    ) -> torch.device:
         """Copy inputs to CPU buffer, return input device."""
         input_device = hidden_states.device
         buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
@@ -392,11 +399,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def submit_backward_repack(self):
         if not self._weights_loaded or self.moe is None:
             return
-        if hasattr(self.moe, 'submit_backward_repack'):
+        if hasattr(self.moe, "submit_backward_repack"):
             self.moe.submit_backward_repack()
 
     def wait_backward_repack(self):
         if not self._weights_loaded or self.moe is None:
             return
-        if hasattr(self.moe, 'wait_backward_repack'):
+        if hasattr(self.moe, "wait_backward_repack"):
             self.moe.wait_backward_repack()

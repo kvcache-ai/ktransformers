@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/bin/bash
 # Pre-commit hook: run clang-format via kt-kernel's CMake 'format' target and Black for Python
 # before allowing commit. If formatting makes changes, stage them and abort so user can review.
 set -euo pipefail
@@ -26,7 +26,8 @@ fi
 
 ## Format only staged changes within kt-kernel
 # Collect staged files (Added/Modified/Copied/Renamed)
-mapfile -d '' STAGED < <(git diff --cached --name-only -z --diff-filter=AMCR)
+STAGED=()
+while IFS= read -r -d '' f; do STAGED+=("$f"); done < <(git diff --cached --name-only -z --diff-filter=AMCR)
 
 PY_CHANGED=()
 CPP_CHANGED=()

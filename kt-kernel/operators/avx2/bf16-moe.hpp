@@ -37,7 +37,7 @@ class AVX2_BF16_MOE_TP : public AVX2_MOE_BASE<T, AVX2_BF16_MOE_TP<T>> {
 
   AVX2_BF16_MOE_TP() = default;
 
-  AVX2_BF16_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
+  AVX2_BF16_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) { this->derived_init(); }
 
   void derived_init() {
     printf("Created AVX2_BF16_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));

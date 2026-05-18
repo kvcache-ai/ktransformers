@@ -32,31 +32,51 @@ DISPATCH_THRESHOLD = 4 * expert_num / num_experts_per_tok
 physical_to_logical_map = torch.tensor(data=range(expert_num), device="cpu", dtype=torch.int64).contiguous()
 
 # E2M1 values: {0, ±0.5, ±1.0, ±1.5, ±2.0, ±3.0, ±4.0, ±6.0}
-E2M1_VALUES = torch.tensor([
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-], dtype=torch.float32)
+E2M1_VALUES = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
+    dtype=torch.float32,
+)
 
 # Nibble encoding: index = 4-bit value
 # 0b0000..0b0111 = positive, 0b1000..0b1111 = negative
-E2M1_NIBBLE_MAP = torch.tensor([
-    0,   # 0b0000 = 0.0
-    1,   # 0b0001 = 0.5
-    2,   # 0b0010 = 1.0
-    3,   # 0b0011 = 1.5
-    4,   # 0b0100 = 2.0
-    5,   # 0b0101 = 3.0
-    6,   # 0b0110 = 4.0
-    7,   # 0b0111 = 6.0
-    8,   # 0b1000 = -0.0
-    9,   # 0b1001 = -0.5
-    10,  # 0b1010 = -1.0
-    11,  # 0b1011 = -1.5
-    12,  # 0b1100 = -2.0
-    13,  # 0b1101 = -3.0
-    14,  # 0b1110 = -4.0
-    15,  # 0b1111 = -6.0
-], dtype=torch.int32)
+E2M1_NIBBLE_MAP = torch.tensor(
+    [
+        0,  # 0b0000 = 0.0
+        1,  # 0b0001 = 0.5
+        2,  # 0b0010 = 1.0
+        3,  # 0b0011 = 1.5
+        4,  # 0b0100 = 2.0
+        5,  # 0b0101 = 3.0
+        6,  # 0b0110 = 4.0
+        7,  # 0b0111 = 6.0
+        8,  # 0b1000 = -0.0
+        9,  # 0b1001 = -0.5
+        10,  # 0b1010 = -1.0
+        11,  # 0b1011 = -1.5
+        12,  # 0b1100 = -2.0
+        13,  # 0b1101 = -3.0
+        14,  # 0b1110 = -4.0
+        15,  # 0b1111 = -6.0
+    ],
+    dtype=torch.int32,
+)
 
 
 def _pattern_uniform(groups: int) -> torch.Tensor:
@@ -183,10 +203,10 @@ def quantize_mxfp4_tensor(weights: torch.Tensor, group_size: int):
     # Pack 4 bytes into int32
     bytes_view = packed_bytes.view(e, rows, cols // 8, 4)
     packed_int32 = (
-        bytes_view[..., 0].to(torch.int32) |
-        (bytes_view[..., 1].to(torch.int32) << 8) |
-        (bytes_view[..., 2].to(torch.int32) << 16) |
-        (bytes_view[..., 3].to(torch.int32) << 24)
+        bytes_view[..., 0].to(torch.int32)
+        | (bytes_view[..., 1].to(torch.int32) << 8)
+        | (bytes_view[..., 2].to(torch.int32) << 16)
+        | (bytes_view[..., 3].to(torch.int32) << 24)
     )
     packed_int32 = packed_int32.view(e, rows, cols // 8).contiguous()
 
@@ -346,8 +366,10 @@ def run_fp4_moe_test():
     print("\n=== Case vs. Relative Error Summary ===")
     print(f"{'Case':<20} {'qlen':>5} {'path':<8} {'Mean':>10} {'Max':>10} {'Min':>10}")
     for row in summary_rows:
-        print(f"{row['case']:<20} {row['qlen']:>5} {row['path']:<8} "
-              f"{row['mean']*100:9.2f}% {row['max']*100:9.2f}% {row['min']*100:9.2f}%")
+        print(
+            f"{row['case']:<20} {row['qlen']:>5} {row['path']:<8} "
+            f"{row['mean']*100:9.2f}% {row['max']*100:9.2f}% {row['min']*100:9.2f}%"
+        )
 
 
 if __name__ == "__main__":

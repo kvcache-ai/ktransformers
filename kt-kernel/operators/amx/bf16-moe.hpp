@@ -13,11 +13,24 @@
 
 // #define DEBUG_BF16_MOE
 
+#ifndef _WIN32
+#include <numa.h>
+#endif
+
+#include <atomic>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <thread>
+
 #include "la/amx_kernels.hpp"  // For vec_mul/mat_mul
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "la/amx_utils.hpp"  // For transpose_16x16_32bit
 #include "moe_base.hpp"
+#include "../mesh/expert_residency.hpp"
+#include "../mesh/prefill_policy.hpp"
+#include "../mesh/runtime_utils.hpp"
 
 /**
  * @brief BF16 MoE operator using CRTP pattern
@@ -42,6 +55,8 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   using Base::up_bb_;
   using Base::up_bc_;
 
+#include "../mesh/bf16_moe_mesh_state.inc"
+
  public:
   using typename Base::input_t;
   using typename Base::output_t;
@@ -49,15 +64,24 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   AMX_BF16_MOE_TP() = default;
 
   AMX_BF16_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
-    // Initialization now happens in derived_init() which is called by base constructor
+    this->derived_init();
   }
 
   void derived_init() {
     // BF16 has no quantization, no need to check quant_config
     printf("Created AMX_BF16_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
+#ifndef _WIN32
+    if (lazy_weight_enabled()) {
+      initialize_lazy_weight_state();
+    }
+#endif
   }
 
-  ~AMX_BF16_MOE_TP() = default;
+  ~AMX_BF16_MOE_TP() {
+#ifndef _WIN32
+    cleanup_lazy_weight_state();
+#endif
+  }
 
   // ============================================================================
   // CRTP buffer creation - without group_size
@@ -113,6 +137,8 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     }
   }
 
+#include "../mesh/bf16_moe_lazy_methods.inc"
+
 #ifdef DEBUG_BF16_MOE
   // Function to dump Buffer B data for debugging
   inline void dump_buffer_b(int expert_idx, const std::string& matrix_type, typename T::BufferB* buffer) {
@@ -157,6 +183,10 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
    * Loads weights from config_.gate_proj, up_proj, down_proj (no scales).
    */
   void load_weights() {
+#ifndef _WIN32
+    if (mesh_load_weights_from_lazy_sources()) return;
+#endif
+
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -206,6 +236,8 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
     dump_buffer_b(0, "down", down_bb_[0].get());
 #endif
   }
+
+#include "../mesh/bf16_moe_runtime_hooks.inc"
 
   // Fast 64-byte (512-bit) memcpy using AVX512
   static inline void fast_memcpy_64(void* __restrict dst, const void* __restrict src) {
@@ -426,117 +458,9 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
         },
         nullptr);
   }
+
 };
 
-template <typename K>
-class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP<K>>> {
- public:
-  using Base = TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP<K>>>;
-  using Base::Base;
-
-  void load_weights() override {
-    auto& config = this->config;
-    auto& tps = this->tps;
-    auto& tp_count = this->tp_count;
-    auto pool = config.pool;
-    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
-
-    // BF16 has no quantization check needed
-    if (config.gate_projs.empty() && config.gate_proj == nullptr) {
-      throw std::runtime_error("no weight source");
-    }
-
-    const bool use_per_expert_ptrs = !config.gate_projs.empty();
-    const size_t full_weight_elems = (size_t)config.intermediate_size * config.hidden_size;
-
-    pool->dispense_backend()->do_numa_job([&, this](int i) {
-      auto& tpc = tps[i]->config_;
-      const size_t tp_weight_elems = (size_t)tpc.intermediate_size * tpc.hidden_size;
-
-      // Allocate BF16 weights (2 bytes/element)
-      tpc.gate_proj = new ggml_bf16_t[tpc.expert_num * tp_weight_elems];
-      tpc.up_proj = new ggml_bf16_t[tpc.expert_num * tp_weight_elems];
-      tpc.down_proj = new ggml_bf16_t[tpc.expert_num * tp_weight_elems];
-
-      const size_t tp_idx = (size_t)i;
-      const size_t gate_up_weight_src_offset = i * tp_weight_elems;
-      const size_t down_weight_src_col_offset = i * (size_t)tpc.intermediate_size;
-
-      pool->get_subpool(i)->do_work_stealing_job(
-          tpc.expert_num, nullptr,
-          [&, &tpc](int expert_id_) {
-            const size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
-
-            ggml_bf16_t* gate_dst = (ggml_bf16_t*)tpc.gate_proj + expert_id * tp_weight_elems;
-            ggml_bf16_t* up_dst = (ggml_bf16_t*)tpc.up_proj + expert_id * tp_weight_elems;
-            ggml_bf16_t* down_dst = (ggml_bf16_t*)tpc.down_proj + expert_id * tp_weight_elems;
-
-            const ggml_bf16_t* gate_src;
-            const ggml_bf16_t* up_src;
-            const ggml_bf16_t* down_src;
-
-            if (use_per_expert_ptrs) {
-              gate_src = (const ggml_bf16_t*)config.gate_projs[0][expert_id] + gate_up_weight_src_offset;
-              up_src = (const ggml_bf16_t*)config.up_projs[0][expert_id] + gate_up_weight_src_offset;
-              down_src = (const ggml_bf16_t*)config.down_projs[0][expert_id];
-            } else {
-              gate_src =
-                  (const ggml_bf16_t*)config.gate_proj + expert_id * full_weight_elems + gate_up_weight_src_offset;
-              up_src = (const ggml_bf16_t*)config.up_proj + expert_id * full_weight_elems + gate_up_weight_src_offset;
-              down_src = (const ggml_bf16_t*)config.down_proj + expert_id * full_weight_elems;
-            }
-
-            // Copy gate and up weights
-            std::memcpy(gate_dst, gate_src, tp_weight_elems * sizeof(ggml_bf16_t));
-            std::memcpy(up_dst, up_src, tp_weight_elems * sizeof(ggml_bf16_t));
-
-            // Copy down weights (row-wise split)
-            for (int row = 0; row < config.hidden_size; row++) {
-              const size_t src_row_offset = (size_t)row * (size_t)config.intermediate_size + down_weight_src_col_offset;
-              const size_t dst_row_offset = (size_t)row * (size_t)tpc.intermediate_size;
-              std::memcpy(down_dst + dst_row_offset, down_src + src_row_offset,
-                          (size_t)tpc.intermediate_size * sizeof(ggml_bf16_t));
-            }
-          },
-          nullptr);
-    });
-
-    DO_TPS_LOAD_WEIGHTS(pool);
-
-    pool->dispense_backend()->do_numa_job([&, this](int i) {
-      auto& tpc = tps[i]->config_;
-      delete[] (ggml_bf16_t*)tpc.gate_proj;
-      delete[] (ggml_bf16_t*)tpc.up_proj;
-      delete[] (ggml_bf16_t*)tpc.down_proj;
-    });
-
-    this->weights_loaded = true;
-  }
-
-  /**
-   * @brief Write weights to GPU buffer for all TP parts
-   *
-   * BF16 version - no scales needed, scale_ptrs parameters are kept for interface compatibility.
-   */
-  void write_weight_scale_to_buffer(int gpu_tp_count, int expert_id, const std::vector<uintptr_t>& w13_weight_ptrs,
-                                    const std::vector<uintptr_t>& w13_scale_ptrs,
-                                    const std::vector<uintptr_t>& w2_weight_ptrs,
-                                    const std::vector<uintptr_t>& w2_scale_ptrs) {
-    if (this->weights_loaded == false) {
-      throw std::runtime_error("Not Loaded");
-    }
-    if (this->tps.empty()) {
-      throw std::runtime_error("No TP parts initialized");
-    }
-    if ((int)w13_weight_ptrs.size() != gpu_tp_count || (int)w2_weight_ptrs.size() != gpu_tp_count) {
-      throw std::runtime_error("Weight pointer arrays size must match gpu_tp_count");
-    }
-
-    this->config.pool->dispense_backend()->do_numa_job([&, this](int i) {
-      this->tps[i]->write_weights_to_buffer(gpu_tp_count, this->tp_count, expert_id, this->config, w13_weight_ptrs,
-                                            w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs);
-    });
-  }
-};
+#include "../mesh/bf16_tp_moe_specialization.inc"
 
 #endif  // CPUINFER_OPERATOR_AMX_BF16_MOE_H

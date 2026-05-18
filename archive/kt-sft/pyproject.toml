@@ -35,6 +35,8 @@ dependencies = [
   "protobuf",
   "datasets",
   "torchviz",
+  "triton>=2.0.0; sys_platform != 'win32'",
+  "triton-windows>=3.1.0; sys_platform == 'win32'",
 ]
 
 requires-python = ">=3.10"
@@ -61,7 +63,8 @@ classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12"
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: Microsoft :: Windows",
 ]
 
 [project.urls]

@@ -53,14 +53,17 @@ kt_kernel_ext = _kt_kernel_ext
 from .experts import KTMoEWrapper
 from .experts_base import generate_gpu_experts_masks
 
+
 def __getattr__(name):
     if name == "AMXSFTMoEWrapper":
         try:
             from .sft.amx import AMXSFTMoEWrapper
+
             return AMXSFTMoEWrapper
         except (ImportError, AttributeError):
             return None
     raise AttributeError(f"module 'kt_kernel' has no attribute {name!r}")
+
 
 # Read version from package metadata (preferred) or fallback to project root
 try:
@@ -93,4 +96,11 @@ except ImportError:
     except ImportError:
         __version__ = "0.6.1"
 
-__all__ = ["KTMoEWrapper", "AMXSFTMoEWrapper", "generate_gpu_experts_masks", "kt_kernel_ext", "__cpu_variant__", "__version__"]
+__all__ = [
+    "KTMoEWrapper",
+    "AMXSFTMoEWrapper",
+    "generate_gpu_experts_masks",
+    "kt_kernel_ext",
+    "__cpu_variant__",
+    "__version__",
+]

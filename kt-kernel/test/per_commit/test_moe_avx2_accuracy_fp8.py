@@ -80,7 +80,7 @@ def float_to_fp8_e4m3(val):
     if exp >= 15:
         return (sign << 7) | 0x7E  # clamp to max
     # Normal
-    man = int(round((val / (2**(exp-7)) - 1.0) * 8))
+    man = int(round((val / (2 ** (exp - 7)) - 1.0) * 8))
     man = min(man, 7)
     return (sign << 7) | (exp << 3) | man
 
@@ -97,7 +97,7 @@ def fp8_e4m3_to_float(byte_val):
     elif exp == 15:
         return float("nan")
     else:
-        val = (2**(exp-7)) * (1.0 + man / 8.0)
+        val = (2 ** (exp - 7)) * (1.0 + man / 8.0)
     return -val if sign else val
 
 
@@ -157,9 +157,15 @@ def test_avx2_fp8_accuracy(qlen, label):
 
     with torch.inference_mode():
         # Generate BF16 weights, quantize to FP8
-        gate_bf16 = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
-        up_bf16 = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
-        down_bf16 = (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+        gate_bf16 = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(
+            torch.bfloat16
+        )
+        up_bf16 = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(
+            torch.bfloat16
+        )
+        down_bf16 = (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 10.0).to(
+            torch.bfloat16
+        )
 
         # Quantize each expert
         gate_fp8_list, gate_scale_list = [], []
@@ -210,23 +216,33 @@ def test_avx2_fp8_accuracy(qlen, label):
 
         print("\n--- %s (qlen=%d) ---" % (label, qlen))
         for i in range(validation_iter):
-            expert_ids = torch.stack([torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]).contiguous()
+            expert_ids = torch.stack(
+                [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
+            ).contiguous()
             weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
             input_data = (torch.randn((qlen, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16).contiguous()
             output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
 
             bsz_tensor = torch.tensor([qlen], dtype=torch.int32)
-            CPUInfer.submit(moe.forward_task(
-                bsz_tensor.data_ptr(), num_experts_per_tok,
-                expert_ids.data_ptr(), weights.data_ptr(),
-                input_data.data_ptr(), output.data_ptr(), False,
-            ))
+            CPUInfer.submit(
+                moe.forward_task(
+                    bsz_tensor.data_ptr(),
+                    num_experts_per_tok,
+                    expert_ids.data_ptr(),
+                    weights.data_ptr(),
+                    input_data.data_ptr(),
+                    output.data_ptr(),
+                    False,
+                )
+            )
             CPUInfer.sync()
 
             # Reference: use dequantized FP32 weights
             t_output = moe_torch(input_data.float(), expert_ids, weights, gate_deq, up_deq, down_deq).to(torch.bfloat16)
 
-            diff = torch.mean(torch.abs(output.float() - t_output.float())) / (torch.mean(torch.abs(t_output.float())) + 1e-8)
+            diff = torch.mean(torch.abs(output.float() - t_output.float())) / (
+                torch.mean(torch.abs(t_output.float())) + 1e-8
+            )
             print("  Iteration %d: diff = %.6f" % (i, diff.item()))
             assert diff < 0.1, "FP8 accuracy test failed: diff=%.6f >= 0.1" % diff.item()
 
@@ -246,5 +262,6 @@ if __name__ == "__main__":
     except Exception as e:
         print("\nTEST FAILED: %s" % e)
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

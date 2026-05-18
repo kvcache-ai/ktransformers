@@ -95,9 +95,7 @@ def build_kt_device_map(config, kt_plugin, device: str = "cuda:0") -> dict[str, 
             else:
                 device_map[expert_key] = "cpu"
 
-    logger.info(
-        f"Built KT device_map: {num_gpu_experts} GPU experts, {num_experts - num_gpu_experts} CPU experts"
-    )
+    logger.info(f"Built KT device_map: {num_gpu_experts} GPU experts, {num_experts - num_gpu_experts} CPU experts")
 
     return device_map
 
@@ -225,7 +223,9 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             cfg.kt_sharded_metadata = sharded_metadata
             logger.info(f"Resolved {len(checkpoint_files)} checkpoint files from kt_expert_checkpoint_path")
         else:
-            logger.warning(f"Failed to resolve checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}")
+            logger.warning(
+                f"Failed to resolve checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}"
+            )
 
     use_checkpoint_files = bool(checkpoint_files) and not use_kt_weight_path
 
@@ -260,6 +260,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             )
 
     import torch.distributed as _dist
+
     _rank = _dist.get_rank() if _dist.is_initialized() else 0
 
     model_container, layers = _get_model_container_and_layers(model, purpose="wrapping")
@@ -509,7 +510,13 @@ def load_kt_model(
     **kwargs,
 ) -> nn.Module:
     """Load model with KTMoEWrapper backend."""
-    from .arch import get_moe_arch_config, move_non_experts_to_gpu, get_expert_device, KTAMXNotAvailableError, KTAMXConfigError
+    from .arch import (
+        get_moe_arch_config,
+        move_non_experts_to_gpu,
+        get_expert_device,
+        KTAMXNotAvailableError,
+        KTAMXConfigError,
+    )
 
     if kt_plugin is None:
         if model_args is None:
@@ -536,8 +543,11 @@ def load_kt_model(
     from transformers.integrations.kt import set_kt_config, unset_kt_config
 
     loading_kwargs = get_kt_loading_kwargs(
-        config, kt_plugin, torch_dtype=torch_dtype,
-        trust_remote_code=trust_remote_code, token=token,
+        config,
+        kt_plugin,
+        torch_dtype=torch_dtype,
+        trust_remote_code=trust_remote_code,
+        token=token,
     )
     if model_args is not None:
         for key in ("cache_dir", "revision"):
@@ -551,8 +561,10 @@ def load_kt_model(
     if getattr(cfg, "kt_skip_expert_loading", None) is None:
         checkpoint_files, sharded_metadata = _resolve_checkpoint_files(
             model_name_or_path=model_name_or_path,
-            cache_dir=cache_dir, revision=revision,
-            token=token, trust_remote_code=trust_remote_code,
+            cache_dir=cache_dir,
+            revision=revision,
+            token=token,
+            trust_remote_code=trust_remote_code,
         )
         if checkpoint_files and all(f.endswith(".safetensors") for f in checkpoint_files):
             if getattr(cfg, "kt_weight_path", None) is None:

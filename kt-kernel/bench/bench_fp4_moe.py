@@ -59,8 +59,7 @@ BACKENDS = {
 
 # OCP MXFP4 (E2M1) codepoints — same order as the kernel's LUT.
 E2M1_VALUES = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
 )
 
@@ -92,8 +91,12 @@ def build_synth_weights():
     uw, us = quantize_mxfp4_tensor(up, K_GROUP_SIZE)
     dw, ds = quantize_mxfp4_tensor(down, K_GROUP_SIZE)
     return {
-        "gate_w": gw, "up_w": uw, "down_w": dw,
-        "gate_s": gs, "up_s": us, "down_s": ds,
+        "gate_w": gw,
+        "up_w": uw,
+        "down_w": dw,
+        "gate_s": gs,
+        "up_s": us,
+        "down_s": ds,
     }
 
 
@@ -130,9 +133,7 @@ def make_expert_ids(M: int, routing: str) -> torch.Tensor:
         hot = torch.randperm(EXPERT_NUM)[:TOP_K]
         return hot.unsqueeze(0).expand(M, TOP_K).contiguous().to(torch.int64)
     # balanced: 每 token 独立 randperm
-    return torch.stack(
-        [torch.randperm(EXPERT_NUM)[:TOP_K] for _ in range(M)]
-    ).to(torch.int64).contiguous()
+    return torch.stack([torch.randperm(EXPERT_NUM)[:TOP_K] for _ in range(M)]).to(torch.int64).contiguous()
 
 
 def bench_one_m(moe, cpu_infer, M: int, routing: str):
@@ -143,16 +144,20 @@ def bench_one_m(moe, cpu_infer, M: int, routing: str):
     y = torch.empty((M, HIDDEN), dtype=torch.bfloat16).contiguous()
 
     for _ in range(WARMUP_ITER):
-        cpu_infer.submit(moe.forward_task(
-            bsz.data_ptr(), TOP_K, expert_ids.data_ptr(),
-            routing_w.data_ptr(), x.data_ptr(), y.data_ptr(), False))
+        cpu_infer.submit(
+            moe.forward_task(
+                bsz.data_ptr(), TOP_K, expert_ids.data_ptr(), routing_w.data_ptr(), x.data_ptr(), y.data_ptr(), False
+            )
+        )
         cpu_infer.sync()
 
     start = time.perf_counter()
     for _ in range(TEST_ITER):
-        cpu_infer.submit(moe.forward_task(
-            bsz.data_ptr(), TOP_K, expert_ids.data_ptr(),
-            routing_w.data_ptr(), x.data_ptr(), y.data_ptr(), False))
+        cpu_infer.submit(
+            moe.forward_task(
+                bsz.data_ptr(), TOP_K, expert_ids.data_ptr(), routing_w.data_ptr(), x.data_ptr(), y.data_ptr(), False
+            )
+        )
         cpu_infer.sync()
     total = time.perf_counter() - start
 
@@ -161,9 +166,13 @@ def bench_one_m(moe, cpu_infer, M: int, routing: str):
     unique_e = int(torch.unique(expert_ids).numel())
     avg_m_per_expert = float(M * TOP_K) / max(unique_e, 1)
     return {
-        "M": M, "iters": TEST_ITER, "total_s": total,
-        "per_iter_us": per_iter_us, "tokens_per_s": tok_per_s,
-        "unique_experts": unique_e, "avg_m_per_expert": avg_m_per_expert,
+        "M": M,
+        "iters": TEST_ITER,
+        "total_s": total,
+        "per_iter_us": per_iter_us,
+        "tokens_per_s": tok_per_s,
+        "unique_experts": unique_e,
+        "avg_m_per_expert": avg_m_per_expert,
     }
 
 
@@ -174,8 +183,10 @@ def run_backend(backend: str, weights, cpu_infer, m_list, routing):
     for M in m_list:
         r = bench_one_m(moe, cpu_infer, M, routing)
         rows.append(r)
-        print(f"  M={M:>5}  avg_m/expert={r['avg_m_per_expert']:>6.1f}  "
-              f"per-iter={r['per_iter_us']:>9.1f} us  tok/s={r['tokens_per_s']:>9.1f}")
+        print(
+            f"  M={M:>5}  avg_m/expert={r['avg_m_per_expert']:>6.1f}  "
+            f"per-iter={r['per_iter_us']:>9.1f} us  tok/s={r['tokens_per_s']:>9.1f}"
+        )
     return rows
 
 
@@ -183,8 +194,7 @@ def print_single_table(backend, rows, routing):
     print(f"\n=== Summary ({backend}, routing={routing}) ===")
     print(f"{'M':>5}  {'avg_m':>6}  {'per-iter us':>12}  {'tok/s':>10}")
     for r in rows:
-        print(f"{r['M']:>5}  {r['avg_m_per_expert']:>6.1f}  "
-              f"{r['per_iter_us']:>12.1f}  {r['tokens_per_s']:>10.1f}")
+        print(f"{r['M']:>5}  {r['avg_m_per_expert']:>6.1f}  " f"{r['per_iter_us']:>12.1f}  {r['tokens_per_s']:>10.1f}")
 
 
 def print_compare_table(all_rows: dict, routing: str):
@@ -206,7 +216,7 @@ def print_compare_table(all_rows: dict, routing: str):
         for be in backends:
             line += f"  {all_rows[be][i]['per_iter_us']:>10.1f}"
         for be in backends[1:]:
-            ratio = all_rows[be][i]['per_iter_us'] / all_rows[base][i]['per_iter_us']
+            ratio = all_rows[be][i]["per_iter_us"] / all_rows[base][i]["per_iter_us"]
             line += f"  {ratio:>8.3f}"
         print(line)
 
@@ -238,16 +248,26 @@ def get_system_info():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--backend", choices=list(BACKENDS.keys()), default="v1",
-                   help="单 backend 模式（被 --all 覆盖）。当前可用: "
-                        + ",".join(k for k, v in BACKENDS.items() if v is not None))
-    p.add_argument("--all", action="store_true",
-                   help="跑所有已绑定的 backend 并打印对比表（自动跳过未绑定的）")
-    p.add_argument("--routing", choices=["balanced", "concentrated"], default="balanced",
-                   help="balanced=每 token randperm (V4 真实); "
-                        "concentrated=所有 token 共用同组 top_k (per-expert m=M, 放大 mat-mat)")
-    p.add_argument("--m-list", type=str, default=None,
-                   help=f"Comma-separated M values, default: {','.join(map(str, DEFAULT_M_LIST))}")
+    p.add_argument(
+        "--backend",
+        choices=list(BACKENDS.keys()),
+        default="v1",
+        help="单 backend 模式（被 --all 覆盖）。当前可用: " + ",".join(k for k, v in BACKENDS.items() if v is not None),
+    )
+    p.add_argument("--all", action="store_true", help="跑所有已绑定的 backend 并打印对比表（自动跳过未绑定的）")
+    p.add_argument(
+        "--routing",
+        choices=["balanced", "concentrated"],
+        default="balanced",
+        help="balanced=每 token randperm (V4 真实); "
+        "concentrated=所有 token 共用同组 top_k (per-expert m=M, 放大 mat-mat)",
+    )
+    p.add_argument(
+        "--m-list",
+        type=str,
+        default=None,
+        help=f"Comma-separated M values, default: {','.join(map(str, DEFAULT_M_LIST))}",
+    )
     p.add_argument("--numa", type=int, default=WORKER_NUMA)
     p.add_argument("--threads-per-numa", type=int, default=WORKER_THREADS_PER_NUMA)
     args = p.parse_args()
@@ -262,8 +282,7 @@ def main():
     else:
         if BACKENDS.get(args.backend) is None:
             raise RuntimeError(
-                f"backend={args.backend} not bound. Available: "
-                f"{[k for k, v in BACKENDS.items() if v is not None]}"
+                f"backend={args.backend} not bound. Available: " f"{[k for k, v in BACKENDS.items() if v is not None]}"
             )
         backends = [args.backend]
 
@@ -299,11 +318,18 @@ def main():
             record = {
                 "backend": be,
                 "routing": args.routing,
-                "shape": {"hidden": HIDDEN, "inter": INTER, "expert_num": EXPERT_NUM,
-                          "top_k": TOP_K, "k_group_size": K_GROUP_SIZE},
+                "shape": {
+                    "hidden": HIDDEN,
+                    "inter": INTER,
+                    "expert_num": EXPERT_NUM,
+                    "top_k": TOP_K,
+                    "k_group_size": K_GROUP_SIZE,
+                },
                 "worker_pool": {"numa": args.numa, "threads_per_numa": args.threads_per_numa},
                 "rows": rows,
-                "git": git, "system": sys_info, "timestamp": ts,
+                "git": git,
+                "system": sys_info,
+                "timestamp": ts,
             }
             f.write(json.dumps(record) + "\n")
     print(f"\n[bench-fp4] appended {len(backends)} record(s) → {out_path}")

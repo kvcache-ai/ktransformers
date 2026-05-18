@@ -80,7 +80,6 @@ class AVX2_MOE_BASE {
 
   AVX2_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
-    derived()->derived_init();
   }
 
   void init() {

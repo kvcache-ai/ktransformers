@@ -134,6 +134,26 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(OpenMP REQUIRED)
 message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 
+# Check for liburing (io_uring support, Linux only)
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LIBURING liburing)
+        if(LIBURING_FOUND)
+            message(STATUS "liburing found: version ${LIBURING_VERSION}")
+            add_definitions(-DHAVE_LIBURING)
+            include_directories(${LIBURING_INCLUDE_DIRS})
+            link_directories(${LIBURING_LIBRARY_DIRS})
+        else()
+            message(WARNING "liburing not found. io_uring backend will be disabled. Install liburing-dev (Debian/Ubuntu) or liburing-devel (RHEL/CentOS) to enable.")
+        endif()
+    else()
+        message(WARNING "PkgConfig not found. Cannot detect liburing.")
+    endif()
+else()
+    message(STATUS "Skipping liburing detection (not Linux)")
+endif()
+
 
 include(CheckCXXCompilerFlag)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -467,6 +487,7 @@ endif()
 
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} SOURCE_DIR1)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend SOURCE_DIR2)
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/mesh SOURCE_DIR_MESH)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/llamafile SOURCE_DIR3)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llamafile SOURCE_DIR4)
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/kvcache SOURCE_DIR5)
@@ -499,7 +520,7 @@ message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 
 
-set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
+set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR_MESH} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
 
 file(GLOB_RECURSE FMT_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
@@ -642,6 +663,11 @@ if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     target_compile_definitions(${PROJECT_NAME} PRIVATE CPU_USE_KML)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC OpenMP::OpenMP_CXX)
+
+# Link liburing if available
+if(LIBURING_FOUND)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${LIBURING_LIBRARIES})
+endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     if(KTRANSFORMERS_CPU_DEBUG)
         # add_executable(convert-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/convert-test.cpp)

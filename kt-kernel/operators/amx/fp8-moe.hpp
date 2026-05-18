@@ -47,7 +47,7 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
   AMX_FP8_MOE_TP() = default;
 
   AMX_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
-    // Initialization now happens in derived_init() which is called by base constructor
+    this->derived_init();
   }
 
   void derived_init() {

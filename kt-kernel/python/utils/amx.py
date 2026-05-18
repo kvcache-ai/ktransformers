@@ -2,7 +2,6 @@ import gc
 import logging
 import os
 import torch
-import ctypes
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -19,6 +18,7 @@ from .loader import (
 )
 from kt_kernel_ext.moe import MOEConfig
 import kt_kernel_ext.moe as _moe_mod
+from .mesh import amx_helpers as mesh_amx
 
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
 AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
@@ -150,6 +150,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
     """
 
     _safetensor_loader_instance = None  # Singleton SafeTensorLoader
+    _safetensor_loader_path = None
 
     def __init__(
         self,
@@ -167,6 +168,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
+        weight_strategy: str = "legacy",
+        max_tier0_experts: Optional[int] = None,
+        num_moe_layers: Optional[int] = None,
     ):
         """
         Initialize AMX MoE Wrapper.
@@ -212,12 +216,15 @@ class AMXMoEWrapper(BaseMoEWrapper):
             gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
+            numa_nodes=numa_nodes,
             weight_path=weight_path,
             chunked_prefill_size=chunked_prefill_size,
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
-            numa_nodes=numa_nodes,
+            weight_strategy=weight_strategy,
+            max_tier0_experts=max_tier0_experts,
+            num_moe_layers=num_moe_layers,
         )
 
         # AMX-specific: Check if we should load merged safetensor weights
@@ -229,8 +236,13 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
         # Initialize SafeTensor loader (singleton)
         if self.load_merged_weight:
-            if AMXMoEWrapper._safetensor_loader_instance is None:
+            resolved_weight_path = os.path.abspath(weight_path)
+            if (
+                AMXMoEWrapper._safetensor_loader_instance is None
+                or AMXMoEWrapper._safetensor_loader_path != resolved_weight_path
+            ):
                 AMXMoEWrapper._safetensor_loader_instance = SafeTensorLoader(weight_path)
+                AMXMoEWrapper._safetensor_loader_path = resolved_weight_path
             self.safetensor_loader = AMXMoEWrapper._safetensor_loader_instance
 
         # AMX-specific weight storage
@@ -240,6 +252,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
+        self._uses_iouring_weights = False
 
     def load_weights_from_tensors(
         self,
@@ -273,6 +286,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        moe_config.resident_cache_policy = self.residency_policy
 
         # Enable save mode for online quantization
         moe_config.save = True
@@ -317,65 +331,21 @@ class AMXMoEWrapper(BaseMoEWrapper):
         up_scale_ptrs = []
         down_scale_ptrs = []
 
+        use_iouring = mesh_amx.resolve_amx_weight_mode(self)
+        file_slots = None
+
         if self.load_merged_weight:
             base_key = f"blk.{self.layer_idx}"
-            w = self.safetensor_loader.load_experts(base_key)
 
-            self.gate_weights = w["gate"]
-            self.up_weights = w["up"]
-            self.down_weights = w["down"]
-            self.gate_scales = w["gate_scale"]
-            self.up_scales = w["up_scale"]
-            self.down_scales = w["down_scale"]
+            if use_iouring:
+                file_slots = mesh_amx.load_amx_iouring_file_slots(self, base_key)
+            else:
+                w = self.safetensor_loader.load_experts(base_key)
 
-            # Get pointers to weight arrays
-            gate_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.gate_weights
-            ]
-
-            up_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.up_weights
-            ]
-
-            down_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.down_weights
-            ]
-
-            gate_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.gate_scales
-            ]
-
-            up_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.up_scales
-            ]
-
-            down_scale_ptrs = [
-                [
-                    ctypes.addressof(ctypes.cast(et.ctypes.data, ctypes.POINTER(ctypes.c_uint64)).contents)
-                    for et in numa_array
-                ]
-                for numa_array in self.down_scales
-            ]
+            if not use_iouring:
+                gate_ptrs, up_ptrs, down_ptrs, gate_scale_ptrs, up_scale_ptrs, down_scale_ptrs = (
+                    mesh_amx.assign_amx_weight_views(self, w)
+                )
 
         # Configure MoE
         moe_config = MOEConfig(
@@ -398,6 +368,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=use_iouring, file_slots=file_slots)
 
         if self.cpu_save:
             moe_config.save = True
@@ -433,9 +404,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
         # Load weights
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
+        self._uses_iouring_weights = use_iouring
 
         # Clean up temporary weight storage if using merged weights
-        if self.load_merged_weight:
+        if self.load_merged_weight and not use_iouring:
             del self.gate_weights
             del self.up_weights
             del self.down_weights
@@ -443,11 +415,38 @@ class AMXMoEWrapper(BaseMoEWrapper):
             del self.up_scales
             del self.down_scales
 
+    def cache_stats_snapshot(self):
+        if self.moe is None or not hasattr(self.moe, "cache_stats_snapshot"):
+            return {}
+        return dict(self.moe.cache_stats_snapshot())
+
+    def close(self):
+        super().close()
+        self.gate_weights = None
+        self.up_weights = None
+        self.down_weights = None
+        self.gate_scales = None
+        self.up_scales = None
+        self.down_scales = None
+        self.gate_file_slots = None
+        self.up_file_slots = None
+        self.down_file_slots = None
+        self.gate_scale_file_slots = None
+        self.up_scale_file_slots = None
+        self.down_scale_file_slots = None
+        self._async_reader_keepalive = None
+        if BaseMoEWrapper._active_wrapper_count == 0:
+            if AMXMoEWrapper._safetensor_loader_instance is not None:
+                AMXMoEWrapper._safetensor_loader_instance.close_all_handles()
+            AMXMoEWrapper._safetensor_loader_instance = None
+            AMXMoEWrapper._safetensor_loader_path = None
+
 
 class NativeMoEWrapper(BaseMoEWrapper):
     """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
+    _native_loader_signature = None
 
     def __init__(
         self,
@@ -465,6 +464,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "RAWINT4",
         numa_nodes: Optional[List[int]] = None,
+        weight_strategy: str = "legacy",
+        max_tier0_experts: Optional[int] = None,
+        num_moe_layers: Optional[int] = None,
         swiglu_limit: float = 0.0,
     ):
         # Defence in depth: reject swiglu_limit on non-MXFP4 methods even
@@ -528,17 +530,26 @@ class NativeMoEWrapper(BaseMoEWrapper):
             gpu_experts_mask=gpu_experts_mask,
             cpuinfer_threads=cpuinfer_threads,
             threadpool_count=threadpool_count,
+            numa_nodes=numa_nodes,
             weight_path=weight_path,
             chunked_prefill_size=chunked_prefill_size,
             cpu_save=cpu_save,
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
-            numa_nodes=numa_nodes,
+            weight_strategy=weight_strategy,
+            max_tier0_experts=max_tier0_experts,
+            num_moe_layers=num_moe_layers,
             swiglu_limit=swiglu_limit,
         )
 
-        if NativeMoEWrapper._native_loader_instance is None:
+        resolved_weight_path = os.path.abspath(weight_path)
+        loader_signature = (method, resolved_weight_path)
+        if (
+            NativeMoEWrapper._native_loader_instance is None
+            or NativeMoEWrapper._native_loader_signature != loader_signature
+        ):
             NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(method, weight_path)
+            NativeMoEWrapper._native_loader_signature = loader_signature
         self.loader = NativeMoEWrapper._native_loader_instance
 
         self.gate_weights = None
@@ -570,14 +581,15 @@ class NativeMoEWrapper(BaseMoEWrapper):
         if NativeMoEWrapper._native_loader_instance is not None:
             NativeMoEWrapper._native_loader_instance.close_all_handles()
             NativeMoEWrapper._native_loader_instance = None
+            NativeMoEWrapper._native_loader_signature = None
             if layer_idx >= 0:
                 logger.info(
                     "[KT] Released NativeMoEWrapper loader after layer %d: "
-                    "safetensors mmap handles freed.", layer_idx,
+                    "safetensors file handles freed.", layer_idx,
                 )
             else:
                 logger.info(
-                    "[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed."
+                    "[KT] Released NativeMoEWrapper loader: safetensors file handles freed."
                 )
 
     @staticmethod
@@ -663,9 +675,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         # Build pointer lists: [numa_id][expert_id] -> pointer
         # Since RAWINT4/FP8/BF16 has no numa sharding, numa dimension is 1
-        gate_ptrs = [[t.data_ptr() for t in self.gate_weights]]
-        up_ptrs = [[t.data_ptr() for t in self.up_weights]]
-        down_ptrs = [[t.data_ptr() for t in self.down_weights]]
+        gate_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.gate_weights]]
+        up_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.up_weights]]
+        down_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.down_weights]]
 
         # BF16 has no scales, pass empty lists (will use 0/nullptr for consistency)
         if self.method == "BF16":
@@ -710,6 +722,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False)
 
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size
@@ -786,7 +799,6 @@ class NativeMoEWrapper(BaseMoEWrapper):
             del self.gate_scales
             del self.up_scales
             del self.down_scales
-
         NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
         t6 = time.time()
 
@@ -842,3 +854,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
         """
         # The CPUInfer.sync() call blocks until pending tasks complete.
         self.cpu_infer.sync()
+
+    def close(self):
+        super().close()
+        if BaseMoEWrapper._active_wrapper_count == 0:
+            if NativeMoEWrapper._native_loader_instance is not None:
+                NativeMoEWrapper._native_loader_instance.close_all_handles()
+            NativeMoEWrapper._native_loader_instance = None
+            NativeMoEWrapper._native_loader_signature = None

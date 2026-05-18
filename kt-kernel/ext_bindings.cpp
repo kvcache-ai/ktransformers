@@ -22,6 +22,11 @@
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
 #include "operators/common.hpp"
+#include "operators/mesh/python_bindings.hpp"
+
+#ifdef HAVE_LIBURING
+#include "operators/mesh/async_io.hpp"
+#endif
 
 #if defined(USE_MOE_KERNEL)
 #include "operators/moe_kernel/la/kernel.hpp"
@@ -430,6 +435,9 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding);
 
+  mesh::bind_moe_runtime_methods<MoeClass>(moe_cls);
+  mesh::bind_moe_residency_methods<MoeClass>(moe_cls);
+
   // Bind write_weight_scale_to_buffer_task for MoE types that support it
   // Uses SFINAE to detect if MoeClass has write_weight_scale_to_buffer method
   if constexpr (requires { &MoeClass::write_weight_scale_to_buffer; }) {
@@ -676,7 +684,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   auto moe_module = m.def_submodule("moe");
 
-  py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
+  auto moe_config_cls = py::class_<GeneralMOEConfig>(moe_module, "MOEConfig")
       .def(py::init([](int expert_num, int routed_expert_num, int hidden_size, int intermediate_size) {
         return GeneralMOEConfig(expert_num, routed_expert_num, hidden_size, intermediate_size);
       }))
@@ -761,6 +769,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .def_readwrite("swiglu_limit", &GeneralMOEConfig::swiglu_limit)
 
       ;
+  mesh::bind_moe_config_extension(moe_config_cls);
 
   // MOESFTConfig - extends GeneralMOEConfig with LoRA support
   py::class_<MOESFTConfig, GeneralMOEConfig>(moe_module, "MOESFTConfig")
@@ -985,6 +994,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   utils.def("from_float", &from_float_ptr, "Convert tensor from float32 to any GGML type", py::arg("input"),
             py::arg("size"), py::arg("type"));
+
+  mesh::bind_async_io_python(m);
 }
 
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)

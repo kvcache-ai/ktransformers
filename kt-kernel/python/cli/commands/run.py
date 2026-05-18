@@ -81,6 +81,41 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 @click.option("--quantize", "-q", is_flag=True, default=False, help="Quantize model")
 @click.option("--advanced", is_flag=True, default=False, help="Show advanced options")
 @click.option("--dry-run", "dry_run", is_flag=True, default=False, help="Show command without executing")
+@click.option(
+    "--weight-strategy",
+    "weight_strategy",
+    type=click.Choice(["auto", "tiered", "legacy"]),
+    default=None,
+    help="Weight loading strategy. Defaults to legacy unless config or env enables MESH.",
+)
+@click.option(
+    "--max-tier0-experts",
+    "max_tier0_experts",
+    type=int,
+    default=None,
+    help="Max expert IDs promoted to Tier 0 NUMA buffers (default: 30)",
+)
+@click.option(
+    "--residency-policy",
+    "residency_policy",
+    type=click.Choice(["baseline", "current_ema", "lru", "2q", "slru", "sieve", "s3fifo", "w_tinylfu"]),
+    default=None,
+    help="MESH resident-cache eviction policy",
+)
+@click.option(
+    "--io-backend",
+    "io_backend",
+    type=click.Choice(["legacy", "mmap", "iouring"], case_sensitive=False),
+    default=None,
+    help="I/O backend for expert weight loading (legacy/mmap: ordinary KT loading, iouring: direct I/O)",
+)
+@click.option(
+    "--enable-cache-stats",
+    "enable_cache_stats",
+    is_flag=True,
+    default=False,
+    help="Enable cache hit/miss statistics collection",
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -107,6 +142,11 @@ def run(
     quantize: bool,
     advanced: bool,
     dry_run: bool,
+    weight_strategy: Optional[str],
+    max_tier0_experts: Optional[int],
+    residency_policy: Optional[str],
+    io_backend: Optional[str],
+    enable_cache_stats: bool,
 ) -> None:
     """Start model inference server.
 
@@ -164,6 +204,11 @@ def run(
         advanced=advanced,
         dry_run=dry_run,
         extra_cli_args=extra_cli_args,
+        weight_strategy=weight_strategy,
+        max_tier0_experts=max_tier0_experts,
+        residency_policy=residency_policy,
+        io_backend=io_backend,
+        enable_cache_stats=enable_cache_stats,
     )
 
 
@@ -191,6 +236,11 @@ def _run_impl(
     advanced: bool,
     dry_run: bool,
     extra_cli_args: list[str],
+    weight_strategy: Optional[str] = None,
+    max_tier0_experts: Optional[int] = None,
+    residency_policy: Optional[str] = None,
+    io_backend: Optional[str] = None,
+    enable_cache_stats: bool = False,
 ) -> None:
     """Actual implementation of run command."""
     # Check if SGLang is installed before proceeding
@@ -445,7 +495,10 @@ def _run_impl(
     # KT-kernel options
     final_kt_method = resolve(kt_method, "inference.kt_method", "AMXINT4")
     final_kt_gpu_prefill_threshold = resolve(kt_gpu_prefill_threshold, "inference.kt_gpu_prefill_token_threshold", 4096)
-
+    final_weight_strategy = resolve(weight_strategy, "inference.weight_strategy", None)
+    final_max_tier0_experts = resolve(max_tier0_experts, "inference.max_tier0_experts", None)
+    final_residency_policy = resolve(residency_policy, "inference.residency_policy", None)
+    final_io_backend = resolve(io_backend, "inference.io_backend", None)
     # SGLang options
     final_attention_backend = resolve(attention_backend, "inference.attention_backend", "flashinfer")
     final_max_total_tokens = resolve(max_total_tokens, "inference.max_total_tokens", 40000)
@@ -506,6 +559,18 @@ def _run_impl(
     if isinstance(inference_env, dict):
         env.update({k: str(v) for k, v in inference_env.items()})
 
+    # Add MESH residency parameters as environment variables (fallback for SGLang)
+    if final_weight_strategy:
+        env["KT_WEIGHT_STRATEGY"] = final_weight_strategy
+    if final_max_tier0_experts is not None:
+        env["KT_MAX_TIER0_EXPERTS"] = str(final_max_tier0_experts)
+    if final_residency_policy:
+        env["KT_RESIDENCY_POLICY"] = str(final_residency_policy)
+    if final_io_backend:
+        env["KT_IO_BACKEND"] = str(final_io_backend).upper()
+    if enable_cache_stats:
+        env["KT_ENABLE_CACHE_STATS"] = "1"
+
     # Step 5: Show configuration summary
     console.print()
     print_step("Configuration")
@@ -525,6 +590,10 @@ def _run_impl(
         console.print(f"  NUMA Nodes (binding): [cyan]{', '.join(map(str, final_kt_numa_nodes))}[/cyan]")
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
+    console.print(f"  Weight Strategy: [cyan]{final_weight_strategy or 'legacy'}[/cyan]")
+    console.print(f"  Residency Policy: [cyan]{final_residency_policy or 'baseline'}[/cyan]")
+    if final_max_tier0_experts is not None:
+        console.print(f"  Max Tier0 Experts: [cyan]{final_max_tier0_experts}[/cyan]")
     console.print(f"  Attention: [cyan]{final_attention_backend}[/cyan]")
 
     # Weights info

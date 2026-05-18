@@ -81,7 +81,6 @@ class AMX_MOE_BASE {
 
   AMX_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
-    derived()->derived_init();
   }
 
   void init() {
@@ -110,6 +109,12 @@ class AMX_MOE_BASE {
     m_local_up_output_ptr_.resize(config_.expert_num);
     m_local_down_output_ptr_.resize(config_.expert_num);
 
+    bool use_lazy_weight_packing = false;
+    if constexpr (requires { Derived::kUsesLazyWeightPacking; }) {
+      use_lazy_weight_packing = config_.io_backend == IOBackend::IOURING && Derived::kUsesLazyWeightPacking;
+    }
+    auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+
     for (size_t i = 0; i < config_.expert_num; i++) {
       gate_up_ba_.push_back(make_buffer_a(config_.max_len, config_.hidden_size, nullptr));
       gate_bc_.push_back(make_buffer_c(config_.max_len, config_.intermediate_size, nullptr));
@@ -117,15 +122,22 @@ class AMX_MOE_BASE {
       down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
-      void* gate_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      size_t gate_bb_bytes = buffer_b_required_size(config_.intermediate_size, config_.hidden_size);
+      size_t up_bb_bytes = buffer_b_required_size(config_.intermediate_size, config_.hidden_size);
+      size_t down_bb_bytes = buffer_b_required_size(config_.hidden_size, config_.intermediate_size);
+      if (use_lazy_weight_packing) {
+        gate_bb_bytes = 64;
+        up_bb_bytes = 64;
+        down_bb_bytes = 64;
+      }
+
+      void* gate_bb_ptr = std::aligned_alloc(64, align64(gate_bb_bytes));
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* up_bb_ptr = std::aligned_alloc(64, align64(up_bb_bytes));
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
-      void* down_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      void* down_bb_ptr = std::aligned_alloc(64, align64(down_bb_bytes));
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
     // TODO: need update to all *.hpp
@@ -162,7 +174,8 @@ class AMX_MOE_BASE {
     forward(qlen, config_.num_experts_per_tok, expert_ids.data(), weights.data(), input.data(), output.data());
   }
 
-  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
+  virtual void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
+                       void* output) {
     if (qlen > 1) {
       forward_prefill(qlen, k, expert_ids, weights, input, output);
     } else {
@@ -179,6 +192,15 @@ class AMX_MOE_BASE {
   void write_weights_to_buffer(Args&&... args) const {
     derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
   }
+
+  void set_physical_to_logical_map(void* map) { config_.physical_to_logical_map = map; }
+
+  // Optional resident-weight hooks. Backends that support dynamic expert
+  // materialization can override these; other native backends keep no-op
+  // defaults so the shared TP wrapper still compiles.
+  virtual void promote_expert(int) {}
+  virtual void demote_expert(int) {}
+  virtual bool is_expert_promoted(int) const { return false; }
 
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {

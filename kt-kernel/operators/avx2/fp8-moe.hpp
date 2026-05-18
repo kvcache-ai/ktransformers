@@ -239,7 +239,7 @@ class AVX2_FP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_FP8_MOE_TP<T>> {
 
   AVX2_FP8_MOE_TP() = default;
 
-  AVX2_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
+  AVX2_FP8_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) { this->derived_init(); }
 
   void derived_init() {
     avx2::ensure_fp8_lut_initialized();

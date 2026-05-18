@@ -142,7 +142,7 @@ def main() -> int:
                 # Optional small GPU op to put work on the same stream
                 if device.type == "cuda":
                     hidden_states.add_(0)  # no-op but enqueued on current stream
-                _ = wrapper.sync_forward(hidden_states, stream)
+                _ = wrapper.sync_forward(hidden_states, topk_ids, stream)
 
             if (i + 1) % 50 == 0:
                 print(f"ok: iter {i + 1}/{n_iters}")

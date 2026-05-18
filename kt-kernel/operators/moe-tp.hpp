@@ -51,6 +51,7 @@ class TP_MOE_Common : public MoE_Interface {
     }
 
     this->config = config;
+    mesh::configure_cache_stats(this->config);
     tp_count = config.pool->config.subpool_count;
     if (config.intermediate_size % tp_count != 0) {
       printf("intermediate_size %d, tp count %d\n", config.intermediate_size, tp_count);
@@ -90,11 +91,12 @@ class TP_MOE_Common : public MoE_Interface {
       int current_offset = 0;
       for (auto i = 0; i < tp_count; i++) {
         tps.push_back(nullptr);
-        GeneralMOEConfig tp_config = config;
+        GeneralMOEConfig tp_config = this->config;
 
         // First extra_blocks TPs get one more block
         int num_blocks_for_this_tp = base_blocks + (i < extra_blocks ? 1 : 0);
         tp_config.intermediate_size = num_blocks_for_this_tp * QK_K;
+        mesh::assign_tp_async_reader(this->config, tp_config, i);
 
         printf("  TP %d: intermediate_size=%d, offset=%d, blocks=%d\n", i, tp_config.intermediate_size, current_offset,
                num_blocks_for_this_tp);
@@ -113,8 +115,9 @@ class TP_MOE_Common : public MoE_Interface {
 
       for (auto i = 0; i < tp_count; i++) {
         tps.push_back(nullptr);
-        GeneralMOEConfig tp_config = config;
+        GeneralMOEConfig tp_config = this->config;
         tp_config.intermediate_size /= tp_count;
+        mesh::assign_tp_async_reader(this->config, tp_config, i);
         tp_configs.push_back(tp_config);
       }
     }
@@ -213,6 +216,8 @@ class TP_MOE_Common : public MoE_Interface {
   }
 
   virtual void load_weights() = 0;
+
+#include "mesh/tp_moe_common_mesh_methods.inc"
 
   virtual void merge_results(int qlen, void* output) = 0;
 

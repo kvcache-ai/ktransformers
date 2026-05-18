@@ -58,6 +58,8 @@ if dev_backend == "xpu":
     triton_dep = [
         "pytorch-triton-xpu==3.3.0"
     ]
+elif sys.platform == "win32":
+    triton_dep = ["triton-windows>=3.1.0"]
 else:
     triton_dep = []
 

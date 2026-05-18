@@ -14,7 +14,23 @@
 // #define FORWARD_TIME_PROFILE
 // #define FORWARD_TIME_REPORT
 
+#ifndef _WIN32
+#include <numa.h>
+#endif
+
+#include <cstdio>
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <memory>
+#include <thread>
+
 #include "moe_base.hpp"
+#include "../mesh/prefill_policy.hpp"
+#include "../mesh/resident_slot_pool.hpp"
+#include "../mesh/runtime_utils.hpp"
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
@@ -31,6 +47,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   using Base::tp_part_idx;
   using Base::up_bb_;
   using Base::up_bc_;
+
+#include "../mesh/amx_moe_mesh_state.inc"
 
 #ifdef CHECK
   char verify_bb[100000000];
@@ -131,11 +149,16 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   AMX_MOE_TP() = default;
 
   AMX_MOE_TP(GeneralMOEConfig config, int tp_part_idx = 0) : Base(config, tp_part_idx) {
-    // Initialization now happens in derived_init() which is called by base constructor
+    this->derived_init();
   }
 
   void derived_init() {
     printf("Creating AMX_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
+#ifndef _WIN32
+    if (resident_io_enabled()) {
+      initialize_resident_io_state();
+    }
+#endif
     auto& load = config_.load;
     auto& save = config_.save;
 
@@ -154,7 +177,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
-  ~AMX_MOE_TP() = default;
+  ~AMX_MOE_TP() {
+#ifndef _WIN32
+    cleanup_resident_io_state();
+#endif
+  }
+
+#include "../mesh/amx_moe_mesh_methods.inc"
 
   // ============================================================================
   // CRTP buffer creation - no group_size
@@ -206,6 +235,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void load_weights() {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
+#ifndef _WIN32
+    if (mesh_load_weights_from_resident_sources(physical_to_logical_map)) return;
+#endif
+
     if (config_.gate_projs.size()) {
       pool->do_work_stealing_job(
           config_.expert_num, nullptr,
@@ -348,83 +381,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
 
+#include "../mesh/amx_moe_prefill_streaming.inc"
+
+#include "../mesh/amx_moe_runtime_hooks.inc"
+
   // forward, forward_prefill, forward_decode, warm_up are inherited from Base
 };
 
-// ============================================================================
-// TP_MOE specialization for AMX_MOE_TP
-// Inherits from TP_MOE<AMX_MOE_BASE<...>> to reuse merge_results implementation
-// ============================================================================
-
-template <typename K>
-class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
- public:
-  using Base = TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>>;
-  using Base::Base;
-
-  void load_weights() override {
-    auto& config = this->config;
-    auto& tps = this->tps;
-    auto& tp_count = this->tp_count;
-    auto pool = config.pool;
-    const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
-    if (config.gate_projs.empty() == false) {
-      printf("TP Load from loader\n");
-      DO_TPS_LOAD_WEIGHTS(pool);
-      this->weights_loaded = true;
-    } else if (config.gate_proj != nullptr) {
-      printf("From BF16\n");
-      for (auto i = 0; i < tp_count; i++) {
-        auto& tpc = tps[i]->config_;
-        size_t gate_up_elcount = tpc.intermediate_size * tpc.hidden_size;
-        tpc.gate_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-        tpc.up_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-        tpc.down_proj = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-        if (tps[i]->config_.load == false) {
-          pool->get_subpool(i)->do_work_stealing_job(
-              tpc.expert_num, nullptr,
-              [&](int expert_id_) {
-                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
-                memcpy((ggml_bf16_t*)tpc.gate_proj + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
-                           i * gate_up_elcount,
-                       sizeof(ggml_bf16_t) * gate_up_elcount);
-                memcpy((ggml_bf16_t*)tpc.up_proj + expert_id * gate_up_elcount,
-                       (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
-                           i * gate_up_elcount,
-                       sizeof(ggml_bf16_t) * gate_up_elcount);
-                for (size_t col = 0; col < config.hidden_size; col++) {
-                  memcpy((ggml_bf16_t*)tpc.down_proj + expert_id * tpc.hidden_size * tpc.intermediate_size +
-                             col * tpc.intermediate_size,
-                         (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
-                             col * config.intermediate_size + i * tpc.intermediate_size,
-                         sizeof(ggml_bf16_t) * tpc.intermediate_size);
-                }
-              },
-              nullptr);
-        }
-      }
-
-      DO_TPS_LOAD_WEIGHTS(pool);
-
-      for (auto i = 0; i < tp_count; i++) {
-        auto& tpc = tps[i]->config_;
-        delete[] (ggml_bf16_t*)(tpc.gate_proj);
-        delete[] (ggml_bf16_t*)(tpc.up_proj);
-        delete[] (ggml_bf16_t*)(tpc.down_proj);
-      }
-
-      this->weights_loaded = true;
-    } else if (config.path != "") {
-      printf("TP Load from file %s\n", config.path.c_str());
-      DO_TPS_LOAD_WEIGHTS(pool);
-      this->weights_loaded = true;
-    } else {
-      throw std::runtime_error("no weight source");
-    }
-  }
-
-  // merge_results is inherited from TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>>
-};
+#include "../mesh/amx_tp_moe_runtime.inc"
 
 #endif

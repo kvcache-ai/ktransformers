@@ -138,7 +138,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             return self.moe.backward_task(
                 buffer.grad_output_cpu.data_ptr(),
                 buffer.grad_input_cpu.data_ptr(),
-                0, 0, 0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 buffer.grad_weights.data_ptr(),
             )
         return self.moe.backward_task(
@@ -235,18 +240,34 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         if getattr(self, "_use_projs_path", False):
             for attr in [
-                "_gate_weights_per_numa", "_up_weights_per_numa", "_down_weights_per_numa",
-                "_gate_scales_per_numa", "_up_scales_per_numa", "_down_scales_per_numa",
-                "_gate_projs_ptrs", "_up_projs_ptrs", "_down_projs_ptrs",
-                "_gate_scale_ptrs", "_up_scale_ptrs", "_down_scale_ptrs",
+                "_gate_weights_per_numa",
+                "_up_weights_per_numa",
+                "_down_weights_per_numa",
+                "_gate_scales_per_numa",
+                "_up_scales_per_numa",
+                "_down_scales_per_numa",
+                "_gate_projs_ptrs",
+                "_up_projs_ptrs",
+                "_down_projs_ptrs",
+                "_gate_scale_ptrs",
+                "_up_scale_ptrs",
+                "_down_scale_ptrs",
             ]:
                 setattr(self, attr, None)
             if getattr(self, "_has_bwd_projs", False):
                 for attr in [
-                    "_gate_bwd_weights_per_numa", "_up_bwd_weights_per_numa", "_down_bwd_weights_per_numa",
-                    "_gate_bwd_scales_per_numa", "_up_bwd_scales_per_numa", "_down_bwd_scales_per_numa",
-                    "_gate_bwd_projs_ptrs", "_up_bwd_projs_ptrs", "_down_bwd_projs_ptrs",
-                    "_gate_bwd_scale_ptrs", "_up_bwd_scale_ptrs", "_down_bwd_scale_ptrs",
+                    "_gate_bwd_weights_per_numa",
+                    "_up_bwd_weights_per_numa",
+                    "_down_bwd_weights_per_numa",
+                    "_gate_bwd_scales_per_numa",
+                    "_up_bwd_scales_per_numa",
+                    "_down_bwd_scales_per_numa",
+                    "_gate_bwd_projs_ptrs",
+                    "_up_bwd_projs_ptrs",
+                    "_down_bwd_projs_ptrs",
+                    "_gate_bwd_scale_ptrs",
+                    "_up_bwd_scale_ptrs",
+                    "_down_bwd_scale_ptrs",
                 ]:
                     setattr(self, attr, None)
 
@@ -297,6 +318,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.up_proj = torch.stack(up_weights, dim=0).contiguous()
             self.down_proj = torch.stack(down_weights, dim=0).contiguous()
         else:
+
             def _make_ptrs(arrays_per_numa):
                 return [
                     [
@@ -349,12 +371,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
     def init_lora_weights(
         self,
-        gate_lora_a: torch.Tensor, gate_lora_b: torch.Tensor,
-        up_lora_a: torch.Tensor, up_lora_b: torch.Tensor,
-        down_lora_a: torch.Tensor, down_lora_b: torch.Tensor,
-        grad_gate_lora_a: torch.Tensor, grad_gate_lora_b: torch.Tensor,
-        grad_up_lora_a: torch.Tensor, grad_up_lora_b: torch.Tensor,
-        grad_down_lora_a: torch.Tensor, grad_down_lora_b: torch.Tensor,
+        gate_lora_a: torch.Tensor,
+        gate_lora_b: torch.Tensor,
+        up_lora_a: torch.Tensor,
+        up_lora_b: torch.Tensor,
+        down_lora_a: torch.Tensor,
+        down_lora_b: torch.Tensor,
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
     ) -> None:
         expected_shapes = {
             "gate_lora_a": (self.num_experts, self.lora_rank, self.hidden_size),
@@ -365,9 +393,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             "down_lora_b": (self.num_experts, self.hidden_size, self.lora_rank),
         }
         provided = {
-            "gate_lora_a": gate_lora_a, "gate_lora_b": gate_lora_b,
-            "up_lora_a": up_lora_a, "up_lora_b": up_lora_b,
-            "down_lora_a": down_lora_a, "down_lora_b": down_lora_b,
+            "gate_lora_a": gate_lora_a,
+            "gate_lora_b": gate_lora_b,
+            "up_lora_a": up_lora_a,
+            "up_lora_b": up_lora_b,
+            "down_lora_a": down_lora_a,
+            "down_lora_b": down_lora_b,
         }
         for name, tensor in provided.items():
             expected = expected_shapes[name]

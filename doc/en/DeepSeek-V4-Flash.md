@@ -184,5 +184,3 @@ The `kt` CLI ships with an OpenAI-compatible chat client that talks to the SGLan
 ```bash
 kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 ```
-
-

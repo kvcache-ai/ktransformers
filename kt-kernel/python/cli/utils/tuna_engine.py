@@ -7,6 +7,7 @@ by testing actual server launches with different configurations.
 
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -178,6 +179,15 @@ def test_config(
     if verbose:
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
+    env = os.environ.copy()
+    env.update(config.get("env", {}) or {})
+    if config.get("weight_strategy"):
+        env["KT_WEIGHT_STRATEGY"] = str(config["weight_strategy"])
+    if config.get("max_tier0_experts") is not None:
+        env["KT_MAX_TIER0_EXPERTS"] = str(config["max_tier0_experts"])
+    if config.get("residency_policy"):
+        env["KT_RESIDENCY_POLICY"] = str(config["residency_policy"])
+
     # Start process
     try:
         process = subprocess.Popen(
@@ -186,7 +196,7 @@ def test_config(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env=config.get("env"),
+            env=env,
         )
     except Exception as e:
         if verbose:

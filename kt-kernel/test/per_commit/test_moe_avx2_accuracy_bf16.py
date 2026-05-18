@@ -76,9 +76,21 @@ def test_avx2_bf16_accuracy(qlen, label):
 
     with torch.inference_mode():
         # Generate BF16 weights
-        gate_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16).contiguous()
-        up_proj = (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16).contiguous()
-        down_proj = (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 10.0).to(torch.bfloat16).contiguous()
+        gate_proj = (
+            (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0)
+            .to(torch.bfloat16)
+            .contiguous()
+        )
+        up_proj = (
+            (torch.randn((expert_num, intermediate_size, hidden_size), dtype=torch.float32) / 10.0)
+            .to(torch.bfloat16)
+            .contiguous()
+        )
+        down_proj = (
+            (torch.randn((expert_num, hidden_size, intermediate_size), dtype=torch.float32) / 10.0)
+            .to(torch.bfloat16)
+            .contiguous()
+        )
 
         # Create MOE config
         config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
@@ -123,12 +135,13 @@ def test_avx2_bf16_accuracy(qlen, label):
 
             # Run torch reference (in float32 for accuracy)
             t_output = moe_torch(
-                input_data.float(), expert_ids, weights,
-                gate_proj.float(), up_proj.float(), down_proj.float()
+                input_data.float(), expert_ids, weights, gate_proj.float(), up_proj.float(), down_proj.float()
             ).to(torch.bfloat16)
 
             # Calculate relative difference
-            diff = torch.mean(torch.abs(output.float() - t_output.float())) / (torch.mean(torch.abs(t_output.float())) + 1e-8)
+            diff = torch.mean(torch.abs(output.float() - t_output.float())) / (
+                torch.mean(torch.abs(t_output.float())) + 1e-8
+            )
             print(f"  Iteration {i}: diff = {diff:.6f}")
 
             # BF16 should be very accurate (< 0.01)
@@ -155,5 +168,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nTEST FAILED: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

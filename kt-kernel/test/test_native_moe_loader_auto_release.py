@@ -1,4 +1,4 @@
-"""Tests for NativeMoEWrapper layerwise mmap-release mechanism.
+"""Tests for NativeMoEWrapper layerwise loader-release mechanism.
 
 Verifies that the SafeTensor loader singleton (_native_loader_instance) is
 released after EACH layer's load_weights() completes (not just after all layers),

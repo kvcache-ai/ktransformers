@@ -265,7 +265,9 @@ class AVXVNNI256_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVXVNNI256_RAW_INT4_M
   using typename Base::output_t;
 
   AVXVNNI256_RAW_INT4_MOE_TP() = default;
-  AVXVNNI256_RAW_INT4_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
+  AVXVNNI256_RAW_INT4_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {
+    this->derived_init();
+  }
 
   void derived_init() {
 #if defined(__GNUC__) || defined(__clang__)

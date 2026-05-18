@@ -391,7 +391,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
 
   AMX_AWQ_MOE_TP() = default;
 
-  AMX_AWQ_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
+  AMX_AWQ_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) { this->derived_init(); }
 
   void derived_init() {
     auto& quant_config = config_.quant_config;

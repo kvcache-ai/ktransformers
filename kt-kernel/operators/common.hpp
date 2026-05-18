@@ -5,6 +5,7 @@
 
 #include "../cpu_backend/worker_pool.h"
 #include "ggml.h"
+#include "mesh/runtime_config.hpp"
 
 #if defined(__aarch64__) && defined(CPU_USE_KML)
 #include <arm_sve.h>
@@ -227,7 +228,7 @@ struct QuantConfig {
   bool per_channel = false;  // Per-channel quantization (GLM-4.7-FP8 style)
 };
 
-struct GeneralMOEConfig {
+struct GeneralMOEConfig : public MeshMOEConfigExtension {
   // Basic Config
   int expert_num;
   int num_experts_per_tok;

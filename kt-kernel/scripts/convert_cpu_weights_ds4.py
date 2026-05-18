@@ -56,8 +56,7 @@ def weight_dequant(x: torch.Tensor, s: torch.Tensor, block_size: int = 128) -> t
 
 
 E2M1_VALUES = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
 )
 
@@ -68,9 +67,7 @@ def _ue8m0_to_bf16(scale_t: torch.Tensor) -> torch.Tensor:
     return (scale_t.to(torch.int32) << 7).to(torch.int16).view(torch.bfloat16).contiguous()
 
 
-def _dequantize_fp4_blockwise(
-    weight_u8: torch.Tensor, scale_bf16: torch.Tensor, group_size: int = 32
-) -> torch.Tensor:
+def _dequantize_fp4_blockwise(weight_u8: torch.Tensor, scale_bf16: torch.Tensor, group_size: int = 32) -> torch.Tensor:
     n, k_packed = weight_u8.shape
     k = k_packed * 2
     assert k % group_size == 0, f"K={k} must be divisible by group_size={group_size}"
@@ -519,7 +516,7 @@ class ConverterBase:
                         non_expert_tensors[new_key] = self._load_tensor(key)
                     elif key.startswith("layers."):
                         new_key = key.replace("layers.", "blk.").replace("layers.", "blk.")
-                        new_key = "blk." + key[len("layers."):]
+                        new_key = "blk." + key[len("layers.") :]
                         non_expert_tensors[new_key] = self._load_tensor(key)
                     else:
                         non_expert_tensors[key] = self._load_tensor(key)
@@ -933,6 +930,7 @@ class OnlineQuantConverter(ConverterBase):
             del gate_up_fused
             del down_fused
         else:
+
             def _expert_key(layer_idx, expert_id, proj_name, suffix):
                 if self.key_format == "v4":
                     v4_proj = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}[proj_name]
@@ -954,7 +952,9 @@ class OnlineQuantConverter(ConverterBase):
                     for proj in proj_names:
                         s_key = _expert_key(layer_idx, expert_id, proj, "weight_scale_inv")
                         if s_key not in self.tensor_file_map:
-                            raise KeyError(f"Missing {proj} scale for layer {layer_idx}, expert {expert_id} (key={s_key})")
+                            raise KeyError(
+                                f"Missing {proj} scale for layer {layer_idx}, expert {expert_id} (key={s_key})"
+                            )
 
             if self.input_type == "fp8":
                 # Batched FP8 dequantization: load all to CPU, then chunked GPU dequant
@@ -969,9 +969,7 @@ class OnlineQuantConverter(ConverterBase):
                     t_load = time.time()
                     with record_function(f"fp8_load_cpu_{proj_name}"):
                         for eid in expert_ids:
-                            fp8_list.append(
-                                self._load_tensor(_expert_key(layer_idx, eid, proj_name, "weight"))
-                            )
+                            fp8_list.append(self._load_tensor(_expert_key(layer_idx, eid, proj_name, "weight")))
                             scale_list.append(
                                 self._load_tensor(_expert_key(layer_idx, eid, proj_name, "weight_scale_inv"))
                             )
@@ -1329,7 +1327,12 @@ def main():
                 input_type=None,
                 merge_to_safetensor=merge_to_safetensor,
             )
-        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in ["fp8", "fp16", "bf16", "fp4"]:
+        elif quant_method in ["int4", "int8", "moe_int4", "moe_int8"] and args.input_type in [
+            "fp8",
+            "fp16",
+            "bf16",
+            "fp4",
+        ]:
             # Use OnlineQuantConverter for both INT4 and INT8 quantization
             converter = OnlineQuantConverter(
                 args.input_path,

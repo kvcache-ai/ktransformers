@@ -128,12 +128,15 @@ class KTMoEWrapper:
         threadpool_count: int,
         weight_path: str,
         chunked_prefill_size: int,
+        numa_nodes: Optional[List[int]] = None,
         # Inference-specific parameters
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
         # Mode and method selection
         method: str = "AMXINT4",
-        numa_nodes: Optional[List[int]] = None,
+        weight_strategy: str = "legacy",
+        max_tier0_experts: Optional[int] = None,
+        num_moe_layers: Optional[int] = None,
         mode: str = "inference",
         # SFT-specific parameters (only used when mode="sft")
         num_gpu_experts: int = 0,
@@ -165,12 +168,17 @@ class KTMoEWrapper:
                               If None, all experts are on CPU.
                               SFT mode uses num_gpu_experts instead.
             cpuinfer_threads: Number of CPU inference threads
-            threadpool_count: Number of NUMA subpools (TP count)
+            threadpool_count: Number of NUMA subpools
+            numa_nodes: Explicit NUMA node IDs for the subpools. If None, use
+                        detected NUMA nodes in ascending order.
             weight_path: Path to weights
             chunked_prefill_size: Maximum prefill chunk size
             cpu_save: Whether to save weights to CPU memory (inference only)
             max_deferred_experts_per_token: Experts per token to defer (inference only)
             numa_nodes: Explicit list of NUMA node IDs for subpool mapping. If None, defaults to sequential.
+            weight_strategy: Inference weight residency strategy.
+            max_tier0_experts: Inference Tier0 expert capacity override.
+            num_moe_layers: Total MoE layer count for Tier0 auto sizing.
             method: Backend method (see INFERENCE_METHODS and SFT_METHODS)
             mode: Operation mode ("inference" or "sft")
             lora_rank: LoRA rank (SFT only)
@@ -219,6 +227,9 @@ class KTMoEWrapper:
                 max_deferred_experts_per_token=max_deferred_experts_per_token,
                 method=method,
                 numa_nodes=numa_nodes,
+                weight_strategy=weight_strategy,
+                max_tier0_experts=max_tier0_experts,
+                num_moe_layers=num_moe_layers,
                 swiglu_limit=swiglu_limit,
             )
         else:  # mode == "sft"
@@ -315,6 +326,9 @@ def _create_inference_wrapper(
     max_deferred_experts_per_token: Optional[int],
     method: str,
     numa_nodes: Optional[List[int]] = None,
+    weight_strategy: str = "legacy",
+    max_tier0_experts: Optional[int] = None,
+    num_moe_layers: Optional[int] = None,
     swiglu_limit: float = 0.0,
 ) -> BaseMoEWrapper:
     """
@@ -372,6 +386,9 @@ def _create_inference_wrapper(
         max_deferred_experts_per_token=max_deferred_experts_per_token,
         method=method,
         numa_nodes=numa_nodes,
+        weight_strategy=weight_strategy,
+        max_tier0_experts=max_tier0_experts,
+        num_moe_layers=num_moe_layers,
         **extra_kwargs,
     )
 

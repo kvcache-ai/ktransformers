@@ -95,9 +95,7 @@ def _dist_scatter_varlen_from_rank0(
         if rank0_chunks is None or len(rank0_chunks) != world_size:
             raise RuntimeError("rank0_chunks must contain one chunk per rank on rank0.")
         if int(rank0_chunks[0].shape[0]) != local_qlen:
-            raise RuntimeError(
-                f"Rank0 local chunk mismatch: got {rank0_chunks[0].shape[0]}, expected {local_qlen}"
-            )
+            raise RuntimeError(f"Rank0 local chunk mismatch: got {rank0_chunks[0].shape[0]}, expected {local_qlen}")
         if local_qlen > 0:
             local_out.copy_(rank0_chunks[0])
         ops: list[dist.P2POp] = []
@@ -107,9 +105,7 @@ def _dist_scatter_varlen_from_rank0(
                 continue
             chunk = rank0_chunks[dst].contiguous()
             if int(chunk.shape[0]) != qlen_dst:
-                raise RuntimeError(
-                    f"Rank{dst} chunk mismatch on rank0: got {chunk.shape[0]}, expected {qlen_dst}"
-                )
+                raise RuntimeError(f"Rank{dst} chunk mismatch on rank0: got {chunk.shape[0]}, expected {qlen_dst}")
             ops.append(dist.P2POp(dist.isend, chunk, dst))
         if ops:
             reqs = dist.batch_isend_irecv(ops)
@@ -122,7 +118,6 @@ def _dist_scatter_varlen_from_rank0(
         for req in reqs:
             req.wait()
     return local_out
-
 
 
 def _checkpoint_hook_mode() -> str:
