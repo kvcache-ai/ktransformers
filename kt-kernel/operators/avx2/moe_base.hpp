@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -60,6 +61,8 @@ class AVX2_MOE_BASE {
   std::vector<std::shared_ptr<typename T::BufferA>> down_ba_;
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
+
+  std::vector<void*> owned_aligned_allocs_;
 
   size_t pool_count_ = 0;
   size_t gate_up_ba_pool_bytes_ = 0;
@@ -117,14 +120,21 @@ class AVX2_MOE_BASE {
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
       void* gate_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+          std::aligned_alloc(64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      if (!gate_bb_ptr) throw std::runtime_error("aligned_alloc failed for gate BufferB");
+      owned_aligned_allocs_.push_back(gate_bb_ptr);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* up_bb_ptr =
+          std::aligned_alloc(64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      if (!up_bb_ptr) throw std::runtime_error("aligned_alloc failed for up BufferB");
+      owned_aligned_allocs_.push_back(up_bb_ptr);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
       void* down_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+          std::aligned_alloc(64, (buffer_b_required_size(config_.hidden_size, config_.intermediate_size) + 63) & ~63ULL);
+      if (!down_bb_ptr) throw std::runtime_error("aligned_alloc failed for down BufferB");
+      owned_aligned_allocs_.push_back(down_bb_ptr);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
 
@@ -145,7 +155,9 @@ class AVX2_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AVX2_MOE_BASE() = default;
+  ~AVX2_MOE_BASE() {
+    for (void* p : owned_aligned_allocs_) std::free(p);
+  }
 
   void warm_up() {
     int qlen = config_.max_len;

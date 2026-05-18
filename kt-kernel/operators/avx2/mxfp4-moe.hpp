@@ -593,9 +593,16 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
 // TP_MOE specialization (boilerplate, identical to rawint4 pattern)
 template <typename K>
 class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_MOE_TP<K>>> {
+  std::vector<void*> tp_owned_down_bufs_;
+
  public:
   using Base = TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_MOE_TP<K>>>;
   using Base::Base;
+
+  ~TP_MOE() {
+    for (void* p : tp_owned_down_bufs_)
+      if (p) std::free(p);
+  }
 
   void load_weights() override {
     auto& config = this->config;
@@ -612,13 +619,20 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
 
       // Allocate per-partition down_proj repack buffers (gate/up use direct pointers).
       // down is [hidden, intermediate] with TP along K — rows are non-contiguous.
+      tp_owned_down_bufs_.resize(this->tp_count, nullptr);
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto* tp = tps[i].get();
         auto& tpc = tp->config_;
         tpc.physical_to_logical_map = config.physical_to_logical_map;
         int per_tp_interm = tpc.intermediate_size;
+        if (per_tp_interm % 2 != 0)
+          throw std::runtime_error("MXFP4 TP: per_tp_interm must be even for nibble-aligned addressing, got " +
+                                   std::to_string(per_tp_interm));
         size_t down_wt_per_expert = (size_t)tpc.hidden_size * per_tp_interm / 2;
-        uint8_t* down_buf = (uint8_t*)std::aligned_alloc(64, (size_t)tpc.expert_num * down_wt_per_expert);
+        size_t alloc_size = ((size_t)tpc.expert_num * down_wt_per_expert + 63) & ~(size_t)63;
+        uint8_t* down_buf = (uint8_t*)std::aligned_alloc(64, alloc_size);
+        if (!down_buf) throw std::runtime_error("aligned_alloc failed for MXFP4 down_buf");
+        tp_owned_down_bufs_[i] = down_buf;
 
         auto subpool = pool->get_subpool(i);
         subpool->do_work_stealing_job(
@@ -661,7 +675,6 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
               }
             },
             nullptr);
-        // down_buf persists for model lifetime (down_bb_[eid]->b points into it)
       });
     } else {
       int group_size = config.quant_config.group_size;
@@ -739,6 +752,22 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
     }
 
     this->weights_loaded = true;
+  }
+
+  void write_weight_scale_to_buffer(int gpu_tp_count, int expert_id,
+                                    const std::vector<uintptr_t>& w13_weight_ptrs,
+                                    const std::vector<uintptr_t>& w13_scale_ptrs,
+                                    const std::vector<uintptr_t>& w2_weight_ptrs,
+                                    const std::vector<uintptr_t>& w2_scale_ptrs) {
+    if (!this->weights_loaded) throw std::runtime_error("Not Loaded");
+    if ((int)w13_weight_ptrs.size() != gpu_tp_count || (int)w13_scale_ptrs.size() != gpu_tp_count ||
+        (int)w2_weight_ptrs.size() != gpu_tp_count || (int)w2_scale_ptrs.size() != gpu_tp_count) {
+      throw std::runtime_error("Pointer arrays size must match gpu_tp_count");
+    }
+    this->config.pool->dispense_backend()->do_numa_job([&, this](int i) {
+      this->tps[i]->write_weights_to_buffer(gpu_tp_count, this->tp_count, expert_id, this->config, w13_weight_ptrs,
+                                            w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs);
+    });
   }
 };
 

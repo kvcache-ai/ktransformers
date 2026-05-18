@@ -210,7 +210,9 @@ def run_case(pattern, qlen):
             print(f"  t_output {t_output.flatten()[:debug_print_count]}")
 
     return {"case": pattern, "description": desc,
-            "mean": sum(diffs)/len(diffs), "max": max(diffs), "min": min(diffs)}
+            "mean": sum(diffs)/len(diffs) if diffs else 0.0,
+            "max": max(diffs) if diffs else 0.0,
+            "min": min(diffs) if diffs else 0.0}
 
 
 def run_fp4_moe_avx2_test():
