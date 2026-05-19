@@ -187,6 +187,10 @@ struct GemmKernelAVX2MXFP4 {
 // ============================================================================
 static void gemm_mxfp4(int m, int n, int k, GemmKernelAVX2MXFP4::BufferA& a, GemmKernelAVX2MXFP4::BufferB& b,
                        GemmKernelAVX2MXFP4::BufferC& c, int ith, int nth) {
+  // H3: Check weight buffer is not null
+  if (b.b == nullptr) {
+    throw std::runtime_error("gemm_mxfp4: weight buffer (b.b) is null");
+  }
   auto [n_start, n_end] = split_range(n, ith, nth);
   const int group_count = b.k_group_count;
   const int group_size = b.k_group_size;
@@ -397,17 +401,35 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
       throw std::runtime_error("MXFP4 AVX2 MoE requires scale pointers");
 
     if (use_per_expert) {
+      // C1: Per-expert mode with TP > 1 must use TP_MOE wrapper which has full_intermediate_size.
+      // Direct use of AVX2_MXFP4_MOE_TP with tp_part_idx > 0 in per-expert mode is not supported
+      // because we cannot compute correct offsets without knowing full_intermediate_size.
+      if (tp_part_idx > 0) {
+        throw std::runtime_error(
+            "AVX2_MXFP4_MOE_TP::load_weights() per-expert mode with tp_part_idx > 0 is not supported. "
+            "Use TP_MOE<AVX2_MXFP4_MOE_TP> wrapper for multi-TP scenarios.");
+      }
+
       // Direct-pointer mode: BufferB.b points into mmap'd safetensor data.
+      // For tp_part_idx == 0, offset is 0, so config_.intermediate_size value doesn't matter.
       pool->do_work_stealing_job(
           config_.expert_num, nullptr,
           [this, physical_to_logical_map](int expert_idx) {
             if (expert_idx < 0 || expert_idx >= config_.expert_num || gate_bb_[expert_idx] == nullptr) return;
             uint64_t lid = expert_map(physical_to_logical_map, expert_idx);
-            size_t gate_tp_byte_offset = (size_t)tp_part_idx * config_.intermediate_size * config_.hidden_size / 2;
-            gate_bb_[expert_idx]->b = (uint8_t*)config_.gate_projs[0][lid] + gate_tp_byte_offset;
-            up_bb_[expert_idx]->b = (uint8_t*)config_.up_projs[0][lid] + gate_tp_byte_offset;
-            size_t down_tp_byte_offset = (size_t)tp_part_idx * config_.intermediate_size / 2;
-            down_bb_[expert_idx]->b = (uint8_t*)config_.down_projs[0][lid] + down_tp_byte_offset;
+            // H1 & H2: Validate source pointers and lid bounds
+            if (lid >= config_.gate_projs[0].size()) {
+              throw std::runtime_error("load_weights: lid " + std::to_string(lid) +
+                                       " out of bounds (size=" + std::to_string(config_.gate_projs[0].size()) + ")");
+            }
+            if (config_.gate_projs[0][lid] == nullptr || config_.up_projs[0][lid] == nullptr ||
+                config_.down_projs[0][lid] == nullptr) {
+              throw std::runtime_error("load_weights: null weight pointer for expert " + std::to_string(lid));
+            }
+            // tp_part_idx == 0 guaranteed here, so offset is 0
+            gate_bb_[expert_idx]->b = (uint8_t*)config_.gate_projs[0][lid];
+            up_bb_[expert_idx]->b = (uint8_t*)config_.up_projs[0][lid];
+            down_bb_[expert_idx]->b = (uint8_t*)config_.down_projs[0][lid];
           },
           nullptr);
 
@@ -417,16 +439,15 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
             uint64_t expert_idx = task_id;
             if (expert_idx >= (uint64_t)config_.expert_num || gate_bb_[expert_idx] == nullptr) return;
             uint64_t lid = expert_map(physical_to_logical_map, expert_idx);
+            // H2: Bounds check (already validated in weight loading, but be safe)
+            if (lid >= config_.gate_scales[0].size()) return;
+            if (config_.gate_scales[0][lid] == nullptr || config_.up_scales[0][lid] == nullptr ||
+                config_.down_scales[0][lid] == nullptr) return;
             size_t scale_elem_count = ((size_t)config_.hidden_size * config_.intermediate_size) / group_size;
-            size_t gate_scale_tp_offset =
-                (size_t)tp_part_idx * config_.intermediate_size * (config_.hidden_size / group_size);
-            size_t down_scale_tp_offset = (size_t)tp_part_idx * (config_.intermediate_size / group_size);
-            convert_or_copy(gate_bb_[expert_idx]->d,
-                            (const ggml_bf16_t*)config_.gate_scales[0][lid] + gate_scale_tp_offset, scale_elem_count);
-            convert_or_copy(up_bb_[expert_idx]->d, (const ggml_bf16_t*)config_.up_scales[0][lid] + gate_scale_tp_offset,
-                            scale_elem_count);
-            convert_or_copy(down_bb_[expert_idx]->d,
-                            (const ggml_bf16_t*)config_.down_scales[0][lid] + down_scale_tp_offset, scale_elem_count);
+            // tp_part_idx == 0 guaranteed here, so offset is 0
+            convert_or_copy(gate_bb_[expert_idx]->d, (const ggml_bf16_t*)config_.gate_scales[0][lid], scale_elem_count);
+            convert_or_copy(up_bb_[expert_idx]->d, (const ggml_bf16_t*)config_.up_scales[0][lid], scale_elem_count);
+            convert_or_copy(down_bb_[expert_idx]->d, (const ggml_bf16_t*)config_.down_scales[0][lid], scale_elem_count);
           },
           nullptr);
     } else {
@@ -637,18 +658,33 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
         auto subpool = pool->get_subpool(i);
         subpool->do_work_stealing_job(
             tpc.expert_num, nullptr,
-            [&, i, per_tp_interm, down_buf, down_wt_per_expert](int eid) {
+            [&, i, per_tp_interm, full_interm, down_buf, down_wt_per_expert](int eid) {
               if (tpc.should_skip_expert(eid)) return;
               uint64_t lid = expert_map(physical_to_logical_map, eid);
 
-              // gate/up weights: N-split, contiguous rows → direct pointer
-              size_t n_byte_off = (size_t)i * per_tp_interm * tpc.hidden_size / 2;
+              // H1 & H2: Validate source pointers and lid bounds
+              if (lid >= config.gate_projs[0].size()) {
+                throw std::runtime_error("TP_MOE load_weights: lid " + std::to_string(lid) +
+                                         " out of bounds (size=" + std::to_string(config.gate_projs[0].size()) + ")");
+              }
+              if (config.gate_projs[0][lid] == nullptr || config.up_projs[0][lid] == nullptr ||
+                  config.down_projs[0][lid] == nullptr) {
+                throw std::runtime_error("TP_MOE load_weights: null weight pointer for expert " + std::to_string(lid));
+              }
+
+              // C2 FIX: gate/up weights: N-split, contiguous rows → direct pointer
+              // Use full_interm (not per_tp_interm) to compute offset into full safetensor data
+              size_t n_byte_off = (size_t)i * full_interm * tpc.hidden_size / 2;
               tp->gate_bb_[eid]->b = (uint8_t*)config.gate_projs[0][lid] + n_byte_off;
               tp->up_bb_[eid]->b = (uint8_t*)config.up_projs[0][lid] + n_byte_off;
 
-              // gate/up scales: contiguous → convert BF16→FP32
+              // C4 FIX: gate/up scales: contiguous → convert BF16→FP32
+              // Use full_interm (not per_tp_interm) for scale offset calculation
               size_t scale_count = (size_t)(tpc.hidden_size / group_size) * per_tp_interm;
-              size_t scale_off = (size_t)i * per_tp_interm * (tpc.hidden_size / group_size);
+              size_t scale_off = (size_t)i * full_interm * (tpc.hidden_size / group_size);
+              if (config.gate_scales[0][lid] == nullptr || config.up_scales[0][lid] == nullptr) {
+                throw std::runtime_error("TP_MOE load_weights: null scale pointer for expert " + std::to_string(lid));
+              }
               convert_or_copy(tp->gate_bb_[eid]->d, (const ggml_bf16_t*)config.gate_scales[0][lid] + scale_off,
                               scale_count);
               convert_or_copy(tp->up_bb_[eid]->d, (const ggml_bf16_t*)config.up_scales[0][lid] + scale_off,
@@ -665,6 +701,9 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
               tp->down_bb_[eid]->b = dst_down;
 
               // down scales: K-split, non-contiguous → per-row convert
+              if (config.down_scales[0][lid] == nullptr) {
+                throw std::runtime_error("TP_MOE load_weights: null down_scale pointer for expert " + std::to_string(lid));
+              }
               int full_interm_groups = full_interm / group_size;
               int per_tp_groups = per_tp_interm / group_size;
               const ggml_bf16_t* src_ds = (const ggml_bf16_t*)config.down_scales[0][lid];
