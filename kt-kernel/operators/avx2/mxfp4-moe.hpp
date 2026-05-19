@@ -672,16 +672,15 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
                 throw std::runtime_error("TP_MOE load_weights: null weight pointer for expert " + std::to_string(lid));
               }
 
-              // C2 FIX: gate/up weights: N-split, contiguous rows → direct pointer
-              // Use full_interm (not per_tp_interm) to compute offset into full safetensor data
-              size_t n_byte_off = (size_t)i * full_interm * tpc.hidden_size / 2;
+              // gate/up weights: N-split, contiguous rows → direct pointer
+              // Each TP partition handles per_tp_interm rows starting at row i*per_tp_interm
+              size_t n_byte_off = (size_t)i * per_tp_interm * tpc.hidden_size / 2;
               tp->gate_bb_[eid]->b = (uint8_t*)config.gate_projs[0][lid] + n_byte_off;
               tp->up_bb_[eid]->b = (uint8_t*)config.up_projs[0][lid] + n_byte_off;
 
-              // C4 FIX: gate/up scales: contiguous → convert BF16→FP32
-              // Use full_interm (not per_tp_interm) for scale offset calculation
+              // gate/up scales: contiguous → convert BF16→FP32
               size_t scale_count = (size_t)(tpc.hidden_size / group_size) * per_tp_interm;
-              size_t scale_off = (size_t)i * full_interm * (tpc.hidden_size / group_size);
+              size_t scale_off = (size_t)i * per_tp_interm * (tpc.hidden_size / group_size);
               if (config.gate_scales[0][lid] == nullptr || config.up_scales[0][lid] == nullptr) {
                 throw std::runtime_error("TP_MOE load_weights: null scale pointer for expert " + std::to_string(lid));
               }
