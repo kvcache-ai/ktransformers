@@ -153,13 +153,12 @@ def test_async_reader_timeout():
 
 
 def test_io_backend_enum():
-    """Test IOBackend enum."""
+    """Test IOBackend enum (io_uring-only codebase)."""
     assert hasattr(ext, "IOBackend"), "IOBackend enum not found"
-    assert hasattr(ext.IOBackend, "MMAP"), "IOBackend.MMAP not found"
     assert hasattr(ext.IOBackend, "IOURING"), "IOBackend.IOURING not found"
-
-    # Check enum values
-    assert ext.IOBackend.MMAP != ext.IOBackend.IOURING, "Enum values should be different"
+    # Legacy 'MMAP' value was removed when the mmap resident path was retired
+    # in favor of io_uring + O_DIRECT.
+    assert not hasattr(ext.IOBackend, "MMAP"), "IOBackend.MMAP should be removed"
 
 
 def test_moe_config_accepts_iouring_file_slots():

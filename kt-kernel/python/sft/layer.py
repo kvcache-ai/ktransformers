@@ -87,7 +87,7 @@ class KTMoELayerWrapper(nn.Module):
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
         saved_experts = None
-        experts_attr = getattr(self, "_experts_attr", None)
+        experts_attr = getattr(self, '_experts_attr', None)
 
         if experts_attr is not None and getattr(self, experts_attr, None) is not None:
             saved_experts = getattr(self, experts_attr)
@@ -103,7 +103,6 @@ class KTMoELayerWrapper(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
         import torch.distributed as dist
-
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
         rank = dist.get_rank() if dist.is_initialized() else 0
 
@@ -142,7 +141,7 @@ class KTMoELayerWrapper(nn.Module):
             if train_lora and self._peft_lora_modules:
                 for expert_loras in self._peft_lora_modules.values():
                     for lora_A, lora_B in expert_loras.values():
-                        if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
+                        if hasattr(lora_A, 'weight') and lora_A.weight.requires_grad:
                             lora_ref = lora_A.weight
                             break
                     if lora_ref.numel() > 0:
@@ -195,9 +194,13 @@ class KTMoELayerWrapper(nn.Module):
             else:
                 all_qlens_list = [int(q) for q in all_qlens]
                 if len(all_qlens_list) != world_size:
-                    raise RuntimeError(f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}")
+                    raise RuntimeError(
+                        f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}"
+                    )
             if int(all_qlens_list[rank]) != qlen:
-                raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}")
+                raise RuntimeError(
+                    f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}"
+                )
             total_qlen = sum(all_qlens_list)
 
             if rank == 0:
@@ -296,7 +299,9 @@ class KTMoELayerWrapper(nn.Module):
         if dist_on:
             all_qlens = _all_gather_qlens(qlen, original_device, world_size)
             if int(all_qlens[rank]) != qlen:
-                raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}")
+                raise RuntimeError(
+                    f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}"
+                )
             total_qlen = sum(all_qlens)
 
             hs_flat = hidden_states.view(qlen, self.hidden_size).contiguous()

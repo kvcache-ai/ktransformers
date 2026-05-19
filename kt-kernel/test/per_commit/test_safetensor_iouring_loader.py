@@ -124,8 +124,74 @@ def test_bf16_loader_builds_iouring_slots_for_packed_experts(tmp_path):
     slots = loader.load_experts_iouring("model.layers.0", tp_count=2, use_direct_io=False)
 
     assert slots["packed_bf16"] is True
+    assert slots["bf16_expert_cache"] is True
     assert len(slots["gate"]) == 2
     assert len(slots["gate"][0]) == 2
     assert slots["gate"][0][0][2] == slots["up"][0][0][2]
     assert slots["down"][0][0][2] == down[0].nbytes
+    loader.close_all_handles()
+
+
+def test_bf16_loader_materializes_cache_for_unpacked_experts(tmp_path, monkeypatch):
+    gate0 = np.arange(16, dtype=np.uint16).reshape(4, 4)
+    up0 = np.arange(16, 32, dtype=np.uint16).reshape(4, 4)
+    down0 = np.arange(32, 48, dtype=np.uint16).reshape(4, 4)
+    gate1 = np.arange(48, 64, dtype=np.uint16).reshape(4, 4)
+    up1 = np.arange(64, 80, dtype=np.uint16).reshape(4, 4)
+    down1 = np.arange(80, 96, dtype=np.uint16).reshape(4, 4)
+    save_file(
+        {
+            "model.layers.0.mlp.experts.0.gate_proj.weight": gate0,
+            "model.layers.0.mlp.experts.0.up_proj.weight": up0,
+            "model.layers.0.mlp.experts.0.down_proj.weight": down0,
+            "model.layers.0.mlp.experts.1.gate_proj.weight": gate1,
+            "model.layers.0.mlp.experts.1.up_proj.weight": up1,
+            "model.layers.0.mlp.experts.1.down_proj.weight": down1,
+        },
+        str(tmp_path / "model.safetensors"),
+    )
+    monkeypatch.setenv("KT_MESH_BF16_EXPERT_CACHE_DIR", str(tmp_path / "mesh_cache"))
+
+    loader_module = _import_loader_module()
+    loader = loader_module.BF16SafeTensorLoader(str(tmp_path))
+    slots = loader.load_experts_iouring("model.layers.0", tp_count=2, use_direct_io=False)
+
+    assert slots["packed_bf16"] is False
+    assert slots["bf16_expert_cache"] is True
+    assert os.path.exists(slots["cache_path"])
+    assert len(slots["gate"]) == 2
+    assert len(slots["gate"][0]) == 2
+    fd, offset, size = slots["gate"][0][0]
+    assert os.pread(fd, size, offset) == gate0[:2, :].tobytes()
+    fd, offset, size = slots["up"][1][1]
+    assert os.pread(fd, size, offset) == up1[2:, :].tobytes()
+    fd, offset, size = slots["down"][0][1]
+    assert os.pread(fd, size, offset) == down1.tobytes()
+    loader.close_all_handles()
+
+
+def test_bf16_loader_precaches_all_discovered_layers(tmp_path, monkeypatch):
+    tensors = {}
+    for layer in range(2):
+        for expert in range(2):
+            base = f"model.layers.{layer}.mlp.experts.{expert}"
+            offset = layer * 100 + expert * 10
+            tensors[f"{base}.gate_proj.weight"] = np.arange(offset, offset + 16, dtype=np.uint16).reshape(4, 4)
+            tensors[f"{base}.up_proj.weight"] = np.arange(offset + 16, offset + 32, dtype=np.uint16).reshape(4, 4)
+            tensors[f"{base}.down_proj.weight"] = np.arange(offset + 32, offset + 48, dtype=np.uint16).reshape(4, 4)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    monkeypatch.setenv("KT_MESH_BF16_EXPERT_CACHE_DIR", str(tmp_path / "mesh_cache"))
+
+    loader_module = _import_loader_module()
+    loader = loader_module.BF16SafeTensorLoader(str(tmp_path))
+    first = loader.precache_experts_iouring(tp_count=2, use_direct_io=False)
+    second = loader.precache_experts_iouring(tp_count=2, use_direct_io=False)
+
+    assert first["layers"] == 2
+    assert first["generated"] == 2
+    assert first["reused"] == 0
+    assert second["layers"] == 2
+    assert second["generated"] == 0
+    assert second["reused"] == 2
+    assert all(os.path.exists(path) for path in second["cache_paths"])
     loader.close_all_handles()

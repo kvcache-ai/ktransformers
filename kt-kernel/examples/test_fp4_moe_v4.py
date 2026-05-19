@@ -26,7 +26,8 @@ from kt_kernel.utils.loader import MXFP4SafeTensorLoader  # noqa: E402
 
 # OCP E2M1 codepoints in our LUT order (matches operators/amx/fp4-moe.hpp).
 E2M1_VALUES = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float32,
 )
 
@@ -148,28 +149,17 @@ def main() -> int:
 
     cpu_infer.submit(
         moe.forward_task(
-            bsz.data_ptr(),
-            top_k,
-            expert_ids.data_ptr(),
-            routing.data_ptr(),
-            x.data_ptr(),
-            y_amx.data_ptr(),
-            False,
+            bsz.data_ptr(), top_k, expert_ids.data_ptr(), routing.data_ptr(),
+            x.data_ptr(), y_amx.data_ptr(), False,
         )
     )
     cpu_infer.sync()
 
     # ----- Torch reference (dequantize same nibbles + scales) -----
     print("[V4-MXFP4] Building torch reference (dequantizing all loaded experts)…")
-    gate_bf16 = torch.stack(
-        [dequantize_mxfp4(weights["gate"][i], weights["gate_scale"][i], group_size) for i in range(expert_num)]
-    )
-    up_bf16 = torch.stack(
-        [dequantize_mxfp4(weights["up"][i], weights["up_scale"][i], group_size) for i in range(expert_num)]
-    )
-    down_bf16 = torch.stack(
-        [dequantize_mxfp4(weights["down"][i], weights["down_scale"][i], group_size) for i in range(expert_num)]
-    )
+    gate_bf16 = torch.stack([dequantize_mxfp4(weights["gate"][i], weights["gate_scale"][i], group_size) for i in range(expert_num)])
+    up_bf16 = torch.stack([dequantize_mxfp4(weights["up"][i], weights["up_scale"][i], group_size) for i in range(expert_num)])
+    down_bf16 = torch.stack([dequantize_mxfp4(weights["down"][i], weights["down_scale"][i], group_size) for i in range(expert_num)])
 
     y_ref = reference_moe(x, expert_ids, routing, gate_bf16, up_bf16, down_bf16)
 

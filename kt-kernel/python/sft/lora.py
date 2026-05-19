@@ -114,9 +114,9 @@ def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
             if peft_lora_modules is not None:
                 for expert_loras in peft_lora_modules.values():
                     for lora_A, lora_B in expert_loras.values():
-                        if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
+                        if hasattr(lora_A, 'weight') and lora_A.weight.requires_grad:
                             params.append(lora_A.weight)
-                        if hasattr(lora_B, "weight") and lora_B.weight.requires_grad:
+                        if hasattr(lora_B, 'weight') and lora_B.weight.requires_grad:
                             params.append(lora_B.weight)
             # Fused expert LoRA parameters (KT-managed, not PEFT)
             fused_params = getattr(wrapper, "_fused_expert_lora_params", None)
@@ -176,10 +176,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         if getattr(wrapper, "_fused_experts", False):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
             lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
-                wrapper,
-                moe_config,
-                lora_rank,
-                torch.bfloat16,
+                wrapper, moe_config, lora_rank, torch.bfloat16,
             )
 
             if is_rank_0 and wrapper.wrapper is not None:
@@ -513,16 +510,9 @@ def _replace_peft_weights_with_views(
                     "[_replace_peft_weights_with_views] first param: "
                     "id %s->%s (same=%s) data_ptr %s->%s buf_ptr=%s (match=%s) "
                     "has_grad=%s requires_grad=%s shape=%s",
-                    _old_id_a,
-                    _new_id_a,
-                    _old_id_a == _new_id_a,
-                    _old_ptr_a,
-                    _new_ptr_a,
-                    _buf_ptr_a,
-                    _new_ptr_a == _buf_ptr_a,
-                    _has_grad,
-                    lora_A.weight.requires_grad,
-                    tuple(lora_A.weight.shape),
+                    _old_id_a, _new_id_a, _old_id_a == _new_id_a,
+                    _old_ptr_a, _new_ptr_a, _buf_ptr_a, _new_ptr_a == _buf_ptr_a,
+                    _has_grad, lora_A.weight.requires_grad, tuple(lora_A.weight.shape),
                 )
                 _first_logged = True
             _replaced += 1

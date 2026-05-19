@@ -921,7 +921,11 @@ class GGUFLoader:
             }
             self.tensor_file_map[tensor.name] = file_path
 
-        self.file_data_map[file_path] = np.memmap(file_path, mode="r")
+        # Use os.open + os.pread (in get_tensor) to read tensor bytes directly,
+        # avoiding mmap-based page-cache residency. This codebase is io_uring-only
+        # for the mesh runtime path; the GGUF startup loader uses pread to stay
+        # consistent (no mmap anywhere).
+        self.file_data_map[file_path] = os.open(file_path, os.O_RDONLY)
 
     def _load_directory(self, dir_path: str):
         """Load all GGUF files from a directory (non-recursive)"""
@@ -955,7 +959,11 @@ class GGUFLoader:
                     }
                     self.tensor_file_map[tensor.name] = file_path
 
-                self.file_data_map[file_path] = np.memmap(file_path, mode="r")
+        # Use os.open + os.pread (in get_tensor) to read tensor bytes directly,
+        # avoiding mmap-based page-cache residency. This codebase is io_uring-only
+        # for the mesh runtime path; the GGUF startup loader uses pread to stay
+        # consistent (no mmap anywhere).
+        self.file_data_map[file_path] = os.open(file_path, os.O_RDONLY)
 
         if not found_gguf:
             raise FileNotFoundError(f"No .gguf files found in directory: {dir_path}")
@@ -1097,7 +1105,7 @@ class GGUFLoader:
 
         info = self.tensor_info[name]
         file_path = self.tensor_file_map[name]
-        mmap_data = self.file_data_map[file_path]
+        gguf_fd = self.file_data_map[file_path]
 
         offset = info["offset"]
         n_elements = info["n_elements"]
@@ -1138,10 +1146,29 @@ class GGUFLoader:
         block_size, type_size = GGML_QUANT_SIZES[ggml_type]
         n_bytes = n_elements * type_size // block_size
 
-        data_bytes = mmap_data[offset : offset + n_bytes]
+        # pread is position-aware and does NOT mutate fd offset, so this is
+        # thread-safe across concurrent get_tensor() calls on the same fd.
+        data_bytes = os.pread(gguf_fd, n_bytes, offset)
         data = torch.from_numpy(np.frombuffer(data_bytes, dtype=np.uint8).copy())
 
         return data, ggml_type
+
+    def close(self):
+        """Close all GGUF file descriptors. Safe to call multiple times."""
+        for fd in list(self.file_data_map.values()):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self.file_data_map.clear()
+
+    def __del__(self):
+        # Best-effort cleanup; close() is the explicit path.
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 class GPTQSafeTensorLoader(FP8SafeTensorLoader):
     """Loader for symmetric GPTQ-Int4 expert weights (qweight + scales, no qzeros).

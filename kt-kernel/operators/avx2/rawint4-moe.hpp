@@ -86,8 +86,9 @@ struct GemmKernelAVX2RawInt4 {
       d = (float*)((uint8_t*)ptr + ((size_t)n * k / 2));
     }
 
-    // Scale-only allocation: b points to external (mmap'd) weight data; d owns scale_ptr.
-    // Used when weights are consumed directly from safetensor mmap without copying.
+    // Scale-only allocation: b points to externally-managed weight data; d owns scale_ptr.
+    // Used when weights are consumed directly from an external buffer without copying
+    // (io_uring-loaded numa_alloc buffer, etc).
     BufferB(int n_, int k_, int k_group_size_, void* scale_ptr, std::nullptr_t /*scale_only*/)
         : b(nullptr), n(n_), k(k_), k_group_size(k_group_size_) {
       if (k_group_size <= 0 || k % k_group_size != 0 || k % 8 != 0) {
@@ -261,7 +262,7 @@ class AVX2_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_RAW_INT4_MOE_TP<T>> {
   }
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
     // When per-expert source pointers are available, only allocate float32 scales.
-    // Weights will be served directly from the mmap'd safetensor data (no copy).
+    // Weights will be served directly from the externally-managed buffer (no copy).
     if (!config_.gate_projs.empty()) {
       return T::BufferB::required_size_scale_only(n, k, config_.quant_config.group_size);
     }
@@ -310,8 +311,8 @@ class AVX2_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_RAW_INT4_MOE_TP<T>> {
     }
 
     if (use_per_expert) {
-      // Direct-pointer mode: BufferB.b is set to point into the mmap'd safetensor data
-      // (no weight copy). Only float32 scales are allocated and converted.
+      // Direct-pointer mode: BufferB.b is set to point into the externally-managed
+      // weight buffer (no weight copy). Only float32 scales are allocated and converted.
       //
       // For gate/up: source shape [intermediate_size_full, hidden_size/2] row-major.
       //   TP partition tp_part_idx handles rows [tp_part_idx * n_per_tp, (tp_part_idx+1) * n_per_tp).
@@ -578,7 +579,8 @@ class TP_MOE<AVX2_RAW_INT4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_RAW_
     }
 
     if (use_per_expert_ptrs) {
-      // Direct-pointer mode: inner load_weights() sets BufferB.b directly from mmap'd data.
+      // Direct-pointer mode: inner load_weights() sets BufferB.b directly from
+      // the externally-managed weight buffer.
       // The down projection column-gather required for tp_count > 1 is NOT supported in
       // this mode; enforce single NUMA pool (kt_threadpool_count=1).
       if (this->tp_count > 1) {
