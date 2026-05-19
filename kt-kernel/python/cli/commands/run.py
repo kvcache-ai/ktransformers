@@ -105,9 +105,9 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 @click.option(
     "--io-backend",
     "io_backend",
-    type=click.Choice(["legacy", "mmap", "iouring"], case_sensitive=False),
-    default=None,
-    help="I/O backend for expert weight loading (legacy/mmap: ordinary KT loading, iouring: direct I/O)",
+    type=click.Choice(["iouring"], case_sensitive=False),
+    default="iouring",
+    help="I/O backend for expert weight loading (only iouring is supported in this codebase)",
 )
 @click.option(
     "--enable-cache-stats",
@@ -115,6 +115,13 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
     is_flag=True,
     default=False,
     help="Enable cache hit/miss statistics collection",
+)
+@click.option(
+    "--precache",
+    "precache",
+    is_flag=True,
+    default=False,
+    help="Materialize MESH expert cache before launching the server",
 )
 @click.pass_context
 def run(
@@ -147,6 +154,7 @@ def run(
     residency_policy: Optional[str],
     io_backend: Optional[str],
     enable_cache_stats: bool,
+    precache: bool,
 ) -> None:
     """Start model inference server.
 
@@ -209,6 +217,7 @@ def run(
         residency_policy=residency_policy,
         io_backend=io_backend,
         enable_cache_stats=enable_cache_stats,
+        precache=precache,
     )
 
 
@@ -241,6 +250,7 @@ def _run_impl(
     residency_policy: Optional[str] = None,
     io_backend: Optional[str] = None,
     enable_cache_stats: bool = False,
+    precache: bool = False,
 ) -> None:
     """Actual implementation of run command."""
     # Check if SGLang is installed before proceeding
@@ -570,6 +580,9 @@ def _run_impl(
         env["KT_IO_BACKEND"] = str(final_io_backend).upper()
     if enable_cache_stats:
         env["KT_ENABLE_CACHE_STATS"] = "1"
+    if precache:
+        env["KT_MESH_PRECACHE"] = "1"
+        env["KT_MESH_BF16_EXPERT_CACHE"] = "1"
 
     # Step 5: Show configuration summary
     console.print()
@@ -590,6 +603,8 @@ def _run_impl(
         console.print(f"  NUMA Nodes (binding): [cyan]{', '.join(map(str, final_kt_numa_nodes))}[/cyan]")
     console.print(f"  Tensor Parallel: [cyan]{final_tensor_parallel_size}[/cyan]")
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
+    if precache:
+        console.print("  Precache: [cyan]enabled[/cyan]")
     console.print(f"  Weight Strategy: [cyan]{final_weight_strategy or 'legacy'}[/cyan]")
     console.print(f"  Residency Policy: [cyan]{final_residency_policy or 'baseline'}[/cyan]")
     if final_max_tier0_experts is not None:
@@ -613,6 +628,28 @@ def _run_impl(
         console.print(f"  [dim]{' '.join(cmd)}[/dim]")
         console.print()
         return
+
+    if precache:
+        from kt_kernel.utils.mesh.precache import precache_mesh_experts
+
+        console.print()
+        print_step("Precaching MESH experts")
+        precache_result = precache_mesh_experts(
+            resolved_weights_path if resolved_weights_path else resolved_model_path,
+            final_kt_method,
+            final_tensor_parallel_size,
+            env,
+        )
+        if precache_result.get("skipped"):
+            print_warning(precache_result["reason"])
+        else:
+            console.print(f"  Cache: [yellow]{precache_result['cache_root']}[/yellow]")
+            console.print(
+                "  Layers: "
+                f"[cyan]{precache_result['layers']}[/cyan], "
+                f"generated: [cyan]{precache_result['generated']}[/cyan], "
+                f"reused: [cyan]{precache_result['reused']}[/cyan]"
+            )
 
     # Execute with prepared environment variables
     # Don't print "Server started" or API info here - let sglang's logs speak for themselves

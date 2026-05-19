@@ -31,6 +31,7 @@
 #include "../mesh/prefill_policy.hpp"
 #include "../mesh/resident_slot_pool.hpp"
 #include "../mesh/runtime_utils.hpp"
+#include "../mesh/global_scratch_pool.hpp"
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {

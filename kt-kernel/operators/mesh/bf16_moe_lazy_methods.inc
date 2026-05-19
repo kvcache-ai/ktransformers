@@ -171,6 +171,8 @@
     mesh::record_iouring_read_stats(config_.cache_stats, config_.enable_cache_stats, read_batch);
   }
 
+  int cache_capacity_for_debug() const { return cache_capacity_; }
+
   bool read_and_pack_iouring_expert(int expert_id, void* gate_owner, void* up_owner, void* down_owner) {
     const size_t down_full_bytes = full_down_weight_bytes();
     void* gate_raw = numa_alloc_onnode(gate_weight_bytes_, numa_node_);
@@ -232,6 +234,114 @@
     numa_free(gate_raw, gate_weight_bytes_);
     numa_free(up_raw, up_weight_bytes_);
     numa_free(down_full_raw, down_full_bytes);
+    return true;
+  }
+
+  bool begin_external_iouring_pack(int expert_id, bool pin_after_pack) {
+    if (expert_id < 0 || expert_id >= config_.expert_num) return false;
+
+    for (;;) {
+      uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (state == EXPERT_PINNED) {
+        return false;
+      }
+      if (state == EXPERT_CACHED) {
+        if (!pin_after_pack) {
+          return false;
+        }
+        uint8_t expected = EXPERT_CACHED;
+        if (expert_states_[expert_id].compare_exchange_strong(
+                expected, EXPERT_PINNED, std::memory_order_acq_rel, std::memory_order_acquire)) {
+          note_expert_pin(expert_id);
+          return false;
+        }
+        continue;
+      }
+      if (state == EXPERT_BASELINE) {
+        if (cache_capacity_ > 0) {
+          while (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
+            if (!evict_one_cached_expert(expert_id)) {
+              break;
+            }
+          }
+          if (resident_expert_count_.load(std::memory_order_acquire) >= cache_capacity_) {
+            return false;
+          }
+        }
+
+        uint8_t expected = EXPERT_BASELINE;
+        if (expert_states_[expert_id].compare_exchange_strong(
+                expected, EXPERT_PACKING, std::memory_order_acq_rel, std::memory_order_acquire)) {
+          return true;
+        }
+        continue;
+      }
+      if (state == EXPERT_PACKING || state == EXPERT_DEMOTING) {
+        std::this_thread::yield();
+        continue;
+      }
+      return false;
+    }
+  }
+
+  void cancel_external_iouring_pack(int expert_id) {
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    uint8_t expected = EXPERT_PACKING;
+    (void)expert_states_[expert_id].compare_exchange_strong(
+        expected, EXPERT_BASELINE, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  bool pack_iouring_expert_from_raw_slices(int expert_id,
+                                           const ggml_bf16_t* gate_raw,
+                                           const ggml_bf16_t* up_raw,
+                                           const ggml_bf16_t* down_full_raw,
+                                           bool pin_after_pack) {
+    void* gate_owner = numa_alloc_onnode(gate_weight_bytes_, numa_node_);
+    void* up_owner = numa_alloc_onnode(up_weight_bytes_, numa_node_);
+    void* down_owner = numa_alloc_onnode(down_weight_bytes_, numa_node_);
+    if (gate_owner == nullptr || up_owner == nullptr || down_owner == nullptr) {
+      mesh::log_bf16_numa_alloc_failure(expert_id,
+                                        gate_weight_bytes_,
+                                        up_weight_bytes_,
+                                        down_weight_bytes_,
+                                        gate_owner,
+                                        up_owner,
+                                        down_owner,
+                                        numa_node_);
+      if (gate_owner) numa_free(gate_owner, gate_weight_bytes_);
+      if (up_owner) numa_free(up_owner, up_weight_bytes_);
+      if (down_owner) numa_free(down_owner, down_weight_bytes_);
+      cancel_external_iouring_pack(expert_id);
+      return false;
+    }
+
+    gate_bb_[expert_id]->set_data(gate_owner);
+    up_bb_[expert_id]->set_data(up_owner);
+    down_bb_[expert_id]->set_data(down_owner);
+
+    gate_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(gate_raw), 0, 1);
+    up_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(up_raw), 0, 1);
+
+    if (full_intermediate_size_ == config_.intermediate_size) {
+      down_bb_[expert_id]->from_mat(const_cast<ggml_bf16_t*>(down_full_raw), 0, 1);
+    } else {
+      std::vector<ggml_bf16_t> down_contiguous((size_t)config_.hidden_size * (size_t)config_.intermediate_size);
+      const size_t down_col_offset = (size_t)tp_part_idx * (size_t)config_.intermediate_size;
+      for (int row = 0; row < config_.hidden_size; ++row) {
+        const ggml_bf16_t* src_row =
+            down_full_raw + (size_t)row * (size_t)full_intermediate_size_ + down_col_offset;
+        ggml_bf16_t* dst_row = down_contiguous.data() + (size_t)row * (size_t)config_.intermediate_size;
+        std::memcpy(dst_row, src_row, sizeof(ggml_bf16_t) * (size_t)config_.intermediate_size);
+      }
+      down_bb_[expert_id]->from_mat(down_contiguous.data(), 0, 1);
+    }
+
+    packed_gate_owner_[expert_id] = gate_owner;
+    packed_up_owner_[expert_id] = up_owner;
+    packed_down_owner_[expert_id] = down_owner;
+    resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
+    expert_states_[expert_id].store(pin_after_pack ? EXPERT_PINNED : EXPERT_CACHED, std::memory_order_release);
+    note_expert_insert(expert_id, pin_after_pack);
     return true;
   }
 

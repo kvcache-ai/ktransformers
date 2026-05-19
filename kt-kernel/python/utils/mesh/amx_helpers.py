@@ -58,6 +58,39 @@ def load_amx_iouring_file_slots(wrapper, base_key: str):
     return file_slots
 
 
+def load_native_bf16_iouring_file_slots(wrapper, base_key: str):
+    from .async_io_manager import get_async_readers
+
+    direct_io_requested = os.environ.get("KT_IOURING_DIRECT", "1") not in ("0", "false", "False")
+    file_slots = wrapper.loader.load_experts_iouring(
+        base_key,
+        tp_count=wrapper.threadpool_count,
+        use_direct_io=direct_io_requested,
+    )
+    if direct_io_requested and not file_slots.get("direct_io", False):
+        raise RuntimeError(
+            f"[NativeMoEWrapper] layer={wrapper.layer_idx} requested KT_IOURING_DIRECT=1 "
+            "but BF16 loader did not return direct I/O slots"
+        )
+    print(
+        "[NativeMoEWrapper] "
+        f"layer={wrapper.layer_idx} backend=IOURING direct_io={file_slots.get('direct_io', False)} "
+        f"source={'bf16_expert_cache' if file_slots.get('bf16_expert_cache') else 'file_slots'} "
+        f"cache={file_slots.get('cache_path', '')}"
+    )
+
+    wrapper.gate_file_slots = file_slots["gate"]
+    wrapper.up_file_slots = file_slots["up"]
+    wrapper.down_file_slots = file_slots["down"]
+    wrapper.gate_scale_file_slots = file_slots["gate_scale"]
+    wrapper.up_scale_file_slots = file_slots["up_scale"]
+    wrapper.down_scale_file_slots = file_slots["down_scale"]
+    reader_count = max(1, len(wrapper.gate_file_slots))
+    wrapper.async_readers = get_async_readers(reader_count)
+    wrapper.async_reader = wrapper.async_readers[0]
+    return file_slots
+
+
 def assign_amx_weight_views(wrapper, weights: dict) -> tuple[list, list, list, list, list, list]:
     wrapper.gate_weights = weights["gate"]
     wrapper.up_weights = weights["up"]

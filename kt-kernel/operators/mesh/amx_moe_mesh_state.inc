@@ -49,5 +49,16 @@
   size_t gate_mins_bytes_ = 0;
   size_t up_mins_bytes_ = 0;
   size_t down_mins_bytes_ = 0;
+  void* gate_scale_cache_owner_ = nullptr;
+  void* up_scale_cache_owner_ = nullptr;
+  void* down_scale_cache_owner_ = nullptr;
+  bool scale_cache_loaded_ = false;
   std::vector<float> lookahead_heat_;
+
+  // Cross-layer shared buffer pool integration.
+  // scratch_slot_pool_block_idx_[slot] holds the GlobalScratchPool block index
+  // when the slot's buffer was borrowed from the pool; -1 means the slot owns
+  // its buffer via numa_alloc (per-layer permanent buffer for stable experts)
+  // or is empty.
+  std::vector<int> scratch_slot_pool_block_idx_;
 #endif

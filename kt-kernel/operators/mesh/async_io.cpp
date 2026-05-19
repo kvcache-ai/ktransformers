@@ -331,7 +331,9 @@ bool AsyncExpertReader::wait_for_request(uint64_t request_id, int timeout_ms) {
 
 bool AsyncExpertReader::wait_for_requests(const std::vector<uint64_t>& request_ids, int timeout_ms) {
 #ifdef HAVE_LIBURING
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    if (request_ids.empty()) {
+        return true;
+    }
     std::vector<std::shared_ptr<RequestInfo>> requests;
     requests.reserve(request_ids.size());
     for (uint64_t request_id : request_ids) {
@@ -342,29 +344,38 @@ bool AsyncExpertReader::wait_for_requests(const std::vector<uint64_t>& request_i
         requests.push_back(std::move(request));
     }
 
-    for (const auto& request : requests) {
-        std::unique_lock<std::mutex> lock(request->mutex);
-        while (true) {
+    // Returns: 0 = all completed OK, 1 = some still inflight, 2 = any failed.
+    // Lockless scan — relies on release stores in complete_request paired with
+    // the acquire load here. No per-request mutex acquired.
+    auto scan = [&requests]() -> int {
+        bool all_done = true;
+        for (const auto& request : requests) {
             const RequestState state = request->state.load(std::memory_order_acquire);
-            if (state == RequestState::Completed) {
-                break;
-            }
             if (state == RequestState::Failed) {
-                return false;
+                return 2;
             }
-            const bool changed = request->cv.wait_until(lock, deadline, [&request]() {
-                return request->state.load(std::memory_order_acquire) != RequestState::Inflight;
-            });
-            if (!changed) {
-                const RequestState final_state = request->state.load(std::memory_order_acquire);
-                if (final_state == RequestState::Completed) {
-                    break;
-                }
-                return false;
+            if (state != RequestState::Completed) {
+                all_done = false;
             }
         }
+        return all_done ? 0 : 1;
+    };
+
+    // Fast path: everything already complete (very common after a small wait).
+    int status = scan();
+    if (status == 0) return true;
+    if (status == 2) return false;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    std::unique_lock<std::mutex> lock(batch_mutex_);
+    while (true) {
+        status = scan();
+        if (status == 0) return true;
+        if (status == 2) return false;
+        if (batch_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+            return scan() == 0;
+        }
     }
-    return true;
 #else
     [[maybe_unused]] const std::vector<uint64_t>& unused_request_ids = request_ids;
     [[maybe_unused]] int unused_timeout_ms = timeout_ms;
@@ -487,6 +498,12 @@ void AsyncExpertReader::complete_request(uint64_t request_id,
         completed_experts_.insert(request->expert_id);
     }
     request->cv.notify_all();
+    // Wake any waiter parked on wait_for_requests. Cheap lock — uncontended in
+    // the common single-waiter case, and we only do one notify per cqe.
+    {
+        std::lock_guard<std::mutex> lock(batch_mutex_);
+    }
+    batch_cv_.notify_all();
     push_completion_event(request->expert_id, ok);
     (void)request_id;
 }
@@ -606,6 +623,78 @@ bool AsyncExpertReader::process_one_completion(int timeout_ms) {
     return true;
 }
 
+unsigned AsyncExpertReader::process_completions_batch(unsigned max_count) {
+    if (max_count == 0) {
+        return 0;
+    }
+    // Stack budget. 32 matches the typical io_uring CQ ring quarter for queue_depth=128.
+    // Larger values would force a heap allocation here; smaller wastes the batching benefit.
+    constexpr unsigned kStackBudget = 32;
+    const unsigned cap = max_count < kStackBudget ? max_count : kStackBudget;
+    struct io_uring_cqe* cqes[kStackBudget];
+    const unsigned harvested = io_uring_peek_batch_cqe(&ring_, cqes, cap);
+    if (harvested == 0) {
+        return 0;
+    }
+
+    // Snapshot cqe payload before advancing — the cqe slots become reusable
+    // after io_uring_cq_advance, so we cannot dereference them afterwards.
+    struct StagedCqe {
+        uint64_t request_id;
+        int result;
+    };
+    StagedCqe staged[kStackBudget];
+    for (unsigned i = 0; i < harvested; ++i) {
+        staged[i].request_id = reinterpret_cast<uint64_t>(io_uring_cqe_get_data(cqes[i]));
+        staged[i].result = cqes[i]->res;
+    }
+    io_uring_cq_advance(&ring_, harvested);
+
+    // Batch lookup the request shared_ptrs under a single map-lock acquisition.
+    // The per-cqe get_request() path would otherwise lock request_map_mutex_
+    // once per completion (N times for a batch of N).
+    std::shared_ptr<RequestInfo> lookups[kStackBudget];
+    {
+        std::lock_guard<std::mutex> lock(request_map_mutex_);
+        for (unsigned i = 0; i < harvested; ++i) {
+            auto it = requests_.find(staged[i].request_id);
+            lookups[i] = (it == requests_.end()) ? nullptr : it->second;
+        }
+    }
+
+    for (unsigned i = 0; i < harvested; ++i) {
+        const uint64_t request_id = staged[i].request_id;
+        const int result = staged[i].result;
+        auto& request = lookups[i];
+        if (request == nullptr) {
+            inflight_count_.fetch_sub(1, std::memory_order_acq_rel);
+            continue;
+        }
+        const bool ok = result >= 0 && static_cast<size_t>(result) == request->expected_size;
+        inflight_count_.fetch_sub(1, std::memory_order_acq_rel);
+        if (ok) {
+            complete_request(request_id, request, true, result);
+            continue;
+        }
+        if (resubmit_read(request_id, request, result)) {
+            continue;
+        }
+        request->retry_count.store(std::min(request->retry_count.load(std::memory_order_acquire), max_read_retries_),
+                                   std::memory_order_release);
+        log_read_status("read_failed",
+                        request_id,
+                        request->expert_id,
+                        request->retry_count.load(std::memory_order_acquire),
+                        max_read_retries_,
+                        request->fd,
+                        request->offset,
+                        request->expected_size,
+                        result);
+        complete_request(request_id, request, false, result);
+    }
+    return harvested;
+}
+
 void AsyncExpertReader::fail_queued_jobs() {
     std::deque<ReadJob> jobs;
     {
@@ -651,12 +740,15 @@ void AsyncExpertReader::io_thread_main() {
                 }
             }
             if (submit_ok) {
-                while (process_one_completion(0)) {
+                // Drain whatever the kernel already has waiting. Batched form
+                // is one syscall (peek_batch_cqe) + one cq_advance regardless
+                // of how many CQEs are ready, vs. one syscall per CQE before.
+                while (process_completions_batch(32) > 0) {
                 }
             }
         } else if (inflight_count_.load(std::memory_order_acquire) > 0) {
             (void)process_one_completion(1);
-            while (process_one_completion(0)) {
+            while (process_completions_batch(32) > 0) {
             }
         }
 

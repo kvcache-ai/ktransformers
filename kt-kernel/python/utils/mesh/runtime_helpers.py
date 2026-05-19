@@ -63,7 +63,7 @@ def _configure_base_runtime(
 
     env_residency_policy = os.environ.get("KT_RESIDENCY_POLICY")
     self.residency_policy = normalize_residency_policy_name(env_residency_policy or "baseline")
-    self.io_backend = os.environ.get("KT_IO_BACKEND", "MMAP").upper()
+    self.io_backend = os.environ.get("KT_IO_BACKEND", "IOURING").upper()
     verbose_runtime_config = os.environ.get("KT_MESH_VERBOSE", "0") in ("1", "true", "True", "TRUE")
     explicit_mesh_runtime = (
         env_weight_strategy is not None
@@ -166,8 +166,20 @@ def _mesh_prefill_layer_mode_enabled(self) -> bool:
 def _mesh_prefill_full_layer_count(self) -> int:
     if not self._mesh_prefill_layer_mode_enabled():
         return 0
-    configured = self._mesh_global_resident_capacity()
+    # Explicit override via KT_MESH_PREFILL_LAYER_WINDOW.
+    #   -1 (default): compute from cache config (sliding window behavior)
+    #    0:           disable sliding — keep ALL layers' prefill state across
+    #                 SGLang chunks. Memory cost = pool capacity, not 40 ×
+    #                 cap. Use when KT_MESH_GLOBAL_POOL_CAPACITY is sized
+    #                 for the full set.
+    #    N > 0:       force window = N (clamped to total_layers).
+    explicit = self._env_int("KT_MESH_PREFILL_LAYER_WINDOW", -1)
     total_layers = self._mesh_total_moe_layers()
+    if explicit == 0:
+        return max(1, int(total_layers))
+    if explicit > 0:
+        return max(1, min(int(total_layers), int(explicit)))
+    configured = self._mesh_global_resident_capacity()
     if configured <= 0 or self.num_experts <= 0 or total_layers <= 0:
         return 0
     full_layers = (int(total_layers) * int(configured)) // int(self.num_experts)
@@ -183,8 +195,14 @@ def _mesh_slot_pool_capacity(self) -> int:
 
 
 def _mesh_prefill_static_resident_capacity(self) -> int:
+    raw = os.environ.get("KT_MESH_PREFILL_STATIC_EXPERTS")
     configured = self._mesh_config_resident_experts()
     cpu_expert_count = self._mesh_current_cpu_expert_count()
+    if raw is not None and str(raw).strip():
+        try:
+            configured = int(str(raw).strip())
+        except ValueError:
+            configured = 0
     if configured <= 0:
         return 0
     return min(int(configured), int(cpu_expert_count))
@@ -1129,7 +1147,22 @@ def _maybe_mesh_prepare_prefill_layer_window(self, qlen: int) -> None:
     if window <= 0:
         return
 
-    if self.layer_idx == 0 and BaseMoEWrapper._mesh_prefill_window_layers:
+    # NOTE: previously this branch unconditionally released every layer in
+    # _mesh_prefill_window_layers when layer_idx==0, intending to reset
+    # state at the start of a new prefill. But that fires on EVERY SGLang
+    # prefill chunk's first layer, even when we're still inside the same
+    # user request (no decode in between). Result: cross-chunk scratch
+    # cache lost ⇒ 3x read amplification observed.
+    #
+    # We now only do the bulk release when we know we've completed a full
+    # prefill→decode→prefill round trip (i.e. transition_to_decode has
+    # cleared the session_seen flag). Continuous prefill chunks within
+    # the same session keep their window state.
+    if (
+        self.layer_idx == 0
+        and BaseMoEWrapper._mesh_prefill_window_layers
+        and not BaseMoEWrapper._mesh_prefill_session_seen
+    ):
         for old_layer in sorted(BaseMoEWrapper._mesh_prefill_window_layers):
             old_wrapper = BaseMoEWrapper._wrappers_by_layer.get(old_layer)
             if old_wrapper is not None:
@@ -1275,6 +1308,7 @@ def _submit_cpuinfer_task(self, task, cuda_stream=None):
         self.cpu_infer.submit(task)
         return
 
+    self._ensure_cuda_graph_stream_compatible(cuda_stream, "submit")
     submit_with_stream = getattr(self.cpu_infer, "submit_with_cuda_stream", None)
     if submit_with_stream is not None:
         submit_with_stream(cuda_stream, task)
@@ -1290,12 +1324,40 @@ def _sync_cpuinfer(self, allow_pending: int = 0, cuda_stream=None):
         self.cpu_infer.sync(allow_pending)
         return
 
+    self._ensure_cuda_graph_stream_compatible(cuda_stream, "sync")
     sync_with_stream = getattr(self.cpu_infer, "sync_with_cuda_stream", None)
     if sync_with_stream is not None:
         sync_with_stream(cuda_stream, allow_pending)
         return
 
     self.cpu_infer.sync(allow_pending)
+
+
+def _cpuinfer_cuda_stream_hooks_available(self) -> bool:
+    return callable(getattr(self.cpu_infer, "submit_with_cuda_stream", None)) and callable(
+        getattr(self.cpu_infer, "sync_with_cuda_stream", None)
+    )
+
+
+def _ensure_cuda_graph_stream_compatible(self, cuda_stream, operation: str) -> None:
+    if cuda_stream is None or not self._cuda_graph_capture_active():
+        return
+    if self._cpuinfer_cuda_stream_hooks_available():
+        return
+    raise RuntimeError(
+        f"MESH CPUInfer cannot {operation} inside CUDA graph capture because this kt_kernel_ext "
+        "was built without CUDA stream hooks. Build kt-kernel with CPUINFER_USE_CUDA=1 "
+        "or start SGLang with --disable-cuda-graph."
+    )
+
+
+def cpuinfer_cuda_stream_hooks_available() -> bool:
+    cpu_infer = getattr(BaseMoEWrapper, "_cpu_infer_instance", None)
+    if cpu_infer is None:
+        return False
+    return callable(getattr(cpu_infer, "submit_with_cuda_stream", None)) and callable(
+        getattr(cpu_infer, "sync_with_cuda_stream", None)
+    )
 
 
 def _sync_external_cuda_stream(cls, cuda_stream):
@@ -1377,6 +1439,8 @@ _INSTANCE_METHODS = (
     "__del__",
     "_submit_cpuinfer_task",
     "_sync_cpuinfer",
+    "_cpuinfer_cuda_stream_hooks_available",
+    "_ensure_cuda_graph_stream_compatible",
     "_mesh_score_transform_id",
     "_mesh_global_resident_capacity",
     "_mesh_prefill_layer_mode_enabled",
@@ -1426,6 +1490,7 @@ _STATIC_METHODS = (
     "_discard_full_gate_batch_slot",
     "_env_flag",
     "_env_int",
+    "cpuinfer_cuda_stream_hooks_available",
 )
 
 _CLASS_METHODS = ("_should_debug_layer", "_sync_external_cuda_stream", "_full_gate_batch_key")

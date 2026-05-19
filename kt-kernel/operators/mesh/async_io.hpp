@@ -202,6 +202,12 @@ private:
     mutable std::mutex completion_events_mutex_;
     std::condition_variable completion_events_cv_;
 
+    // Shared batch waiter — used by wait_for_requests to avoid N per-request locks.
+    // Every complete_request() also notifies this cv, so a single waiter rescans
+    // its request set on each wake.
+    mutable std::mutex batch_mutex_;
+    std::condition_variable batch_cv_;
+
     std::thread io_thread_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<int> inflight_count_{0};
@@ -211,6 +217,10 @@ private:
     bool prep_read(uint64_t request_id, const std::shared_ptr<RequestInfo>& request);
     bool flush_submissions();
     bool process_one_completion(int timeout_ms);
+    // Harvest up to `max_count` CQEs in one io_uring_peek_batch_cqe call, then
+    // io_uring_cq_advance them in one shot. Used by the io thread main loop to
+    // amortize syscall + cq head update across many completions.
+    unsigned process_completions_batch(unsigned max_count);
     bool resubmit_read(uint64_t request_id, const std::shared_ptr<RequestInfo>& request, int failed_result);
     void complete_request(uint64_t request_id, const std::shared_ptr<RequestInfo>& request, bool ok, int result);
     void fail_queued_jobs();

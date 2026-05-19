@@ -126,8 +126,14 @@
     });
     const auto copy_input_end = std::chrono::steady_clock::now();
 
+    if (config_.mesh_prefill_layer_mode_enabled && expert_frequency_total_ > 0 && prefill_static_capacity_ > 0) {
+      rebuild_prefill_static_expert_set_by_frequency(prefill_static_capacity_);
+    }
     ensure_prefill_static_residents();
-    if (!release_prefill_scratch_slots(true)) {
+    // Unbind scratch slots from the previous scheduling round. Pool-backed
+    // buffers return to IDLE with metadata preserved for warm restore; fallback
+    // numa_alloc buffers are freed immediately.
+    if (!release_prefill_scratch_slots()) {
       std::ostringstream oss;
       oss << "AMX prefill scratch slots are still busy before scheduling layer=" << config_.layer_idx
           << " tp=" << tp_part_idx << " static_slots=" << prefill_static_slot_count_
@@ -155,6 +161,24 @@
     if constexpr (requires { gate_bb_[0]->mins; }) {
       include_mins = true;
     }
+
+    // Cross-chunk warm restore: probe the global scratch pool for any active
+    // scratch expert whose weight is still resident in a pool block (placed
+    // there by a prior layer / SGLang prefill chunk and not yet covered by a
+    // newer acquire). On hit we bind the pool block to a scratch slot and
+    // promote the expert to EXPERT_CACHED — this is what closes the
+    // "memory reused but expert content NOT reused" gap that drove the
+    // measured 3x read amplification.
+    //
+    // Must run BEFORE count_prefill_scratch_states so the stat snapshot
+    // reflects the post-restore state, and BEFORE submit_scratch_chunk so
+    // restored experts are skipped by its EXPERT_CACHED state check.
+    const int warm_restored = try_warm_restore_scratch_experts(
+        scratch_active_experts,
+        std::max(0, std::min(prefill_static_slot_count_, cache_capacity_)),
+        protected_mask);
+    (void)warm_restored;  // counter consumed via standard cache_stats path
+
     const mesh::PrefillScratchStateCounts scratch_state_before = mesh::count_prefill_scratch_states(
         config_, tp_part_idx, scratch_active_experts, expert_states_.get(), include_mins);
 
@@ -195,10 +219,26 @@
       read_batch->clear();
       requests->clear();
       int next_scratch_slot = scratch_begin_slot;
+      // Slot picker: from the current cursor, skip past any scratch slot that
+      // currently holds an expert in protected_mask (i.e. an expert this layer's
+      // active set still needs). This is what keeps chunk-2's already-cached
+      // experts from being evicted by chunk-2's own new submissions.
+      auto advance_to_evictable_slot = [&]() {
+        while (next_scratch_slot < cache_capacity_) {
+          const int slot_expert = slot_to_expert_[next_scratch_slot];
+          if (slot_expert >= 0 && slot_expert < static_cast<int>(protected_mask.size()) &&
+              protected_mask[slot_expert]) {
+            next_scratch_slot += 1;
+            continue;
+          }
+          return;
+        }
+      };
       for (size_t idx = begin; idx < end; ++idx) {
         const int expert_id = scratch_active_experts[idx];
         const uint8_t state = expert_states_[expert_id].load(std::memory_order_acquire);
         if (state != EXPERT_CACHED && state != EXPERT_PINNED && state != EXPERT_PREFETCHING) {
+          advance_to_evictable_slot();
           if (next_scratch_slot >= cache_capacity_) {
             std::ostringstream oss;
             oss << "AMX prefill scratch has no free slot layer=" << config_.layer_idx
@@ -320,7 +360,24 @@
       const auto scratch_wait_end = std::chrono::steady_clock::now();
       scratch_wait_us += elapsed_us(scratch_wait_start, scratch_wait_end);
       scratch_compute_us += compute_expert_group(group);
-      release_prefill_scratch_slots(true);
+      for (int expert_id : group) {
+        (void)maybe_promote_prefill_scratch_expert_by_frequency(expert_id, &protected_mask);
+      }
+      // INTENTIONALLY do NOT call release_prefill_scratch_slots here.
+      //
+      // Why: each chunk's experts often overlap heavily with the next chunk's
+      // active set (same prompt, adjacent tokens hit similar router top-k).
+      // Unbinding on every chunk forces the next chunk to re-read every expert
+      // from disk even if it's already in a slot. Measured 3x read amplification
+      // (25 GiB vs historical 8 GiB) when this was active.
+      //
+      // Instead let reserve_slot_for_loading do natural eviction on the next
+      // chunk: protected_mask already pins this chunk's still-needed experts,
+      // and the chunk-2 active set's protected_mask also pins what chunk-2
+      // needs. Overlapping experts stay resident, non-overlapping ones get
+      // evicted only when the new chunk actually needs the slot.
+      //
+      // Final teardown still runs through release_prefill_layer_window().
     };
 
     finish_scratch_chunk(scratch_compute_group, &scratch_promotions, scratch_requests);

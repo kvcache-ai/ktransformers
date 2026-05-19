@@ -624,19 +624,30 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         t0 = time.time()
         base_key = f"model.layers.{self.layer_idx}"
-        try:
-            weights = self.loader.load_experts(base_key)
-        except (ValueError, KeyError):
-            # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix
-            base_key = f"model.language_model.layers.{self.layer_idx}"
-            weights = self.loader.load_experts(base_key)
+        use_iouring = self.method == "BF16" and self.io_backend == "IOURING"
+        file_slots = None
+        weights = None
+        if use_iouring:
+            try:
+                file_slots = mesh_amx.load_native_bf16_iouring_file_slots(self, base_key)
+            except (ValueError, KeyError):
+                base_key = f"model.language_model.layers.{self.layer_idx}"
+                file_slots = mesh_amx.load_native_bf16_iouring_file_slots(self, base_key)
+        else:
+            try:
+                weights = self.loader.load_experts(base_key)
+            except (ValueError, KeyError):
+                # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix
+                base_key = f"model.language_model.layers.{self.layer_idx}"
+                weights = self.loader.load_experts(base_key)
         t1 = time.time()
 
-        # Keep individual tensors instead of stacking - avoid expensive memory copy
-        # weights["gate"], weights["up"], weights["down"] are lists of tensors per expert
-        self.gate_weights = weights["gate"]  # list of tensors
-        self.up_weights = weights["up"]
-        self.down_weights = weights["down"]
+        if not use_iouring:
+            # Keep individual tensors instead of stacking - avoid expensive memory copy
+            # weights["gate"], weights["up"], weights["down"] are lists of tensors per expert
+            self.gate_weights = weights["gate"]  # list of tensors
+            self.up_weights = weights["up"]
+            self.down_weights = weights["down"]
 
         # BF16 has no scales, others have scales
         if self.method == "BF16":
@@ -644,7 +655,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.gate_scales = None
             self.up_scales = None
             self.down_scales = None
-        else:
+        elif weights is not None:
             # Convert scales to bf16 individually
             # self.gate_scales = [t.to(torch.bfloat16).contiguous() for t in weights["gate_scale"]]
             # self.up_scales = [t.to(torch.bfloat16).contiguous() for t in weights["up_scale"]]
@@ -675,15 +686,15 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         # Build pointer lists: [numa_id][expert_id] -> pointer
         # Since RAWINT4/FP8/BF16 has no numa sharding, numa dimension is 1
-        gate_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.gate_weights]]
-        up_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.up_weights]]
-        down_ptrs = [[mesh_amx.tensor_data_ptr(t) for t in self.down_weights]]
+        gate_ptrs = [] if use_iouring else [[mesh_amx.tensor_data_ptr(t) for t in self.gate_weights]]
+        up_ptrs = [] if use_iouring else [[mesh_amx.tensor_data_ptr(t) for t in self.up_weights]]
+        down_ptrs = [] if use_iouring else [[mesh_amx.tensor_data_ptr(t) for t in self.down_weights]]
 
         # BF16 has no scales, pass empty lists (will use 0/nullptr for consistency)
         if self.method == "BF16":
-            gate_scale_ptrs = [[0 for _ in self.gate_weights]]
-            up_scale_ptrs = [[0 for _ in self.up_weights]]
-            down_scale_ptrs = [[0 for _ in self.down_weights]]
+            gate_scale_ptrs = []
+            up_scale_ptrs = []
+            down_scale_ptrs = []
         else:
             gate_scale_ptrs = [[t.data_ptr() for t in self.gate_scales]]
             up_scale_ptrs = [[t.data_ptr() for t in self.up_scales]]
@@ -722,7 +733,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.gate_scales = gate_scale_ptrs
         moe_config.up_scales = up_scale_ptrs
         moe_config.down_scales = down_scale_ptrs
-        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=False)
+        mesh_amx.apply_mesh_moe_config(self, moe_config, use_iouring=use_iouring, file_slots=file_slots)
 
         # Infer group_size from scale shape (column-major layout)
         # For gate/up projection: in_features = hidden_size
@@ -790,16 +801,19 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
+        self._uses_iouring_weights = use_iouring
         t5 = time.time()
 
-        del self.gate_weights
-        del self.up_weights
-        del self.down_weights
+        if self.gate_weights is not None:
+            del self.gate_weights
+            del self.up_weights
+            del self.down_weights
         if self.gate_scales is not None:
             del self.gate_scales
             del self.up_scales
             del self.down_scales
-        NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
+        if not use_iouring:
+            NativeMoEWrapper._release_loader(layer_idx=self.layer_idx)
         t6 = time.time()
 
         print(

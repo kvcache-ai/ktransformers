@@ -530,7 +530,10 @@ void bind_moe_config_extension(PyClass& cls) {
 
 #ifdef HAVE_LIBURING
   cls.def("set_io_backend", [](GeneralMOEConfig& self, int backend) {
-       self.io_backend = backend == static_cast<int>(IOBackend::IOURING) ? IOBackend::IOURING : IOBackend::MMAP;
+       // Single-backend codebase: io_uring only. The argument is accepted for
+       // call-site compatibility but always resolves to IOURING.
+       (void)backend;
+       self.io_backend = IOBackend::IOURING;
      })
       .def("set_iouring_file_slots",
            [](GeneralMOEConfig& self,
@@ -604,7 +607,6 @@ inline void bind_async_io_python(pybind11::module_& m) {
            "Return a compact status summary for request diagnostics");
 
   pybind11::enum_<IOBackend>(m, "IOBackend")
-      .value("MMAP", IOBackend::MMAP, "Compatibility value for ordinary KT resident loading")
       .value("IOURING", IOBackend::IOURING, "io_uring direct I/O (bypass page cache)")
       .export_values();
 #endif

@@ -32,10 +32,12 @@ enum class ResidentCachePolicyKind : uint8_t {
   WTinyLFU = 6,
 };
 
-// I/O backend for expert weight loading
+// I/O backend for expert weight loading. This codebase is io_uring-only; the
+// enum is kept as a single-value placeholder so the field type and existing
+// `iouring_enabled()` call sites stay stable. The historical mmap-based
+// resident loader was removed in favor of io_uring + O_DIRECT.
 enum class IOBackend : uint8_t {
-  MMAP = 0,      // Compatibility name for ordinary KT resident loading.
-  IOURING = 1,   // io_uring-based async I/O (Linux 5.1+, direct I/O capable)
+  IOURING = 1,
 };
 
 // File slot for io_uring direct I/O
@@ -56,9 +58,9 @@ struct MeshMOEConfigExtension {
   // baseline maps to the historical round-robin resident eviction behavior.
   std::string resident_cache_policy = "baseline";
 
-  // I/O backend selection. MMAP is retained as a compatibility enum value for
-  // normal KT resident loading; MESH's lazy path is io_uring-only.
-  IOBackend io_backend = IOBackend::MMAP;
+  // I/O backend selection. This codebase is io_uring-only; the field is
+  // retained for forward compatibility but always IOURING.
+  IOBackend io_backend = IOBackend::IOURING;
   bool iouring_direct_io = true;
 
   // File slots for io_uring direct I/O: [numa_node][expert_id]

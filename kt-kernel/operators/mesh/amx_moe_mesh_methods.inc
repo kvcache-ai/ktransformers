@@ -15,10 +15,126 @@
   bool iouring_enabled() const { return mesh::iouring_enabled(config_); }
   bool resident_io_enabled() const { return buffer_b_has_scale_ptr() && iouring_enabled(); }
 
+  size_t gate_scale_cache_bytes() const { return gate_scale_bytes_ * static_cast<size_t>(config_.expert_num); }
+  size_t up_scale_cache_bytes() const { return up_scale_bytes_ * static_cast<size_t>(config_.expert_num); }
+  size_t down_scale_cache_bytes() const { return down_scale_bytes_ * static_cast<size_t>(config_.expert_num); }
+
+  void release_iouring_scale_cache() {
+    if (gate_scale_cache_owner_ != nullptr) {
+      numa_free(gate_scale_cache_owner_, gate_scale_cache_bytes());
+      gate_scale_cache_owner_ = nullptr;
+    }
+    if (up_scale_cache_owner_ != nullptr) {
+      numa_free(up_scale_cache_owner_, up_scale_cache_bytes());
+      up_scale_cache_owner_ = nullptr;
+    }
+    if (down_scale_cache_owner_ != nullptr) {
+      numa_free(down_scale_cache_owner_, down_scale_cache_bytes());
+      down_scale_cache_owner_ = nullptr;
+    }
+    scale_cache_loaded_ = false;
+  }
+
+  void* scale_cache_ptr(void* owner, size_t scale_bytes, int expert_id) const {
+    return reinterpret_cast<char*>(owner) + static_cast<size_t>(expert_id) * scale_bytes;
+  }
+
+  void copy_preloaded_scales_to_slot(int expert_id, void* gate_owner, void* up_owner, void* down_owner) {
+    if (!scale_cache_loaded_) return;
+    if (gate_scale_bytes_ > 0) {
+      std::memcpy(reinterpret_cast<char*>(gate_owner) + gate_weight_bytes_,
+                  scale_cache_ptr(gate_scale_cache_owner_, gate_scale_bytes_, expert_id),
+                  gate_scale_bytes_);
+    }
+    if (up_scale_bytes_ > 0) {
+      std::memcpy(reinterpret_cast<char*>(up_owner) + up_weight_bytes_,
+                  scale_cache_ptr(up_scale_cache_owner_, up_scale_bytes_, expert_id),
+                  up_scale_bytes_);
+    }
+    if (down_scale_bytes_ > 0) {
+      std::memcpy(reinterpret_cast<char*>(down_owner) + down_weight_bytes_,
+                  scale_cache_ptr(down_scale_cache_owner_, down_scale_bytes_, expert_id),
+                  down_scale_bytes_);
+    }
+  }
+
+  void preload_iouring_scale_cache() {
+#ifdef HAVE_LIBURING
+    if (!iouring_enabled() || config_.async_reader == nullptr || config_.expert_num <= 0 || scale_cache_loaded_) return;
+    const size_t gate_total = gate_scale_cache_bytes();
+    const size_t up_total = up_scale_cache_bytes();
+    const size_t down_total = down_scale_cache_bytes();
+    if (gate_total == 0 && up_total == 0 && down_total == 0) return;
+
+    gate_scale_cache_owner_ = gate_total > 0 ? numa_alloc_onnode(gate_total, numa_node_) : nullptr;
+    up_scale_cache_owner_ = up_total > 0 ? numa_alloc_onnode(up_total, numa_node_) : nullptr;
+    down_scale_cache_owner_ = down_total > 0 ? numa_alloc_onnode(down_total, numa_node_) : nullptr;
+    if ((gate_total > 0 && gate_scale_cache_owner_ == nullptr) ||
+        (up_total > 0 && up_scale_cache_owner_ == nullptr) ||
+        (down_total > 0 && down_scale_cache_owner_ == nullptr)) {
+      release_iouring_scale_cache();
+      throw std::runtime_error("Failed to allocate AMX MESH scale cache");
+    }
+
+    std::vector<ktransformers::AsyncExpertReader::ReadRequest> read_batch;
+    read_batch.reserve(static_cast<size_t>(config_.expert_num) * 3);
+    auto append_scale_read = [&](const std::vector<std::vector<ExpertFileSlot>>& slots,
+                                 const char* name,
+                                 void* owner,
+                                 size_t scale_bytes,
+                                 int expert_id) {
+      if (scale_bytes == 0) return;
+      const auto& slot = mesh::file_slot_at(config_, tp_part_idx, slots, name, expert_id, true);
+      if (slot.fd < 0 || slot.size != scale_bytes) {
+        std::ostringstream oss;
+        oss << "AMX scale preload found invalid slot layer=" << config_.layer_idx
+            << " tp=" << tp_part_idx << " expert=" << expert_id << " name=" << name
+            << " fd=" << slot.fd << " expected=" << scale_bytes << " actual=" << slot.size;
+        throw std::runtime_error(oss.str());
+      }
+      read_batch.push_back(ktransformers::AsyncExpertReader::ReadRequest{
+          expert_id, slot.fd, scale_cache_ptr(owner, scale_bytes, expert_id), slot.size, slot.offset, 0});
+    };
+
+    try {
+      for (int expert_id = 0; expert_id < config_.expert_num; ++expert_id) {
+        append_scale_read(config_.gate_scale_file_slots, "gate.scale", gate_scale_cache_owner_, gate_scale_bytes_, expert_id);
+        append_scale_read(config_.up_scale_file_slots, "up.scale", up_scale_cache_owner_, up_scale_bytes_, expert_id);
+        append_scale_read(config_.down_scale_file_slots, "down.scale", down_scale_cache_owner_, down_scale_bytes_, expert_id);
+      }
+      std::vector<uint64_t> request_ids = config_.async_reader->submit_reads(read_batch);
+      const int timeout_ms = 60000;
+      if (!config_.async_reader->wait_for_requests(request_ids, timeout_ms)) {
+        std::ostringstream oss;
+        oss << "AMX scale preload failed layer=" << config_.layer_idx << " tp=" << tp_part_idx
+            << " requests=" << request_ids.size() << " timeout_ms=" << timeout_ms
+            << " detail=" << config_.async_reader->describe_requests(request_ids);
+        throw std::runtime_error(oss.str());
+      }
+    } catch (...) {
+      release_iouring_scale_cache();
+      throw;
+    }
+
+    scale_cache_loaded_ = true;
+    if (const char* trace = std::getenv("KT_MESH_AMX_SCALE_PRELOAD_TRACE");
+        trace != nullptr && trace[0] != '\0' && trace[0] != '0') {
+      std::fprintf(stderr,
+                   "[MESH_AMX_SCALE_PRELOAD] layer=%d tp=%d experts=%d bytes=%zu requests=%zu\n",
+                   config_.layer_idx,
+                   tp_part_idx,
+                   config_.expert_num,
+                   gate_total + up_total + down_total,
+                   read_batch.size());
+    }
+#endif
+  }
+
   bool mesh_load_weights_from_resident_sources(const uint64_t* physical_to_logical_map) {
     (void)physical_to_logical_map;
     if (iouring_enabled()) {
       validate_iouring_config();
+      preload_iouring_scale_cache();
       return true;
     }
     return false;
@@ -35,6 +151,7 @@
       free_packed_expert(expert_id);
     }
     (void)release_resident_slot_pool(false);
+    release_iouring_scale_cache();
   }
 
   void initialize_resident_io_state() {
@@ -91,11 +208,31 @@
                                        expert_to_slot_,
                                        slot_states_,
                                        slot_active_readers_);
+    scratch_slot_pool_block_idx_.assign(cache_capacity_, -1);
     resident_policy_.reset(en, config_.resident_cache_policy);
     lookahead_heat_.assign(en, 0.0f);
 
     if (config_.pool != nullptr && tp_part_idx < (int)config_.pool->config.subpool_numa_map.size()) {
       numa_node_ = config_.pool->config.subpool_numa_map[tp_part_idx];
+    }
+
+    // Register this layer with the per-NUMA global scratch pool. The first
+    // layer on a node allocates the pool's blocks; subsequent layers just
+    // verify size compatibility and share. Capacity defaults to 128 (env
+    // KT_MESH_GLOBAL_POOL_CAPACITY can override). Pool persists across
+    // prefill/decode and is shared by all 40 MoE layers on this NUMA node.
+    if (gate_total_bytes_ > 0 && up_total_bytes_ > 0 && down_total_bytes_ > 0) {
+      auto& pool = mesh::GlobalScratchPoolRegistry::get(numa_node_);
+      const int pool_cap = mesh::GlobalScratchPoolRegistry::env_capacity_default();
+      if (!pool.initialized()) {
+        if (!pool.initialize(pool_cap, gate_total_bytes_, up_total_bytes_, down_total_bytes_, numa_node_)) {
+          // Pool init failed (size mismatch or alloc fail) — fall back silently to
+          // per-layer numa_alloc. allocate_slot_buffers() guards on pool.initialized().
+          std::fprintf(stderr,
+                       "[MESH-POOL] layer=%d numa=%d pool init failed (cap=%d), using per-layer alloc\n",
+                       config_.layer_idx, numa_node_, pool_cap);
+        }
+      }
     }
 
     rebuild_prefill_static_expert_set();
@@ -289,11 +426,49 @@
   bool allocate_slot_buffers(int slot) {
     if (slot < 0 || slot >= cache_capacity_) return false;
     if (slot_has_buffers(slot)) return true;
+
+    // Try to borrow a block from the cross-layer global pool first. This is
+    // the buffer-reuse path the design hinges on: 40 layers share one pool,
+    // so total memory becomes (per-layer permanent buffers + pool capacity)
+    // instead of (40 * cache_capacity_).
+    //
+    // Only route through the pool when the prefill-layer-mode + iouring
+    // (lazy buffer) configuration is active. When buffers are eagerly
+    // preallocated (legacy path), every layer would otherwise drain the pool
+    // on startup before any cross-layer sharing happens.
+    if (lazy_slot_buffers_enabled()) {
+      auto& pool = mesh::GlobalScratchPoolRegistry::get(numa_node_);
+      if (pool.initialized()) {
+        std::vector<int> ids;
+        if (pool.acquire_for_load(1, ids) && !ids.empty()) {
+          scratch_slot_pool_block_idx_[slot] = ids[0];
+          pool.get_owners(ids[0], &slot_gate_owner_[slot], &slot_up_owner_[slot], &slot_down_owner_[slot]);
+          return true;
+        }
+        // Pool exhausted — fall through to per-layer numa_alloc. This
+        // shouldn't happen in steady state if KT_MESH_GLOBAL_POOL_CAPACITY
+        // is sized for 40*stable_per_layer + peak temp.
+      }
+    }
+    scratch_slot_pool_block_idx_[slot] = -1;
     return allocate_expert_buffers(&slot_gate_owner_[slot], &slot_up_owner_[slot], &slot_down_owner_[slot]);
   }
 
   void release_slot_buffers(int slot) {
     if (slot < 0 || slot >= cache_capacity_) return;
+    const int block_idx = scratch_slot_pool_block_idx_[slot];
+    if (block_idx >= 0) {
+      // Borrowed from pool: return the block (state -> IDLE). Buffer memory
+      // stays in the pool for the next layer to overwrite. This is the
+      // "cross-layer covering" behavior.
+      auto& pool = mesh::GlobalScratchPoolRegistry::get(numa_node_);
+      pool.release(block_idx);
+      scratch_slot_pool_block_idx_[slot] = -1;
+      slot_gate_owner_[slot] = nullptr;
+      slot_up_owner_[slot] = nullptr;
+      slot_down_owner_[slot] = nullptr;
+      return;
+    }
     release_expert_buffers(slot_gate_owner_[slot], slot_up_owner_[slot], slot_down_owner_[slot]);
     slot_gate_owner_[slot] = nullptr;
     slot_up_owner_[slot] = nullptr;
@@ -318,6 +493,19 @@
   void bind_slot_to_expert(int slot, int expert_id, bool pin_after_copy) {
     auto hooks = resident_slot_pool_hooks();
     mesh::bind_slot_to_expert(resident_slot_pool_view(), hooks, slot, expert_id, pin_after_copy, slot_pool_enabled());
+    // After binding, the io_uring read for this slot has completed and its
+    // buffer now holds (layer_idx, expert_id)'s weight. Tag the pool block so
+    // a subsequent try_warm_restore(layer_idx, expert_id) can find it on a
+    // future SGLang prefill chunk. (acquire_for_load happens BEFORE we know
+    // the real expert_id, so this is the right point to record metadata.)
+    if (slot >= 0 && slot < cache_capacity_) {
+      const int block_idx = (slot < static_cast<int>(scratch_slot_pool_block_idx_.size()))
+                                ? scratch_slot_pool_block_idx_[slot] : -1;
+      if (block_idx >= 0) {
+        auto& pool = mesh::GlobalScratchPoolRegistry::get(numa_node_);
+        pool.set_block_metadata(block_idx, config_.layer_idx, expert_id);
+      }
+    }
   }
 
   bool unbind_slot(int slot, bool release_occupancy, bool count_stats = true) {
@@ -438,7 +626,7 @@
     if constexpr (requires { gate_bb_[expert_id]->mins; }) {
       include_mins = true;
     }
-    return mesh::amx_iouring_read_bytes_for_expert(config_, tp_part_idx, expert_id, include_mins);
+    return mesh::amx_iouring_read_bytes_for_expert(config_, tp_part_idx, expert_id, include_mins, !scale_cache_loaded_);
   }
 
   bool is_eviction_protected(int expert_id, const std::vector<uint8_t>* protected_mask) const {
@@ -631,6 +819,7 @@
   }
 
   void finalize_expert_buffers(int expert_id, void* gate_owner, void* up_owner, void* down_owner, bool pin_after_copy) {
+    copy_preloaded_scales_to_slot(expert_id, gate_owner, up_owner, down_owner);
     if (slot_pool_enabled()) {
       const int slot =
           mesh::find_slot_by_owners(mesh::const_view(resident_slot_pool_view()), gate_owner, up_owner, down_owner);
@@ -672,6 +861,7 @@
                                                       up_scale_bytes_,
                                                       down_weight_bytes_,
                                                       down_scale_bytes_,
+                                                      !scale_cache_loaded_,
                                                       include_mins,
                                                       read_batch);
   }
@@ -686,7 +876,7 @@
     }
 
     std::vector<ktransformers::AsyncExpertReader::ReadRequest> read_batch;
-    read_batch.reserve(9);
+    read_batch.reserve(scale_cache_loaded_ ? 6 : 9);
     append_iouring_read_requests_for_expert(expert_id, gate_owner, up_owner, down_owner, &read_batch);
     std::vector<uint64_t> read_requests = config_.async_reader->submit_reads(read_batch);
     record_iouring_read_stats(read_batch);
@@ -1055,6 +1245,12 @@
            decode_main_slot_count() > 0;
   }
 
+  bool prefill_frequency_policy_active() const {
+    return config_.mesh_prefill_layer_mode_enabled && slot_pool_enabled() &&
+           mesh_slot_mode_ == MESH_SLOT_PREFILL_LAYER && expert_frequency_total_ > 0 &&
+           prefill_static_slot_count_ > 0;
+  }
+
   uint64_t expert_frequency_score(int expert_id) const {
     return mesh::expert_frequency_score(expert_frequency_score_, expert_id);
   }
@@ -1121,6 +1317,11 @@
     std::swap(slot_gate_owner_[lhs], slot_gate_owner_[rhs]);
     std::swap(slot_up_owner_[lhs], slot_up_owner_[rhs]);
     std::swap(slot_down_owner_[lhs], slot_down_owner_[rhs]);
+    // The pool-block-index follows its physical buffer. After this swap the
+    // buffer at slot lhs is what was at rhs (and vice versa), so the pool
+    // block ownership tracking must move with it; otherwise release_slot_buffers
+    // would try to free a pool-borrowed buffer via numa_free (UB).
+    std::swap(scratch_slot_pool_block_idx_[lhs], scratch_slot_pool_block_idx_[rhs]);
     std::swap(slot_to_expert_[lhs], slot_to_expert_[rhs]);
     slot_states_[lhs].store(rhs_state, std::memory_order_release);
     slot_states_[rhs].store(lhs_state, std::memory_order_release);
@@ -1160,24 +1361,162 @@
     return find_frequency_scratch_slot(protected_mask);
   }
 
+  void refresh_prefill_static_slot_metadata(int slot, int expert_id) {
+    if (slot < 0 || slot >= prefill_static_slot_count_) return;
+    if (expert_id >= 0 && expert_id < config_.expert_num) {
+      prefill_static_expert_mask_[expert_id] = 1;
+      prefill_static_slot_for_expert_[expert_id] = slot;
+    }
+    if (slot >= static_cast<int>(prefill_static_experts_.size())) {
+      prefill_static_experts_.resize(slot + 1, -1);
+    }
+    prefill_static_experts_[slot] = expert_id;
+  }
+
+  void clear_prefill_static_expert_metadata(int expert_id) {
+    if (expert_id < 0 || expert_id >= config_.expert_num) return;
+    prefill_static_expert_mask_[expert_id] = 0;
+    prefill_static_slot_for_expert_[expert_id] = -1;
+  }
+
   int find_main_slot_outside_frequency_set(const std::vector<uint8_t>& desired_mask) const {
     return mesh::find_main_slot_outside_frequency_set(
         resident_slot_pool_view(), config_, decode_main_slot_count(), desired_mask);
   }
 
-  bool maybe_promote_scratch_expert_by_frequency(int expert_id, const std::vector<uint8_t>* protected_mask) {
-    if (!decode_frequency_policy_active()) return false;
+  bool maybe_promote_scratch_expert_by_frequency_impl(int expert_id,
+                                                      const std::vector<uint8_t>* protected_mask,
+                                                      int main_slots,
+                                                      bool update_prefill_static_metadata) {
     if (expert_id < 0 || expert_id >= config_.expert_num) return false;
-    const int main_slots = decode_main_slot_count();
+    if (main_slots <= 0) return false;
     const int current_slot = expert_to_slot_[expert_id];
     if (current_slot < main_slots || current_slot >= cache_capacity_) return false;
     if (!slot_has_rebindable_expert(current_slot, nullptr)) return false;
-    const int target_slot = find_frequency_main_replacement_slot(expert_id, protected_mask);
+    const int target_slot = mesh::find_frequency_main_replacement_slot(mesh::const_view(resident_slot_pool_view()),
+                                                                       config_,
+                                                                       main_slots,
+                                                                       expert_frequency_score_,
+                                                                       expert_id,
+                                                                       protected_mask);
     if (target_slot < 0) return false;
-    return swap_slot_bindings(target_slot, current_slot);
+    const int old_static_expert =
+        update_prefill_static_metadata ? slot_to_expert_[target_slot] : -1;
+    if (!swap_slot_bindings(target_slot, current_slot)) return false;
+    if (update_prefill_static_metadata) {
+      clear_prefill_static_expert_metadata(old_static_expert);
+      refresh_prefill_static_slot_metadata(target_slot, expert_id);
+    }
+    return true;
   }
 
-  bool release_prefill_scratch_slots(bool release_buffers) {
+  bool maybe_promote_scratch_expert_by_frequency(int expert_id, const std::vector<uint8_t>* protected_mask) {
+    if (!decode_frequency_policy_active()) return false;
+    return maybe_promote_scratch_expert_by_frequency_impl(
+        expert_id, protected_mask, decode_main_slot_count(), false);
+  }
+
+  bool maybe_promote_prefill_scratch_expert_by_frequency(int expert_id,
+                                                         const std::vector<uint8_t>* protected_mask) {
+    if (!prefill_frequency_policy_active()) return false;
+    return maybe_promote_scratch_expert_by_frequency_impl(
+        expert_id, protected_mask, prefill_static_slot_count_, true);
+  }
+
+  // Cross-chunk warm restore for scratch experts.
+  //
+  // The GlobalScratchPool keeps a (last_layer_id, last_expert_id) tag on each
+  // block even after the block is released back to IDLE. As long as that
+  // block has not been re-acquired by a different (layer, expert), its buffer
+  // still holds the previously-read weight. This function probes the pool
+  // for every active scratch expert before the io_uring submit phase and,
+  // on hit, binds the pool block to a scratch slot and marks the expert
+  // EXPERT_CACHED — so the subsequent submit_scratch_chunk's state check
+  // will skip submitting a (redundant) read for it.
+  //
+  // Returns the number of experts whose weight was restored without disk IO.
+  int try_warm_restore_scratch_experts(const std::vector<int>& scratch_active,
+                                       int scratch_begin_slot,
+                                       const std::vector<uint8_t>& protected_mask) {
+    if (!lazy_slot_buffers_enabled()) return 0;
+    auto& pool = mesh::GlobalScratchPoolRegistry::get(numa_node_);
+    if (!pool.initialized()) return 0;
+
+    int restored = 0;
+    int next_slot = scratch_begin_slot;
+
+    for (int expert_id : scratch_active) {
+      if (expert_id < 0 || expert_id >= config_.expert_num) continue;
+      // Already resident in any form — skip.
+      const uint8_t st = expert_states_[expert_id].load(std::memory_order_acquire);
+      if (st == EXPERT_CACHED || st == EXPERT_PINNED || st == EXPERT_PREFETCHING) continue;
+
+      const int block = pool.try_warm_restore(config_.layer_idx, expert_id);
+      if (block < 0) continue;  // miss — pool block was covered by a later acquire
+
+      // Advance next_slot past slots holding still-needed (protected) cached experts
+      // and past slots currently being loaded by an in-flight io_uring request.
+      while (next_slot < cache_capacity_) {
+        const int slot_expert = (next_slot < static_cast<int>(slot_to_expert_.size()))
+                                    ? slot_to_expert_[next_slot] : -1;
+        const uint8_t slot_st = slot_states_[next_slot].load(std::memory_order_acquire);
+        if (slot_st == SLOT_LOADING) { ++next_slot; continue; }
+        if (slot_expert >= 0 && slot_expert < static_cast<int>(protected_mask.size()) &&
+            protected_mask[slot_expert]) {
+          const uint8_t exp_st = expert_states_[slot_expert].load(std::memory_order_acquire);
+          if (exp_st == EXPERT_CACHED || exp_st == EXPERT_PINNED || exp_st == EXPERT_PREFETCHING) {
+            ++next_slot;
+            continue;
+          }
+        }
+        break;
+      }
+      if (next_slot >= cache_capacity_) {
+        // No more slots to host warm-restored experts. Return this block to
+        // the pool so future probes can still find it.
+        pool.release(block);
+        break;
+      }
+
+      // Unbind whatever expert is currently on this slot. This also drops the
+      // old expert's state back to EXPERT_BASELINE and resets slot to EMPTY.
+      const uint8_t cur_state = slot_states_[next_slot].load(std::memory_order_acquire);
+      if (cur_state == SLOT_READY && !unbind_slot(next_slot, true, false)) {
+        pool.release(block);
+        ++next_slot;
+        continue;
+      }
+      // Free any buffer previously attached to this slot — pool-borrowed or
+      // numa_alloc'd. For pool-borrowed buffers this returns the old block
+      // to the pool's IDLE state; for numa_alloc it numa_free's.
+      release_slot_buffers(next_slot);
+
+      // Bind the warm pool block to this slot.
+      pool.get_owners(block, &slot_gate_owner_[next_slot], &slot_up_owner_[next_slot],
+                      &slot_down_owner_[next_slot]);
+      scratch_slot_pool_block_idx_[next_slot] = block;
+      slot_to_expert_[next_slot] = expert_id;
+      expert_to_slot_[expert_id] = next_slot;
+      slot_states_[next_slot].store(SLOT_READY, std::memory_order_release);
+
+      // Wire AMX kernel pointer chain (matches what submit_prefill_promotion_to_slot
+      // does after a successful io_uring read).
+      packed_gate_owner_[expert_id] = slot_gate_owner_[next_slot];
+      packed_up_owner_[expert_id] = slot_up_owner_[next_slot];
+      packed_down_owner_[expert_id] = slot_down_owner_[next_slot];
+      apply_owned_ptrs(expert_id, slot_gate_owner_[next_slot], slot_up_owner_[next_slot],
+                       slot_down_owner_[next_slot]);
+
+      expert_states_[expert_id].store(EXPERT_CACHED, std::memory_order_release);
+      resident_expert_count_.fetch_add(1, std::memory_order_acq_rel);
+
+      ++restored;
+      ++next_slot;
+    }
+    return restored;
+  }
+
+  bool release_prefill_scratch_slots() {
     if (!slot_pool_enabled()) return true;
     bool ok = true;
     const int scratch_begin = std::max(0, std::min(prefill_static_slot_count_, cache_capacity_));
@@ -1191,7 +1530,10 @@
         ok = false;
         continue;
       }
-      if (release_buffers && slot_states_[slot].load(std::memory_order_acquire) == SLOT_EMPTY &&
+      // Always release scratch buffers. Pool-backed buffers return to IDLE
+      // with metadata preserved for warm restore; numa_alloc fallback buffers
+      // must be freed here or they leak across chunks.
+      if (slot_states_[slot].load(std::memory_order_acquire) == SLOT_EMPTY &&
           slot_to_expert_[slot] < 0 && slot_has_buffers(slot)) {
         release_slot_buffers(slot);
       }
@@ -1556,13 +1898,17 @@
 
   int prepare_prefill_layer_window() {
     if (!config_.mesh_prefill_layer_mode_enabled || !resident_io_enabled() || cache_capacity_ <= 0) return 0;
+    if (expert_frequency_total_ == 0) return 0;
+    if (prefill_static_capacity_ > 0) {
+      rebuild_prefill_static_expert_set_by_frequency(prefill_static_capacity_);
+    }
     return ensure_prefill_static_residents();
   }
 
   bool release_prefill_layer_window() {
     if (!config_.mesh_prefill_layer_mode_enabled || !resident_io_enabled()) return true;
     complete_ready_prefetches();
-    return release_prefill_scratch_slots(true);
+    return release_prefill_scratch_slots();
   }
 
   int transition_to_decode_cache(int requested_decode_capacity, int fill_limit) {

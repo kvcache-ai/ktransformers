@@ -291,7 +291,8 @@ inline void record_cache_async_prefetch(const GeneralMOEConfig& config) {
 inline uint64_t amx_iouring_read_bytes_for_expert(const GeneralMOEConfig& config,
                                                   int tp_part_idx,
                                                   int expert_id,
-                                                  bool include_mins) {
+                                                  bool include_mins,
+                                                  bool include_scales = true) {
   if (expert_id < 0 || expert_id >= config.expert_num) return 0;
   uint64_t total = 0;
   auto add_slot = [&](const std::vector<std::vector<ExpertFileSlot>>& slots, const char* name) {
@@ -303,11 +304,11 @@ inline uint64_t amx_iouring_read_bytes_for_expert(const GeneralMOEConfig& config
     }
   };
   add_slot(config.gate_file_slots, "gate.weight");
-  add_slot(config.gate_scale_file_slots, "gate.scale");
+  if (include_scales) add_slot(config.gate_scale_file_slots, "gate.scale");
   add_slot(config.up_file_slots, "up.weight");
-  add_slot(config.up_scale_file_slots, "up.scale");
+  if (include_scales) add_slot(config.up_scale_file_slots, "up.scale");
   add_slot(config.down_file_slots, "down.weight");
-  add_slot(config.down_scale_file_slots, "down.scale");
+  if (include_scales) add_slot(config.down_scale_file_slots, "down.scale");
   if (include_mins) {
     add_slot(config.gate_mins_file_slots, "gate.mins");
     add_slot(config.up_mins_file_slots, "up.mins");
@@ -329,27 +330,37 @@ inline void append_amx_iouring_read_requests_for_expert(
     size_t up_scale_bytes,
     size_t down_weight_bytes,
     size_t down_scale_bytes,
+    bool include_scales,
     bool include_mins,
     std::vector<ktransformers::AsyncExpertReader::ReadRequest>* read_batch) {
   if (read_batch == nullptr) return;
   const auto& gate_slot = file_slot_at(config, tp_part_idx, config.gate_file_slots, "gate.weight", expert_id, true);
   const auto& up_slot = file_slot_at(config, tp_part_idx, config.up_file_slots, "up.weight", expert_id, true);
   const auto& down_slot = file_slot_at(config, tp_part_idx, config.down_file_slots, "down.weight", expert_id, true);
-  const auto& gate_scale_slot =
-      file_slot_at(config, tp_part_idx, config.gate_scale_file_slots, "gate.scale", expert_id, true);
-  const auto& up_scale_slot =
-      file_slot_at(config, tp_part_idx, config.up_scale_file_slots, "up.scale", expert_id, true);
-  const auto& down_scale_slot =
-      file_slot_at(config, tp_part_idx, config.down_scale_file_slots, "down.scale", expert_id, true);
 
-  if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0 || gate_scale_slot.fd < 0 ||
-      up_scale_slot.fd < 0 || down_scale_slot.fd < 0) {
+  if (gate_slot.fd < 0 || up_slot.fd < 0 || down_slot.fd < 0) {
     std::ostringstream oss;
     oss << "AMX io_uring promotion found invalid fd layer=" << config.layer_idx << " tp=" << tp_part_idx
         << " expert=" << expert_id << " gate_fd=" << gate_slot.fd << " up_fd=" << up_slot.fd
-        << " down_fd=" << down_slot.fd << " gate_scale_fd=" << gate_scale_slot.fd
-        << " up_scale_fd=" << up_scale_slot.fd << " down_scale_fd=" << down_scale_slot.fd;
+        << " down_fd=" << down_slot.fd;
     throw std::runtime_error(oss.str());
+  }
+
+  const ExpertFileSlot* gate_scale_slot = nullptr;
+  const ExpertFileSlot* up_scale_slot = nullptr;
+  const ExpertFileSlot* down_scale_slot = nullptr;
+  if (include_scales) {
+    gate_scale_slot = &file_slot_at(config, tp_part_idx, config.gate_scale_file_slots, "gate.scale", expert_id, true);
+    up_scale_slot = &file_slot_at(config, tp_part_idx, config.up_scale_file_slots, "up.scale", expert_id, true);
+    down_scale_slot = &file_slot_at(config, tp_part_idx, config.down_scale_file_slots, "down.scale", expert_id, true);
+    if (gate_scale_slot->fd < 0 || up_scale_slot->fd < 0 || down_scale_slot->fd < 0) {
+      std::ostringstream oss;
+      oss << "AMX io_uring promotion found invalid scale fd layer=" << config.layer_idx
+          << " tp=" << tp_part_idx << " expert=" << expert_id
+          << " gate_scale_fd=" << gate_scale_slot->fd << " up_scale_fd=" << up_scale_slot->fd
+          << " down_scale_fd=" << down_scale_slot->fd;
+      throw std::runtime_error(oss.str());
+    }
   }
 
   auto queue_slot = [&](const ExpertFileSlot& slot, void* dst) {
@@ -360,11 +371,17 @@ inline void append_amx_iouring_read_requests_for_expert(
   };
 
   queue_slot(gate_slot, gate_owner);
-  queue_slot(gate_scale_slot, reinterpret_cast<char*>(gate_owner) + gate_weight_bytes);
+  if (include_scales) {
+    queue_slot(*gate_scale_slot, reinterpret_cast<char*>(gate_owner) + gate_weight_bytes);
+  }
   queue_slot(up_slot, up_owner);
-  queue_slot(up_scale_slot, reinterpret_cast<char*>(up_owner) + up_weight_bytes);
+  if (include_scales) {
+    queue_slot(*up_scale_slot, reinterpret_cast<char*>(up_owner) + up_weight_bytes);
+  }
   queue_slot(down_slot, down_owner);
-  queue_slot(down_scale_slot, reinterpret_cast<char*>(down_owner) + down_weight_bytes);
+  if (include_scales) {
+    queue_slot(*down_scale_slot, reinterpret_cast<char*>(down_owner) + down_weight_bytes);
+  }
 
   if (include_mins) {
     if (!config.gate_mins_file_slots.empty()) {

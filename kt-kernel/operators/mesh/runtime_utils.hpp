@@ -411,6 +411,11 @@ inline bool bf16_wave_resident_enabled() {
          (std::strcmp(raw, "1") == 0 || std::strcmp(raw, "true") == 0 || std::strcmp(raw, "TRUE") == 0);
 }
 
+inline bool bf16_cache_blob_trace_enabled() {
+  const char* raw = std::getenv("KT_MESH_BF16_BLOB_TRACE");
+  return raw != nullptr && raw[0] != '\0' && raw[0] != '0';
+}
+
 inline void maybe_log_cpu_mem_resident(const GeneralMOEConfig& config,
                                        int tp_part_idx,
                                        int expert_id,
