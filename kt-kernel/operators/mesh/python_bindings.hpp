@@ -530,10 +530,16 @@ void bind_moe_config_extension(PyClass& cls) {
 
 #ifdef HAVE_LIBURING
   cls.def("set_io_backend", [](GeneralMOEConfig& self, int backend) {
-       // Single-backend codebase: io_uring only. The argument is accepted for
-       // call-site compatibility but always resolves to IOURING.
-       (void)backend;
-       self.io_backend = IOBackend::IOURING;
+       // 0 -> FULL (ordinary KT preload), 1 -> IOURING. Any other value is
+       // rejected so callers get a clear error instead of silently falling
+       // back to a different backend.
+       if (backend == static_cast<int>(IOBackend::FULL)) {
+         self.io_backend = IOBackend::FULL;
+       } else if (backend == static_cast<int>(IOBackend::IOURING)) {
+         self.io_backend = IOBackend::IOURING;
+       } else {
+         throw std::invalid_argument("set_io_backend: expected 0 (FULL) or 1 (IOURING)");
+       }
      })
       .def("set_iouring_file_slots",
            [](GeneralMOEConfig& self,
@@ -607,6 +613,7 @@ inline void bind_async_io_python(pybind11::module_& m) {
            "Return a compact status summary for request diagnostics");
 
   pybind11::enum_<IOBackend>(m, "IOBackend")
+      .value("FULL", IOBackend::FULL, "Ordinary KT preload (Python loads experts into memory)")
       .value("IOURING", IOBackend::IOURING, "io_uring direct I/O (bypass page cache)")
       .export_values();
 #endif

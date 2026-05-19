@@ -32,11 +32,18 @@ enum class ResidentCachePolicyKind : uint8_t {
   WTinyLFU = 6,
 };
 
-// I/O backend for expert weight loading. This codebase is io_uring-only; the
-// enum is kept as a single-value placeholder so the field type and existing
-// `iouring_enabled()` call sites stay stable. The historical mmap-based
-// resident loader was removed in favor of io_uring + O_DIRECT.
+// I/O backend for expert weight loading.
+//   FULL    : ordinary KT path — Python loader reads every expert into memory
+//             up front and hands raw pointers to C++ via `gate_projs` etc.
+//             Picked up by `amx_tp_moe_runtime.inc` "TP Load from loader"
+//             branch. Default for compatibility with callers unaware of
+//             io_uring.
+//   IOURING : MESH lazy path — Python supplies file slots and an
+//             AsyncExpertReader, C++ reads experts on demand via io_uring.
+// The historical mmap-based resident loader was removed; FULL is *not* mmap,
+// it's the original full-preload path.
 enum class IOBackend : uint8_t {
+  FULL = 0,
   IOURING = 1,
 };
 
@@ -58,9 +65,11 @@ struct MeshMOEConfigExtension {
   // baseline maps to the historical round-robin resident eviction behavior.
   std::string resident_cache_policy = "baseline";
 
-  // I/O backend selection. This codebase is io_uring-only; the field is
-  // retained for forward compatibility but always IOURING.
-  IOBackend io_backend = IOBackend::IOURING;
+  // I/O backend selection. Defaults to FULL (ordinary KT preload via
+  // gate_projs/up_projs/down_projs). MESH's lazy path flips this to IOURING
+  // when Python calls set_iouring_file_slots_for_readers — see
+  // python_bindings.hpp.
+  IOBackend io_backend = IOBackend::FULL;
   bool iouring_direct_io = true;
 
   // File slots for io_uring direct I/O: [numa_node][expert_id]
