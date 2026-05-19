@@ -359,7 +359,9 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
     return T::BufferA::required_size(m, k, config_.quant_config.group_size);
   }
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
-    if (!config_.gate_projs.empty()) return T::BufferB::required_size_scale_only(n, k, config_.quant_config.group_size);
+    // Always allocate full buffer (weights + scales) for both per-expert and flat-buffer modes.
+    // Per-expert mode used to only allocate scales and point b into mmap, but that caused
+    // use-after-free when Python releases the mmap after load_weights().
     return T::BufferB::required_size(n, k, config_.quant_config.group_size);
   }
   size_t buffer_c_required_size_impl(size_t m, size_t n) const { return T::BufferC::required_size(m, n); }
@@ -368,8 +370,7 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
     return std::make_shared<typename T::BufferA>(m, k, config_.quant_config.group_size, data);
   }
   std::shared_ptr<typename T::BufferB> make_buffer_b_impl(size_t n, size_t k, void* data) const {
-    if (!config_.gate_projs.empty())
-      return std::make_shared<typename T::BufferB>((int)n, (int)k, config_.quant_config.group_size, data, nullptr);
+    // Always create full BufferB with owned weight buffer for both modes.
     return std::make_shared<typename T::BufferB>((int)n, (int)k, config_.quant_config.group_size, data);
   }
   std::shared_ptr<typename T::BufferC> make_buffer_c_impl(size_t m, size_t n, void* data) const {
@@ -410,8 +411,9 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
             "Use TP_MOE<AVX2_MXFP4_MOE_TP> wrapper for multi-TP scenarios.");
       }
 
-      // Direct-pointer mode: BufferB.b points into mmap'd safetensor data.
-      // For tp_part_idx == 0, offset is 0, so config_.intermediate_size value doesn't matter.
+      // Copy weights from mmap into owned buffers (aligned with AMX behavior).
+      // Previously used direct pointers into mmap, but Python releases mmap after load_weights(),
+      // causing use-after-free. Now we memcpy to decouple from mmap lifecycle.
       pool->do_work_stealing_job(
           config_.expert_num, nullptr,
           [this, physical_to_logical_map](int expert_idx) {
@@ -426,10 +428,10 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
                 config_.down_projs[0][lid] == nullptr) {
               throw std::runtime_error("load_weights: null weight pointer for expert " + std::to_string(lid));
             }
-            // tp_part_idx == 0 guaranteed here, so offset is 0
-            gate_bb_[expert_idx]->b = (uint8_t*)config_.gate_projs[0][lid];
-            up_bb_[expert_idx]->b = (uint8_t*)config_.up_projs[0][lid];
-            down_bb_[expert_idx]->b = (uint8_t*)config_.down_projs[0][lid];
+            // tp_part_idx == 0 guaranteed here, so offset is 0. Copy full expert weights.
+            gate_bb_[expert_idx]->from_raw_mat((const uint8_t*)config_.gate_projs[0][lid], 0, 1);
+            up_bb_[expert_idx]->from_raw_mat((const uint8_t*)config_.up_projs[0][lid], 0, 1);
+            down_bb_[expert_idx]->from_raw_mat((const uint8_t*)config_.down_projs[0][lid], 0, 1);
           },
           nullptr);
 
@@ -615,6 +617,8 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
 template <typename K>
 class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_MOE_TP<K>>> {
   std::vector<void*> tp_owned_down_bufs_;
+  std::vector<void*> tp_owned_gate_bufs_;
+  std::vector<void*> tp_owned_up_bufs_;
 
  public:
   using Base = TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_MOE_TP<K>>>;
@@ -622,6 +626,10 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
 
   ~TP_MOE() {
     for (void* p : tp_owned_down_bufs_)
+      if (p) std::free(p);
+    for (void* p : tp_owned_gate_bufs_)
+      if (p) std::free(p);
+    for (void* p : tp_owned_up_bufs_)
       if (p) std::free(p);
   }
 
@@ -638,9 +646,12 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
       int group_size = config.quant_config.group_size;
       int full_interm = config.intermediate_size;
 
-      // Allocate per-partition down_proj repack buffers (gate/up use direct pointers).
-      // down is [hidden, intermediate] with TP along K — rows are non-contiguous.
+      // Allocate per-partition repack buffers for all projections.
+      // Previously gate/up used direct mmap pointers, causing use-after-free when Python
+      // releases mmap. Now we memcpy all weights to decouple from mmap lifecycle (aligned with AMX).
       tp_owned_down_bufs_.resize(this->tp_count, nullptr);
+      tp_owned_gate_bufs_.resize(this->tp_count, nullptr);
+      tp_owned_up_bufs_.resize(this->tp_count, nullptr);
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto* tp = tps[i].get();
         auto& tpc = tp->config_;
@@ -649,6 +660,15 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
         if (per_tp_interm % 2 != 0)
           throw std::runtime_error("MXFP4 TP: per_tp_interm must be even for nibble-aligned addressing, got " +
                                    std::to_string(per_tp_interm));
+        // gate/up: [intermediate × hidden] = [N × K], TP slices along N → contiguous rows
+        size_t gate_up_wt_per_expert = (size_t)per_tp_interm * tpc.hidden_size / 2;
+        size_t gate_up_alloc = ((size_t)tpc.expert_num * gate_up_wt_per_expert + 63) & ~(size_t)63;
+        uint8_t* gate_buf = (uint8_t*)std::aligned_alloc(64, gate_up_alloc);
+        uint8_t* up_buf = (uint8_t*)std::aligned_alloc(64, gate_up_alloc);
+        if (!gate_buf || !up_buf) throw std::runtime_error("aligned_alloc failed for MXFP4 gate/up_buf");
+        tp_owned_gate_bufs_[i] = gate_buf;
+        tp_owned_up_bufs_[i] = up_buf;
+        // down: [hidden × intermediate], TP slices along K → non-contiguous
         size_t down_wt_per_expert = (size_t)tpc.hidden_size * per_tp_interm / 2;
         size_t alloc_size = ((size_t)tpc.expert_num * down_wt_per_expert + 63) & ~(size_t)63;
         uint8_t* down_buf = (uint8_t*)std::aligned_alloc(64, alloc_size);
@@ -658,7 +678,7 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
         auto subpool = pool->get_subpool(i);
         subpool->do_work_stealing_job(
             tpc.expert_num, nullptr,
-            [&, i, per_tp_interm, full_interm, down_buf, down_wt_per_expert](int eid) {
+            [&, i, per_tp_interm, full_interm, gate_buf, up_buf, down_buf, gate_up_wt_per_expert, down_wt_per_expert](int eid) {
               if (tpc.should_skip_expert(eid)) return;
               uint64_t lid = expert_map(physical_to_logical_map, eid);
 
@@ -672,11 +692,15 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
                 throw std::runtime_error("TP_MOE load_weights: null weight pointer for expert " + std::to_string(lid));
               }
 
-              // gate/up weights: N-split, contiguous rows → direct pointer
+              // gate/up weights: N-split, contiguous rows → memcpy TP slice into owned buffer
               // Each TP partition handles per_tp_interm rows starting at row i*per_tp_interm
               size_t n_byte_off = (size_t)i * per_tp_interm * tpc.hidden_size / 2;
-              tp->gate_bb_[eid]->b = (uint8_t*)config.gate_projs[0][lid] + n_byte_off;
-              tp->up_bb_[eid]->b = (uint8_t*)config.up_projs[0][lid] + n_byte_off;
+              uint8_t* dst_gate = gate_buf + (size_t)eid * gate_up_wt_per_expert;
+              uint8_t* dst_up = up_buf + (size_t)eid * gate_up_wt_per_expert;
+              std::memcpy(dst_gate, (const uint8_t*)config.gate_projs[0][lid] + n_byte_off, gate_up_wt_per_expert);
+              std::memcpy(dst_up, (const uint8_t*)config.up_projs[0][lid] + n_byte_off, gate_up_wt_per_expert);
+              tp->gate_bb_[eid]->b = dst_gate;
+              tp->up_bb_[eid]->b = dst_up;
 
               // gate/up scales: contiguous → convert BF16→FP32
               size_t scale_count = (size_t)(tpc.hidden_size / group_size) * per_tp_interm;
