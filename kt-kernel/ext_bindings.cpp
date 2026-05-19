@@ -59,6 +59,7 @@ static const bool _is_plain_ = false;
 #include "operators/avx2/fp8-moe.hpp"
 #include "operators/avx2/gptq_int4-moe.hpp"
 #include "operators/avx2/gptq_int4_avxvnni-moe.hpp"
+#include "operators/avx2/mxfp4-moe.hpp"
 #include "operators/avx2/rawint4-moe.hpp"
 #include "operators/avx2/rawint4_avxvnni-moe.hpp"
 #endif
@@ -821,6 +822,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AVX2_FP8_MOE_TP<avx2::GemmKernelAVX2FP8>>(moe_module, "AVX2FP8_MOE");
   bind_moe_module<AVX2_GPTQ_INT4_MOE_TP<avx2::GemmKernelAVX2GPTQInt4>>(moe_module, "AVX2GPTQInt4_MOE");
   bind_moe_module<AVX2_RAW_INT4_MOE_TP<avx2::GemmKernelAVX2RawInt4>>(moe_module, "AVX2RawInt4_MOE");
+  bind_moe_module<AVX2_MXFP4_MOE_TP<avx2::GemmKernelAVX2MXFP4>>(moe_module, "AVX2MXFP4_MOE");
   bind_moe_module<AVXVNNI256_GPTQ_INT4_MOE_TP<avxvnni::GemmKernelAVXVNNI256GPTQInt4>>(moe_module,
                                                                                       "AVXVNNI256GPTQInt4_MOE");
   bind_moe_module<AVXVNNI256_RAW_INT4_MOE_TP<avxvnni_rawint4::GemmKernelAVXVNNI256RawInt4>>(moe_module,

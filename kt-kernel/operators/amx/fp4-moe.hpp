@@ -332,6 +332,245 @@ struct GemmKernel224MXFP4SmallKGroup {
   }
 };
 
+// ============================================================================
+// GemmKernel224MXFP4 — true AMX tile path for MXFP4 (high-M prefill)
+//
+// Reuses the same buffer types as GemmKernel224MXFP4SmallKGroup so weights
+// are loaded once.  On-the-fly per-k-group FP4→BF16 VNNI dequant feeds
+// _tile_dpbf16ps; per-group scales are applied after each tile store.
+//
+// K_STEP must equal k_group_size (= 32 for DeepSeek V4 Flash).
+// Falls back to SmallKGroup AVX-512 when m < M_STEP or m % M_STEP != 0.
+// ============================================================================
+struct GemmKernel224MXFP4 {
+  using dt = uint8_t;
+  using output_t = float;
+  static constexpr double ELEMENT_SIZE = 0.5;
+
+  static constexpr int TILE_M = 16;
+  static constexpr int TILE_N = 16;
+  static constexpr int TILE_K = 32;  // must equal k_group_size
+  static constexpr int VNNI_BLK = 2;
+
+  static constexpr int M_STEP = TILE_M * 2;  // 32
+  static constexpr int N_STEP = TILE_N * 2;  // 32
+  static constexpr int K_STEP = TILE_K;      // 32
+
+  static inline const int N_BLOCK = GemmKernel224MXFP4SmallKGroup::N_BLOCK;
+  static inline const int K_BLOCK = GemmKernel224MXFP4SmallKGroup::K_BLOCK;
+
+  static std::string name() { return "MXFP4_AMX_TILE"; }
+  static int recommended_nth(int n) { return (n + N_BLOCK - 1) / N_BLOCK; }
+  static std::pair<int, int> split_range_n(int n, int ith, int nth) {
+    return GemmKernel224MXFP4SmallKGroup::split_range_n(n, ith, nth);
+  }
+
+  // Reuse buffer types from SmallKGroup — same weight format, same layout.
+  using BufferA = GemmKernel224MXFP4SmallKGroup::BufferA;
+  using BufferB = GemmKernel224MXFP4SmallKGroup::BufferB;
+  using BufferC = GemmKernel224MXFP4SmallKGroup::BufferC;
+
+  static void config() {
+#ifdef HAVE_AMX
+    enable_amx();
+    TileConfig tile_config;
+    using bf16 = ggml_bf16_t;
+    // A tiles 0-1: TILE_M rows × TILE_K BF16 columns
+    for (int i = 0; i < 2; i++) tile_config.set_row_col(i, TILE_M, TILE_K * sizeof(bf16));
+    // B tiles 2-3: TILE_K/2 rows × TILE_N*2 BF16 columns (VNNI)
+    for (int i = 2; i < 4; i++) tile_config.set_row_col(i, TILE_K / VNNI_BLK, TILE_N * VNNI_BLK * sizeof(bf16));
+    // C tiles 4-7: TILE_M rows × TILE_N float columns
+    for (int i = 4; i < 8; i++) tile_config.set_row_col(i, TILE_M, TILE_N * sizeof(float));
+    tile_config.set_config();
+#endif
+  }
+
+  // Decode 16 packed FP4 bytes (32 values) → 32 BF16 in column order.
+  // Same logic as GemmKernel224MXFP4SmallKGroup::mxfp4_to_bf16_32.
+  alignas(16) static constexpr uint8_t fp4_bf16_lo[16] = {0x00, 0x00, 0x80, 0xC0, 0x00, 0x40, 0x80, 0xC0,
+                                                          0x00, 0x00, 0x80, 0xC0, 0x00, 0x40, 0x80, 0xC0};
+  alignas(16) static constexpr uint8_t fp4_bf16_hi[16] = {0x00, 0x3F, 0x3F, 0x3F, 0x40, 0x40, 0x40, 0x40,
+                                                          0x80, 0xBF, 0xBF, 0xBF, 0xC0, 0xC0, 0xC0, 0xC0};
+
+  __attribute__((always_inline)) static inline __m512i mxfp4_to_bf16_32(__m128i packed) {
+    __m128i lo_mask = _mm_set1_epi8(0x0F);
+    __m128i lo = _mm_and_si128(packed, lo_mask);
+    __m128i hi = _mm_and_si128(_mm_srli_epi16(packed, 4), lo_mask);
+    __m128i lut_lo = _mm_load_si128((const __m128i*)fp4_bf16_lo);
+    __m128i lut_hi = _mm_load_si128((const __m128i*)fp4_bf16_hi);
+    __m128i l_lo = _mm_shuffle_epi8(lut_lo, lo);
+    __m128i l_hi = _mm_shuffle_epi8(lut_hi, lo);
+    __m128i lo_bf16_0 = _mm_unpacklo_epi8(l_lo, l_hi);
+    __m128i lo_bf16_1 = _mm_unpackhi_epi8(l_lo, l_hi);
+    __m128i h_lo = _mm_shuffle_epi8(lut_lo, hi);
+    __m128i h_hi = _mm_shuffle_epi8(lut_hi, hi);
+    __m128i hi_bf16_0 = _mm_unpacklo_epi8(h_lo, h_hi);
+    __m128i hi_bf16_1 = _mm_unpackhi_epi8(h_lo, h_hi);
+    __m128i p0 = _mm_unpacklo_epi16(lo_bf16_0, hi_bf16_0);
+    __m128i p1 = _mm_unpackhi_epi16(lo_bf16_0, hi_bf16_0);
+    __m128i p2 = _mm_unpacklo_epi16(lo_bf16_1, hi_bf16_1);
+    __m128i p3 = _mm_unpackhi_epi16(lo_bf16_1, hi_bf16_1);
+    __m256i q0 = _mm256_inserti128_si256(_mm256_castsi128_si256(p0), p1, 1);
+    __m256i q1 = _mm256_inserti128_si256(_mm256_castsi128_si256(p2), p3, 1);
+    return _mm512_inserti64x4(_mm512_castsi256_si512(q0), q1, 1);
+  }
+
+  // Pack TILE_N rows of FP4 (each 16 bytes = 32 FP4 values at one k_group) into
+  // one VNNI B-tile staging buffer: staging[k_pair=0..15][n_idx*2 + {0,1}].
+  // b_rows[n_i] → 16 bytes at k_off/2 offset within the packed weight row.
+  static void pack_vnni_tile(const uint8_t* b_rows[TILE_N], int k_off_half,
+                             int k_full,  // = k (total k dimension)
+                             uint16_t staging[TILE_K / VNNI_BLK][TILE_N * VNNI_BLK]) {
+    alignas(64) uint16_t decoded[TILE_N][TILE_K];
+    for (int n_i = 0; n_i < TILE_N; n_i++) {
+      const uint8_t* fp4_ptr = b_rows[n_i] + k_off_half;
+      __m512i bf16 = mxfp4_to_bf16_32(_mm_loadu_si128((const __m128i*)fp4_ptr));
+      _mm512_storeu_si512(decoded[n_i], bf16);
+    }
+    for (int kp = 0; kp < TILE_K / VNNI_BLK; kp++) {
+      for (int n_i = 0; n_i < TILE_N; n_i++) {
+        staging[kp][2 * n_i] = decoded[n_i][2 * kp];
+        staging[kp][2 * n_i + 1] = decoded[n_i][2 * kp + 1];
+      }
+    }
+    (void)k_full;
+  }
+
+  // AMX tile mat-mul for complete M_STEP × N_STEP blocks.
+  // m must be a positive multiple of M_STEP; n_end - n_begin must be N_STEP.
+  static void amx_block(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc, int m_begin,
+                        int n_begin) {
+#ifdef HAVE_AMX
+    const int kg_count = k / k_group_size;
+    // Row stride in A buffer: SmallKGroup has M_STEP=1, so rows are row-major.
+    const size_t a_stride = (size_t)k * sizeof(ggml_bf16_t);
+
+    // B row base pointers (packed FP4, row-major: b + n_row * k/2)
+    const uint8_t* b_row[N_STEP];
+    for (int n_i = 0; n_i < N_STEP; n_i++) b_row[n_i] = (const uint8_t*)bb->b + (size_t)(n_begin + n_i) * (k / 2);
+
+    // Scale base pointers (row-major: d + n_row * kg_count)
+    const float* s_row[N_STEP];
+    for (int n_i = 0; n_i < N_STEP; n_i++) s_row[n_i] = bb->d + (size_t)(n_begin + n_i) * kg_count;
+
+    // Thread-local staging: 2 VNNI B-tiles + temp C
+    alignas(64) static thread_local uint16_t stg[2][TILE_K / VNNI_BLK][TILE_N * VNNI_BLK];
+    alignas(64) static thread_local float tmp_c[M_STEP][N_STEP];
+
+    alignas(64) float running_c[M_STEP][N_STEP];
+    std::memset(running_c, 0, sizeof(running_c));
+
+    for (int g = 0; g < kg_count; g++) {
+      const int k_off = g * k_group_size;
+      const int k_off_half = k_off / 2;  // byte offset in packed FP4 row
+
+      // Dequant and VNNI-pack both B tiles
+      pack_vnni_tile(&b_row[0], k_off_half, k, stg[0]);
+      pack_vnni_tile(&b_row[TILE_N], k_off_half, k, stg[1]);
+
+      // Load A tiles (direct from row-major BF16, stride = full k)
+      ggml_bf16_t* a0 = ba->a + (size_t)m_begin * k + k_off;
+      ggml_bf16_t* a1 = ba->a + (size_t)(m_begin + TILE_M) * k + k_off;
+      _tile_loadd(0, a0, a_stride);
+      _tile_loadd(1, a1, a_stride);
+
+      // Load B tiles from VNNI staging
+      constexpr size_t b_stg_stride = TILE_N * VNNI_BLK * sizeof(uint16_t);  // 64
+      _tile_loadd(2, stg[0], b_stg_stride);
+      _tile_loadd(3, stg[1], b_stg_stride);
+
+      // Reset C tiles and compute
+      _tile_zero(4);
+      _tile_zero(5);
+      _tile_zero(6);
+      _tile_zero(7);
+      _tile_dpbf16ps(4, 0, 2);
+      _tile_dpbf16ps(5, 0, 3);
+      _tile_dpbf16ps(6, 1, 2);
+      _tile_dpbf16ps(7, 1, 3);
+
+      // Store C tiles into tmp_c[M_STEP][N_STEP]
+      constexpr size_t tmp_stride = N_STEP * sizeof(float);
+      _tile_stored(4, &tmp_c[0][0], tmp_stride);
+      _tile_stored(5, &tmp_c[0][TILE_N], tmp_stride);
+      _tile_stored(6, &tmp_c[TILE_M][0], tmp_stride);
+      _tile_stored(7, &tmp_c[TILE_M][TILE_N], tmp_stride);
+
+      // Gather scales for this k_group, then fmadd into running_c
+      alignas(64) float scales[N_STEP];
+      for (int n_i = 0; n_i < N_STEP; n_i++) scales[n_i] = s_row[n_i][g];
+      __m512 sv0 = _mm512_loadu_ps(scales);
+      __m512 sv1 = _mm512_loadu_ps(scales + TILE_N);
+      for (int mi = 0; mi < M_STEP; mi++) {
+        _mm512_storeu_ps(&running_c[mi][0],
+                         _mm512_fmadd_ps(sv0, _mm512_loadu_ps(&tmp_c[mi][0]), _mm512_loadu_ps(&running_c[mi][0])));
+        _mm512_storeu_ps(&running_c[mi][TILE_N], _mm512_fmadd_ps(sv1, _mm512_loadu_ps(&tmp_c[mi][TILE_N]),
+                                                                 _mm512_loadu_ps(&running_c[mi][TILE_N])));
+      }
+    }  // k_group loop
+
+    // Write running_c → bc output buffer
+    for (int mi = 0; mi < M_STEP; mi++) {
+      float* dst = bc->get_submat(m, n, m_begin + mi, n_begin);
+      _mm512_storeu_ps(dst, _mm512_loadu_ps(&running_c[mi][0]));
+      _mm512_storeu_ps(dst + TILE_N, _mm512_loadu_ps(&running_c[mi][TILE_N]));
+    }
+#else
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)k_group_size;
+    (void)ba;
+    (void)bb;
+    (void)bc;
+    (void)m_begin;
+    (void)n_begin;
+#endif
+  }
+
+  // Top-level dispatch: AMX tiles when m is a positive multiple of M_STEP,
+  // otherwise SmallKGroup AVX-512 (covers decode / small-batch / non-aligned m).
+  static void mat_mul_kgroup_impl(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc, int ith,
+                                  int nth) {
+    assert(k_group_size == TILE_K && "GemmKernel224MXFP4 requires k_group_size == 32");
+
+#ifdef HAVE_AMX
+    if (m >= M_STEP && m % M_STEP == 0) {
+      config();
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_tile_end = n_start + ((n_end - n_start) / N_STEP) * N_STEP;
+      for (int m_begin = 0; m_begin < m; m_begin += M_STEP) {
+        for (int n_begin = n_start; n_begin < n_tile_end; n_begin += N_STEP) {
+          amx_block(m, n, k, k_group_size, ba, bb, bc, m_begin, n_begin);
+        }
+      }
+      // N-tail: remaining columns not covered by full N_STEP tiles
+      if (n_tile_end < n_end) {
+        const int kg_count = k / k_group_size;
+        for (int mi = 0; mi < m; mi++) {
+          __m512bh* a_row = (__m512bh*)(ba->a + (size_t)mi * k);
+          float* c_row = bc->get_submat(m, n, mi, n_tile_end);
+          for (int ni = n_tile_end; ni < n_end; ni++) {
+            const __m128i* w = (const __m128i*)((const uint8_t*)bb->b + (size_t)ni * (k / 2));
+            const float* s = bb->d + (size_t)ni * kg_count;
+            __m512 acc = _mm512_setzero_ps();
+            for (int g = 0; g < kg_count; g++) {
+              const GemmKernel224MXFP4SmallKGroup::ActivationBF16 a(a_row[g]);
+              const GemmKernel224MXFP4SmallKGroup::DequantizedWeight d(w[g]);
+              acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
+                                    GemmKernel224MXFP4SmallKGroup::mxfp4_dot_bf16(d, a), acc);
+            }
+            c_row[ni - n_tile_end] = _mm512_reduce_add_ps(acc);
+          }
+        }
+      }
+      return;
+    }
+#endif
+    GemmKernel224MXFP4SmallKGroup::fp4_mat_mat_kgroup(m, n, k, k_group_size, ba, bb, bc, ith, nth);
+  }
+};
+
 // Dispatch functions
 inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferA> ba,
@@ -344,7 +583,11 @@ inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224MXFP4SmallKGroup::BufferC> bc, int ith, int nth) {
+#ifdef HAVE_AMX
+  GemmKernel224MXFP4::mat_mul_kgroup_impl(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+#else
   GemmKernel224MXFP4SmallKGroup::fp4_mat_mat_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+#endif
 }
 
 }  // namespace amx
