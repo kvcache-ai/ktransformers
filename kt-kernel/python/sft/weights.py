@@ -114,18 +114,15 @@ def _clear_original_expert_weights(
     """
     Clear original expert weights to free memory after KT weights are loaded.
 
-    In full_weight_grad mode, skip clearing to preserve original weights
-    for Python-side nn.Parameter initialization.
+    In full_weight_grad mode, gate_proj_buf/up_proj_buf/down_proj_buf serve as
+    the authoritative copies for the optimizer. The original expert weights in
+    the model tree are redundant and cause double-counting in count_parameters().
+    Clear them just like in LoRA mode.
     """
     from .arch import detect_fused_experts
 
     experts = getattr(moe_module, moe_config.experts_attr, None)
     if experts is None:
-        return
-
-    # In full mode, preserve original weights for nn.Parameter buffer initialization
-    if full_weight_grad:
-        logger.info("Skipping expert weight clearing (full_weight_grad mode)")
         return
 
     # Fused format: replace gate_up_proj/down_proj tensors with zero-storage placeholders
@@ -142,7 +139,9 @@ def _clear_original_expert_weights(
                 size=param.shape,
                 stride=[0] * len(param.shape),
             )
-            experts._parameters[name] = nn.Parameter(fake_tensor, requires_grad=False)
+            placeholder = nn.Parameter(fake_tensor, requires_grad=False)
+            placeholder._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
+            experts._parameters[name] = placeholder
         return
 
     def _iter_weight_params():
@@ -198,6 +197,7 @@ def _clear_original_expert_weights(
                 stride=[0] * len(weight_param.shape),
             )
             new_param = nn.Parameter(fake_tensor, requires_grad=False)
+            new_param._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
             replaced_count += 1
 
             # Avoid `KeyError: attribute 'weight' already exists` for parametrized modules

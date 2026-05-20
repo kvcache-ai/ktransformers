@@ -407,7 +407,13 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
              self.prepare_and_save_bwd((void*)gate, (void*)up, (void*)down, path);
            })
       .def("submit_backward_repack", &MoeClass::submit_backward_repack)
-      .def("wait_backward_repack", &MoeClass::wait_backward_repack);
+      .def("wait_backward_repack", &MoeClass::wait_backward_repack)
+      // Update base weight BF16 pointers for reload_base_weights (full mode training)
+      // After calling this, call load_weights_task() to re-quantize BF16->AMX
+      .def("set_base_weight_pointers",
+           [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down) {
+             self.set_base_weight_pointers((void*)gate, (void*)up, (void*)down);
+           });
 }
 #endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 

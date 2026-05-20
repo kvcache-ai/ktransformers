@@ -244,6 +244,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             config.quant_config.group_size = self.group_size
             config.quant_config.zero_point = self.zero_point
 
+        # Release old C++ MOE object before creating a new one to avoid memory leak
+        old_moe = getattr(self, "moe", None)
+        if old_moe is not None:
+            del old_moe
+            import gc
+            gc.collect()
+
         self.moe = self._moe_class(config)
 
         self.cpu_infer.submit(self.moe.load_weights_task())
@@ -481,13 +488,31 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if self.gate_proj_buf is None:
             raise RuntimeError("Base weight buffers not initialized. Call init_full_weight_grad_buffers() first.")
 
-        # Update MOESFTConfig base weight pointers and reload
-        # The C++ kernel stores its own copy, so we need to copy the updated weights back.
-        # We do this by creating a temporary load with the updated weights.
-        # For now, use the update_lora_weights_task pattern but for base weights.
-        # TODO: Add a dedicated C++ update_base_weights_task for efficiency.
-        # For the first implementation, we reload the weights from the updated buffers.
         logger.info(f"Layer {self.layer_idx}: update_base_weights() - syncing updated weights to C++ kernel")
+
+        # Preferred path: update config pointers on existing C++ object and re-quantize.
+        # This avoids full C++ MOE object recreation (~0.6s/layer vs ~1.9s/layer).
+        if hasattr(self.moe, "set_base_weight_pointers"):
+            self.moe.set_base_weight_pointers(
+                self.gate_proj_buf.data.data_ptr(),
+                self.up_proj_buf.data.data_ptr(),
+                self.down_proj_buf.data.data_ptr(),
+            )
+            self.cpu_infer.submit(self.moe.load_weights_task())
+            self.cpu_infer.sync()
+            logger.info(f"Layer {self.layer_idx}: update_base_weights() - re-quantized existing kernel")
+            return
+
+        # Fallback: full reload path (creates new C++ MOE object)
+        # This is slower but works without C++ set_base_weight_pointers support.
+        logger.warning(
+            f"Layer {self.layer_idx}: set_base_weight_pointers not available, "
+            f"falling back to full C++ MOE object recreation"
+        )
+        old_moe = getattr(self, "moe", None)
+        if old_moe is not None:
+            del old_moe
+
         self.gate_proj = self.gate_proj_buf.data
         self.up_proj = self.up_proj_buf.data
         self.down_proj = self.down_proj_buf.data

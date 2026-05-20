@@ -63,7 +63,29 @@ class KTMoELayerWrapper(nn.Module):
 
         # 1. gate/router FIRST - keep original attribute name for PEFT compatibility
         router_attr = moe_config.router_attr  # "gate" for Qwen3/DeepSeek
-        setattr(self, router_attr, getattr(original_moe, router_attr, None))
+        original_router = getattr(original_moe, router_attr, None)
+        self._original_router = None  # Set when router is not nn.Linear (e.g. TopKRouter)
+
+        if original_router is not None and isinstance(original_router, nn.Linear):
+            # transformers <=4.x / some models: gate is nn.Linear - register directly.
+            setattr(self, router_attr, original_router)
+        elif original_router is not None and hasattr(original_router, "weight") and isinstance(
+            getattr(original_router, "weight"), nn.Parameter
+        ):
+            # transformers v5+: gate is a TopKRouter with nn.Parameter weight.
+            # Wrap it in nn.Linear so PEFT can discover and inject LoRA.
+            # The nn.Linear shares the same weight tensor - LoRA applied to it
+            # is equivalent to LoRA on the original gate.
+            router_weight = original_router.weight
+            router_linear = nn.Linear(
+                router_weight.shape[1], router_weight.shape[0], bias=False,
+            )
+            router_linear.weight = router_weight  # share the same parameter
+            setattr(self, router_attr, router_linear)
+            # Keep the original router for forward (top-k selection logic)
+            self._original_router = original_router
+        else:
+            setattr(self, router_attr, original_router)
         self._router_attr = router_attr
 
         # 2. experts SECOND (this is what PEFT targets for LoRA)
@@ -269,6 +291,23 @@ class KTMoELayerWrapper(nn.Module):
                     topk_ids, topk_weights = router_output
                 else:
                     topk_ids, topk_weights = router_output[0], router_output[1]
+                if topk_weights.is_floating_point():
+                    topk_weights = topk_weights.to(torch.bfloat16)
+                return topk_ids, topk_weights
+
+            # When _original_router is set, self.gate is an nn.Linear wrapper
+            # around the TopKRouter's weight.  Use it (with PEFT LoRA if
+            # applied) for the linear projection, then replicate top-k logic.
+            if self._original_router is not None:
+                orig_router = self._original_router
+                router_logits = router(hidden_states.view(-1, self.hidden_size))
+                router_probs = F.softmax(router_logits, dtype=torch.float, dim=-1)
+                top_k = getattr(orig_router, "top_k", self.moe_config.num_experts_per_tok)
+                norm_topk_prob = getattr(orig_router, "norm_topk_prob", True)
+                topk_weights, topk_ids = torch.topk(router_probs, top_k, dim=-1)
+                if norm_topk_prob:
+                    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+                topk_weights = topk_weights.to(router_logits.dtype)
                 if topk_weights.is_floating_point():
                     topk_weights = topk_weights.to(torch.bfloat16)
                 return topk_ids, topk_weights

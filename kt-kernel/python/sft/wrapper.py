@@ -161,15 +161,21 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     cfg = _get_kt_config(kt_plugin)
 
     # Read lora_rank/lora_alpha for C++ wrapper initialization (buffer allocation only)
-    lora_rank = getattr(cfg, "kt_lora_rank", 1) or 1
-    lora_alpha = getattr(cfg, "kt_lora_alpha", 1.0) or 1.0
+    # Use explicit None checks: lora_rank=0 is a valid value (full mode, no LoRA),
+    # but `or` pattern would treat 0 as falsy and replace it with 1.
+    _raw_rank = getattr(cfg, "kt_lora_rank", None)
+    lora_rank = _raw_rank if _raw_rank is not None else 1
+    _raw_alpha = getattr(cfg, "kt_lora_alpha", None)
+    lora_alpha = _raw_alpha if _raw_alpha is not None else 1.0
 
     # Read full_weight_grad mode
-    full_weight_grad = getattr(cfg, "kt_full_weight_grad", False) or False
+    _raw_fwg = getattr(cfg, "kt_full_weight_grad", None)
+    full_weight_grad = _raw_fwg if _raw_fwg is not None else False
 
-    # In full mode, lora_rank can be 0 (no LoRA, only base weight grad)
-    if full_weight_grad and lora_rank == 1:
-        # Default lora_rank=1 was auto-set; in full mode without LoRA, use 0
+    # In full mode, lora_rank should be 0 (no LoRA, only base weight grad)
+    # If user explicitly set lora_rank > 0 in full mode (hybrid), keep it.
+    # Otherwise, auto-set lora_rank=0.
+    if full_weight_grad and lora_rank > 0:
         _has_explicit_lora_rank = getattr(cfg, "kt_lora_rank", None) is not None
         if not _has_explicit_lora_rank:
             lora_rank = 0
@@ -404,18 +410,17 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
-        # In full_weight_grad mode, the Python-side references are kept for nn.Parameter buffers.
-        # In LoRA mode, release to save ~1 GB/layer.
-        if not full_weight_grad:
-            del gate_proj, up_proj, down_proj
+        # In full_weight_grad mode, the authoritative copies are gate_proj_buf etc.
+        # Always release local references to save ~1 GB/layer.
+        del gate_proj, up_proj, down_proj
 
         wrappers.append(layer_wrapper)
         moe_layer_count += 1
 
-        # Replace original expert weights with meta placeholders.
+        # Replace original expert weights with zero-storage placeholders.
         # Experts remain in the model tree (via wrapper.experts) so PEFT can discover them.
         # Rank 0 already copied weights to C++ kernel via load_weights_from_tensors.
-        # In full_weight_grad mode, skip clearing to preserve weights for nn.Parameter init.
+        # gate_proj_buf serves as the authoritative copy in full_weight_grad mode.
         _clear_original_expert_weights(moe_module, moe_config, full_weight_grad=full_weight_grad)
 
     logger.info(f"Wrapped {moe_layer_count} MoE layers with KTMoEWrapper")

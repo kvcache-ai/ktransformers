@@ -217,6 +217,19 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         # wrap as nn.Parameter for optimizer, and pre-assign .grad for C++ backward.
         if getattr(wrapper, "_fused_experts", False):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
+
+            # In full mode (lora_rank=0), skip LoRA buffer creation entirely.
+            # C++ kernel will not compute LoRA contributions when lora_rank=0.
+            if lora_rank == 0:
+                wrapper._fused_expert_lora_params = []
+                wrapper._peft_lora_modules = None
+                logger.info(
+                    f"[kt_adapt_peft_lora] Layer {layer_idx}: fused expert, "
+                    f"full mode (lora_rank=0, no LoRA buffers)"
+                )
+                adapted_count += 1
+                continue
+
             lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
                 wrapper,
                 moe_config,
@@ -240,6 +253,18 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             continue
 
         if len(experts) == 0:
+            continue
+
+        # In full mode (lora_rank=0), PEFT does not inject LoRA on experts.
+        # Skip LoRA detection and initialization entirely.
+        if getattr(wrapper, "_lora_rank", 1) == 0:
+            wrapper._peft_lora_modules = None
+            wrapper._fused_expert_lora_params = []
+            logger.info(
+                f"[kt_adapt_peft_lora] Layer {layer_idx}: non-fused expert, "
+                f"full mode (lora_rank=0, no LoRA)"
+            )
+            adapted_count += 1
             continue
 
         # Collect references to PEFT LoRA modules for each expert
