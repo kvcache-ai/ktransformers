@@ -18,6 +18,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <immintrin.h>  // _mm_pause()
 #include <stdexcept>
 
 #include "hwloc.h"
@@ -221,6 +222,19 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
       process_tasks(thread_id);
       start = std::chrono::high_resolution_clock::now();
     } else if (status == ThreadStatus::WAITING) {
+      // Mitigate clock_gettime hot-path in the WAITING spin: the prior
+      // loop called high_resolution_clock::now() every iteration, which
+      // dominated CPU profiles (78% [vdso] on a 96-thread MoE-inference
+      // run) and starved HT-partner pipelines. _mm_pause() yields
+      // pipeline resources and saves power; sampling the clock once
+      // per 100 iterations keeps the 50ms wake-up budget unchanged
+      // while removing ~99% of the syscalls.
+      _mm_pause();
+      static thread_local int spin_counter = 0;
+      if (++spin_counter < 100) {
+        continue;
+      }
+      spin_counter = 0;
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (duration > 50) {
