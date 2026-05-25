@@ -272,7 +272,13 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
             list(APPEND ARCH_FLAGS -mavx2 -mfma -msse3 -mf16c)
         endif()
         if(LLAMA_AVX512)
-            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mavx512dq -mfma -mf16c -msse3)
+            # AVX512_VL is required by operators/amx/la/avx_kernels.hpp (pulled in
+            # via ext_bindings.cpp -> operators/amx/sft_moe.hpp), which uses the
+            # 256-bit mask intrinsics (_mm256_maskz_loadu_epi16 family). Keep it
+            # in the base block alongside BW/DQ so every AVX512 variant that
+            # includes that header builds, not just VBMI/BF16. This excludes no
+            # hardware the block did not already exclude: KNL/KNM lack BW/DQ.
+            list(APPEND ARCH_FLAGS -mavx512f -mavx512bw -mavx512dq -mavx512vl -mfma -mf16c -msse3)
         endif()
         if(LLAMA_AVX512_VBMI)
             list(APPEND ARCH_FLAGS -mavx512vbmi)
@@ -290,14 +296,6 @@ elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LWR
         endif()
         if(LLAMA_AVX512_BF16)
             list(APPEND ARCH_FLAGS -mavx512bf16)
-        endif()
-        # AVX512_VL+BW is required by operators/amx/la/avx_kernels.hpp
-        # (_mm256_maskz_loadu_epi16 family). BW is already in LLAMA_AVX512;
-        # VL is only added by LLAMA_AVX512_FANCY_SIMD, which the
-        # multi-variant build path never enables. Pull it in here whenever
-        # a variant that uses this code path is active.
-        if(LLAMA_AVX512_VBMI OR LLAMA_AVX512_BF16)
-            list(APPEND ARCH_FLAGS -mavx512vl)
         endif()
     endif()
 elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "ppc64")
