@@ -809,7 +809,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2
-            if _HAS_BF16_SUPPORT and _host_has_cpu_flag("amx_bf16"):  
+            if _HAS_BF16_SUPPORT:
                 self.moe = AMXBF16_MOE(moe_config)
             else:
                 self.moe = AVX2BF16_MOE(moe_config)
