@@ -438,7 +438,7 @@ def doctor(
     # 8. Potentially conflicting environment variables
     # Only surface a row when the variable is actually present; no noise otherwise.
     dsv4_submode = os.environ.get("SGLANG_DSV4_2604_SUBMODE")
-    if dsv4_submode is not None:
+    if dsv4_submode:
         checks.append(
             {
                 "name": "Env: SGLANG_DSV4_2604_SUBMODE",

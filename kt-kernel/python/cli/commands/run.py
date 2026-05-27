@@ -592,7 +592,7 @@ def _check_conflicting_env_vars(kt_method: str, env: dict) -> None:
     in the shell after switching from a MXFP4 launch to another method.
     """
     dsv4_submode = env.get("SGLANG_DSV4_2604_SUBMODE", "")
-    if dsv4_submode == "2604B" and kt_method.upper() != "MXFP4":
+    if dsv4_submode == "2604B" and (not kt_method or kt_method.upper() != "MXFP4"):
         print_error(
             f"SGLANG_DSV4_2604_SUBMODE=2604B is set but kt-method is "
             f"{kt_method!r} (not MXFP4). "
