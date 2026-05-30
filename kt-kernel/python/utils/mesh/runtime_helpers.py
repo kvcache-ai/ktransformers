@@ -93,6 +93,23 @@ def _configure_base_runtime(
     if self.enable_cache_stats:
         _mesh_log_once(("cache_stats", method), f"[KTCacheStats] Cache statistics collection enabled for method={method}")
 
+    rolling_requested = os.environ.get("KT_MESH_PREFILL_ROLLING") not in (None, "", "0", "false", "False", "FALSE", "no", "No", "NO")
+    if rolling_requested and self.io_backend == "IOURING":
+        rolling_depth_env = os.environ.get("KT_MESH_PREFILL_ROLLING_DEPTH", "10")
+        try:
+            rolling_depth = max(1, int(rolling_depth_env))
+        except ValueError:
+            rolling_depth = 10
+        _mesh_log_once(
+            ("rlp_enabled", method, rolling_depth),
+            f"[KTMeshRuntime] [RLP] enabled depth={rolling_depth} method={method!r} io_backend={self.io_backend}",
+        )
+    elif rolling_requested:
+        _mesh_log_once(
+            ("rlp_disabled_backend", method, self.io_backend),
+            f"[KTMeshRuntime] [RLP] requested but io_backend={self.io_backend} (need IOURING) — falling back to default prefill",
+        )
+
     if max_tier0_experts is not None:
         parsed_max_tier0 = int(max_tier0_experts)
         max_tier0_experts = None if parsed_max_tier0 <= 0 else parsed_max_tier0
@@ -161,6 +178,18 @@ def _mesh_global_resident_capacity(self) -> int:
 
 def _mesh_prefill_layer_mode_enabled(self) -> bool:
     return self.io_backend == "IOURING" and self._env_flag("KT_MESH_PREFILL_LAYER_MODE", False)
+
+
+def _mesh_prefill_rolling_enabled(self) -> bool:
+    # Rolling Layer Prefetch (RLP): non-default opt-in. Requires IOURING because
+    # the strategy depends on cross-layer async submission.
+    return self.io_backend == "IOURING" and self._env_flag("KT_MESH_PREFILL_ROLLING", False)
+
+
+def _mesh_prefill_rolling_depth(self) -> int:
+    if not self._mesh_prefill_rolling_enabled():
+        return 0
+    return max(1, self._env_int("KT_MESH_PREFILL_ROLLING_DEPTH", 10))
 
 
 def _mesh_prefill_full_layer_count(self) -> int:
@@ -1444,6 +1473,8 @@ _INSTANCE_METHODS = (
     "_mesh_score_transform_id",
     "_mesh_global_resident_capacity",
     "_mesh_prefill_layer_mode_enabled",
+    "_mesh_prefill_rolling_enabled",
+    "_mesh_prefill_rolling_depth",
     "_mesh_prefill_full_layer_count",
     "_mesh_slot_pool_capacity",
     "_mesh_prefill_static_resident_capacity",

@@ -106,6 +106,12 @@ struct MeshMOEConfigExtension {
   int mesh_coldstart_prefill_limit = 0;
   bool mesh_prefill_layer_mode_enabled = false;
   int mesh_prefill_static_experts = 0;
+  // Rolling Layer Prefetch (RLP): non-default opt-in strategy that pipelines
+  // a full per-layer CPU-expert prefetch over `rolling_depth` layers. Driven
+  // by KT_MESH_PREFILL_ROLLING / KT_MESH_PREFILL_ROLLING_DEPTH; ignored when
+  // disabled, leaving the default prefill path untouched.
+  bool mesh_prefill_rolling_enabled = false;
+  int mesh_prefill_rolling_depth = 10;
   int mesh_decode_resident_experts = 0;
   bool mesh_memory_guard_enabled = false;
   float mesh_memory_high_watermark = 0.95f;

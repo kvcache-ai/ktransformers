@@ -115,6 +115,10 @@ def apply_mesh_moe_config(wrapper, moe_config, *, use_iouring: bool, file_slots=
         moe_config.mesh_prefill_layer_mode_enabled = wrapper._mesh_prefill_layer_mode_enabled()
     if hasattr(moe_config, "mesh_prefill_static_experts"):
         moe_config.mesh_prefill_static_experts = wrapper._mesh_prefill_static_resident_capacity()
+    if hasattr(moe_config, "mesh_prefill_rolling_enabled"):
+        moe_config.mesh_prefill_rolling_enabled = wrapper._mesh_prefill_rolling_enabled()
+    if hasattr(moe_config, "mesh_prefill_rolling_depth"):
+        moe_config.mesh_prefill_rolling_depth = wrapper._mesh_prefill_rolling_depth()
     if hasattr(moe_config, "mesh_decode_resident_experts"):
         moe_config.mesh_decode_resident_experts = wrapper._mesh_config_resident_experts()
     moe_config.resident_cache_policy = wrapper.residency_policy

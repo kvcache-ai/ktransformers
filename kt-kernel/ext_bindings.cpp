@@ -23,6 +23,7 @@
 #include "cpu_backend/worker_pool.h"
 #include "operators/common.hpp"
 #include "operators/mesh/python_bindings.hpp"
+#include "operators/mesh/rolling_prefetch.hpp"
 
 #ifdef HAVE_LIBURING
 #include "operators/mesh/async_io.hpp"
@@ -996,6 +997,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
             py::arg("size"), py::arg("type"));
 
   mesh::bind_async_io_python(m);
+  mesh::bind_rolling_prefetch_python(m);
 }
 
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)

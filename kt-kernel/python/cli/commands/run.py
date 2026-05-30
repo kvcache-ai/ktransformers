@@ -123,6 +123,23 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
     default=False,
     help="Materialize MESH expert cache before launching the server",
 )
+@click.option(
+    "--mesh-prefill-rolling",
+    "mesh_prefill_rolling",
+    is_flag=True,
+    default=False,
+    help=(
+        "Enable Rolling Layer Prefetch (RLP): non-default, full-read prefetch pipeline over "
+        "N layers. Requires iouring backend and fast NVMe. Default path is unaffected when off."
+    ),
+)
+@click.option(
+    "--mesh-prefill-rolling-depth",
+    "mesh_prefill_rolling_depth",
+    type=int,
+    default=None,
+    help="Pipeline depth for --mesh-prefill-rolling (default 10). Only honored when --mesh-prefill-rolling is set.",
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -155,6 +172,8 @@ def run(
     io_backend: Optional[str],
     enable_cache_stats: bool,
     precache: bool,
+    mesh_prefill_rolling: bool,
+    mesh_prefill_rolling_depth: Optional[int],
 ) -> None:
     """Start model inference server.
 
@@ -218,6 +237,8 @@ def run(
         io_backend=io_backend,
         enable_cache_stats=enable_cache_stats,
         precache=precache,
+        mesh_prefill_rolling=mesh_prefill_rolling,
+        mesh_prefill_rolling_depth=mesh_prefill_rolling_depth,
     )
 
 
@@ -251,6 +272,8 @@ def _run_impl(
     io_backend: Optional[str] = None,
     enable_cache_stats: bool = False,
     precache: bool = False,
+    mesh_prefill_rolling: bool = False,
+    mesh_prefill_rolling_depth: Optional[int] = None,
 ) -> None:
     """Actual implementation of run command."""
     # Check if SGLang is installed before proceeding
@@ -583,6 +606,17 @@ def _run_impl(
     if precache:
         env["KT_MESH_PRECACHE"] = "1"
         env["KT_MESH_BF16_EXPERT_CACHE"] = "1"
+    if mesh_prefill_rolling:
+        # Rolling Layer Prefetch (opt-in, full-read pipeline). Requires iouring;
+        # if the user picked something else upstream, the runtime will refuse to
+        # activate the path and fall back to the default prefill flow.
+        env["KT_MESH_PREFILL_ROLLING"] = "1"
+        if mesh_prefill_rolling_depth is not None:
+            env["KT_MESH_PREFILL_ROLLING_DEPTH"] = str(int(mesh_prefill_rolling_depth))
+    elif mesh_prefill_rolling_depth is not None:
+        print_warning(
+            "--mesh-prefill-rolling-depth is ignored without --mesh-prefill-rolling"
+        )
 
     # Step 5: Show configuration summary
     console.print()
@@ -605,6 +639,9 @@ def _run_impl(
     console.print(f"  Method: [cyan]{final_kt_method}[/cyan]")
     if precache:
         console.print("  Precache: [cyan]enabled[/cyan]")
+    if mesh_prefill_rolling:
+        depth = int(mesh_prefill_rolling_depth) if mesh_prefill_rolling_depth is not None else 10
+        console.print(f"  Mesh Prefill Rolling: [cyan]enabled depth={depth}[/cyan]")
     console.print(f"  Weight Strategy: [cyan]{final_weight_strategy or 'legacy'}[/cyan]")
     console.print(f"  Residency Policy: [cyan]{final_residency_policy or 'baseline'}[/cyan]")
     if final_max_tier0_experts is not None:
