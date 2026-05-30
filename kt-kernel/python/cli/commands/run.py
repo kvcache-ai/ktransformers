@@ -506,6 +506,11 @@ def _run_impl(
     if isinstance(inference_env, dict):
         env.update({k: str(v) for k, v in inference_env.items()})
 
+    # Fail fast if a conflicting env var would crash sglang during model loading.
+    # Check against the fully-assembled env dict (shell + kt config settings) so
+    # nothing slips through regardless of where the variable was set.
+    _check_conflicting_env_vars(final_kt_method, env)
+
     # Step 5: Show configuration summary
     console.print()
     print_step("Configuration")
@@ -576,6 +581,26 @@ def _run_impl(
 
 # Dead code removed: _find_model_path() and _find_weights_path()
 # These functions were part of the old builtin model system
+
+
+def _check_conflicting_env_vars(kt_method: str, env: dict) -> None:
+    """Exit early if environment variables conflict with the chosen kt-method.
+
+    Receives the fully-assembled subprocess env dict (shell + kt config settings)
+    so that variables injected via inference.env or advanced.env are also caught.
+    Catches copy-paste mistakes such as keeping SGLANG_DSV4_2604_SUBMODE=2604B
+    in the shell after switching from a MXFP4 launch to another method.
+    """
+    dsv4_submode = env.get("SGLANG_DSV4_2604_SUBMODE", "")
+    if dsv4_submode == "2604B" and (not kt_method or kt_method.upper() != "MXFP4"):
+        print_error(
+            f"SGLANG_DSV4_2604_SUBMODE=2604B is set but kt-method is "
+            f"{kt_method!r} (not MXFP4). "
+            f"This will raise a ValueError during model loading. "
+            f"Either unset the variable (unset SGLANG_DSV4_2604_SUBMODE) "
+            f"or switch to --kt-method MXFP4."
+        )
+        raise typer.Exit(1)
 
 
 def _build_sglang_command(

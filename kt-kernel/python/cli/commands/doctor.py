@@ -435,7 +435,25 @@ def doctor(
             }
         )
 
-    # 8. Environment managers
+    # 8. Potentially conflicting environment variables
+    # Only surface a row when the variable is actually present; no noise otherwise.
+    dsv4_submode = os.environ.get("SGLANG_DSV4_2604_SUBMODE")
+    if dsv4_submode:
+        checks.append(
+            {
+                "name": "Env: SGLANG_DSV4_2604_SUBMODE",
+                "status": "warning" if dsv4_submode == "2604B" else "ok",
+                "value": dsv4_submode,
+                "hint": (
+                    "Intended for MXFP4 launches only. "
+                    "Causes a startup crash when kt-method is not MXFP4. Unset it if unused."
+                    if dsv4_submode == "2604B"
+                    else None
+                ),
+            }
+        )
+
+    # 9. Environment managers
     env_managers = detect_env_managers()
     docker = check_docker()
     env_list = [f"{m.name} {m.version}" for m in env_managers]
