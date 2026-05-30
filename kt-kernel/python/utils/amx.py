@@ -31,6 +31,7 @@ AVX2BF16_MOE = getattr(_moe_mod, "AVX2BF16_MOE", None)
 AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
 AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
 AVX2RawInt4_MOE = getattr(_moe_mod, "AVX2RawInt4_MOE", None)
+AVX2MXFP4_MOE = getattr(_moe_mod, "AVX2MXFP4_MOE", None)
 AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 AVXVNNI256RawInt4_MOE = getattr(_moe_mod, "AVXVNNI256RawInt4_MOE", None)
 
@@ -45,6 +46,7 @@ _HAS_AVX2_BF16_SUPPORT = AVX2BF16_MOE is not None
 _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
 _HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
 _HAS_AVX2_RAWINT4_SUPPORT = AVX2RawInt4_MOE is not None
+_HAS_AVX2_MXFP4_SUPPORT = AVX2MXFP4_MOE is not None
 _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
 _HAS_AVXVNNI256_RAW_INT4_SUPPORT = AVXVNNI256RawInt4_MOE is not None
 _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
@@ -140,6 +142,37 @@ def _select_rawint4_backend(group_size: Optional[int] = None):
         return AVXVNNI256RawInt4_MOE
     if _HAS_AVX2_RAWINT4_SUPPORT:
         return AVX2RawInt4_MOE
+    return None
+
+
+def _select_mxfp4_backend():
+    """Select MXFP4 backend: AMX/AVX-512 (preferred) > AVX2 (fallback).
+
+    Override with KT_MXFP4_BACKEND=avx2|amx.
+    Returns None if no MXFP4 backend is available.
+    """
+    forced = os.getenv("KT_MXFP4_BACKEND", "").strip().lower()
+
+    if forced == "amx":
+        if not _HAS_MXFP4_SUPPORT:
+            raise RuntimeError(
+                "KT_MXFP4_BACKEND=amx requested, but AMXFP4_KGroup_MOE is not compiled in. "
+                "Recompile with AVX512F + AVX512BW + AVX512_BF16 enabled."
+            )
+        return AMXFP4_KGroup_MOE
+
+    if forced == "avx2":
+        if not _HAS_AVX2_MXFP4_SUPPORT:
+            raise RuntimeError(
+                "KT_MXFP4_BACKEND=avx2 requested, but AVX2MXFP4_MOE is not compiled in. "
+                "Recompile with AVX2 + FMA enabled."
+            )
+        return AVX2MXFP4_MOE
+
+    if _HAS_MXFP4_SUPPORT:
+        return AMXFP4_KGroup_MOE
+    if _HAS_AVX2_MXFP4_SUPPORT:
+        return AVX2MXFP4_MOE
     return None
 
 
@@ -512,11 +545,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "Please recompile kt_kernel_ext with GPTQ INT4 support enabled.\n"
                 "AVX-VNNI-256 will be selected automatically when available on the current CPU."
             )
-        if method == "MXFP4" and not _HAS_MXFP4_SUPPORT:
+        if method == "MXFP4" and not (_HAS_MXFP4_SUPPORT or _HAS_AVX2_MXFP4_SUPPORT):
             raise RuntimeError(
-                "MXFP4 backend not available. Required ISA:\n"
-                "  - AVX512F + AVX512BW + AVX512_BF16\n"
-                "Please recompile kt_kernel_ext with AVX512 + BF16 enabled."
+                "MXFP4 backend not available. Required ISA (any one of):\n"
+                "  - AVX512F + AVX512BW + AVX512_BF16 (for AMX/AVX-512 backend)\n"
+                "  - AVX2 + FMA (for AVX2 fallback backend)\n"
+                "Please recompile kt_kernel_ext with one of the above enabled."
             )
 
         super().__init__(
@@ -736,7 +770,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.bits = 4
             moe_config.quant_config.group_size = group_size
             moe_config.quant_config.zero_point = False
-            self.moe = AMXFP4_KGroup_MOE(moe_config)
+            backend_cls = _select_mxfp4_backend()
+            if backend_cls is None:
+                raise RuntimeError(
+                    "No MXFP4 backend available after runtime selection. "
+                    "Compile with AVX512_BF16 (AMXFP4_KGroup_MOE) or AVX2 (AVX2MXFP4_MOE)."
+                )
+            self.moe = backend_cls(moe_config)
         elif self.method == "FP8":
             moe_config.quant_config.bits = 8
             moe_config.quant_config.group_size = 128
@@ -769,7 +809,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2
-            if _HAS_BF16_SUPPORT and _host_has_cpu_flag("amx_bf16"):  
+            if _HAS_BF16_SUPPORT:
                 self.moe = AMXBF16_MOE(moe_config)
             else:
                 self.moe = AVX2BF16_MOE(moe_config)
