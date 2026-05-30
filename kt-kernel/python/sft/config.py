@@ -75,6 +75,10 @@ class KTConfig:
     kt_lora_rank: int | None = None
     kt_lora_alpha: float | None = None
 
+    # Training mode
+    kt_train_mode: str | None = None  # "lora" | "full" | "hybrid"
+    kt_full_weight_grad: bool | None = None  # auto-set True when train_mode in (full, hybrid)
+
     # LoRA Experts (GPU-side extra experts)
     kt_use_lora_experts: bool | None = None
     kt_lora_expert_num: int | None = None
@@ -132,6 +136,10 @@ class KTConfig:
             self.kt_lora_alpha = _env_float("ACCELERATE_KT_LORA_ALPHA", None)
         if self.kt_lora_alpha is None and self.kt_lora_rank is not None:
             self.kt_lora_alpha = float(self.kt_lora_rank * 2)
+        if self.kt_train_mode is None:
+            self.kt_train_mode = os.environ.get("ACCELERATE_KT_TRAIN_MODE", "lora")
+        if self.kt_full_weight_grad is None:
+            self.kt_full_weight_grad = self.kt_train_mode in ("full", "hybrid")
         if self.kt_model_max_length is None:
             self.kt_model_max_length = _env_int("ACCELERATE_KT_MODEL_MAX_LENGTH", None)
         if self.kt_skip_expert_loading is None:

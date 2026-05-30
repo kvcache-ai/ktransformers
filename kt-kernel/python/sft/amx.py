@@ -9,12 +9,15 @@ this file handles weight loading, LoRA init, and C++ task construction.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import glob as _glob
 import torch
 from typing import Optional, List
 
 from kt_kernel_ext.moe import MOESFTConfig
+
+logger = logging.getLogger(__name__)
 
 from ..utils.loader import BF16SafeTensorLoader, SafeTensorLoader
 
@@ -79,6 +82,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         method: str = "AMXBF16_SFT",
         group_size: int = 128,
         zero_point: bool = True,
+        full_weight_grad: bool = False,
     ):
         if not _HAS_AMX_SFT_SUPPORT:
             raise RuntimeError(
@@ -100,6 +104,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
             max_cache_depth=max_cache_depth,
+            full_weight_grad=full_weight_grad,
         )
 
         self.method = method
@@ -138,19 +143,42 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             return self.moe.backward_task(
                 buffer.grad_output_cpu.data_ptr(),
                 buffer.grad_input_cpu.data_ptr(),
-                0, 0, 0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 buffer.grad_weights.data_ptr(),
+                0,
+                0,
+                0,  # grad_gate_proj, grad_up_proj, grad_down_proj
             )
+
+        # Base weight grad pointers (nullptr if not in full mode)
+        grad_gate_proj_ptr = (
+            self.grad_gate_proj_buf.data_ptr() if self._full_weight_grad and self.grad_gate_proj_buf is not None else 0
+        )
+        grad_up_proj_ptr = (
+            self.grad_up_proj_buf.data_ptr() if self._full_weight_grad and self.grad_up_proj_buf is not None else 0
+        )
+        grad_down_proj_ptr = (
+            self.grad_down_proj_buf.data_ptr() if self._full_weight_grad and self.grad_down_proj_buf is not None else 0
+        )
+
         return self.moe.backward_task(
             buffer.grad_output_cpu.data_ptr(),
             buffer.grad_input_cpu.data_ptr(),
-            self.grad_gate_lora_a.data_ptr(),
-            self.grad_gate_lora_b.data_ptr(),
-            self.grad_up_lora_a.data_ptr(),
-            self.grad_up_lora_b.data_ptr(),
-            self.grad_down_lora_a.data_ptr(),
-            self.grad_down_lora_b.data_ptr(),
+            self.grad_gate_lora_a.data_ptr() if self.lora_rank > 0 else 0,
+            self.grad_gate_lora_b.data_ptr() if self.lora_rank > 0 else 0,
+            self.grad_up_lora_a.data_ptr() if self.lora_rank > 0 else 0,
+            self.grad_up_lora_b.data_ptr() if self.lora_rank > 0 else 0,
+            self.grad_down_lora_a.data_ptr() if self.lora_rank > 0 else 0,
+            self.grad_down_lora_b.data_ptr() if self.lora_rank > 0 else 0,
             buffer.grad_weights.data_ptr(),
+            grad_gate_proj_ptr,
+            grad_up_proj_ptr,
+            grad_down_proj_ptr,
         )
 
     # ========== Weight loading ==========
@@ -174,6 +202,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.layer_idx = self.layer_idx
         config.share_backward_bb = getattr(self, "share_backward_bb", False)
         config.share_cache_pool = getattr(self, "share_cache_pool", False)
+        config.full_weight_grad = self._full_weight_grad
 
         if getattr(self, "_use_kt_direct_load", False):
             config.load = True
@@ -215,6 +244,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             config.quant_config.group_size = self.group_size
             config.quant_config.zero_point = self.zero_point
 
+        # Release old C++ MOE object before creating a new one to avoid memory leak
+        old_moe = getattr(self, "moe", None)
+        if old_moe is not None:
+            del old_moe
+            import gc
+            gc.collect()
+
         self.moe = self._moe_class(config)
 
         self.cpu_infer.submit(self.moe.load_weights_task())
@@ -224,9 +260,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.cpu_infer.sync()
 
         # Release Python-side weight tensors (C++ copied them)
-        self.gate_proj = None
-        self.up_proj = None
-        self.down_proj = None
+        # In full_weight_grad mode, keep them for nn.Parameter initialization
+        if not self._full_weight_grad:
+            self.gate_proj = None
+            self.up_proj = None
+            self.down_proj = None
 
         if getattr(self, "_bf16_gate_proj", None) is not None:
             self._bf16_gate_proj = None
@@ -235,18 +273,34 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         if getattr(self, "_use_projs_path", False):
             for attr in [
-                "_gate_weights_per_numa", "_up_weights_per_numa", "_down_weights_per_numa",
-                "_gate_scales_per_numa", "_up_scales_per_numa", "_down_scales_per_numa",
-                "_gate_projs_ptrs", "_up_projs_ptrs", "_down_projs_ptrs",
-                "_gate_scale_ptrs", "_up_scale_ptrs", "_down_scale_ptrs",
+                "_gate_weights_per_numa",
+                "_up_weights_per_numa",
+                "_down_weights_per_numa",
+                "_gate_scales_per_numa",
+                "_up_scales_per_numa",
+                "_down_scales_per_numa",
+                "_gate_projs_ptrs",
+                "_up_projs_ptrs",
+                "_down_projs_ptrs",
+                "_gate_scale_ptrs",
+                "_up_scale_ptrs",
+                "_down_scale_ptrs",
             ]:
                 setattr(self, attr, None)
             if getattr(self, "_has_bwd_projs", False):
                 for attr in [
-                    "_gate_bwd_weights_per_numa", "_up_bwd_weights_per_numa", "_down_bwd_weights_per_numa",
-                    "_gate_bwd_scales_per_numa", "_up_bwd_scales_per_numa", "_down_bwd_scales_per_numa",
-                    "_gate_bwd_projs_ptrs", "_up_bwd_projs_ptrs", "_down_bwd_projs_ptrs",
-                    "_gate_bwd_scale_ptrs", "_up_bwd_scale_ptrs", "_down_bwd_scale_ptrs",
+                    "_gate_bwd_weights_per_numa",
+                    "_up_bwd_weights_per_numa",
+                    "_down_bwd_weights_per_numa",
+                    "_gate_bwd_scales_per_numa",
+                    "_up_bwd_scales_per_numa",
+                    "_down_bwd_scales_per_numa",
+                    "_gate_bwd_projs_ptrs",
+                    "_up_bwd_projs_ptrs",
+                    "_down_bwd_projs_ptrs",
+                    "_gate_bwd_scale_ptrs",
+                    "_up_bwd_scale_ptrs",
+                    "_down_bwd_scale_ptrs",
                 ]:
                     setattr(self, attr, None)
 
@@ -297,6 +351,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.up_proj = torch.stack(up_weights, dim=0).contiguous()
             self.down_proj = torch.stack(down_weights, dim=0).contiguous()
         else:
+
             def _make_ptrs(arrays_per_numa):
                 return [
                     [
@@ -349,12 +404,18 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
     def init_lora_weights(
         self,
-        gate_lora_a: torch.Tensor, gate_lora_b: torch.Tensor,
-        up_lora_a: torch.Tensor, up_lora_b: torch.Tensor,
-        down_lora_a: torch.Tensor, down_lora_b: torch.Tensor,
-        grad_gate_lora_a: torch.Tensor, grad_gate_lora_b: torch.Tensor,
-        grad_up_lora_a: torch.Tensor, grad_up_lora_b: torch.Tensor,
-        grad_down_lora_a: torch.Tensor, grad_down_lora_b: torch.Tensor,
+        gate_lora_a: torch.Tensor,
+        gate_lora_b: torch.Tensor,
+        up_lora_a: torch.Tensor,
+        up_lora_b: torch.Tensor,
+        down_lora_a: torch.Tensor,
+        down_lora_b: torch.Tensor,
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
     ) -> None:
         expected_shapes = {
             "gate_lora_a": (self.num_experts, self.lora_rank, self.hidden_size),
@@ -365,9 +426,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             "down_lora_b": (self.num_experts, self.hidden_size, self.lora_rank),
         }
         provided = {
-            "gate_lora_a": gate_lora_a, "gate_lora_b": gate_lora_b,
-            "up_lora_a": up_lora_a, "up_lora_b": up_lora_b,
-            "down_lora_a": down_lora_a, "down_lora_b": down_lora_b,
+            "gate_lora_a": gate_lora_a,
+            "gate_lora_b": gate_lora_b,
+            "up_lora_a": up_lora_a,
+            "up_lora_b": up_lora_b,
+            "down_lora_a": down_lora_a,
+            "down_lora_b": down_lora_b,
         }
         for name, tensor in provided.items():
             expected = expected_shapes[name]
@@ -399,6 +463,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if self._is_skip_lora:
             return
         if not self._lora_initialized:
+            if self.lora_rank <= 0:
+                return  # Full mode without LoRA — no LoRA weights to update
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
         self.cpu_infer.submit(
@@ -412,6 +478,52 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             )
         )
         self.cpu_infer.sync()
+
+    def update_base_weights(self) -> None:
+        """Sync updated base weight parameters back to C++ kernel after optimizer step."""
+        if not self._weights_loaded:
+            raise RuntimeError("Weights not loaded. Call load_weights() first.")
+        if not self._full_weight_grad:
+            return  # No base weights to update in LoRA mode
+        if self.gate_proj_buf is None:
+            raise RuntimeError("Base weight buffers not initialized. Call init_full_weight_grad_buffers() first.")
+
+        logger.info(f"Layer {self.layer_idx}: update_base_weights() - syncing updated weights to C++ kernel")
+
+        # Preferred path: update config pointers on existing C++ object and re-quantize.
+        # This avoids full C++ MOE object recreation (~0.6s/layer vs ~1.9s/layer).
+        if hasattr(self.moe, "set_base_weight_pointers"):
+            self.moe.set_base_weight_pointers(
+                self.gate_proj_buf.data.data_ptr(),
+                self.up_proj_buf.data.data_ptr(),
+                self.down_proj_buf.data.data_ptr(),
+            )
+            self.cpu_infer.submit(self.moe.load_weights_task())
+            self.cpu_infer.sync()
+            logger.info(f"Layer {self.layer_idx}: update_base_weights() - re-quantized existing kernel")
+            return
+
+        # Fallback: full reload path (creates new C++ MOE object)
+        # This is slower but works without C++ set_base_weight_pointers support.
+        logger.warning(
+            f"Layer {self.layer_idx}: set_base_weight_pointers not available, "
+            f"falling back to full C++ MOE object recreation"
+        )
+        old_moe = getattr(self, "moe", None)
+        if old_moe is not None:
+            del old_moe
+
+        self.gate_proj = self.gate_proj_buf.data
+        self.up_proj = self.up_proj_buf.data
+        self.down_proj = self.down_proj_buf.data
+        physical_to_logical_map = torch.arange(self.num_experts, dtype=torch.int64, device="cpu")
+        self._weights_loaded = False  # Allow re-load
+        self.load_weights_from_tensors(
+            gate_proj=self.gate_proj,
+            up_proj=self.up_proj,
+            down_proj=self.down_proj,
+            physical_to_logical_map_cpu=physical_to_logical_map,
+        )
 
     def save_backward_weights_from_tensors(
         self,

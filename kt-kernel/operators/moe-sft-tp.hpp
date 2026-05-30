@@ -343,7 +343,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
         throw std::runtime_error("K2 pre-quantized mode does not support TP > 1 yet");
       }
     } else if (config.gate_proj != nullptr) {
-      printf("TP_MOE_SFT: From BF16 with partitioning\n");
+      // printf("TP_MOE_SFT: From BF16 with partitioning\n");
 
       // Temporary storage for partitioned weights
       std::vector<ggml_bf16_t*> temp_gate(tp_count);
@@ -548,7 +548,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
-                void* grad_weights) {
+                void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
+                void* grad_down_proj = nullptr) {
     auto pool = config.pool;
 
 
@@ -694,7 +695,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              tp_down_a_ptr[numa_id], /* copy-type: direct write */
                              nullptr,                /* grad_down_lora_b — unused, FP32 path below */
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
-                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id]);
+                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id],
+                             grad_gate_proj, grad_up_proj, grad_down_proj);
     });
 
     // // Collect per-thread timing from all NUMA subpools
@@ -891,10 +893,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void backward_binding(intptr_t grad_output, intptr_t grad_input, intptr_t grad_gate_lora_a, intptr_t grad_gate_lora_b,
                         intptr_t grad_up_lora_a, intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
-                        intptr_t grad_down_lora_b, intptr_t grad_weights) {
+                        intptr_t grad_down_lora_b, intptr_t grad_weights, intptr_t grad_gate_proj,
+                        intptr_t grad_up_proj, intptr_t grad_down_proj) {
     backward((const void*)grad_output, (void*)grad_input, (void*)grad_gate_lora_a, (void*)grad_gate_lora_b,
              (void*)grad_up_lora_a, (void*)grad_up_lora_b, (void*)grad_down_lora_a, (void*)grad_down_lora_b,
-             (void*)grad_weights);
+             (void*)grad_weights, (void*)grad_gate_proj, (void*)grad_up_proj, (void*)grad_down_proj);
   }
 
   /**
@@ -1105,6 +1108,22 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                    intptr_t down_lora_a, intptr_t down_lora_b) {
     update_lora_weights((void*)gate_lora_a, (void*)gate_lora_b, (void*)up_lora_a, (void*)up_lora_b, (void*)down_lora_a,
                         (void*)down_lora_b);
+  }
+
+  /**
+   * @brief Update base weight BF16 pointers for reload_base_weights (full mode training).
+   *
+   * After calling this, call load_weights_task() to re-quantize BF16->AMX
+   * and update the C++ kernel's internal quantized buffers.
+   * This avoids creating a new C++ MOE object (~0.6s/layer for quantization
+   * vs ~1.9s/layer for full object recreation).
+   */
+  void set_base_weight_pointers(void* gate, void* up, void* down) {
+    config.gate_proj = gate;
+    config.up_proj = up;
+    config.down_proj = down;
+    // Mark that weights need re-loading (partitioning + quantization)
+    weights_loaded = false;
   }
 };
 

@@ -346,6 +346,15 @@ struct MOESFTConfig : public GeneralMOEConfig {
   void* down_lora_a = nullptr;  // [expert_num, lora_rank, intermediate_size]
   void* down_lora_b = nullptr;  // [expert_num, hidden_size, lora_rank]
 
+  // Full weight gradient configuration
+  bool full_weight_grad = false;
+
+  // Base weight gradient buffer pointers (directly pointing to Python tensor memory, zero-copy)
+  // Only used when full_weight_grad == true
+  void* grad_gate_proj = nullptr;  // [expert_num, intermediate_size, hidden_size]
+  void* grad_up_proj = nullptr;    // [expert_num, intermediate_size, hidden_size]
+  void* grad_down_proj = nullptr;  // [expert_num, hidden_size, intermediate_size]
+
   MOESFTConfig() : GeneralMOEConfig() {}
 
   MOESFTConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)

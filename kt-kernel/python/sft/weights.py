@@ -108,9 +108,16 @@ def extract_moe_weights(
     return gate_proj, up_proj, down_proj
 
 
-def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchConfig) -> None:
+def _clear_original_expert_weights(
+    moe_module: nn.Module, moe_config: MOEArchConfig, full_weight_grad: bool = False
+) -> None:
     """
     Clear original expert weights to free memory after KT weights are loaded.
+
+    In full_weight_grad mode, gate_proj_buf/up_proj_buf/down_proj_buf serve as
+    the authoritative copies for the optimizer. The original expert weights in
+    the model tree are redundant and cause double-counting in count_parameters().
+    Clear them just like in LoRA mode.
     """
     from .arch import detect_fused_experts
 
@@ -127,10 +134,14 @@ def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchCon
             original_dtype = param.dtype
             tiny_storage = torch.UntypedStorage(1, device="cpu")
             fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage, storage_offset=0, size=param.shape,
+                tiny_storage,
+                storage_offset=0,
+                size=param.shape,
                 stride=[0] * len(param.shape),
             )
-            experts._parameters[name] = nn.Parameter(fake_tensor, requires_grad=False)
+            placeholder = nn.Parameter(fake_tensor, requires_grad=False)
+            placeholder._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
+            experts._parameters[name] = placeholder
         return
 
     def _iter_weight_params():
@@ -141,7 +152,9 @@ def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchCon
                     continue
 
                 parametrizations = getattr(proj, "parametrizations", None)
-                parametrized_weight = getattr(parametrizations, "weight", None) if parametrizations is not None else None
+                parametrized_weight = (
+                    getattr(parametrizations, "weight", None) if parametrizations is not None else None
+                )
                 if parametrized_weight is not None:
                     original = getattr(parametrized_weight, "original", None)
                     if isinstance(original, torch.nn.Parameter):
@@ -178,10 +191,13 @@ def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchCon
             # only used for shape/dtype discovery by PEFT.
             tiny_storage = torch.UntypedStorage(1, device="cpu")
             fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage, storage_offset=0, size=weight_param.shape,
+                tiny_storage,
+                storage_offset=0,
+                size=weight_param.shape,
                 stride=[0] * len(weight_param.shape),
             )
             new_param = nn.Parameter(fake_tensor, requires_grad=False)
+            new_param._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
             replaced_count += 1
 
             # Avoid `KeyError: attribute 'weight' already exists` for parametrized modules
@@ -201,9 +217,7 @@ def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchCon
             try:
                 setattr(container, param_name, new_param)
             except Exception as exc:
-                logger.warning(
-                    f"Failed to clear expert weight {type(proj).__name__}.{param_name}: {exc}"
-                )
+                logger.warning(f"Failed to clear expert weight {type(proj).__name__}.{param_name}: {exc}")
 
     logger.info(f"Replaced {replaced_count} expert weight params")
 
@@ -256,7 +270,9 @@ def _load_kt_weight_index(kt_weight_path: str) -> dict[str, str]:
     return index
 
 
-def _dequant_fp8_experts(weights: list[torch.Tensor], scales: list[torch.Tensor | None], block_size: tuple[int, int]) -> torch.Tensor:
+def _dequant_fp8_experts(
+    weights: list[torch.Tensor], scales: list[torch.Tensor | None], block_size: tuple[int, int]
+) -> torch.Tensor:
     """Dequantize a list of FP8 expert weights and stack them (batched, vectorized).
 
     Args:
@@ -468,9 +484,7 @@ def load_experts_from_kt_weight_path(
             f"Expected keys like 'blk.{layer_idx}.ffn_gate_exps.0.numa.0.weight'"
         )
 
-    logger.info(
-        f"Loading INT8 weights for layer {layer_idx}: {num_experts} experts, {numa_count} NUMA partitions"
-    )
+    logger.info(f"Loading INT8 weights for layer {layer_idx}: {num_experts} experts, {numa_count} NUMA partitions")
 
     gate_weights_list = []
     gate_scales_list = []

@@ -125,6 +125,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         lora_rank: int = 16,
         lora_alpha: float = 32.0,
         max_cache_depth: int = 1,
+        full_weight_grad: bool = False,
     ):
         self.cpu_infer = self._get_cpu_infer(cpuinfer_threads, threadpool_count)
 
@@ -134,7 +135,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             moe_intermediate_size=moe_intermediate_size,
             num_experts_per_tok=num_experts_per_tok,
         )
-        self._validate_sft_config(lora_rank, lora_alpha, max_cache_depth)
+        self._validate_sft_config(lora_rank, lora_alpha, max_cache_depth, full_weight_grad=full_weight_grad)
 
         self.layer_idx = layer_idx
         self.num_experts = num_experts
@@ -148,8 +149,10 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
-        self.lora_scaling = lora_alpha / lora_rank
+        self.lora_scaling = lora_alpha / lora_rank if lora_rank > 0 else 0.0
         self.max_cache_depth = max_cache_depth
+
+        self._full_weight_grad = full_weight_grad
 
         self.gate_lora_a: Optional[torch.Tensor] = None
         self.gate_lora_b: Optional[torch.Tensor] = None
@@ -158,21 +161,74 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self.down_lora_a: Optional[torch.Tensor] = None
         self.down_lora_b: Optional[torch.Tensor] = None
 
+        # Base weight parameters for full fine-tuning
+        self.gate_proj_buf: Optional[torch.Tensor] = None
+        self.up_proj_buf: Optional[torch.Tensor] = None
+        self.down_proj_buf: Optional[torch.Tensor] = None
+        self.grad_gate_proj_buf: Optional[torch.Tensor] = None
+        self.grad_up_proj_buf: Optional[torch.Tensor] = None
+        self.grad_down_proj_buf: Optional[torch.Tensor] = None
+
         self._weights_loaded: bool = False
         self._lora_initialized: bool = False
         self._cache_depth: int = 0
         self._is_skip_lora: bool = False
+        self._base_weights_dirty: bool = False
 
         self.moe = None
 
     @staticmethod
-    def _validate_sft_config(lora_rank: int, lora_alpha: float, max_cache_depth: int) -> None:
-        if lora_rank <= 0:
-            raise ValueError(f"lora_rank must be positive, got {lora_rank}")
-        if lora_alpha <= 0:
+    def _validate_sft_config(
+        lora_rank: int, lora_alpha: float, max_cache_depth: int, full_weight_grad: bool = False
+    ) -> None:
+        if not full_weight_grad and lora_rank <= 0:
+            raise ValueError(
+                f"lora_rank must be positive in LoRA mode, got {lora_rank}. "
+                "Set kt_train_mode='full' for full fine-tuning."
+            )
+        if lora_rank > 0 and lora_alpha <= 0:
             raise ValueError(f"lora_alpha must be positive, got {lora_alpha}")
         if max_cache_depth <= 0:
             raise ValueError(f"max_cache_depth must be positive, got {max_cache_depth}")
+
+    # ========== Full weight grad methods ==========
+
+    def init_full_weight_grad_buffers(
+        self, gate_proj: torch.Tensor, up_proj: torch.Tensor, down_proj: torch.Tensor
+    ) -> None:
+        """Initialize base weight nn.Parameter buffers and gradient buffers for full fine-tuning.
+
+        Args:
+            gate_proj: [num_experts, intermediate_size, hidden_size] BF16 CPU tensor
+            up_proj: [num_experts, intermediate_size, hidden_size] BF16 CPU tensor
+            down_proj: [num_experts, hidden_size, intermediate_size] BF16 CPU tensor
+        """
+        import torch.nn as nn
+
+        dtype = torch.bfloat16
+        E = self.num_experts
+        I = self.moe_intermediate_size
+        H = self.hidden_size
+
+        # Create nn.Parameter buffers (optimizer-visible)
+        self.gate_proj_buf = nn.Parameter(gate_proj.to(dtype=dtype, device="cpu").contiguous(), requires_grad=True)
+        self.up_proj_buf = nn.Parameter(up_proj.to(dtype=dtype, device="cpu").contiguous(), requires_grad=True)
+        self.down_proj_buf = nn.Parameter(down_proj.to(dtype=dtype, device="cpu").contiguous(), requires_grad=True)
+
+        # Create gradient buffers (C++ writes directly to these)
+        self.grad_gate_proj_buf = torch.zeros(E, I, H, dtype=dtype, device="cpu")
+        self.grad_up_proj_buf = torch.zeros(E, I, H, dtype=dtype, device="cpu")
+        self.grad_down_proj_buf = torch.zeros(E, H, I, dtype=dtype, device="cpu")
+
+        # Note: .grad is NOT pre-assigned here. PyTorch autograd will set it
+        # when KTMoEFunction.backward() returns the gradient buffers.
+        # The C++ kernel writes directly to grad_gate_proj_buf etc.,
+        # and backward returns them so PyTorch can propagate correctly.
+
+    @abstractmethod
+    def update_base_weights(self) -> None:
+        """Sync updated base weight parameters back to C++ kernel after optimizer step."""
+        ...
 
     # ========== Abstract methods for subclasses ==========
 
@@ -187,24 +243,27 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         ...
 
     @abstractmethod
-    def load_weights(self, physical_to_logical_map_cpu: torch.Tensor) -> None:
-        ...
+    def load_weights(self, physical_to_logical_map_cpu: torch.Tensor) -> None: ...
 
     @abstractmethod
     def init_lora_weights(
         self,
-        gate_lora_a: torch.Tensor, gate_lora_b: torch.Tensor,
-        up_lora_a: torch.Tensor, up_lora_b: torch.Tensor,
-        down_lora_a: torch.Tensor, down_lora_b: torch.Tensor,
-        grad_gate_lora_a: torch.Tensor, grad_gate_lora_b: torch.Tensor,
-        grad_up_lora_a: torch.Tensor, grad_up_lora_b: torch.Tensor,
-        grad_down_lora_a: torch.Tensor, grad_down_lora_b: torch.Tensor,
-    ) -> None:
-        ...
+        gate_lora_a: torch.Tensor,
+        gate_lora_b: torch.Tensor,
+        up_lora_a: torch.Tensor,
+        up_lora_b: torch.Tensor,
+        down_lora_a: torch.Tensor,
+        down_lora_b: torch.Tensor,
+        grad_gate_lora_a: torch.Tensor,
+        grad_gate_lora_b: torch.Tensor,
+        grad_up_lora_a: torch.Tensor,
+        grad_up_lora_b: torch.Tensor,
+        grad_down_lora_a: torch.Tensor,
+        grad_down_lora_b: torch.Tensor,
+    ) -> None: ...
 
     @abstractmethod
-    def update_lora_weights(self) -> None:
-        ...
+    def update_lora_weights(self) -> None: ...
 
     # ========== Buffer helpers ==========
 
@@ -222,7 +281,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def _validate_forward_inputs(self, hidden_states: torch.Tensor, expert_ids: torch.Tensor, weights: torch.Tensor):
         if not self._weights_loaded:
             raise RuntimeError("Weights not loaded. Call load_weights() or load_weights_from_tensors() first.")
-        if not self._lora_initialized and not self._is_skip_lora:
+        if not self._lora_initialized and not self._is_skip_lora and not self._full_weight_grad:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
         qlen = hidden_states.shape[0]
         if qlen > self.chunked_prefill_size:
@@ -235,12 +294,16 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 f"expert_ids shape {tuple(expert_ids.shape)} must be ({qlen}, {self.num_experts_per_tok})."
             )
         if weights.shape[0] != qlen or weights.shape[1] != self.num_experts_per_tok:
-            raise ValueError(
-                f"weights shape {tuple(weights.shape)} must be ({qlen}, {self.num_experts_per_tok})."
-            )
+            raise ValueError(f"weights shape {tuple(weights.shape)} must be ({qlen}, {self.num_experts_per_tok}).")
 
-    def _copy_inputs_to_buffer(self, buffer: KExpertsSFTBuffer, hidden_states: torch.Tensor,
-                               expert_ids: torch.Tensor, weights: torch.Tensor, qlen: int) -> torch.device:
+    def _copy_inputs_to_buffer(
+        self,
+        buffer: KExpertsSFTBuffer,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        qlen: int,
+    ) -> torch.device:
         """Copy inputs to CPU buffer, return input device."""
         input_device = hidden_states.device
         buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
@@ -392,11 +455,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def submit_backward_repack(self):
         if not self._weights_loaded or self.moe is None:
             return
-        if hasattr(self.moe, 'submit_backward_repack'):
+        if hasattr(self.moe, "submit_backward_repack"):
             self.moe.submit_backward_repack()
 
     def wait_backward_repack(self):
         if not self._weights_loaded or self.moe is None:
             return
-        if hasattr(self.moe, 'wait_backward_repack'):
+        if hasattr(self.moe, "wait_backward_repack"):
             self.moe.wait_backward_repack()

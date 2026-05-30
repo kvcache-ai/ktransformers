@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -62,7 +63,29 @@ class KTMoELayerWrapper(nn.Module):
 
         # 1. gate/router FIRST - keep original attribute name for PEFT compatibility
         router_attr = moe_config.router_attr  # "gate" for Qwen3/DeepSeek
-        setattr(self, router_attr, getattr(original_moe, router_attr, None))
+        original_router = getattr(original_moe, router_attr, None)
+        self._original_router = None  # Set when router is not nn.Linear (e.g. TopKRouter)
+
+        if original_router is not None and isinstance(original_router, nn.Linear):
+            # transformers <=4.x / some models: gate is nn.Linear - register directly.
+            setattr(self, router_attr, original_router)
+        elif original_router is not None and hasattr(original_router, "weight") and isinstance(
+            getattr(original_router, "weight"), nn.Parameter
+        ):
+            # transformers v5+: gate is a TopKRouter with nn.Parameter weight.
+            # Wrap it in nn.Linear so PEFT can discover and inject LoRA.
+            # The nn.Linear shares the same weight tensor - LoRA applied to it
+            # is equivalent to LoRA on the original gate.
+            router_weight = original_router.weight
+            router_linear = nn.Linear(
+                router_weight.shape[1], router_weight.shape[0], bias=False,
+            )
+            router_linear.weight = router_weight  # share the same parameter
+            setattr(self, router_attr, router_linear)
+            # Keep the original router for forward (top-k selection logic)
+            self._original_router = original_router
+        else:
+            setattr(self, router_attr, original_router)
         self._router_attr = router_attr
 
         # 2. experts SECOND (this is what PEFT targets for LoRA)
@@ -84,10 +107,13 @@ class KTMoELayerWrapper(nn.Module):
         self._peft_lora_modules: dict[int, dict[str, tuple[nn.Module, nn.Module]]] | None = None
         self._lora_pointers_dirty = False
 
+        # Full weight grad mode (set during wrapping or kt_adapt_peft_lora)
+        self._full_weight_grad = getattr(wrapper, "_full_weight_grad", False) if wrapper is not None else False
+
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
         saved_experts = None
-        experts_attr = getattr(self, '_experts_attr', None)
+        experts_attr = getattr(self, "_experts_attr", None)
 
         if experts_attr is not None and getattr(self, experts_attr, None) is not None:
             saved_experts = getattr(self, experts_attr)
@@ -103,6 +129,7 @@ class KTMoELayerWrapper(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
         import torch.distributed as dist
+
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
         rank = dist.get_rank() if dist.is_initialized() else 0
 
@@ -112,11 +139,12 @@ class KTMoELayerWrapper(nn.Module):
         topk_ids, topk_weights = self._compute_routing(hidden_states)
 
         train_lora = self._peft_lora_modules is not None and len(self._peft_lora_modules) > 0
+        full_weight_grad = self._full_weight_grad
 
         save_for_backward = (
             self.training
             and torch.is_grad_enabled()
-            and (hidden_states.requires_grad or topk_weights.requires_grad or train_lora)
+            and (hidden_states.requires_grad or topk_weights.requires_grad or train_lora or full_weight_grad)
         )
         use_autograd_path = save_for_backward
         save_for_backward_submit = use_autograd_path
@@ -126,6 +154,11 @@ class KTMoELayerWrapper(nn.Module):
         if train_lora and self._lora_pointers_dirty:
             self.update_lora_pointers()
             self._lora_pointers_dirty = False
+
+        # In full_weight_grad mode, sync base weights after optimizer step
+        if full_weight_grad and getattr(self.wrapper, "_base_weights_dirty", False):
+            self.wrapper.update_base_weights()
+            self.wrapper._base_weights_dirty = False
 
         gpu_output, all_qlens = self._submit_and_compute_gpu(
             hidden_states,
@@ -141,11 +174,15 @@ class KTMoELayerWrapper(nn.Module):
             if train_lora and self._peft_lora_modules:
                 for expert_loras in self._peft_lora_modules.values():
                     for lora_A, lora_B in expert_loras.values():
-                        if hasattr(lora_A, 'weight') and lora_A.weight.requires_grad:
+                        if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
                             lora_ref = lora_A.weight
                             break
                     if lora_ref.numel() > 0:
                         break
+            elif full_weight_grad and self.wrapper is not None:
+                # In full mode, use base weight param as autograd sentinel
+                if self.wrapper.gate_proj_buf is not None:
+                    lora_ref = self.wrapper.gate_proj_buf
 
             moe_output = KTMoEFunction.apply(
                 hidden_states,
@@ -159,6 +196,10 @@ class KTMoELayerWrapper(nn.Module):
                 save_for_backward,
                 train_lora,
                 all_qlens,
+                # Base weight params for full mode gradient flow
+                self.wrapper.gate_proj_buf if full_weight_grad and self.wrapper is not None else None,
+                self.wrapper.up_proj_buf if full_weight_grad and self.wrapper is not None else None,
+                self.wrapper.down_proj_buf if full_weight_grad and self.wrapper is not None else None,
             )
         else:
             moe_output = self._sync_forward_output_no_autograd(
@@ -194,13 +235,9 @@ class KTMoELayerWrapper(nn.Module):
             else:
                 all_qlens_list = [int(q) for q in all_qlens]
                 if len(all_qlens_list) != world_size:
-                    raise RuntimeError(
-                        f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}"
-                    )
+                    raise RuntimeError(f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}")
             if int(all_qlens_list[rank]) != qlen:
-                raise RuntimeError(
-                    f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}"
-                )
+                raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}")
             total_qlen = sum(all_qlens_list)
 
             if rank == 0:
@@ -234,12 +271,11 @@ class KTMoELayerWrapper(nn.Module):
         return torch.empty(batch_size, seq_len, self.hidden_size, device=original_device, dtype=original_dtype)
 
     def _compute_routing(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Run routing under no_grad to avoid creating autograd nodes whose
-        # SavedVariables become orphan holders inside gradient checkpoint.
-        # The gate is frozen during LoRA fine-tuning and the main gradient
-        # flows through KTMoEFunction.backward()'s grad_input, so the
-        # routing gradient contribution to hidden_states can be safely dropped.
-        with torch.no_grad():
+        # In full_weight_grad mode, Router gradients should flow (no torch.no_grad).
+        # In LoRA mode, Router is frozen — wrap in no_grad to avoid orphan autograd nodes.
+        no_grad_ctx = torch.no_grad() if not self._full_weight_grad else nullcontext()
+
+        with no_grad_ctx:
             router = getattr(self, self._router_attr)
             if self.router_type == "deepseek_gate":
                 # DeepSeek V3's MoEGate has `assert not self.training` in its noaux_tc
@@ -255,6 +291,23 @@ class KTMoELayerWrapper(nn.Module):
                     topk_ids, topk_weights = router_output
                 else:
                     topk_ids, topk_weights = router_output[0], router_output[1]
+                if topk_weights.is_floating_point():
+                    topk_weights = topk_weights.to(torch.bfloat16)
+                return topk_ids, topk_weights
+
+            # When _original_router is set, self.gate is an nn.Linear wrapper
+            # around the TopKRouter's weight.  Use it (with PEFT LoRA if
+            # applied) for the linear projection, then replicate top-k logic.
+            if self._original_router is not None:
+                orig_router = self._original_router
+                router_logits = router(hidden_states.view(-1, self.hidden_size))
+                router_probs = F.softmax(router_logits, dtype=torch.float, dim=-1)
+                top_k = getattr(orig_router, "top_k", self.moe_config.num_experts_per_tok)
+                norm_topk_prob = getattr(orig_router, "norm_topk_prob", True)
+                topk_weights, topk_ids = torch.topk(router_probs, top_k, dim=-1)
+                if norm_topk_prob:
+                    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+                topk_weights = topk_weights.to(router_logits.dtype)
                 if topk_weights.is_floating_point():
                     topk_weights = topk_weights.to(torch.bfloat16)
                 return topk_ids, topk_weights
@@ -299,9 +352,7 @@ class KTMoELayerWrapper(nn.Module):
         if dist_on:
             all_qlens = _all_gather_qlens(qlen, original_device, world_size)
             if int(all_qlens[rank]) != qlen:
-                raise RuntimeError(
-                    f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}"
-                )
+                raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}")
             total_qlen = sum(all_qlens)
 
             hs_flat = hidden_states.view(qlen, self.hidden_size).contiguous()
