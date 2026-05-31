@@ -7,11 +7,11 @@ expert). The previous ``== 0`` check was an off-by-one that falsely raised
 "No experts found" for a single-expert layer and silently returned empty weight
 lists for the genuine zero-expert case.
 
-The loader module is imported by file path so the test does not pull in the
-compiled kt_kernel_ext extension (via utils/__init__.py).
+The loader module is imported as a top-level module (its directory is added to
+sys.path) so the test does not pull in the compiled kt_kernel_ext extension via
+utils/__init__.py.
 """
 
-import importlib.util
 import os
 import sys
 import unittest
@@ -22,11 +22,10 @@ from ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=5, suite="default")
 
-_LOADER_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "python", "utils", "loader.py")
-_spec = importlib.util.spec_from_file_location("kt_loader_under_test", _LOADER_PATH)
-_loader_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_loader_mod)
-SafeTensorLoader = _loader_mod.SafeTensorLoader
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python", "utils"))
+import loader
+
+SafeTensorLoader = loader.SafeTensorLoader
 
 
 class _FakeTensor:
