@@ -29,12 +29,12 @@ ARG UBUNTU_MIRROR
 ARG GITHUB_ARTIFACTORY=github.com
 ARG FLASHINFER_VERSION=0.5.3
 
-# ktransformers wheel version (cu128torch28 for CUDA 12.8 + PyTorch 2.8)
-ARG KTRANSFORMERS_VERSION=0.5.3
-ARG KTRANSFORMERS_WHEEL=ktransformers-0.5.3+cu128torch28fancy-cp312-cp312-linux_x86_64.whl
+# ktransformers is installed from the cloned source tree (see below); no
+# prebuilt wheel is downloaded because the release assets are not published.
 
-# flash_attn wheel for fine-tune env
-ARG FLASH_ATTN_WHEEL=flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+# flash_attn wheel for fine-tune env (torch 2.9 build to match the torch pin below
+# and the torch==2.9.1 requirement of kt-kernel pulled in by ktransformers[sft])
+ARG FLASH_ATTN_WHEEL=flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_HOME=/usr/local/cuda \
@@ -198,8 +198,6 @@ ARG HOPPER_SBO
 ARG HOPPER_SBO_DEEPEP_COMMIT
 ARG DEEPEP_COMMIT
 ARG GITHUB_ARTIFACTORY
-ARG KTRANSFORMERS_VERSION
-ARG KTRANSFORMERS_WHEEL
 ARG FLASH_ATTN_WHEEL
 ARG FUNCTIONALITY=sft
 
@@ -223,11 +221,11 @@ RUN git clone --depth 1 https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers.g
         git clone --depth 1 https://${GITHUB_ARTIFACTORY}/hiyouga/LLaMA-Factory.git /workspace/LLaMA-Factory; \
     fi
 
-# Download ktransformers wheel and flash_attn wheel for fine-tune env (sft mode only)
+# Download flash_attn wheel for fine-tune env (sft mode only).
+# ktransformers itself is installed from the cloned source tree (see below);
+# the prebuilt release wheel is no longer published as a release asset.
 RUN if [ "$FUNCTIONALITY" = "sft" ]; then \
-        curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${KTRANSFORMERS_WHEEL} \
-            https://${GITHUB_ARTIFACTORY}/kvcache-ai/ktransformers/releases/download/v${KTRANSFORMERS_VERSION}/${KTRANSFORMERS_WHEEL} \
-        && curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${FLASH_ATTN_WHEEL} \
+        curl --retry 3 --retry-delay 2 -fsSL -o /workspace/${FLASH_ATTN_WHEEL} \
             https://${GITHUB_ARTIFACTORY}/Dao-AILab/flash-attention/releases/download/v2.8.3/${FLASH_ATTN_WHEEL}; \
     fi
 
@@ -342,9 +340,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             12.9.1) CUINDEX=129 ;; \
             13.0.1) CUINDEX=130 ;; \
         esac \
-        && /opt/miniconda3/envs/fine-tune/bin/pip install --upgrade pip setuptools wheel hatchling \
+        && /opt/miniconda3/envs/fine-tune/bin/pip install --upgrade pip setuptools wheel hatchling editables \
         && /opt/miniconda3/envs/fine-tune/bin/pip install \
-            torch==2.8.0 \
+            torch==2.9.1 \
             torchvision \
             torchaudio \
             --extra-index-url https://download.pytorch.org/whl/cu${CUINDEX}; \
@@ -357,10 +355,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && /opt/miniconda3/envs/fine-tune/bin/pip install -e ".[torch,metrics]" --no-build-isolation; \
     fi
 
-# Install ktransformers wheel in fine-tune env
+# Install ktransformers (with sft extras) from the cloned source in fine-tune env
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$FUNCTIONALITY" = "sft" ]; then \
-        /opt/miniconda3/envs/fine-tune/bin/pip install /workspace/${KTRANSFORMERS_WHEEL}; \
+        /opt/miniconda3/envs/fine-tune/bin/pip install "/workspace/ktransformers[sft]"; \
     fi
 
 # Install flash_attn wheel in fine-tune env
@@ -385,7 +383,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Clean up downloaded wheels
 RUN if [ "$FUNCTIONALITY" = "sft" ]; then \
-        rm -f /workspace/${KTRANSFORMERS_WHEEL} /workspace/${FLASH_ATTN_WHEEL}; \
+        rm -f /workspace/${FLASH_ATTN_WHEEL}; \
     fi
 
 # Initialize conda for bash
