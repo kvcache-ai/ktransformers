@@ -355,10 +355,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         && /opt/miniconda3/envs/fine-tune/bin/pip install -e ".[torch,metrics]" --no-build-isolation; \
     fi
 
-# Install ktransformers (with sft extras) from the cloned source in fine-tune env
+# Build and install the local kt-kernel into the fine-tune env (same as the serve
+# env), then install ktransformers (with sft extras) from the cloned source. Building
+# kt-kernel from source first means the locally checked-out C++ kernels are used, and
+# pip does not fall back to a PyPI kt-kernel (which may not exist for an unreleased version).
 RUN --mount=type=cache,target=/root/.cache/pip \
     if [ "$FUNCTIONALITY" = "sft" ]; then \
-        /opt/miniconda3/envs/fine-tune/bin/pip install "/workspace/ktransformers[sft]"; \
+        . /opt/miniconda3/etc/profile.d/conda.sh && conda activate fine-tune \
+        && cd /workspace/ktransformers/kt-kernel \
+        && CPUINFER_BUILD_ALL_VARIANTS=1 ./install.sh build \
+        && pip install "/workspace/ktransformers[sft]"; \
     fi
 
 # Install flash_attn wheel in fine-tune env
