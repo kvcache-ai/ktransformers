@@ -21,7 +21,7 @@ layers.{L}.experts.down_lora_a
 layers.{L}.experts.down_lora_b
 ```
 
-Use `convert_kt_to_sglang_adapter.py` to split those tensors per expert and write an adapter directory:
+Use `convert_kt_to_sglang_adapter.py` to convert raw KT SFT output into one merged SGLang adapter directory:
 
 ```bash
 python scripts/convert_kt_to_sglang_adapter.py /path/to/kt_adapter /path/to/sglang_adapter \
@@ -38,11 +38,28 @@ sglang_adapter/
 └── adapter_model.safetensors
 ```
 
-The converter also merges an existing `adapter_model.safetensors` from the input directory, if present, so attention/shared LoRA weights are preserved in the same output adapter. Existing PEFT prefixes such as `base_model.model.` are stripped to match SGLang's loader.
+The converter merges the existing non-expert `adapter_model.safetensors` with expanded expert tensors from `fused_expert_lora.safetensors`. Pass this merged directory to SGLang with:
 
-Scaling is not folded into the LoRA B tensors. Runtime scaling remains `lora_alpha / r`; if the input directory has no `adapter_config.json`, pass `--lora-alpha` explicitly.
+```bash
+--enable-lora \
+--lora-paths my_lora=/path/to/sglang_adapter
+```
 
-This script only converts adapter files. It does not add runtime MoE LoRA support to SGLang `FusedMoE`; serving compatibility depends on the SGLang runtime branch being used.
+The KTransformers SGLang fork will auto-split the merged adapter internally at server startup. Users do not need to pass separate expert and non-expert adapter paths in the normal workflow.
+
+Optional split outputs for debugging:
+
+```bash
+python scripts/convert_kt_to_sglang_adapter.py /path/to/kt_adapter /path/to/sglang_adapter \
+  --base-model-name-or-path /path/to/base_model \
+  --expert-output-dir /path/to/expert_adapter \
+  --nonexpert-output-dir /path/to/nonexpert_adapter \
+  --overwrite
+```
+
+Existing PEFT prefixes such as `base_model.model.` are stripped to match SGLang's loader. Scaling is not folded into the LoRA B tensors. Runtime scaling remains `lora_alpha / r`; if the input directory has no `adapter_config.json`, pass `--lora-alpha` explicitly.
+
+This script only converts adapter files. Serving compatibility depends on the KTransformers SGLang runtime branch being used.
 
 ### Optional Integration Validation
 
