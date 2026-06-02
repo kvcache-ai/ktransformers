@@ -41,6 +41,7 @@ INFERENCE_METHODS = frozenset(
         "FP8_PERCHANNEL",  # Per-channel FP8
         "GPTQ_INT4",  # GPTQ INT4
         "MXFP4",  # MXFP4 (E2M1 nibble + ue8m0 group scale, e.g. DeepSeek-V4-Flash routed experts)
+        "MXFP8",  # MXFP8 (E4M3fn byte + ue8m0 group scale, e.g. MiniMax-M3-Preview)
         "LLAMAFILE",  # GGUF format
         "MOE_INT4",
         "MOE_INT8",  # General kernel
@@ -149,6 +150,9 @@ class KTMoEWrapper:
         # _apply_swiglu_limit). Plumbed into MOEConfig.swiglu_limit and
         # consumed by amx::act_fn. Origin: kt-sglang 耦合.
         swiglu_limit: float = 0.0,
+        # MiniMax M3 swigluoai sigmoid alpha. 0.0 = standard silu (default).
+        # Non-zero triggers gate * sigmoid(gate * alpha) * (up + 1) in act_fn.
+        swiglu_alpha: float = 0.0,
     ):
         """
         Factory method to create the appropriate backend implementation.
@@ -329,7 +333,7 @@ def _create_inference_wrapper(
     # Select backend based on method
     if method in ["AMXINT4", "AMXINT8"]:
         backend_cls = AMXMoEWrapper
-    elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4", "MXFP4"]:
+    elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4", "MXFP4", "MXFP8"]:
         backend_cls = NativeMoEWrapper
     elif method == "LLAMAFILE":
         backend_cls = LlamafileMoEWrapper
@@ -347,15 +351,16 @@ def _create_inference_wrapper(
     # into a non-MXFP4 backend; act_fn would then clamp gate/up to ±10 with
     # no warning. Gate strictly on method instead. Origin: kt-sglang 耦合.
     extra_kwargs = {}
-    if method == "MXFP4":
+    if method in ("MXFP4", "MXFP8"):
         extra_kwargs["swiglu_limit"] = swiglu_limit
+        extra_kwargs["swiglu_alpha"] = swiglu_alpha
     elif swiglu_limit != 0.0:
         raise ValueError(
-            f"swiglu_limit={swiglu_limit} is only supported on method='MXFP4', "
+            f"swiglu_limit={swiglu_limit} is only supported on method='MXFP4'/'MXFP8', "
             f"got method={method!r} (backend={backend_cls.__name__}). This "
             f"usually means SGLANG_DSV4_2604_SUBMODE=2604B is set in the "
             f"environment while the current launch does not actually use "
-            f"MXFP4 weights — either unset the env or pass --kt-method MXFP4."
+            f"MXFP4/MXFP8 weights — either unset the env or pass --kt-method MXFP4/MXFP8."
         )
     return backend_cls(
         layer_idx=layer_idx,
