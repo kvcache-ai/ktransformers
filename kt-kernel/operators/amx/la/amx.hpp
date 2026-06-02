@@ -72,6 +72,34 @@ static inline __m512 act_fn(__m512 gate_val, __m512 up_val, float swiglu_limit =
   return _mm512_mul_ps(act_val, up_val);
 }
 
+// MiniMax M3 "swigluoai" activation + DeepSeek V4 "silu" unified entry point.
+//   alpha > 0  → swigluoai: gate * sigmoid(gate * alpha) * (up + 1), symmetric clamp
+//   alpha == 0 → falls back to standard silu path above
+static inline __m512 act_fn(__m512 gate_val, __m512 up_val, float swiglu_limit, float swiglu_alpha) {
+  if (swiglu_alpha > 0.0f) {
+    // --- MiniMax M3 swigluoai path ---
+    // Symmetric clamp on both gate and up (differs from V4 which clamps gate one-sided)
+    if (swiglu_limit > 0.0f) {
+      const __m512 pos_lim = _mm512_set1_ps(swiglu_limit);
+      const __m512 neg_lim = _mm512_set1_ps(-swiglu_limit);
+      gate_val = _mm512_min_ps(gate_val, pos_lim);
+      gate_val = _mm512_max_ps(gate_val, neg_lim);
+      up_val = _mm512_min_ps(up_val, pos_lim);
+      up_val = _mm512_max_ps(up_val, neg_lim);
+    }
+    // sigmoid(gate * alpha) = 1 / (1 + exp(-gate * alpha))
+    __m512 neg_ga = _mm512_mul_ps(gate_val, _mm512_set1_ps(-swiglu_alpha));
+    neg_ga = _mm512_min_ps(neg_ga, _mm512_set1_ps(88.0f));
+    __m512 exp_neg = exp_avx512(neg_ga);
+    __m512 sigmoid_val = _mm512_div_ps(_mm512_set1_ps(1.0f),
+                                       _mm512_add_ps(_mm512_set1_ps(1.0f), exp_neg));
+    // gate * sigmoid(gate * alpha) * (up + 1)
+    __m512 up_plus_1 = _mm512_add_ps(up_val, _mm512_set1_ps(1.0f));
+    return _mm512_mul_ps(_mm512_mul_ps(gate_val, sigmoid_val), up_plus_1);
+  }
+  return act_fn(gate_val, up_val, swiglu_limit);
+}
+
 #define AMX_DISPATCH_QTYPES(QA, QB, ...)                                 \
   [&] {                                                                  \
     switch (QB) {                                                        \
