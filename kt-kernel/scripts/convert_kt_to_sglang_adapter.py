@@ -194,6 +194,36 @@ def _build_adapter_config(
     return config
 
 
+def _paths_have_ancestor_relationship(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_no_ancestor_paths(
+    paths: Iterable[Path],
+    *,
+    label: str,
+) -> None:
+    resolved = list(paths)
+    for i, left in enumerate(resolved):
+        for right in resolved[i + 1 :]:
+            if _paths_have_ancestor_relationship(left, right):
+                raise ValueError(
+                    f"{label} cannot have ancestor/descendant relationships: "
+                    f"{left} and {right}."
+                )
+
+
 def _prepare_output_dir(output_path: Path, input_path: Path, overwrite: bool) -> None:
     _validate_output_dir(output_path, input_path, overwrite)
     if output_path.exists() and any(output_path.iterdir()):
@@ -204,11 +234,52 @@ def _prepare_output_dir(output_path: Path, input_path: Path, overwrite: bool) ->
 def _validate_output_dir(output_path: Path, input_path: Path, overwrite: bool) -> None:
     if output_path == input_path:
         raise ValueError("Output directory must be different from input directory.")
+    if _paths_have_ancestor_relationship(output_path, input_path):
+        raise ValueError(
+            "Output and input directories cannot be ancestor/descendant of each other: "
+            f"output={output_path}, input={input_path}."
+        )
     if output_path.exists() and not output_path.is_dir():
         raise FileExistsError(f"Output path exists and is not a directory: {output_path}")
     if output_path.exists() and any(output_path.iterdir()):
         if not overwrite:
             raise FileExistsError(f"Output directory is not empty: {output_path}")
+
+
+def _infer_lora_rank_from_tensor(key: str, tensor: torch.Tensor) -> int | None:
+    if ".lora_A." in key:
+        return int(tensor.shape[0])
+    if ".lora_B." in key:
+        return int(tensor.shape[1])
+    return None
+
+
+def _validate_nonexpert_rank(
+    existing_tensors: Mapping[str, torch.Tensor],
+    expert_rank: int,
+    input_dir: Path,
+) -> None:
+    if not existing_tensors:
+        return
+
+    config_path = input_dir / ADAPTER_CONFIG_FILE
+    if config_path.exists():
+        config_rank = _load_json(config_path).get("r")
+        if config_rank is not None and int(config_rank) != expert_rank:
+            raise ValueError(
+                f"Non-expert adapter rank mismatch: adapter_config.json r={config_rank}, "
+                f"but fused expert LoRA rank={expert_rank}."
+            )
+
+    for key, tensor in existing_tensors.items():
+        tensor_rank = _infer_lora_rank_from_tensor(key, tensor)
+        if tensor_rank is None:
+            continue
+        if tensor_rank != expert_rank:
+            raise ValueError(
+                f"Non-expert adapter tensor rank mismatch for {key}: "
+                f"tensor rank={tensor_rank}, fused expert LoRA rank={expert_rank}."
+            )
 
 
 def _write_adapter(
@@ -254,11 +325,16 @@ def convert_kt_to_sglang_adapter(
     output_paths.extend(path for path in (expert_output_path, nonexpert_output_path) if path is not None)
     if len(set(output_paths)) != len(output_paths):
         raise ValueError("Merged, expert, and non-expert output directories must be distinct.")
+    _validate_no_ancestor_paths(
+        output_paths,
+        label="Merged/expert/non-expert output directories",
+    )
     for path in output_paths:
         _validate_output_dir(path, input_path, overwrite)
 
     existing_tensors, existing_targets = _load_existing_adapter(input_path)
     fused_tensors, rank, fused_targets = _convert_fused_expert_lora(input_path / FUSED_EXPERT_LORA_FILE)
+    _validate_nonexpert_rank(existing_tensors, rank, input_path)
     if nonexpert_output_path is not None and not existing_tensors:
         raise ValueError(
             f"Cannot write non-expert adapter: no {ADAPTER_MODEL_FILE} found in {input_path}."

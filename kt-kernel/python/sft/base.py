@@ -417,9 +417,15 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         current_slot = self.layer_idx % KExpertsCPUBuffer.buffer_depth
         bsz_slot_tensor = bsz_tensor_cpu[current_slot]
 
-        input_tensor_cpu[current_slot].copy_(flat_hidden_states.to(torch.bfloat16), non_blocking=True)
-        expert_ids_cpu[current_slot].copy_(expert_ids.to(torch.int64), non_blocking=True)
-        weights_cpu[current_slot].copy_(weights.to(torch.float32), non_blocking=True)
+        torch_stream = (
+            cuda_stream
+            if isinstance(cuda_stream, torch.cuda.Stream)
+            else torch.cuda.ExternalStream(cuda_stream, device=flat_hidden_states.device)
+        )
+        with torch.cuda.stream(torch_stream):
+            input_tensor_cpu[current_slot].copy_(flat_hidden_states.to(torch.bfloat16), non_blocking=True)
+            expert_ids_cpu[current_slot].copy_(expert_ids.to(torch.int64), non_blocking=True)
+            weights_cpu[current_slot].copy_(weights.to(torch.float32), non_blocking=True)
 
         buffer_view = _SFTForwardBufferView(
             bsz_tensor=bsz_slot_tensor,
@@ -455,8 +461,14 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         if not hasattr(self, "_pending_inference_output_cpu"):
             raise RuntimeError("No pending inference forward. Call submit_forward_inference() first.")
 
+        torch_stream = (
+            cuda_stream
+            if isinstance(cuda_stream, torch.cuda.Stream)
+            else torch.cuda.ExternalStream(cuda_stream, device=self._pending_inference_output_gpu.device)
+        )
         self.cpu_infer.sync_with_cuda_stream(cuda_stream)
-        self._pending_inference_output_gpu.copy_(self._pending_inference_output_cpu, non_blocking=True)
+        with torch.cuda.stream(torch_stream):
+            self._pending_inference_output_gpu.copy_(self._pending_inference_output_cpu, non_blocking=True)
         output = self._pending_inference_output_gpu
 
         del self._pending_inference_output_cpu

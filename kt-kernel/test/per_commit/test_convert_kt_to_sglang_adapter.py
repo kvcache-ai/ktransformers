@@ -270,3 +270,104 @@ def test_rejects_output_same_as_input(tmp_path):
             lora_alpha=8,
             overwrite=True,
         )
+
+
+def test_rejects_output_ancestor_of_input(tmp_path):
+    run_dir = tmp_path / "run"
+    input_dir = run_dir / "adapter"
+    output_dir = run_dir
+    input_dir.mkdir(parents=True)
+    _write_full_fused_checkpoint(input_dir)
+
+    with pytest.raises(ValueError, match="ancestor/descendant"):
+        converter.convert_kt_to_sglang_adapter(
+            input_dir,
+            output_dir,
+            base_model_name_or_path="/models/base",
+            lora_alpha=8,
+            overwrite=True,
+        )
+
+
+def test_rejects_output_descendant_of_input(tmp_path):
+    input_dir = tmp_path / "input"
+    output_dir = input_dir / "output"
+    input_dir.mkdir()
+    _write_full_fused_checkpoint(input_dir)
+
+    with pytest.raises(ValueError, match="ancestor/descendant"):
+        converter.convert_kt_to_sglang_adapter(
+            input_dir,
+            output_dir,
+            base_model_name_or_path="/models/base",
+            lora_alpha=8,
+            overwrite=True,
+        )
+
+
+def test_rejects_split_output_ancestor_relationship(tmp_path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    expert_dir = tmp_path / "split" / "expert"
+    nonexpert_dir = tmp_path / "split"
+    input_dir.mkdir()
+    _write_full_fused_checkpoint(input_dir)
+    save_file(
+        {
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(3, 5),
+        },
+        str(input_dir / converter.ADAPTER_MODEL_FILE),
+    )
+    converter._write_json(
+        input_dir / converter.ADAPTER_CONFIG_FILE,
+        {
+            "peft_type": "LORA",
+            "r": 3,
+            "lora_alpha": 9,
+            "target_modules": ["q_proj"],
+            "bias": "none",
+            "task_type": "CAUSAL_LM",
+            "base_model_name_or_path": "old-base",
+        },
+    )
+
+    with pytest.raises(ValueError, match="ancestor/descendant"):
+        converter.convert_kt_to_sglang_adapter(
+            input_dir,
+            output_dir,
+            base_model_name_or_path="/models/base",
+            expert_output_dir=expert_dir,
+            nonexpert_output_dir=nonexpert_dir,
+        )
+
+
+def test_rejects_mismatched_nonexpert_rank(tmp_path):
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    _write_full_fused_checkpoint(input_dir, rank=3)
+    save_file(
+        {
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.ones(4, 5),
+        },
+        str(input_dir / converter.ADAPTER_MODEL_FILE),
+    )
+    converter._write_json(
+        input_dir / converter.ADAPTER_CONFIG_FILE,
+        {
+            "peft_type": "LORA",
+            "r": 4,
+            "lora_alpha": 9,
+            "target_modules": ["q_proj"],
+            "bias": "none",
+            "task_type": "CAUSAL_LM",
+            "base_model_name_or_path": "old-base",
+        },
+    )
+
+    with pytest.raises(ValueError, match="rank mismatch"):
+        converter.convert_kt_to_sglang_adapter(
+            input_dir,
+            output_dir,
+            base_model_name_or_path="/models/base",
+        )
