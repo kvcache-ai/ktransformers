@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -60,6 +61,8 @@ class AVX2_MOE_BASE {
   std::vector<std::shared_ptr<typename T::BufferA>> down_ba_;
   std::vector<std::shared_ptr<typename T::BufferB>> down_bb_;
   std::vector<std::shared_ptr<typename T::BufferC>> down_bc_;
+
+  std::vector<void*> owned_aligned_allocs_;
 
   size_t pool_count_ = 0;
   size_t gate_up_ba_pool_bytes_ = 0;
@@ -116,15 +119,22 @@ class AVX2_MOE_BASE {
       down_ba_.push_back(make_buffer_a(config_.max_len, config_.intermediate_size, nullptr));
       down_bc_.push_back(make_buffer_c(config_.max_len, config_.hidden_size, nullptr));
 
-      void* gate_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* gate_bb_ptr = std::aligned_alloc(
+          64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      if (!gate_bb_ptr) throw std::runtime_error("aligned_alloc failed for gate BufferB");
+      owned_aligned_allocs_.push_back(gate_bb_ptr);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
-      void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      void* up_bb_ptr = std::aligned_alloc(
+          64, (buffer_b_required_size(config_.intermediate_size, config_.hidden_size) + 63) & ~63ULL);
+      if (!up_bb_ptr) throw std::runtime_error("aligned_alloc failed for up BufferB");
+      owned_aligned_allocs_.push_back(up_bb_ptr);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
-      void* down_bb_ptr =
-          std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      void* down_bb_ptr = std::aligned_alloc(
+          64, (buffer_b_required_size(config_.hidden_size, config_.intermediate_size) + 63) & ~63ULL);
+      if (!down_bb_ptr) throw std::runtime_error("aligned_alloc failed for down BufferB");
+      owned_aligned_allocs_.push_back(down_bb_ptr);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
 
@@ -145,7 +155,9 @@ class AVX2_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AVX2_MOE_BASE() = default;
+  ~AVX2_MOE_BASE() {
+    for (void* p : owned_aligned_allocs_) std::free(p);
+  }
 
   void warm_up() {
     int qlen = config_.max_len;
@@ -222,23 +234,28 @@ class AVX2_MOE_BASE {
       size_t max_m = (m_local_num_[i] + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[i]->max_m = max_m;
       gate_up_ba_[i]->set_data(gate_up_ba_pool_ptr);
-      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.hidden_size)));
+      gate_up_ba_pool_ptr =
+          (void*)((uintptr_t)gate_up_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.hidden_size)));
 
       gate_bc_[i]->max_m = max_m;
       gate_bc_[i]->set_data(gate_bc_pool_ptr);
-      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      gate_bc_pool_ptr =
+          (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
       up_bc_[i]->max_m = max_m;
       up_bc_[i]->set_data(up_bc_pool_ptr);
-      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      up_bc_pool_ptr =
+          (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
       down_ba_[i]->max_m = max_m;
       down_ba_[i]->set_data(down_ba_pool_ptr);
-      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.intermediate_size)));
+      down_ba_pool_ptr =
+          (void*)((uintptr_t)down_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.intermediate_size)));
 
       down_bc_[i]->max_m = max_m;
       down_bc_[i]->set_data(down_bc_pool_ptr);
-      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.hidden_size)));
+      down_bc_pool_ptr =
+          (void*)((uintptr_t)down_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.hidden_size)));
     }
 
     auto direct_or_pool = [&](int count, auto&& fn) {
@@ -318,9 +335,8 @@ class AVX2_MOE_BASE {
               __m256 weight = _mm256_set1_ps(weights[i * k + j]);
               __m256 d0, d1;
               avx2::load_16xbf16_to_2x8xfp32(
-                  m_local_down_output_ptr_[expert_ids[i * k + j]] +
-                      m_local_pos_[i][j] * config_.hidden_size + e,
-                  &d0, &d1);
+                  m_local_down_output_ptr_[expert_ids[i * k + j]] + m_local_pos_[i][j] * config_.hidden_size + e, &d0,
+                  &d1);
               x0 = _mm256_fmadd_ps(d0, weight, x0);
               x1 = _mm256_fmadd_ps(d1, weight, x1);
             }
@@ -369,19 +385,23 @@ class AVX2_MOE_BASE {
 
       gate_bc_[expert_idx]->max_m = max_m;
       gate_bc_[expert_idx]->set_data(gate_bc_pool_ptr);
-      gate_bc_pool_ptr = (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      gate_bc_pool_ptr =
+          (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
       up_bc_[expert_idx]->max_m = max_m;
       up_bc_[expert_idx]->set_data(up_bc_pool_ptr);
-      up_bc_pool_ptr = (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      up_bc_pool_ptr =
+          (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
       down_ba_[expert_idx]->max_m = max_m;
       down_ba_[expert_idx]->set_data(down_ba_pool_ptr);
-      down_ba_pool_ptr = (void*)((uintptr_t)down_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.intermediate_size)));
+      down_ba_pool_ptr =
+          (void*)((uintptr_t)down_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.intermediate_size)));
 
       down_bc_[expert_idx]->max_m = max_m;
       down_bc_[expert_idx]->set_data(down_bc_pool_ptr);
-      down_bc_pool_ptr = (void*)((uintptr_t)down_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.hidden_size)));
+      down_bc_pool_ptr =
+          (void*)((uintptr_t)down_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.hidden_size)));
     }
 
     // Pack input into BufferA for each activated expert
@@ -391,7 +411,8 @@ class AVX2_MOE_BASE {
       size_t max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
       gate_up_ba_[expert_idx]->max_m = max_m;
       gate_up_ba_[expert_idx]->set_data(gate_up_ba_pool_ptr);
-      gate_up_ba_pool_ptr = (void*)((uintptr_t)gate_up_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.hidden_size)));
+      gate_up_ba_pool_ptr =
+          (void*)((uintptr_t)gate_up_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.hidden_size)));
       gate_up_ba_[expert_idx]->from_mat(qlen, (ggml_bf16_t*)input, 0, 1);
     }
 
@@ -446,8 +467,7 @@ class AVX2_MOE_BASE {
         __m256 weight = _mm256_set1_ps(weights[j]);
         __m256 d0, d1;
         avx2::load_16xbf16_to_2x8xfp32(
-            m_local_down_output_ptr_[expert_ids[j]] + m_local_pos_[0][j] * config_.hidden_size + e,
-            &d0, &d1);
+            m_local_down_output_ptr_[expert_ids[j]] + m_local_pos_[0][j] * config_.hidden_size + e, &d0, &d1);
         x0 = _mm256_fmadd_ps(d0, weight, x0);
         x1 = _mm256_fmadd_ps(d1, weight, x1);
       }

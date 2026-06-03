@@ -85,6 +85,59 @@ struct GemmKernel224MXFP4SmallKGroup {
     return _mm512_inserti64x4(_mm512_castsi256_si512(q0), q1, 1);
   }
 
+  struct ActivationBF16 {
+    __m512bh a;
+#if !defined(__AVX512BF16__)
+    __m512 a_even;
+    __m512 a_odd;
+    inline static const __m512i odd_mask = _mm512_set1_epi32(0xFFFF0000);
+#endif
+
+    __attribute__((always_inline)) ActivationBF16(__m512bh a_) : a(a_) {
+#if !defined(__AVX512BF16__)
+      a_even = _mm512_castsi512_ps(_mm512_slli_epi32((__m512i)a_, 16));
+      a_odd = _mm512_castsi512_ps(_mm512_and_si512((__m512i)a_, odd_mask));
+#endif
+    }
+  };
+
+  struct DequantizedWeight {
+#if defined(__AVX512BF16__)
+    __m512bh d;
+#else
+    __m512 w_even;
+    __m512 w_odd;
+    inline static const __m128i lo_mask = _mm_set1_epi8(0x0F);
+    inline static const __m512 lut = _mm512_setr_ps(0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f,
+                                                    -1.5f, -2.0f, -3.0f, -4.0f, -6.0f);
+#endif
+
+    __attribute__((always_inline)) DequantizedWeight(__m128i w) {
+#if defined(__AVX512BF16__)
+      d = (__m512bh)mxfp4_to_bf16_32(w);
+#else
+      __m128i lo = _mm_and_si128(w, lo_mask);
+      __m128i hi = _mm_and_si128(_mm_srli_epi16(w, 4), lo_mask);
+
+      __m512i lo_32 = _mm512_cvtepu8_epi32(lo);
+      __m512i hi_32 = _mm512_cvtepu8_epi32(hi);
+
+      w_even = _mm512_permutexvar_ps(lo_32, lut);
+      w_odd = _mm512_permutexvar_ps(hi_32, lut);
+#endif
+    }
+  };
+
+  __attribute__((always_inline)) static inline __m512 mxfp4_dot_bf16(const DequantizedWeight& w,
+                                                                     const ActivationBF16& act) {
+#if defined(__AVX512BF16__)
+    return _mm512_dpbf16_ps(_mm512_setzero_ps(), act.a, w.d);
+#else
+    __m512 dot = _mm512_mul_ps(act.a_odd, w.w_odd);
+    return _mm512_fmadd_ps(act.a_even, w.w_even, dot);
+#endif
+  }
+
   // Buffers
   using BufferA = BufferABF16Impl<GemmKernel224MXFP4SmallKGroup>;        // raw BF16, no quant
   using BufferB = BufferBInt4KGroupImpl<GemmKernel224MXFP4SmallKGroup>;  // nibble-packed FP4
@@ -92,8 +145,7 @@ struct GemmKernel224MXFP4SmallKGroup {
 
   // 4 个 zmm 的 horizontal reduce → 4 个连续 fp32。
   // 4 次 reduce_add_ps 之间无依赖，编译器/CPU 可并行调度。
-  __attribute__((always_inline)) static inline void
-  reduce4(__m512 s0, __m512 s1, __m512 s2, __m512 s3, float* dst) {
+  __attribute__((always_inline)) static inline void reduce4(__m512 s0, __m512 s1, __m512 s2, __m512 s3, float* dst) {
     dst[0] = _mm512_reduce_add_ps(s0);
     dst[1] = _mm512_reduce_add_ps(s1);
     dst[2] = _mm512_reduce_add_ps(s2);
@@ -101,8 +153,8 @@ struct GemmKernel224MXFP4SmallKGroup {
   }
 
   // mat-vec: M 个独立 token，N 维 4 行一组累加，摊销 horizontal reduce。
-  static void fp4_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc,
-                                 int ith, int nth) {
+  static void fp4_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc, int ith,
+                                 int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
     if (n_start >= n_end) return;
     const int kg_count = k / 32;
@@ -129,19 +181,15 @@ struct GemmKernel224MXFP4SmallKGroup {
         __m512 acc3 = _mm512_setzero_ps();
 
         for (int g = 0; g < kg_count; g++) {
-          const __m512bh a  = a_row[g];
-          const __m512bh d0 = (__m512bh)mxfp4_to_bf16_32(w0[g]);
-          const __m512bh d1 = (__m512bh)mxfp4_to_bf16_32(w1[g]);
-          const __m512bh d2 = (__m512bh)mxfp4_to_bf16_32(w2[g]);
-          const __m512bh d3 = (__m512bh)mxfp4_to_bf16_32(w3[g]);
-          acc0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]),
-                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d0), acc0);
-          acc1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]),
-                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d1), acc1);
-          acc2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]),
-                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d2), acc2);
-          acc3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]),
-                                 _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d3), acc3);
+          const ActivationBF16 a(a_row[g]);
+          const DequantizedWeight d0(w0[g]);
+          const DequantizedWeight d1(w1[g]);
+          const DequantizedWeight d2(w2[g]);
+          const DequantizedWeight d3(w3[g]);
+          acc0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]), mxfp4_dot_bf16(d0, a), acc0);
+          acc1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]), mxfp4_dot_bf16(d1, a), acc1);
+          acc2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]), mxfp4_dot_bf16(d2, a), acc2);
+          acc3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]), mxfp4_dot_bf16(d3, a), acc3);
         }
         reduce4(acc0, acc1, acc2, acc3, c_row + (n_pos - n_start));
       }
@@ -151,10 +199,9 @@ struct GemmKernel224MXFP4SmallKGroup {
         const float* s = bb->get_scale(n, n_pos, k, 0);
         __m512 acc = _mm512_setzero_ps();
         for (int g = 0; g < kg_count; g++) {
-          const __m512bh a = a_row[g];
-          const __m512bh d = (__m512bh)mxfp4_to_bf16_32(w[g]);
-          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
-                                _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d), acc);
+          const ActivationBF16 a(a_row[g]);
+          const DequantizedWeight d(w[g]);
+          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]), mxfp4_dot_bf16(d, a), acc);
         }
         c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
       }
@@ -164,8 +211,8 @@ struct GemmKernel224MXFP4SmallKGroup {
   // mat-mat: 4×4 register tile (M_TILE=4, N_TILE=4 → 16 累加器)。
   // 每 K-group 解码 4 行 N 一次, 被 4 个 token 共享 → PSHUFB 解码开销 / 4。
   // M / N 尾巴回退到 mat-vec 单 token 内层 (V4 chunked-prefill 16/32/64 整数倍, 极少触发)。
-  static void fp4_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc,
-                                 int ith, int nth) {
+  static void fp4_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb, BufferC* bc, int ith,
+                                 int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
     if (n_start >= n_end) return;
     const int kg_count = k / 32;
@@ -198,27 +245,28 @@ struct GemmKernel224MXFP4SmallKGroup {
 
         for (int g = 0; g < kg_count; g++) {
           // 4 行权重解码一次, MB 个 token 共享
-          const __m512bh d0 = (__m512bh)mxfp4_to_bf16_32(w0[g]);
-          const __m512bh d1 = (__m512bh)mxfp4_to_bf16_32(w1[g]);
-          const __m512bh d2 = (__m512bh)mxfp4_to_bf16_32(w2[g]);
-          const __m512bh d3 = (__m512bh)mxfp4_to_bf16_32(w3[g]);
-          const __m512  sv0 = _mm512_set1_ps(s0[g]);
-          const __m512  sv1 = _mm512_set1_ps(s1[g]);
-          const __m512  sv2 = _mm512_set1_ps(s2[g]);
-          const __m512  sv3 = _mm512_set1_ps(s3[g]);
+          const DequantizedWeight d0(w0[g]);
+          const DequantizedWeight d1(w1[g]);
+          const DequantizedWeight d2(w2[g]);
+          const DequantizedWeight d3(w3[g]);
+          const __m512 sv0 = _mm512_set1_ps(s0[g]);
+          const __m512 sv1 = _mm512_set1_ps(s1[g]);
+          const __m512 sv2 = _mm512_set1_ps(s2[g]);
+          const __m512 sv3 = _mm512_set1_ps(s3[g]);
 
-          #define V_FMA_ROW(M_I) do { \
-              const __m512bh a = a_rows[M_I][g]; \
-              acc[M_I][0] = _mm512_fmadd_ps(sv0, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d0), acc[M_I][0]); \
-              acc[M_I][1] = _mm512_fmadd_ps(sv1, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d1), acc[M_I][1]); \
-              acc[M_I][2] = _mm512_fmadd_ps(sv2, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d2), acc[M_I][2]); \
-              acc[M_I][3] = _mm512_fmadd_ps(sv3, _mm512_dpbf16_ps(_mm512_setzero_ps(), a, d3), acc[M_I][3]); \
-          } while (0)
+#define V_FMA_ROW(M_I)                                                      \
+  do {                                                                      \
+    const ActivationBF16 a(a_rows[M_I][g]);                                 \
+    acc[M_I][0] = _mm512_fmadd_ps(sv0, mxfp4_dot_bf16(d0, a), acc[M_I][0]); \
+    acc[M_I][1] = _mm512_fmadd_ps(sv1, mxfp4_dot_bf16(d1, a), acc[M_I][1]); \
+    acc[M_I][2] = _mm512_fmadd_ps(sv2, mxfp4_dot_bf16(d2, a), acc[M_I][2]); \
+    acc[M_I][3] = _mm512_fmadd_ps(sv3, mxfp4_dot_bf16(d3, a), acc[M_I][3]); \
+  } while (0)
           V_FMA_ROW(0);
           V_FMA_ROW(1);
           V_FMA_ROW(2);
           V_FMA_ROW(3);
-          #undef V_FMA_ROW
+#undef V_FMA_ROW
         }
         for (int i = 0; i < MB; i++) {
           float* c_row = bc->get_submat(m, n, m_pos + i, n_start);
@@ -233,11 +281,9 @@ struct GemmKernel224MXFP4SmallKGroup {
           float* c_row = bc->get_submat(m, n, m_pos + i, n_start);
           __m512 acc = _mm512_setzero_ps();
           for (int g = 0; g < kg_count; g++) {
-            acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
-                                  _mm512_dpbf16_ps(_mm512_setzero_ps(),
-                                                   a_rows[i][g],
-                                                   (__m512bh)mxfp4_to_bf16_32(w[g])),
-                                  acc);
+            const ActivationBF16 a(a_rows[i][g]);
+            const DequantizedWeight d(w[g]);
+            acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]), mxfp4_dot_bf16(d, a), acc);
           }
           c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
         }
@@ -257,18 +303,17 @@ struct GemmKernel224MXFP4SmallKGroup {
         const float* s1 = bb->get_scale(n, n_pos + 1, k, 0);
         const float* s2 = bb->get_scale(n, n_pos + 2, k, 0);
         const float* s3 = bb->get_scale(n, n_pos + 3, k, 0);
-        __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps(),
-               a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps();
+        __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps(), a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps();
         for (int g = 0; g < kg_count; g++) {
-          const __m512bh a = a_row[g];
-          a0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]),
-                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w0[g])), a0);
-          a1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]),
-                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w1[g])), a1);
-          a2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]),
-                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w2[g])), a2);
-          a3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]),
-                               _mm512_dpbf16_ps(_mm512_setzero_ps(), a, (__m512bh)mxfp4_to_bf16_32(w3[g])), a3);
+          const ActivationBF16 a(a_row[g]);
+          const DequantizedWeight d0(w0[g]);
+          const DequantizedWeight d1(w1[g]);
+          const DequantizedWeight d2(w2[g]);
+          const DequantizedWeight d3(w3[g]);
+          a0 = _mm512_fmadd_ps(_mm512_set1_ps(s0[g]), mxfp4_dot_bf16(d0, a), a0);
+          a1 = _mm512_fmadd_ps(_mm512_set1_ps(s1[g]), mxfp4_dot_bf16(d1, a), a1);
+          a2 = _mm512_fmadd_ps(_mm512_set1_ps(s2[g]), mxfp4_dot_bf16(d2, a), a2);
+          a3 = _mm512_fmadd_ps(_mm512_set1_ps(s3[g]), mxfp4_dot_bf16(d3, a), a3);
         }
         reduce4(a0, a1, a2, a3, c_row + (n_pos - n_start));
       }
@@ -277,11 +322,9 @@ struct GemmKernel224MXFP4SmallKGroup {
         const float* s = bb->get_scale(n, n_pos, k, 0);
         __m512 acc = _mm512_setzero_ps();
         for (int g = 0; g < kg_count; g++) {
-          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]),
-                                _mm512_dpbf16_ps(_mm512_setzero_ps(),
-                                                 a_row[g],
-                                                 (__m512bh)mxfp4_to_bf16_32(w[g])),
-                                acc);
+          const ActivationBF16 a(a_row[g]);
+          const DequantizedWeight d(w[g]);
+          acc = _mm512_fmadd_ps(_mm512_set1_ps(s[g]), mxfp4_dot_bf16(d, a), acc);
         }
         c_row[n_pos - n_start] = _mm512_reduce_add_ps(acc);
       }
