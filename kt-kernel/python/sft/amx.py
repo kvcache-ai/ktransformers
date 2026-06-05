@@ -40,6 +40,8 @@ except (ImportError, AttributeError):
 
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 
+_AMX_M_STEP = 32
+
 
 # Mapping from method string to C++ SFT MOE class
 _SFT_METHOD_TO_CLASS = {
@@ -159,6 +161,17 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if self._weights_loaded:
             return
 
+        if physical_to_logical_map_cpu is None:
+            physical_to_logical_map_cpu = torch.arange(self.num_experts, dtype=torch.int64)
+        self._physical_to_logical_map_cpu = physical_to_logical_map_cpu.to(
+            dtype=torch.int64, device="cpu"
+        ).contiguous()
+        if self._physical_to_logical_map_cpu.numel() < self.num_experts:
+            raise ValueError(
+                "physical_to_logical_map_cpu must contain at least "
+                f"{self.num_experts} entries, got {self._physical_to_logical_map_cpu.numel()}."
+            )
+
         if self.gate_proj is None and not getattr(self, "_use_projs_path", False):
             self._load_base_weights_from_file()
 
@@ -170,10 +183,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.lora_rank = self.lora_rank
         config.lora_alpha = self.lora_alpha
         config.max_cache_depth = self.max_cache_depth
-        config.max_len = self.chunked_prefill_size
+        config.max_len = self._aligned_max_len()
         config.layer_idx = self.layer_idx
         config.share_backward_bb = getattr(self, "share_backward_bb", False)
         config.share_cache_pool = getattr(self, "share_cache_pool", False)
+        config.physical_to_logical_map = self._physical_to_logical_map_cpu.data_ptr()
 
         if getattr(self, "_use_kt_direct_load", False):
             config.load = True
@@ -220,8 +234,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.cpu_infer.submit(self.moe.load_weights_task())
         self.cpu_infer.sync()
 
-        self.cpu_infer.submit(self.moe.warm_up_task())
-        self.cpu_infer.sync()
+        if os.environ.get("KT_SFT_ENABLE_WARMUP", "0") == "1":
+            self.cpu_infer.submit(self.moe.warm_up_task())
+            self.cpu_infer.sync()
 
         # Release Python-side weight tensors (C++ copied them)
         self.gate_proj = None
@@ -312,6 +327,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self._gate_scales_per_numa = experts_data["gate_scale"]
             self._up_scales_per_numa = experts_data["up_scale"]
             self._down_scales_per_numa = experts_data["down_scale"]
+            self._validate_prepartitioned_weights()
 
             self._gate_projs_ptrs = _make_ptrs(gate_weights)
             self._up_projs_ptrs = _make_ptrs(up_weights)
@@ -345,6 +361,57 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         loader.close_all_handles()
 
+    def _aligned_max_len(self) -> int:
+        return ((self.chunked_prefill_size + _AMX_M_STEP - 1) // _AMX_M_STEP) * _AMX_M_STEP
+
+    def _validate_prepartitioned_weights(self) -> None:
+        numa_count = len(self._gate_weights_per_numa)
+        if self.moe_intermediate_size % self.threadpool_count != 0:
+            raise ValueError(
+                f"moe_intermediate_size={self.moe_intermediate_size} must be divisible by "
+                f"threadpool_count={self.threadpool_count} for {self.method} SFT."
+            )
+        if numa_count != self.threadpool_count:
+            raise ValueError(
+                f"{self.method} SFT pre-partitioned expert weights have {numa_count} NUMA partitions, "
+                f"but CPUInfer was created with threadpool_count={self.threadpool_count}. "
+                f"Use --kt-threadpool-count {numa_count} for this weight directory, or convert weights "
+                "for the requested threadpool count."
+            )
+
+        collections = {
+            "gate": self._gate_weights_per_numa,
+            "up": self._up_weights_per_numa,
+            "down": self._down_weights_per_numa,
+            "gate_scale": self._gate_scales_per_numa,
+            "up_scale": self._up_scales_per_numa,
+            "down_scale": self._down_scales_per_numa,
+        }
+        for name, per_numa in collections.items():
+            if len(per_numa) != numa_count:
+                raise ValueError(f"{name} has {len(per_numa)} NUMA partitions, expected {numa_count}.")
+            for numa_id, entries in enumerate(per_numa):
+                if len(entries) != self.num_experts:
+                    raise ValueError(
+                        f"{name}[numa={numa_id}] has {len(entries)} experts, expected {self.num_experts}."
+                    )
+
+        for numa_id in range(numa_count):
+            gate_scale_len = self._gate_scales_per_numa[numa_id][0].size
+            up_scale_len = self._up_scales_per_numa[numa_id][0].size
+            down_scale_len = self._down_scales_per_numa[numa_id][0].size
+            expected_intermediate = self.moe_intermediate_size // self.threadpool_count
+            if gate_scale_len != expected_intermediate or up_scale_len != expected_intermediate:
+                raise ValueError(
+                    f"{self.method} gate/up scale length for NUMA {numa_id} is "
+                    f"{gate_scale_len}/{up_scale_len}, expected {expected_intermediate}."
+                )
+            if down_scale_len != self.hidden_size:
+                raise ValueError(
+                    f"{self.method} down scale length for NUMA {numa_id} is "
+                    f"{down_scale_len}, expected {self.hidden_size}."
+                )
+
     # ========== LoRA ==========
 
     def init_lora_weights(
@@ -373,6 +440,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             expected = expected_shapes[name]
             if tensor.shape != expected:
                 raise ValueError(f"{name} shape mismatch: expected {expected}, got {tuple(tensor.shape)}")
+            if tensor.device.type != "cpu":
+                raise ValueError(
+                    f"{name} must be a CPU tensor for {self.method} SFT, got {tensor.device}."
+                )
 
         self.gate_lora_a = gate_lora_a.contiguous()
         self.gate_lora_b = gate_lora_b.contiguous()
@@ -401,17 +472,17 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if not self._lora_initialized:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
 
-        self.cpu_infer.submit(
-            self.moe.update_lora_weights_task(
-                self.gate_lora_a.data_ptr(),
-                self.gate_lora_b.data_ptr(),
-                self.up_lora_a.data_ptr(),
-                self.up_lora_b.data_ptr(),
-                self.down_lora_a.data_ptr(),
-                self.down_lora_b.data_ptr(),
-            )
+        # Weight pointer updates are load-time synchronous work. Calling the
+        # direct binding avoids nesting an update task inside CPUInfer's queue
+        # while SGLang is still in distributed model-loading barriers.
+        self.moe.update_lora_weights(
+            self.gate_lora_a.data_ptr(),
+            self.gate_lora_b.data_ptr(),
+            self.up_lora_a.data_ptr(),
+            self.up_lora_b.data_ptr(),
+            self.down_lora_a.data_ptr(),
+            self.down_lora_b.data_ptr(),
         )
-        self.cpu_infer.sync()
 
     def save_backward_weights_from_tensors(
         self,

@@ -7,6 +7,8 @@
 
 # Tutorial
 - [kt-sft part](en/SFT/README.md)
+  - [KT-FT Fine-Tuning and Inference Loop](en/SFT/Qwen3.5-SGLang-LoRA-Serving.md)
+  - [KT-FT 微调推理闭环](zh/Qwen3.5-SGLang-LoRA-Serving_zh.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
   - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
   - [DPO tutorial](en/SFT/DPO_tutorial.md)

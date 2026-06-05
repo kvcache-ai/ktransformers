@@ -4,6 +4,86 @@ KT-Kernel provides weight conversion tools for CPU-GPU hybrid inference (e.g., i
 
 - **CPU Weights (`convert_cpu_weights.py`)**: Quantize weights to INT4/INT8 with AMX optimization for CPU-resident "cold" experts
 - **GPU Weights (`convert_gpu_weights.py`)**: Apply GPTQ/RTN quantization (W4A16/W8A16) for GPU-resident "hot" experts
+- **KT Fused Expert LoRA (`convert_kt_to_sglang_adapter.py`)**: Convert KT SFT fused expert LoRA checkpoints into adapter-only SafeTensors directories
+
+---
+
+## KT Fused Expert LoRA Adapter Conversion
+
+KT SFT fused expert LoRA saves MoE expert LoRA tensors in `fused_expert_lora.safetensors` using compact 3D tensors:
+
+```
+layers.{L}.experts.gate_lora_a
+layers.{L}.experts.gate_lora_b
+layers.{L}.experts.up_lora_a
+layers.{L}.experts.up_lora_b
+layers.{L}.experts.down_lora_a
+layers.{L}.experts.down_lora_b
+```
+
+Use `convert_kt_to_sglang_adapter.py` to convert raw KT SFT output into one merged SGLang adapter directory:
+
+```bash
+python scripts/convert_kt_to_sglang_adapter.py /path/to/kt_adapter /path/to/sglang_adapter \
+  --base-model-name-or-path /path/to/base_model \
+  --lora-alpha 16 \
+  --overwrite
+```
+
+Output:
+
+```
+sglang_adapter/
+├── adapter_config.json
+└── adapter_model.safetensors
+```
+
+The converter merges the existing non-expert `adapter_model.safetensors` with expanded expert tensors from `fused_expert_lora.safetensors`. Pass this merged directory to SGLang with:
+
+```bash
+--enable-lora \
+--lora-paths my_lora=/path/to/sglang_adapter
+```
+
+The KTransformers SGLang fork will auto-split the merged adapter internally at server startup. Users do not need to pass separate expert and non-expert adapter paths in the normal workflow.
+
+Optional split outputs for debugging:
+
+```bash
+python scripts/convert_kt_to_sglang_adapter.py /path/to/kt_adapter /path/to/sglang_adapter \
+  --base-model-name-or-path /path/to/base_model \
+  --expert-output-dir /path/to/expert_adapter \
+  --nonexpert-output-dir /path/to/nonexpert_adapter \
+  --overwrite
+```
+
+Existing PEFT prefixes such as `base_model.model.` are stripped to match SGLang's loader. Scaling is not folded into the LoRA B tensors. Runtime scaling remains `lora_alpha / r`; if the input directory has no `adapter_config.json`, pass `--lora-alpha` explicitly.
+
+This script only converts adapter files. Serving compatibility depends on the KTransformers SGLang runtime branch being used.
+
+### Optional Integration Validation
+
+The unit tests use synthetic tensors and run without model files. To validate a real KT adapter directory, set these environment variables:
+
+```bash
+export KT_LORA_ADAPTER_DIR=/path/to/kt_adapter
+export KT_LORA_BASE_MODEL=/path/to/base_model
+export KT_LORA_ALPHA=16  # required only if the input has no adapter_config.json
+```
+
+Then run:
+
+```bash
+python -m pytest kt-kernel/test/per_commit/test_convert_kt_to_sglang_adapter_integration.py -q
+```
+
+To run a large adapter conversion smoke test, also set:
+
+```bash
+export KT_LORA_LARGE_ADAPTER_DIR=/path/to/large_kt_adapter
+```
+
+These integration tests check real fused tensor splitting, optional `adapter_model.safetensors` merging, `adapter_config.json` compatibility with `sglang.srt.lora.lora_config.LoRAConfig`, and large-file readability. They intentionally do not start an SGLang server or validate runtime `FusedMoE` LoRA application.
 
 ---
 

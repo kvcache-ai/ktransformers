@@ -8,7 +8,6 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
-
 #include <immintrin.h>
 
 #include <algorithm>
@@ -266,6 +265,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if (!config.gate_projs.empty()) {
       // Pre-quantized per-NUMA weights (INT8/INT4 with separate scales)
       printf("TP_MOE_SFT: Pre-quantized per-NUMA mode (gate_projs path)\n");
+      for (int i = 0; i < tp_count; i++) {
+        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+      }
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
       // Check if pre-quantized backward weights are available
@@ -391,6 +393,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
       // Step 2: Set weight pointers BEFORE load_weights (Bug #24 fix)
       for (int i = 0; i < tp_count; i++) {
+        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
         tps[i]->set_weight_pointers_for_forward(temp_gate[i], temp_up[i], temp_down[i]);
       }
 
@@ -401,7 +404,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
         if (!config.share_backward_bb) {
           tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
         }
-        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
       }
 
       for (int i = 0; i < tp_count; i++) {
@@ -411,6 +413,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     } else {
       // Other loading methods (from loader or file)
+      for (int i = 0; i < tp_count; i++) {
+        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+      }
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
 
       // Try loading backward weights from disk (.kt files) — parallel across NUMA nodes.
@@ -489,7 +494,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("Weights not loaded");
     }
 
-
     int qlen = *qlen_ptr;
     auto pool = config.pool;
 
@@ -504,7 +508,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
-
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
     // }
@@ -514,9 +517,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
 
-
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {
-    });
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
 
   /**
@@ -550,7 +551,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights) {
     auto pool = config.pool;
-
 
     // Get full intermediate_size (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
@@ -655,7 +655,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  std::memset(seg.ptr, 0, seg.len);
                                },
                                nullptr);
-
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
@@ -882,8 +881,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
           nullptr);
     }
 
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {
-    });
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
 
   /**
@@ -934,43 +932,38 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
-    // Single do_numa_job: work-stealing memcpy + update_lora_weights
-    auto pool = config.pool;
-    pool->dispense_backend()->do_numa_job([this, gate_lora_a, gate_lora_b, up_lora_a, up_lora_b, down_lora_a,
-                                           down_lora_b, full_intermediate_size, expert_num, lora_rank,
-                                           pool](int numa_id) {
+    // LoRA weights are installed at load time. Keep the partitioning copy
+    // synchronous and serial here instead of nesting work-stealing jobs inside
+    // SGLang's scheduler process during model-loading barriers.
+    for (int numa_id = 0; numa_id < tp_count; numa_id++) {
       int tp_inter = tp_configs[numa_id].intermediate_size;
       size_t lora_b_slice = (size_t)tp_inter * lora_rank;
-      auto subpool = pool->get_subpool(numa_id);
 
-      // Work-stealing: copy all weights for this expert (gate + up + down)
-      subpool->do_work_stealing_job(
-          expert_num,
-          [&](int e) {
-            // gate_lora_b: [expert_num, intermediate_size, lora_rank]
-            memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
-                   (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
-                   sizeof(ggml_bf16_t) * lora_b_slice);
+      for (int e = 0; e < expert_num; e++) {
+        // gate_lora_b: [expert_num, intermediate_size, lora_rank]
+        memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
+               (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+               sizeof(ggml_bf16_t) * lora_b_slice);
 
-            // up_lora_b: [expert_num, intermediate_size, lora_rank]
-            memcpy(partitioned_up_lora_b_[numa_id] + e * lora_b_slice,
-                   (ggml_bf16_t*)up_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
-                   sizeof(ggml_bf16_t) * lora_b_slice);
+        // up_lora_b: [expert_num, intermediate_size, lora_rank]
+        memcpy(partitioned_up_lora_b_[numa_id] + e * lora_b_slice,
+               (ggml_bf16_t*)up_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+               sizeof(ggml_bf16_t) * lora_b_slice);
 
-            // down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
-            for (int r = 0; r < lora_rank; r++) {
-              memcpy(partitioned_down_lora_a_[numa_id] + e * lora_rank * tp_inter + r * tp_inter,
-                     (ggml_bf16_t*)down_lora_a + e * lora_rank * full_intermediate_size + r * full_intermediate_size +
-                         numa_id * tp_inter,
-                     sizeof(ggml_bf16_t) * tp_inter);
-            }
-          });
+        // down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
+        for (int r = 0; r < lora_rank; r++) {
+          memcpy(partitioned_down_lora_a_[numa_id] + e * lora_rank * tp_inter + r * tp_inter,
+                 (ggml_bf16_t*)down_lora_a + e * lora_rank * full_intermediate_size + r * full_intermediate_size +
+                     numa_id * tp_inter,
+                 sizeof(ggml_bf16_t) * tp_inter);
+        }
+      }
 
       // Update weights after all memcpy complete
       tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
                                         partitioned_up_lora_b_[numa_id], partitioned_down_lora_a_[numa_id],
                                         down_lora_b);
-    });
+    }
   }
 
   /**

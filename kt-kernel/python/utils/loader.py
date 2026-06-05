@@ -726,6 +726,7 @@ class CompressedSafeTensorLoader(SafeTensorLoader):
             "down_scale": down_scales,
         }
 
+
 class GGUFLoader:
     """
     GGUF format loader using the official gguf library (gguf.gguf_reader.GGUFReader)

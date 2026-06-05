@@ -15,7 +15,7 @@ import torch
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
-from ..experts_base import _MoEBase
+from ..experts_base import KExpertsCPUBuffer, _MoEBase
 
 
 class KExpertsSFTBuffer:
@@ -96,6 +96,26 @@ class KExpertsSFTBuffer:
     def clear_cache(cls) -> None:
         """Clear the shared buffer."""
         cls._shared_buffer = None
+
+
+class _SFTForwardBufferView:
+    """Minimal buffer view consumed by AMXSFTMoEWrapper._make_forward_task."""
+
+    __slots__ = ("bsz_tensor", "expert_ids_cpu", "weights_cpu", "input_cpu", "output_cpu")
+
+    def __init__(
+        self,
+        bsz_tensor: torch.Tensor,
+        expert_ids_cpu: torch.Tensor,
+        weights_cpu: torch.Tensor,
+        input_cpu: torch.Tensor,
+        output_cpu: torch.Tensor,
+    ):
+        self.bsz_tensor = bsz_tensor
+        self.expert_ids_cpu = expert_ids_cpu
+        self.weights_cpu = weights_cpu
+        self.input_cpu = input_cpu
+        self.output_cpu = output_cpu
 
 
 class BaseSFTMoEWrapper(_MoEBase, ABC):
@@ -356,6 +376,104 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._pending_qlen = None
 
         return self._return_output(buffer, qlen, output_device)
+
+    # ========== Inference-only async forward ==========
+
+    def submit_forward_inference(
+        self,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        cuda_stream,
+    ) -> None:
+        """
+        Submit an SFT MoE forward pass for serving.
+
+        This path mirrors the normal KT inference wrapper: inputs are copied to
+        pinned CPU staging buffers, the CPUInfer task is enqueued with the
+        caller CUDA stream, and sync_forward_inference() returns a persistent
+        GPU output buffer. It deliberately avoids the training-oriented
+        torch.cuda.synchronize() in _copy_inputs_to_buffer().
+        """
+        if not hasattr(self.cpu_infer, "submit_with_cuda_stream"):
+            self.submit_forward(hidden_states, expert_ids, weights, save_for_backward=False)
+            self._pending_inference_fallback = True
+            self._pending_inference_fallback_device = hidden_states.device
+            return
+
+        self._validate_forward_inputs(hidden_states, expert_ids, weights)
+        flat_hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
+        (
+            input_tensor_cpu,
+            expert_ids_cpu,
+            _deferred_expert_ids_cpu,
+            weights_cpu,
+            output_cpu,
+            bsz_tensor_cpu,
+            output_gpu,
+        ) = KExpertsCPUBuffer.get_buffer(flat_hidden_states, self.num_experts_per_tok)
+
+        current_slot = self.layer_idx % KExpertsCPUBuffer.buffer_depth
+        bsz_slot_tensor = bsz_tensor_cpu[current_slot]
+
+        torch_stream = (
+            cuda_stream
+            if isinstance(cuda_stream, torch.cuda.Stream)
+            else torch.cuda.ExternalStream(cuda_stream, device=flat_hidden_states.device)
+        )
+        with torch.cuda.stream(torch_stream):
+            input_tensor_cpu[current_slot].copy_(flat_hidden_states.to(torch.bfloat16), non_blocking=True)
+            expert_ids_cpu[current_slot].copy_(expert_ids.to(torch.int64), non_blocking=True)
+            weights_cpu[current_slot].copy_(weights.to(torch.float32), non_blocking=True)
+
+        buffer_view = _SFTForwardBufferView(
+            bsz_tensor=bsz_slot_tensor,
+            expert_ids_cpu=expert_ids_cpu[current_slot],
+            weights_cpu=weights_cpu[current_slot],
+            input_cpu=input_tensor_cpu[current_slot],
+            output_cpu=output_cpu[current_slot],
+        )
+
+        self._pending_inference_fallback = False
+        self._pending_inference_output_cpu = output_cpu[current_slot]
+        self._pending_inference_output_gpu = output_gpu[current_slot]
+
+        self.cpu_infer.submit_with_cuda_stream(
+            cuda_stream,
+            self._make_forward_task(buffer_view, save_for_backward=False),
+        )
+
+    def sync_forward_inference(self, cuda_stream) -> torch.Tensor:
+        """
+        Synchronize a serving forward submitted by submit_forward_inference().
+
+        Returns a persistent GPU buffer matching the input batch shape. Consumers
+        on the same CUDA stream will naturally wait for the non-blocking D2H/H2D
+        staging work ordered through CPUInfer's stream synchronization.
+        """
+        if getattr(self, "_pending_inference_fallback", False):
+            self._pending_inference_fallback = False
+            output_device = getattr(self, "_pending_inference_fallback_device", None)
+            self._pending_inference_fallback_device = None
+            return self.sync_forward(output_device=output_device)
+
+        if not hasattr(self, "_pending_inference_output_cpu"):
+            raise RuntimeError("No pending inference forward. Call submit_forward_inference() first.")
+
+        torch_stream = (
+            cuda_stream
+            if isinstance(cuda_stream, torch.cuda.Stream)
+            else torch.cuda.ExternalStream(cuda_stream, device=self._pending_inference_output_gpu.device)
+        )
+        self.cpu_infer.sync_with_cuda_stream(cuda_stream)
+        with torch.cuda.stream(torch_stream):
+            self._pending_inference_output_gpu.copy_(self._pending_inference_output_cpu, non_blocking=True)
+        output = self._pending_inference_output_gpu
+
+        del self._pending_inference_output_cpu
+        del self._pending_inference_output_gpu
+        return output
 
     # ========== Async backward ==========
 

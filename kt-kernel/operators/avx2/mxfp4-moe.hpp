@@ -444,7 +444,8 @@ class AVX2_MXFP4_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP4_MOE_TP<T>> {
             // H2: Bounds check (already validated in weight loading, but be safe)
             if (lid >= config_.gate_scales[0].size()) return;
             if (config_.gate_scales[0][lid] == nullptr || config_.up_scales[0][lid] == nullptr ||
-                config_.down_scales[0][lid] == nullptr) return;
+                config_.down_scales[0][lid] == nullptr)
+              return;
             size_t scale_elem_count = ((size_t)config_.hidden_size * config_.intermediate_size) / group_size;
             // tp_part_idx == 0 guaranteed here, so offset is 0
             convert_or_copy(gate_bb_[expert_idx]->d, (const ggml_bf16_t*)config_.gate_scales[0][lid], scale_elem_count);
@@ -678,7 +679,8 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
         auto subpool = pool->get_subpool(i);
         subpool->do_work_stealing_job(
             tpc.expert_num, nullptr,
-            [&, i, per_tp_interm, full_interm, gate_buf, up_buf, down_buf, gate_up_wt_per_expert, down_wt_per_expert](int eid) {
+            [&, i, per_tp_interm, full_interm, gate_buf, up_buf, down_buf, gate_up_wt_per_expert,
+             down_wt_per_expert](int eid) {
               if (tpc.should_skip_expert(eid)) return;
               uint64_t lid = expert_map(physical_to_logical_map, eid);
 
@@ -725,7 +727,8 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
 
               // down scales: K-split, non-contiguous → per-row convert
               if (config.down_scales[0][lid] == nullptr) {
-                throw std::runtime_error("TP_MOE load_weights: null down_scale pointer for expert " + std::to_string(lid));
+                throw std::runtime_error("TP_MOE load_weights: null down_scale pointer for expert " +
+                                         std::to_string(lid));
               }
               int full_interm_groups = full_interm / group_size;
               int per_tp_groups = per_tp_interm / group_size;
@@ -743,8 +746,9 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
       pool->dispense_backend()->do_numa_job([&, this](int i) {
         auto& tpc = tps[i]->config_;
         if (tpc.intermediate_size % 2 != 0)
-          throw std::runtime_error("MXFP4 TP flat-buffer: intermediate_size must be even for nibble-aligned addressing, got " +
-                                   std::to_string(tpc.intermediate_size));
+          throw std::runtime_error(
+              "MXFP4 TP flat-buffer: intermediate_size must be even for nibble-aligned addressing, got " +
+              std::to_string(tpc.intermediate_size));
         size_t weight_elem_count = (size_t)tpc.intermediate_size * tpc.hidden_size;
         size_t scales_elem_count = ((size_t)tpc.hidden_size / group_size) * tpc.intermediate_size;
         tpc.gate_proj = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
@@ -819,8 +823,7 @@ class TP_MOE<AVX2_MXFP4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_MXFP4_M
     this->weights_loaded = true;
   }
 
-  void write_weight_scale_to_buffer(int gpu_tp_count, int expert_id,
-                                    const std::vector<uintptr_t>& w13_weight_ptrs,
+  void write_weight_scale_to_buffer(int gpu_tp_count, int expert_id, const std::vector<uintptr_t>& w13_weight_ptrs,
                                     const std::vector<uintptr_t>& w13_scale_ptrs,
                                     const std::vector<uintptr_t>& w2_weight_ptrs,
                                     const std::vector<uintptr_t>& w2_scale_ptrs) {
