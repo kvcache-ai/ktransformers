@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>kt-sft part - Ktransformers</title>
+        <title>KT-FT Fine-Tuning and Inference Loop - Ktransformers</title>
 
 
         <!-- Custom HTML head -->
@@ -146,7 +146,7 @@
                         <a href="https://github.com/kvcache-ai/ktransformers" title="Git repository" aria-label="Git repository">
                             <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
                         </a>
-                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/SFT/README.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                        <a href="https://github.com/kvcache-ai/ktransformers/edit/main/doc/en/SFT/Qwen3.5-SGLang-LoRA-Serving.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
                             <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
                         </a>
 
@@ -180,25 +180,175 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="ktransformers-sft-docs"><a class="header" href="#ktransformers-sft-docs">KTransformers SFT Docs</a></h1>
+                        <h1 id="kt-ft-fine-tuning-and-inference-loop"><a class="header" href="#kt-ft-fine-tuning-and-inference-loop">KT-FT Fine-Tuning and Inference Loop</a></h1>
+<p>Last updated: 2026-06-01</p>
+<p>This guide documents the current KT-FT loop for Qwen3.5 MoE: train with KT SFT, convert the output once, and serve the fine-tuned result through SGLang with a single merged adapter path.</p>
+<pre><code class="language-text">KT SFT raw output
+  -&gt; convert_kt_to_sglang_adapter.py
+  -&gt; &lt;MERGED_ADAPTER_DIR&gt;
+  -&gt; sglang --lora-paths &lt;name&gt;=&lt;MERGED_ADAPTER_DIR&gt;
+  -&gt; server auto-splits expert / non-expert internally
+  -&gt; request model=&lt;served_model&gt;:&lt;name&gt;
+</code></pre>
+<p>Training-side KT SFT docs remain separate. This page focuses on the bridge from trained LoRA artifacts to online inference.</p>
+<h2 id="1-scope"><a class="header" href="#1-scope">1. Scope</a></h2>
+<p>Current supported and validated workflow:</p>
 <ul>
-<li><a href="./KTransformers-Fine-Tuning_Quick-Start.html">v0.6.1 Quick Start</a></li>
-<li><a href="./KTransformers-Fine-Tuning_User-Guide.html">Fine-Tuning User Guide</a></li>
-<li><a href="./Qwen3.5-SGLang-LoRA-Serving.html">KT-FT Fine-Tuning and Inference Loop</a></li>
-<li><a href="./KTransformers-Fine-Tuning_Developer-Technical-Notes.html">Developer Technical Notes</a></li>
-<li><a href="./DPO_tutorial.html">DPO Tutorial</a></li>
-<li><a href="./injection_tutorial.html">Injection Tutorial</a></li>
+<li>Base model: Qwen3.5 MoE, for example <code>Qwen3.5-35B-A3B</code></li>
+<li>KT expert weights: AMX/BF16 SFT-compatible KT CPU expert path</li>
+<li>User-facing serving input: one converted merged adapter directory</li>
+<li>Runtime split: expert LoRA goes to the KT CPU expert path; non-expert LoRA goes to SGLang’s LoRA manager. This split happens automatically at server startup.</li>
 </ul>
+<h2 id="2-artifacts-at-each-stage"><a class="header" href="#2-artifacts-at-each-stage">2. Artifacts At Each Stage</a></h2>
+<h3 id="raw-kt-sft-output"><a class="header" href="#raw-kt-sft-output">Raw KT SFT output</a></h3>
+<p>After LLaMA-Factory + KT training, the output directory contains two LoRA artifacts:</p>
+<pre><code class="language-text">&lt;KT_SFT_OUTPUT_DIR&gt;/
+  adapter_model.safetensors      # non-expert LoRA
+  fused_expert_lora.safetensors  # expert LoRA in KT fused format
+  adapter_config.json
+</code></pre>
+<p>Do not pass this raw directory directly to SGLang serving.</p>
+<h3 id="converted-merged-adapter"><a class="header" href="#converted-merged-adapter">Converted merged adapter</a></h3>
+<p>Run the converter once to produce the serving input:</p>
+<pre><code class="language-text">&lt;MERGED_ADAPTER_DIR&gt;/
+  adapter_config.json
+  adapter_model.safetensors
+</code></pre>
+<p>This merged directory contains both expert and non-expert LoRA tensors in one PEFT-style adapter. Pass only this directory to <code>--lora-paths</code>.</p>
+<h2 id="3-convert-once"><a class="header" href="#3-convert-once">3. Convert Once</a></h2>
+<pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
+  &lt;KT_SFT_OUTPUT_DIR&gt; \
+  &lt;MERGED_ADAPTER_DIR&gt; \
+  --base-model-name-or-path /path/to/Qwen3.5-35B-A3B \
+  --overwrite
+</code></pre>
+<p>Example:</p>
+<pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
+  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240 \
+  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  --base-model-name-or-path /mnt/data3/models/Qwen3.5-35B-A3B \
+  --overwrite
+</code></pre>
+<p>The converter reads <code>fused_expert_lora.safetensors</code> and the existing non-expert <code>adapter_model.safetensors</code>, then writes one merged adapter directory.</p>
+<p>Optional split outputs for debugging:</p>
+<pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
+  &lt;KT_SFT_OUTPUT_DIR&gt; \
+  &lt;MERGED_ADAPTER_DIR&gt; \
+  --base-model-name-or-path /path/to/Qwen3.5-35B-A3B \
+  --expert-output-dir &lt;EXPERT_ADAPTER_DIR&gt; \
+  --nonexpert-output-dir &lt;NONEXPERT_ADAPTER_DIR&gt; \
+  --overwrite
+</code></pre>
+<p>For normal serving, only <code>&lt;MERGED_ADAPTER_DIR&gt;</code> is needed.</p>
+<h2 id="4-launch-sglang"><a class="header" href="#4-launch-sglang">4. Launch SGLang</a></h2>
+<p>Use the KTransformers SGLang fork from this repository and point <code>PYTHONPATH</code> at both <code>kt-kernel/python</code> and <code>third_party/sglang/python</code>.</p>
+<pre><code class="language-bash">cd /path/to/ktransformers
+
+PYTHONPATH=/path/to/ktransformers/kt-kernel/python:/path/to/ktransformers/third_party/sglang/python:$PYTHONPATH \
+python -m sglang.launch_server \
+  --host 127.0.0.1 \
+  --port 30006 \
+  --model-path /path/to/Qwen3.5-35B-A3B \
+  --tokenizer-path /path/to/Qwen3.5-35B-A3B \
+  --kt-weight-path /path/to/Qwen3.5-35B-A3B-AMXINT4 \
+  --kt-method AMXINT4 \
+  --kt-cpuinfer 60 \
+  --kt-threadpool-count 2 \
+  --kt-numa-nodes 0 1 \
+  --kt-num-gpu-experts 0 \
+  --attention-backend flashinfer \
+  --trust-remote-code \
+  --mem-fraction-static 0.98 \
+  --chunked-prefill-size 4096 \
+  --max-running-requests 2 \
+  --max-total-tokens 32000 \
+  --served-model-name qwen3.5-kt-ft \
+  --enable-mixed-chunk \
+  --tensor-parallel-size 4 \
+  --enable-p2p-check \
+  --disable-cuda-graph \
+  --disable-custom-all-reduce \
+  --enable-lora \
+  --lora-backend triton \
+  --lora-paths qwen35b_neko=/path/to/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  --log-level info
+</code></pre>
+<p>Important points:</p>
+<ul>
+<li>Pass only one merged adapter through <code>--lora-paths</code>.</li>
+<li>Do not also pass <code>--kt-expert-lora-path</code> in the normal user workflow.</li>
+<li>At startup, the server detects the merged KT MoE adapter, splits it internally, and writes runtime cache directories under <code>$TMPDIR/sglang_kt_lora_cache/</code> (or <code>$SGLANG_KT_LORA_CACHE_DIR</code> if set).</li>
+<li>Prefer <code>--lora-backend triton</code> for Qwen3.5 full-LoRA generation.</li>
+</ul>
+<p>Current constraints:</p>
+<ul>
+<li>single merged KT composite adapter only</li>
+<li><code>--kt-num-gpu-experts 0</code></li>
+<li>do not enable <code>--kt-enable-dynamic-expert-update</code></li>
+<li>do not use <code>--kt-gpu-prefill-token-threshold</code></li>
+<li>use an AMX/BF16 SFT-compatible KT method such as <code>AMXINT4</code>, <code>AMXINT8</code>, <code>AMXBF16</code>, or <code>BF16</code></li>
+</ul>
+<h2 id="5-request-semantics"><a class="header" href="#5-request-semantics">5. Request Semantics</a></h2>
+<p>The OpenAI-compatible request <code>model</code> field uses names, not paths.</p>
+<pre><code class="language-text">--served-model-name qwen3.5-kt-ft
+--lora-paths qwen35b_neko=/path/to/merged_adapter
+</code></pre>
+<p>Request behavior in the current single-adapter implementation:</p>
+<pre><code class="language-text">model=qwen3.5-kt-ft
+=&gt; base + KT expert LoRA
+
+model=qwen3.5-kt-ft:qwen35b_neko
+=&gt; base + KT expert LoRA + SGLang non-expert LoRA
+</code></pre>
+<p>The suffix after <code>:</code> must match the left-side name in <code>--lora-paths</code>.</p>
+<h2 id="6-smoke-test"><a class="header" href="#6-smoke-test">6. Smoke Test</a></h2>
+<pre><code class="language-bash">curl -sS http://127.0.0.1:30006/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.5-kt-ft:qwen35b_neko",
+    "messages": [{"role": "user", "content": "我回来了，你在干嘛？"}],
+    "temperature": 0.7,
+    "max_tokens": 160,
+    "chat_template_kwargs": {"enable_thinking": false}
+  }'
+</code></pre>
+<p>Startup logs should include lines similar to:</p>
+<pre><code class="language-text">Prepared merged KT LoRA adapter ... for runtime: expert=... nonexpert=...
+Loaded KT expert LoRA for layer ...
+Using triton as backend of LoRA kernels.
+</code></pre>
+<h2 id="7-advanced-manual-split-serving"><a class="header" href="#7-advanced-manual-split-serving">7. Advanced: Manual Split Serving</a></h2>
+<p>The older split-runtime contract is still available for debugging:</p>
+<pre><code class="language-bash">--kt-expert-lora-path &lt;EXPERT_ADAPTER_DIR&gt; \
+--enable-lora \
+--lora-paths &lt;NONEXPERT_LORA_NAME&gt;=&lt;NONEXPERT_ADAPTER_DIR&gt;
+</code></pre>
+<p>This is not the recommended user-facing path. Normal users should pass one merged adapter directory through <code>--lora-paths</code> only.</p>
+<h2 id="8-troubleshooting"><a class="header" href="#8-troubleshooting">8. Troubleshooting</a></h2>
+<h3 id="got-lora-adapter-that-has-never-been-loaded-lora0"><a class="header" href="#got-lora-adapter-that-has-never-been-loaded-lora0"><code>Got LoRA adapter that has never been loaded: lora0</code></a></h3>
+<p>The adapter name in the request must match the left side of <code>--lora-paths</code>. If you launched with <code>qwen35b_neko=...</code>, request <code>model=qwen3.5-kt-ft:qwen35b_neko</code>, not <code>:lora0</code>.</p>
+<h3 id="no-visible-adapter-effect"><a class="header" href="#no-visible-adapter-effect">No visible adapter effect</a></h3>
+<p>Make sure you are serving the intended merged adapter directory. For example, use the Neko adapter at <code>..._nekoqa_eod_240_sglang</code>, not a generic sanity adapter such as <code>..._Moe_sglang</code>.</p>
+<h3 id="connection-refused"><a class="header" href="#connection-refused"><code>connection refused</code></a></h3>
+<p>Check that the server is listening on the port you curl, and remember the example above binds to <code>127.0.0.1</code>, not <code>0.0.0.0</code>.</p>
+<h3 id="server-resolves-upstream-sglang-instead-of-this-checkout"><a class="header" href="#server-resolves-upstream-sglang-instead-of-this-checkout">Server resolves upstream SGLang instead of this checkout</a></h3>
+<pre><code class="language-bash">python - &lt;&lt;'PY'
+import inspect
+import sglang.srt.models.qwen3_5 as qwen3_5
+print(inspect.getfile(qwen3_5))
+PY
+</code></pre>
+<p>The path should come from this repository’s <code>third_party/sglang</code>.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../../en/SFT/KTransformers-Fine-Tuning_User-Guide.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../../en/SFT/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../../en/SFT/Qwen3.5-SGLang-LoRA-Serving.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../zh/Qwen3.5-SGLang-LoRA-Serving_zh.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -208,11 +358,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../../en/SFT/KTransformers-Fine-Tuning_User-Guide.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../../en/SFT/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../../en/SFT/Qwen3.5-SGLang-LoRA-Serving.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../zh/Qwen3.5-SGLang-LoRA-Serving_zh.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
