@@ -658,13 +658,22 @@ class NativeMoEWrapper(BaseMoEWrapper):
             self.loader = NativeMoEWrapper._native_loader_instance
 
         t0 = time.time()
-        base_key = f"model.layers.{self.layer_idx}"
-        try:
-            weights = self.loader.load_experts(base_key)
-        except (ValueError, KeyError):
-            # For VL/multimodal models (e.g. Qwen3.5) with 'language_model' prefix
-            base_key = f"model.language_model.layers.{self.layer_idx}"
-            weights = self.loader.load_experts(base_key)
+        _candidates = [
+            f"model.layers.{self.layer_idx}",
+            f"language_model.model.layers.{self.layer_idx}",
+            f"model.language_model.layers.{self.layer_idx}",
+        ]
+        weights = None
+        for base_key in _candidates:
+            try:
+                weights = self.loader.load_experts(base_key)
+                break
+            except (ValueError, KeyError):
+                continue
+        if weights is None:
+            raise ValueError(
+                f"No experts found for layer {self.layer_idx} under any prefix: {_candidates}"
+            )
         t1 = time.time()
 
         # Keep individual tensors instead of stacking - avoid expensive memory copy
