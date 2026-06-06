@@ -224,6 +224,7 @@ class KTMoEWrapper:
                 method=method,
                 numa_nodes=numa_nodes,
                 swiglu_limit=swiglu_limit,
+                swiglu_alpha=swiglu_alpha,
             )
         else:  # mode == "sft"
             # SFT factory does not plumb swiglu_limit; reject non-zero
@@ -320,6 +321,7 @@ def _create_inference_wrapper(
     method: str,
     numa_nodes: Optional[List[int]] = None,
     swiglu_limit: float = 0.0,
+    swiglu_alpha: float = 0.0,
 ) -> BaseMoEWrapper:
     """
     Create an inference wrapper based on the method.
