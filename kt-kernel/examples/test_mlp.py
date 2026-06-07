@@ -30,11 +30,11 @@ CPUInfer = kt_kernel_ext.CPUInfer(48)
 validation_iter = 100
 
 
-def act_fn(x):
+def act_fn(x: torch.Tensor) -> torch.Tensor:
     return x / (1.0 + torch.exp(-x))
 
 
-def mlp_torch(input, gate_proj, up_proj, down_proj):
+def mlp_torch(input: torch.Tensor, gate_proj: torch.Tensor, up_proj: torch.Tensor, down_proj: torch.Tensor) -> torch.Tensor:
     gate_buf = torch.mm(input, gate_proj.t())
     up_buf = torch.mm(input, up_proj.t())
     intermediate = act_fn(gate_buf) * up_buf
@@ -95,4 +95,4 @@ with torch.inference_mode(mode=True):
 
         diff = torch.mean(torch.abs(output - t_output)) / torch.mean(torch.abs(t_output))
         print("diff = ", diff)
-        assert diff < 0.001
+        assert diff < 0.001, f"MLP output mismatch: diff={diff:.4e} exceeds threshold 0.001"

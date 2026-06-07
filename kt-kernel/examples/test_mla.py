@@ -58,15 +58,15 @@ def get_torch_tensor_and_type_from_gguf(gguf_weights, name):
     return torch.from_numpy(gguf_weights[name].data).contiguous(), gguf_weights[name].tensor_type.name
 
 
-def type_to_ggml_type(type):
-    if type == "F32":
+def type_to_ggml_type(dtype_str: str) -> ggml_type:
+    if dtype_str == "F32":
         return ggml_type.FP32
-    elif type == "F16":
+    elif dtype_str == "F16":
         return ggml_type.FP16
-    elif type == "BF16":
+    elif dtype_str == "BF16":
         return ggml_type.BF16
     else:
-        raise ValueError(f"Unsupported data type: {type}")
+        raise ValueError(f"Unsupported data type: {dtype_str}")
 
 
 use_real_weights = True
@@ -721,4 +721,4 @@ diff_relative_mean = torch.mean(torch.abs(output_cpu - output_torch)) / torch.me
 print(
     f"Diff: ave:{diff.mean()}, max:{diff.max()}, min:{diff.min()},  relative_mean:{diff_relative_mean}, relative_max:{diff_relative.max()}, relative_min:{diff_relative.min()}"
 )
-assert diff_relative_mean < 2e-1, "CPU and Torch outputs are not close enough!"
+assert diff_relative_mean < 2e-1, f"CPU and Torch outputs diverge: relative_mean={diff_relative_mean:.4e} >= 2e-1"
