@@ -199,7 +199,11 @@ class SafeTensorLoader:
         max_experts_count = -1
         while self.has_tensor(f"{up_base_key}.{max_experts_count+1}.numa.{0}.weight"):
             max_experts_count += 1
-        if max_experts_count == 0:
+        # After the loop max_experts_count is the highest expert index found, i.e.
+        # (expert count - 1). It stays -1 only when no experts exist for this key.
+        # (Checking == 0 was an off-by-one: it falsely rejected single-expert layers
+        # and silently accepted the zero-expert case, returning empty lists.)
+        if max_experts_count == -1:
             raise ValueError(f"No experts found for key {base_key}")
         while self.has_tensor(f"{up_base_key}.{0}.numa.{max_numa_id+1}.weight"):
             max_numa_id += 1
