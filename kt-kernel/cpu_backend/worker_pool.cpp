@@ -18,6 +18,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <immintrin.h>  // _mm_pause()
 #include <stdexcept>
 
 #include "hwloc.h"
@@ -215,12 +216,30 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
   }
   auto start = std::chrono::high_resolution_clock::now();
   WorkerPool::thread_local_id = thread_id;  // 设置线程本地变量
+  // Spin-sampling counter for the WAITING pre-sleep loop below. Plain local
+  // (not thread_local): worker_thread runs once per thread, so the counter
+  // needs no TLS storage and avoids the per-iteration %fs load.
+  int spin_counter = 0;
   while (true) {
     ThreadStatus status = thread_state_[thread_id].status.load(std::memory_order_acquire);
     if (status == ThreadStatus::WORKING) {
       process_tasks(thread_id);
       start = std::chrono::high_resolution_clock::now();
     } else if (status == ThreadStatus::WAITING) {
+      // Mitigate the clock_gettime hot-path in the WAITING pre-sleep spin:
+      // the prior loop called high_resolution_clock::now() every iteration.
+      // Under heavy idle-worker conditions this dominates the CPU profile
+      // ([vdso] clock_gettime) and burns the SMT sibling's pipeline.
+      // _mm_pause() yields pipeline resources and lowers power; sampling the
+      // clock once every 100 iterations removes ~99% of those VDSO calls
+      // while leaving the 50ms pre-sleep budget unchanged. Note: the status
+      // load above runs every iteration, so work is still detected without
+      // delay -- only the elapsed-time check is throttled.
+      _mm_pause();
+      if (++spin_counter < 100) {
+        continue;
+      }
+      spin_counter = 0;
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (duration > 50) {
@@ -388,6 +407,9 @@ void NumaJobDistributor::worker_thread(int numa_id) {
   status[numa_id] =
       std::move(std::unique_ptr<std::atomic<ThreadStatus>>(new std::atomic<ThreadStatus>(ThreadStatus::WAITING)));
   ready_bar->arrive_and_wait();
+  // Same WAITING-spin sampling counter as InNumaPool::worker_thread; plain
+  // local, runs once per thread.
+  int spin_counter = 0;
   while (true) {
     auto stat = status[numa_id]->load(std::memory_order_acquire);
     if (stat == ThreadStatus::WORKING) {
@@ -397,6 +419,15 @@ void NumaJobDistributor::worker_thread(int numa_id) {
       status[numa_id]->store(ThreadStatus::WAITING, std::memory_order_release);
       start = std::chrono::high_resolution_clock::now();
     } else if (stat == ThreadStatus::WAITING) {
+      // Identical mitigation to InNumaPool::worker_thread: _mm_pause() per
+      // iteration + sample the clock once every 100 iterations, leaving the
+      // 50ms pre-sleep budget intact. Without this the idle-spin hot-spot
+      // would simply relocate here from the InNumaPool workers.
+      _mm_pause();
+      if (++spin_counter < 100) {
+        continue;
+      }
+      spin_counter = 0;
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
       if (duration > 50) {
