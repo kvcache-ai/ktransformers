@@ -319,6 +319,11 @@ struct GeneralMOEConfig {
   // Origin: kt-sglang 耦合 (carries the V4-2604B limit set by sglang side).
   float swiglu_limit = 0.0f;
 
+  // MiniMax M3 "swigluoai" activation: gate * sigmoid(gate * alpha) * (up + 1).
+  // When alpha > 0, act_fn uses the swigluoai formula with symmetric clamp on
+  // both gate and up (±swiglu_limit). 0.0f = disabled (standard silu path).
+  float swiglu_alpha = 0.0f;
+
   GeneralMOEConfig() {}
 
   GeneralMOEConfig(int expert_num, int routed_expert_num, int hidden_size, int intermediate_size)
