@@ -34,10 +34,12 @@ Environment knobs (export before running pip install .):
   CPUINFER_NATIVE=ON               (override LLAMA_NATIVE)
 
 
-GPU backends (if ever added later, keep placeholders):
+GPU backends:
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA
   CPUINFER_USE_ROCM=0/1           -DKTRANSFORMERS_USE_ROCM
   CPUINFER_USE_MUSA=0/1           -DKTRANSFORMERS_USE_MUSA
+  CPUINFER_USE_MACA=0/1           -DKTRANSFORMERS_USE_MACA
+  MACA_PATH=/opt/maca             MACA SDK root
 
 Usage:
   pip install .
@@ -101,6 +103,12 @@ def _forward_str_env(cmake_args: list[str], env_name: str, cmake_flag: str) -> b
 ################################################################################
 
 REPO_ROOT = Path(__file__).parent.resolve()
+
+# setuptools resolves package_dir and inplace extension copy paths relative to
+# the current working directory. Keep direct invocations like
+# `python kt-kernel/setup.py build_ext --inplace` equivalent to running from
+# inside kt-kernel.
+os.chdir(REPO_ROOT)
 
 CPU_FEATURE_MAP = {
     "FANCY": "-DLLAMA_NATIVE=OFF -DLLAMA_FMA=ON -DLLAMA_F16C=ON -DLLAMA_AVX=ON -DLLAMA_AVX2=ON -DLLAMA_AVX512=ON -DLLAMA_AVX512_FANCY_SIMD=ON",
@@ -490,6 +498,19 @@ class CMakeBuild(build_ext):
                     return cand
             return None
 
+        def find_maca_path() -> str | None:
+            for cand in [
+                os.environ.get("MACA_PATH"),
+                "/opt/maca",
+                "/usr/local/maca",
+            ]:
+                if not cand:
+                    continue
+                root = Path(cand)
+                if (root / "include" / "mcr" / "maca.h").exists():
+                    return str(root)
+            return None
+
         # Note: We no longer set CMAKE_CUDA_ARCHITECTURES by default.
         # If users want to specify CUDA archs, they can set env CPUINFER_CUDA_ARCHS
         # (e.g. "89" or "86;89") or pass it via CMAKE_ARGS.
@@ -497,9 +518,30 @@ class CMakeBuild(build_ext):
         # Normalize CPUINFER_USE_CUDA: if unset, auto-detect; otherwise respect truthy/falsey values
         cuda_env = _env_get_bool("CPUINFER_USE_CUDA", None)
         if cuda_env is None:
-            auto_cuda = detect_cuda_toolkit()
-            os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
-            print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
+            requested_non_cuda_gpu = any(
+                _env_get_bool(name, False)
+                for name in ("CPUINFER_USE_ROCM", "CPUINFER_USE_MUSA", "CPUINFER_USE_MACA")
+            )
+            if requested_non_cuda_gpu:
+                os.environ["CPUINFER_USE_CUDA"] = "0"
+                print("-- CPUINFER_USE_CUDA not set; another GPU backend was requested, disabling CUDA auto-detect")
+            else:
+                auto_cuda = detect_cuda_toolkit()
+                os.environ["CPUINFER_USE_CUDA"] = "1" if auto_cuda else "0"
+                print(f"-- CPUINFER_USE_CUDA not set; auto-detected CUDA toolkit: {'YES' if auto_cuda else 'NO'}")
+
+        enabled_gpu_backends = [
+            name
+            for name, env_name in (
+                ("CUDA", "CPUINFER_USE_CUDA"),
+                ("ROCM", "CPUINFER_USE_ROCM"),
+                ("MUSA", "CPUINFER_USE_MUSA"),
+                ("MACA", "CPUINFER_USE_MACA"),
+            )
+            if _env_get_bool(env_name, False)
+        ]
+        if len(enabled_gpu_backends) > 1:
+            raise RuntimeError(f"GPU backends are mutually exclusive, but enabled: {', '.join(enabled_gpu_backends)}")
 
         # Base CMake args
         cmake_args = [
@@ -647,6 +689,12 @@ class CMakeBuild(build_ext):
             cmake_args.append("-DKTRANSFORMERS_USE_ROCM=ON")
         if _env_get_bool("CPUINFER_USE_MUSA", False):
             cmake_args.append("-DKTRANSFORMERS_USE_MUSA=ON")
+        if _env_get_bool("CPUINFER_USE_MACA", False):
+            cmake_args.append("-DKTRANSFORMERS_USE_MACA=ON")
+            maca_path = find_maca_path()
+            if maca_path and not os.environ.get("MACA_PATH"):
+                cmake_args.append(f"-DMACA_PATH={maca_path}")
+            print("-- Enabling MACA backend (-DKTRANSFORMERS_USE_MACA=ON)")
 
         # Respect user extra CMAKE_ARGS (space separated)
         extra = os.environ.get("CMAKE_ARGS")
@@ -711,11 +759,21 @@ else:
     print(f"-- Version: {VERSION}")
 
 # Package name is always kt-kernel
-# The CUDA-enabled wheel includes both CPU multi-variant support and CUDA capabilities
+# GPU-enabled wheels include both CPU multi-variant support and the selected GPU runtime.
 PACKAGE_NAME = "kt-kernel"
-cuda_enabled = _env_get_bool("CPUINFER_USE_CUDA", False)
-if cuda_enabled:
-    print(f"-- Building kt-kernel with CUDA support (+ CPU multi-variant)")
+gpu_backend = None
+for _backend_name, _env_name in (
+    ("CUDA", "CPUINFER_USE_CUDA"),
+    ("ROCM", "CPUINFER_USE_ROCM"),
+    ("MUSA", "CPUINFER_USE_MUSA"),
+    ("MACA", "CPUINFER_USE_MACA"),
+):
+    if _env_get_bool(_env_name, False):
+        gpu_backend = _backend_name
+        break
+
+if gpu_backend:
+    print(f"-- Building kt-kernel with {gpu_backend} support (+ CPU multi-variant)")
 else:
     print(f"-- Building kt-kernel (CPU-only multi-variant)")
 

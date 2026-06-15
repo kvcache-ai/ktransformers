@@ -24,6 +24,8 @@
 #elif KTRANSFORMERS_USE_ROCM
 #define __HIP_PLATFORM_AMD__
 #include "vendors/hip.h"
+#elif KTRANSFORMERS_USE_MACA
+#include "vendors/maca.h"
 #endif
 
 #include "./vendors/vendor.h"
@@ -83,7 +85,8 @@ class CPUInfer {
   }
 #ifndef KTRANSFORMERS_CPU_ONLY
   void submit_with_cuda_stream(intptr_t user_cuda_stream, std::pair<intptr_t, intptr_t> params) {
-#if defined(KTRANSFORMERS_USE_CUDA)
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \
+    defined(KTRANSFORMERS_USE_MACA)
     void (*func)(void*) = (void (*)(void*))params.first;
     void* args = (void*)params.second;
     *((CPUInfer**)args) = this;
@@ -108,7 +111,8 @@ class CPUInfer {
   }
 #ifndef KTRANSFORMERS_CPU_ONLY
   void sync_with_cuda_stream(intptr_t user_cuda_stream, size_t allow_n_pending = 0) {
-#if defined(KTRANSFORMERS_USE_CUDA)
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \
+    defined(KTRANSFORMERS_USE_MACA)
     SyncArgs* args = new SyncArgs{this, allow_n_pending};
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream, (cudaHostFn_t)&sync_, (void*)args);
 #endif

@@ -8,6 +8,8 @@
 #include "hip.h"
 #elif USE_MUSA
 #include "musa.h"
+#elif USE_MACA
+#include "maca.h"
 #endif
 
 #endif  // CPUINFER_VENDOR_VENDOR_H
