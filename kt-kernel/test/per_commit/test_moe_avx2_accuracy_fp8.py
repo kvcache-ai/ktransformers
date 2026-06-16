@@ -8,8 +8,12 @@ import math
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import pytest
 import torch
 from kt_kernel import kt_kernel_ext
+from ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=120, suite="default")
 
 expert_num = 8
 hidden_size = 256
@@ -94,8 +98,10 @@ def fp8_e4m3_to_float(byte_val):
         return 0.0
     if exp == 0:
         val = (2**-6) * (man / 8.0)
-    elif exp == 15:
-        return float("nan")
+    elif exp == 15 and man == 7:
+        # Match the AVX2 LUT: E4M3 has finite exp=15 values up to 0x7e,
+        # and the NaN sentinel is treated as zero to avoid propagation.
+        return 0.0
     else:
         val = (2**(exp-7)) * (1.0 + man / 8.0)
     return -val if sign else val
@@ -151,6 +157,8 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
     return (new_x.view(*expert_ids.shape, -1).float().mul_(weights.unsqueeze(-1)).sum(1)).to(new_x.dtype)
 
 
+@pytest.mark.cpu
+@pytest.mark.parametrize("qlen,label", [(1, "Decode"), (16, "Prefill")])
 def test_avx2_fp8_accuracy(qlen, label):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
     CPUInfer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)

@@ -1,0 +1,145 @@
+#pragma once
+
+#include <common/maca_bfloat16.h>
+#include <common/maca_fp16.h>
+#include <common/mc_library_types.h>
+#include <mcblas/mcblas.h>
+#include <mcr/maca.h>
+
+#define CUBLAS_COMPUTE_16F MCBLAS_COMPUTE_16F
+#define CUBLAS_COMPUTE_32F MCBLAS_COMPUTE_32F
+#define CUBLAS_COMPUTE_32F_FAST_16F MCBLAS_COMPUTE_32F_FAST_16F
+#define CUBLAS_COMPUTE_32F_FAST_16BF MCBLAS_COMPUTE_32F_FAST_16BF
+#define CUBLAS_COMPUTE_32F_FAST_TF32 MCBLAS_COMPUTE_32F_FAST_TF32
+#define CUBLAS_GEMM_DEFAULT MCBLAS_GEMM_DEFAULT
+#define CUBLAS_GEMM_DEFAULT_TENSOR_OP MCBLAS_GEMM_DEFAULT_TENSOR_OP
+#define CUBLAS_OP_N MCBLAS_OP_N
+#define CUBLAS_OP_T MCBLAS_OP_T
+#define CUBLAS_STATUS_SUCCESS MCBLAS_STATUS_SUCCESS
+#define CUBLAS_TF32_TENSOR_OP_MATH MCBLAS_TF32_TENSOR_OP_MATH
+#define CUDA_R_16F MACA_R_16F
+#define CUDA_R_16BF MACA_R_16BF
+#define CUDA_R_32F MACA_R_32F
+#define cublasComputeType_t mcblasComputeType_t
+#define cublasCreate mcblasCreate
+#define cublasDestroy mcblasDestroy
+#define cublasGemmEx mcblasGemmEx
+#define cublasGemmBatchedEx mcblasGemmBatchedEx
+#define cublasGemmStridedBatchedEx mcblasGemmStridedBatchedEx
+#define cublasHandle_t mcblasHandle_t
+#define cublasSetMathMode mcblasSetMathMode
+#define cublasSetStream mcblasSetStream
+#define cublasSgemm mcblasSgemm
+#define cublasStatus_t mcblasStatus_t
+#define cublasOperation_t mcblasOperation_t
+#define cublasGetStatusString mcblasGetStatusString
+#define cudaDataType_t macaDataType_t
+#define cudaDeviceCanAccessPeer mcDeviceCanAccessPeer
+#define cudaDeviceDisablePeerAccess mcDeviceDisablePeerAccess
+#define cudaDeviceEnablePeerAccess mcDeviceEnablePeerAccess
+#define cudaDeviceProp mcDeviceProp_t
+#define cudaDeviceSynchronize mcDeviceSynchronize
+#define cudaError_t mcError_t
+#define cudaErrorPeerAccessAlreadyEnabled mcErrorPeerAccessAlreadyEnabled
+#define cudaErrorPeerAccessNotEnabled mcErrorPeerAccessNotEnabled
+#define cudaEventCreate mcEventCreate
+#define cudaEventCreateWithFlags mcEventCreateWithFlags
+#define cudaEventDisableTiming mcEventDisableTiming
+#define cudaEventElapsedTime mcEventElapsedTime
+#define cudaEventRecord mcEventRecord
+#define cudaEventSynchronize mcEventSynchronize
+#define cudaEvent_t mcEvent_t
+#define cudaEventDestroy mcEventDestroy
+#define cudaFree mcFree
+#define cudaFreeHost mcFreeHost
+#define cudaGetDevice mcGetDevice
+#define cudaGetDeviceCount mcGetDeviceCount
+#define cudaGetDeviceProperties mcGetDeviceProperties
+#define cudaGetErrorString mcGetErrorString
+#define cudaGetLastError mcGetLastError
+#define cudaHostRegister mcHostRegister
+#define cudaHostRegisterPortable mcHostRegisterPortable
+#define cudaHostRegisterReadOnly mcHostRegisterReadOnly
+#define cudaHostUnregister mcHostUnregister
+#define cudaLaunchHostFunc mcLaunchHostFunc
+#define cudaMalloc mcMalloc
+#define cudaMallocHost(ptr, size) mcMallocHost(ptr, size)
+#define cudaMallocManaged mcMallocManaged
+#define cudaMemcpy mcMemcpy
+#define cudaMemcpyAsync mcMemcpyAsync
+#define cudaMemcpyPeerAsync mcMemcpyPeerAsync
+#define cudaMemcpy2DAsync mcMemcpy2DAsync
+#define cudaMemcpyDeviceToDevice mcMemcpyDeviceToDevice
+#define cudaMemcpyDeviceToHost mcMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice mcMemcpyHostToDevice
+#define cudaMemcpyKind mcMemcpyKind
+#define cudaMemset mcMemset
+#define cudaMemsetAsync mcMemsetAsync
+#define cudaMemGetInfo mcMemGetInfo
+#define cudaOccupancyMaxPotentialBlockSize mcOccupancyMaxPotentialBlockSize
+#define cudaSetDevice mcSetDevice
+#define cudaStreamCreateWithFlags mcStreamCreateWithFlags
+#define cudaStreamDestroy mcStreamDestroy
+#define cudaStreamNonBlocking mcStreamNonBlocking
+#define cudaStreamPerThread mcStreamPerThread
+#define cudaStreamSynchronize mcStreamSynchronize
+#define cudaStreamWaitEvent mcStreamWaitEvent
+#define cudaStream_t mcStream_t
+#define cudaHostFn_t mcHostFn_t
+#define cudaSuccess mcSuccess
+#define nv_bfloat16 maca_bfloat16
+
+// Additional mappings for MACA virtual memory pool.
+#define CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED mcDeviceAttributeVirtualMemoryManagementSupported
+#define CU_MEM_ACCESS_FLAGS_PROT_READWRITE mcMemAccessFlagsProtReadWrite
+#define CU_MEM_ALLOC_GRANULARITY_RECOMMENDED MC_MEM_ALLOC_GRANULARITY_RECOMMENDED
+#define CU_MEM_ALLOCATION_TYPE_PINNED mcMemAllocationTypePinned
+#define CU_MEM_LOCATION_TYPE_DEVICE mcMemLocationTypeDevice
+#define CUdevice mcDevice_t
+#define CUdeviceptr mcDeviceptr_t
+#define CUmemAccessDesc mcMemAccessDesc
+#define CUmemAllocationProp mcMemAllocationProp
+#define CUmemGenericAllocationHandle mcMemGenericAllocationHandle
+#define cuDeviceGet mcDeviceGet
+#define cuDeviceGetAttribute mcDeviceGetAttribute
+#define cuMemAddressFree mcMemAddressFree
+#define cuMemAddressReserve mcMemAddressReserve
+#define cuMemCreate mcMemCreate
+#define cuMemGetAllocationGranularity mcMemGetAllocationGranularity
+#define cuMemMap mcMemMap
+#define cuMemRelease mcMemRelease
+#define cuMemSetAccess mcMemSetAccess
+#define cuMemUnmap mcMemUnmap
+#define cudaFuncAttributeMaxDynamicSharedMemorySize mcFuncAttributeMaxDynamicSharedMemorySize
+#define cudaFuncSetAttribute mcFuncSetAttribute
+#define cudaMemcpy3DPeerParms mcMemcpy3DPeerParms
+#define make_cudaExtent make_mcExtent
+#define make_cudaPitchedPtr make_mcPitchedPtr
+
+// Additional mappings for MACA graphs.
+#define CUDA_SUCCESS mcSuccess
+#define CUresult mcError_t
+#define cuGetErrorString(error, pstr) (*(pstr) = mcGetErrorString(error), mcSuccess)
+#define cudaErrorGraphExecUpdateFailure mcErrorGraphExecUpdateFailure
+#define cudaErrorInvalidDeviceFunction mcErrorInvalidDeviceFunction
+#define cudaGraphDestroy mcGraphDestroy
+#define cudaGraphExecDestroy mcGraphExecDestroy
+#define cudaGraphExec_t mcGraphExec_t
+#define cudaGraphExecUpdate mcGraphExecUpdate
+#define cudaGraphExecUpdateResultInfo mcGraphExecUpdateResultInfo
+#define cudaGraphGetNodes mcGraphGetNodes
+#define cudaGraphInstantiate mcGraphInstantiate
+#define cudaGraphKernelNodeGetParams mcGraphKernelNodeGetParams
+#define cudaGraphKernelNodeSetParams mcGraphKernelNodeSetParams
+#define cudaGraphLaunch mcGraphLaunch
+#define cudaGraphNodeGetType mcGraphNodeGetType
+#define cudaGraphNode_t mcGraphNode_t
+#define cudaGraphNodeType mcGraphNodeType
+#define cudaGraphNodeTypeKernel mcGraphNodeTypeKernel
+#define cudaGraph_t mcGraph_t
+#define cudaKernelNodeParams mcKernelNodeParams
+#define cudaStreamCaptureModeRelaxed mcStreamCaptureModeRelaxed
+#define cudaStreamBeginCapture mcStreamBeginCapture
+#define cudaStreamEndCapture mcStreamEndCapture
+
+typedef maca_bfloat16 nv_bfloat16;
