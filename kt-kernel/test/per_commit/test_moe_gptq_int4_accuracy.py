@@ -8,7 +8,12 @@ import sys
 import types
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from ci.ci_register import register_cpu_ci
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
+
+register_cpu_ci(est_time=120, suite="default")
 
 import pytest
 import torch

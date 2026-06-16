@@ -382,6 +382,11 @@ if(HOST_IS_X86)
             list(APPEND ARCH_FLAGS -mamx-tile -mamx-bf16 -mamx-int8)
             message(STATUS "AMX enabled")
         endif()
+        if(NOT MSVC)
+            # AMX/SFT kernels use 256-bit AVX512 masked load/store intrinsics.
+            # GCC requires AVX512VL in addition to AVX512BW for those intrinsics.
+            list(APPEND ARCH_FLAGS -mavx512vl)
+        endif()
         # add_executable(amx-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/amx/amx-test.cpp)
         # target_link_libraries(amx-test llama)
         if(KTRANSFORMERS_CPU_DEBUG)

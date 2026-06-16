@@ -11,8 +11,12 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+import pytest
 import torch
 from kt_kernel import kt_kernel_ext
+from ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=120, suite="default")
 
 # Small test parameters for fast validation
 expert_num = 8
@@ -69,6 +73,8 @@ def moe_torch(input, expert_ids, weights, gate_proj, up_proj, down_proj):
     return t_output
 
 
+@pytest.mark.cpu
+@pytest.mark.parametrize("qlen,label", [(1, "Decode"), (16, "Prefill")])
 def test_avx2_bf16_accuracy(qlen, label):
     """Test AVX2 BF16 MoE accuracy."""
     physical_to_logical_map = torch.tensor(range(expert_num), device="cpu", dtype=torch.int64).contiguous()
