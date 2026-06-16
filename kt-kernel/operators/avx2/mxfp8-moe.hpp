@@ -324,8 +324,8 @@ class AVX2_MXFP8_MOE_TP : public AVX2_MOE_BASE<T, AVX2_MXFP8_MOE_TP<T>> {
   void derived_init() {
     avx2::ensure_fp8_lut_initialized();  // single-threaded init before any forward
     auto& quant_config = config_.quant_config;
-    if (quant_config.group_size == 0 || quant_config.zero_point) {
-      throw std::runtime_error("AVX2 MXFP8 MoE requires group_size > 0 and no zero_point");
+    if (quant_config.group_size != 32 || quant_config.zero_point) {
+      throw std::runtime_error("AVX2 MXFP8 MoE requires group_size == 32 and no zero_point");
     }
     if (config_.hidden_size % quant_config.group_size != 0 ||
         config_.intermediate_size % quant_config.group_size != 0) {
