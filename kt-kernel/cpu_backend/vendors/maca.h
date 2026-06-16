@@ -42,8 +42,10 @@
 #define cudaError_t mcError_t
 #define cudaErrorPeerAccessAlreadyEnabled mcErrorPeerAccessAlreadyEnabled
 #define cudaErrorPeerAccessNotEnabled mcErrorPeerAccessNotEnabled
+#define cudaEventCreate mcEventCreate
 #define cudaEventCreateWithFlags mcEventCreateWithFlags
 #define cudaEventDisableTiming mcEventDisableTiming
+#define cudaEventElapsedTime mcEventElapsedTime
 #define cudaEventRecord mcEventRecord
 #define cudaEventSynchronize mcEventSynchronize
 #define cudaEvent_t mcEvent_t
