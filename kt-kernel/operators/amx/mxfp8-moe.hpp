@@ -469,8 +469,13 @@ class AMX_MXFP8_MOE_TP : public AMX_MOE_BASE<T, AMX_MXFP8_MOE_TP<T>> {
 
   void derived_init() {
     auto& quant_config = config_.quant_config;
-    if (quant_config.group_size == 0 || quant_config.zero_point) {
-      throw std::runtime_error("MXFP8 MoE requires group_size > 0 and no zero_point");
+    if (quant_config.group_size != 32 || quant_config.zero_point) {
+      throw std::runtime_error("MXFP8 MoE requires group_size == 32 and no zero_point");
+    }
+    if (config_.hidden_size % quant_config.group_size != 0 ||
+        config_.intermediate_size % quant_config.group_size != 0) {
+      throw std::runtime_error(
+          "MXFP8 MoE: hidden_size and intermediate_size must be divisible by group_size");
     }
     printf("Creating AMX_MXFP8_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
   }
