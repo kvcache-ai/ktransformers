@@ -67,7 +67,9 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
    ```bash
    pip install tilelang "apache-tvm-ffi<0.1.12"
    ```
-   `sglang-kt`'s pyproject does not declare `tilelang` as a dependency, so `pip install ./python[all]` will not pull it in. Validated with `tilelang==0.1.8`. Constrain `apache-tvm-ffi<0.1.12`: the standalone `apache-tvm-ffi` 0.1.12 wheel collides with the TVM FFI runtime bundled inside `tilelang`, so importing `tilelang` aborts with `TypeAttr __ffi_repr__ is already registered for type index 130` and the SGLang scheduler dies on startup. `apache-tvm-ffi==0.1.11` does not register the conflicting attribute and starts cleanly; pin until the upstream duplicate-registration fix lands.
+   `sglang-kt`'s pyproject does not declare `tilelang` as a dependency, so `pip install ./python[all]` will not pull it in. Validated with `tilelang==0.1.8`.
+
+   > **Note:** Constrain `apache-tvm-ffi<0.1.12`. The standalone `apache-tvm-ffi` 0.1.12 wheel collides with the TVM FFI runtime bundled inside `tilelang`, so importing `tilelang` aborts with `TypeAttr __ffi_repr__ is already registered for type index 130` and the SGLang scheduler dies on startup. `apache-tvm-ffi==0.1.11` does not register the conflicting attribute and starts cleanly; pin until the upstream duplicate-registration fix lands.
 
 
 ## Step 1: Download Model Weights
