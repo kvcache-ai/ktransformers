@@ -34,6 +34,7 @@ AVX2FP8_MOE = getattr(_moe_mod, "AVX2FP8_MOE", None)
 AVX2GPTQInt4_MOE = getattr(_moe_mod, "AVX2GPTQInt4_MOE", None)
 AVX2RawInt4_MOE = getattr(_moe_mod, "AVX2RawInt4_MOE", None)
 AVX2MXFP4_MOE = getattr(_moe_mod, "AVX2MXFP4_MOE", None)
+AVX2MXFP8_MOE = getattr(_moe_mod, "AVX2MXFP8_MOE", None)
 AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 AVXVNNI256RawInt4_MOE = getattr(_moe_mod, "AVXVNNI256RawInt4_MOE", None)
 
@@ -50,6 +51,7 @@ _HAS_AVX2_FP8_SUPPORT = AVX2FP8_MOE is not None
 _HAS_AVX2_GPTQ_INT4_SUPPORT = AVX2GPTQInt4_MOE is not None
 _HAS_AVX2_RAWINT4_SUPPORT = AVX2RawInt4_MOE is not None
 _HAS_AVX2_MXFP4_SUPPORT = AVX2MXFP4_MOE is not None
+_HAS_AVX2_MXFP8_SUPPORT = AVX2MXFP8_MOE is not None
 _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
 _HAS_AVXVNNI256_RAW_INT4_SUPPORT = AVXVNNI256RawInt4_MOE is not None
 _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
@@ -176,6 +178,44 @@ def _select_mxfp4_backend():
         return AMXFP4_KGroup_MOE
     if _HAS_AVX2_MXFP4_SUPPORT:
         return AVX2MXFP4_MOE
+    return None
+
+
+def _select_mxfp8_backend():
+    """Select MXFP8 backend: AMX/AVX-512 (preferred) > AVX2 (fallback).
+
+    Override with KT_MXFP8_BACKEND=avx2|amx.
+    Returns None if no MXFP8 backend is available.
+    """
+    forced = os.getenv("KT_MXFP8_BACKEND", "").strip().lower()
+
+    if forced == "amx":
+        if not _HAS_MXFP8_SUPPORT:
+            raise RuntimeError(
+                "KT_MXFP8_BACKEND=amx requested, but AMXMXFP8_KGroup_MOE is not compiled in. "
+                "Recompile with AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI enabled."
+            )
+        if not _host_has_cpu_flag("amx_tile", "amx_bf16"):
+            raise RuntimeError(
+                "KT_MXFP8_BACKEND=amx requested, but the host CPU lacks AMX (amx_tile / amx_bf16). "
+                "This would SIGILL at first forward. Unset the env to fall back to AVX2."
+            )
+        return AMXMXFP8_KGroup_MOE
+
+    if forced == "avx2":
+        if not _HAS_AVX2_MXFP8_SUPPORT:
+            raise RuntimeError(
+                "KT_MXFP8_BACKEND=avx2 requested, but AVX2MXFP8_MOE is not compiled in. "
+                "Recompile with AVX2 + FMA enabled."
+            )
+        return AVX2MXFP8_MOE
+
+    # Auto-select: prefer AMX iff the .so was built with it AND the runtime CPU has AMX.
+    # Compile-time-only check would SIGILL on AVX-512 CPUs lacking AMX (pre-Sapphire Rapids).
+    if _HAS_MXFP8_SUPPORT and _host_has_cpu_flag("amx_tile", "amx_bf16"):
+        return AMXMXFP8_KGroup_MOE
+    if _HAS_AVX2_MXFP8_SUPPORT:
+        return AVX2MXFP8_MOE
     return None
 
 
@@ -557,11 +597,12 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "  - AVX2 + FMA (for AVX2 fallback backend)\n"
                 "Please recompile kt_kernel_ext with one of the above enabled."
             )
-        if method == "MXFP8" and not _HAS_MXFP8_SUPPORT:
+        if method == "MXFP8" and not (_HAS_MXFP8_SUPPORT or _HAS_AVX2_MXFP8_SUPPORT):
             raise RuntimeError(
-                "MXFP8 backend not available. Required ISA:\n"
-                "  - AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI\n"
-                "Please recompile kt_kernel_ext with AVX512 + VBMI enabled."
+                "MXFP8 backend not available. Required ISA (any one of):\n"
+                "  - AVX512F + AVX512BW + AVX512_BF16 + AVX512_VBMI (for AMX/AVX-512 backend)\n"
+                "  - AVX2 + FMA (for AVX2 fallback backend)\n"
+                "Please recompile kt_kernel_ext with one of the above enabled."
             )
 
         super().__init__(
@@ -810,7 +851,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.group_size = group_size
             moe_config.quant_config.zero_point = False
             moe_config.swiglu_alpha = getattr(self, "_swiglu_alpha", 0.0)
-            self.moe = AMXMXFP8_KGroup_MOE(moe_config)
+            backend_cls = _select_mxfp8_backend()
+            if backend_cls is None:
+                raise RuntimeError(
+                    "No MXFP8 backend available after runtime selection. "
+                    "Compile with AVX512+VBMI (AMXMXFP8_KGroup_MOE) or AVX2 (AVX2MXFP8_MOE)."
+                )
+            self.moe = backend_cls(moe_config)
         elif self.method == "FP8":
             moe_config.quant_config.bits = 8
             moe_config.quant_config.group_size = 128
