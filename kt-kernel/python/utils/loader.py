@@ -1222,3 +1222,82 @@ class MXFP4SafeTensorLoader(SafeTensorLoader):
             "up_scale": up_scales,
             "down_scale": down_scales,
         }
+
+
+class MXFP8SafeTensorLoader(SafeTensorLoader):
+    """Loader for native MXFP8 expert weights (MiniMax M3 Preview format).
+
+    Per expert layout:
+      {base}.block_sparse_moe.experts.{i}.w1.weight            F8_E4M3  [N, K]     gate
+      {base}.block_sparse_moe.experts.{i}.w1.weight_scale_inv  U8       [N, K/32]  ue8m0
+      {base}.block_sparse_moe.experts.{i}.w3.{weight,weight_scale_inv}             up
+      {base}.block_sparse_moe.experts.{i}.w2.{weight,weight_scale_inv}             down
+
+    M3 keys are prefixed with ``language_model.model.layers.{L}``; we also probe
+    the stripped form. Scales stay as uint8 — the C++ kernel converts ue8m0→FP32
+    via bit-shift during load_weights.
+    """
+
+    EXPERTS_PATH_TPL = "{base}.block_sparse_moe.experts"
+    PROJ_NAMES = ("w1", "w3", "w2")  # (gate, up, down)
+
+    def _experts_prefix_candidates(self, base_key: str) -> list[str]:
+        candidates = [self.EXPERTS_PATH_TPL.format(base=base_key)]
+        for strip in ("language_model.model.", "language_model.", "model."):
+            if base_key.startswith(strip):
+                candidates.append(self.EXPERTS_PATH_TPL.format(base=base_key[len(strip):]))
+        return list(dict.fromkeys(candidates))
+
+    def load_experts(self, base_key: str, device: str = "cpu"):
+        gate_name, up_name, down_name = self.PROJ_NAMES
+        prefix = None
+        expert_count = 0
+        for cand in self._experts_prefix_candidates(base_key):
+            expert_count = 0
+            while self.has_tensor(f"{cand}.{expert_count}.{gate_name}.weight"):
+                expert_count += 1
+            if expert_count > 0:
+                prefix = cand
+                break
+        if prefix is None:
+            raise ValueError(
+                f"No MXFP8 experts found under any of: {self._experts_prefix_candidates(base_key)}"
+            )
+
+        gate_weights = [None] * expert_count
+        up_weights = [None] * expert_count
+        down_weights = [None] * expert_count
+        gate_scales = [None] * expert_count
+        up_scales = [None] * expert_count
+        down_scales = [None] * expert_count
+
+        for exp_id in range(expert_count):
+            for proj, dst in (
+                (gate_name, gate_weights),
+                (up_name, up_weights),
+                (down_name, down_weights),
+            ):
+                w = self.load_tensor(f"{prefix}.{exp_id}.{proj}.weight", device).contiguous()
+                if w.dtype != torch.uint8:
+                    w = w.view(torch.uint8)
+                dst[exp_id] = w
+
+            for proj, dst in (
+                (gate_name, gate_scales),
+                (up_name, up_scales),
+                (down_name, down_scales),
+            ):
+                s = self.load_tensor(f"{prefix}.{exp_id}.{proj}.weight_scale_inv", device).contiguous()
+                if s.dtype != torch.uint8:
+                    s = s.view(torch.uint8)
+                dst[exp_id] = s
+
+        print(f"[MXFP8SafeTensorLoader] Loaded {expert_count} experts from {prefix}")
+        return {
+            "gate": gate_weights,
+            "up": up_weights,
+            "down": down_weights,
+            "gate_scale": gate_scales,
+            "up_scale": up_scales,
+            "down_scale": down_scales,
+        }

@@ -127,6 +127,47 @@ static inline __m256 act_fn(__m256 gate_val, __m256 up_val) {
   return _mm256_mul_ps(act_val, up_val);
 }
 
+// Overload with swiglu_limit: DeepSeek V4-Flash 2604B asymmetric clamp (no alpha).
+//   gate = min(gate, limit)            (one-sided pre-silu)
+//   up   = clamp(up, -limit, limit)    (symmetric)
+// Mirrors amx::act_fn(g, u, swiglu_limit).
+static inline __m256 act_fn(__m256 gate_val, __m256 up_val, float swiglu_limit) {
+  if (swiglu_limit > 0.0f) {
+    const __m256 pos_lim = _mm256_set1_ps(swiglu_limit);
+    const __m256 neg_lim = _mm256_set1_ps(-swiglu_limit);
+    gate_val = _mm256_min_ps(gate_val, pos_lim);
+    up_val = _mm256_min_ps(up_val, pos_lim);
+    up_val = _mm256_max_ps(up_val, neg_lim);
+  }
+  return act_fn(gate_val, up_val);
+}
+
+// MiniMax M3 \"swigluoai\" activation + DeepSeek V4 \"silu\" unified entry point.
+//   alpha > 0  -> swigluoai: gate * sigmoid(gate * alpha) * (up + 1), symmetric clamp on both
+//   alpha == 0 -> falls back to silu (with optional one-sided clamp via the overload above)
+// Mirrors amx::act_fn(g, u, swiglu_limit, swiglu_alpha).
+static inline __m256 act_fn(__m256 gate_val, __m256 up_val, float swiglu_limit, float swiglu_alpha) {
+  if (swiglu_alpha > 0.0f) {
+    if (swiglu_limit > 0.0f) {
+      const __m256 pos_lim = _mm256_set1_ps(swiglu_limit);
+      const __m256 neg_lim = _mm256_set1_ps(-swiglu_limit);
+      gate_val = _mm256_min_ps(gate_val, pos_lim);
+      gate_val = _mm256_max_ps(gate_val, neg_lim);
+      up_val = _mm256_min_ps(up_val, pos_lim);
+      up_val = _mm256_max_ps(up_val, neg_lim);
+    }
+    // sigmoid(gate * alpha)
+    __m256 neg_ga = _mm256_mul_ps(gate_val, _mm256_set1_ps(-swiglu_alpha));
+    neg_ga = _mm256_min_ps(neg_ga, _mm256_set1_ps(88.0f));
+    __m256 exp_neg = exp_avx2(neg_ga);
+    __m256 sigmoid_val = _mm256_div_ps(_mm256_set1_ps(1.0f),
+                                       _mm256_add_ps(_mm256_set1_ps(1.0f), exp_neg));
+    __m256 up_plus_1 = _mm256_add_ps(up_val, _mm256_set1_ps(1.0f));
+    return _mm256_mul_ps(_mm256_mul_ps(gate_val, sigmoid_val), up_plus_1);
+  }
+  return act_fn(gate_val, up_val, swiglu_limit);
+}
+
 }  // namespace avx2
 
 #endif  // CPUINFER_OPERATOR_AVX2_BF16_UTILS_H
