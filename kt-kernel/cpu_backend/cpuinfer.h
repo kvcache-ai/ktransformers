@@ -103,7 +103,6 @@ class CPUInfer {
   static void sync_(void* sync_args) {
     SyncArgs* args = (SyncArgs*)sync_args;
     args->cpuinfer->task_queue_->sync(args->allow_n_pending);
-    delete args;
   }
 
   void sync(size_t allow_n_pending = 0) {

@@ -55,7 +55,11 @@ class AMX_FP8_MOE_TP : public AMX_MOE_BASE<T, AMX_FP8_MOE_TP<T>> {
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("KT-Kernel fp8 MoE only support block-wise FP8");
     }
-    printf("Created AMX_FP8_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
+    // Backend reflects the compile-time GEMM path: AMX tiles when __AMXBF16__ etc. are
+    // defined, otherwise the AVX512-BF16 fallback in amx_raw_kernels.hpp::float_mat_vec_kgroup.
+    constexpr const char* backend = amx::AMX_AVAILABLE ? "AMX" : "AVX512-BF16";
+    printf("Created FP8_MOE_TP %d at numa %d (backend=%s)\n", tp_part_idx,
+           numa_node_of_cpu(sched_getcpu()), backend);
   }
 
   ~AMX_FP8_MOE_TP() = default;
