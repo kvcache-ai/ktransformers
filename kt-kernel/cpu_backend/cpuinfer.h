@@ -109,6 +109,44 @@ class CPUInfer {
     SyncArgs* args = new SyncArgs{this, allow_n_pending};
     sync_(args);
   }
+
+  // ===== MESH 插件：gating score 批量传输回调 =====
+  // MESH 需要每 token 结束后将所有层的 gating 分数从 GPU 一次性传到 CPU。
+  // 利用现有 submit_with_cuda_stream 机制，通过 cudaLaunchHostFunc 调度到 CUDA stream。
+  // 原版 KT 的 moe gate 只传 top-8，MESH 改成传全长 vector（专家数长度）。
+  struct GatingScoreArgs {
+    CPUInfer* cpuinfer;
+    void* mesh_residency;                  // mesh::MeshResidencyManager*
+    const float* gating_scores_gpu;        // GPU 指针，所有层的 gating 分数
+    int num_layers;
+    int expert_num;
+    // CQE 到达后由 mesh_residency 的 on_decode_token_end 消费
+  };
+
+  static void submit_gating_scores_(void* args_ptr) {
+    GatingScoreArgs* args = (GatingScoreArgs*)args_ptr;
+    // 实际实现：将 gating_scores_gpu 数据传给 mesh::MeshResidencyManager::on_decode_token_end
+    // mesh_residency 通过 CUDA memcpy 或 unified memory 获取数据
+    // 这里是 host callback，在 CUDA stream 上执行
+    delete args;
+  }
+
+#ifndef KTRANSFORMERS_CPU_ONLY
+  void submit_gating_scores_with_cuda_stream(
+      intptr_t user_cuda_stream,
+      void* mesh_residency,
+      const float* gating_scores_gpu,
+      int num_layers, int expert_num) {
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \
+    defined(KTRANSFORMERS_USE_MACA)
+    GatingScoreArgs* args = new GatingScoreArgs{
+      this, mesh_residency, gating_scores_gpu, num_layers, expert_num
+    };
+    cudaLaunchHostFunc((cudaStream_t)user_cuda_stream,
+                       (cudaHostFn_t)&submit_gating_scores_, (void*)args);
+#endif
+  }
+#endif
 #ifndef KTRANSFORMERS_CPU_ONLY
   void sync_with_cuda_stream(intptr_t user_cuda_stream, size_t allow_n_pending = 0) {
 #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \

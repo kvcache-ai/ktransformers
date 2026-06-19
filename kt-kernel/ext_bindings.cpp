@@ -23,6 +23,11 @@
 #include "cpu_backend/worker_pool.h"
 #include "operators/common.hpp"
 
+// MESH 插件（仅在 KT_ENABLE_MESH 编译时生效）
+#if defined(KT_ENABLE_MESH)
+#include "operators/mesh/mesh.hpp"
+#endif
+
 #if defined(USE_MOE_KERNEL)
 #include "operators/moe_kernel/la/kernel.hpp"
 #include "operators/moe_kernel/moe.hpp"
@@ -992,6 +997,85 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   utils.def("from_float", &from_float_ptr, "Convert tensor from float32 to any GGML type", py::arg("input"),
             py::arg("size"), py::arg("type"));
+
+  // ===== MESH 插件子模块 =====
+#if defined(KT_ENABLE_MESH)
+  {
+    auto mesh_module = m.def_submodule("mesh");
+
+    // MeshConfig
+    py::class_<mesh::MeshConfig>(mesh_module, "MeshConfig")
+        .def(py::init<>())
+        .def_readwrite("enabled", &mesh::MeshConfig::enabled)
+        .def_readwrite("cap", &mesh::MeshConfig::cap)
+        .def_readwrite("num_gpu_experts", &mesh::MeshConfig::num_gpu_experts)
+        .def_readwrite("max_deferred_per_token", &mesh::MeshConfig::max_deferred_per_token)
+        .def_readwrite("decode_front_layers", &mesh::MeshConfig::decode_front_layers)
+        .def_readwrite("decode_front_layer_cap", &mesh::MeshConfig::decode_front_layer_cap)
+        .def_readwrite("total_layers", &mesh::MeshConfig::total_layers)
+        .def_readwrite("prefill_window", &mesh::MeshConfig::prefill_window)
+        .def_readwrite("heat_gamma", &mesh::MeshConfig::heat_gamma)
+        .def_readwrite("heat_beta", &mesh::MeshConfig::heat_beta)
+        .def_readwrite("markov_alpha", &mesh::MeshConfig::markov_alpha)
+        .def_readwrite("markov_topk", &mesh::MeshConfig::markov_topk)
+        .def_readwrite("lookahead_weight", &mesh::MeshConfig::lookahead_weight)
+        .def_readwrite("weight_type", &mesh::MeshConfig::weight_type)
+        .def_readwrite("hidden_size", &mesh::MeshConfig::hidden_size)
+        .def_readwrite("intermediate_size", &mesh::MeshConfig::intermediate_size)
+        .def_readwrite("expert_num", &mesh::MeshConfig::expert_num)
+        .def_readwrite("tp_count", &mesh::MeshConfig::tp_count);
+
+    // ExpertFileLayout
+    py::class_<mesh::ExpertFileLayout>(mesh_module, "ExpertFileLayout")
+        .def(py::init<>())
+        .def_readwrite("fd", &mesh::ExpertFileLayout::fd)
+        .def_readwrite("gate_offset", &mesh::ExpertFileLayout::gate_offset)
+        .def_readwrite("up_offset", &mesh::ExpertFileLayout::up_offset)
+        .def_readwrite("down_offset", &mesh::ExpertFileLayout::down_offset)
+        .def_readwrite("gate_bytes", &mesh::ExpertFileLayout::gate_bytes)
+        .def_readwrite("up_bytes", &mesh::ExpertFileLayout::up_bytes)
+        .def_readwrite("down_bytes", &mesh::ExpertFileLayout::down_bytes);
+
+    // MeshResidencyManager
+    py::class_<mesh::MeshResidencyManager, std::shared_ptr<mesh::MeshResidencyManager>>(
+        mesh_module, "ResidencyManager")
+        .def(py::init<>())
+        .def("init", &mesh::MeshResidencyManager::init,
+             py::arg("config"), py::arg("numa_nodes"))
+        .def("set_file_layout", &mesh::MeshResidencyManager::set_file_layout,
+             py::arg("tp_part_idx"), py::arg("expert_id"), py::arg("layout"))
+        .def("set_gpu_experts_mask", &mesh::MeshResidencyManager::set_gpu_experts_mask,
+             py::arg("mask"))
+        .def("bootstrap", &mesh::MeshResidencyManager::bootstrap)
+        .def("get_gate_ptr", &mesh::MeshResidencyManager::get_gate_ptr)
+        .def("get_up_ptr", &mesh::MeshResidencyManager::get_up_ptr)
+        .def("get_down_ptr", &mesh::MeshResidencyManager::get_down_ptr)
+        .def("on_prefill_layer_start", &mesh::MeshResidencyManager::on_prefill_layer_start)
+        .def("on_prefill_layer_done", &mesh::MeshResidencyManager::on_prefill_layer_done)
+        .def("on_prefill_to_decode", &mesh::MeshResidencyManager::on_prefill_to_decode)
+        .def("on_decode_token_start", &mesh::MeshResidencyManager::on_decode_token_start)
+        .def("on_decode_layer", &mesh::MeshResidencyManager::on_decode_layer)
+        .def("on_decode_token_end", &mesh::MeshResidencyManager::on_decode_token_end)
+        .def("config", [](mesh::MeshResidencyManager& mgr) -> mesh::MeshConfig& {
+          return mgr.config();
+        }, py::return_value_policy::reference);
+
+    // 注册 hook 函数指针（让 mesh_hook.hpp 的 inline 函数能调用 ResidencyManager）
+    mesh::hook::HookRegistry registry;
+    registry.get_gate_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_gate_ptr(layer, tp, eid);
+    };
+    registry.get_up_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_up_ptr(layer, tp, eid);
+    };
+    registry.get_down_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_down_ptr(layer, tp, eid);
+    };
+    mesh::hook::register_hooks(registry);
+
+    printf("MESH plugin: bindings registered\n");
+  }
+#endif
 }
 
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)

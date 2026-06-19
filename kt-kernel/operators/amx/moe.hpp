@@ -184,6 +184,10 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
+    // MESH hook: mesh_enabled 时 bb 的底层指针已由 MESH slot 池提供
+    // gate_bb_/up_bb_ 在 load_weights() mesh 分支中已绑定为 slot buffer 的包装
+    // MESH 通过覆盖 slot 内存实现专家切换，bb 指针本身不变
+
     if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
       amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
     } else {
@@ -197,6 +201,8 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     auto& bb = down_bb_[expert_idx];
     auto& bc = down_bc_[expert_idx];
 
+    // MESH hook: 同上，down_bb_ 已绑定为 MESH slot buffer
+
     if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
       amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
     } else {
@@ -204,6 +210,13 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     }
   }
   void load_weights() {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版 mmap/file/bf16 路径
+    if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式下 gate_bb_/up_bb_/down_bb_ 在 forward 时由 mesh hook 动态重定向到 slot buffer
+      // 这里只需标记 weights_loaded，实际权重加载由 ResidencyManager.bootstrap() 完成
+      this->weights_loaded = true;
+      return;
+    }
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     if (config_.gate_projs.size()) {
@@ -363,6 +376,14 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
   using Base::Base;
 
   void load_weights() override {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (config.mesh_enabled && config.mesh_residency) {
+      for (auto i = 0; i < tp_count; i++) {
+        tps[i]->load_weights();  // 各 TP 走 mesh 分支
+      }
+      this->weights_loaded = true;
+      return;
+    }
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;

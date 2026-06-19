@@ -153,6 +153,8 @@ class KTMoEWrapper:
         # MiniMax M3 swigluoai sigmoid alpha. 0.0 = standard silu (default).
         # Non-zero triggers gate * sigmoid(gate * alpha) * (up + 1) in act_fn.
         swiglu_alpha: float = 0.0,
+        # MESH 插件配置，None 时不启用 MESH
+        mesh_config=None,
     ):
         """
         Factory method to create the appropriate backend implementation.
@@ -225,6 +227,7 @@ class KTMoEWrapper:
                 numa_nodes=numa_nodes,
                 swiglu_limit=swiglu_limit,
                 swiglu_alpha=swiglu_alpha,
+                mesh_config=mesh_config,
             )
         else:  # mode == "sft"
             # SFT factory does not plumb swiglu_limit; reject non-zero
@@ -322,16 +325,39 @@ def _create_inference_wrapper(
     numa_nodes: Optional[List[int]] = None,
     swiglu_limit: float = 0.0,
     swiglu_alpha: float = 0.0,
+    mesh_config=None,  # MESH 插件配置，None 时不启用 MESH
 ) -> BaseMoEWrapper:
     """
     Create an inference wrapper based on the method.
 
     Args:
         See KTMoEWrapper.__new__ for parameter descriptions.
+        mesh_config: MESH 配置对象，非 None 时启用 MESH 模式
 
     Returns:
         BaseMoEWrapper instance
     """
+    # MESH 插件：mesh_config 非 None 且 enabled 时走 MESH 路径
+    if mesh_config is not None and getattr(mesh_config, "enabled", False):
+        from .utils.mesh.wrapper import MeshMoEWrapper
+        return MeshMoEWrapper(
+            layer_idx=layer_idx,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            hidden_size=hidden_size,
+            moe_intermediate_size=moe_intermediate_size,
+            gpu_experts_mask=gpu_experts_mask,
+            cpuinfer_threads=cpuinfer_threads,
+            threadpool_count=threadpool_count,
+            weight_path=weight_path,
+            chunked_prefill_size=chunked_prefill_size,
+            mesh_config=mesh_config,
+            method=method,
+            numa_nodes=numa_nodes,
+            cpu_save=cpu_save,
+            max_deferred_experts_per_token=max_deferred_experts_per_token,
+        )
+
     # Select backend based on method
     if method in ["AMXINT4", "AMXINT8"]:
         backend_cls = AMXMoEWrapper
