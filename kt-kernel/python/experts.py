@@ -338,6 +338,16 @@ def _create_inference_wrapper(
         BaseMoEWrapper instance
     """
     # MESH 插件：mesh_config 非 None 且 enabled 时走 MESH 路径
+    # 自动从环境变量检测 MESH 配置（kt run CLI 路径）
+    if mesh_config is None:
+        import os
+        if os.environ.get("KT_ENABLE_MESH", "0") == "1":
+            from .utils.mesh.config import MeshConfig
+            mesh_config = MeshConfig.from_env()
+        else:
+            # SGLang spawn 不继承 KT_* env vars，回退到配置文件
+            from .utils.mesh.config import MeshConfig
+            mesh_config = MeshConfig.from_file()
     if mesh_config is not None and getattr(mesh_config, "enabled", False):
         from .utils.mesh.wrapper import MeshMoEWrapper
         return MeshMoEWrapper(

@@ -16,6 +16,11 @@
 #include <fcntl.h>
 #include <liburing.h>
 #include <numa.h>
+// liburing.h 定义了 BLOCK_SIZE 等宏，会污染全局命名空间，
+// 与 amx_raw_kernels.hpp / fp8-moe.hpp 中的 BLOCK_SIZE 变量冲突
+#ifdef BLOCK_SIZE
+#undef BLOCK_SIZE
+#endif
 #include <stdexcept>
 #include <string>
 #include <unordered_map>

@@ -1003,6 +1003,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   {
     auto mesh_module = m.def_submodule("mesh");
 
+    // WeightType 枚举
+    py::enum_<mesh::WeightType>(mesh_module, "WeightType")
+        .value("AMXINT4", mesh::WeightType::AMXINT4)
+        .value("BF16", mesh::WeightType::BF16)
+        .export_values();
+
     // MeshConfig
     py::class_<mesh::MeshConfig>(mesh_module, "MeshConfig")
         .def(py::init<>())
@@ -1044,7 +1050,15 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
              py::arg("config"), py::arg("numa_nodes"))
         .def("set_file_layout", &mesh::MeshResidencyManager::set_file_layout,
              py::arg("tp_part_idx"), py::arg("expert_id"), py::arg("layout"))
-        .def("set_gpu_experts_mask", &mesh::MeshResidencyManager::set_gpu_experts_mask,
+        .def("set_gpu_experts_mask",
+             [](mesh::MeshResidencyManager& mgr, py::list mask_list) {
+               std::vector<uint8_t> mask;
+               mask.reserve(py::len(mask_list));
+               for (auto item : mask_list) {
+                 mask.push_back(static_cast<uint8_t>(py::cast<int>(item)));
+               }
+               mgr.set_gpu_experts_mask(mask.data(), static_cast<int>(mask.size()));
+             },
              py::arg("mask"))
         .def("bootstrap", &mesh::MeshResidencyManager::bootstrap)
         .def("get_gate_ptr", &mesh::MeshResidencyManager::get_gate_ptr)
@@ -1056,7 +1070,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def("on_decode_token_start", &mesh::MeshResidencyManager::on_decode_token_start)
         .def("on_decode_layer", &mesh::MeshResidencyManager::on_decode_layer)
         .def("on_decode_token_end", &mesh::MeshResidencyManager::on_decode_token_end)
-        .def("config", [](mesh::MeshResidencyManager& mgr) -> mesh::MeshConfig& {
+        .def("config", [](mesh::MeshResidencyManager& mgr) -> const mesh::MeshConfig& {
           return mgr.config();
         }, py::return_value_policy::reference);
 

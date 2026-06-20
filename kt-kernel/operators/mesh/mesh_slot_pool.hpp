@@ -34,6 +34,23 @@ struct Slot {
   std::atomic<int> active_readers{0};  // 引用计数：AMX 计算 / GPU 搬运 / 内部访问
   int bound_expert_id{-1};             // 当前 slot 装的是哪个专家，-1 = 空
 
+  // std::atomic 不可拷贝/移动，需自定义 move 以支持 std::vector
+  Slot() = default;
+  Slot(Slot&& other) noexcept
+      : state(other.state.load(std::memory_order_relaxed)),
+        active_readers(other.active_readers.load(std::memory_order_relaxed)),
+        bound_expert_id(other.bound_expert_id) {}
+  Slot& operator=(Slot&& other) noexcept {
+    if (this != &other) {
+      state.store(other.state.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      active_readers.store(other.active_readers.load(std::memory_order_relaxed), std::memory_order_relaxed);
+      bound_expert_id = other.bound_expert_id;
+    }
+    return *this;
+  }
+  Slot(const Slot&) = delete;
+  Slot& operator=(const Slot&) = delete;
+
   ExpertState get_state() const {
     return static_cast<ExpertState>(state.load(std::memory_order_acquire));
   }
@@ -73,7 +90,6 @@ class MeshSlotPool {
     std::memset(memory_, 0, total_bytes_);
 
     slots_.resize(cap);
-    expert_to_slot_.clear();
     slot_to_expert_.assign(cap, -1);
   }
 
@@ -86,6 +102,42 @@ class MeshSlotPool {
   // 禁止拷贝
   MeshSlotPool(const MeshSlotPool&) = delete;
   MeshSlotPool& operator=(const MeshSlotPool&) = delete;
+
+  // 允许移动（std::vector 需要）
+  MeshSlotPool(MeshSlotPool&& other) noexcept
+      : slots_(std::move(other.slots_)),
+        expert_to_slot_(std::move(other.expert_to_slot_)),
+        slot_to_expert_(std::move(other.slot_to_expert_)),
+        layer_idx_(other.layer_idx_),
+        tp_part_idx_(other.tp_part_idx_),
+        numa_node_(other.numa_node_),
+        cap_(other.cap_),
+        slot_bytes_(other.slot_bytes_),
+        gate_up_bytes_(other.gate_up_bytes_),
+        memory_(other.memory_),
+        total_bytes_(other.total_bytes_) {
+    other.memory_ = nullptr;
+    other.total_bytes_ = 0;
+  }
+  MeshSlotPool& operator=(MeshSlotPool&& other) noexcept {
+    if (this != &other) {
+      if (memory_) numa_free(memory_, total_bytes_);
+      slots_ = std::move(other.slots_);
+      expert_to_slot_ = std::move(other.expert_to_slot_);
+      slot_to_expert_ = std::move(other.slot_to_expert_);
+      layer_idx_ = other.layer_idx_;
+      tp_part_idx_ = other.tp_part_idx_;
+      numa_node_ = other.numa_node_;
+      cap_ = other.cap_;
+      slot_bytes_ = other.slot_bytes_;
+      gate_up_bytes_ = other.gate_up_bytes_;
+      memory_ = other.memory_;
+      total_bytes_ = other.total_bytes_;
+      other.memory_ = nullptr;
+      other.total_bytes_ = 0;
+    }
+    return *this;
+  }
 
   // ===== 指针访问 =====
 

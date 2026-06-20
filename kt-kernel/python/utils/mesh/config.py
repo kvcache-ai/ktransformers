@@ -21,9 +21,14 @@ MESH 插件 Python 侧配置。
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Optional
+
+# 配置文件路径：当环境变量未传递到 scheduler 子进程时（SGLang spawn 不继承 KT_* env），
+# 主进程将配置写入此文件，scheduler 从文件读取
+MESH_CONFIG_FILE = "/tmp/kt_mesh_config.json"
 
 
 @dataclass
@@ -106,6 +111,37 @@ class MeshConfig:
             weight_type=os.environ.get("KT_MESH_WEIGHT_TYPE", "amxint4").lower(),
         )
 
+    def to_file(self, path: str = MESH_CONFIG_FILE) -> None:
+        """将配置写入 JSON 文件，供 scheduler 子进程读取。"""
+        data = {
+            "enabled": self.enabled,
+            "cap": self.cap,
+            "num_gpu_experts": self.num_gpu_experts,
+            "max_deferred_per_token": self.max_deferred_per_token,
+            "decode_front_layers": self.decode_front_layers,
+            "decode_front_layer_cap": self.decode_front_layer_cap,
+            "total_layers": self.total_layers,
+            "prefill_window": self.prefill_window,
+            "heat_gamma": self.heat_gamma,
+            "heat_beta": self.heat_beta,
+            "markov_alpha": self.markov_alpha,
+            "markov_topk": self.markov_topk,
+            "lookahead_weight": self.lookahead_weight,
+            "weight_type": self.weight_type,
+        }
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    @classmethod
+    def from_file(cls, path: str = MESH_CONFIG_FILE) -> Optional["MeshConfig"]:
+        """从 JSON 文件读取配置。文件不存在时返回 None。"""
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            return cls(**data)
+        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+            return None
+
     def validate(self) -> None:
         """校验配置合法性。"""
         if not self.enabled:
@@ -135,6 +171,7 @@ class MeshConfig:
             ) from e
 
         cpp_cfg = CppMeshConfig()
+        from kt_kernel_ext.mesh import WeightType
         cpp_cfg.enabled = self.enabled
         cpp_cfg.cap = self.cap
         cpp_cfg.num_gpu_experts = self.num_gpu_experts
@@ -150,9 +187,9 @@ class MeshConfig:
         cpp_cfg.lookahead_weight = self.lookahead_weight
         # weight_type 枚举
         if self.weight_type == "amxint4":
-            cpp_cfg.weight_type = 0  # WeightType::AMXINT4
+            cpp_cfg.weight_type = WeightType.AMXINT4
         else:
-            cpp_cfg.weight_type = 1  # WeightType::BF16
+            cpp_cfg.weight_type = WeightType.BF16
         cpp_cfg.hidden_size = self.hidden_size
         cpp_cfg.intermediate_size = self.intermediate_size
         cpp_cfg.expert_num = self.expert_num

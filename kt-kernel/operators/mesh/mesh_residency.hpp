@@ -54,6 +54,24 @@ class MeshResidencyManager {
 
     // 计算 slot 字节数（根据权重类型和模型维度）
     slot_bytes_ = compute_slot_bytes(config);
+    size_t gate_up_bytes = compute_gate_up_bytes(config);
+    size_t down_bytes = compute_down_bytes(config);
+
+    // 诊断日志：确认 config 值和内存分配量
+    size_t total_slot_bytes = static_cast<size_t>(config.total_layers) *
+                              config.tp_count * config.cap * slot_bytes_;
+    fprintf(stderr,
+            "[MESH init DIAG] hidden=%d, inter=%d, expert_num=%d, tp=%d, "
+            "cap=%d, layers=%d, weight_type=%d\n",
+            config.hidden_size, config.intermediate_size,
+            config.expert_num, config.tp_count,
+            config.cap, config.total_layers,
+            static_cast<int>(config.weight_type));
+    fprintf(stderr,
+            "[MESH init DIAG] gate_up_bytes=%zu, down_bytes=%zu, slot_bytes=%zu, "
+            "total_slot_pool=%zu MB\n",
+            gate_up_bytes, down_bytes, slot_bytes_,
+            total_slot_bytes / (1024 * 1024));
 
     // 创建 slot 池 [layer][tp]
     pools_.resize(config.total_layers);
@@ -78,6 +96,9 @@ class MeshResidencyManager {
 
     // 初始化 temporal 双缓冲
     prefill_->init_temporal();
+
+    fprintf(stderr, "[MESH init DIAG] init complete, pools_ size=%zu\n",
+            pools_.size());
   }
 
   // ===== 文件布局注入 =====
@@ -111,6 +132,13 @@ class MeshResidencyManager {
    * 每层 Slot 池按编号顺序填满。
    */
   void bootstrap() {
+    // 文件布局未注入时跳过实际权重加载（仅用于内存测试模式）
+    if (layouts_.empty()) {
+      fprintf(stderr, "[MESH] bootstrap: layouts_ empty, skipping weight preload "
+              "(memory-test mode, slot pools already allocated)\n");
+      return;
+    }
+
     // 预加载 Scale Cache（AMXINT4 专用）
     if (config_.weight_type == WeightType::AMXINT4) {
       io_->preload_scale_cache(config_.expert_num, config_.tp_count,

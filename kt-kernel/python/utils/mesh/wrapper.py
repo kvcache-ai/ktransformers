@@ -27,7 +27,14 @@ class MeshMoEWrapper:
     """MESH 模式的 MoE Wrapper。
 
     委托给 AMXMoEWrapper 进行实际计算，MESH 只负责权重驻留管理。
+
+    ResidencyManager 是进程级单例：所有层共享同一个 manager，
+    避免 40× 内存重复（每层都创建完整 40 层 pool）。
     """
+
+    # 进程级单例：key=numa_nodes tuple, value=MeshResidencyManager
+    _shared_residency = None
+    _shared_bootstrap_done = False
 
     def __init__(
         self,
@@ -95,31 +102,43 @@ class MeshMoEWrapper:
             numa_nodes=numa_nodes,
         )
 
-        # 2. 创建 ResidencyManager
-        self._residency = MeshResidencyManager()
+        # 2. 创建/复用 ResidencyManager（进程级单例，避免 40× 内存重复）
         if numa_nodes is None:
             numa_nodes = list(range(threadpool_count))
-        self._residency.init(mesh_config, numa_nodes)
 
-        # 3. 注入 GPU expert mask
-        if gpu_experts_mask is not None:
-            mask_list = gpu_experts_mask.cpu().tolist()
-            mask_int = [1 if x else 0 for x in mask_list]
-            self._residency.set_gpu_experts_mask(mask_int)
+        if MeshMoEWrapper._shared_residency is None:
+            # 第一层：创建并初始化共享 ResidencyManager
+            self._residency = MeshResidencyManager()
+            self._residency.init(mesh_config, numa_nodes)
 
-        # 4. 注入文件布局（从 SafeTensorLoader 获取）
-        self._inject_file_layouts(weight_path, threadpool_count, num_experts, mesh_config)
+            # 注入 GPU expert mask
+            if gpu_experts_mask is not None:
+                mask_list = gpu_experts_mask.cpu().tolist()
+                mask_int = [1 if x else 0 for x in mask_list]
+                self._residency.set_gpu_experts_mask(mask_int)
 
-        # 5. 启动阶段：读前 cap 个专家进 slot
-        self._residency.mark_layouts_set()
-        self._residency.bootstrap()
+            # 注入文件布局（从 SafeTensorLoader 获取）
+            self._inject_file_layouts(weight_path, threadpool_count, num_experts, mesh_config)
+
+            # 启动阶段：读前 cap 个专家进 slot
+            self._residency.mark_layouts_set()
+            self._residency.bootstrap()
+            MeshMoEWrapper._shared_residency = self._residency
+            MeshMoEWrapper._shared_bootstrap_done = True
+            logger.info(
+                "MeshMoEWrapper: shared ResidencyManager created at layer=%d, cap=%d, method=%s",
+                layer_idx, mesh_config.cap, method,
+            )
+        else:
+            # 后续层：复用共享 ResidencyManager
+            self._residency = MeshMoEWrapper._shared_residency
+            logger.info(
+                "MeshMoEWrapper: layer=%d reuses shared ResidencyManager",
+                layer_idx,
+            )
 
         self._mesh_config = mesh_config
         self._layer_idx = layer_idx
-        logger.info(
-            "MeshMoEWrapper initialized: layer=%d, cap=%d, method=%s",
-            layer_idx, mesh_config.cap, method,
-        )
 
     def _inject_file_layouts(
         self,
@@ -151,6 +170,22 @@ class MeshMoEWrapper:
             "Please implement _inject_file_layouts based on SafeTensorLoader."
         )
 
+    # ===== 属性委托 =====
+
+    def __getattr__(self, name: str):
+        """未在 MeshMoEWrapper 中定义的属性，委托给内部 AMXMoEWrapper。
+
+        确保 submit_forward / sync_forward 等基类方法自动透传，
+        无需逐个手写委托。__getattr__ 仅在正常属性查找失败时调用，
+        不会覆盖本类已显式定义的方法（forward / load_weights 等）。
+        """
+        inner = self.__dict__.get("_inner")
+        if inner is not None:
+            return getattr(inner, name)
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'"
+        )
+
     # ===== forward 委托 =====
 
     def forward(self, *args, **kwargs):
@@ -161,13 +196,15 @@ class MeshMoEWrapper:
         """
         return self._inner.forward(*args, **kwargs)
 
-    def load_weights(self):
-        """load_weights 委托给 AMXMoEWrapper。
+    def load_weights(self, physical_to_logical_map_cpu=None):
+        """load_weights：委托给内部 AMXMoEWrapper 加载全量权重。
 
-        MESH 模式下 AMXMoEWrapper.load_weights() 会走 mesh 分支（直接 return），
-        实际权重加载由 ResidencyManager.bootstrap() 完成。
+        TODO: MESH 模式的最终目标是跳过全量加载，仅由 ResidencyManager 的
+        slot pool 管理 cap 个专家（io_uring 按需加载）。但当前 io_uring 按需
+        加载和 AMX 内核 hook 尚未实现，self.moe 为 None 会导致 submit_forward
+        崩溃。暂时先正常加载权重以保证推理可用，slot pool 作为额外开销。
         """
-        return self._inner.load_weights()
+        return self._inner.load_weights(physical_to_logical_map_cpu)
 
     # ===== MESH 专属接口 =====
 

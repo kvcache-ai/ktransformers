@@ -61,14 +61,18 @@ class MeshPrefill {
   void init_temporal() {
     if (temporal_a_ != nullptr) return;  // 已初始化
     size_t bytes = static_cast<size_t>(temporal_size_) * slot_bytes_ * tp_count_;
+    role_a_ = TemporalRole::COMPUTE;
+    role_b_ = TemporalRole::PREFETCH;
+    if (bytes == 0) {
+      // cap >= expert_num: 所有专家常驻 slot，不需要 temporal buffer
+      return;
+    }
     temporal_a_ = numa_alloc_onnode(bytes, numa_node_);
     temporal_b_ = numa_alloc_onnode(bytes, numa_node_);
     if (!temporal_a_ || !temporal_b_) {
       throw std::runtime_error("MeshPrefill: numa_alloc_onnode for temporal failed");
     }
     temporal_bytes_ = bytes;
-    role_a_ = TemporalRole::COMPUTE;
-    role_b_ = TemporalRole::PREFETCH;
   }
 
   // 释放 temporal 内存（仅 prefill→decode 切换时调用）

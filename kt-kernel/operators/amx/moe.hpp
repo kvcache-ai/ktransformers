@@ -213,8 +213,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版 mmap/file/bf16 路径
     if (config_.mesh_enabled && config_.mesh_residency) {
       // MESH 模式下 gate_bb_/up_bb_/down_bb_ 在 forward 时由 mesh hook 动态重定向到 slot buffer
-      // 这里只需标记 weights_loaded，实际权重加载由 ResidencyManager.bootstrap() 完成
-      this->weights_loaded = true;
+      // 实际权重加载由 ResidencyManager.bootstrap() 完成
       return;
     }
     auto pool = config_.pool->get_subpool(tp_part_idx);
@@ -377,9 +376,9 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
 
   void load_weights() override {
     // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
-    if (config.mesh_enabled && config.mesh_residency) {
-      for (auto i = 0; i < tp_count; i++) {
-        tps[i]->load_weights();  // 各 TP 走 mesh 分支
+    if (this->config.mesh_enabled && this->config.mesh_residency) {
+      for (auto i = 0; i < this->tp_count; i++) {
+        this->tps[i]->load_weights();  // 各 TP 走 mesh 分支
       }
       this->weights_loaded = true;
       return;
