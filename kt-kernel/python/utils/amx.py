@@ -243,6 +243,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
+        mesh_enabled: bool = False,
+        mesh_residency_ptr: int = 0,
     ):
         """
         Initialize AMX MoE Wrapper.
@@ -316,6 +318,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.gate_scales = None
         self.up_scales = None
         self.down_scales = None
+
+        # MESH 插件接入点
+        self.mesh_enabled = mesh_enabled
+        self.mesh_residency_ptr = mesh_residency_ptr
 
     def load_weights_from_tensors(
         self,
@@ -464,6 +470,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        # A2: 注入 MESH 配置
+        moe_config.mesh_enabled = self.mesh_enabled
+        moe_config.mesh_residency = self.mesh_residency_ptr
 
         moe_config.gate_proj = gate_ptr
         moe_config.up_proj = up_ptr

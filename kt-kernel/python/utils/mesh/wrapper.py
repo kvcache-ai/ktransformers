@@ -100,6 +100,10 @@ class MeshMoEWrapper:
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
             numa_nodes=numa_nodes,
+            # A2: mesh_enabled 暂不开启（避免 load_weights 跳过导致 gate_bb_ 为空崩溃）
+            # 仅注入 mesh_residency 指针，让 do_gate_up_gemm 的 hook 可被调用
+            mesh_enabled=False,
+            mesh_residency_ptr=0,
         )
 
         # 2. 创建/复用 ResidencyManager（进程级单例，避免 40× 内存重复）
@@ -140,6 +144,10 @@ class MeshMoEWrapper:
         self._mesh_config = mesh_config
         self._layer_idx = layer_idx
 
+        # A2: 注入 mesh_residency 指针到 inner AMXMoEWrapper
+        # 这样 do_gate_up_gemm/do_down_gemm 中的 mesh hook 可以调用 ResidencyManager
+        self._inner.mesh_residency_ptr = self._residency.raw_ptr()
+
     def _inject_file_layouts(
         self,
         weight_path: str,
@@ -147,27 +155,247 @@ class MeshMoEWrapper:
         expert_num: int,
         mesh_config: MeshConfig,
     ) -> None:
-        """从 SafeTensorLoader 获取文件布局并注入 ResidencyManager。
+        """从 safetensors 文件解析专家权重偏移并注入 ResidencyManager。
 
-        这里需要根据实际权重文件格式解析偏移。
-        简化实现：假设权重已按 TP 切分存储，每个 TP 一个文件。
+        A4 实现：解析 safetensors 文件头获取每个 tensor 的绝对文件偏移，
+        为每层每 TP 每专家构造 ExpertFileLayout 并注入。
+
+        支持两种格式：
+        - AMXINT4 NUMA-sharded: blk.{L}.ffn_{gate,up,down}_exps.{E}.numa.{N}.{weight,scale}
+        - BF16 packed: model.layers.{L}.mlp.experts.{gate_up_proj,down_proj}
         """
-        # TODO: 实际实现需要根据 SafeTensorLoader 的接口获取每个专家的文件偏移
-        # 这里只提供框架，具体偏移计算依赖权重文件格式
-        #
-        # for tp in range(tp_count):
-        #     for eid in range(expert_num):
-        #         layout = loader.get_expert_layout(tp, eid)
-        #         fd = os.open(layout.path, os.O_DIRECT | os.O_RDONLY)
-        #         self._residency.set_file_layout(
-        #             tp, eid, fd,
-        #             layout.gate_offset, layout.up_offset, layout.down_offset,
-        #             layout.gate_bytes, layout.up_bytes, layout.down_bytes,
-        #             ...
-        #         )
-        logger.warning(
-            "File layout injection not yet implemented. "
-            "Please implement _inject_file_layouts based on SafeTensorLoader."
+        import struct
+        import json
+
+        total_layers = mesh_config.total_layers
+        weight_type = mesh_config.weight_type
+
+        # 1. 遍历所有 safetensors 文件，构建 tensor_name -> (file_path, abs_offset, bytes) 映射
+        tensor_map: dict[str, tuple[str, int, int]] = {}
+        for root, _, files in os.walk(weight_path):
+            for fname in sorted(files):
+                if not fname.endswith('.safetensors'):
+                    continue
+                fpath = os.path.join(root, fname)
+                with open(fpath, 'rb') as f:
+                    header_len_bytes = f.read(8)
+                    header_len = struct.unpack('<Q', header_len_bytes)[0]
+                    header_raw = f.read(header_len).decode('utf-8')
+                header = json.loads(header_raw)
+                data_start = 8 + header_len
+                for name, info in header.items():
+                    if name == '__metadata__':
+                        continue
+                    if not isinstance(info, dict) or 'data_offsets' not in info:
+                        continue
+                    abs_offset = data_start + info['data_offsets'][0]
+                    nbytes = info['data_offsets'][1] - info['data_offsets'][0]
+                    tensor_map[name] = (fpath, abs_offset, nbytes)
+
+        if not tensor_map:
+            logger.warning(
+                "_inject_file_layouts: no safetensors tensors found under %s, "
+                "bootstrap will run in memory-test mode", weight_path,
+            )
+            return
+
+        logger.info(
+            "_inject_file_layouts: parsed %d tensors from safetensors under %s",
+            len(tensor_map), weight_path,
+        )
+
+        # 2. 根据 weight_type 注入偏移
+        if weight_type == "amxint4":
+            self._inject_amxint4_layouts(tensor_map, total_layers, tp_count, expert_num)
+        elif weight_type == "bf16":
+            self._inject_bf16_layouts(
+                tensor_map, total_layers, tp_count, expert_num, mesh_config,
+            )
+        else:
+            logger.warning("_inject_file_layouts: unknown weight_type=%s, skipping", weight_type)
+
+    def _inject_amxint4_layouts(
+        self,
+        tensor_map: dict,
+        total_layers: int,
+        tp_count: int,
+        expert_num: int,
+    ) -> None:
+        """注入 AMXINT4 NUMA-sharded 格式的文件布局。
+
+        Tensor 命名：
+        - blk.{L}.ffn_gate_exps.{E}.numa.{N}.weight / .scale
+        - blk.{L}.ffn_up_exps.{E}.numa.{N}.weight / .scale
+        - blk.{L}.ffn_down_exps.{E}.numa.{N}.weight / .scale
+        """
+        # 收集所有需要打开的文件，用 O_DIRECT 打开
+        file_fds: dict[str, int] = {}
+
+        def get_fd(fpath: str) -> int:
+            if fpath not in file_fds:
+                # O_DIRECT 需要对齐读取，但 safetensors 偏移可能不对齐
+                # 先用 O_RDONLY 打开，O_DIRECT 对齐问题在 io_uring 层处理
+                fd = os.open(fpath, os.O_RDONLY)
+                file_fds[fpath] = fd
+                logger.debug("_inject_amxint4_layouts: opened %s as fd=%d", fpath, fd)
+            return file_fds[fpath]
+
+        injected = 0
+        missing = 0
+        for layer in range(total_layers):
+            for tp in range(tp_count):
+                for expert in range(expert_num):
+                    # AMXINT4 NUMA-sharded tensor 名
+                    gate_w_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{tp}.weight"
+                    gate_s_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{tp}.scale"
+                    up_w_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{tp}.weight"
+                    up_s_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{tp}.scale"
+                    down_w_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{tp}.weight"
+                    down_s_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{tp}.scale"
+
+                    # 检查必需的 tensor 是否存在
+                    required = [gate_w_key, up_w_key, down_w_key]
+                    if not all(k in tensor_map for k in required):
+                        missing += 1
+                        continue
+
+                    # 获取 gate 布局
+                    g_fpath, g_off, g_bytes = tensor_map[gate_w_key]
+                    fd = get_fd(g_fpath)
+
+                    # 获取 up 布局
+                    u_fpath, u_off, u_bytes = tensor_map[up_w_key]
+                    if u_fpath != g_fpath:
+                        fd = get_fd(u_fpath)  # 不同文件需要不同 fd
+
+                    # 获取 down 布局
+                    d_fpath, d_off, d_bytes = tensor_map[down_w_key]
+                    if d_fpath not in file_fds:
+                        fd = get_fd(d_fpath)
+
+                    # scale 偏移（AMXINT4 专用）
+                    g_s_off = g_s_bytes = 0
+                    u_s_off = u_s_bytes = 0
+                    d_s_off = d_s_bytes = 0
+                    if gate_s_key in tensor_map:
+                        _, g_s_off, g_s_bytes = tensor_map[gate_s_key]
+                    if up_s_key in tensor_map:
+                        _, u_s_off, u_s_bytes = tensor_map[up_s_key]
+                    if down_s_key in tensor_map:
+                        _, d_s_off, d_s_bytes = tensor_map[down_s_key]
+
+                    # 注意：fd 取 gate 所在文件的 fd。如果 up/down 在不同文件，
+                    # io_uring 的 submit_load 会用 layout.fd 读取所有三个矩阵，
+                    # 这要求三个矩阵在同一文件。safetensors 通常如此（同层同 NUMA 在同一文件）。
+                    # 如果跨文件，需要后续拆分为多次 submit_load。
+                    self._residency.set_file_layout(
+                        layer_idx=layer,
+                        tp_part_idx=tp,
+                        expert_id=expert,
+                        fd=fd,
+                        gate_offset=g_off,
+                        up_offset=u_off,
+                        down_offset=d_off,
+                        gate_bytes=g_bytes,
+                        up_bytes=u_bytes,
+                        down_bytes=d_bytes,
+                        gate_scale_offset=g_s_off,
+                        up_scale_offset=u_s_off,
+                        down_scale_offset=d_s_off,
+                        gate_scale_bytes=g_s_bytes,
+                        up_scale_bytes=u_s_bytes,
+                        down_scale_bytes=d_s_bytes,
+                        # AMXINT4 对称量化无 mins，保持 0
+                    )
+                    injected += 1
+
+        logger.info(
+            "_inject_amxint4_layouts: injected %d layouts (missing %d), "
+            "opened %d files with O_RDONLY",
+            injected, missing, len(file_fds),
+        )
+
+    def _inject_bf16_layouts(
+        self,
+        tensor_map: dict,
+        total_layers: int,
+        tp_count: int,
+        expert_num: int,
+        mesh_config: MeshConfig,
+    ) -> None:
+        """注入 BF16 packed 格式的文件布局。
+
+        Packed 格式：所有专家打包成 3D tensor
+        - model.layers.{L}.mlp.experts.gate_up_proj  [E, 2*I, H]
+        - model.layers.{L}.mlp.experts.down_proj     [E, H, I]
+
+        每个 TP 分片读取 intermediate_size/tp_count 的切片。
+        """
+        hidden = mesh_config.hidden_size
+        inter = mesh_config.intermediate_size
+        inter_per_tp = inter // tp_count
+        # bf16 = 2 bytes
+        elem_bytes = 2
+
+        file_fds: dict[str, int] = {}
+
+        def get_fd(fpath: str) -> int:
+            if fpath not in file_fds:
+                fd = os.open(fpath, os.O_RDONLY)
+                file_fds[fpath] = fd
+            return file_fds[fpath]
+
+        injected = 0
+        missing = 0
+        for layer in range(total_layers):
+            gate_up_key = f"model.layers.{layer}.mlp.experts.gate_up_proj"
+            down_key = f"model.layers.{layer}.mlp.experts.down_proj"
+
+            if gate_up_key not in tensor_map or down_key not in tensor_map:
+                missing += 1
+                continue
+
+            gu_fpath, gu_base, _ = tensor_map[gate_up_key]
+            d_fpath, d_base, _ = tensor_map[down_key]
+            fd = get_fd(gu_fpath)
+
+            # gate_up_proj: [E, 2*I, H]，每个专家占 2*I*H*elem_bytes
+            expert_stride_gu = 2 * inter * hidden * elem_bytes
+            gate_bytes = inter_per_tp * hidden * elem_bytes
+            up_bytes = inter_per_tp * hidden * elem_bytes
+
+            # down_proj: [E, H, I]，每个专家占 H*I*elem_bytes
+            expert_stride_d = hidden * inter * elem_bytes
+            down_bytes = hidden * inter_per_tp * elem_bytes
+
+            for tp in range(tp_count):
+                for expert in range(expert_num):
+                    # gate: expert 的 gate 部分起始偏移 + TP 切片偏移
+                    gate_off = gu_base + expert * expert_stride_gu + tp * gate_bytes
+                    # up: expert 的 up 部分起始偏移（跳过 gate） + TP 切片偏移
+                    up_off = gu_base + expert * expert_stride_gu + inter * hidden * elem_bytes + tp * up_bytes
+                    # down: expert 的 down 起始偏移 + TP 切片偏移
+                    down_off = d_base + expert * expert_stride_d + tp * down_bytes
+
+                    self._residency.set_file_layout(
+                        layer_idx=layer,
+                        tp_part_idx=tp,
+                        expert_id=expert,
+                        fd=fd,
+                        gate_offset=gate_off,
+                        up_offset=up_off,
+                        down_offset=down_off,
+                        gate_bytes=gate_bytes,
+                        up_bytes=up_bytes,
+                        down_bytes=down_bytes,
+                        # BF16 无 scale/mins
+                    )
+                    injected += 1
+
+        logger.info(
+            "_inject_bf16_layouts: injected %d layouts (missing %d), "
+            "opened %d files",
+            injected, missing, len(file_fds),
         )
 
     # ===== 属性委托 =====

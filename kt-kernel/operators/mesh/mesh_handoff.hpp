@@ -42,7 +42,7 @@ class MeshHandoff {
    * @param io io_uring 读取器
    * @param scorer 驱逐评分器
    * @param pools [layer][tp] 的 slot 池
-   * @param layouts [tp][expert] 的文件布局
+   * @param layouts A4 fix: [layer][tp][expert] 的文件布局
    * @param move_gpu_expert_to_gpu 搬运 GPU 专家到 GPU 的回调
    * @param get_dst_ptrs 获取 slot buffer 指针的回调
    */
@@ -52,7 +52,7 @@ class MeshHandoff {
                   MeshIoUring& io,
                   EvictionScorer& scorer,
                   std::vector<std::vector<MeshSlotPool>>& pools,
-                  const std::vector<std::vector<ExpertFileLayout>>& layouts,
+                  const std::vector<std::vector<std::vector<ExpertFileLayout>>>& layouts,
                   std::function<void(int, int)> move_gpu_expert_to_gpu,
                   std::function<std::vector<void*>(int, int, int)> get_dst_ptrs) {
     int ge = config.num_gpu_experts;
@@ -91,7 +91,7 @@ class MeshHandoff {
   void move_gpu_experts_and_refill(
       const MeshConfig& config,
       std::vector<std::vector<MeshSlotPool>>& pools,
-      const std::vector<std::vector<ExpertFileLayout>>& layouts,
+      const std::vector<std::vector<std::vector<ExpertFileLayout>>>& layouts,
       EvictionScorer& scorer,
       MeshIoUring& io,
       std::function<void(int, int)> move_gpu_expert_to_gpu,
@@ -132,11 +132,18 @@ class MeshHandoff {
             new_expert_id = refill_experts[slot_idx];
             auto ptrs = get_dst_ptrs(layer, tp, new_expert_id);
             // 提交 io_uring 读
-            const auto& layout = layouts[tp][new_expert_id];
+            // A4 fix: layouts 改为 [layer][tp][expert] 3D
+            // A6: 传入 layer_idx 和 on_complete 回调
+            const auto& layout = layouts[layer][tp][new_expert_id];
+            MeshSlotPool& pool_ref = pools[layer][tp];
             io.submit_load(new_expert_id, tp, layout,
                            ptrs[0], ptrs[1], ptrs[2],
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           ReadPriority::Demand);
+                           ReadPriority::Demand,
+                           /*layer_idx=*/layer,
+                           /*on_complete=*/[&pool_ref, new_expert_id](int, int, int) {
+                             pool_ref.mark_cached(new_expert_id);
+                           });
             // 覆盖 slot
             pool.overwrite(slot_idx, new_expert_id);
           }

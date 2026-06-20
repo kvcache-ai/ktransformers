@@ -19,42 +19,6 @@ namespace hook {
 // 前向声明，避免强制 include mesh_residency.hpp
 class MeshResidencyManager;
 
-// ===== 权重指针重定向 hook =====
-
-// 获取 gate 矩阵指针（MESH 启用时返回 slot buffer，否则返回 nullptr 走原版）
-// mesh_mgr 为 nullptr 时直接返回 nullptr，编译期可优化
-inline void* get_gate_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
-  if (!mesh_mgr) return nullptr;
-  // 实际实现通过 reinterpret_cast 调用 MeshResidencyManager::get_gate_ptr
-  // 这里用函数指针避免头文件循环依赖
-  using GetPtrFn = void* (*)(void*, int, int, int);
-  static GetPtrFn fn = nullptr;
-  if (!fn) return nullptr;
-  return fn(mesh_mgr, layer, tp, expert_id);
-}
-
-inline void* get_up_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
-  if (!mesh_mgr) return nullptr;
-  using GetPtrFn = void* (*)(void*, int, int, int);
-  static GetPtrFn fn = nullptr;
-  if (!fn) return nullptr;
-  return fn(mesh_mgr, layer, tp, expert_id);
-}
-
-inline void* get_down_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
-  if (!mesh_mgr) return nullptr;
-  using GetPtrFn = void* (*)(void*, int, int, int);
-  static GetPtrFn fn = nullptr;
-  if (!fn) return nullptr;
-  return fn(mesh_mgr, layer, tp, expert_id);
-}
-
-// ===== MESH 启用判断 hook =====
-
-inline bool is_mesh_enabled(void* mesh_mgr) {
-  return mesh_mgr != nullptr;
-}
-
 // ===== 注册函数指针（由 ext_bindings.cpp 在模块初始化时调用）=====
 
 // 这些函数指针用于解耦 mesh_hook.hpp 和 mesh_residency.hpp
@@ -73,6 +37,37 @@ inline HookRegistry& get_registry() {
 // 注册 hook 函数（ext_bindings.cpp 调用）
 inline void register_hooks(HookRegistry r) {
   get_registry() = r;
+}
+
+// ===== 权重指针重定向 hook =====
+
+// 获取 gate 矩阵指针（MESH 启用时返回 slot buffer，否则返回 nullptr 走原版）
+// mesh_mgr 为 nullptr 时直接返回 nullptr，编译期可优化
+inline void* get_gate_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
+  if (!mesh_mgr) return nullptr;
+  auto fn = get_registry().get_gate_ptr;
+  if (!fn) return nullptr;
+  return fn(mesh_mgr, layer, tp, expert_id);
+}
+
+inline void* get_up_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
+  if (!mesh_mgr) return nullptr;
+  auto fn = get_registry().get_up_ptr;
+  if (!fn) return nullptr;
+  return fn(mesh_mgr, layer, tp, expert_id);
+}
+
+inline void* get_down_bb(void* mesh_mgr, int layer, int tp, int expert_id) {
+  if (!mesh_mgr) return nullptr;
+  auto fn = get_registry().get_down_ptr;
+  if (!fn) return nullptr;
+  return fn(mesh_mgr, layer, tp, expert_id);
+}
+
+// ===== MESH 启用判断 hook =====
+
+inline bool is_mesh_enabled(void* mesh_mgr) {
+  return mesh_mgr != nullptr;
 }
 
 }  // namespace hook

@@ -12,8 +12,10 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <liburing.h>
 #include <numa.h>
 // liburing.h 定义了 BLOCK_SIZE 等宏，会污染全局命名空间，
@@ -62,24 +64,32 @@ class MeshIoUring {
 
   // ===== Scale Cache 预加载（AMXINT4 专用）=====
 
-  // 启动时一次性把所有专家的 scale 数据读入 NUMA 本地 buffer
+  // 启动时一次性把某层所有专家的 scale 数据读入 NUMA 本地 buffer
+  // A4 fix: 改为按层预加载，因为每层的 scale 数据不同
   // expert_num 个专家，每个 scale_bytes 字节
   void preload_scale_cache(int expert_num, int tp_count, int numa_node,
-                           const std::vector<std::vector<ExpertFileLayout>>& layouts) {
+                           const std::vector<std::vector<ExpertFileLayout>>& layouts_tp,
+                           int layer_idx) {
     if (scale_cache_loaded_) return;
 
+    // 确保 scale_cache_ 有足够层
+    if ((int)scale_cache_.size() <= layer_idx) {
+      scale_cache_.resize(layer_idx + 1);
+    }
+
+    auto& layer_cache = scale_cache_[layer_idx];
     // 计算每个 TP 分片的 scale 总大小
     for (int tp = 0; tp < tp_count; tp++) {
       ScaleCacheTP cache;
       size_t total_gate = 0, total_up = 0, total_down = 0;
       size_t total_gate_mins = 0, total_up_mins = 0, total_down_mins = 0;
       for (int e = 0; e < expert_num; e++) {
-        total_gate += layouts[tp][e].gate_scale_bytes;
-        total_up += layouts[tp][e].up_scale_bytes;
-        total_down += layouts[tp][e].down_scale_bytes;
-        total_gate_mins += layouts[tp][e].gate_mins_bytes;
-        total_up_mins += layouts[tp][e].up_mins_bytes;
-        total_down_mins += layouts[tp][e].down_mins_bytes;
+        total_gate += layouts_tp[tp][e].gate_scale_bytes;
+        total_up += layouts_tp[tp][e].up_scale_bytes;
+        total_down += layouts_tp[tp][e].down_scale_bytes;
+        total_gate_mins += layouts_tp[tp][e].gate_mins_bytes;
+        total_up_mins += layouts_tp[tp][e].up_mins_bytes;
+        total_down_mins += layouts_tp[tp][e].down_mins_bytes;
       }
       cache.gate_scale = numa_alloc_onnode(total_gate, numa_node);
       cache.up_scale = numa_alloc_onnode(total_up, numa_node);
@@ -98,7 +108,7 @@ class MeshIoUring {
       size_t off_g = 0, off_u = 0, off_d = 0;
       size_t off_gm = 0, off_um = 0, off_dm = 0;
       for (int e = 0; e < expert_num; e++) {
-        const auto& layout = layouts[tp][e];
+        const auto& layout = layouts_tp[tp][e];
         sync_read_to(layout.fd, layout.gate_scale_offset, layout.gate_scale_bytes,
                      (char*)cache.gate_scale + off_g);
         sync_read_to(layout.fd, layout.up_scale_offset, layout.up_scale_bytes,
@@ -118,17 +128,21 @@ class MeshIoUring {
         off_um += layout.up_mins_bytes;
         off_dm += layout.down_mins_bytes;
       }
-      scale_cache_.push_back(std::move(cache));
+      layer_cache.push_back(std::move(cache));
     }
     scale_cache_loaded_ = true;
   }
 
   // 从 scale cache 中 memcpy 某个专家的 scale 到目标 buffer
-  void copy_scale_from_cache(int tp_part_idx, int expert_id,
+  // A4 fix: 加 layer_idx 参数
+  void copy_scale_from_cache(int layer_idx, int tp_part_idx, int expert_id,
                              void* gate_scale_dst, void* up_scale_dst, void* down_scale_dst,
                              void* gate_mins_dst, void* up_mins_dst, void* down_mins_dst,
                              const std::vector<ExpertFileLayout>& layouts_tp) {
-    // 需要外部传入该 TP 的 layouts 来计算偏移
+    if ((int)scale_cache_.size() <= layer_idx) return;
+    auto& layer_cache = scale_cache_[layer_idx];
+    if ((int)layer_cache.size() <= tp_part_idx) return;
+
     size_t off_g = 0, off_u = 0, off_d = 0;
     size_t off_gm = 0, off_um = 0, off_dm = 0;
     for (int e = 0; e < expert_id; e++) {
@@ -140,7 +154,7 @@ class MeshIoUring {
       off_dm += layouts_tp[e].down_mins_bytes;
     }
     const auto& layout = layouts_tp[expert_id];
-    const auto& cache = scale_cache_[tp_part_idx];
+    const auto& cache = layer_cache[tp_part_idx];
     memcpy(gate_scale_dst, (char*)cache.gate_scale + off_g, layout.gate_scale_bytes);
     memcpy(up_scale_dst, (char*)cache.up_scale + off_u, layout.up_scale_bytes);
     memcpy(down_scale_dst, (char*)cache.down_scale + off_d, layout.down_scale_bytes);
@@ -153,70 +167,129 @@ class MeshIoUring {
 
   // ===== io_uring 异步读 =====
 
+  // A6 fix: PendingRequest 跟踪每个专家读取的完成状态
+  // 一个专家的读取可能涉及 3-9 个 SQE，所有 SQE 完成后触发 on_complete
+  struct PendingRequest {
+    int layer_idx = -1;
+    int tp_part_idx = -1;
+    int expert_id = -1;
+    int total_reqs = 0;
+    std::atomic<int> completed_reqs{0};
+    std::function<void(int, int, int)> on_complete;  // (layer, tp, expert)
+  };
+
   // 提交一个专家的读取请求
   // scale_cache_loaded_=true: 发 3 个请求（只读 weight），scale 从 cache memcpy
   // scale_cache_loaded_=false: 发 9 个请求（weight + scale + mins 全读）
+  // A6 fix: 加 layer_idx 和 on_complete 回调，CQE 完成后触发 mark_cached
   void submit_load(int expert_id, int tp_part_idx,
                    const ExpertFileLayout& layout,
                    void* gate_dst, void* up_dst, void* down_dst,
                    void* gate_scale_dst, void* up_scale_dst, void* down_scale_dst,
                    void* gate_mins_dst, void* up_mins_dst, void* down_mins_dst,
-                   ReadPriority priority) {
+                   ReadPriority priority,
+                   int layer_idx = -1,
+                   std::function<void(int, int, int)> on_complete = nullptr) {
     int n_reqs = scale_cache_loaded_ ? 3 : 9;
-    std::vector<io_uring_sqe*> sqes;
-    sqes.reserve(n_reqs);
 
-    // 提交 SQE
+    // A6: 创建 PendingRequest 跟踪完成状态
+    auto* pending = new PendingRequest{
+      layer_idx, tp_part_idx, expert_id, n_reqs, 0, std::move(on_complete)
+    };
+
+    // 提交 SQE，user_data 指向 pending
     auto* sqe = io_uring_get_sqe(&ring_);
     io_uring_prep_read(sqe, layout.fd, gate_dst, layout.gate_bytes, layout.gate_offset);
-    sqes.push_back(sqe);
+    io_uring_sqe_set_data(sqe, pending);
 
     sqe = io_uring_get_sqe(&ring_);
     io_uring_prep_read(sqe, layout.fd, up_dst, layout.up_bytes, layout.up_offset);
-    sqes.push_back(sqe);
+    io_uring_sqe_set_data(sqe, pending);
 
     sqe = io_uring_get_sqe(&ring_);
     io_uring_prep_read(sqe, layout.fd, down_dst, layout.down_bytes, layout.down_offset);
-    sqes.push_back(sqe);
+    io_uring_sqe_set_data(sqe, pending);
 
     if (!scale_cache_loaded_) {
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, gate_scale_dst, layout.gate_scale_bytes, layout.gate_scale_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
 
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, up_scale_dst, layout.up_scale_bytes, layout.up_scale_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
 
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, down_scale_dst, layout.down_scale_bytes, layout.down_scale_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
 
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, gate_mins_dst, layout.gate_mins_bytes, layout.gate_mins_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
 
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, up_mins_dst, layout.up_mins_bytes, layout.up_mins_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
 
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, down_mins_dst, layout.down_mins_bytes, layout.down_mins_offset);
-      sqes.push_back(sqe);
+      io_uring_sqe_set_data(sqe, pending);
     }
 
-    // 设置 user_data 用于 CQE 回调识别
-    for (auto* s : sqes) {
-      io_uring_sqe_set_data(s, nullptr);
-    }
     io_uring_submit(&ring_);
   }
 
+  // A6: 处理已完成的 CQE，触发 on_complete 回调
+  // 非阻塞：只处理当前已有的 CQE，不等待
+  void process_cqes() {
+    unsigned head;
+    unsigned count = 0;
+    io_uring_cqe* cqe;
+
+    io_uring_for_each_cqe(&ring_, head, cqe) {
+      auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
+      if (pending) {
+        // 检查读取错误
+        if (cqe->res < 0) {
+          fprintf(stderr, "[MESH] io_uring read error: expert=%d tp=%d res=%d (%s)\n",
+                  pending->expert_id, pending->tp_part_idx, cqe->res, strerror(-cqe->res));
+        }
+        int completed = pending->completed_reqs.fetch_add(1) + 1;
+        if (completed == pending->total_reqs) {
+          // 所有 SQE 完成，触发回调
+          if (pending->on_complete) {
+            pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+          }
+          delete pending;
+        }
+      }
+      count++;
+    }
+    if (count > 0) {
+      io_uring_cq_advance(&ring_, count);
+    }
+  }
+
   // 阻塞等待某专家的读请求完成（通过 CQE 计数）
+  // A6: 改为处理 CQE 并触发回调
   void wait_expert(int expert_id, int n_reqs) {
     for (int i = 0; i < n_reqs; i++) {
       io_uring_cqe* cqe;
       io_uring_wait_cqe(&ring_, &cqe);
+      auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
+      if (pending) {
+        if (cqe->res < 0) {
+          fprintf(stderr, "[MESH] io_uring read error in wait_expert: expert=%d res=%d (%s)\n",
+                  pending->expert_id, cqe->res, strerror(-cqe->res));
+        }
+        int completed = pending->completed_reqs.fetch_add(1) + 1;
+        if (completed == pending->total_reqs) {
+          if (pending->on_complete) {
+            pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+          }
+          delete pending;
+        }
+      }
       io_uring_cqe_seen(&ring_, cqe);
     }
   }
@@ -238,26 +311,48 @@ class MeshIoUring {
   }
 
   // 提交并等待全部完成（同步接口，启动阶段用）
+  // A6: 处理 CQE 并触发 on_complete 回调
   void submit_and_wait() {
     io_uring_submit(&ring_);
-    // 等待所有 inflight 完成
-    unsigned head;
-    unsigned count = 0;
-    io_uring_cqe* cqe;
+    // 等待所有 inflight 完成，处理回调
     while (true) {
+      unsigned head;
+      unsigned count = 0;
+      io_uring_cqe* cqe;
       io_uring_for_each_cqe(&ring_, head, cqe) {
+        auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
+        if (pending) {
+          if (cqe->res < 0) {
+            fprintf(stderr, "[MESH] io_uring read error in submit_and_wait: expert=%d res=%d (%s)\n",
+                    pending->expert_id, cqe->res, strerror(-cqe->res));
+          }
+          int completed = pending->completed_reqs.fetch_add(1) + 1;
+          if (completed == pending->total_reqs) {
+            if (pending->on_complete) {
+              pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+            }
+            delete pending;
+          }
+        }
         count++;
       }
-      if (count == 0) break;
+      if (count == 0) {
+        // 没有更多 CQE，检查是否还有 inflight SQE
+        unsigned inflight = io_uring_sq_ready(&ring_);
+        if (inflight == 0) break;
+        // 还有 inflight，等待一个 CQE
+        io_uring_cqe* wait_cqe;
+        io_uring_wait_cqe(&ring_, &wait_cqe);
+        continue;
+      }
       io_uring_cq_advance(&ring_, count);
-      count = 0;
     }
   }
 
  private:
   io_uring ring_;
 
-  // Scale Cache（每 TP 一个）
+  // Scale Cache（A4 fix: [layer][tp] 每层独立）
   struct ScaleCacheTP {
     void* gate_scale = nullptr;
     void* up_scale = nullptr;
@@ -272,7 +367,8 @@ class MeshIoUring {
     size_t up_mins_total = 0;
     size_t down_mins_total = 0;
   };
-  std::vector<ScaleCacheTP> scale_cache_;
+  // A4 fix: [layer][tp] 的 scale cache
+  std::vector<std::vector<ScaleCacheTP>> scale_cache_;
   bool scale_cache_loaded_ = false;
 
   // 同步读取（启动阶段用，pread + O_DIRECT）
@@ -289,13 +385,15 @@ class MeshIoUring {
   }
 
   void release_scale_cache() {
-    for (auto& c : scale_cache_) {
-      if (c.gate_scale) numa_free(c.gate_scale, c.gate_scale_total);
-      if (c.up_scale) numa_free(c.up_scale, c.up_scale_total);
-      if (c.down_scale) numa_free(c.down_scale, c.down_scale_total);
-      if (c.gate_mins) numa_free(c.gate_mins, c.gate_mins_total);
-      if (c.up_mins) numa_free(c.up_mins, c.up_mins_total);
-      if (c.down_mins) numa_free(c.down_mins, c.down_mins_total);
+    for (auto& layer_cache : scale_cache_) {
+      for (auto& c : layer_cache) {
+        if (c.gate_scale) numa_free(c.gate_scale, c.gate_scale_total);
+        if (c.up_scale) numa_free(c.up_scale, c.up_scale_total);
+        if (c.down_scale) numa_free(c.down_scale, c.down_scale_total);
+        if (c.gate_mins) numa_free(c.gate_mins, c.gate_mins_total);
+        if (c.up_mins) numa_free(c.up_mins, c.up_mins_total);
+        if (c.down_mins) numa_free(c.down_mins, c.down_mins_total);
+      }
     }
     scale_cache_.clear();
   }

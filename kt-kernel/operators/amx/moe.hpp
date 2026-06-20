@@ -15,6 +15,7 @@
 // #define FORWARD_TIME_REPORT
 
 #include "moe_base.hpp"
+#include "../mesh/mesh_hook.hpp"
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
@@ -181,32 +182,64 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = gate_up_ba_[expert_idx];
-    auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
-    // MESH hook: mesh_enabled 时 bb 的底层指针已由 MESH slot 池提供
-    // gate_bb_/up_bb_ 在 load_weights() mesh 分支中已绑定为 slot buffer 的包装
-    // MESH 通过覆盖 slot 内存实现专家切换，bb 指针本身不变
+    // A1-call: MESH hook — 如果 mesh_residency 已设置，尝试从 slot 池获取权重指针
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = do_up
+          ? mesh::hook::get_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::get_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+    if (slot_ptr) {
+      // MESH 路径：用 slot 指针创建临时 BufferB
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.intermediate_size, config_.hidden_size, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      }
     } else {
-      amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      // 原版路径
+      auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      }
     }
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = down_ba_[expert_idx];
-    auto& bb = down_bb_[expert_idx];
     auto& bc = down_bc_[expert_idx];
 
-    // MESH hook: 同上，down_bb_ 已绑定为 MESH slot buffer
+    // A1-call: MESH hook
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = mesh::hook::get_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+    if (slot_ptr) {
+      // MESH 路径
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.hidden_size, config_.intermediate_size, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      }
     } else {
-      amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      // 原版路径
+      auto& bb = down_bb_[expert_idx];
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      }
     }
   }
   void load_weights() {

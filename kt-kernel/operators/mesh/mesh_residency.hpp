@@ -103,13 +103,20 @@ class MeshResidencyManager {
 
   // ===== 文件布局注入 =====
 
-  void set_file_layout(int tp_part_idx, int expert_id, const ExpertFileLayout& layout) {
+  // A4 fix: layouts_ 改为 [layer][tp][expert] 3D，
+  // 因为每层的专家权重在 safetensors 文件中的偏移不同。
+  void set_file_layout(int layer_idx, int tp_part_idx, int expert_id,
+                       const ExpertFileLayout& layout) {
     if (layouts_.empty()) {
-      layouts_.resize(config_.tp_count, std::vector<ExpertFileLayout>(config_.expert_num));
+      layouts_.resize(config_.total_layers,
+                      std::vector<std::vector<ExpertFileLayout>>(
+                          config_.tp_count,
+                          std::vector<ExpertFileLayout>(config_.expert_num)));
     }
-    if (tp_part_idx >= 0 && tp_part_idx < (int)layouts_.size() &&
-        expert_id >= 0 && expert_id < (int)layouts_[tp_part_idx].size()) {
-      layouts_[tp_part_idx][expert_id] = layout;
+    if (layer_idx >= 0 && layer_idx < (int)layouts_.size() &&
+        tp_part_idx >= 0 && tp_part_idx < (int)layouts_[layer_idx].size() &&
+        expert_id >= 0 && expert_id < (int)layouts_[layer_idx][tp_part_idx].size()) {
+      layouts_[layer_idx][tp_part_idx][expert_id] = layout;
     }
   }
 
@@ -139,10 +146,12 @@ class MeshResidencyManager {
       return;
     }
 
-    // 预加载 Scale Cache（AMXINT4 专用）
+    // 预加载 Scale Cache（AMXINT4 专用）— 每层独立预加载
     if (config_.weight_type == WeightType::AMXINT4) {
-      io_->preload_scale_cache(config_.expert_num, config_.tp_count,
-                               numa_nodes_[0], layouts_);
+      for (int l = 0; l < config_.total_layers; l++) {
+        io_->preload_scale_cache(config_.expert_num, config_.tp_count,
+                                 numa_nodes_[0], layouts_[l], l);
+      }
     }
 
     // 每层每 TP 读前 cap 个专家
@@ -152,7 +161,7 @@ class MeshResidencyManager {
         for (int e = 0; e < config_.cap && e < config_.expert_num; e++) {
           if (is_gpu_expert(e)) continue;  // GPU expert 跳过
 
-          const auto& layout = layouts_[tp][e];
+          const auto& layout = layouts_[l][tp][e];
           void* gate_dst = pool.gate_ptr(e);
           void* up_dst = pool.up_ptr(e);
           void* down_dst = pool.down_ptr(e);
@@ -161,9 +170,14 @@ class MeshResidencyManager {
           pool.bind(e, e);
 
           // 提交 io_uring 读
+          // A6: 传入 layer_idx 和 on_complete 回调，完成后 mark_cached
           io_->submit_load(e, tp, layout, gate_dst, up_dst, down_dst,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           ReadPriority::Demand);
+                           ReadPriority::Demand,
+                           /*layer_idx=*/l,
+                           /*on_complete=*/[this, l, tp, e](int, int, int) {
+                             pools_[l][tp].mark_cached(e);
+                           });
         }
       }
     }
@@ -222,10 +236,12 @@ class MeshResidencyManager {
                          pools_, layouts_,
                          /*move_gpu_expert_to_gpu=*/[](int, int) {},
                          /*get_dst_ptrs=*/[this](int l, int tp, int e) {
+                           // A5 fix: 用 expert_*_ptr 按 expert_id 查 slot，
+                           // 不能把 expert_id 当 slot_idx 传给 gate_ptr（eid>=cap 时越界）
                            return std::vector<void*>{
-                               pools_[l][tp].gate_ptr(e),
-                               pools_[l][tp].up_ptr(e),
-                               pools_[l][tp].down_ptr(e)};
+                               pools_[l][tp].expert_gate_ptr(e),
+                               pools_[l][tp].expert_up_ptr(e),
+                               pools_[l][tp].expert_down_ptr(e)};
                          });
   }
 
@@ -248,14 +264,71 @@ class MeshResidencyManager {
                                           const std::vector<int>& topk,
                                           const std::vector<float>& scores,
                                           int tp_part_idx) {
+    // A7: 先处理已完成的 io_uring CQE，触发 mark_cached 回调
+    io_->process_cqes();
+
     MeshSlotPool& pool = pools_[layer_idx][tp_part_idx];
-    return decode_->split(topk, scores, pool, *scheduler_, layer_idx, tp_part_idx,
+    auto result = decode_->split(topk, scores, pool, *scheduler_, layer_idx, tp_part_idx,
                           [this, &pool, layer_idx, tp_part_idx](int eid) {
+                            // A5 fix: 用 expert_*_ptr 按 expert_id 查 slot，
+                            // 不能把 expert_id 当 slot_idx 传给 gate_ptr（eid>=cap 时越界）
                             return std::vector<void*>{
-                                pool.gate_ptr(eid),
-                                pool.up_ptr(eid),
-                                pool.down_ptr(eid)};
+                                pool.expert_gate_ptr(eid),
+                                pool.expert_up_ptr(eid),
+                                pool.expert_down_ptr(eid)};
                           });
+
+    // A7: 排空调度器队列，提交 io_uring 读取
+    drain_and_submit();
+
+    return result;
+  }
+
+  /**
+   * @brief A7: 排空调度器队列并提交 io_uring 读取
+   *
+   * 把 MeshScheduler 优先队列中的 ScheduledRequest 取出，
+   * 为每个请求找到对应的 ExpertFileLayout 并提交给 MeshIoUring。
+   * 完成后触发 mark_cached + 原始 on_complete 回调。
+   */
+  void drain_and_submit() {
+    auto requests = scheduler_->drain_all();
+    for (auto& req : requests) {
+      // 边界检查
+      if (req.layer_idx < 0 || req.layer_idx >= (int)layouts_.size()) continue;
+      if (req.tp_part_idx < 0 || req.tp_part_idx >= (int)layouts_[req.layer_idx].size()) continue;
+      if (req.expert_id < 0 || req.expert_id >= (int)layouts_[req.layer_idx][req.tp_part_idx].size()) continue;
+      // layouts_ 为空（memory-test 模式）时跳过
+      if (layouts_.empty()) continue;
+
+      const auto& layout = layouts_[req.layer_idx][req.tp_part_idx][req.expert_id];
+
+      // 捕获原始 on_complete 回调
+      auto orig_on_complete = std::move(req.on_complete);
+      int layer = req.layer_idx;
+      int tp = req.tp_part_idx;
+      int expert = req.expert_id;
+
+      // 绑定 slot（如果尚未绑定）
+      MeshSlotPool& pool = pools_[layer][tp];
+      if (!pool.is_cached(expert)) {
+        // 需要先驱逐一个 slot（如果池满）
+        // B1: 在线驱逐尚未完全实现，这里先尝试 bind
+        // 如果池未满，bind 到空闲 slot
+        // 如果池满，需要驱逐（B1 修复后完善）
+      }
+
+      io_->submit_load(
+          req.expert_id, req.tp_part_idx, layout,
+          req.gate_dst, req.up_dst, req.down_dst,
+          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,  // scale 从 cache memcpy
+          req.priority,
+          /*layer_idx=*/layer,
+          /*on_complete=*/[this, layer, tp, expert, orig_on_complete](int, int, int) {
+            pools_[layer][tp].mark_cached(expert);
+            if (orig_on_complete) orig_on_complete();
+          });
+    }
   }
 
   /**
@@ -277,7 +350,8 @@ class MeshResidencyManager {
   MeshDecode& decode() { return *decode_; }
   EvictionScorer& scorer() { return *scorer_; }
   MeshSlotPool& pool(int layer, int tp) { return pools_[layer][tp]; }
-  const std::vector<std::vector<ExpertFileLayout>>& layouts() const { return layouts_; }
+  // A4 fix: layouts_ 改为 [layer][tp][expert] 3D
+  const std::vector<std::vector<std::vector<ExpertFileLayout>>>& layouts() const { return layouts_; }
 
  private:
   MeshConfig config_;
@@ -287,8 +361,8 @@ class MeshResidencyManager {
   // [layer][tp] 的 slot 池
   std::vector<std::vector<MeshSlotPool>> pools_;
 
-  // [tp][expert] 的文件布局
-  std::vector<std::vector<ExpertFileLayout>> layouts_;
+  // A4 fix: [layer][tp][expert] 的文件布局（每层偏移不同）
+  std::vector<std::vector<std::vector<ExpertFileLayout>>> layouts_;
 
   // GPU expert mask
   std::vector<uint8_t> gpu_experts_mask_;

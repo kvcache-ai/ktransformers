@@ -54,6 +54,7 @@ class MeshResidencyManager:
 
     def set_file_layout(
         self,
+        layer_idx: int,
         tp_part_idx: int,
         expert_id: int,
         fd: int,
@@ -76,9 +77,12 @@ class MeshResidencyManager:
         up_mins_bytes: int = 0,
         down_mins_bytes: int = 0,
     ) -> None:
-        """注入单个专家在某个 TP 分片上的文件布局。
+        """注入单个专家在某层某 TP 分片上的文件布局。
+
+        A4 fix: 加 layer_idx 参数，因为每层的专家权重在文件中偏移不同。
 
         Args:
+            layer_idx: 层索引
             tp_part_idx: TP 分片索引
             expert_id: 专家 ID
             fd: O_DIRECT 打开的文件描述符
@@ -87,15 +91,29 @@ class MeshResidencyManager:
         """
         if not self._initialized:
             raise RuntimeError("Call init() before set_file_layout()")
-        self._mgr.set_file_layout(
-            tp_part_idx, expert_id, fd,
-            gate_offset, up_offset, down_offset,
-            gate_bytes, up_bytes, down_bytes,
-            gate_scale_offset, up_scale_offset, down_scale_offset,
-            gate_scale_bytes, up_scale_bytes, down_scale_bytes,
-            gate_mins_offset, up_mins_offset, down_mins_offset,
-            gate_mins_bytes, up_mins_bytes, down_mins_bytes,
-        )
+        # A3 fix: 构造 ExpertFileLayout 对象传给 C++，而非 21 个位置参数
+        from kt_kernel_ext.mesh import ExpertFileLayout
+        layout = ExpertFileLayout()
+        layout.fd = fd
+        layout.gate_offset = gate_offset
+        layout.up_offset = up_offset
+        layout.down_offset = down_offset
+        layout.gate_bytes = gate_bytes
+        layout.up_bytes = up_bytes
+        layout.down_bytes = down_bytes
+        layout.gate_scale_offset = gate_scale_offset
+        layout.up_scale_offset = up_scale_offset
+        layout.down_scale_offset = down_scale_offset
+        layout.gate_scale_bytes = gate_scale_bytes
+        layout.up_scale_bytes = up_scale_bytes
+        layout.down_scale_bytes = down_scale_bytes
+        layout.gate_mins_offset = gate_mins_offset
+        layout.up_mins_offset = up_mins_offset
+        layout.down_mins_offset = down_mins_offset
+        layout.gate_mins_bytes = gate_mins_bytes
+        layout.up_mins_bytes = up_mins_bytes
+        layout.down_mins_bytes = down_mins_bytes
+        self._mgr.set_file_layout(layer_idx, tp_part_idx, expert_id, layout)
 
     def set_gpu_experts_mask(self, mask: List[int]) -> None:
         """注入 GPU expert mask。

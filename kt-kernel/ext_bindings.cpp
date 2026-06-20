@@ -768,6 +768,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       // V4-Flash 2604B SwiGLU clamp limit (0.0 = disabled). See common.hpp.
       .def_readwrite("swiglu_limit", &GeneralMOEConfig::swiglu_limit)
       .def_readwrite("swiglu_alpha", &GeneralMOEConfig::swiglu_alpha)
+      // MESH 插件接入点
+      .def_readwrite("mesh_enabled", &GeneralMOEConfig::mesh_enabled)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, mesh_residency)
 
       ;
 
@@ -1040,7 +1043,20 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def_readwrite("down_offset", &mesh::ExpertFileLayout::down_offset)
         .def_readwrite("gate_bytes", &mesh::ExpertFileLayout::gate_bytes)
         .def_readwrite("up_bytes", &mesh::ExpertFileLayout::up_bytes)
-        .def_readwrite("down_bytes", &mesh::ExpertFileLayout::down_bytes);
+        .def_readwrite("down_bytes", &mesh::ExpertFileLayout::down_bytes)
+        // A3 fix: 暴露 AMXINT4 专用 scale/mins 字段
+        .def_readwrite("gate_scale_offset", &mesh::ExpertFileLayout::gate_scale_offset)
+        .def_readwrite("up_scale_offset", &mesh::ExpertFileLayout::up_scale_offset)
+        .def_readwrite("down_scale_offset", &mesh::ExpertFileLayout::down_scale_offset)
+        .def_readwrite("gate_scale_bytes", &mesh::ExpertFileLayout::gate_scale_bytes)
+        .def_readwrite("up_scale_bytes", &mesh::ExpertFileLayout::up_scale_bytes)
+        .def_readwrite("down_scale_bytes", &mesh::ExpertFileLayout::down_scale_bytes)
+        .def_readwrite("gate_mins_offset", &mesh::ExpertFileLayout::gate_mins_offset)
+        .def_readwrite("up_mins_offset", &mesh::ExpertFileLayout::up_mins_offset)
+        .def_readwrite("down_mins_offset", &mesh::ExpertFileLayout::down_mins_offset)
+        .def_readwrite("gate_mins_bytes", &mesh::ExpertFileLayout::gate_mins_bytes)
+        .def_readwrite("up_mins_bytes", &mesh::ExpertFileLayout::up_mins_bytes)
+        .def_readwrite("down_mins_bytes", &mesh::ExpertFileLayout::down_mins_bytes);
 
     // MeshResidencyManager
     py::class_<mesh::MeshResidencyManager, std::shared_ptr<mesh::MeshResidencyManager>>(
@@ -1049,7 +1065,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def("init", &mesh::MeshResidencyManager::init,
              py::arg("config"), py::arg("numa_nodes"))
         .def("set_file_layout", &mesh::MeshResidencyManager::set_file_layout,
-             py::arg("tp_part_idx"), py::arg("expert_id"), py::arg("layout"))
+             py::arg("layer_idx"), py::arg("tp_part_idx"), py::arg("expert_id"), py::arg("layout"))
         .def("set_gpu_experts_mask",
              [](mesh::MeshResidencyManager& mgr, py::list mask_list) {
                std::vector<uint8_t> mask;
@@ -1072,7 +1088,19 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def("on_decode_token_end", &mesh::MeshResidencyManager::on_decode_token_end)
         .def("config", [](mesh::MeshResidencyManager& mgr) -> const mesh::MeshConfig& {
           return mgr.config();
-        }, py::return_value_policy::reference);
+        }, py::return_value_policy::reference)
+        // A2: 获取原始 C++ 指针，用于注入 MOEConfig.mesh_residency
+        .def("raw_ptr", [](mesh::MeshResidencyManager& mgr) -> uintptr_t {
+          return reinterpret_cast<uintptr_t>(&mgr);
+        })
+        // A6: io_uring CQE 到达后标记 slot 已缓存
+        .def("mark_slot_cached", [](mesh::MeshResidencyManager& mgr, int layer, int tp, int slot_idx) {
+          mgr.pool(layer, tp).mark_cached(slot_idx);
+        }, py::arg("layer"), py::arg("tp"), py::arg("slot_idx"))
+        // A6: 查询专家是否已缓存
+        .def("is_cached", [](mesh::MeshResidencyManager& mgr, int layer, int tp, int expert_id) -> bool {
+          return mgr.pool(layer, tp).is_cached(expert_id);
+        }, py::arg("layer"), py::arg("tp"), py::arg("expert_id"));
 
     // 注册 hook 函数指针（让 mesh_hook.hpp 的 inline 函数能调用 ResidencyManager）
     mesh::hook::HookRegistry registry;
