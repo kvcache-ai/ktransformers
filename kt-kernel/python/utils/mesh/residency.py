@@ -76,6 +76,8 @@ class MeshResidencyManager:
         gate_mins_bytes: int = 0,
         up_mins_bytes: int = 0,
         down_mins_bytes: int = 0,
+        down_stride: int = 0,
+        down_rows: int = 0,
     ) -> None:
         """注入单个专家在某层某 TP 分片上的文件布局。
 
@@ -113,6 +115,8 @@ class MeshResidencyManager:
         layout.gate_mins_bytes = gate_mins_bytes
         layout.up_mins_bytes = up_mins_bytes
         layout.down_mins_bytes = down_mins_bytes
+        layout.down_stride = down_stride
+        layout.down_rows = down_rows
         self._mgr.set_file_layout(layer_idx, tp_part_idx, expert_id, layout)
 
     def set_gpu_experts_mask(self, mask: List[int]) -> None:
@@ -193,6 +197,10 @@ class MeshResidencyManager:
     @property
     def config(self):
         return self._mgr.config()
+
+    def raw_ptr(self) -> int:
+        """获取底层 C++ ResidencyManager 的内存地址（用于 hook 注册）。"""
+        return self._mgr.raw_ptr()
 
     @property
     def raw(self):

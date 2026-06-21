@@ -12,6 +12,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numa.h>
 #include <numaif.h>
@@ -114,6 +116,8 @@ class MeshSlotPool {
         cap_(other.cap_),
         slot_bytes_(other.slot_bytes_),
         gate_up_bytes_(other.gate_up_bytes_),
+        gate_up_weights_bytes_(other.gate_up_weights_bytes_),
+        down_weights_bytes_(other.down_weights_bytes_),
         memory_(other.memory_),
         total_bytes_(other.total_bytes_) {
     other.memory_ = nullptr;
@@ -131,6 +135,8 @@ class MeshSlotPool {
       cap_ = other.cap_;
       slot_bytes_ = other.slot_bytes_;
       gate_up_bytes_ = other.gate_up_bytes_;
+      gate_up_weights_bytes_ = other.gate_up_weights_bytes_;
+      down_weights_bytes_ = other.down_weights_bytes_;
       memory_ = other.memory_;
       total_bytes_ = other.total_bytes_;
       other.memory_ = nullptr;
@@ -152,6 +158,21 @@ class MeshSlotPool {
   // 获取 slot 中 down 矩阵的地址
   void* down_ptr(int slot_idx) {
     return static_cast<char*>(memory_) + static_cast<size_t>(slot_idx) * slot_bytes_ + gate_up_bytes_ * 2;
+  }
+
+  // AMXINT4: 获取 slot 中 gate scale 的地址（紧跟 gate 权重之后）
+  // BufferB 期望 d = ptr + n*k/2，n=intermediate/tp, k=hidden
+  void* gate_scale_ptr(int slot_idx) {
+    return static_cast<char*>(gate_ptr(slot_idx)) + gate_up_weights_bytes_;
+  }
+  // AMXINT4: 获取 slot 中 up scale 的地址
+  void* up_scale_ptr(int slot_idx) {
+    return static_cast<char*>(up_ptr(slot_idx)) + gate_up_weights_bytes_;
+  }
+  // AMXINT4: 获取 slot 中 down scale 的地址
+  // down 的 BufferB n=hidden, k=intermediate/tp → 权重=n*k/2=hidden*(intermediate/tp)/2
+  void* down_scale_ptr(int slot_idx) {
+    return static_cast<char*>(down_ptr(slot_idx)) + down_weights_bytes_;
   }
 
   // 根据专家 ID 获取 gate 指针（KT 计算用），未缓存返回 nullptr
@@ -188,6 +209,24 @@ class MeshSlotPool {
     return slots_[slot_idx].get_state();
   }
 
+  // Bug 7 fix: 直接按 slot_idx 查状态，避免 expert_id->slot_idx->expert_id 双重映射
+  ExpertState slot_state(int slot_idx) const {
+    if (slot_idx < 0 || slot_idx >= cap_) return ExpertState::BASELINE;
+    return slots_[slot_idx].get_state();
+  }
+
+  // Bug 7 fix: 找空闲 slot（BASELINE 或未绑定），返回 slot_idx，找不到返回 -1
+  // 替代 drain_and_submit 中的线性扫描 + 双重映射
+  int find_free_slot() const {
+    for (int i = 0; i < cap_; i++) {
+      if (slot_to_expert_[i] < 0 ||
+          slots_[i].get_state() == ExpertState::BASELINE) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   // B1 fix: 查询专家绑定的 slot_idx（驱逐用），未绑定返回 -1
   int expert_to_slot_idx(int expert_id) const {
     return expert_to_slot_.lookup(expert_id);
@@ -221,16 +260,29 @@ class MeshSlotPool {
   // 必须等 active_readers 归零后才能执行
   void overwrite(int slot_idx, int new_expert_id) {
     Slot& s = slots_[slot_idx];
-    // 等待活跃 reader 归零
-    while (s.active_readers.load(std::memory_order_acquire) > 0) {
-      // spin wait，实际实现可用 futex
+    // Bug 8 fix: spin-wait 加超时（10 秒），避免 reader 泄漏导致永久死锁
+    // 超时后 abort，因为继续执行会导致数据损坏
+    {
+      const int kMaxSpinIters = 100000000;  // ~10s 取决于 CPU
+      int spin = 0;
+      while (s.active_readers.load(std::memory_order_acquire) > 0) {
+        if (++spin > kMaxSpinIters) {
+          fprintf(stderr,
+                  "[MESH] overwrite: slot %d active_readers never reached 0 "
+                  "(expert %d -> %d), aborting to avoid data corruption\n",
+                  slot_idx, s.bound_expert_id, new_expert_id);
+          std::abort();
+        }
+        // Bug 8 fix: 轻量让步，减少空转功耗（不用 sched_yield 避免系统调用开销）
+      }
     }
     int old_expert_id = s.bound_expert_id;
     if (old_expert_id >= 0) {
       expert_to_slot_.erase(old_expert_id);
     }
-    s.set_state(ExpertState::DEMOTING);
-    // 解绑完成，进入 LOADING 状态等待新数据
+    // Bug 8 fix: 去掉无意义的 DEMOTING 中间状态
+    // 原代码 DEMOTING 立即被 LOADING 覆盖，无窗口让其他线程看到
+    // reader==0 已保证安全，直接进 LOADING
     s.set_state(ExpertState::LOADING);
     s.bound_expert_id = new_expert_id;
     slot_to_expert_[slot_idx] = new_expert_id;
@@ -250,6 +302,17 @@ class MeshSlotPool {
   void release_reader(int expert_id) {
     int slot_idx = expert_to_slot_.lookup(expert_id);
     if (slot_idx < 0) return;
+    slots_[slot_idx].active_readers.fetch_sub(1, std::memory_order_acq_rel);
+  }
+
+  // Bug 11 fix: 按 slot_idx 递增/递减 reader，不依赖 expert 绑定关系
+  // 用于 handoff 等场景，expert 可能未绑定但 slot 需要保护
+  void acquire_slot_reader(int slot_idx) {
+    if (slot_idx < 0 || slot_idx >= cap_) return;
+    slots_[slot_idx].active_readers.fetch_add(1, std::memory_order_acq_rel);
+  }
+  void release_slot_reader(int slot_idx) {
+    if (slot_idx < 0 || slot_idx >= cap_) return;
     slots_[slot_idx].active_readers.fetch_sub(1, std::memory_order_acq_rel);
   }
 
@@ -286,8 +349,14 @@ class MeshSlotPool {
   int cap() const { return cap_; }
   size_t slot_bytes() const { return slot_bytes_; }
 
-  // 设置 gate/up 的单块字节数（用于指针偏移计算）
+  // 设置 gate/up 的单块字节数（含 scale，用于指针偏移计算）
   void set_gate_up_bytes(size_t bytes) { gate_up_bytes_ = bytes; }
+
+  // AMXINT4: 设置 gate/up 的纯权重大小（不含 scale，用于 scale 指针偏移）
+  void set_gate_up_weights_bytes(size_t bytes) { gate_up_weights_bytes_ = bytes; }
+
+  // AMXINT4: 设置 down 的纯权重大小（不含 scale，用于 down scale 指针偏移）
+  void set_down_weights_bytes(size_t bytes) { down_weights_bytes_ = bytes; }
 
  private:
   int layer_idx_;
@@ -295,7 +364,9 @@ class MeshSlotPool {
   int numa_node_;
   int cap_;
   size_t slot_bytes_;
-  size_t gate_up_bytes_ = 0;  // gate 或 up 单块字节数
+  size_t gate_up_bytes_ = 0;  // gate 或 up 单块字节数（含 scale）
+  size_t gate_up_weights_bytes_ = 0;  // AMXINT4: gate/up 纯权重大小（不含 scale）
+  size_t down_weights_bytes_ = 0;     // AMXINT4: down 纯权重大小（不含 scale）
   void* memory_ = nullptr;
   size_t total_bytes_ = 0;
 

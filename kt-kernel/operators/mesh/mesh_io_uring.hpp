@@ -13,6 +13,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
@@ -66,11 +68,14 @@ class MeshIoUring {
 
   // 启动时一次性把某层所有专家的 scale 数据读入 NUMA 本地 buffer
   // A4 fix: 改为按层预加载，因为每层的 scale 数据不同
+  // 辅因2 fix: 按 TP 分片传入对应 NUMA 节点，避免跨 NUMA 访问
   // expert_num 个专家，每个 scale_bytes 字节
-  void preload_scale_cache(int expert_num, int tp_count, int numa_node,
+  void preload_scale_cache(int expert_num, int tp_count,
+                           const std::vector<int>& numa_nodes,
                            const std::vector<std::vector<ExpertFileLayout>>& layouts_tp,
                            int layer_idx) {
-    if (scale_cache_loaded_) return;
+    if (scale_cache_loaded_per_layer_.size() > (size_t)layer_idx &&
+        scale_cache_loaded_per_layer_[layer_idx]) return;
 
     // 确保 scale_cache_ 有足够层
     if ((int)scale_cache_.size() <= layer_idx) {
@@ -78,8 +83,9 @@ class MeshIoUring {
     }
 
     auto& layer_cache = scale_cache_[layer_idx];
-    // 计算每个 TP 分片的 scale 总大小
+    // 计算每个 TP 分片的 scale 总大小，按 TP 对应 NUMA 节点分配
     for (int tp = 0; tp < tp_count; tp++) {
+      int numa_node = numa_nodes[tp % numa_nodes.size()];  // 辅因2: 按 TP 选 NUMA
       ScaleCacheTP cache;
       size_t total_gate = 0, total_up = 0, total_down = 0;
       size_t total_gate_mins = 0, total_up_mins = 0, total_down_mins = 0;
@@ -130,11 +136,16 @@ class MeshIoUring {
       }
       layer_cache.push_back(std::move(cache));
     }
-    scale_cache_loaded_ = true;
+    // 第二轮根因1 fix: 按层设置标志，而非全局标志
+    if ((int)scale_cache_loaded_per_layer_.size() <= layer_idx) {
+      scale_cache_loaded_per_layer_.resize(layer_idx + 1, false);
+    }
+    scale_cache_loaded_per_layer_[layer_idx] = true;
   }
 
   // 从 scale cache 中 memcpy 某个专家的 scale 到目标 buffer
   // A4 fix: 加 layer_idx 参数
+  // 辅因1 fix: 支持 nullptr 参数（slot 中无 mins 空间时跳过 mins memcpy）
   void copy_scale_from_cache(int layer_idx, int tp_part_idx, int expert_id,
                              void* gate_scale_dst, void* up_scale_dst, void* down_scale_dst,
                              void* gate_mins_dst, void* up_mins_dst, void* down_mins_dst,
@@ -155,15 +166,25 @@ class MeshIoUring {
     }
     const auto& layout = layouts_tp[expert_id];
     const auto& cache = layer_cache[tp_part_idx];
-    memcpy(gate_scale_dst, (char*)cache.gate_scale + off_g, layout.gate_scale_bytes);
-    memcpy(up_scale_dst, (char*)cache.up_scale + off_u, layout.up_scale_bytes);
-    memcpy(down_scale_dst, (char*)cache.down_scale + off_d, layout.down_scale_bytes);
-    memcpy(gate_mins_dst, (char*)cache.gate_mins + off_gm, layout.gate_mins_bytes);
-    memcpy(up_mins_dst, (char*)cache.up_mins + off_um, layout.up_mins_bytes);
-    memcpy(down_mins_dst, (char*)cache.down_mins + off_dm, layout.down_mins_bytes);
+    // scale 数据必须拷贝（BufferB 的 d 指针依赖）
+    if (gate_scale_dst) memcpy(gate_scale_dst, (char*)cache.gate_scale + off_g, layout.gate_scale_bytes);
+    if (up_scale_dst) memcpy(up_scale_dst, (char*)cache.up_scale + off_u, layout.up_scale_bytes);
+    if (down_scale_dst) memcpy(down_scale_dst, (char*)cache.down_scale + off_d, layout.down_scale_bytes);
+    // mins 数据可选拷贝（slot 中无 mins 空间时传 nullptr 跳过）
+    if (gate_mins_dst) memcpy(gate_mins_dst, (char*)cache.gate_mins + off_gm, layout.gate_mins_bytes);
+    if (up_mins_dst) memcpy(up_mins_dst, (char*)cache.up_mins + off_um, layout.up_mins_bytes);
+    if (down_mins_dst) memcpy(down_mins_dst, (char*)cache.down_mins + off_dm, layout.down_mins_bytes);
   }
 
-  bool scale_cache_loaded() const { return scale_cache_loaded_; }
+  // 第二轮根因1 fix: 按层查询 scale cache 是否已预加载
+  bool scale_cache_loaded(int layer_idx = -1) const {
+    if (layer_idx < 0) {
+      // 无参：返回是否任意层已加载（用于粗略判断）
+      return !scale_cache_loaded_per_layer_.empty();
+    }
+    return (size_t)layer_idx < scale_cache_loaded_per_layer_.size() &&
+           scale_cache_loaded_per_layer_[layer_idx];
+  }
 
   // ===== io_uring 异步读 =====
 
@@ -190,7 +211,15 @@ class MeshIoUring {
                    ReadPriority priority,
                    int layer_idx = -1,
                    std::function<void(int, int, int)> on_complete = nullptr) {
-    int n_reqs = scale_cache_loaded_ ? 3 : 9;
+    // 第二轮根因1 fix: 按层判断 scale cache 是否已预加载
+    // Bug 2 fix: BF16 路径 gate_scale_bytes == 0，无 scale/mins，只发 3 个 SQE
+    bool has_scale = (layout.gate_scale_bytes > 0);
+    bool layer_scale_loaded = has_scale && scale_cache_loaded(layer_idx);
+    // Bug 1 fix: down_stride > 0 表示 BF16 down_proj TP 切片不连续，用 pread 逐行同步读取
+    // 此时 down 不走 io_uring，n_reqs 减 1
+    bool down_scattered = (layout.down_stride > 0 && layout.down_rows > 0);
+    int n_reqs = layer_scale_loaded ? 3 : (has_scale ? 9 : 3);
+    if (down_scattered) n_reqs -= 1;  // down 用 pread，不走 io_uring
 
     // A6: 创建 PendingRequest 跟踪完成状态
     auto* pending = new PendingRequest{
@@ -206,11 +235,15 @@ class MeshIoUring {
     io_uring_prep_read(sqe, layout.fd, up_dst, layout.up_bytes, layout.up_offset);
     io_uring_sqe_set_data(sqe, pending);
 
-    sqe = io_uring_get_sqe(&ring_);
-    io_uring_prep_read(sqe, layout.fd, down_dst, layout.down_bytes, layout.down_offset);
-    io_uring_sqe_set_data(sqe, pending);
+    // Bug 5 fix: 先提交 gate/up SQE，再 pread down，让 io_uring 与 pread 并行
+    // 原代码 pread 在 io_uring_submit 之前，阻塞期间 io_uring 空闲
+    if (!down_scattered) {
+      sqe = io_uring_get_sqe(&ring_);
+      io_uring_prep_read(sqe, layout.fd, down_dst, layout.down_bytes, layout.down_offset);
+      io_uring_sqe_set_data(sqe, pending);
+    }
 
-    if (!scale_cache_loaded_) {
+    if (!layer_scale_loaded && has_scale) {
       sqe = io_uring_get_sqe(&ring_);
       io_uring_prep_read(sqe, layout.fd, gate_scale_dst, layout.gate_scale_bytes, layout.gate_scale_offset);
       io_uring_sqe_set_data(sqe, pending);
@@ -236,7 +269,46 @@ class MeshIoUring {
       io_uring_sqe_set_data(sqe, pending);
     }
 
+    // Bug 5 fix: 先 submit 所有 SQE，让 io_uring 开始 DMA
     io_uring_submit(&ring_);
+
+    // Bug 5 fix: down_scattered 的 pread 在 submit 之后执行，与 io_uring 并行
+    if (down_scattered) {
+      // Bug 1 fix: BF16 down_proj [E,H,I] 行主序，TP 沿 I 切不连续
+      // 用 pread 逐行同步读取到 slot buffer 的连续区域
+      size_t row_bytes = layout.down_bytes / layout.down_rows;
+      char* dst = static_cast<char*>(down_dst);
+      off_t src_off = layout.down_offset;
+      for (int r = 0; r < layout.down_rows; r++) {
+        // Bug 6 fix: pread 加错误处理，失败 abort 避免后续 use-after-free
+        // 注意：不能 throw 或 delete pending，因为 gate/up SQE 已提交，
+        // CQE 处理时会访问 pending，throw/delete 会导致 use-after-free
+        ssize_t ret = pread(layout.fd, dst + r * row_bytes, row_bytes, src_off);
+        if (ret < 0) {
+          fprintf(stderr,
+                  "[MESH] pread down scattered failed at row %d/%d, expert=%d, "
+                  "errno=%d (%s), aborting\n",
+                  r, layout.down_rows, expert_id, errno, strerror(errno));
+          std::abort();
+        }
+        if (ret < (ssize_t)row_bytes) {
+          // 部分读，补齐剩余（理论上 pread 对普通文件应一次读完）
+          ssize_t done = ret;
+          while (done < (ssize_t)row_bytes) {
+            ret = pread(layout.fd, dst + r * row_bytes + done,
+                        row_bytes - done, src_off + done);
+            if (ret < 0) {
+              fprintf(stderr,
+                      "[MESH] pread down scattered partial fail, errno=%d (%s), "
+                      "aborting\n", errno, strerror(errno));
+              std::abort();
+            }
+            done += ret;
+          }
+        }
+        src_off += layout.down_stride;
+      }
+    }
   }
 
   // A6: 处理已完成的 CQE，触发 on_complete 回调
@@ -369,7 +441,8 @@ class MeshIoUring {
   };
   // A4 fix: [layer][tp] 的 scale cache
   std::vector<std::vector<ScaleCacheTP>> scale_cache_;
-  bool scale_cache_loaded_ = false;
+  // 第二轮根因1 fix: 改为按层标志，避免全局标志导致 l>=1 层跳过预加载
+  std::vector<bool> scale_cache_loaded_per_layer_;
 
   // 同步读取（启动阶段用，pread + O_DIRECT）
   void sync_read_to(int fd, off_t offset, size_t bytes, void* dst) {

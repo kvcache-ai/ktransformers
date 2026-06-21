@@ -41,6 +41,11 @@ struct ExpertFileLayout {
   size_t gate_mins_bytes = 0;
   size_t up_mins_bytes = 0;
   size_t down_mins_bytes = 0;
+  // Bug 1 fix: BF16 down_proj [E,H,I] 行主序，TP 沿 I 切不连续
+  // down_stride > 0 表示 down 矩阵的行步长（字节），需逐行读取
+  // down_stride == 0 表示连续（AMXINT4 per-TP 预切分或 BF16 tp=0）
+  size_t down_stride = 0;
+  int down_rows = 0;  // down 矩阵行数（H），down_stride > 0 时有效
 };
 
 // MESH 配置

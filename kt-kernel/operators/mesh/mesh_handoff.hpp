@@ -122,14 +122,15 @@ class MeshHandoff {
           int expert_id = slot_idx;  // 假设 GPU expert 占据前 GE 个 slot
           if (expert_id >= config.expert_num) break;
 
-          // 标记 active_readers 防止驱逐
-          pool.acquire_reader(expert_id);
+          // Bug 11 fix: 用 acquire_slot_reader 按 slot_idx 保护，不依赖 expert 绑定
+          // 原 acquire_reader(expert_id) 在 expert 未绑定时静默返回，无保护
+          pool.acquire_slot_reader(slot_idx);
 
           // 搬运到 GPU（不读盘，纯内存→GPU 拷贝）
           move_gpu_expert_to_gpu(layer, expert_id);
 
           // 释放 reader
-          pool.release_reader(expert_id);
+          pool.release_slot_reader(slot_idx);
 
           // B7 fix: 先 overwrite 释放旧 slot 绑定，绑定新专家
           int new_expert_id = cap + slot_idx;
@@ -150,13 +151,32 @@ class MeshHandoff {
             // A6: 传入 layer_idx 和 on_complete 回调
             const auto& layout = layouts[layer][tp][new_expert_id];
             MeshSlotPool& pool_ref = pools[layer][tp];
+            // Bug 3 fix: 捕获 slot_idx，mark_cached 参数是 slot_idx
+            int slot_idx_capture = slot_idx;
+            // Bug 4 fix: 捕获 io 和 layouts 引用，用于 copy scale
+            const auto& layouts_ref = layouts;
             io.submit_load(new_expert_id, tp, layout,
                            gate_dst, up_dst, down_dst,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            ReadPriority::Demand,
                            /*layer_idx=*/layer,
-                           /*on_complete=*/[&pool_ref, new_expert_id](int, int, int) {
-                             pool_ref.mark_cached(new_expert_id);
+                           /*on_complete=*/[&pool_ref, &io, &layouts_ref,
+                                            layer, tp, new_expert_id,
+                                            slot_idx_capture,
+                                            &config](int, int, int) {
+                             // Bug 4 fix: 先 copy scale，再 mark_cached
+                             if (config.weight_type == WeightType::AMXINT4 &&
+                                 io.scale_cache_loaded(layer)) {
+                               void* gs = pool_ref.gate_scale_ptr(slot_idx_capture);
+                               void* us = pool_ref.up_scale_ptr(slot_idx_capture);
+                               void* ds = pool_ref.down_scale_ptr(slot_idx_capture);
+                               io.copy_scale_from_cache(layer, tp, new_expert_id,
+                                                        gs, us, ds,
+                                                        nullptr, nullptr, nullptr,
+                                                        layouts_ref[layer][tp]);
+                             }
+                             // Bug 3 fix: mark_cached 参数是 slot_idx
+                             pool_ref.mark_cached(slot_idx_capture);
                            });
           }
         }

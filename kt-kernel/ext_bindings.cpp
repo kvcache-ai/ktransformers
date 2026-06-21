@@ -1091,7 +1091,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def_readwrite("down_mins_offset", &mesh::ExpertFileLayout::down_mins_offset)
         .def_readwrite("gate_mins_bytes", &mesh::ExpertFileLayout::gate_mins_bytes)
         .def_readwrite("up_mins_bytes", &mesh::ExpertFileLayout::up_mins_bytes)
-        .def_readwrite("down_mins_bytes", &mesh::ExpertFileLayout::down_mins_bytes);
+        .def_readwrite("down_mins_bytes", &mesh::ExpertFileLayout::down_mins_bytes)
+        // Bug 1 fix: BF16 down_proj 不连续读取支持
+        .def_readwrite("down_stride", &mesh::ExpertFileLayout::down_stride)
+        .def_readwrite("down_rows", &mesh::ExpertFileLayout::down_rows);
 
     // B9: MeshStats 绑定
     py::class_<mesh::MeshStats>(mesh_module, "MeshStats")

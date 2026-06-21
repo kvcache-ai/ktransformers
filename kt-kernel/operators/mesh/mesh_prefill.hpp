@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <numa.h>
@@ -45,23 +46,24 @@ class MeshPrefill {
   enum class TemporalRole { COMPUTE, PREFETCH };
 
   MeshPrefill(int num_layers, int expert_num, int cap, int tp_count,
-              size_t slot_bytes, int numa_node)
+              size_t slot_bytes, const std::vector<int>& numa_nodes)
       : num_layers_(num_layers),
         expert_num_(expert_num),
         cap_(cap),
         tp_count_(tp_count),
         slot_bytes_(slot_bytes),
-        numa_node_(numa_node) {
+        numa_nodes_(numa_nodes) {
     // temporal 长度 = 单层专家总数 - slot cap
     temporal_size_ = (expert_num > cap) ? (expert_num - cap) : 0;
   }
 
   ~MeshPrefill() { release_temporal(); }
 
-  // 初始化 temporal 双缓冲（每 TP 一对 A/B）
+  // 初始化 temporal 双缓冲（每 TP 一对 A/B，按 TP 对应 NUMA 节点分配）
   void init_temporal() {
-    if (temporal_a_ != nullptr) return;  // 已初始化
-    size_t bytes = static_cast<size_t>(temporal_size_) * slot_bytes_ * tp_count_;
+    if (!temporal_a_vec_.empty()) return;  // 已初始化
+    // 辅因3: 每 TP 独立分配，单 TP 字节数 = temporal_size * slot_bytes
+    size_t per_tp_bytes = static_cast<size_t>(temporal_size_) * slot_bytes_;
     role_a_ = TemporalRole::COMPUTE;
     role_b_ = TemporalRole::PREFETCH;
     // B4 fix: 初始化 expert_id -> temporal_offset 映射
@@ -72,28 +74,33 @@ class MeshPrefill {
         temporal_expert_map_[tp][e] = e - cap_;
       }
     }
-    if (bytes == 0) {
+    if (per_tp_bytes == 0) {
       // cap >= expert_num: 所有专家常驻 slot，不需要 temporal buffer
       return;
     }
-    temporal_a_ = numa_alloc_onnode(bytes, numa_node_);
-    temporal_b_ = numa_alloc_onnode(bytes, numa_node_);
-    if (!temporal_a_ || !temporal_b_) {
-      throw std::runtime_error("MeshPrefill: numa_alloc_onnode for temporal failed");
+    temporal_a_vec_.assign(tp_count_, nullptr);
+    temporal_b_vec_.assign(tp_count_, nullptr);
+    for (int tp = 0; tp < tp_count_; tp++) {
+      int numa_node = numa_nodes_[tp % numa_nodes_.size()];  // 辅因3: 按 TP 选 NUMA
+      temporal_a_vec_[tp] = numa_alloc_onnode(per_tp_bytes, numa_node);
+      temporal_b_vec_[tp] = numa_alloc_onnode(per_tp_bytes, numa_node);
+      if (!temporal_a_vec_[tp] || !temporal_b_vec_[tp]) {
+        throw std::runtime_error("MeshPrefill: numa_alloc_onnode for temporal failed");
+      }
     }
-    temporal_bytes_ = bytes;
+    temporal_bytes_ = per_tp_bytes;
   }
 
   // 释放 temporal 内存（仅 prefill→decode 切换时调用）
   void release_temporal() {
-    if (temporal_a_) {
-      numa_free(temporal_a_, temporal_bytes_);
-      temporal_a_ = nullptr;
+    for (void* p : temporal_a_vec_) {
+      if (p) numa_free(p, temporal_bytes_);
     }
-    if (temporal_b_) {
-      numa_free(temporal_b_, temporal_bytes_);
-      temporal_b_ = nullptr;
+    for (void* p : temporal_b_vec_) {
+      if (p) numa_free(p, temporal_bytes_);
     }
+    temporal_a_vec_.clear();
+    temporal_b_vec_.clear();
   }
 
   // ===== Prefill 主流程 =====
@@ -117,10 +124,7 @@ class MeshPrefill {
                  MeshSlotPool& slot_pool, MeshScheduler& scheduler,
                  MeshIoUring* io,
                  std::function<void(int, int, const std::vector<int>&)> amx_forward) {
-    void* compute_buf = compute_temporal();
-    void* prefetch_buf = prefetch_temporal();
-    (void)compute_buf;  // compute_buf 由 amx_forward 通过 slot_pool/temporal_ptr 访问
-
+    // 辅因3: temporal buffer 按 TP 分片，compute/prefetch 通过 tp 索引访问
     for (int c = 0; c < total_chunks; c++) {
       const auto& active = active_experts_per_chunk[c];
 
@@ -130,7 +134,7 @@ class MeshPrefill {
 
       // b. 对 temporal_B 发起第 L+1 层的异步预取（覆盖另一个 temporal）
       if (layer_idx + 1 < num_layers_) {
-        submit_next_layer_prefetch(layer_idx + 1, active, scheduler, prefetch_buf);
+        submit_next_layer_prefetch(layer_idx + 1, active, scheduler);
       }
 
       // c. 本层计算使用 temporal_A 中的临时专家 + slot 池常驻专家
@@ -159,33 +163,40 @@ class MeshPrefill {
     role_b_ = tmp;
   }
 
-  // 获取当前 COMPUTE 角色的 temporal buffer
-  void* compute_temporal() const {
-    return role_a_ == TemporalRole::COMPUTE ? temporal_a_ : temporal_b_;
+  // 获取当前 COMPUTE 角色的 temporal buffer（辅因3: 按 TP 索引）
+  void* compute_temporal(int tp) const {
+    if (tp < 0 || tp >= tp_count_) return nullptr;
+    const auto& vec = (role_a_ == TemporalRole::COMPUTE) ? temporal_a_vec_ : temporal_b_vec_;
+    if (tp >= (int)vec.size()) return nullptr;
+    return vec[tp];
   }
 
-  // 获取当前 PREFETCH 角色的 temporal buffer
-  void* prefetch_temporal() const {
-    return role_a_ == TemporalRole::PREFETCH ? temporal_a_ : temporal_b_;
+  // 获取当前 PREFETCH 角色的 temporal buffer（辅因3: 按 TP 索引）
+  void* prefetch_temporal(int tp) const {
+    if (tp < 0 || tp >= tp_count_) return nullptr;
+    const auto& vec = (role_a_ == TemporalRole::PREFETCH) ? temporal_a_vec_ : temporal_b_vec_;
+    if (tp >= (int)vec.size()) return nullptr;
+    return vec[tp];
   }
 
   /**
    * @brief B4 fix: 获取 temporal buffer 中某专家某矩阵的指针
    *
-   * @param buf temporal buffer 基地址（compute_temporal() 或 prefetch_temporal()）
-   * @param tp TP 分片
+   * @param buf 某 TP 的 temporal buffer 基地址（compute_temporal(tp) 或 prefetch_temporal(tp)）
    * @param expert_id 专家 ID
    * @param matrix_idx 0=gate, 1=up, 2=down
    * @return void* 指针，未映射返回 nullptr
+   *
+   * 辅因3: buf 已是 per-TP 指针，无需再按 tp 偏移
    */
-  void* temporal_ptr(void* buf, int tp, int expert_id, int matrix_idx) const {
-    if (tp < 0 || tp >= tp_count_) return nullptr;
+  void* temporal_ptr(void* buf, int expert_id, int matrix_idx) const {
     if (expert_id < 0 || expert_id >= expert_num_) return nullptr;
-    int offset = temporal_expert_map_[tp][expert_id];
+    // expert_id -> offset 映射对所有 TP 相同（cap ~ expert_num-1）
+    int offset = (temporal_expert_map_.empty() || temporal_expert_map_[0].empty())
+                 ? -1 : temporal_expert_map_[0][expert_id];
     if (offset < 0) return nullptr;
-    // 布局：[tp][offset] 每个 slot_bytes_，内含 gate + up + down
+    // 布局：[offset] 每个 slot_bytes_，内含 gate + up + down
     char* base = static_cast<char*>(buf) +
-                 static_cast<size_t>(tp) * temporal_size_ * slot_bytes_ +
                  static_cast<size_t>(offset) * slot_bytes_;
     // gate 在偏移 0，up 在偏移 gate_up_bytes_，down 在偏移 gate_up_bytes_*2
     size_t matrix_offset = (matrix_idx == 0) ? 0 :
@@ -198,7 +209,7 @@ class MeshPrefill {
 
   // ===== 访问器 =====
   int temporal_size() const { return temporal_size_; }
-  bool temporal_ready() const { return temporal_a_ != nullptr; }
+  bool temporal_ready() const { return !temporal_a_vec_.empty(); }
 
  private:
   int num_layers_;
@@ -207,12 +218,12 @@ class MeshPrefill {
   int tp_count_;
   size_t slot_bytes_;
   size_t gate_up_bytes_ = 0;  // B4: gate/up 单块字节数
-  int numa_node_;
-  size_t temporal_bytes_ = 0;
+  std::vector<int> numa_nodes_;  // 辅因3: 每 TP 对应的 NUMA 节点
+  size_t temporal_bytes_ = 0;    // 辅因3: 单 TP temporal 字节数
 
-  // temporal 双缓冲
-  void* temporal_a_ = nullptr;
-  void* temporal_b_ = nullptr;
+  // temporal 双缓冲（辅因3: 每 TP 独立分配，按 NUMA 节点定位）
+  std::vector<void*> temporal_a_vec_;  // size == tp_count_
+  std::vector<void*> temporal_b_vec_;  // size == tp_count_
   TemporalRole role_a_ = TemporalRole::COMPUTE;
   TemporalRole role_b_ = TemporalRole::PREFETCH;
   int temporal_size_ = 0;  // = expert_num - cap
@@ -224,14 +235,25 @@ class MeshPrefill {
   // B3 fix: 调用 io_uring process_cqes 推进 CQE，直到所有活跃专家 CACHED
   void wait_temporal_ready(int layer_idx, const std::vector<int>& active,
                            MeshSlotPool& slot_pool, MeshIoUring* io) {
+    // Bug 10 fix: 加超时保护，避免 expert 未被调度时死循环
+    const int kMaxWaitIters = 1000000;  // ~几秒
+    int wait_iters = 0;
     for (int eid : active) {
       if (slot_pool.is_cached(eid)) continue;
       // 阻塞等待 io_uring CQE 到达
-      // 实际实现需要与 MeshIoUring 配合轮询 process_cqes
+      // Bug 10 fix: 只用 process_cqes，不用 submit_and_wait
+      // submit_and_wait 内部也处理 CQE 并 delete pending，
+      // 与 process_cqes 同时调用会导致 double free
       if (io) {
         while (!slot_pool.is_cached(eid)) {
           io->process_cqes();
-          io->submit_and_wait();
+          if (++wait_iters > kMaxWaitIters) {
+            fprintf(stderr,
+                    "[MESH] wait_temporal_ready: expert %d never cached at layer %d, "
+                    "possible scheduler deadlock\n",
+                    eid, layer_idx);
+            break;  // 避免死循环，返回后 AMX 会读到未就绪数据（nullptr 检查）
+          }
         }
       }
     }
@@ -239,20 +261,24 @@ class MeshPrefill {
 
   // 提交下一层的异步预取
   // B4 fix: 用 temporal_ptr 正确寻址，不再用 ptrs[eid*3] 越界
+  // 辅因3: prefetch_buf 按 TP 从 prefetch_temporal(tp) 获取
   void submit_next_layer_prefetch(int next_layer,
                                   const std::vector<int>& active,
-                                  MeshScheduler& scheduler,
-                                  void* prefetch_buf) {
+                                  MeshScheduler& scheduler) {
     for (int tp = 0; tp < tp_count_; tp++) {
+      void* prefetch_buf = prefetch_temporal(tp);
+      if (!prefetch_buf) continue;
       for (int eid : active) {
         // 只预取不在 slot 中的专家（在 temporal 中的）
-        int offset = (tp < (int)temporal_expert_map_.size() &&
+        // expert_id -> offset 映射对所有 TP 相同
+        int offset = (!temporal_expert_map_.empty() &&
+                      tp < (int)temporal_expert_map_.size() &&
                       eid < (int)temporal_expert_map_[tp].size())
                      ? temporal_expert_map_[tp][eid] : -1;
         if (offset < 0) continue;
-        void* gate = temporal_ptr(prefetch_buf, tp, eid, 0);
-        void* up = temporal_ptr(prefetch_buf, tp, eid, 1);
-        void* down = temporal_ptr(prefetch_buf, tp, eid, 2);
+        void* gate = temporal_ptr(prefetch_buf, eid, 0);
+        void* up = temporal_ptr(prefetch_buf, eid, 1);
+        void* down = temporal_ptr(prefetch_buf, eid, 2);
         if (!gate || !up || !down) continue;
         scheduler.submit_prefill(next_layer, eid, tp, gate, up, down,
                                   ReadPriority::Prefetch);

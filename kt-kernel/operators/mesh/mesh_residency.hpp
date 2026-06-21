@@ -81,6 +81,11 @@ class MeshResidencyManager {
       for (int tp = 0; tp < config.tp_count; tp++) {
         pools_[l].emplace_back(l, tp, numa_nodes[tp], config.cap, slot_bytes_);
         pools_[l][tp].set_gate_up_bytes(compute_gate_up_bytes(config));
+        // AMXINT4: 设置纯权重大小（不含 scale），用于 slot 内 scale 指针偏移
+        if (config.weight_type == WeightType::AMXINT4) {
+          pools_[l][tp].set_gate_up_weights_bytes(compute_gate_up_weights_bytes(config));
+          pools_[l][tp].set_down_weights_bytes(compute_down_weights_bytes(config));
+        }
         pools_[l][tp].init_expert_map(config.expert_num);
       }
     }
@@ -91,7 +96,7 @@ class MeshResidencyManager {
     scorer_ = std::make_unique<EvictionScorer>(config.total_layers, config.expert_num, config);
     prefill_ = std::make_unique<MeshPrefill>(config.total_layers, config.expert_num,
                                              config.cap, config.tp_count,
-                                             slot_bytes_, numa_nodes[0]);
+                                             slot_bytes_, numa_nodes);
     decode_ = std::make_unique<MeshDecode>(config);
     handoff_ = std::make_unique<MeshHandoff>();
 
@@ -153,7 +158,7 @@ class MeshResidencyManager {
     if (config_.weight_type == WeightType::AMXINT4) {
       for (int l = 0; l < config_.total_layers; l++) {
         io_->preload_scale_cache(config_.expert_num, config_.tp_count,
-                                 numa_nodes_[0], layouts_[l], l);
+                                 numa_nodes_, layouts_[l], l);
       }
     }
 
@@ -174,11 +179,28 @@ class MeshResidencyManager {
 
           // 提交 io_uring 读
           // A6: 传入 layer_idx 和 on_complete 回调，完成后 mark_cached
+          // 辅因1 fix: on_complete 中调用 copy_scale_from_cache 把 scale 写入 slot
           io_->submit_load(e, tp, layout, gate_dst, up_dst, down_dst,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            ReadPriority::Demand,
                            /*layer_idx=*/l,
                            /*on_complete=*/[this, l, tp, e](int, int, int) {
+                             // Bug 4 fix: 先 copy scale，再 mark_cached
+                             // mark_cached 后状态为 CACHED，AMX kernel 可能立即读取
+                             // 若先 mark_cached 后 copy scale，AMX 会读到零 scale → NaN
+                             if (config_.weight_type == WeightType::AMXINT4 && io_->scale_cache_loaded(l)) {
+                               // Bug 3 fix: bootstrap 中 bind(e, e) 使 slot_idx == e
+                               int slot_idx = pools_[l][tp].expert_to_slot_idx(e);
+                               if (slot_idx >= 0) {
+                                 void* gs = pools_[l][tp].gate_scale_ptr(slot_idx);
+                                 void* us = pools_[l][tp].up_scale_ptr(slot_idx);
+                                 void* ds = pools_[l][tp].down_scale_ptr(slot_idx);
+                                 io_->copy_scale_from_cache(l, tp, e, gs, us, ds,
+                                                            nullptr, nullptr, nullptr,
+                                                            layouts_[l][tp]);
+                               }
+                             }
+                             // Bug 3 fix: mark_cached 参数是 slot_idx，bootstrap 中 slot_idx == e
                              pools_[l][tp].mark_cached(e);
                            });
         }
@@ -390,17 +412,8 @@ class MeshResidencyManager {
 
         if (slot_idx < 0) {
           // 专家没有绑定 slot，需要分配
-          // 先找空闲 slot（BASELINE 状态）
-          // 简化：用 find_evictable 找一个可覆盖的 slot
-          // 或者找 BASELINE 状态的 slot
-          slot_idx = -1;
-          for (int i = 0; i < pool.cap(); i++) {
-            if (pool.get_expert_state(pool.slot_to_expert_id(i)) == ExpertState::BASELINE ||
-                pool.slot_to_expert_id(i) < 0) {
-              slot_idx = i;
-              break;
-            }
-          }
+          // Bug 7 fix: 用 find_free_slot 替代线性扫描 + 双重映射
+          slot_idx = pool.find_free_slot();
 
           if (slot_idx < 0) {
             // 没有空闲 slot，需要驱逐
@@ -425,6 +438,11 @@ class MeshResidencyManager {
 
       if (!gate_dst) continue;  // 无法分配 slot，跳过
 
+      // Bug 3 fix: 查询 expert 绑定的 slot_idx，传给 lambda
+      // mark_cached 参数是 slot_idx，不是 expert_id
+      int slot_idx = pool.expert_to_slot_idx(expert);
+      if (slot_idx < 0) continue;  // 未绑定 slot，跳过
+
       // B9: 统计 io_uring 读取
       stats_.io_uring_read_count++;
       stats_.io_uring_read_bytes += static_cast<uint64_t>(
@@ -436,8 +454,20 @@ class MeshResidencyManager {
           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,  // scale 从 cache memcpy
           req.priority,
           /*layer_idx=*/layer,
-          /*on_complete=*/[this, layer, tp, expert, orig_on_complete](int, int, int) {
-            pools_[layer][tp].mark_cached(expert);
+          /*on_complete=*/[this, layer, tp, expert, slot_idx, orig_on_complete](int, int, int) {
+            // Bug 4 fix: 先 copy scale，再 mark_cached
+            // mark_cached 后状态为 CACHED，AMX kernel 可能立即读取
+            // 若先 mark_cached 后 copy scale，AMX 会读到零 scale → NaN
+            if (config_.weight_type == WeightType::AMXINT4 && io_->scale_cache_loaded(layer)) {
+              void* gs = pools_[layer][tp].gate_scale_ptr(slot_idx);
+              void* us = pools_[layer][tp].up_scale_ptr(slot_idx);
+              void* ds = pools_[layer][tp].down_scale_ptr(slot_idx);
+              io_->copy_scale_from_cache(layer, tp, expert, gs, us, ds,
+                                         nullptr, nullptr, nullptr,
+                                         layouts_[layer][tp]);
+            }
+            // Bug 3 fix: mark_cached 参数是 slot_idx，不是 expert_id
+            pools_[layer][tp].mark_cached(slot_idx);
             if (orig_on_complete) orig_on_complete();
           });
     }
@@ -498,25 +528,27 @@ class MeshResidencyManager {
   std::unique_ptr<MeshDecode> decode_;
   std::unique_ptr<MeshHandoff> handoff_;
 
-  // 计算 slot 字节数（gate + up + down 三个矩阵）
+  // 计算 slot 字节数（gate + up + down 三个矩阵，AMXINT4 含 scale）
   size_t compute_slot_bytes(const MeshConfig& config) const {
     // 根据 SKILL 第 8 节的双 NUMA 拆分：
-    // gate: [hidden, intermediate/tp_count]
-    // up:   [hidden, intermediate/tp_count]
-    // down: [intermediate/tp_count, hidden]
+    // gate: [hidden, intermediate/tp_count]  BufferB n=intermediate/tp, k=hidden
+    // up:   [hidden, intermediate/tp_count]  BufferB n=intermediate/tp, k=hidden
+    // down: [intermediate/tp_count, hidden]  BufferB n=hidden, k=intermediate/tp
+    // AMXINT4 BufferB 期望: n*k/2 (权重) + n*sizeof(float) (scale) 连续存放
     size_t gate_up_bytes = compute_gate_up_bytes(config);
     size_t down_bytes = compute_down_bytes(config);
     return gate_up_bytes * 2 + down_bytes;
   }
 
+  // gate 或 up 单块字节数（权重 + scale）
+  // BufferB 构造: n=intermediate/tp, k=hidden → 权重=n*k/2, scale=n*4
   size_t compute_gate_up_bytes(const MeshConfig& config) const {
-    // gate 或 up 单块字节数
     int h = config.hidden_size;
     int i = config.intermediate_size / config.tp_count;  // TP 切分后
     size_t elements = static_cast<size_t>(h) * i;
     switch (config.weight_type) {
       case WeightType::AMXINT4:
-        return elements / 2;  // int4 = 0.5 byte
+        return elements / 2 + static_cast<size_t>(i) * sizeof(float);  // int4 权重 + scale (n=i)
       case WeightType::BF16:
         return elements * 2;  // bf16 = 2 bytes
       default:
@@ -524,19 +556,34 @@ class MeshResidencyManager {
     }
   }
 
+  // down 单块字节数（权重 + scale）
+  // BufferB 构造: n=hidden, k=intermediate/tp → 权重=n*k/2, scale=n*4
   size_t compute_down_bytes(const MeshConfig& config) const {
-    // down 单块字节数
     int h = config.hidden_size;
     int i = config.intermediate_size / config.tp_count;
     size_t elements = static_cast<size_t>(i) * h;
     switch (config.weight_type) {
       case WeightType::AMXINT4:
-        return elements / 2;
+        return elements / 2 + static_cast<size_t>(h) * sizeof(float);  // int4 权重 + scale (n=h)
       case WeightType::BF16:
         return elements * 2;
       default:
         return elements * 2;
     }
+  }
+
+  // AMXINT4: gate/up 的纯权重大小（不含 scale），用于 slot 内 scale 指针偏移
+  size_t compute_gate_up_weights_bytes(const MeshConfig& config) const {
+    int h = config.hidden_size;
+    int i = config.intermediate_size / config.tp_count;
+    return static_cast<size_t>(h) * i / 2;
+  }
+
+  // AMXINT4: down 的纯权重大小（不含 scale）
+  size_t compute_down_weights_bytes(const MeshConfig& config) const {
+    int h = config.hidden_size;
+    int i = config.intermediate_size / config.tp_count;
+    return static_cast<size_t>(i) * h / 2;
   }
 };
 

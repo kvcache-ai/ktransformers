@@ -367,6 +367,11 @@ class MeshMoEWrapper:
             # down_proj: [E, H, I]，每个专家占 H*I*elem_bytes
             expert_stride_d = hidden * inter * elem_bytes
             down_bytes = hidden * inter_per_tp * elem_bytes
+            # Bug 1 fix: BF16 down_proj [E,H,I] 行主序，TP 沿 I 切不连续
+            # down_stride = 完整行字节数（I * elem_bytes），down_rows = H
+            # tp_count > 1 时 down_stride > row_bytes，需逐行读取
+            down_stride = inter * elem_bytes  # 完整行步长
+            down_rows = hidden
 
             for tp in range(tp_count):
                 for expert in range(expert_num):
@@ -389,6 +394,9 @@ class MeshMoEWrapper:
                         up_bytes=up_bytes,
                         down_bytes=down_bytes,
                         # BF16 无 scale/mins
+                        # Bug 1 fix: 传入 down_stride/down_rows 支持不连续读取
+                        down_stride=down_stride,
+                        down_rows=down_rows,
                     )
                     injected += 1
 
