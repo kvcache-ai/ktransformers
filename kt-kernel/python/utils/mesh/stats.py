@@ -86,6 +86,7 @@ class MeshStatsCollector:
         """收集当前统计信息。"""
         stats = MeshStats()
         try:
+            # B9: C++ 侧已绑定 stats() 方法，返回 MeshStats 引用
             cpp_stats = self._mgr.raw.stats()
             stats.cache_hit_count = getattr(cpp_stats, "cache_hit_count", 0)
             stats.cache_miss_count = getattr(cpp_stats, "cache_miss_count", 0)
@@ -101,7 +102,7 @@ class MeshStatsCollector:
             stats.decode_immediate_count = getattr(cpp_stats, "decode_immediate_count", 0)
             stats.decode_deferred_count = getattr(cpp_stats, "decode_deferred_count", 0)
         except (AttributeError, RuntimeError) as e:
-            logger.debug("Failed to collect MESH stats: %s", e)
+            logger.warning("Failed to collect MESH stats: %s", e)
         return stats
 
     def log_summary(self) -> None:

@@ -257,9 +257,13 @@ class MarkovTracker {
 /**
  * @brief 驱逐评分器
  *
- * score = policy_rank + lookahead_weight * max(heat, markov_prior)
+ * score = policy_rank + lookahead_weight * max(heat, cross_layer_prior)
  *
  * Markov 严格限制：只用于驱逐评分，绝对不用于预取。
+ *
+ * B2 fix: cross_layer_prior 按 [layer][expert] 累积，predict_next_layer 在每层结束时
+ * 调用一次，把 Markov 预测结果 EMA 进 cross_layer_prior_[layer+1]。
+ * score() 直接读 cross_layer_prior_[layer]，不再每次 predict。
  */
 class EvictionScorer {
  public:
@@ -267,7 +271,11 @@ class EvictionScorer {
       : heat_(expert_num, config.heat_beta, config.heat_gamma),
         markov_(num_layers, expert_num, config.markov_alpha),
         lookahead_weight_(config.lookahead_weight),
-        expert_num_(expert_num) {}
+        markov_alpha_(config.markov_alpha),
+        num_layers_(num_layers),
+        expert_num_(expert_num) {
+    cross_layer_prior_.assign(num_layers, std::vector<float>(expert_num, 0.0f));
+  }
 
   // 单 token 结束后批量更新 Heat 和 Markov
   // all_layers_topk: [layer] -> top-k expert ids
@@ -285,12 +293,35 @@ class EvictionScorer {
     }
   }
 
+  /**
+   * @brief B2: 在第 layer_idx 层结束时，预测第 layer_idx+1 层的 cross_layer_prior
+   *
+   * cross_layer_prior_[layer+1][t] = α * P_predicted[t] + (1-α) * cross_layer_prior_[layer+1][t]
+   *
+   * @param layer_idx 当前层 L（预测 L+1）
+   * @param topk 当前层的 top-k 专家集合
+   * @param scores 当前层各专家的归一化权重（全长 expert_num）
+   */
+  void predict_next_layer(int layer_idx, const std::vector<int>& topk,
+                          const std::vector<float>& scores) {
+    if (layer_idx < 0 || layer_idx + 1 >= num_layers_) return;
+    std::vector<float> predicted;
+    markov_.predict(layer_idx, topk, scores, predicted);
+    auto& prior = cross_layer_prior_[layer_idx + 1];
+    for (int t = 0; t < expert_num_ && t < (int)predicted.size(); t++) {
+      prior[t] = markov_alpha_ * predicted[t] + (1.0f - markov_alpha_) * prior[t];
+    }
+  }
+
   // 计算某专家的驱逐评分（分数越低越该被驱逐）
+  // B2 fix: 直接读 cross_layer_prior_[layer_idx]，不再每次 predict
   float score(int expert_id, int layer_idx) const {
     float h = heat_.heat(expert_id);
-    std::vector<float> prior;
-    markov_.predict(layer_idx, {}, {}, prior);  // 简化：实际需要传入当前层 topk
-    float m = (expert_id < (int)prior.size()) ? prior[expert_id] : 0.0f;
+    float m = 0.0f;
+    if (layer_idx >= 0 && layer_idx < num_layers_ &&
+        expert_id >= 0 && expert_id < expert_num_) {
+      m = cross_layer_prior_[layer_idx][expert_id];
+    }
     float heat = std::max(h, m);
     return lookahead_weight_ * heat;
   }
@@ -323,7 +354,11 @@ class EvictionScorer {
   HeatTracker heat_;
   MarkovTracker markov_;
   float lookahead_weight_;
+  float markov_alpha_;
+  int num_layers_;
   int expert_num_;
+  // B2: [layer][expert] 的 Markov 先验，由 predict_next_layer 累积
+  std::vector<std::vector<float>> cross_layer_prior_;
 };
 
 }  // namespace mesh

@@ -82,6 +82,11 @@ class MeshHandoff {
   /**
    * @brief 搬运 GPU 专家到 GPU，并用 io_uring 读新专家填充释放的 slot
    *
+   * B7 fix:
+   * 1. 先 overwrite 释放旧 slot 绑定，绑定新专家
+   * 2. 再用 slot 指针作为 io_uring 目标地址 submit_load
+   * 3. on_complete 回调中 mark_cached
+   *
    * GPU expert 在 slot 前茅（GE 个位置）：
    * - 标记这些 slot 的 active_readers（防止驱逐）
    * - 搬运到 GPU（不读盘）
@@ -96,12 +101,13 @@ class MeshHandoff {
       MeshIoUring& io,
       std::function<void(int, int)> move_gpu_expert_to_gpu,
       std::function<std::vector<void*>(int, int, int)> get_dst_ptrs) {
+    (void)scorer;  // 暂未使用 scorer 选 victim，用固定区间
     int ge = config.num_gpu_experts;
     int cap = config.cap;
     int num_layers = config.total_layers;
     int tp_count = config.tp_count;
 
-    // (cap, cap+GE] 区间的专家 ID
+    // (cap, cap+GE] 区间的专家 ID — 用于填充释放的 slot
     std::vector<int> refill_experts;
     for (int e = cap; e < cap + ge && e < config.expert_num; e++) {
       refill_experts.push_back(e);
@@ -125,27 +131,33 @@ class MeshHandoff {
           // 释放 reader
           pool.release_reader(expert_id);
 
-          // 释放这个 slot，用 io_uring 读新专家填充
+          // B7 fix: 先 overwrite 释放旧 slot 绑定，绑定新专家
           int new_expert_id = cap + slot_idx;
           if (new_expert_id < config.expert_num &&
               slot_idx < static_cast<int>(refill_experts.size())) {
             new_expert_id = refill_experts[slot_idx];
-            auto ptrs = get_dst_ptrs(layer, tp, new_expert_id);
+
+            // 先 overwrite：解绑旧 expert，绑定新 expert
+            pool.overwrite(slot_idx, new_expert_id);
+
+            // B7 fix: 用 slot 指针作为 io_uring 目标地址（overwrite 后 slot 已绑定新专家）
+            void* gate_dst = pool.gate_ptr(slot_idx);
+            void* up_dst = pool.up_ptr(slot_idx);
+            void* down_dst = pool.down_ptr(slot_idx);
+
             // 提交 io_uring 读
             // A4 fix: layouts 改为 [layer][tp][expert] 3D
             // A6: 传入 layer_idx 和 on_complete 回调
             const auto& layout = layouts[layer][tp][new_expert_id];
             MeshSlotPool& pool_ref = pools[layer][tp];
             io.submit_load(new_expert_id, tp, layout,
-                           ptrs[0], ptrs[1], ptrs[2],
+                           gate_dst, up_dst, down_dst,
                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                            ReadPriority::Demand,
                            /*layer_idx=*/layer,
                            /*on_complete=*/[&pool_ref, new_expert_id](int, int, int) {
                              pool_ref.mark_cached(new_expert_id);
                            });
-            // 覆盖 slot
-            pool.overwrite(slot_idx, new_expert_id);
           }
         }
       }

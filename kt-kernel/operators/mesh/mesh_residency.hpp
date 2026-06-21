@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -96,6 +97,8 @@ class MeshResidencyManager {
 
     // 初始化 temporal 双缓冲
     prefill_->init_temporal();
+    // B4 fix: 注入 gate_up_bytes 用于 temporal_ptr 偏移计算
+    prefill_->set_gate_up_bytes(compute_gate_up_bytes(config));
 
     fprintf(stderr, "[MESH init DIAG] init complete, pools_ size=%zu\n",
             pools_.size());
@@ -249,10 +252,19 @@ class MeshResidencyManager {
 
   void on_decode_token_start() {
     scheduler_->inc_timeline_step();
+    // B5: 每 token 开始时清空跨层 defer 队列
+    prev_layer_deferred_.clear();
+    total_deferred_ = 0;
+    // B9: 统计
+    stats_.decode_token_count++;
   }
 
   /**
    * @brief Decode 每层处理
+   *
+   * B5: 跨层 defer 累积 + overflow 阻塞
+   * - 上一层的 deferred 专家在当前层转为 immediate 候选
+   * - 如果 deferred 累积超过 max_deferred_per_token，阻塞等待 io_uring 完成
    *
    * @param layer_idx 当前层
    * @param topk 当前 token 的 top-k 专家
@@ -267,8 +279,27 @@ class MeshResidencyManager {
     // A7: 先处理已完成的 io_uring CQE，触发 mark_cached 回调
     io_->process_cqes();
 
+    // B5: 把上一层的 deferred 专家加入当前层的 immediate 候选
+    // 它们应该已经通过 io_uring 读取完成
+    std::vector<int> effective_topk = topk;
+    if (!prev_layer_deferred_.empty()) {
+      // 检查 deferred 专家是否已 CACHED
+      MeshSlotPool& pool = pools_[layer_idx][tp_part_idx];
+      for (int eid : prev_layer_deferred_) {
+        if (pool.is_cached(eid)) {
+          // 已缓存，加入 immediate 候选
+          if (std::find(effective_topk.begin(), effective_topk.end(), eid) == effective_topk.end()) {
+            effective_topk.push_back(eid);
+          }
+        }
+        // 未缓存的 deferred 专家在本层继续等待（会在 split 中被当作 missing 处理）
+      }
+      // 清空上一层的 defer 队列
+      prev_layer_deferred_.clear();
+    }
+
     MeshSlotPool& pool = pools_[layer_idx][tp_part_idx];
-    auto result = decode_->split(topk, scores, pool, *scheduler_, layer_idx, tp_part_idx,
+    auto result = decode_->split(effective_topk, scores, pool, *scheduler_, layer_idx, tp_part_idx,
                           [this, &pool, layer_idx, tp_part_idx](int eid) {
                             // A5 fix: 用 expert_*_ptr 按 expert_id 查 slot，
                             // 不能把 expert_id 当 slot_idx 传给 gate_ptr（eid>=cap 时越界）
@@ -276,10 +307,45 @@ class MeshResidencyManager {
                                 pool.expert_gate_ptr(eid),
                                 pool.expert_up_ptr(eid),
                                 pool.expert_down_ptr(eid)};
-                          });
+                          },
+                          // B6: 传入 is_gpu_expert 回调，过滤 GPU 专家
+                          [this](int eid) { return is_gpu_expert(eid); });
+
+    // B5: 更新跨层 defer 队列
+    prev_layer_deferred_ = result.deferred;
+    total_deferred_ += static_cast<int>(result.deferred.size());
+
+    // B9: 统计
+    stats_.decode_immediate_count += static_cast<uint64_t>(result.immediate.size());
+    stats_.decode_deferred_count += static_cast<uint64_t>(result.deferred.size());
+    stats_.defer_count += static_cast<uint64_t>(result.deferred.size());
+    // hit/miss 统计：effective_topk 中已缓存的是 hit，未缓存的是 miss
+    for (int eid : effective_topk) {
+      if (is_gpu_expert(eid)) continue;  // GPU 专家不计入 hit/miss
+      if (pool.is_cached(eid)) {
+        stats_.cache_hit_count++;
+      } else {
+        stats_.cache_miss_count++;
+      }
+    }
+
+    // B5: overflow 检查 — 如果 defer 累积超过阈值，阻塞等待 io_uring 完成
+    if (total_deferred_ > config_.max_deferred_per_token * config_.total_layers) {
+      // B9: 统计
+      stats_.defer_overflow_count++;
+      // 阻塞等待所有 inflight io_uring 完成
+      io_->submit_and_wait();
+      io_->process_cqes();
+      total_deferred_ = 0;  // 重置计数
+    }
 
     // A7: 排空调度器队列，提交 io_uring 读取
     drain_and_submit();
+
+    // B2: 用当前层的实际路由（原始 topk + scores）预测下一层的 cross_layer_prior
+    // 放在 drain_and_submit 之后：当前层 IO 已提交，为下一层驱逐评分做准备
+    // 注意：用原始 topk/scores，不用 effective_topk（后者混入了上一层 deferred，不是真实路由）
+    scorer_->predict_next_layer(layer_idx, topk, scores);
 
     return result;
   }
@@ -290,6 +356,8 @@ class MeshResidencyManager {
    * 把 MeshScheduler 优先队列中的 ScheduledRequest 取出，
    * 为每个请求找到对应的 ExpertFileLayout 并提交给 MeshIoUring。
    * 完成后触发 mark_cached + 原始 on_complete 回调。
+   *
+   * B1: 如果专家未缓存且 slot 池满，先驱逐一个 victim 再 bind
    */
   void drain_and_submit() {
     auto requests = scheduler_->drain_all();
@@ -309,18 +377,62 @@ class MeshResidencyManager {
       int tp = req.tp_part_idx;
       int expert = req.expert_id;
 
-      // 绑定 slot（如果尚未绑定）
       MeshSlotPool& pool = pools_[layer][tp];
-      if (!pool.is_cached(expert)) {
-        // 需要先驱逐一个 slot（如果池满）
-        // B1: 在线驱逐尚未完全实现，这里先尝试 bind
-        // 如果池未满，bind 到空闲 slot
-        // 如果池满，需要驱逐（B1 修复后完善）
+
+      // B1: 如果专家未缓存，需要分配 slot
+      void* gate_dst = req.gate_dst;
+      void* up_dst = req.up_dst;
+      void* down_dst = req.down_dst;
+
+      if (!pool.is_cached(expert) && !is_gpu_expert(expert)) {
+        // 专家未缓存，需要分配 slot
+        int slot_idx = pool.expert_to_slot_idx(expert);
+
+        if (slot_idx < 0) {
+          // 专家没有绑定 slot，需要分配
+          // 先找空闲 slot（BASELINE 状态）
+          // 简化：用 find_evictable 找一个可覆盖的 slot
+          // 或者找 BASELINE 状态的 slot
+          slot_idx = -1;
+          for (int i = 0; i < pool.cap(); i++) {
+            if (pool.get_expert_state(pool.slot_to_expert_id(i)) == ExpertState::BASELINE ||
+                pool.slot_to_expert_id(i) < 0) {
+              slot_idx = i;
+              break;
+            }
+          }
+
+          if (slot_idx < 0) {
+            // 没有空闲 slot，需要驱逐
+            slot_idx = decode_->evict_for_new_expert(pool, *scorer_, layer, expert);
+            if (slot_idx >= 0) {
+              // B9: 统计驱逐
+              stats_.eviction_count++;
+            }
+          }
+
+          if (slot_idx >= 0) {
+            // bind slot
+            pool.bind(slot_idx, expert);
+            // 获取 slot 指针
+            gate_dst = pool.gate_ptr(slot_idx);
+            up_dst = pool.up_ptr(slot_idx);
+            down_dst = pool.down_ptr(slot_idx);
+          }
+          // slot_idx < 0 表示无法分配，跳过此专家
+        }
       }
+
+      if (!gate_dst) continue;  // 无法分配 slot，跳过
+
+      // B9: 统计 io_uring 读取
+      stats_.io_uring_read_count++;
+      stats_.io_uring_read_bytes += static_cast<uint64_t>(
+          layout.gate_bytes + layout.up_bytes + layout.down_bytes);
 
       io_->submit_load(
           req.expert_id, req.tp_part_idx, layout,
-          req.gate_dst, req.up_dst, req.down_dst,
+          gate_dst, up_dst, down_dst,
           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,  // scale 从 cache memcpy
           req.priority,
           /*layer_idx=*/layer,
@@ -353,6 +465,10 @@ class MeshResidencyManager {
   // A4 fix: layouts_ 改为 [layer][tp][expert] 3D
   const std::vector<std::vector<std::vector<ExpertFileLayout>>>& layouts() const { return layouts_; }
 
+  // B9: 统计接口
+  const MeshStats& stats() const { return stats_; }
+  MeshStats& stats_mut() { return stats_; }
+
  private:
   MeshConfig config_;
   std::vector<int> numa_nodes_;
@@ -366,6 +482,13 @@ class MeshResidencyManager {
 
   // GPU expert mask
   std::vector<uint8_t> gpu_experts_mask_;
+
+  // B5: 跨层 defer 队列状态
+  std::vector<int> prev_layer_deferred_;  // 上一层的 deferred 专家
+  int total_deferred_ = 0;                // 跨层累积 defer 计数
+
+  // B9: 运行时统计
+  MeshStats stats_;
 
   // 组件
   std::unique_ptr<MeshIoUring> io_;

@@ -91,4 +91,32 @@ struct MeshConfig {
   // 实际存储在 MeshResidencyManager 中，这里只放声明
 };
 
+// B9: 运行时统计结构体
+struct MeshStats {
+  // 命中率
+  uint64_t cache_hit_count = 0;
+  uint64_t cache_miss_count = 0;
+
+  // io_uring 读取量
+  uint64_t io_uring_read_bytes = 0;
+  uint64_t io_uring_read_count = 0;
+
+  // 驱逐统计
+  uint64_t eviction_count = 0;
+  uint64_t eviction_blocked_wait_us = 0;
+
+  // defer 统计
+  uint64_t defer_count = 0;
+  uint64_t defer_overflow_count = 0;
+
+  // prefill 统计
+  uint64_t prefill_layer_count = 0;
+  uint64_t prefill_temporal_swap_count = 0;
+
+  // decode 统计
+  uint64_t decode_token_count = 0;
+  uint64_t decode_immediate_count = 0;
+  uint64_t decode_deferred_count = 0;
+};
+
 }  // namespace mesh

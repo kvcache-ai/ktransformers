@@ -188,6 +188,17 @@ class MeshSlotPool {
     return slots_[slot_idx].get_state();
   }
 
+  // B1 fix: 查询专家绑定的 slot_idx（驱逐用），未绑定返回 -1
+  int expert_to_slot_idx(int expert_id) const {
+    return expert_to_slot_.lookup(expert_id);
+  }
+
+  // B1 fix: 查询 slot 绑定的专家 ID（驱逐用），未绑定返回 -1
+  int slot_to_expert_id(int slot_idx) const {
+    if (slot_idx < 0 || slot_idx >= cap_) return -1;
+    return slot_to_expert_[slot_idx];
+  }
+
   // ===== 绑定 / 覆盖 =====
 
   // 绑定：将 expert 读入空闲 slot，设置指针指向

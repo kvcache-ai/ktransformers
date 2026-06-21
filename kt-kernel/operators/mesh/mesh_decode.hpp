@@ -52,6 +52,8 @@ class MeshDecode {
   /**
    * @brief 对 top-k 专家进行 immediate/deferred 分组
    *
+   * B6 fix: 入口先过滤 GPU 专家（GPU 专家不参与 slot 调度）
+   *
    * @param topk 当前层 top-k 专家 ID
    * @param scores 各专家的 router score（全长 expert_num）
    * @param slot_pool 该层 slot 池
@@ -59,6 +61,7 @@ class MeshDecode {
    * @param layer_idx 当前层
    * @param tp_part_idx TP 分片
    * @param get_dst_ptrs 获取 slot buffer 指针的回调
+   * @param is_gpu_expert 判断专家是否在 GPU 上的回调
    * @return SplitResult
    */
   SplitResult split(const std::vector<int>& topk,
@@ -66,13 +69,25 @@ class MeshDecode {
                     MeshSlotPool& slot_pool,
                     MeshScheduler& scheduler,
                     int layer_idx, int tp_part_idx,
-                    std::function<std::vector<void*>(int)> get_dst_ptrs) {
+                    std::function<std::vector<void*>(int)> get_dst_ptrs,
+                    std::function<bool(int)> is_gpu_expert = nullptr) {
     int k = static_cast<int>(topk.size());
     int target_immediate = std::max(0, k - defer_count_);
 
-    // 区分已缓存和缺失
-    std::vector<int> cached, missing;
+    // B6 fix: 过滤 GPU 专家，GPU 专家直接进 immediate（由 GPU 计算，不需 slot）
+    std::vector<int> cpu_topk;
+    std::vector<int> gpu_experts;
     for (int eid : topk) {
+      if (is_gpu_expert && is_gpu_expert(eid)) {
+        gpu_experts.push_back(eid);
+      } else {
+        cpu_topk.push_back(eid);
+      }
+    }
+
+    // 区分已缓存和缺失（仅 CPU 专家）
+    std::vector<int> cached, missing;
+    for (int eid : cpu_topk) {
       if (slot_pool.is_cached(eid)) {
         cached.push_back(eid);
       } else {
@@ -81,6 +96,8 @@ class MeshDecode {
     }
 
     SplitResult result;
+    // GPU 专家直接进 immediate
+    result.immediate = gpu_experts;
 
     if (static_cast<int>(cached.size()) > target_immediate) {
       // immediate 数 > k-defer：按 router score 排序取前 target_immediate 个
@@ -90,7 +107,7 @@ class MeshDecode {
                   float sb = (b < (int)scores.size()) ? scores[b] : 0.0f;
                   return sa > sb;  // 降序
                 });
-      result.immediate.assign(cached.begin(), cached.begin() + target_immediate);
+      result.immediate.insert(result.immediate.end(), cached.begin(), cached.begin() + target_immediate);
       result.deferred.assign(cached.begin() + target_immediate, cached.end());
       // 缺失专家全部进 deferred
       result.deferred.insert(result.deferred.end(), missing.begin(), missing.end());
@@ -103,7 +120,7 @@ class MeshDecode {
       }
     } else {
       // immediate 数 < k-defer：阻塞读缺失专家直到 immediate 数量够
-      result.immediate = cached;
+      result.immediate.insert(result.immediate.end(), cached.begin(), cached.end());
       int need = target_immediate - static_cast<int>(cached.size());
 
       for (int i = 0; i < need && i < static_cast<int>(missing.size()); i++) {
@@ -134,11 +151,16 @@ class MeshDecode {
   /**
    * @brief 在线驱逐：slot 满时选分数最低的覆盖
    *
+   * B1 fix: 实现完整的驱逐逻辑
+   * 1. 找 victim 专家（分数最低的 CACHED 专家）
+   * 2. 查 victim 的 slot_idx
+   * 3. 调用 overwrite(slot_idx, new_expert_id)
+   *
    * @param slot_pool 该层 slot 池
    * @param scorer 驱逐评分器
    * @param layer_idx 当前层
    * @param new_expert_id 要加载的新专家
-   * @return int 被驱逐的 slot_idx，-1 表示无需驱逐
+   * @return int 被驱逐释放的 slot_idx，-1 表示无需驱逐或无法驱逐
    */
   int evict_for_new_expert(MeshSlotPool& slot_pool,
                            const EvictionScorer& scorer,
@@ -159,9 +181,16 @@ class MeshDecode {
     int victim_expert = scorer.select_victim(cached, layer_idx);
     if (victim_expert < 0) return -1;
 
-    // 查找 victim 对应的 slot_idx
-    // 实际实现需要通过 slot_pool 的接口
-    return -1;  // placeholder
+    // B1 fix: 查找 victim 对应的 slot_idx
+    int victim_slot_idx = slot_pool.expert_to_slot_idx(victim_expert);
+    if (victim_slot_idx < 0) return -1;
+
+    // 检查 victim 是否有活跃 reader
+    // overwrite 内部会 spin wait 等 reader 归零
+    // 调用 overwrite 覆盖 slot
+    slot_pool.overwrite(victim_slot_idx, new_expert_id);
+
+    return victim_slot_idx;
   }
 
   // ===== 前 5 层满配 =====

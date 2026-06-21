@@ -33,6 +33,14 @@
 #include "task_queue.h"
 #include "worker_pool.h"
 
+// B8: MESH Heat 批量传输回调声明（定义在 ext_bindings.cpp 中）
+// 由 CPUInfer::submit_gating_scores_ 调用，避免 cpuinfer.h 直接依赖 mesh 头文件
+#if defined(KT_ENABLE_MESH)
+extern "C" void mesh_on_gating_scores_ready(void* mesh_residency,
+                                              const float* gating_scores_cpu,
+                                              int num_layers, int expert_num, int topk);
+#endif
+
 class CPUInfer {
  public:
   CPUInfer(int thread_num) {
@@ -120,14 +128,24 @@ class CPUInfer {
     const float* gating_scores_gpu;        // GPU 指针，所有层的 gating 分数
     int num_layers;
     int expert_num;
-    // CQE 到达后由 mesh_residency 的 on_decode_token_end 消费
+    int topk;                              // B8: top-k 参数（每层激活的专家数）
   };
 
   static void submit_gating_scores_(void* args_ptr) {
     GatingScoreArgs* args = (GatingScoreArgs*)args_ptr;
-    // 实际实现：将 gating_scores_gpu 数据传给 mesh::MeshResidencyManager::on_decode_token_end
-    // mesh_residency 通过 CUDA memcpy 或 unified memory 获取数据
-    // 这里是 host callback，在 CUDA stream 上执行
+#if defined(KT_ENABLE_MESH)
+    // B8: 从 GPU 拷贝 gating scores 到 CPU，然后调用 mesh 回调
+    int total_floats = args->num_layers * args->expert_num;
+    std::vector<float> gating_scores_cpu(total_floats);
+#if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \
+    defined(KTRANSFORMERS_USE_MACA)
+    cudaMemcpy(gating_scores_cpu.data(), args->gating_scores_gpu,
+               total_floats * sizeof(float), cudaMemcpyDeviceToHost);
+#endif
+    // 调用 mesh 回调，内部会组织数据并调用 on_decode_token_end
+    mesh_on_gating_scores_ready(args->mesh_residency, gating_scores_cpu.data(),
+                                 args->num_layers, args->expert_num, args->topk);
+#endif
     delete args;
   }
 
@@ -136,11 +154,11 @@ class CPUInfer {
       intptr_t user_cuda_stream,
       void* mesh_residency,
       const float* gating_scores_gpu,
-      int num_layers, int expert_num) {
+      int num_layers, int expert_num, int topk) {
 #if defined(KTRANSFORMERS_USE_CUDA) || defined(KTRANSFORMERS_USE_MUSA) || defined(KTRANSFORMERS_USE_ROCM) || \
     defined(KTRANSFORMERS_USE_MACA)
     GatingScoreArgs* args = new GatingScoreArgs{
-      this, mesh_residency, gating_scores_gpu, num_layers, expert_num
+      this, mesh_residency, gating_scores_gpu, num_layers, expert_num, topk
     };
     cudaLaunchHostFunc((cudaStream_t)user_cuda_stream,
                        (cudaHostFn_t)&submit_gating_scores_, (void*)args);

@@ -12,6 +12,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <numeric>
+
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)
 #include <cpptrace/cpptrace.hpp>
 #endif
@@ -26,6 +29,38 @@
 // MESH 插件（仅在 KT_ENABLE_MESH 编译时生效）
 #if defined(KT_ENABLE_MESH)
 #include "operators/mesh/mesh.hpp"
+
+// B8: Heat 批量传输回调 — 由 cpuinfer.h 的 submit_gating_scores_ 调用
+// 把 GPU 传来的扁平 gating scores 组织成 [layer][expert_num] 并计算 top-k，
+// 然后调用 MeshResidencyManager::on_decode_token_end 更新 Heat 和 Markov
+extern "C" void mesh_on_gating_scores_ready(void* mesh_residency,
+                                              const float* gating_scores_cpu,
+                                              int num_layers, int expert_num, int topk) {
+  if (!mesh_residency || !gating_scores_cpu) return;
+  auto* mgr = static_cast<mesh::MeshResidencyManager*>(mesh_residency);
+
+  // 组织成 [layer][expert_num]
+  std::vector<std::vector<float>> all_layers_scores(num_layers);
+  for (int l = 0; l < num_layers; l++) {
+    all_layers_scores[l].assign(
+        gating_scores_cpu + l * expert_num,
+        gating_scores_cpu + (l + 1) * expert_num);
+  }
+
+  // 从 scores 计算 top-k（每层取分数最高的 topk 个专家）
+  std::vector<std::vector<int>> all_layers_topk(num_layers);
+  int k = std::min(topk, expert_num);
+  for (int l = 0; l < num_layers; l++) {
+    const auto& scores = all_layers_scores[l];
+    std::vector<int> indices(scores.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                      [&scores](int a, int b) { return scores[a] > scores[b]; });
+    all_layers_topk[l].assign(indices.begin(), indices.begin() + k);
+  }
+
+  mgr->on_decode_token_end(all_layers_topk, all_layers_scores);
+}
 #endif
 
 #if defined(USE_MOE_KERNEL)
@@ -1058,6 +1093,22 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         .def_readwrite("up_mins_bytes", &mesh::ExpertFileLayout::up_mins_bytes)
         .def_readwrite("down_mins_bytes", &mesh::ExpertFileLayout::down_mins_bytes);
 
+    // B9: MeshStats 绑定
+    py::class_<mesh::MeshStats>(mesh_module, "MeshStats")
+        .def_readwrite("cache_hit_count", &mesh::MeshStats::cache_hit_count)
+        .def_readwrite("cache_miss_count", &mesh::MeshStats::cache_miss_count)
+        .def_readwrite("io_uring_read_bytes", &mesh::MeshStats::io_uring_read_bytes)
+        .def_readwrite("io_uring_read_count", &mesh::MeshStats::io_uring_read_count)
+        .def_readwrite("eviction_count", &mesh::MeshStats::eviction_count)
+        .def_readwrite("eviction_blocked_wait_us", &mesh::MeshStats::eviction_blocked_wait_us)
+        .def_readwrite("defer_count", &mesh::MeshStats::defer_count)
+        .def_readwrite("defer_overflow_count", &mesh::MeshStats::defer_overflow_count)
+        .def_readwrite("prefill_layer_count", &mesh::MeshStats::prefill_layer_count)
+        .def_readwrite("prefill_temporal_swap_count", &mesh::MeshStats::prefill_temporal_swap_count)
+        .def_readwrite("decode_token_count", &mesh::MeshStats::decode_token_count)
+        .def_readwrite("decode_immediate_count", &mesh::MeshStats::decode_immediate_count)
+        .def_readwrite("decode_deferred_count", &mesh::MeshStats::decode_deferred_count);
+
     // MeshResidencyManager
     py::class_<mesh::MeshResidencyManager, std::shared_ptr<mesh::MeshResidencyManager>>(
         mesh_module, "ResidencyManager")
@@ -1100,7 +1151,11 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         // A6: 查询专家是否已缓存
         .def("is_cached", [](mesh::MeshResidencyManager& mgr, int layer, int tp, int expert_id) -> bool {
           return mgr.pool(layer, tp).is_cached(expert_id);
-        }, py::arg("layer"), py::arg("tp"), py::arg("expert_id"));
+        }, py::arg("layer"), py::arg("tp"), py::arg("expert_id"))
+        // B9: 统计接口
+        .def("stats", [](mesh::MeshResidencyManager& mgr) -> const mesh::MeshStats& {
+          return mgr.stats();
+        }, py::return_value_policy::reference_internal);
 
     // 注册 hook 函数指针（让 mesh_hook.hpp 的 inline 函数能调用 ResidencyManager）
     mesh::hook::HookRegistry registry;
