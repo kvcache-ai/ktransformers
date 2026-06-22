@@ -104,7 +104,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     Subclasses implement:
     - _make_forward_task(buffer, save_for_backward) -> C++ task object
-    - _make_backward_task(buffer) -> C++ task object
+    - _make_backward_task(buffer, compute_grad_weights) -> C++ task object
     - load_weights(physical_to_logical_map_cpu)
     - init_lora_weights(...)
     - update_lora_weights()
@@ -182,7 +182,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         ...
 
     @abstractmethod
-    def _make_backward_task(self, buffer: KExpertsSFTBuffer):
+    def _make_backward_task(self, buffer: KExpertsSFTBuffer, compute_grad_weights: bool = True):
         """Construct the C++ backward task object. Backend-specific."""
         ...
 
@@ -301,8 +301,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self,
         grad_output: torch.Tensor,
         output_device: Optional[torch.device] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Backward pass computing grad_input and grad_weights."""
+        compute_grad_weights: bool = True,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Backward pass computing grad_input and, when requested, grad_weights."""
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward(save_for_backward=True) first.")
 
@@ -310,11 +311,14 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer = self._get_buffer(qlen)
         self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
-        self.cpu_infer.submit(self._make_backward_task(buffer))
+        self.cpu_infer.submit(self._make_backward_task(buffer, compute_grad_weights=compute_grad_weights))
         self.cpu_infer.sync()
 
         self._cache_depth -= 1
-        return self._return_grads(buffer, qlen, output_device)
+        grad_input, grad_weights = self._return_grads(buffer, qlen, output_device)
+        if not compute_grad_weights:
+            grad_weights = None
+        return grad_input, grad_weights
 
     # ========== Async forward ==========
 
@@ -363,6 +367,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self,
         grad_output: torch.Tensor,
         output_device: Optional[torch.device] = None,
+        compute_grad_weights: bool = True,
     ) -> None:
         """Submit backward task without waiting. Call sync_backward() for results."""
         if self._cache_depth <= 0:
@@ -372,20 +377,25 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer = self._get_buffer(qlen)
         self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
-        self.cpu_infer.submit(self._make_backward_task(buffer))
+        self.cpu_infer.submit(self._make_backward_task(buffer, compute_grad_weights=compute_grad_weights))
         self._async_bwd_qlen = qlen
         self._async_bwd_output_device = output_device
+        self._async_bwd_compute_grad_weights = compute_grad_weights
 
-    def sync_backward(self) -> Tuple[torch.Tensor, torch.Tensor]:
+    def sync_backward(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Wait for async backward and return results."""
         self.cpu_infer.sync()
 
         qlen = self._async_bwd_qlen
         output_device = self._async_bwd_output_device
+        compute_grad_weights = getattr(self, "_async_bwd_compute_grad_weights", True)
         buffer = self._get_buffer(qlen)
 
         self._cache_depth -= 1
-        return self._return_grads(buffer, qlen, output_device)
+        grad_input, grad_weights = self._return_grads(buffer, qlen, output_device)
+        if not compute_grad_weights:
+            grad_weights = None
+        return grad_input, grad_weights
 
     # ========== Backward repack (optional, subclasses may override) ==========
 

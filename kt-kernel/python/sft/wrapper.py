@@ -58,12 +58,32 @@ def _log_kgroup_backward_capability(layer_idx: int | None, threadpool_count: int
             label,
         )
     else:
-        logger.warning(
-            "%s packed backward is only enabled for TP=1; "
-            "TP=%s remains pending.",
+        logger.info(
+            "%s TP=%s packed-dequant backward uses per-TP packed shards.",
             label,
             threadpool_count,
         )
+
+
+def _sync_after_kt_wrap(cfg: Any) -> None:
+    """Synchronize ranks after KT wrapping/loading so later FSDP collectives stay aligned."""
+    if not getattr(cfg, "kt_sync_after_wrap", True):
+        return
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            logger.info("Synchronizing ranks after KT MoE wrapping.")
+            dist.barrier()
+    except Exception as exc:
+        logger.warning("KT post-wrap synchronization failed: %s", exc)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
 
 
 # =============================================================================
@@ -184,6 +204,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     hidden_size = _text_cfg.hidden_size
 
     cfg = _get_kt_config(kt_plugin)
+    if getattr(cfg, "kt_text_only_sft", False) and is_rank_0:
+        logger.info("KT text-only SFT mode enabled; multimodal components are expected to stay unused.")
 
     # Read lora_rank/lora_alpha for C++ wrapper initialization (buffer allocation only)
     lora_rank = getattr(cfg, "kt_lora_rank", 1) or 1
@@ -224,6 +246,31 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             f"Please use the exact name from: {list(kt_backend_map.keys())}"
         )
 
+    skip_expert_lora_adaptation = bool(getattr(cfg, "kt_skip_expert_lora_adaptation", False)) or _env_bool(
+        "ACCELERATE_KT_SKIP_EXPERT_LORA_ADAPTATION"
+    )
+    force_fused_expert_lora = bool(getattr(cfg, "kt_force_fused_expert_lora", False))
+    if force_fused_expert_lora and skip_expert_lora_adaptation:
+        raise KTAMXConfigError(
+            "kt_force_fused_expert_lora is incompatible with kt_skip_expert_lora_adaptation. "
+            "Forced fused expert LoRA requires KT expert LoRA adaptation to stay enabled."
+        )
+    if force_fused_expert_lora and "SkipLoRA" in kt_method:
+        raise KTAMXConfigError(
+            "kt_force_fused_expert_lora is incompatible with SkipLoRA backends. "
+            "Use a non-SkipLoRA kt_backend when training fused expert LoRA."
+        )
+    if skip_expert_lora_adaptation and "SkipLoRA" not in kt_method:
+        skip_method = f"{kt_method}_SkipLoRA"
+        if skip_method not in kt_backend_map.values():
+            raise RuntimeError(f"KT skip expert LoRA adaptation is not supported for backend method {kt_method}.")
+        logger.info(
+            "KT expert LoRA adaptation is disabled; using SkipLoRA backend %s instead of %s.",
+            skip_method,
+            kt_method,
+        )
+        kt_method = skip_method
+
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
 
@@ -239,6 +286,18 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         cfg.kt_share_backward_bb = False
 
     threadpool_count = getattr(cfg, "kt_threadpool_count", 1) if getattr(cfg, "kt_tp_enabled", False) else 1
+    if is_kgroup_method and threadpool_count > 1:
+        if moe_config.intermediate_size % threadpool_count != 0:
+            raise RuntimeError(
+                "KGroup SFT TP requires intermediate_size divisible by kt_threadpool_count. "
+                f"Got intermediate_size={moe_config.intermediate_size}, kt_threadpool_count={threadpool_count}."
+            )
+        local_intermediate_size = moe_config.intermediate_size // threadpool_count
+        if local_intermediate_size % group_size != 0:
+            raise RuntimeError(
+                "KGroup SFT TP requires intermediate_size/kt_threadpool_count divisible by kt_group_size. "
+                f"Got local_intermediate_size={local_intermediate_size}, kt_group_size={group_size}."
+            )
     if is_kgroup_method:
         _log_kgroup_backward_capability(None, threadpool_count)
 
@@ -322,7 +381,12 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         _layer_experts = getattr(moe_module, moe_config.experts_attr, None)
         _layer_is_fused = _detect_fused(_layer_experts)
 
-        logger.debug(f"Wrapping MoE layer {layer_idx} (method={kt_method}, fused={_layer_is_fused})")
+        _use_fused_expert_lora = _layer_is_fused or force_fused_expert_lora
+
+        logger.debug(
+            f"Wrapping MoE layer {layer_idx} "
+            f"(method={kt_method}, fused={_layer_is_fused}, force_fused_lora={force_fused_expert_lora})"
+        )
 
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
@@ -484,8 +548,9 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             layer_idx=layer_idx,
             lora_experts=lora_experts,
         )
-        layer_wrapper._fused_experts = _layer_is_fused
+        layer_wrapper._fused_experts = _use_fused_expert_lora
         layer_wrapper._lora_rank = lora_rank
+        layer_wrapper._skip_expert_lora_adaptation = skip_expert_lora_adaptation or "SkipLoRA" in kt_method
 
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
@@ -510,6 +575,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         wrappers[0].wrapper._next_backward_wrapper = None
 
     gc.collect()
+    _sync_after_kt_wrap(cfg)
     return wrappers
 
 
@@ -545,6 +611,10 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_lora_rank=getattr(finetuning_args, "lora_rank", None) if finetuning_args else None,
         kt_lora_alpha=getattr(finetuning_args, "lora_alpha", None) if finetuning_args else None,
         kt_model_max_length=getattr(model_args, "model_max_length", None),
+        kt_sync_after_wrap=getattr(model_args, "kt_sync_after_wrap", None),
+        kt_text_only_sft=getattr(model_args, "kt_text_only_sft", None),
+        kt_skip_expert_lora_adaptation=getattr(model_args, "kt_skip_expert_lora_adaptation", None),
+        kt_force_fused_expert_lora=getattr(model_args, "kt_force_fused_expert_lora", None),
     )
     return KTransformersPlugin(enabled=True, kt_config=kt_config)
 

@@ -114,6 +114,7 @@ class KTMoEFunction(torch.autograd.Function):
         ctx.weights_shape = topk_weights.shape
         ctx.weights_dtype = topk_weights.dtype
         ctx.weights_device = topk_weights.device
+        ctx.compute_grad_weights = bool(ctx.needs_input_grad[2])
         ctx.dist_on = dist_on
         ctx.world_size = world_size
         ctx.all_qlens = all_qlens_list if dist_on else None
@@ -150,6 +151,7 @@ class KTMoEFunction(torch.autograd.Function):
         dist_on = ctx.dist_on
         world_size = ctx.world_size
         num_experts_per_tok = ctx.num_experts_per_tok
+        compute_grad_weights = bool(getattr(ctx, "compute_grad_weights", True))
 
         import torch.distributed as dist
         rank = dist.get_rank() if dist.is_initialized() else 0
@@ -186,6 +188,7 @@ class KTMoEFunction(torch.autograd.Function):
                 backward_out = ctx.wrapper.backward(
                     all_go,
                     output_device=ctx.original_device,
+                    compute_grad_weights=compute_grad_weights,
                 )
                 if isinstance(backward_out, tuple) and len(backward_out) == 2:
                     all_grad_input, all_grad_weights = backward_out
@@ -195,11 +198,18 @@ class KTMoEFunction(torch.autograd.Function):
                     raise ValueError("KTMoEWrapper.backward returned unexpected format.")
 
                 all_grad_input = all_grad_input.to(dtype=ctx.original_dtype).view(total_qlen, hidden_size)
-                all_grad_weights = all_grad_weights.to(dtype=torch.bfloat16).view(total_qlen, num_experts_per_tok)
 
                 offsets = _qlen_offsets(all_qlens)
                 scatter_gi = [all_grad_input[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
-                scatter_gw = [all_grad_weights[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
+                if compute_grad_weights:
+                    if all_grad_weights is None:
+                        raise ValueError("KTMoEWrapper.backward did not return grad_weights.")
+                    all_grad_weights = all_grad_weights.to(dtype=torch.bfloat16).view(total_qlen, num_experts_per_tok)
+                    scatter_gw = [
+                        all_grad_weights[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)
+                    ]
+                else:
+                    scatter_gw = None
             else:
                 scatter_gi = None
                 scatter_gw = None
@@ -213,17 +223,20 @@ class KTMoEFunction(torch.autograd.Function):
                 device=ctx.original_device,
                 dtype=ctx.original_dtype,
             )
-            grad_weights_flat = _dist_scatter_varlen_from_rank0(
-                rank0_chunks=scatter_gw,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-                feature_shape=(num_experts_per_tok,),
-                device=ctx.weights_device,
-                dtype=torch.bfloat16,
-            )
             grad_input = grad_input_flat.view(batch_size, seq_len, hidden_size)
-            grad_weights = grad_weights_flat.view(ctx.weights_shape).to(dtype=ctx.weights_dtype)
+            if compute_grad_weights:
+                grad_weights_flat = _dist_scatter_varlen_from_rank0(
+                    rank0_chunks=scatter_gw,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                    feature_shape=(num_experts_per_tok,),
+                    device=ctx.weights_device,
+                    dtype=torch.bfloat16,
+                )
+                grad_weights = grad_weights_flat.view(ctx.weights_shape).to(dtype=ctx.weights_dtype)
+            else:
+                grad_weights = None
 
         elif not ctx.use_broadcast:
             # ---- Single-GPU path ----
@@ -231,6 +244,7 @@ class KTMoEFunction(torch.autograd.Function):
             backward_out = ctx.wrapper.backward(
                 grad_output_flat,
                 output_device=ctx.original_device,
+                compute_grad_weights=compute_grad_weights,
             )
             ctx.wrapper._kt_has_cached_forward = False
             if isinstance(backward_out, tuple) and len(backward_out) == 2:
@@ -240,11 +254,20 @@ class KTMoEFunction(torch.autograd.Function):
             else:
                 raise ValueError("KTMoEWrapper.backward returned unexpected format.")
             grad_input = grad_input.view(batch_size, seq_len, hidden_size).to(dtype=ctx.original_dtype)
-            grad_weights = grad_weights.to(dtype=torch.bfloat16)
+            if compute_grad_weights:
+                if grad_weights is None:
+                    raise ValueError("KTMoEWrapper.backward did not return grad_weights.")
+                grad_weights = grad_weights.to(dtype=torch.bfloat16)
+            else:
+                grad_weights = None
         else:
             # No wrapper, no dist — shouldn't happen in normal flow
             grad_input = torch.zeros(batch_size, seq_len, hidden_size, device=ctx.original_device, dtype=ctx.original_dtype)
-            grad_weights = torch.zeros(ctx.weights_shape, device=ctx.weights_device, dtype=ctx.weights_dtype)
+            grad_weights = (
+                torch.zeros(ctx.weights_shape, device=ctx.weights_device, dtype=ctx.weights_dtype)
+                if compute_grad_weights
+                else None
+            )
 
         # Trigger async repack for next MoE layer in backward order
         next_bwd = getattr(ctx.wrapper, '_next_backward_wrapper', None)

@@ -10,8 +10,11 @@
 #define CPUINFER_OPERATOR_AMX_SFT_K2_MOE_H
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -540,6 +543,1219 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return static_cast<float>(packed_int4_value(packed, row, col, cols)) * kgroup_scale(scales, row, col, cols);
   }
 
+  static bool dense_coeff_fastpath_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_DENSE_COEFF_FASTPATH");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool gate_up32_fastpath_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_GATE_UP32_FASTPATH");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool short_base_fastpath_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_SHORT_BASE_FASTPATH");
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool sparse_lora_b_accum_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_SPARSE_LORA_B");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool bf16_dot2_lora_u_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_BF16_DOT2_LORA_U");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool down_bprop_rank2_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_DOWN_BPROP_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool down_lora_b_rank2_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_DOWN_LORA_B_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool gate_up_lora_b_rank2_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_GATE_UP_LORA_B_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool gate_up_a_input_rank2_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_GATE_UP_A_INPUT_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool tp_gate_up_a_input_rank2_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_TP_GATE_UP_A_INPUT_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool bf16_write_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_BF16_WRITE_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static inline void bf16_dot2_scalar(const ggml_bf16_t* input, const ggml_bf16_t* a0, const ggml_bf16_t* a1,
+                                      int hidden, float& out0, float& out1) {
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (int h = 0; h < hidden; h++) {
+      const float x = GGML_BF16_TO_FP32(input[h]);
+      acc0 += x * GGML_BF16_TO_FP32(a0[h]);
+      acc1 += x * GGML_BF16_TO_FP32(a1[h]);
+    }
+    out0 = acc0;
+    out1 = acc1;
+  }
+
+  static inline void bf16_dot2_lora_u(const ggml_bf16_t* input, const ggml_bf16_t* a0, const ggml_bf16_t* a1,
+                                      int hidden, float& out0, float& out1) {
+    if (!bf16_dot2_lora_u_enabled()) {
+      bf16_dot2_scalar(input, a0, a1, hidden, out0, out1);
+      return;
+    }
+#if defined(__AVX512BF16__)
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 31 < hidden; h += 32) {
+      const __m512bh x = (__m512bh)_mm512_loadu_si512((const __m512i*)(input + h));
+      acc0 = _mm512_dpbf16_ps(acc0, x, (__m512bh)_mm512_loadu_si512((const __m512i*)(a0 + h)));
+      acc1 = _mm512_dpbf16_ps(acc1, x, (__m512bh)_mm512_loadu_si512((const __m512i*)(a1 + h)));
+    }
+    float sum0 = _mm512_reduce_add_ps(acc0);
+    float sum1 = _mm512_reduce_add_ps(acc1);
+    for (; h < hidden; h++) {
+      const float x = GGML_BF16_TO_FP32(input[h]);
+      sum0 += x * GGML_BF16_TO_FP32(a0[h]);
+      sum1 += x * GGML_BF16_TO_FP32(a1[h]);
+    }
+    out0 = sum0;
+    out1 = sum1;
+#else
+    bf16_dot2_scalar(input, a0, a1, hidden, out0, out1);
+#endif
+  }
+
+  static inline __m512 bf16x16_to_fp32(__m256i v) {
+    const __m512i expanded = _mm512_cvtepu16_epi32(v);
+    return _mm512_castsi512_ps(_mm512_slli_epi32(expanded, 16));
+  }
+
+  static inline void down_bprop_rank2_scalar(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                             float& out0, float& out1) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * 2;
+      gb0 += g * GGML_BF16_TO_FP32(down_b_row[0]);
+      gb1 += g * GGML_BF16_TO_FP32(down_b_row[1]);
+    }
+    out0 = gb0;
+    out1 = gb1;
+  }
+
+  static inline void down_bprop_rank2_vec(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                          float& out0, float& out1) {
+    if (!down_bprop_rank2_vec_enabled()) {
+      down_bprop_rank2_scalar(grad_down_row, expert_down_b, hidden, out0, out1);
+      return;
+    }
+#if defined(__AVX512BW__)
+    alignas(64) static const uint16_t even_idx_values[32] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30,
+                                                             0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
+    alignas(64) static const uint16_t odd_idx_values[32] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+                                                            1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
+    const __m512i even_idx = _mm512_load_si512(reinterpret_cast<const __m512i*>(even_idx_values));
+    const __m512i odd_idx = _mm512_load_si512(reinterpret_cast<const __m512i*>(odd_idx_values));
+
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 15 < hidden; h += 16) {
+      const __m512 g = _mm512_loadu_ps(grad_down_row + h);
+      const __m512i b01 =
+          _mm512_loadu_si512(reinterpret_cast<const __m512i*>(expert_down_b + static_cast<size_t>(h) * 2));
+      const __m512i b0_perm = _mm512_permutexvar_epi16(even_idx, b01);
+      const __m512i b1_perm = _mm512_permutexvar_epi16(odd_idx, b01);
+      const __m512 b0 = bf16x16_to_fp32(_mm512_castsi512_si256(b0_perm));
+      const __m512 b1 = bf16x16_to_fp32(_mm512_castsi512_si256(b1_perm));
+      acc0 = _mm512_fmadd_ps(g, b0, acc0);
+      acc1 = _mm512_fmadd_ps(g, b1, acc1);
+    }
+    float gb0 = _mm512_reduce_add_ps(acc0);
+    float gb1 = _mm512_reduce_add_ps(acc1);
+    for (; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * 2;
+      gb0 += g * GGML_BF16_TO_FP32(down_b_row[0]);
+      gb1 += g * GGML_BF16_TO_FP32(down_b_row[1]);
+    }
+    out0 = gb0;
+    out1 = gb1;
+#else
+    down_bprop_rank2_scalar(grad_down_row, expert_down_b, hidden, out0, out1);
+#endif
+  }
+
+  static inline void accumulate_down_lora_b_rank2_scalar(const float* grad_down_row, float u0_scaled, float u1_scaled,
+                                                         int hidden, float* grad_b) {
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* grad_b_row = grad_b + static_cast<size_t>(h) * 2;
+      grad_b_row[0] += g * u0_scaled;
+      grad_b_row[1] += g * u1_scaled;
+    }
+  }
+
+  static inline void accumulate_down_lora_b_rank2_vec(const float* grad_down_row, float u0_scaled, float u1_scaled,
+                                                      int hidden, float* grad_b) {
+    if (!down_lora_b_rank2_vec_enabled()) {
+      accumulate_down_lora_b_rank2_scalar(grad_down_row, u0_scaled, u1_scaled, hidden, grad_b);
+      return;
+    }
+#if defined(__AVX512F__)
+    alignas(64) static const int32_t idx_lo_values[16] = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
+    alignas(64) static const int32_t idx_hi_values[16] = {8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31};
+    const __m512i idx_lo = _mm512_load_si512(reinterpret_cast<const __m512i*>(idx_lo_values));
+    const __m512i idx_hi = _mm512_load_si512(reinterpret_cast<const __m512i*>(idx_hi_values));
+    const __m512 u0 = _mm512_set1_ps(u0_scaled);
+    const __m512 u1 = _mm512_set1_ps(u1_scaled);
+
+    int h = 0;
+    for (; h + 15 < hidden; h += 16) {
+      const __m512 g = _mm512_loadu_ps(grad_down_row + h);
+      const __m512 add0 = _mm512_mul_ps(g, u0);
+      const __m512 add1 = _mm512_mul_ps(g, u1);
+      const __m512 interleaved_lo = _mm512_permutex2var_ps(add0, idx_lo, add1);
+      const __m512 interleaved_hi = _mm512_permutex2var_ps(add0, idx_hi, add1);
+      float* out = grad_b + static_cast<size_t>(h) * 2;
+      _mm512_storeu_ps(out, _mm512_add_ps(_mm512_loadu_ps(out), interleaved_lo));
+      _mm512_storeu_ps(out + 16, _mm512_add_ps(_mm512_loadu_ps(out + 16), interleaved_hi));
+    }
+    for (; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* grad_b_row = grad_b + static_cast<size_t>(h) * 2;
+      grad_b_row[0] += g * u0_scaled;
+      grad_b_row[1] += g * u1_scaled;
+    }
+#else
+    accumulate_down_lora_b_rank2_scalar(grad_down_row, u0_scaled, u1_scaled, hidden, grad_b);
+#endif
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank2_scalar(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                            float u0_scaled, float u1_scaled, int inter_size,
+                                                            float* grad_b, float& out0, float& out1) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    for (int i = 0; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * 2;
+      if (grad_b != nullptr) {
+        float* grad_b_row = grad_b + static_cast<size_t>(i) * 2;
+        grad_b_row[0] += g * u0_scaled;
+        grad_b_row[1] += g * u1_scaled;
+      }
+      gb0 += g * GGML_BF16_TO_FP32(b_row[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b_row[1]);
+    }
+    out0 = gb0;
+    out1 = gb1;
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank2_vec(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                         float u0_scaled, float u1_scaled, int inter_size,
+                                                         float* grad_b, float& out0, float& out1) {
+    if (!gate_up_lora_b_rank2_vec_enabled()) {
+      accumulate_gate_up_lora_b_rank2_scalar(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, out0, out1);
+      return;
+    }
+#if defined(__AVX512BW__) && defined(__AVX512F__)
+    alignas(64) static const uint16_t even_idx_values[32] = {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30,
+                                                             0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30};
+    alignas(64) static const uint16_t odd_idx_values[32] = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31,
+                                                            1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31};
+    alignas(64) static const int32_t idx_lo_values[16] = {0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23};
+    alignas(64) static const int32_t idx_hi_values[16] = {8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31};
+    const __m512i even_idx = _mm512_load_si512(reinterpret_cast<const __m512i*>(even_idx_values));
+    const __m512i odd_idx = _mm512_load_si512(reinterpret_cast<const __m512i*>(odd_idx_values));
+    const __m512i idx_lo = _mm512_load_si512(reinterpret_cast<const __m512i*>(idx_lo_values));
+    const __m512i idx_hi = _mm512_load_si512(reinterpret_cast<const __m512i*>(idx_hi_values));
+    const __m512 u0 = _mm512_set1_ps(u0_scaled);
+    const __m512 u1 = _mm512_set1_ps(u1_scaled);
+
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    int i = 0;
+    for (; i + 15 < inter_size; i += 16) {
+      const __m512 g = _mm512_loadu_ps(grad_row + i);
+      const __m512i b01 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(lora_b + static_cast<size_t>(i) * 2));
+      const __m512i b0_perm = _mm512_permutexvar_epi16(even_idx, b01);
+      const __m512i b1_perm = _mm512_permutexvar_epi16(odd_idx, b01);
+      const __m512 b0 = bf16x16_to_fp32(_mm512_castsi512_si256(b0_perm));
+      const __m512 b1 = bf16x16_to_fp32(_mm512_castsi512_si256(b1_perm));
+      acc0 = _mm512_fmadd_ps(g, b0, acc0);
+      acc1 = _mm512_fmadd_ps(g, b1, acc1);
+
+      if (grad_b != nullptr) {
+        const __m512 add0 = _mm512_mul_ps(g, u0);
+        const __m512 add1 = _mm512_mul_ps(g, u1);
+        const __m512 interleaved_lo = _mm512_permutex2var_ps(add0, idx_lo, add1);
+        const __m512 interleaved_hi = _mm512_permutex2var_ps(add0, idx_hi, add1);
+        float* out = grad_b + static_cast<size_t>(i) * 2;
+        _mm512_storeu_ps(out, _mm512_add_ps(_mm512_loadu_ps(out), interleaved_lo));
+        _mm512_storeu_ps(out + 16, _mm512_add_ps(_mm512_loadu_ps(out + 16), interleaved_hi));
+      }
+    }
+    float gb0 = _mm512_reduce_add_ps(acc0);
+    float gb1 = _mm512_reduce_add_ps(acc1);
+    for (; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * 2;
+      if (grad_b != nullptr) {
+        float* grad_b_row = grad_b + static_cast<size_t>(i) * 2;
+        grad_b_row[0] += g * u0_scaled;
+        grad_b_row[1] += g * u1_scaled;
+      }
+      gb0 += g * GGML_BF16_TO_FP32(b_row[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b_row[1]);
+    }
+    out0 = gb0;
+    out1 = gb1;
+#else
+    accumulate_gate_up_lora_b_rank2_scalar(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, out0, out1);
+#endif
+  }
+
+  static inline void accumulate_gate_up_a_input_rank2_scalar(const ggml_bf16_t* input_row, const ggml_bf16_t* a0,
+                                                             const ggml_bf16_t* a1, float gu0, float gu1, int hidden,
+                                                             float* grad_input_row, float* grad_a0, float* grad_a1) {
+    if (grad_a0 != nullptr && grad_a1 != nullptr) {
+      for (int h = 0; h < hidden; h++) {
+        const float x = GGML_BF16_TO_FP32(input_row[h]);
+        grad_a0[h] += gu0 * x;
+        grad_input_row[h] += gu0 * GGML_BF16_TO_FP32(a0[h]);
+      }
+      for (int h = 0; h < hidden; h++) {
+        const float x = GGML_BF16_TO_FP32(input_row[h]);
+        grad_a1[h] += gu1 * x;
+        grad_input_row[h] += gu1 * GGML_BF16_TO_FP32(a1[h]);
+      }
+    } else {
+      for (int h = 0; h < hidden; h++) {
+        grad_input_row[h] += gu0 * GGML_BF16_TO_FP32(a0[h]);
+      }
+      for (int h = 0; h < hidden; h++) {
+        grad_input_row[h] += gu1 * GGML_BF16_TO_FP32(a1[h]);
+      }
+    }
+  }
+
+  static inline void accumulate_gate_up_a_input_rank2_vec(const ggml_bf16_t* input_row, const ggml_bf16_t* a0,
+                                                          const ggml_bf16_t* a1, float gu0, float gu1, int hidden,
+                                                          float* grad_input_row, float* grad_a0, float* grad_a1,
+                                                          bool check_single_tp_env = true) {
+    if (check_single_tp_env && !gate_up_a_input_rank2_vec_enabled()) {
+      accumulate_gate_up_a_input_rank2_scalar(input_row, a0, a1, gu0, gu1, hidden, grad_input_row, grad_a0, grad_a1);
+      return;
+    }
+#if defined(__AVX512F__)
+    const __m512 gu0_vec = _mm512_set1_ps(gu0);
+    const __m512 gu1_vec = _mm512_set1_ps(gu1);
+    int h = 0;
+    if (grad_a0 != nullptr && grad_a1 != nullptr) {
+      for (; h + 15 < hidden; h += 16) {
+        const __m512 x = bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(input_row + h)));
+        const __m512 a0v = bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(a0 + h)));
+        const __m512 a1v = bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(a1 + h)));
+
+        _mm512_storeu_ps(grad_a0 + h, _mm512_add_ps(_mm512_loadu_ps(grad_a0 + h), _mm512_mul_ps(gu0_vec, x)));
+        _mm512_storeu_ps(grad_a1 + h, _mm512_add_ps(_mm512_loadu_ps(grad_a1 + h), _mm512_mul_ps(gu1_vec, x)));
+
+        __m512 grad_input = _mm512_loadu_ps(grad_input_row + h);
+        grad_input = _mm512_add_ps(grad_input, _mm512_mul_ps(gu0_vec, a0v));
+        grad_input = _mm512_add_ps(grad_input, _mm512_mul_ps(gu1_vec, a1v));
+        _mm512_storeu_ps(grad_input_row + h, grad_input);
+      }
+    } else {
+      for (; h + 15 < hidden; h += 16) {
+        const __m512 a0v = bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(a0 + h)));
+        const __m512 a1v = bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(a1 + h)));
+        __m512 grad_input = _mm512_loadu_ps(grad_input_row + h);
+        grad_input = _mm512_add_ps(grad_input, _mm512_mul_ps(gu0_vec, a0v));
+        grad_input = _mm512_add_ps(grad_input, _mm512_mul_ps(gu1_vec, a1v));
+        _mm512_storeu_ps(grad_input_row + h, grad_input);
+      }
+    }
+    if (h < hidden) {
+      accumulate_gate_up_a_input_rank2_scalar(input_row + h, a0 + h, a1 + h, gu0, gu1, hidden - h, grad_input_row + h,
+                                              grad_a0 == nullptr ? nullptr : grad_a0 + h,
+                                              grad_a1 == nullptr ? nullptr : grad_a1 + h);
+    }
+#else
+    accumulate_gate_up_a_input_rank2_scalar(input_row, a0, a1, gu0, gu1, hidden, grad_input_row, grad_a0, grad_a1);
+#endif
+  }
+
+  static inline void fmadd_int4_group32(const uint8_t* group_packed, __m512 scale_vec, __m512i zero_point,
+                                        __m128i nibble_mask, __m512& f0, __m512& f1) {
+    const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+    const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+    const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+    const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+    const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+    const __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point);
+    const __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
+    f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
+    f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+  }
+
+  void add_scaled_packed_row_f32(const uint8_t* packed, const float* scales, int row, int cols, float coeff,
+                                 float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    const int groups_per_row = cols / group_size;
+    const uint8_t* row_packed = packed + static_cast<size_t>(row) * (cols / 2);
+    const float* row_scales = scales + static_cast<size_t>(row) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      const float scale = coeff * row_scales[group];
+      const uint8_t* group_packed = row_packed + static_cast<size_t>(group) * (group_size / 2);
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      if (group_size == 32) {
+        const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+        const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+        const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+        const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+        const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+        const __m512 scale_vec = _mm512_set1_ps(scale);
+
+        __m512i vals0 = _mm512_cvtepu8_epi32(interleaved_lo);
+        vals0 = _mm512_sub_epi32(vals0, zero_point);
+        __m512 f0 = _mm512_mul_ps(_mm512_cvtepi32_ps(vals0), scale_vec);
+        f0 = _mm512_add_ps(_mm512_loadu_ps(group_dst), f0);
+        _mm512_storeu_ps(group_dst, f0);
+
+        __m512i vals1 = _mm512_cvtepu8_epi32(interleaved_hi);
+        vals1 = _mm512_sub_epi32(vals1, zero_point);
+        __m512 f1 = _mm512_mul_ps(_mm512_cvtepi32_ps(vals1), scale_vec);
+        f1 = _mm512_add_ps(_mm512_loadu_ps(group_dst + 16), f1);
+        _mm512_storeu_ps(group_dst + 16, f1);
+        continue;
+      }
+      for (int byte_idx = 0; byte_idx < group_size / 2; byte_idx++) {
+        const uint8_t byte = group_packed[byte_idx];
+        group_dst[byte_idx * 2] += scale * static_cast<float>((byte & 0x0f) - 8);
+        group_dst[byte_idx * 2 + 1] += scale * static_cast<float>(((byte >> 4) & 0x0f) - 8);
+      }
+    }
+  }
+
+  void add_scaled_two_packed_rows_f32(const uint8_t* packed_a, const float* scales_a, int row_a, float coeff_a,
+                                      const uint8_t* packed_b, const float* scales_b, int row_b, float coeff_b,
+                                      int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    const int groups_per_row = cols / group_size;
+    const uint8_t* row_a_packed = packed_a + static_cast<size_t>(row_a) * (cols / 2);
+    const uint8_t* row_b_packed = packed_b + static_cast<size_t>(row_b) * (cols / 2);
+    const float* row_a_scales = scales_a + static_cast<size_t>(row_a) * groups_per_row;
+    const float* row_b_scales = scales_b + static_cast<size_t>(row_b) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      const float scale_a = coeff_a * row_a_scales[group];
+      const float scale_b = coeff_b * row_b_scales[group];
+      const uint8_t* group_a_packed = row_a_packed + static_cast<size_t>(group) * (group_size / 2);
+      const uint8_t* group_b_packed = row_b_packed + static_cast<size_t>(group) * (group_size / 2);
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      if (group_size == 32) {
+        const __m512 scale_a_vec = _mm512_set1_ps(scale_a);
+        const __m512 scale_b_vec = _mm512_set1_ps(scale_b);
+        const __m128i packed_a16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_a_packed));
+        const __m128i packed_b16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_b_packed));
+
+        const __m128i a_low4 = _mm_and_si128(packed_a16, nibble_mask);
+        const __m128i a_high4 = _mm_and_si128(_mm_srli_epi16(packed_a16, 4), nibble_mask);
+        const __m128i b_low4 = _mm_and_si128(packed_b16, nibble_mask);
+        const __m128i b_high4 = _mm_and_si128(_mm_srli_epi16(packed_b16, 4), nibble_mask);
+
+        const __m128i a_interleaved_lo = _mm_unpacklo_epi8(a_low4, a_high4);
+        const __m128i a_interleaved_hi = _mm_unpackhi_epi8(a_low4, a_high4);
+        const __m128i b_interleaved_lo = _mm_unpacklo_epi8(b_low4, b_high4);
+        const __m128i b_interleaved_hi = _mm_unpackhi_epi8(b_low4, b_high4);
+
+        __m512i vals_a0 = _mm512_cvtepu8_epi32(a_interleaved_lo);
+        __m512i vals_b0 = _mm512_cvtepu8_epi32(b_interleaved_lo);
+        vals_a0 = _mm512_sub_epi32(vals_a0, zero_point);
+        vals_b0 = _mm512_sub_epi32(vals_b0, zero_point);
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals_a0), scale_a_vec, f0);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals_b0), scale_b_vec, f0);
+        _mm512_storeu_ps(group_dst, f0);
+
+        __m512i vals_a1 = _mm512_cvtepu8_epi32(a_interleaved_hi);
+        __m512i vals_b1 = _mm512_cvtepu8_epi32(b_interleaved_hi);
+        vals_a1 = _mm512_sub_epi32(vals_a1, zero_point);
+        vals_b1 = _mm512_sub_epi32(vals_b1, zero_point);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals_a1), scale_a_vec, f1);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals_b1), scale_b_vec, f1);
+        _mm512_storeu_ps(group_dst + 16, f1);
+        continue;
+      }
+      for (int byte_idx = 0; byte_idx < group_size / 2; byte_idx++) {
+        const uint8_t byte_a = group_a_packed[byte_idx];
+        const uint8_t byte_b = group_b_packed[byte_idx];
+        group_dst[byte_idx * 2] +=
+            scale_a * static_cast<float>((byte_a & 0x0f) - 8) + scale_b * static_cast<float>((byte_b & 0x0f) - 8);
+        group_dst[byte_idx * 2 + 1] += scale_a * static_cast<float>(((byte_a >> 4) & 0x0f) - 8) +
+                                       scale_b * static_cast<float>(((byte_b >> 4) & 0x0f) - 8);
+      }
+    }
+  }
+
+  void add_scaled_four_packed_rows_f32(const uint8_t* packed0, const float* scales0, int row0, float coeff0,
+                                       const uint8_t* packed1, const float* scales1, int row1, float coeff1,
+                                       const uint8_t* packed2, const float* scales2, int row2, float coeff2,
+                                       const uint8_t* packed3, const float* scales3, int row3, float coeff3, int cols,
+                                       float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    const int groups_per_row = cols / group_size;
+    const uint8_t* row0_packed = packed0 + static_cast<size_t>(row0) * (cols / 2);
+    const uint8_t* row1_packed = packed1 + static_cast<size_t>(row1) * (cols / 2);
+    const uint8_t* row2_packed = packed2 + static_cast<size_t>(row2) * (cols / 2);
+    const uint8_t* row3_packed = packed3 + static_cast<size_t>(row3) * (cols / 2);
+    const float* row0_scales = scales0 + static_cast<size_t>(row0) * groups_per_row;
+    const float* row1_scales = scales1 + static_cast<size_t>(row1) * groups_per_row;
+    const float* row2_scales = scales2 + static_cast<size_t>(row2) * groups_per_row;
+    const float* row3_scales = scales3 + static_cast<size_t>(row3) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      const float scale0 = coeff0 * row0_scales[group];
+      const float scale1 = coeff1 * row1_scales[group];
+      const float scale2 = coeff2 * row2_scales[group];
+      const float scale3 = coeff3 * row3_scales[group];
+      const uint8_t* group0_packed = row0_packed + static_cast<size_t>(group) * (group_size / 2);
+      const uint8_t* group1_packed = row1_packed + static_cast<size_t>(group) * (group_size / 2);
+      const uint8_t* group2_packed = row2_packed + static_cast<size_t>(group) * (group_size / 2);
+      const uint8_t* group3_packed = row3_packed + static_cast<size_t>(group) * (group_size / 2);
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      if (group_size == 32) {
+        const __m512 scale0_vec = _mm512_set1_ps(scale0);
+        const __m512 scale1_vec = _mm512_set1_ps(scale1);
+        const __m512 scale2_vec = _mm512_set1_ps(scale2);
+        const __m512 scale3_vec = _mm512_set1_ps(scale3);
+        const __m128i packed0_16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group0_packed));
+        const __m128i packed1_16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group1_packed));
+        const __m128i packed2_16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group2_packed));
+        const __m128i packed3_16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group3_packed));
+
+        __m128i lo0;
+        __m128i hi0;
+        __m128i lo1;
+        __m128i hi1;
+        __m128i lo2;
+        __m128i hi2;
+        __m128i lo3;
+        __m128i hi3;
+        auto unpack_nibbles = [&](const __m128i packed16, __m128i& lo, __m128i& hi) {
+          const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+          const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+          lo = _mm_unpacklo_epi8(low4, high4);
+          hi = _mm_unpackhi_epi8(low4, high4);
+        };
+        unpack_nibbles(packed0_16, lo0, hi0);
+        unpack_nibbles(packed1_16, lo1, hi1);
+        unpack_nibbles(packed2_16, lo2, hi2);
+        unpack_nibbles(packed3_16, lo3, hi3);
+
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(lo0), zero_point);
+        __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(lo1), zero_point);
+        __m512i vals2 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(lo2), zero_point);
+        __m512i vals3 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(lo3), zero_point);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale0_vec, f0);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale1_vec, f0);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals2), scale2_vec, f0);
+        f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals3), scale3_vec, f0);
+        _mm512_storeu_ps(group_dst, f0);
+
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+        vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(hi0), zero_point);
+        vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(hi1), zero_point);
+        vals2 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(hi2), zero_point);
+        vals3 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(hi3), zero_point);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale0_vec, f1);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale1_vec, f1);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals2), scale2_vec, f1);
+        f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals3), scale3_vec, f1);
+        _mm512_storeu_ps(group_dst + 16, f1);
+        continue;
+      }
+      for (int byte_idx = 0; byte_idx < group_size / 2; byte_idx++) {
+        const uint8_t byte0 = group0_packed[byte_idx];
+        const uint8_t byte1 = group1_packed[byte_idx];
+        const uint8_t byte2 = group2_packed[byte_idx];
+        const uint8_t byte3 = group3_packed[byte_idx];
+        group_dst[byte_idx * 2] +=
+            scale0 * static_cast<float>((byte0 & 0x0f) - 8) + scale1 * static_cast<float>((byte1 & 0x0f) - 8) +
+            scale2 * static_cast<float>((byte2 & 0x0f) - 8) + scale3 * static_cast<float>((byte3 & 0x0f) - 8);
+        group_dst[byte_idx * 2 + 1] += scale0 * static_cast<float>(((byte0 >> 4) & 0x0f) - 8) +
+                                       scale1 * static_cast<float>(((byte1 >> 4) & 0x0f) - 8) +
+                                       scale2 * static_cast<float>(((byte2 >> 4) & 0x0f) - 8) +
+                                       scale3 * static_cast<float>(((byte3 >> 4) & 0x0f) - 8);
+      }
+    }
+  }
+
+  void add_scaled_eight_packed_rows_f32(const uint8_t* const* packed_list, const float* const* scales_list,
+                                        const int* rows, const float* coeffs, int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    const int groups_per_row = cols / group_size;
+    const uint8_t* row_packed[8];
+    const float* row_scales[8];
+    for (int src = 0; src < 8; src++) {
+      row_packed[src] = packed_list[src] + static_cast<size_t>(rows[src]) * (cols / 2);
+      row_scales[src] = scales_list[src] + static_cast<size_t>(rows[src]) * groups_per_row;
+    }
+
+    if (group_size == 32 && dense_coeff_fastpath_enabled()) {
+      const __m512i zero_point = _mm512_set1_epi32(8);
+      const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+      for (int group = 0; group < groups_per_row; group++) {
+        float* group_dst = dst + static_cast<size_t>(group) * group_size;
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+        for (int src = 0; src < 8; src++) {
+          const __m512 scale_vec = _mm512_set1_ps(coeffs[src] * row_scales[src][group]);
+          const uint8_t* group_packed = row_packed[src] + static_cast<size_t>(group) * (group_size / 2);
+          const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+          const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+          const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+          const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+          const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+          const __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point);
+          const __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
+          f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
+          f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+        }
+
+        _mm512_storeu_ps(group_dst, f0);
+        _mm512_storeu_ps(group_dst + 16, f1);
+      }
+      return;
+    }
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      if (group_size == 32) {
+        const __m512i zero_point = _mm512_set1_epi32(8);
+        const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+        for (int src = 0; src < 8; src++) {
+          const float coeff = coeffs[src];
+          if (coeff == 0.0f) continue;
+          const float scale = coeff * row_scales[src][group];
+          const __m512 scale_vec = _mm512_set1_ps(scale);
+          const uint8_t* group_packed = row_packed[src] + static_cast<size_t>(group) * (group_size / 2);
+          const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+          const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+          const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+          const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+          const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+          __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point);
+          __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
+          f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
+          f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+        }
+        _mm512_storeu_ps(group_dst, f0);
+        _mm512_storeu_ps(group_dst + 16, f1);
+        continue;
+      }
+
+      for (int byte_idx = 0; byte_idx < group_size / 2; byte_idx++) {
+        float even_acc = 0.0f;
+        float odd_acc = 0.0f;
+        for (int src = 0; src < 8; src++) {
+          const float coeff = coeffs[src];
+          if (coeff == 0.0f) continue;
+          const float scale = coeff * row_scales[src][group];
+          const uint8_t byte = row_packed[src][static_cast<size_t>(group) * (group_size / 2) + byte_idx];
+          even_acc += scale * static_cast<float>((byte & 0x0f) - 8);
+          odd_acc += scale * static_cast<float>(((byte >> 4) & 0x0f) - 8);
+        }
+        group_dst[byte_idx * 2] += even_acc;
+        group_dst[byte_idx * 2 + 1] += odd_acc;
+      }
+    }
+  }
+
+  void add_scaled_four_gate_up_rows_f32(const uint8_t* gate_packed, const float* gate_scales, const uint8_t* up_packed,
+                                        const float* up_scales, int row, const float* gate_coeffs,
+                                        const float* up_coeffs, int cols, float* dst) const {
+    const uint8_t* packed_list[8] = {gate_packed, up_packed, gate_packed, up_packed,
+                                     gate_packed, up_packed, gate_packed, up_packed};
+    const float* scales_list[8] = {gate_scales, up_scales, gate_scales, up_scales,
+                                   gate_scales, up_scales, gate_scales, up_scales};
+    const int rows[8] = {row, row, row + 1, row + 1, row + 2, row + 2, row + 3, row + 3};
+    const float coeffs[8] = {gate_coeffs[0], up_coeffs[0], gate_coeffs[1], up_coeffs[1],
+                             gate_coeffs[2], up_coeffs[2], gate_coeffs[3], up_coeffs[3]};
+    add_scaled_eight_packed_rows_f32(packed_list, scales_list, rows, coeffs, cols, dst);
+  }
+
+  void add_scaled_sixteen_packed_rows_f32(const uint8_t* const* packed_list, const float* const* scales_list,
+                                          const int* rows, const float* coeffs, int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    const int groups_per_row = cols / group_size;
+    const uint8_t* row_packed[16];
+    const float* row_scales[16];
+    for (int src = 0; src < 16; src++) {
+      row_packed[src] = packed_list[src] + static_cast<size_t>(rows[src]) * (cols / 2);
+      row_scales[src] = scales_list[src] + static_cast<size_t>(rows[src]) * groups_per_row;
+    }
+
+    if (group_size == 32 && dense_coeff_fastpath_enabled()) {
+      const __m512i zero_point = _mm512_set1_epi32(8);
+      const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+      for (int group = 0; group < groups_per_row; group++) {
+        float* group_dst = dst + static_cast<size_t>(group) * group_size;
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+        for (int src = 0; src < 16; src++) {
+          const __m512 scale_vec = _mm512_set1_ps(coeffs[src] * row_scales[src][group]);
+          const uint8_t* group_packed = row_packed[src] + static_cast<size_t>(group) * (group_size / 2);
+          const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+          const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+          const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+          const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+          const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+          const __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point);
+          const __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
+          f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
+          f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+        }
+
+        _mm512_storeu_ps(group_dst, f0);
+        _mm512_storeu_ps(group_dst + 16, f1);
+      }
+      return;
+    }
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      if (group_size == 32) {
+        const __m512i zero_point = _mm512_set1_epi32(8);
+        const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+        for (int src = 0; src < 16; src++) {
+          const float coeff = coeffs[src];
+          if (coeff == 0.0f) continue;
+          const __m512 scale_vec = _mm512_set1_ps(coeff * row_scales[src][group]);
+          const uint8_t* group_packed = row_packed[src] + static_cast<size_t>(group) * (group_size / 2);
+          const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+          const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+          const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+          const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+          const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+          const __m512i vals0 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point);
+          const __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
+          f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
+          f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+        }
+        _mm512_storeu_ps(group_dst, f0);
+        _mm512_storeu_ps(group_dst + 16, f1);
+        continue;
+      }
+
+      for (int byte_idx = 0; byte_idx < group_size / 2; byte_idx++) {
+        float even_acc = 0.0f;
+        float odd_acc = 0.0f;
+        for (int src = 0; src < 16; src++) {
+          const float coeff = coeffs[src];
+          if (coeff == 0.0f) continue;
+          const float scale = coeff * row_scales[src][group];
+          const uint8_t byte = row_packed[src][static_cast<size_t>(group) * (group_size / 2) + byte_idx];
+          even_acc += scale * static_cast<float>((byte & 0x0f) - 8);
+          odd_acc += scale * static_cast<float>(((byte >> 4) & 0x0f) - 8);
+        }
+        group_dst[byte_idx * 2] += even_acc;
+        group_dst[byte_idx * 2 + 1] += odd_acc;
+      }
+    }
+  }
+
+  void add_scaled_sixteen_contiguous_packed_rows_f32(const uint8_t* packed, const float* scales, int row,
+                                                     const float* coeffs, int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size != 32 || !dense_coeff_fastpath_enabled()) {
+      const uint8_t* packed_list[16] = {packed, packed, packed, packed, packed, packed, packed, packed,
+                                        packed, packed, packed, packed, packed, packed, packed, packed};
+      const float* scales_list[16] = {scales, scales, scales, scales, scales, scales, scales, scales,
+                                      scales, scales, scales, scales, scales, scales, scales, scales};
+      const int row_ids[16] = {row,     row + 1, row + 2,  row + 3,  row + 4,  row + 5,  row + 6,  row + 7,
+                               row + 8, row + 9, row + 10, row + 11, row + 12, row + 13, row + 14, row + 15};
+      add_scaled_sixteen_packed_rows_f32(packed_list, scales_list, row_ids, coeffs, cols, dst);
+      return;
+    }
+
+    const int groups_per_row = cols / group_size;
+    const size_t packed_row_stride = static_cast<size_t>(cols / 2);
+    const uint8_t* row_packed = packed + static_cast<size_t>(row) * packed_row_stride;
+    const float* row_scales = scales + static_cast<size_t>(row) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      __m512 f0 = _mm512_loadu_ps(group_dst);
+      __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+#define KT_K2_ACCUM_CONTIG_SRC(SRC)                                                                               \
+  fmadd_int4_group32(row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16, \
+                     _mm512_set1_ps(coeffs[SRC] * row_scales[static_cast<size_t>(SRC) * groups_per_row + group]), \
+                     zero_point, nibble_mask, f0, f1)
+      KT_K2_ACCUM_CONTIG_SRC(0);
+      KT_K2_ACCUM_CONTIG_SRC(1);
+      KT_K2_ACCUM_CONTIG_SRC(2);
+      KT_K2_ACCUM_CONTIG_SRC(3);
+      KT_K2_ACCUM_CONTIG_SRC(4);
+      KT_K2_ACCUM_CONTIG_SRC(5);
+      KT_K2_ACCUM_CONTIG_SRC(6);
+      KT_K2_ACCUM_CONTIG_SRC(7);
+      KT_K2_ACCUM_CONTIG_SRC(8);
+      KT_K2_ACCUM_CONTIG_SRC(9);
+      KT_K2_ACCUM_CONTIG_SRC(10);
+      KT_K2_ACCUM_CONTIG_SRC(11);
+      KT_K2_ACCUM_CONTIG_SRC(12);
+      KT_K2_ACCUM_CONTIG_SRC(13);
+      KT_K2_ACCUM_CONTIG_SRC(14);
+      KT_K2_ACCUM_CONTIG_SRC(15);
+#undef KT_K2_ACCUM_CONTIG_SRC
+
+      _mm512_storeu_ps(group_dst, f0);
+      _mm512_storeu_ps(group_dst + 16, f1);
+    }
+  }
+
+  void add_scaled_thirtytwo_contiguous_packed_rows_f32(const uint8_t* packed, const float* scales, int row,
+                                                       const float* coeffs, int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size != 32 || !dense_coeff_fastpath_enabled()) {
+      add_scaled_sixteen_contiguous_packed_rows_f32(packed, scales, row, coeffs, cols, dst);
+      add_scaled_sixteen_contiguous_packed_rows_f32(packed, scales, row + 16, coeffs + 16, cols, dst);
+      return;
+    }
+
+    const int groups_per_row = cols / group_size;
+    const size_t packed_row_stride = static_cast<size_t>(cols / 2);
+    const uint8_t* row_packed = packed + static_cast<size_t>(row) * packed_row_stride;
+    const float* row_scales = scales + static_cast<size_t>(row) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      __m512 f0 = _mm512_loadu_ps(group_dst);
+      __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+#define KT_K2_ACCUM_CONTIG32_SRC(SRC)                                                                             \
+  fmadd_int4_group32(row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16, \
+                     _mm512_set1_ps(coeffs[SRC] * row_scales[static_cast<size_t>(SRC) * groups_per_row + group]), \
+                     zero_point, nibble_mask, f0, f1)
+      KT_K2_ACCUM_CONTIG32_SRC(0);
+      KT_K2_ACCUM_CONTIG32_SRC(1);
+      KT_K2_ACCUM_CONTIG32_SRC(2);
+      KT_K2_ACCUM_CONTIG32_SRC(3);
+      KT_K2_ACCUM_CONTIG32_SRC(4);
+      KT_K2_ACCUM_CONTIG32_SRC(5);
+      KT_K2_ACCUM_CONTIG32_SRC(6);
+      KT_K2_ACCUM_CONTIG32_SRC(7);
+      KT_K2_ACCUM_CONTIG32_SRC(8);
+      KT_K2_ACCUM_CONTIG32_SRC(9);
+      KT_K2_ACCUM_CONTIG32_SRC(10);
+      KT_K2_ACCUM_CONTIG32_SRC(11);
+      KT_K2_ACCUM_CONTIG32_SRC(12);
+      KT_K2_ACCUM_CONTIG32_SRC(13);
+      KT_K2_ACCUM_CONTIG32_SRC(14);
+      KT_K2_ACCUM_CONTIG32_SRC(15);
+      KT_K2_ACCUM_CONTIG32_SRC(16);
+      KT_K2_ACCUM_CONTIG32_SRC(17);
+      KT_K2_ACCUM_CONTIG32_SRC(18);
+      KT_K2_ACCUM_CONTIG32_SRC(19);
+      KT_K2_ACCUM_CONTIG32_SRC(20);
+      KT_K2_ACCUM_CONTIG32_SRC(21);
+      KT_K2_ACCUM_CONTIG32_SRC(22);
+      KT_K2_ACCUM_CONTIG32_SRC(23);
+      KT_K2_ACCUM_CONTIG32_SRC(24);
+      KT_K2_ACCUM_CONTIG32_SRC(25);
+      KT_K2_ACCUM_CONTIG32_SRC(26);
+      KT_K2_ACCUM_CONTIG32_SRC(27);
+      KT_K2_ACCUM_CONTIG32_SRC(28);
+      KT_K2_ACCUM_CONTIG32_SRC(29);
+      KT_K2_ACCUM_CONTIG32_SRC(30);
+      KT_K2_ACCUM_CONTIG32_SRC(31);
+#undef KT_K2_ACCUM_CONTIG32_SRC
+
+      _mm512_storeu_ps(group_dst, f0);
+      _mm512_storeu_ps(group_dst + 16, f1);
+    }
+  }
+
+  void add_scaled_eight_gate_up_rows_f32(const uint8_t* gate_packed, const float* gate_scales, const uint8_t* up_packed,
+                                         const float* up_scales, int row, const float* gate_coeffs,
+                                         const float* up_coeffs, int cols, float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size == 32 && dense_coeff_fastpath_enabled()) {
+      const int groups_per_row = cols / group_size;
+      const size_t packed_row_stride = static_cast<size_t>(cols / 2);
+      const uint8_t* gate_row_packed = gate_packed + static_cast<size_t>(row) * packed_row_stride;
+      const uint8_t* up_row_packed = up_packed + static_cast<size_t>(row) * packed_row_stride;
+      const float* gate_row_scales = gate_scales + static_cast<size_t>(row) * groups_per_row;
+      const float* up_row_scales = up_scales + static_cast<size_t>(row) * groups_per_row;
+      const __m512i zero_point = _mm512_set1_epi32(8);
+      const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+      for (int group = 0; group < groups_per_row; group++) {
+        float* group_dst = dst + static_cast<size_t>(group) * group_size;
+        __m512 f0 = _mm512_loadu_ps(group_dst);
+        __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+#define KT_K2_ACCUM_GATE_UP_SRC(SRC)                                                                                 \
+  fmadd_int4_group32(                                                                                                \
+      gate_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,              \
+      _mm512_set1_ps(gate_coeffs[SRC] * gate_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]),         \
+      zero_point, nibble_mask, f0, f1);                                                                              \
+  fmadd_int4_group32(                                                                                                \
+      up_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,                \
+      _mm512_set1_ps(up_coeffs[SRC] * up_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]), zero_point, \
+      nibble_mask, f0, f1)
+        KT_K2_ACCUM_GATE_UP_SRC(0);
+        KT_K2_ACCUM_GATE_UP_SRC(1);
+        KT_K2_ACCUM_GATE_UP_SRC(2);
+        KT_K2_ACCUM_GATE_UP_SRC(3);
+        KT_K2_ACCUM_GATE_UP_SRC(4);
+        KT_K2_ACCUM_GATE_UP_SRC(5);
+        KT_K2_ACCUM_GATE_UP_SRC(6);
+        KT_K2_ACCUM_GATE_UP_SRC(7);
+#undef KT_K2_ACCUM_GATE_UP_SRC
+
+        _mm512_storeu_ps(group_dst, f0);
+        _mm512_storeu_ps(group_dst + 16, f1);
+      }
+      return;
+    }
+
+    const uint8_t* packed_list[16] = {gate_packed, up_packed, gate_packed, up_packed, gate_packed, up_packed,
+                                      gate_packed, up_packed, gate_packed, up_packed, gate_packed, up_packed,
+                                      gate_packed, up_packed, gate_packed, up_packed};
+    const float* scales_list[16] = {gate_scales, up_scales, gate_scales, up_scales, gate_scales, up_scales,
+                                    gate_scales, up_scales, gate_scales, up_scales, gate_scales, up_scales,
+                                    gate_scales, up_scales, gate_scales, up_scales};
+    const int rows[16] = {row,     row,     row + 1, row + 1, row + 2, row + 2, row + 3, row + 3,
+                          row + 4, row + 4, row + 5, row + 5, row + 6, row + 6, row + 7, row + 7};
+    const float coeffs[16] = {gate_coeffs[0], up_coeffs[0], gate_coeffs[1], up_coeffs[1], gate_coeffs[2], up_coeffs[2],
+                              gate_coeffs[3], up_coeffs[3], gate_coeffs[4], up_coeffs[4], gate_coeffs[5], up_coeffs[5],
+                              gate_coeffs[6], up_coeffs[6], gate_coeffs[7], up_coeffs[7]};
+    add_scaled_sixteen_packed_rows_f32(packed_list, scales_list, rows, coeffs, cols, dst);
+  }
+
+  void add_scaled_sixteen_gate_up_rows_f32(const uint8_t* gate_packed, const float* gate_scales,
+                                           const uint8_t* up_packed, const float* up_scales, int row,
+                                           const float* gate_coeffs, const float* up_coeffs, int cols,
+                                           float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size != 32 || !dense_coeff_fastpath_enabled()) {
+      add_scaled_eight_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, row, gate_coeffs, up_coeffs,
+                                        cols, dst);
+      add_scaled_eight_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, row + 8, gate_coeffs + 8,
+                                        up_coeffs + 8, cols, dst);
+      return;
+    }
+
+    const int groups_per_row = cols / group_size;
+    const size_t packed_row_stride = static_cast<size_t>(cols / 2);
+    const uint8_t* gate_row_packed = gate_packed + static_cast<size_t>(row) * packed_row_stride;
+    const uint8_t* up_row_packed = up_packed + static_cast<size_t>(row) * packed_row_stride;
+    const float* gate_row_scales = gate_scales + static_cast<size_t>(row) * groups_per_row;
+    const float* up_row_scales = up_scales + static_cast<size_t>(row) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      __m512 f0 = _mm512_loadu_ps(group_dst);
+      __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+#define KT_K2_ACCUM_GATE_UP16_SRC(SRC)                                                                               \
+  fmadd_int4_group32(                                                                                                \
+      gate_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,              \
+      _mm512_set1_ps(gate_coeffs[SRC] * gate_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]),         \
+      zero_point, nibble_mask, f0, f1);                                                                              \
+  fmadd_int4_group32(                                                                                                \
+      up_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,                \
+      _mm512_set1_ps(up_coeffs[SRC] * up_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]), zero_point, \
+      nibble_mask, f0, f1)
+      KT_K2_ACCUM_GATE_UP16_SRC(0);
+      KT_K2_ACCUM_GATE_UP16_SRC(1);
+      KT_K2_ACCUM_GATE_UP16_SRC(2);
+      KT_K2_ACCUM_GATE_UP16_SRC(3);
+      KT_K2_ACCUM_GATE_UP16_SRC(4);
+      KT_K2_ACCUM_GATE_UP16_SRC(5);
+      KT_K2_ACCUM_GATE_UP16_SRC(6);
+      KT_K2_ACCUM_GATE_UP16_SRC(7);
+      KT_K2_ACCUM_GATE_UP16_SRC(8);
+      KT_K2_ACCUM_GATE_UP16_SRC(9);
+      KT_K2_ACCUM_GATE_UP16_SRC(10);
+      KT_K2_ACCUM_GATE_UP16_SRC(11);
+      KT_K2_ACCUM_GATE_UP16_SRC(12);
+      KT_K2_ACCUM_GATE_UP16_SRC(13);
+      KT_K2_ACCUM_GATE_UP16_SRC(14);
+      KT_K2_ACCUM_GATE_UP16_SRC(15);
+#undef KT_K2_ACCUM_GATE_UP16_SRC
+
+      _mm512_storeu_ps(group_dst, f0);
+      _mm512_storeu_ps(group_dst + 16, f1);
+    }
+  }
+
+  void add_scaled_thirtytwo_gate_up_rows_f32(const uint8_t* gate_packed, const float* gate_scales,
+                                             const uint8_t* up_packed, const float* up_scales, int row,
+                                             const float* gate_coeffs, const float* up_coeffs, int cols,
+                                             float* dst) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size != 32 || !dense_coeff_fastpath_enabled() || !gate_up32_fastpath_enabled()) {
+      add_scaled_sixteen_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, row, gate_coeffs, up_coeffs,
+                                          cols, dst);
+      add_scaled_sixteen_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, row + 16, gate_coeffs + 16,
+                                          up_coeffs + 16, cols, dst);
+      return;
+    }
+
+    const int groups_per_row = cols / group_size;
+    const size_t packed_row_stride = static_cast<size_t>(cols / 2);
+    const uint8_t* gate_row_packed = gate_packed + static_cast<size_t>(row) * packed_row_stride;
+    const uint8_t* up_row_packed = up_packed + static_cast<size_t>(row) * packed_row_stride;
+    const float* gate_row_scales = gate_scales + static_cast<size_t>(row) * groups_per_row;
+    const float* up_row_scales = up_scales + static_cast<size_t>(row) * groups_per_row;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      float* group_dst = dst + static_cast<size_t>(group) * group_size;
+      __m512 f0 = _mm512_loadu_ps(group_dst);
+      __m512 f1 = _mm512_loadu_ps(group_dst + 16);
+
+#define KT_K2_ACCUM_GATE_UP32_SRC(SRC)                                                                               \
+  fmadd_int4_group32(                                                                                                \
+      gate_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,              \
+      _mm512_set1_ps(gate_coeffs[SRC] * gate_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]),         \
+      zero_point, nibble_mask, f0, f1);                                                                              \
+  fmadd_int4_group32(                                                                                                \
+      up_row_packed + static_cast<size_t>(SRC) * packed_row_stride + static_cast<size_t>(group) * 16,                \
+      _mm512_set1_ps(up_coeffs[SRC] * up_row_scales[static_cast<size_t>(SRC) * groups_per_row + group]), zero_point, \
+      nibble_mask, f0, f1)
+      KT_K2_ACCUM_GATE_UP32_SRC(0);
+      KT_K2_ACCUM_GATE_UP32_SRC(1);
+      KT_K2_ACCUM_GATE_UP32_SRC(2);
+      KT_K2_ACCUM_GATE_UP32_SRC(3);
+      KT_K2_ACCUM_GATE_UP32_SRC(4);
+      KT_K2_ACCUM_GATE_UP32_SRC(5);
+      KT_K2_ACCUM_GATE_UP32_SRC(6);
+      KT_K2_ACCUM_GATE_UP32_SRC(7);
+      KT_K2_ACCUM_GATE_UP32_SRC(8);
+      KT_K2_ACCUM_GATE_UP32_SRC(9);
+      KT_K2_ACCUM_GATE_UP32_SRC(10);
+      KT_K2_ACCUM_GATE_UP32_SRC(11);
+      KT_K2_ACCUM_GATE_UP32_SRC(12);
+      KT_K2_ACCUM_GATE_UP32_SRC(13);
+      KT_K2_ACCUM_GATE_UP32_SRC(14);
+      KT_K2_ACCUM_GATE_UP32_SRC(15);
+      KT_K2_ACCUM_GATE_UP32_SRC(16);
+      KT_K2_ACCUM_GATE_UP32_SRC(17);
+      KT_K2_ACCUM_GATE_UP32_SRC(18);
+      KT_K2_ACCUM_GATE_UP32_SRC(19);
+      KT_K2_ACCUM_GATE_UP32_SRC(20);
+      KT_K2_ACCUM_GATE_UP32_SRC(21);
+      KT_K2_ACCUM_GATE_UP32_SRC(22);
+      KT_K2_ACCUM_GATE_UP32_SRC(23);
+      KT_K2_ACCUM_GATE_UP32_SRC(24);
+      KT_K2_ACCUM_GATE_UP32_SRC(25);
+      KT_K2_ACCUM_GATE_UP32_SRC(26);
+      KT_K2_ACCUM_GATE_UP32_SRC(27);
+      KT_K2_ACCUM_GATE_UP32_SRC(28);
+      KT_K2_ACCUM_GATE_UP32_SRC(29);
+      KT_K2_ACCUM_GATE_UP32_SRC(30);
+      KT_K2_ACCUM_GATE_UP32_SRC(31);
+#undef KT_K2_ACCUM_GATE_UP32_SRC
+
+      _mm512_storeu_ps(group_dst, f0);
+      _mm512_storeu_ps(group_dst + 16, f1);
+    }
+  }
+
+  void add_scaled_packed_rows_f32(const uint8_t* packed, const float* scales, const float* coeffs, int rows, int cols,
+                                  float* dst, bool use_four_row_fast_path) const {
+    auto add_pair_or_single = [&](int row) {
+      const float g0 = coeffs[row];
+      const float g1 = coeffs[row + 1];
+      if (g0 != 0.0f && g1 != 0.0f) {
+        add_scaled_two_packed_rows_f32(packed, scales, row, g0, packed, scales, row + 1, g1, cols, dst);
+      } else if (g0 != 0.0f) {
+        add_scaled_packed_row_f32(packed, scales, row, cols, g0, dst);
+      } else if (g1 != 0.0f) {
+        add_scaled_packed_row_f32(packed, scales, row + 1, cols, g1, dst);
+      }
+    };
+
+    int row = 0;
+    if (use_four_row_fast_path) {
+      for (; row + 31 < rows; row += 32) {
+        add_scaled_thirtytwo_contiguous_packed_rows_f32(packed, scales, row, coeffs + row, cols, dst);
+      }
+      for (; row + 15 < rows; row += 16) {
+        add_scaled_sixteen_contiguous_packed_rows_f32(packed, scales, row, coeffs + row, cols, dst);
+      }
+      const uint8_t* packed_list[8] = {packed, packed, packed, packed, packed, packed, packed, packed};
+      const float* scales_list[8] = {scales, scales, scales, scales, scales, scales, scales, scales};
+      for (; row + 7 < rows; row += 8) {
+        const int row_ids[8] = {row, row + 1, row + 2, row + 3, row + 4, row + 5, row + 6, row + 7};
+        add_scaled_eight_packed_rows_f32(packed_list, scales_list, row_ids, coeffs + row, cols, dst);
+      }
+      for (; row + 3 < rows; row += 4) {
+        const float g0 = coeffs[row];
+        const float g1 = coeffs[row + 1];
+        const float g2 = coeffs[row + 2];
+        const float g3 = coeffs[row + 3];
+        add_scaled_four_packed_rows_f32(packed, scales, row, g0, packed, scales, row + 1, g1, packed, scales, row + 2,
+                                        g2, packed, scales, row + 3, g3, cols, dst);
+      }
+    }
+
+    for (; row + 1 < rows; row += 2) {
+      add_pair_or_single(row);
+    }
+    if (row < rows) {
+      const float g = coeffs[row];
+      if (g != 0.0f) add_scaled_packed_row_f32(packed, scales, row, cols, g, dst);
+    }
+  }
+
+  static bool tp1_backward_profile_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_PROFILE_PACKED_BWD");
+      if (value == nullptr || value[0] == '\0') {
+        value = std::getenv("KT_K2_SFT_PROFILE_TP1_BWD");
+      }
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  struct TP1BackwardProfile {
+    using Clock = std::chrono::high_resolution_clock;
+    bool enabled = false;
+    Clock::time_point start;
+    Clock::time_point last;
+    long long grad_weights_us = 0;
+    long long down_us = 0;
+    long long down_lora_grads_us = 0;
+    long long down_route_us = 0;
+    long long down_write_us = 0;
+    long long down_base_us = 0;
+    long long down_lora_bprop_us = 0;
+    long long down_lora_a_us = 0;
+    long long down_lora_b_us = 0;
+    long long activation_us = 0;
+    long long gate_up_us = 0;
+    long long gate_up_base_us = 0;
+    long long gate_up_lora_u_us = 0;
+    long long gate_up_lora_b_us = 0;
+    long long gate_up_lora_b_write_us = 0;
+    long long gate_up_lora_a_input_us = 0;
+    long long gate_up_write_us = 0;
+
+    explicit TP1BackwardProfile(bool enabled_) : enabled(enabled_) {
+      if (enabled) {
+        start = Clock::now();
+        last = start;
+      }
+    }
+
+    void mark(long long& slot) {
+      if (!enabled) return;
+      auto now = Clock::now();
+      slot = std::chrono::duration_cast<std::chrono::microseconds>(now - last).count();
+      last = now;
+    }
+
+    void add_since(Clock::time_point section_start, long long& slot) {
+      if (!enabled) return;
+      auto now = Clock::now();
+      slot += std::chrono::duration_cast<std::chrono::microseconds>(now - section_start).count();
+    }
+
+    static Clock::time_point disabled_time_point() { return Clock::time_point{}; }
+
+    Clock::time_point section_start() const { return enabled ? Clock::now() : disabled_time_point(); }
+
+    long long total_us() const {
+      if (!enabled) return 0;
+      return std::chrono::duration_cast<std::chrono::microseconds>(last - start).count();
+    }
+  };
+
   size_t gate_up_packed_bytes_per_expert() const {
     return static_cast<size_t>(config_.intermediate_size) * config_.hidden_size / 2;
   }
@@ -595,12 +1811,29 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return layout;
   }
 
-  static void write_bf16_vector(void* dst, const std::vector<float>& src) {
+  static void write_bf16_array(void* dst, const float* src, size_t count) {
     if (dst == nullptr) return;
     auto* out = reinterpret_cast<ggml_bf16_t*>(dst);
-    for (size_t i = 0; i < src.size(); i++) {
+#if defined(__AVX512BF16__)
+    size_t i = 0;
+    if (bf16_write_vec_enabled()) {
+      for (; i + 15 < count; i += 16) {
+        const __m512 v = _mm512_loadu_ps(src + i);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + i), (__m256i)_mm512_cvtneps_pbh(v));
+      }
+    }
+    for (; i < count; i++) {
       out[i] = GGML_FP32_TO_BF16(src[i]);
     }
+#else
+    for (size_t i = 0; i < count; i++) {
+      out[i] = GGML_FP32_TO_BF16(src[i]);
+    }
+#endif
+  }
+
+  static void write_bf16_vector(void* dst, const std::vector<float>& src) {
+    write_bf16_array(dst, src.data(), src.size());
   }
 
   static std::vector<ggml_bf16_t> bf16_vector_from_fp32(const std::vector<float>& src) {
@@ -647,7 +1880,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   void compute_tp1_down_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                  void* grad_down, std::vector<float>* grad_down_fp32_out, void* grad_intermediate,
                                  std::vector<float>* grad_inter_fp32_out, void* grad_down_lora_a,
-                                 void* grad_down_lora_b) const {
+                                 void* grad_down_lora_b, TP1BackwardProfile* profile = nullptr) const {
     if (grad_output == nullptr) {
       throw std::runtime_error("K2 RAWINT4 SFT TP=1 down backward requires grad_output");
     }
@@ -672,6 +1905,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
     std::vector<float> grad_down_fp32(layout.total_tokens * hidden, 0.0f);
 
+    auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     for (int token_idx = 0; token_idx < qlen; token_idx++) {
       const ggml_bf16_t* token_grad = grad_out + static_cast<size_t>(token_idx) * hidden;
       for (int route_idx = 0; route_idx < k; route_idx++) {
@@ -687,8 +1921,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
       }
     }
+    if (profile != nullptr) profile->add_since(section_start, profile->down_route_us);
 
+    section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_down, grad_down_fp32);
+    if (profile != nullptr) profile->add_since(section_start, profile->down_write_us);
 
     if (!need_grad_intermediate && !need_lora_grads) {
       if (grad_down_fp32_out != nullptr) *grad_down_fp32_out = std::move(grad_down_fp32);
@@ -707,44 +1944,82 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       grad_down_b_fp32.assign(static_cast<size_t>(config_.expert_num) * hidden * rank, 0.0f);
     }
 
+    const bool parallel_base = need_grad_intermediate && layout.total_tokens >= 10 && config_.pool != nullptr;
+    if (parallel_base) {
+      section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      std::vector<int> row_to_expert(layout.total_tokens, -1);
+      for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
+        const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+        const int num_tokens = cache.m_local_num_cache[expert_idx];
+        const size_t row_base = layout.expert_base[expert_idx];
+        for (int local_t = 0; local_t < num_tokens; local_t++) {
+          row_to_expert[row_base + static_cast<size_t>(local_t)] = expert_idx;
+        }
+      }
+
+      auto pool = config_.pool->get_subpool(tp_part_idx);
+      pool->do_work_stealing_job(
+          static_cast<int>(layout.total_tokens), nullptr,
+          [&](int row_idx) {
+            const int expert_idx = row_to_expert[static_cast<size_t>(row_idx)];
+            if (expert_idx < 0) return;
+            const float* grad_down_row = grad_down_fp32.data() + static_cast<size_t>(row_idx) * hidden;
+            float* grad_inter_row = grad_inter_fp32.data() + static_cast<size_t>(row_idx) * inter_size;
+            const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
+            const float* down_scales = this->down_bb_[expert_idx]->d;
+            add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
+                                       true);
+          },
+          nullptr);
+      if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
+    }
+
     for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
       const int expert_idx = cache.m_expert_id_map_cache[expert_task];
       const int num_tokens = cache.m_local_num_cache[expert_idx];
       const size_t row_base = layout.expert_base[expert_idx];
+      std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
 
       for (int local_t = 0; local_t < num_tokens; local_t++) {
         const size_t row = row_base + static_cast<size_t>(local_t);
         const float* grad_down_row = grad_down_fp32.data() + row * hidden;
 
-        if (need_grad_intermediate) {
+        if (need_grad_intermediate && !parallel_base) {
+          section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
           const float* down_scales = this->down_bb_[expert_idx]->d;
-
-          for (int h = 0; h < hidden; h++) {
-            const float g = grad_down_row[h];
-            if (g == 0.0f) continue;
-            for (int i = 0; i < inter_size; i++) {
-              grad_inter_row[i] += g * load_kgroup_weight_f32(down_packed, down_scales, h, i, inter_size);
-            }
-          }
+          add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
+                                     layout.total_tokens >= 10 || short_base_fastpath_enabled());
+          if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
         }
 
         if (!need_down_lora_path) continue;
 
-        std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+        std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
         const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
-        for (int h = 0; h < hidden; h++) {
-          const float g = grad_down_row[h];
-          if (g == 0.0f) continue;
-          const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-          for (int r = 0; r < rank; r++) {
-            grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+        section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+        if (rank == 2) {
+          float gb0;
+          float gb1;
+          down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+          grad_times_b[0] = gb0;
+          grad_times_b[1] = gb1;
+        } else {
+          for (int h = 0; h < hidden; h++) {
+            const float g = grad_down_row[h];
+            if (g == 0.0f) continue;
+            const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+            for (int r = 0; r < rank; r++) {
+              grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+            }
           }
         }
+        if (profile != nullptr) profile->add_since(section_start, profile->down_lora_bprop_us);
 
         const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
         if (need_grad_intermediate) {
+          section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           for (int r = 0; r < rank; r++) {
             const float gu = grad_times_b[r] * lora_scaling_;
@@ -753,9 +2028,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
             }
           }
+          if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
         }
 
         if (grad_down_lora_a != nullptr) {
+          section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
           float* grad_a = grad_down_a_fp32.data() + static_cast<size_t>(expert_idx) * rank * inter_size;
           for (int r = 0; r < rank; r++) {
@@ -765,19 +2042,27 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
             }
           }
+          if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
         }
 
         if (grad_down_lora_b != nullptr) {
+          section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const float* down_u_row = cache.down_lora_u_cache + row * rank;
           float* grad_b = grad_down_b_fp32.data() + static_cast<size_t>(expert_idx) * hidden * rank;
-          for (int h = 0; h < hidden; h++) {
-            const float g = grad_down_row[h] * lora_scaling_;
-            if (g == 0.0f) continue;
-            float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
-            for (int r = 0; r < rank; r++) {
-              grad_b_row[r] += g * down_u_row[r];
+          if (rank == 2) {
+            accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
+                                             down_u_row[1] * lora_scaling_, hidden, grad_b);
+          } else {
+            for (int h = 0; h < hidden; h++) {
+              const float g = grad_down_row[h] * lora_scaling_;
+              if (g == 0.0f) continue;
+              float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
+              for (int r = 0; r < rank; r++) {
+                grad_b_row[r] += g * down_u_row[r];
+              }
             }
           }
+          if (profile != nullptr) profile->add_since(section_start, profile->down_lora_b_us);
         }
       }
     }
@@ -818,10 +2103,33 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
+  void compute_tp1_activation_backward_fp32(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
+                                            const float* grad_intermediate, std::vector<float>& grad_gate,
+                                            std::vector<float>& grad_up) const {
+    if (grad_intermediate == nullptr) {
+      throw std::runtime_error("K2 RAWINT4 SFT TP=1 activation backward requires grad_intermediate");
+    }
+
+    const size_t elems = layout.total_tokens * static_cast<size_t>(config_.intermediate_size);
+    grad_gate.assign(elems, 0.0f);
+    grad_up.assign(elems, 0.0f);
+
+    for (size_t idx = 0; idx < elems; idx++) {
+      const float grad_inter = grad_intermediate[idx];
+      const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
+      const float up = GGML_BF16_TO_FP32(cache.up_output_cache[idx]);
+      const float sigmoid = 1.0f / (1.0f + std::exp(-gate));
+      const float silu = gate * sigmoid;
+      const float silu_grad = sigmoid * (1.0f + gate * (1.0f - sigmoid));
+      grad_gate[idx] = grad_inter * up * silu_grad;
+      grad_up[idx] = grad_inter * silu;
+    }
+  }
+
   void compute_tp1_gate_up_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
-                                    const ggml_bf16_t* grad_gate, const ggml_bf16_t* grad_up, void* grad_input,
+                                    const float* grad_gate, const float* grad_up, void* grad_input,
                                     void* grad_gate_lora_a, void* grad_gate_lora_b, void* grad_up_lora_a,
-                                    void* grad_up_lora_b) const {
+                                    void* grad_up_lora_b, TP1BackwardProfile* profile = nullptr) const {
     const int qlen = cache.qlen_cache;
     const int k = cache.k_cache;
     const int hidden = config_.hidden_size;
@@ -853,72 +2161,180 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       grad_up_b_fp32.assign(static_cast<size_t>(config_.expert_num) * inter_size * rank, 0.0f);
     }
 
-    auto backward_one_projection = [&](int expert_idx, int token_idx, const ggml_bf16_t* grad_row,
-                                       const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
-                                       const ggml_bf16_t* lora_b, float* grad_lora_a, float* grad_lora_b) {
+    std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
+    std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+
+    auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
+      if (grad_input == nullptr) return;
       float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
-      const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
+      const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
+      const auto* up_packed = reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b);
+      const float* gate_scales = this->gate_bb_[expert_idx]->d;
+      const float* up_scales = this->up_bb_[expert_idx]->d;
+      const float* grad_gate_row = grad_gate + row * inter_size;
+      const float* grad_up_row = grad_up + row * inter_size;
+      const bool use_four_row_fast_path = qlen >= 10 || short_base_fastpath_enabled();
 
-      if (grad_input != nullptr) {
-        for (int i = 0; i < inter_size; i++) {
-          const float g = GGML_BF16_TO_FP32(grad_row[i]);
-          if (g == 0.0f) continue;
-          for (int h = 0; h < hidden; h++) {
-            grad_input_row[h] += g * load_kgroup_weight_f32(packed_weight, scales, i, h, hidden);
-          }
-        }
-      }
-
-      if (!use_gate_up_lora) return;
-
-      std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
-      std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
-
-      for (int r = 0; r < rank; r++) {
-        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
-        float acc = 0.0f;
-        for (int h = 0; h < hidden; h++) {
-          acc += GGML_BF16_TO_FP32(input_row[h]) * GGML_BF16_TO_FP32(a_row[h]);
-        }
-        lora_u[r] = acc;
-      }
-
-      for (int i = 0; i < inter_size; i++) {
-        const float g = GGML_BF16_TO_FP32(grad_row[i]);
-        if (g == 0.0f) continue;
-        const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
-        if (grad_lora_b != nullptr) {
-          float* grad_b_row =
-              grad_lora_b + static_cast<size_t>(expert_idx) * inter_size * rank + static_cast<size_t>(i) * rank;
-          for (int r = 0; r < rank; r++) {
-            grad_b_row[r] += g * lora_u[r] * lora_scaling_;
-          }
-        }
-        for (int r = 0; r < rank; r++) {
-          grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
-        }
-      }
-
-      for (int r = 0; r < rank; r++) {
-        const float gu = grad_times_b[r] * lora_scaling_;
-        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
-        if (grad_lora_a != nullptr) {
-          float* grad_a_row =
-              grad_lora_a + static_cast<size_t>(expert_idx) * rank * hidden + static_cast<size_t>(r) * hidden;
-          for (int h = 0; h < hidden; h++) {
-            const float x = GGML_BF16_TO_FP32(input_row[h]);
-            grad_a_row[h] += gu * x;
-            grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
-          }
+      auto add_gate_up_base_row = [&](int i) {
+        const float gate_g = grad_gate_row[i];
+        const float up_g = grad_up_row[i];
+        if (gate_g == 0.0f && up_g == 0.0f) return;
+        if (gate_g != 0.0f && up_g != 0.0f) {
+          add_scaled_two_packed_rows_f32(gate_packed, gate_scales, i, gate_g, up_packed, up_scales, i, up_g, hidden,
+                                         grad_input_row);
+        } else if (gate_g != 0.0f) {
+          add_scaled_packed_row_f32(gate_packed, gate_scales, i, hidden, gate_g, grad_input_row);
         } else {
-          for (int h = 0; h < hidden; h++) {
-            grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
-          }
+          add_scaled_packed_row_f32(up_packed, up_scales, i, hidden, up_g, grad_input_row);
         }
+      };
+
+      if (!use_four_row_fast_path) {
+        for (int i = 0; i < inter_size; i++) {
+          add_gate_up_base_row(i);
+        }
+        return;
+      }
+
+      int i = 0;
+      for (; i + 31 < inter_size; i += 32) {
+        add_scaled_thirtytwo_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                              grad_up_row + i, hidden, grad_input_row);
+      }
+      for (; i + 15 < inter_size; i += 16) {
+        add_scaled_sixteen_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                            grad_up_row + i, hidden, grad_input_row);
+      }
+      for (; i + 7 < inter_size; i += 8) {
+        add_scaled_eight_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                          grad_up_row + i, hidden, grad_input_row);
+      }
+      for (; i + 3 < inter_size; i += 4) {
+        add_scaled_four_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                         grad_up_row + i, hidden, grad_input_row);
+      }
+      for (; i + 1 < inter_size; i += 2) {
+        const float gate_g0 = grad_gate_row[i];
+        const float up_g0 = grad_up_row[i];
+        const float gate_g1 = grad_gate_row[i + 1];
+        const float up_g1 = grad_up_row[i + 1];
+        add_scaled_four_packed_rows_f32(gate_packed, gate_scales, i, gate_g0, up_packed, up_scales, i, up_g0,
+                                        gate_packed, gate_scales, i + 1, gate_g1, up_packed, up_scales, i + 1, up_g1,
+                                        hidden, grad_input_row);
+      }
+      if (i < inter_size) {
+        add_gate_up_base_row(i);
       }
     };
 
-    for (int token_idx = 0; token_idx < qlen; token_idx++) {
+    auto backward_one_projection = [&](int expert_idx, int token_idx, const float* grad_row,
+                                       const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
+                                       const ggml_bf16_t* lora_b, float* grad_lora_a, float* grad_lora_b, bool do_base,
+                                       bool do_lora, bool profile_base_inside) {
+      float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
+      const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
+
+      if (do_base && grad_input != nullptr) {
+        const auto section_start = profile_base_inside && profile != nullptr
+                                       ? profile->section_start()
+                                       : TP1BackwardProfile::disabled_time_point();
+        for (int i = 0; i < inter_size; i++) {
+          const float g = grad_row[i];
+          if (g == 0.0f) continue;
+          add_scaled_packed_row_f32(packed_weight, scales, i, hidden, g, grad_input_row);
+        }
+        if (profile_base_inside && profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
+      }
+
+      if (!do_lora || !use_gate_up_lora) return;
+
+      std::fill(lora_u.begin(), lora_u.end(), 0.0f);
+      std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
+
+      auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      if (rank == 2) {
+        const ggml_bf16_t* a0 = lora_a;
+        const ggml_bf16_t* a1 = lora_a + hidden;
+        float acc0;
+        float acc1;
+        bf16_dot2_lora_u(input_row, a0, a1, hidden, acc0, acc1);
+        lora_u[0] = acc0;
+        lora_u[1] = acc1;
+      } else {
+        for (int r = 0; r < rank; r++) {
+          const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+          float acc = 0.0f;
+          for (int h = 0; h < hidden; h++) {
+            acc += GGML_BF16_TO_FP32(input_row[h]) * GGML_BF16_TO_FP32(a_row[h]);
+          }
+          lora_u[r] = acc;
+        }
+      }
+      if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_u_us);
+
+      section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      if (rank == 2) {
+        const float u0_scaled = lora_u[0] * lora_scaling_;
+        const float u1_scaled = lora_u[1] * lora_scaling_;
+        float gb0 = 0.0f;
+        float gb1 = 0.0f;
+        float* grad_b =
+            grad_lora_b == nullptr ? nullptr : grad_lora_b + static_cast<size_t>(expert_idx) * inter_size * 2;
+        accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
+        grad_times_b[0] = gb0;
+        grad_times_b[1] = gb1;
+      } else {
+        for (int i = 0; i < inter_size; i++) {
+          const float g = grad_row[i];
+          if (g == 0.0f) continue;
+          const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
+          if (grad_lora_b != nullptr) {
+            float* grad_b_row =
+                grad_lora_b + static_cast<size_t>(expert_idx) * inter_size * rank + static_cast<size_t>(i) * rank;
+            for (int r = 0; r < rank; r++) {
+              grad_b_row[r] += g * lora_u[r] * lora_scaling_;
+            }
+          }
+          for (int r = 0; r < rank; r++) {
+            grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
+          }
+        }
+      }
+      if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_b_us);
+
+      section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      if (rank == 2) {
+        float* grad_a0 = nullptr;
+        float* grad_a1 = nullptr;
+        if (grad_lora_a != nullptr) {
+          grad_a0 = grad_lora_a + static_cast<size_t>(expert_idx) * 2 * hidden;
+          grad_a1 = grad_a0 + hidden;
+        }
+        accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
+                                             grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0, grad_a1);
+      } else {
+        for (int r = 0; r < rank; r++) {
+          const float gu = grad_times_b[r] * lora_scaling_;
+          const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+          if (grad_lora_a != nullptr) {
+            float* grad_a_row =
+                grad_lora_a + static_cast<size_t>(expert_idx) * rank * hidden + static_cast<size_t>(r) * hidden;
+            for (int h = 0; h < hidden; h++) {
+              const float x = GGML_BF16_TO_FP32(input_row[h]);
+              grad_a_row[h] += gu * x;
+              grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+            }
+          } else {
+            for (int h = 0; h < hidden; h++) {
+              grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+            }
+          }
+        }
+      }
+      if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_a_input_us);
+    };
+
+    auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
       for (int route_idx = 0; route_idx < k; route_idx++) {
         const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
         if (config_.should_skip_expert(expert_id)) continue;
@@ -927,24 +2343,53 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
         const size_t row = layout.expert_base[static_cast<size_t>(expert_idx)] + static_cast<size_t>(local_pos);
 
+        if (do_base && grad_input != nullptr) {
+          const auto section_start = profile_base_inside && profile != nullptr
+                                         ? profile->section_start()
+                                         : TP1BackwardProfile::disabled_time_point();
+          add_gate_up_base(expert_idx, token_idx, row);
+          if (profile_base_inside && profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
+        }
+        if (!do_lora) continue;
+
         backward_one_projection(
             expert_idx, token_idx, grad_gate + row * inter_size,
             reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b), this->gate_bb_[expert_idx]->d,
             use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
             use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
             grad_gate_lora_a != nullptr ? grad_gate_a_fp32.data() : nullptr,
-            grad_gate_lora_b != nullptr ? grad_gate_b_fp32.data() : nullptr);
+            grad_gate_lora_b != nullptr ? grad_gate_b_fp32.data() : nullptr, false, true, false);
         backward_one_projection(
             expert_idx, token_idx, grad_up + row * inter_size,
             reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
             use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
             use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
             grad_up_lora_a != nullptr ? grad_up_a_fp32.data() : nullptr,
-            grad_up_lora_b != nullptr ? grad_up_b_fp32.data() : nullptr);
+            grad_up_lora_b != nullptr ? grad_up_b_fp32.data() : nullptr, false, true, false);
+      }
+    };
+
+    const bool parallel_base = grad_input != nullptr && qlen >= 10 && config_.pool != nullptr;
+    if (parallel_base) {
+      const auto section_start =
+          profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      auto pool = config_.pool->get_subpool(tp_part_idx);
+      pool->do_work_stealing_job(
+          qlen, nullptr, [&](int token_idx) { run_token_routes(token_idx, true, false, false); }, nullptr);
+      if (profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
+      if (use_gate_up_lora) {
+        for (int token_idx = 0; token_idx < qlen; token_idx++) run_token_routes(token_idx, false, true, false);
+      }
+    } else {
+      for (int token_idx = 0; token_idx < qlen; token_idx++) {
+        run_token_routes(token_idx, true, true, true);
       }
     }
 
+    const auto section_start =
+        profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_input, grad_input_fp32);
+    if (profile != nullptr) profile->add_since(section_start, profile->gate_up_write_us);
     write_bf16_vector(grad_gate_lora_a, grad_gate_a_fp32);
     write_bf16_vector(grad_gate_lora_b, grad_gate_b_fp32);
     write_bf16_vector(grad_up_lora_a, grad_up_a_fp32);
@@ -961,23 +2406,475 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const K2ForwardCache& cache = latest_cache();
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
     bool should_pop_cache = true;
+    TP1BackwardProfile profile(tp1_backward_profile_enabled());
 
     try {
       compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
+      profile.mark(profile.grad_weights_us);
 
       std::vector<float> grad_inter_fp32;
       compute_tp1_down_backward(cache, layout, grad_output, nullptr, nullptr, nullptr, &grad_inter_fp32,
-                                grad_down_lora_a, grad_down_lora_b);
+                                grad_down_lora_a, grad_down_lora_b, &profile);
+      profile.mark(profile.down_us);
 
-      std::vector<ggml_bf16_t> grad_inter_bf16 = bf16_vector_from_fp32(grad_inter_fp32);
-      std::vector<ggml_bf16_t> grad_gate_bf16(layout.total_tokens * static_cast<size_t>(config_.intermediate_size));
-      std::vector<ggml_bf16_t> grad_up_bf16(layout.total_tokens * static_cast<size_t>(config_.intermediate_size));
+      std::vector<float> grad_gate_fp32;
+      std::vector<float> grad_up_fp32;
 
-      compute_tp1_activation_backward(cache, layout, grad_inter_bf16.data(), grad_gate_bf16.data(),
-                                      grad_up_bf16.data());
-      compute_tp1_gate_up_backward(cache, layout, grad_gate_bf16.data(), grad_up_bf16.data(), grad_input,
-                                   grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
+      compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
+      profile.mark(profile.activation_us);
+      compute_tp1_gate_up_backward(cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input,
+                                   grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b, &profile);
+      profile.mark(profile.gate_up_us);
 
+      if (profile.enabled) {
+        std::fprintf(stderr,
+                     "[KT_K2_SFT_PROFILE] layer=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld down_us=%lld "
+                     "down_route_us=%lld down_write_us=%lld down_base_us=%lld down_lora_bprop_us=%lld "
+                     "down_lora_a_us=%lld down_lora_b_us=%lld activation_us=%lld gate_up_us=%lld "
+                     "gate_up_base_us=%lld gate_up_lora_u_us=%lld "
+                     "gate_up_lora_b_us=%lld gate_up_lora_b_write_us=%lld "
+                     "gate_up_lora_a_input_us=%lld gate_up_write_us=%lld total_us=%lld\n",
+                     sft_config_.layer_idx, cache.qlen_cache, cache.activated_expert_cache, layout.total_tokens,
+                     profile.grad_weights_us, profile.down_us, profile.down_route_us, profile.down_write_us,
+                     profile.down_base_us, profile.down_lora_bprop_us, profile.down_lora_a_us, profile.down_lora_b_us,
+                     profile.activation_us, profile.gate_up_us, profile.gate_up_base_us, profile.gate_up_lora_u_us,
+                     profile.gate_up_lora_b_us, profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us,
+                     profile.gate_up_write_us, profile.total_us());
+      }
+
+      pop_latest_cache();
+      should_pop_cache = false;
+    } catch (...) {
+      if (should_pop_cache) {
+        try {
+          pop_latest_cache();
+        } catch (...) {
+        }
+      }
+      throw;
+    }
+  }
+
+  void run_tp_packed_backward(const void* grad_output, void* grad_input, void* grad_gate_lora_b, void* grad_up_lora_b,
+                              void* grad_down_lora_a, void* grad_weights, int full_intermediate_size,
+                              float* fp32_grad_down_lora_b, float* fp32_grad_gate_lora_a, float* fp32_grad_up_lora_a) {
+    if (grad_output == nullptr || grad_input == nullptr) {
+      throw std::runtime_error("K2 RAWINT4 SFT TP backward requires grad_output and grad_input");
+    }
+
+    ensure_packed_weight_buffers_ready();
+
+    const K2ForwardCache& cache = latest_cache();
+    const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
+    const int qlen = cache.qlen_cache;
+    const int k = cache.k_cache;
+    const int hidden = config_.hidden_size;
+    const int inter_size = config_.intermediate_size;
+    const int full_inter = full_intermediate_size > 0 ? full_intermediate_size : inter_size;
+    const int rank = lora_rank_;
+
+    if (full_inter < inter_size) {
+      throw std::runtime_error("K2 RAWINT4 SFT TP backward full_intermediate_size is smaller than TP local size");
+    }
+
+    bool should_pop_cache = true;
+    TP1BackwardProfile profile(tp1_backward_profile_enabled());
+    try {
+      const bool use_down_lora = rank > 0 && has_down_lora();
+      const bool need_down_a = grad_down_lora_a != nullptr;
+      const bool need_down_b = fp32_grad_down_lora_b != nullptr;
+      if ((need_down_a || need_down_b) && !use_down_lora) {
+        throw std::runtime_error("K2 RAWINT4 SFT TP backward requires down LoRA weights");
+      }
+      if (need_down_b && cache.down_lora_u_cache == nullptr) {
+        throw std::runtime_error("K2 RAWINT4 SFT TP backward requires cached down LoRA activations");
+      }
+
+      compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
+      profile.mark(profile.grad_weights_us);
+
+      std::vector<float> grad_down_fp32;
+      std::vector<float> grad_inter_fp32;
+      compute_tp1_down_backward(cache, layout, grad_output, nullptr,
+                                (need_down_a || need_down_b) ? &grad_down_fp32 : nullptr, nullptr, &grad_inter_fp32,
+                                nullptr, nullptr, &profile);
+      profile.mark(profile.down_us);
+
+      if (use_down_lora && (need_down_a || need_down_b)) {
+        std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+
+        for (int task = 0; task < cache.activated_expert_cache; task++) {
+          const int expert_idx = cache.m_expert_id_map_cache[task];
+          const int num_tokens = cache.m_local_num_cache[expert_idx];
+          const size_t row_base = layout.expert_base[expert_idx];
+          const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
+
+          for (int local_t = 0; local_t < num_tokens; local_t++) {
+            const size_t row = row_base + static_cast<size_t>(local_t);
+            const float* grad_down_row = grad_down_fp32.data() + row * hidden;
+
+            std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
+            auto section_start = profile.section_start();
+            if (rank == 2) {
+              float gb0;
+              float gb1;
+              down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+              grad_times_b[0] = gb0;
+              grad_times_b[1] = gb1;
+            } else {
+              for (int h = 0; h < hidden; h++) {
+                const float g = grad_down_row[h];
+                if (g == 0.0f) continue;
+                const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+                for (int r = 0; r < rank; r++) {
+                  grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+                }
+              }
+            }
+            profile.add_since(section_start, profile.down_lora_bprop_us);
+
+            if (need_down_a) {
+              section_start = profile.section_start();
+              auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
+              const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
+              for (int r = 0; r < rank; r++) {
+                const float gu = grad_times_b[r] * lora_scaling_;
+                ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
+                for (int i = 0; i < inter_size; i++) {
+                  const float old_v = GGML_BF16_TO_FP32(out_row[i]);
+                  const float add_v = gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+                  out_row[i] = GGML_FP32_TO_BF16(old_v + add_v);
+                }
+              }
+              profile.add_since(section_start, profile.down_lora_a_us);
+            }
+
+            if (need_down_b) {
+              section_start = profile.section_start();
+              const float* down_u_row = cache.down_lora_u_cache + row * rank;
+              float* grad_b = fp32_grad_down_lora_b + static_cast<size_t>(task) * hidden * rank;
+              if (rank == 2) {
+                accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
+                                                 down_u_row[1] * lora_scaling_, hidden, grad_b);
+              } else {
+                for (int h = 0; h < hidden; h++) {
+                  const float g = grad_down_row[h] * lora_scaling_;
+                  if (g == 0.0f) continue;
+                  float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
+                  for (int r = 0; r < rank; r++) {
+                    grad_b_row[r] += g * down_u_row[r];
+                  }
+                }
+              }
+              profile.add_since(section_start, profile.down_lora_b_us);
+            }
+          }
+        }
+      }
+      profile.mark(profile.down_lora_grads_us);
+
+      std::vector<float> grad_gate_fp32;
+      std::vector<float> grad_up_fp32;
+      compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
+      profile.mark(profile.activation_us);
+
+      const bool use_gate_up_lora = rank > 0 && has_gate_up_lora();
+      const bool need_gate_up_lora = grad_gate_lora_b != nullptr || grad_up_lora_b != nullptr ||
+                                     fp32_grad_gate_lora_a != nullptr || fp32_grad_up_lora_a != nullptr;
+      if (need_gate_up_lora && !use_gate_up_lora) {
+        throw std::runtime_error("K2 RAWINT4 SFT TP backward requires gate/up LoRA weights");
+      }
+
+      std::vector<float> grad_input_fp32(static_cast<size_t>(qlen) * hidden, 0.0f);
+      std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
+      std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+      std::vector<float> grad_gate_b_fp32;
+      std::vector<float> grad_up_b_fp32;
+      const bool use_sparse_lora_b = sparse_lora_b_accum_enabled();
+      if (use_sparse_lora_b && use_gate_up_lora && grad_gate_lora_b != nullptr) {
+        grad_gate_b_fp32.assign(static_cast<size_t>(cache.activated_expert_cache) * inter_size * rank, 0.0f);
+      }
+      if (use_sparse_lora_b && use_gate_up_lora && grad_up_lora_b != nullptr) {
+        grad_up_b_fp32.assign(static_cast<size_t>(cache.activated_expert_cache) * inter_size * rank, 0.0f);
+      }
+
+      auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
+        float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
+        const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
+        const auto* up_packed = reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b);
+        const float* gate_scales = this->gate_bb_[expert_idx]->d;
+        const float* up_scales = this->up_bb_[expert_idx]->d;
+        const float* grad_gate_row = grad_gate_fp32.data() + row * inter_size;
+        const float* grad_up_row = grad_up_fp32.data() + row * inter_size;
+        const bool use_four_row_fast_path = qlen >= 10 || short_base_fastpath_enabled();
+
+        auto add_gate_up_base_row = [&](int i) {
+          const float gate_g = grad_gate_row[i];
+          const float up_g = grad_up_row[i];
+          if (gate_g == 0.0f && up_g == 0.0f) return;
+          if (gate_g != 0.0f && up_g != 0.0f) {
+            add_scaled_two_packed_rows_f32(gate_packed, gate_scales, i, gate_g, up_packed, up_scales, i, up_g, hidden,
+                                           grad_input_row);
+          } else if (gate_g != 0.0f) {
+            add_scaled_packed_row_f32(gate_packed, gate_scales, i, hidden, gate_g, grad_input_row);
+          } else {
+            add_scaled_packed_row_f32(up_packed, up_scales, i, hidden, up_g, grad_input_row);
+          }
+        };
+
+        if (!use_four_row_fast_path) {
+          for (int i = 0; i < inter_size; i++) {
+            add_gate_up_base_row(i);
+          }
+          return;
+        }
+
+        int i = 0;
+        for (; i + 15 < inter_size; i += 16) {
+          add_scaled_sixteen_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                              grad_up_row + i, hidden, grad_input_row);
+        }
+        for (; i + 7 < inter_size; i += 8) {
+          add_scaled_eight_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                            grad_up_row + i, hidden, grad_input_row);
+        }
+        for (; i + 3 < inter_size; i += 4) {
+          add_scaled_four_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, grad_gate_row + i,
+                                           grad_up_row + i, hidden, grad_input_row);
+        }
+        for (; i + 1 < inter_size; i += 2) {
+          const float gate_g0 = grad_gate_row[i];
+          const float up_g0 = grad_up_row[i];
+          const float gate_g1 = grad_gate_row[i + 1];
+          const float up_g1 = grad_up_row[i + 1];
+          add_scaled_four_packed_rows_f32(gate_packed, gate_scales, i, gate_g0, up_packed, up_scales, i, up_g0,
+                                          gate_packed, gate_scales, i + 1, gate_g1, up_packed, up_scales, i + 1, up_g1,
+                                          hidden, grad_input_row);
+        }
+        if (i < inter_size) {
+          add_gate_up_base_row(i);
+        }
+      };
+
+      auto backward_one_projection = [&](int task, int expert_idx, int token_idx, const float* grad_row,
+                                         const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
+                                         const ggml_bf16_t* lora_b, float* fp32_grad_lora_a, float* fp32_grad_lora_b,
+                                         void* grad_lora_b, bool do_base, bool do_lora, bool profile_base_inside) {
+        float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
+        const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
+
+        if (do_base) {
+          auto section_start =
+              profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
+          for (int i = 0; i < inter_size; i++) {
+            const float g = grad_row[i];
+            if (g == 0.0f) continue;
+            add_scaled_packed_row_f32(packed_weight, scales, i, hidden, g, grad_input_row);
+          }
+          if (profile_base_inside) profile.add_since(section_start, profile.gate_up_base_us);
+        }
+
+        if (!do_lora || !use_gate_up_lora) return;
+
+        std::fill(lora_u.begin(), lora_u.end(), 0.0f);
+        std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
+
+        auto section_start = profile.section_start();
+        if (rank == 2) {
+          const ggml_bf16_t* a0 = lora_a;
+          const ggml_bf16_t* a1 = lora_a + hidden;
+          float acc0;
+          float acc1;
+          bf16_dot2_scalar(input_row, a0, a1, hidden, acc0, acc1);
+          lora_u[0] = acc0;
+          lora_u[1] = acc1;
+        } else {
+          for (int r = 0; r < rank; r++) {
+            const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+            float acc = 0.0f;
+            for (int h = 0; h < hidden; h++) {
+              acc += GGML_BF16_TO_FP32(input_row[h]) * GGML_BF16_TO_FP32(a_row[h]);
+            }
+            lora_u[r] = acc;
+          }
+        }
+        profile.add_since(section_start, profile.gate_up_lora_u_us);
+
+        auto* out_lora_b = reinterpret_cast<ggml_bf16_t*>(grad_lora_b);
+        section_start = profile.section_start();
+        if (rank == 2) {
+          const float u0_scaled = lora_u[0] * lora_scaling_;
+          const float u1_scaled = lora_u[1] * lora_scaling_;
+          float gb0 = 0.0f;
+          float gb1 = 0.0f;
+          if (fp32_grad_lora_b != nullptr) {
+            float* grad_b = fp32_grad_lora_b + static_cast<size_t>(task) * inter_size * 2;
+            accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
+          } else {
+            for (int i = 0; i < inter_size; i++) {
+              const float g = grad_row[i];
+              if (g == 0.0f) continue;
+              const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * 2;
+              if (out_lora_b != nullptr) {
+                ggml_bf16_t* out_b_row =
+                    out_lora_b + static_cast<size_t>(expert_idx) * full_inter * 2 + static_cast<size_t>(i) * 2;
+                out_b_row[0] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[0]) + g * u0_scaled);
+                out_b_row[1] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[1]) + g * u1_scaled);
+              }
+              gb0 += g * GGML_BF16_TO_FP32(b_row[0]);
+              gb1 += g * GGML_BF16_TO_FP32(b_row[1]);
+            }
+          }
+          grad_times_b[0] = gb0;
+          grad_times_b[1] = gb1;
+        } else {
+          for (int i = 0; i < inter_size; i++) {
+            const float g = grad_row[i];
+            if (g == 0.0f) continue;
+            const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
+            if (fp32_grad_lora_b != nullptr) {
+              float* out_b_row =
+                  fp32_grad_lora_b + (static_cast<size_t>(task) * inter_size + static_cast<size_t>(i)) * rank;
+              for (int r = 0; r < rank; r++) {
+                out_b_row[r] += g * lora_u[r] * lora_scaling_;
+              }
+            } else if (out_lora_b != nullptr) {
+              ggml_bf16_t* out_b_row =
+                  out_lora_b + static_cast<size_t>(expert_idx) * full_inter * rank + static_cast<size_t>(i) * rank;
+              for (int r = 0; r < rank; r++) {
+                const float old_v = GGML_BF16_TO_FP32(out_b_row[r]);
+                out_b_row[r] = GGML_FP32_TO_BF16(old_v + g * lora_u[r] * lora_scaling_);
+              }
+            }
+            for (int r = 0; r < rank; r++) {
+              grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
+            }
+          }
+        }
+        profile.add_since(section_start, profile.gate_up_lora_b_us);
+
+        section_start = profile.section_start();
+        if (rank == 2 && tp_gate_up_a_input_rank2_vec_enabled()) {
+          float* grad_a0 = nullptr;
+          float* grad_a1 = nullptr;
+          if (fp32_grad_lora_a != nullptr) {
+            grad_a0 = fp32_grad_lora_a + static_cast<size_t>(task) * 2 * hidden;
+            grad_a1 = grad_a0 + hidden;
+          }
+          accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
+                                               grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0,
+                                               grad_a1, false);
+        } else {
+          for (int r = 0; r < rank; r++) {
+            const float gu = grad_times_b[r] * lora_scaling_;
+            const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+            if (fp32_grad_lora_a != nullptr) {
+              float* grad_a_row = fp32_grad_lora_a + (static_cast<size_t>(task) * rank + r) * hidden;
+              for (int h = 0; h < hidden; h++) {
+                const float x = GGML_BF16_TO_FP32(input_row[h]);
+                grad_a_row[h] += gu * x;
+                grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+              }
+            } else {
+              for (int h = 0; h < hidden; h++) {
+                grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+              }
+            }
+          }
+        }
+        profile.add_since(section_start, profile.gate_up_lora_a_input_us);
+      };
+
+      auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
+        for (int route_idx = 0; route_idx < k; route_idx++) {
+          const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
+          if (config_.should_skip_expert(expert_id)) continue;
+
+          const int expert_idx = static_cast<int>(expert_id);
+          const int task = layout.expert_task_index[expert_idx];
+          const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
+          const size_t row = layout.expert_base[static_cast<size_t>(expert_idx)] + static_cast<size_t>(local_pos);
+
+          if (do_base) {
+            auto section_start =
+                profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
+            add_gate_up_base(expert_idx, token_idx, row);
+            if (profile_base_inside) profile.add_since(section_start, profile.gate_up_base_us);
+          }
+          if (!do_lora) continue;
+
+          backward_one_projection(
+              task, expert_idx, token_idx, grad_gate_fp32.data() + row * inter_size,
+              reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b), this->gate_bb_[expert_idx]->d,
+              use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
+              use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
+              fp32_grad_gate_lora_a, grad_gate_b_fp32.empty() ? nullptr : grad_gate_b_fp32.data(),
+              grad_gate_b_fp32.empty() ? grad_gate_lora_b : nullptr, false, true, false);
+          backward_one_projection(
+              task, expert_idx, token_idx, grad_up_fp32.data() + row * inter_size,
+              reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
+              use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
+              use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
+              fp32_grad_up_lora_a, grad_up_b_fp32.empty() ? nullptr : grad_up_b_fp32.data(),
+              grad_up_b_fp32.empty() ? grad_up_lora_b : nullptr, false, true, false);
+        }
+      };
+
+      const bool parallel_base = qlen >= 10 && config_.pool != nullptr;
+      if (parallel_base) {
+        auto section_start = profile.section_start();
+        auto pool = config_.pool->get_subpool(tp_part_idx);
+        pool->do_work_stealing_job(
+            qlen, nullptr, [&](int token_idx) { run_token_routes(token_idx, true, false, false); }, nullptr);
+        profile.add_since(section_start, profile.gate_up_base_us);
+        if (use_gate_up_lora) {
+          for (int token_idx = 0; token_idx < qlen; token_idx++) run_token_routes(token_idx, false, true, false);
+        }
+      } else {
+        for (int token_idx = 0; token_idx < qlen; token_idx++) {
+          run_token_routes(token_idx, true, true, true);
+        }
+      }
+
+      if ((grad_gate_lora_b != nullptr && !grad_gate_b_fp32.empty()) ||
+          (grad_up_lora_b != nullptr && !grad_up_b_fp32.empty())) {
+        auto section_start = profile.section_start();
+        auto write_sparse_lora_b = [&](void* dst_ptr, const std::vector<float>& src) {
+          if (dst_ptr == nullptr || src.empty()) return;
+          auto* dst = reinterpret_cast<ggml_bf16_t*>(dst_ptr);
+          for (int task = 0; task < cache.activated_expert_cache; task++) {
+            const int expert_idx = cache.m_expert_id_map_cache[task];
+            const float* src_expert = src.data() + static_cast<size_t>(task) * inter_size * rank;
+            ggml_bf16_t* dst_expert = dst + static_cast<size_t>(expert_idx) * full_inter * rank;
+            write_bf16_array(dst_expert, src_expert, static_cast<size_t>(inter_size) * rank);
+          }
+        };
+        write_sparse_lora_b(grad_gate_lora_b, grad_gate_b_fp32);
+        write_sparse_lora_b(grad_up_lora_b, grad_up_b_fp32);
+        profile.add_since(section_start, profile.gate_up_lora_b_write_us);
+      }
+
+      auto section_start = profile.section_start();
+      write_bf16_vector(grad_input, grad_input_fp32);
+      profile.add_since(section_start, profile.gate_up_write_us);
+      profile.mark(profile.gate_up_us);
+      if (profile.enabled) {
+        std::fprintf(stderr,
+                     "[KT_K2_SFT_PROFILE] layer=%d tp_part=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld "
+                     "down_us=%lld down_lora_grads_us=%lld down_route_us=%lld down_write_us=%lld "
+                     "down_base_us=%lld down_lora_bprop_us=%lld down_lora_a_us=%lld down_lora_b_us=%lld "
+                     "activation_us=%lld gate_up_us=%lld "
+                     "gate_up_base_us=%lld gate_up_lora_u_us=%lld gate_up_lora_b_us=%lld "
+                     "gate_up_lora_b_write_us=%lld gate_up_lora_a_input_us=%lld "
+                     "gate_up_write_us=%lld total_us=%lld\n",
+                     sft_config_.layer_idx, tp_part_idx, cache.qlen_cache, cache.activated_expert_cache,
+                     layout.total_tokens, profile.grad_weights_us, profile.down_us, profile.down_lora_grads_us,
+                     profile.down_route_us, profile.down_write_us, profile.down_base_us, profile.down_lora_bprop_us,
+                     profile.down_lora_a_us, profile.down_lora_b_us, profile.activation_us, profile.gate_up_us,
+                     profile.gate_up_base_us, profile.gate_up_lora_u_us, profile.gate_up_lora_b_us,
+                     profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us, profile.gate_up_write_us,
+                     profile.total_us());
+      }
       pop_latest_cache();
       should_pop_cache = false;
     } catch (...) {
@@ -994,9 +2891,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
   static constexpr bool kUsesKGroupPackedBaseWeights = true;
-  static constexpr bool kHasInt4PackedBackward = false;
+  static constexpr bool kHasInt4PackedBackward = true;
   static constexpr bool kSupportsForwardCache = true;
-  static constexpr bool kSupportsBackward = kHasInt4PackedBackward;
+  static constexpr bool kSupportsBackward = true;
   static constexpr bool kSupportsTPReferenceBackward = false;
   static constexpr bool kSupportsTP1DirectBackward = true;
 
@@ -1213,273 +3110,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                 float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr) {
-    if constexpr (!kHasInt4PackedBackward) {
-      throw std::runtime_error(packed_backward_retired_message());
-    }
-    if (grad_output == nullptr || grad_input == nullptr) {
-      throw std::runtime_error("K2 RAWINT4 SFT backward requires grad_output and grad_input");
-    }
-
-    const K2ForwardCache& cache = latest_cache();
-    const int qlen = cache.qlen_cache;
-    const int k = cache.k_cache;
-    const int hidden = config_.hidden_size;
-    const int inter_size = config_.intermediate_size;
-    const int full_inter = full_intermediate_size > 0 ? full_intermediate_size : inter_size;
-    const int rank = lora_rank_;
-
-    if (full_inter < inter_size) {
-      throw std::runtime_error("K2 RAWINT4 SFT backward full_intermediate_size is smaller than TP local size");
-    }
-
-    ensure_bwd_shadow_ready();
-
-    debug_backward_sample(grad_output, nullptr, grad_weights);
-
-    std::vector<size_t> expert_base(static_cast<size_t>(config_.expert_num), 0);
-    std::vector<int> expert_task_index(static_cast<size_t>(config_.expert_num), -1);
-    size_t total_tokens = 0;
-    for (int task = 0; task < cache.activated_expert_cache; task++) {
-      const int expert_idx = cache.m_expert_id_map_cache[task];
-      expert_base[expert_idx] = total_tokens;
-      expert_task_index[expert_idx] = task;
-      total_tokens += static_cast<size_t>(cache.m_local_num_cache[expert_idx]);
-    }
-
-    auto zero_lora_b_slice = [&](void* ptr) {
-      if (ptr == nullptr || rank <= 0) return;
-      auto* out = reinterpret_cast<ggml_bf16_t*>(ptr);
-      for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
-        for (int i = 0; i < inter_size; i++) {
-          std::memset(out + (static_cast<size_t>(expert_idx) * full_inter + i) * rank, 0,
-                      static_cast<size_t>(rank) * sizeof(ggml_bf16_t));
-        }
-      }
-    };
-    auto zero_down_a_slice = [&]() {
-      if (grad_down_lora_a == nullptr || rank <= 0) return;
-      auto* out = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
-      for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
-        for (int r = 0; r < rank; r++) {
-          std::memset(out + (static_cast<size_t>(expert_idx) * rank + r) * full_inter, 0,
-                      static_cast<size_t>(inter_size) * sizeof(ggml_bf16_t));
-        }
-      }
-    };
-    zero_lora_b_slice(grad_gate_lora_b);
-    zero_lora_b_slice(grad_up_lora_b);
-    zero_down_a_slice();
-
-    auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
-    std::vector<float> grad_down_fp32(total_tokens * hidden, 0.0f);
-    for (int token_idx = 0; token_idx < qlen; token_idx++) {
-      const ggml_bf16_t* token_grad = grad_out + static_cast<size_t>(token_idx) * hidden;
-      for (int route_idx = 0; route_idx < k; route_idx++) {
-        const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
-        if (config_.should_skip_expert(expert_id)) continue;
-
-        const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
-        const size_t row = expert_base[static_cast<size_t>(expert_id)] + static_cast<size_t>(local_pos);
-        const float route_weight = cache.weights_cache[static_cast<size_t>(token_idx) * k + route_idx];
-        float* grad_down_row = grad_down_fp32.data() + row * hidden;
-        for (int h = 0; h < hidden; h++) {
-          grad_down_row[h] += GGML_BF16_TO_FP32(token_grad[h]) * route_weight;
-        }
-      }
-    }
-
-    std::vector<float> grad_inter_fp32(total_tokens * inter_size, 0.0f);
-    const bool use_down_lora = rank > 0 && has_down_lora();
-    if ((grad_down_lora_a != nullptr || fp32_grad_down_lora_b != nullptr) && !use_down_lora) {
-      throw std::runtime_error("K2 RAWINT4 SFT backward requires down LoRA weights for down LoRA grads");
-    }
-
-    for (int task = 0; task < cache.activated_expert_cache; task++) {
-      const int expert_idx = cache.m_expert_id_map_cache[task];
-      const int num_tokens = cache.m_local_num_cache[expert_idx];
-      const size_t row_base = expert_base[expert_idx];
-
-      for (int local_t = 0; local_t < num_tokens; local_t++) {
-        const size_t row = row_base + static_cast<size_t>(local_t);
-        const float* grad_down_row = grad_down_fp32.data() + row * hidden;
-        float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
-        const ggml_bf16_t* down_shadow = down_bwd_shadow_ + static_cast<size_t>(expert_idx) * hidden * inter_size;
-
-        for (int h = 0; h < hidden; h++) {
-          const float g = grad_down_row[h];
-          if (g == 0.0f) continue;
-          const ggml_bf16_t* down_row = down_shadow + static_cast<size_t>(h) * inter_size;
-          for (int i = 0; i < inter_size; i++) {
-            grad_inter_row[i] += g * GGML_BF16_TO_FP32(down_row[i]);
-          }
-        }
-
-        if (!use_down_lora) continue;
-
-        std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
-        const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
-        for (int h = 0; h < hidden; h++) {
-          const float g = grad_down_row[h];
-          if (g == 0.0f) continue;
-          const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-          for (int r = 0; r < rank; r++) {
-            grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
-          }
-        }
-
-        const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
-        for (int r = 0; r < rank; r++) {
-          const float gu = grad_times_b[r] * lora_scaling_;
-          const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
-          for (int i = 0; i < inter_size; i++) {
-            grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
-          }
-        }
-
-        if (grad_down_lora_a != nullptr) {
-          auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
-          const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
-            for (int i = 0; i < inter_size; i++) {
-              const float old_v = GGML_BF16_TO_FP32(out_row[i]);
-              const float add_v = gu * GGML_BF16_TO_FP32(intermediate_row[i]);
-              out_row[i] = GGML_FP32_TO_BF16(old_v + add_v);
-            }
-          }
-        }
-
-        if (fp32_grad_down_lora_b != nullptr) {
-          const float* down_u_row = cache.down_lora_u_cache + row * rank;
-          float* grad_b = fp32_grad_down_lora_b + static_cast<size_t>(task) * hidden * rank;
-          for (int h = 0; h < hidden; h++) {
-            const float g = grad_down_row[h] * lora_scaling_;
-            if (g == 0.0f) continue;
-            float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
-            for (int r = 0; r < rank; r++) {
-              grad_b_row[r] += g * down_u_row[r];
-            }
-          }
-        }
-      }
-    }
-
-    std::vector<float> grad_gate_fp32(total_tokens * inter_size, 0.0f);
-    std::vector<float> grad_up_fp32(total_tokens * inter_size, 0.0f);
-    for (size_t idx = 0; idx < total_tokens * inter_size; idx++) {
-      const float grad_inter = grad_inter_fp32[idx];
-      const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
-      const float up = GGML_BF16_TO_FP32(cache.up_output_cache[idx]);
-      const float sigmoid = 1.0f / (1.0f + std::exp(-gate));
-      const float silu = gate * sigmoid;
-      const float silu_grad = sigmoid * (1.0f + gate * (1.0f - sigmoid));
-      grad_gate_fp32[idx] = grad_inter * up * silu_grad;
-      grad_up_fp32[idx] = grad_inter * silu;
-    }
-
-    const bool use_gate_up_lora = rank > 0 && has_gate_up_lora();
-    if ((grad_gate_lora_b != nullptr || grad_up_lora_b != nullptr || fp32_grad_gate_lora_a != nullptr ||
-         fp32_grad_up_lora_a != nullptr) &&
-        !use_gate_up_lora) {
-      throw std::runtime_error("K2 RAWINT4 SFT backward requires gate/up LoRA weights for gate/up LoRA grads");
-    }
-
-    std::vector<float> grad_input_fp32(static_cast<size_t>(qlen) * hidden, 0.0f);
-    auto backward_one_projection = [&](int task, int expert_idx, int token_idx, const float* grad_row,
-                                       const ggml_bf16_t* shadow_weight, const ggml_bf16_t* lora_a,
-                                       const ggml_bf16_t* lora_b, float* fp32_grad_lora_a, void* grad_lora_b) {
-      float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
-      const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
-
-      for (int i = 0; i < inter_size; i++) {
-        const float g = grad_row[i];
-        if (g == 0.0f) continue;
-        const ggml_bf16_t* weight_row = shadow_weight + static_cast<size_t>(i) * hidden;
-        for (int h = 0; h < hidden; h++) {
-          grad_input_row[h] += g * GGML_BF16_TO_FP32(weight_row[h]);
-        }
-      }
-
-      if (!use_gate_up_lora) return;
-
-      std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
-      std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
-      for (int r = 0; r < rank; r++) {
-        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
-        float acc = 0.0f;
-        for (int h = 0; h < hidden; h++) {
-          acc += GGML_BF16_TO_FP32(input_row[h]) * GGML_BF16_TO_FP32(a_row[h]);
-        }
-        lora_u[r] = acc;
-      }
-
-      auto* out_lora_b = reinterpret_cast<ggml_bf16_t*>(grad_lora_b);
-      for (int i = 0; i < inter_size; i++) {
-        const float g = grad_row[i];
-        if (g == 0.0f) continue;
-        const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
-        if (out_lora_b != nullptr) {
-          ggml_bf16_t* out_b_row = out_lora_b + (static_cast<size_t>(expert_idx) * full_inter + i) * rank;
-          for (int r = 0; r < rank; r++) {
-            const float old_v = GGML_BF16_TO_FP32(out_b_row[r]);
-            out_b_row[r] = GGML_FP32_TO_BF16(old_v + g * lora_u[r] * lora_scaling_);
-          }
-        }
-        for (int r = 0; r < rank; r++) {
-          grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
-        }
-      }
-
-      for (int r = 0; r < rank; r++) {
-        const float gu = grad_times_b[r] * lora_scaling_;
-        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
-        if (fp32_grad_lora_a != nullptr) {
-          float* grad_a_row = fp32_grad_lora_a + (static_cast<size_t>(task) * rank + r) * hidden;
-          for (int h = 0; h < hidden; h++) {
-            const float x = GGML_BF16_TO_FP32(input_row[h]);
-            grad_a_row[h] += gu * x;
-            grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
-          }
-        } else {
-          for (int h = 0; h < hidden; h++) {
-            grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
-          }
-        }
-      }
-    };
-
-    for (int token_idx = 0; token_idx < qlen; token_idx++) {
-      for (int route_idx = 0; route_idx < k; route_idx++) {
-        const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
-        if (config_.should_skip_expert(expert_id)) continue;
-
-        const int expert_idx = static_cast<int>(expert_id);
-        const int task = expert_task_index[expert_idx];
-        const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
-        const size_t row = expert_base[static_cast<size_t>(expert_idx)] + static_cast<size_t>(local_pos);
-
-        backward_one_projection(
-            task, expert_idx, token_idx, grad_gate_fp32.data() + row * inter_size,
-            gate_bwd_shadow_ + static_cast<size_t>(expert_idx) * inter_size * hidden,
-            use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
-            use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
-            fp32_grad_gate_lora_a, grad_gate_lora_b);
-        backward_one_projection(
-            task, expert_idx, token_idx, grad_up_fp32.data() + row * inter_size,
-            up_bwd_shadow_ + static_cast<size_t>(expert_idx) * inter_size * hidden,
-            use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
-            use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
-            fp32_grad_up_lora_a, grad_up_lora_b);
-      }
-    }
-
-    auto* out_grad_input = reinterpret_cast<ggml_bf16_t*>(grad_input);
-    for (size_t i = 0; i < grad_input_fp32.size(); i++) {
-      out_grad_input[i] = GGML_FP32_TO_BF16(grad_input_fp32[i]);
-    }
-
-    pop_latest_cache();
+    (void)grad_gate_lora_a;
+    (void)grad_up_lora_a;
+    (void)grad_down_lora_b;
+    run_tp_packed_backward(grad_output, grad_input, grad_gate_lora_b, grad_up_lora_b, grad_down_lora_a, grad_weights,
+                           full_intermediate_size, fp32_grad_down_lora_b, fp32_grad_gate_lora_a, fp32_grad_up_lora_a);
   }
 
   void backward_tp1_direct(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
@@ -1749,18 +3384,15 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   void debug_backward_gate_up_sample(const void* grad_output, void* grad_input, void* grad_gate_lora_a,
                                      void* grad_gate_lora_b, void* grad_up_lora_a, void* grad_up_lora_b) const {
     const K2ForwardCache& cache = latest_cache();
-    const int inter_size = config_.intermediate_size;
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
 
     std::vector<float> grad_inter_fp32;
     compute_tp1_down_backward(cache, layout, grad_output, nullptr, nullptr, nullptr, &grad_inter_fp32, nullptr,
                               nullptr);
-    std::vector<ggml_bf16_t> grad_inter_bf16 = bf16_vector_from_fp32(grad_inter_fp32);
-    std::vector<ggml_bf16_t> grad_gate_storage(layout.total_tokens * static_cast<size_t>(inter_size));
-    std::vector<ggml_bf16_t> grad_up_storage(layout.total_tokens * static_cast<size_t>(inter_size));
+    std::vector<float> grad_gate_storage;
+    std::vector<float> grad_up_storage;
 
-    compute_tp1_activation_backward(cache, layout, grad_inter_bf16.data(), grad_gate_storage.data(),
-                                    grad_up_storage.data());
+    compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_storage, grad_up_storage);
     compute_tp1_gate_up_backward(cache, layout, grad_gate_storage.data(), grad_up_storage.data(), grad_input,
                                  grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
   }

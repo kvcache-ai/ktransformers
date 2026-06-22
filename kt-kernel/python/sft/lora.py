@@ -26,6 +26,13 @@ from .arch import MOEArchConfig
 logger = logging.getLogger(__name__)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
 # =============================================================================
 # LoRA Experts Modules
 # =============================================================================
@@ -161,6 +168,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         is_rank_0 = dist.get_rank() == 0
 
     adapted_count = 0
+    skipped_count = 0
     for wrapper in wrappers:
         moe_config = wrapper.moe_config
         layer_idx = wrapper.layer_idx
@@ -168,6 +176,18 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         experts = getattr(wrapper, experts_attr, None)
 
         if experts is None:
+            continue
+
+        if getattr(wrapper, "_skip_expert_lora_adaptation", False) or _env_bool(
+            "ACCELERATE_KT_SKIP_EXPERT_LORA_ADAPTATION"
+        ):
+            wrapper._peft_lora_modules = {}
+            wrapper._fused_expert_lora_params = None
+            skipped_count += 1
+            logger.info(
+                f"[kt_adapt_peft_lora] Layer {layer_idx}: skipping KT expert LoRA adaptation "
+                "(nonexpert PEFT LoRA mode)"
+            )
             continue
 
         # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
@@ -266,6 +286,8 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             continue
         if getattr(wrapper, "_fused_experts", False):
             continue
+        if getattr(wrapper, "_skip_expert_lora_adaptation", False):
+            continue
         for expert in experts:
             for param_name, param in list(expert.named_parameters()):
                 if param.requires_grad:
@@ -276,6 +298,8 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                     continue
                 if storage_bytes > 2:
                     continue  # Skip non-placeholder params
+                if param.numel() <= 1:
+                    continue  # Already shrunk (idempotent)
 
                 # This is a tiny-storage placeholder (base weight) — replace with
                 # a scalar (1,) parameter so FSDP broadcasts only 1 element.
@@ -300,6 +324,9 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             f"[kt_adapt_peft_lora] Shrunk {shrunk_count} expert base weight params "
             f"to shape (1,), FSDP broadcast savings={shrunk_saved_bytes / 1024 / 1024:.1f} MB"
         )
+
+    if skipped_count > 0:
+        logger.info(f"[kt_adapt_peft_lora] Skipped expert LoRA adaptation for {skipped_count} layers")
 
     logger.info(f"[kt_adapt_peft_lora] Adapted {adapted_count} layers (PEFT LoRA mode)")
 

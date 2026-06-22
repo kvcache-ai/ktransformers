@@ -662,11 +662,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
   }
 
   std::tuple<int, int, int, std::vector<int>, std::vector<int>> debug_cache_summary() const {
-    if (tp_count != 1) {
-      throw std::runtime_error("SFT forward cache debug hook currently supports TP=1 only");
-    }
     if constexpr (requires(const T& t) { t.debug_cache_summary(); }) {
-      return tps[0]->debug_cache_summary();
+      auto summary = tps[0]->debug_cache_summary();
+      for (int i = 1; i < tp_count; i++) {
+        auto shard_summary = tps[i]->debug_cache_summary();
+        if (std::get<0>(summary) != std::get<0>(shard_summary) || std::get<1>(summary) != std::get<1>(shard_summary) ||
+            std::get<2>(summary) != std::get<2>(shard_summary) || std::get<3>(summary) != std::get<3>(shard_summary) ||
+            std::get<4>(summary) != std::get<4>(shard_summary)) {
+          throw std::runtime_error("SFT TP forward cache debug summaries differ across TP shards");
+        }
+      }
+      return summary;
     } else {
       throw std::runtime_error("SFT forward cache debug hook is not implemented for this backend");
     }
@@ -820,6 +826,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights) {
+    if constexpr (kSupportsTP1DirectBackward && requires(T& t) {
+                    t.backward_tp1_direct(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                          nullptr);
+                  }) {
+      if (tp_count == 1) {
+        tps[0]->backward_tp1_direct(grad_output, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a,
+                                    grad_up_lora_b, grad_down_lora_a, grad_down_lora_b, grad_weights);
+        return;
+      }
+    }
+
     if constexpr (!kSupportsBackward && !kSupportsTPReferenceBackward) {
       if constexpr (kSupportsTP1DirectBackward && requires(T& t) {
                       t.backward_tp1_direct(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,

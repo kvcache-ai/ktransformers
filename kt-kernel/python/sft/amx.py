@@ -113,6 +113,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self._is_skip_lora = "SkipLoRA" in method
         self.group_size = group_size
         self.zero_point = False if self._is_kgroup else zero_point
+        self._supports_kgroup_packed_backward = self._is_kgroup
         self._supports_tp1_packed_backward = self._is_kgroup and threadpool_count == 1
 
         if method not in _SFT_METHOD_TO_CLASS:
@@ -147,13 +148,14 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             save_for_backward,
         )
 
-    def _make_backward_task(self, buffer: KExpertsSFTBuffer):
+    def _make_backward_task(self, buffer: KExpertsSFTBuffer, compute_grad_weights: bool = True):
+        grad_weights_ptr = buffer.grad_weights.data_ptr() if compute_grad_weights else 0
         if self._is_skip_lora:
             return self.moe.backward_task(
                 buffer.grad_output_cpu.data_ptr(),
                 buffer.grad_input_cpu.data_ptr(),
                 0, 0, 0, 0, 0, 0,
-                buffer.grad_weights.data_ptr(),
+                grad_weights_ptr,
             )
         return self.moe.backward_task(
             buffer.grad_output_cpu.data_ptr(),
@@ -164,7 +166,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.grad_up_lora_b.data_ptr(),
             self.grad_down_lora_a.data_ptr(),
             self.grad_down_lora_b.data_ptr(),
-            buffer.grad_weights.data_ptr(),
+            grad_weights_ptr,
         )
 
     # ========== Weight loading ==========
