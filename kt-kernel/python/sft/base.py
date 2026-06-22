@@ -361,6 +361,35 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
         return self._return_output(buffer, qlen, output_device)
 
+    # ========== Serving inference compatibility ==========
+
+    def submit_forward_inference(
+        self,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        weights: torch.Tensor,
+        cuda_stream=None,
+    ) -> None:
+        """Submit a serving forward without training cache.
+
+        The cuda_stream argument is accepted for API compatibility with the
+        optimized inference wrapper. This fallback uses the SFT async path and
+        returns the output to the original input device in sync_forward_inference().
+        """
+        self._pending_inference_output_device = hidden_states.device
+        self.submit_forward(
+            hidden_states,
+            expert_ids,
+            weights,
+            save_for_backward=False,
+        )
+
+    def sync_forward_inference(self, cuda_stream=None) -> torch.Tensor:
+        """Synchronize a serving forward submitted by submit_forward_inference()."""
+        output_device = getattr(self, "_pending_inference_output_device", None)
+        self._pending_inference_output_device = None
+        return self.sync_forward(output_device=output_device)
+
     # ========== Async backward ==========
 
     def submit_backward_async(
