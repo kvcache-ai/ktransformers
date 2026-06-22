@@ -74,6 +74,23 @@ def get_moe_arch_config(config) -> MOEArchConfig:
     """
     arch = config.architectures[0] if getattr(config, "architectures", None) else ""
 
+    cfg = getattr(config, "text_config", config)
+    model_type = getattr(config, "model_type", "")
+    text_model_type = getattr(cfg, "model_type", "")
+
+    if "KimiK25" in arch or model_type == "kimi_k25" or text_model_type == "kimi_k2":
+        return MOEArchConfig(
+            moe_layer_attr="mlp",
+            router_attr="gate",
+            experts_attr="experts",
+            weight_names=("gate_proj", "up_proj", "down_proj"),
+            expert_num=cfg.n_routed_experts,
+            intermediate_size=cfg.moe_intermediate_size,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            has_shared_experts=getattr(cfg, "n_shared_experts", 0) > 0,
+            router_type="deepseek_gate",
+        )
+
     if "DeepseekV2" in arch:
         return MOEArchConfig(
             moe_layer_attr="mlp",
@@ -155,6 +172,9 @@ def detect_fused_experts(experts: nn.Module) -> bool:
 
 def _get_layers_prefix(config) -> str:
     arch = config.architectures[0] if getattr(config, "architectures", None) else ""
+    model_type = getattr(config, "model_type", "")
+    if "KimiK25" in arch or model_type == "kimi_k25":
+        return "language_model.model.layers"
     if "Qwen3_5Moe" in arch:
         return "model.language_model.layers"
     return "model.layers"

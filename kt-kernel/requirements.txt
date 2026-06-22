@@ -3,7 +3,7 @@
 # You can skip this file if you already have these packages installed
 
 # Core dependencies (minimum versions)
-torch>=2.10,<2.12
+torch==2.9.1
 safetensors>=0.4.0
 numpy>=1.24.0
 triton>=2.0.0

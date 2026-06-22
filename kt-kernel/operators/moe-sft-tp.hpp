@@ -8,7 +8,6 @@
 #ifndef CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 #define CPUINFER_OPERATOR_MOE_SFT_TP_HPP
 
-
 #include <immintrin.h>
 
 #include <algorithm>
@@ -23,6 +22,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "amx/la/amx.hpp"
@@ -145,6 +145,43 @@ template <class T>
 class TP_MOE_SFT : public TP_MOE<T> {
  public:
   static constexpr bool kSkipLoRA = T::kSkipLoRA;
+
+  static constexpr bool supports_forward_cache() {
+    if constexpr (requires { T::kSupportsForwardCache; }) {
+      return T::kSupportsForwardCache;
+    } else {
+      return true;
+    }
+  }
+
+  static constexpr bool supports_backward() {
+    if constexpr (requires { T::kSupportsBackward; }) {
+      return T::kSupportsBackward;
+    } else {
+      return true;
+    }
+  }
+
+  static constexpr bool supports_tp_reference_backward() {
+    if constexpr (requires { T::kSupportsTPReferenceBackward; }) {
+      return T::kSupportsTPReferenceBackward;
+    } else {
+      return false;
+    }
+  }
+
+  static constexpr bool supports_tp1_direct_backward() {
+    if constexpr (requires { T::kSupportsTP1DirectBackward; }) {
+      return T::kSupportsTP1DirectBackward;
+    } else {
+      return true;
+    }
+  }
+
+  static constexpr bool kSupportsForwardCache = supports_forward_cache();
+  static constexpr bool kSupportsBackward = supports_backward();
+  static constexpr bool kSupportsTPReferenceBackward = supports_tp_reference_backward();
+  static constexpr bool kSupportsTP1DirectBackward = supports_tp1_direct_backward();
 
   using Base = TP_MOE<T>;
   using Base::config;
@@ -339,8 +376,102 @@ class TP_MOE_SFT : public TP_MOE<T> {
         // No-TP: just call load_weights directly
         pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
       } else {
-        // TP mode with K2 would need int4-aware partitioning (not implemented yet)
-        throw std::runtime_error("K2 pre-quantized mode does not support TP > 1 yet");
+        if constexpr (requires(T& t) {
+                        t.set_k2_packed_weight_scale_pointers(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                      }) {
+          int& group_size = config.quant_config.group_size;
+          if (group_size <= 0 || config.intermediate_size % tp_count != 0 ||
+              (config.intermediate_size / tp_count) % group_size != 0) {
+            throw std::runtime_error("K2 pre-quantized TP requires intermediate_size/tp_count divisible by group_size");
+          }
+
+          std::vector<uint8_t*> temp_gate_proj(tp_count, nullptr);
+          std::vector<uint8_t*> temp_up_proj(tp_count, nullptr);
+          std::vector<uint8_t*> temp_down_proj(tp_count, nullptr);
+          std::vector<ggml_bf16_t*> temp_gate_scale(tp_count, nullptr);
+          std::vector<ggml_bf16_t*> temp_up_scale(tp_count, nullptr);
+          std::vector<ggml_bf16_t*> temp_down_scale(tp_count, nullptr);
+
+          pool->dispense_backend()->do_numa_job([&, this](int i) {
+            auto& tpc = tp_configs[i];
+            const size_t weight_elem_count = static_cast<size_t>(tpc.intermediate_size) * tpc.hidden_size;
+            const size_t scales_elem_count =
+                (static_cast<size_t>(tpc.hidden_size) / group_size) * tpc.intermediate_size;
+
+            temp_gate_proj[i] = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
+            temp_up_proj[i] = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
+            temp_down_proj[i] = new uint8_t[(tpc.expert_num * weight_elem_count) / 2];
+            temp_gate_scale[i] = new ggml_bf16_t[tpc.expert_num * scales_elem_count];
+            temp_up_scale[i] = new ggml_bf16_t[tpc.expert_num * scales_elem_count];
+            temp_down_scale[i] = new ggml_bf16_t[tpc.expert_num * scales_elem_count];
+
+            pool->get_subpool(i)->do_work_stealing_job(
+                tpc.expert_num, nullptr,
+                [&, i, weight_elem_count, scales_elem_count](int expert_id_) {
+                  const size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
+
+                  std::memcpy(
+                      temp_gate_proj[i] + ((expert_id * weight_elem_count) >> 1),
+                      (uint8_t*)config.gate_proj +
+                          ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                      weight_elem_count >> 1);
+
+                  std::memcpy(
+                      temp_up_proj[i] + ((expert_id * weight_elem_count) >> 1),
+                      (uint8_t*)config.up_proj +
+                          ((expert_id * config.intermediate_size * config.hidden_size + i * weight_elem_count) >> 1),
+                      weight_elem_count >> 1);
+
+                  std::memcpy(temp_gate_scale[i] + expert_id * scales_elem_count,
+                              (ggml_bf16_t*)config.gate_scale +
+                                  (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+                                   i * scales_elem_count),
+                              sizeof(ggml_bf16_t) * scales_elem_count);
+
+                  std::memcpy(temp_up_scale[i] + expert_id * scales_elem_count,
+                              (ggml_bf16_t*)config.up_scale +
+                                  (expert_id * (config.hidden_size / group_size) * config.intermediate_size +
+                                   i * scales_elem_count),
+                              sizeof(ggml_bf16_t) * scales_elem_count);
+
+                  for (int col = 0; col < config.hidden_size; col++) {
+                    std::memcpy(
+                        temp_down_proj[i] +
+                            ((expert_id * weight_elem_count + static_cast<size_t>(col) * tpc.intermediate_size) >> 1),
+                        (uint8_t*)config.down_proj +
+                            ((expert_id * config.intermediate_size * config.hidden_size +
+                              static_cast<size_t>(col) * config.intermediate_size + i * tpc.intermediate_size) >>
+                             1),
+                        tpc.intermediate_size >> 1);
+                    std::memcpy(temp_down_scale[i] + (expert_id * scales_elem_count +
+                                                      static_cast<size_t>(col) * (tpc.intermediate_size / group_size)),
+                                (ggml_bf16_t*)config.down_scale +
+                                    (expert_id * (config.intermediate_size / group_size) * config.hidden_size +
+                                     static_cast<size_t>(col) * (config.intermediate_size / group_size) +
+                                     i * (tpc.intermediate_size / group_size)),
+                                sizeof(ggml_bf16_t) * (tpc.intermediate_size / group_size));
+                  }
+                },
+                nullptr);
+
+            tps[i]->set_k2_packed_weight_scale_pointers(temp_gate_proj[i], temp_up_proj[i], temp_down_proj[i],
+                                                        temp_gate_scale[i], temp_up_scale[i], temp_down_scale[i]);
+          });
+
+          pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+
+          pool->dispense_backend()->do_numa_job([&, this](int i) {
+            tps[i]->set_k2_packed_weight_scale_pointers(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+            delete[] temp_gate_proj[i];
+            delete[] temp_up_proj[i];
+            delete[] temp_down_proj[i];
+            delete[] temp_gate_scale[i];
+            delete[] temp_up_scale[i];
+            delete[] temp_down_scale[i];
+          });
+        } else {
+          throw std::runtime_error("K2 pre-quantized TP requires a K2 SFT backend");
+        }
       }
     } else if (config.gate_proj != nullptr) {
       printf("TP_MOE_SFT: From BF16 with partitioning\n");
@@ -489,6 +620,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("Weights not loaded");
     }
 
+    if constexpr (!kSupportsForwardCache) {
+      if (save_for_backward) {
+        throw std::runtime_error("K2 RAWINT4 SFT backward cache is not implemented yet");
+      }
+    }
 
     int qlen = *qlen_ptr;
     auto pool = config.pool;
@@ -504,7 +640,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                 save_for_backward);
     });
 
-
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
     // }
@@ -514,9 +649,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Merge results from all NUMA nodes
     this->merge_results(qlen, output);
 
-
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {
-    });
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
 
   /**
@@ -526,6 +659,144 @@ class TP_MOE_SFT : public TP_MOE<T> {
                            intptr_t output, bool save_for_backward) {
     forward_sft((int*)qlen_ptr, k, (const int64_t*)expert_ids, (const float*)weights, (const void*)input, (void*)output,
                 save_for_backward);
+  }
+
+  std::tuple<int, int, int, std::vector<int>, std::vector<int>> debug_cache_summary() const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT forward cache debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_cache_summary(); }) {
+      return tps[0]->debug_cache_summary();
+    } else {
+      throw std::runtime_error("SFT forward cache debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_copy_forward_cache(intptr_t input, intptr_t gate, intptr_t up, intptr_t intermediate, intptr_t down,
+                                intptr_t down_lora_u) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT forward cache debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) {
+                    t.debug_copy_forward_cache(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                  }) {
+      tps[0]->debug_copy_forward_cache((void*)input, (void*)gate, (void*)up, (void*)intermediate, (void*)down,
+                                       (void*)down_lora_u);
+    } else {
+      throw std::runtime_error("SFT forward cache debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_remerge_forward_cache(intptr_t output) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT forward cache remerge hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_remerge_forward_cache(nullptr); }) {
+      tps[0]->debug_remerge_forward_cache((void*)output);
+    } else {
+      throw std::runtime_error("SFT forward cache remerge hook is not implemented for this backend");
+    }
+  }
+
+  std::tuple<bool, int, int, int> debug_bwd_shadow_summary() const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT BF16 shadow debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_bwd_shadow_summary(); }) {
+      return tps[0]->debug_bwd_shadow_summary();
+    } else {
+      throw std::runtime_error("SFT BF16 shadow debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_copy_bwd_shadow(intptr_t gate, intptr_t up, intptr_t down) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT BF16 shadow debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_copy_bwd_shadow(nullptr, nullptr, nullptr); }) {
+      tps[0]->debug_copy_bwd_shadow((void*)gate, (void*)up, (void*)down);
+    } else {
+      throw std::runtime_error("SFT BF16 shadow debug hook is not implemented for this backend");
+    }
+  }
+
+  std::tuple<bool, int, int, int, int, size_t, size_t, size_t, size_t> debug_packed_weight_summary() const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT packed weight debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_packed_weight_summary(); }) {
+      return tps[0]->debug_packed_weight_summary();
+    } else {
+      throw std::runtime_error("SFT packed weight debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_copy_packed_weights(intptr_t gate, intptr_t up, intptr_t down, intptr_t gate_scale, intptr_t up_scale,
+                                 intptr_t down_scale) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT packed weight debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) {
+                    t.debug_copy_packed_weights(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                  }) {
+      tps[0]->debug_copy_packed_weights((void*)gate, (void*)up, (void*)down, (void*)gate_scale, (void*)up_scale,
+                                        (void*)down_scale);
+    } else {
+      throw std::runtime_error("SFT packed weight debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_backward_sample(intptr_t grad_output, intptr_t grad_input, intptr_t grad_weights) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT backward sample debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_backward_sample(nullptr, nullptr, nullptr); }) {
+      tps[0]->debug_backward_sample((const void*)grad_output, (void*)grad_input, (void*)grad_weights);
+    } else {
+      throw std::runtime_error("SFT backward sample debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_backward_down_sample(intptr_t grad_output, intptr_t grad_down, intptr_t grad_intermediate,
+                                  intptr_t grad_down_lora_a, intptr_t grad_down_lora_b) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT backward down sample debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_backward_down_sample(nullptr, nullptr, nullptr, nullptr, nullptr); }) {
+      tps[0]->debug_backward_down_sample((const void*)grad_output, (void*)grad_down, (void*)grad_intermediate,
+                                         (void*)grad_down_lora_a, (void*)grad_down_lora_b);
+    } else {
+      throw std::runtime_error("SFT backward down sample debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_backward_activation_sample(intptr_t grad_output, intptr_t grad_intermediate, intptr_t grad_gate,
+                                        intptr_t grad_up) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT backward activation sample debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) { t.debug_backward_activation_sample(nullptr, nullptr, nullptr, nullptr); }) {
+      tps[0]->debug_backward_activation_sample((const void*)grad_output, (void*)grad_intermediate, (void*)grad_gate,
+                                               (void*)grad_up);
+    } else {
+      throw std::runtime_error("SFT backward activation sample debug hook is not implemented for this backend");
+    }
+  }
+
+  void debug_backward_gate_up_sample(intptr_t grad_output, intptr_t grad_input, intptr_t grad_gate_lora_a,
+                                     intptr_t grad_gate_lora_b, intptr_t grad_up_lora_a,
+                                     intptr_t grad_up_lora_b) const {
+    if (tp_count != 1) {
+      throw std::runtime_error("SFT backward gate/up sample debug hook currently supports TP=1 only");
+    }
+    if constexpr (requires(const T& t) {
+                    t.debug_backward_gate_up_sample(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+                  }) {
+      tps[0]->debug_backward_gate_up_sample((const void*)grad_output, (void*)grad_input, (void*)grad_gate_lora_a,
+                                            (void*)grad_gate_lora_b, (void*)grad_up_lora_a, (void*)grad_up_lora_b);
+    } else {
+      throw std::runtime_error("SFT backward gate/up sample debug hook is not implemented for this backend");
+    }
   }
 
   /**
@@ -549,8 +820,23 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights) {
-    auto pool = config.pool;
+    if constexpr (!kSupportsBackward && !kSupportsTPReferenceBackward) {
+      if constexpr (kSupportsTP1DirectBackward && requires(T& t) {
+                      t.backward_tp1_direct(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                            nullptr);
+                    }) {
+        if (tp_count != 1) {
+          throw std::runtime_error("SFT TP=1 direct backward fallback only supports tp_count=1");
+        }
+        tps[0]->backward_tp1_direct(grad_output, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a,
+                                    grad_up_lora_b, grad_down_lora_a, grad_down_lora_b, grad_weights);
+        return;
+      } else {
+        throw std::runtime_error("K2 RAWINT4 SFT packed backward is not implemented yet; BF16 shadow path is retired");
+      }
+    }
 
+    auto pool = config.pool;
 
     // Get full intermediate_size (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
@@ -656,7 +942,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                },
                                nullptr);
 
-
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
     std::vector<ggml_bf16_t*> tp_gate_b_ptr(tp_count);
@@ -726,42 +1011,27 @@ class TP_MOE_SFT : public TP_MOE<T> {
       pool->do_work_stealing_job(
           qlen, nullptr,
           [&](int token_id) {
-            const ggml_bf16_t* src0 = part_grad_input_[0] + (size_t)token_id * hidden_size;
-            const ggml_bf16_t* src1 = (tp_count > 1) ? (part_grad_input_[1] + (size_t)token_id * hidden_size) : nullptr;
-            const ggml_bf16_t* src2 = (tp_count > 2) ? (part_grad_input_[2] + (size_t)token_id * hidden_size) : nullptr;
-            const ggml_bf16_t* src3 = (tp_count > 3) ? (part_grad_input_[3] + (size_t)token_id * hidden_size) : nullptr;
-
+            const size_t token_offset = (size_t)token_id * hidden_size;
             ggml_bf16_t* dst = out + (size_t)token_id * hidden_size;
 
             int h = 0;
             for (; h + 32 <= hidden_size; h += 32) {
-              __m512 sum0, sum1;
-              avx512_32xbf16_to_32xfp32((__m512i*)(src0 + h), &sum0, &sum1);
-              if (src1) {
+              __m512 sum0 = _mm512_setzero_ps();
+              __m512 sum1 = _mm512_setzero_ps();
+              for (int tp = 0; tp < tp_count; tp++) {
+                const ggml_bf16_t* src = part_grad_input_[tp] + token_offset;
                 __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(src1 + h), &x0, &x1);
-                sum0 = _mm512_add_ps(sum0, x0);
-                sum1 = _mm512_add_ps(sum1, x1);
-              }
-              if (src2) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(src2 + h), &x0, &x1);
-                sum0 = _mm512_add_ps(sum0, x0);
-                sum1 = _mm512_add_ps(sum1, x1);
-              }
-              if (src3) {
-                __m512 x0, x1;
-                avx512_32xbf16_to_32xfp32((__m512i*)(src3 + h), &x0, &x1);
+                avx512_32xbf16_to_32xfp32((__m512i*)(src + h), &x0, &x1);
                 sum0 = _mm512_add_ps(sum0, x0);
                 sum1 = _mm512_add_ps(sum1, x1);
               }
               avx512_32xfp32_to_32xbf16(&sum0, &sum1, (__m512i*)(dst + h));
             }
             for (; h < hidden_size; h++) {
-              float sum = GGML_BF16_TO_FP32(src0[h]);
-              if (src1) sum += GGML_BF16_TO_FP32(src1[h]);
-              if (src2) sum += GGML_BF16_TO_FP32(src2[h]);
-              if (src3) sum += GGML_BF16_TO_FP32(src3[h]);
+              float sum = 0.0f;
+              for (int tp = 0; tp < tp_count; tp++) {
+                sum += GGML_BF16_TO_FP32(part_grad_input_[tp][token_offset + h]);
+              }
               dst[h] = GGML_FP32_TO_BF16(sum);
             }
           },
@@ -858,32 +1128,26 @@ class TP_MOE_SFT : public TP_MOE<T> {
             size_t end = begin + kBlock;
             if (end > total) end = total;
 
-            const float* s0 = part_grad_weights_[0];
-            const float* s1 = (tp_count > 1) ? part_grad_weights_[1] : nullptr;
-            const float* s2 = (tp_count > 2) ? part_grad_weights_[2] : nullptr;
-            const float* s3 = (tp_count > 3) ? part_grad_weights_[3] : nullptr;
-
             size_t i = begin;
             for (; i + 16 <= end; i += 16) {
-              __m512 v = _mm512_loadu_ps(s0 + i);
-              if (s1) v = _mm512_add_ps(v, _mm512_loadu_ps(s1 + i));
-              if (s2) v = _mm512_add_ps(v, _mm512_loadu_ps(s2 + i));
-              if (s3) v = _mm512_add_ps(v, _mm512_loadu_ps(s3 + i));
+              __m512 v = _mm512_setzero_ps();
+              for (int tp = 0; tp < tp_count; tp++) {
+                v = _mm512_add_ps(v, _mm512_loadu_ps(part_grad_weights_[tp] + i));
+              }
               _mm512_storeu_ps(out_grad_weights + i, v);
             }
             for (; i < end; i++) {
-              float sum = s0[i];
-              if (s1) sum += s1[i];
-              if (s2) sum += s2[i];
-              if (s3) sum += s3[i];
+              float sum = 0.0f;
+              for (int tp = 0; tp < tp_count; tp++) {
+                sum += part_grad_weights_[tp][i];
+              }
               out_grad_weights[i] = sum;
             }
           },
           nullptr);
     }
 
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {
-    });
+    pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
 
   /**
@@ -944,27 +1208,25 @@ class TP_MOE_SFT : public TP_MOE<T> {
       auto subpool = pool->get_subpool(numa_id);
 
       // Work-stealing: copy all weights for this expert (gate + up + down)
-      subpool->do_work_stealing_job(
-          expert_num,
-          [&](int e) {
-            // gate_lora_b: [expert_num, intermediate_size, lora_rank]
-            memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
-                   (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
-                   sizeof(ggml_bf16_t) * lora_b_slice);
+      subpool->do_work_stealing_job(expert_num, [&](int e) {
+        // gate_lora_b: [expert_num, intermediate_size, lora_rank]
+        memcpy(partitioned_gate_lora_b_[numa_id] + e * lora_b_slice,
+               (ggml_bf16_t*)gate_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+               sizeof(ggml_bf16_t) * lora_b_slice);
 
-            // up_lora_b: [expert_num, intermediate_size, lora_rank]
-            memcpy(partitioned_up_lora_b_[numa_id] + e * lora_b_slice,
-                   (ggml_bf16_t*)up_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
-                   sizeof(ggml_bf16_t) * lora_b_slice);
+        // up_lora_b: [expert_num, intermediate_size, lora_rank]
+        memcpy(partitioned_up_lora_b_[numa_id] + e * lora_b_slice,
+               (ggml_bf16_t*)up_lora_b + e * full_intermediate_size * lora_rank + numa_id * lora_b_slice,
+               sizeof(ggml_bf16_t) * lora_b_slice);
 
-            // down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
-            for (int r = 0; r < lora_rank; r++) {
-              memcpy(partitioned_down_lora_a_[numa_id] + e * lora_rank * tp_inter + r * tp_inter,
-                     (ggml_bf16_t*)down_lora_a + e * lora_rank * full_intermediate_size + r * full_intermediate_size +
-                         numa_id * tp_inter,
-                     sizeof(ggml_bf16_t) * tp_inter);
-            }
-          });
+        // down_lora_a: [expert_num, lora_rank, intermediate_size] - row-wise slice
+        for (int r = 0; r < lora_rank; r++) {
+          memcpy(partitioned_down_lora_a_[numa_id] + e * lora_rank * tp_inter + r * tp_inter,
+                 (ggml_bf16_t*)down_lora_a + e * lora_rank * full_intermediate_size + r * full_intermediate_size +
+                     numa_id * tp_inter,
+                 sizeof(ggml_bf16_t) * tp_inter);
+        }
+      });
 
       // Update weights after all memcpy complete
       tps[numa_id]->update_lora_weights(gate_lora_a, partitioned_gate_lora_b_[numa_id], up_lora_a,
@@ -1018,6 +1280,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * @param path Output directory path
    */
   void prepare_and_save_bwd(void* gate, void* up, void* down, const std::string& path) {
+    if constexpr (!kSupportsBackward) {
+      throw std::runtime_error("K2 RAWINT4 SFT backward weight save is not implemented yet");
+    }
+
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -1069,6 +1335,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void submit_backward_repack() {
     if (!config.share_backward_bb) return;
+
+    if constexpr (!kSupportsBackward) {
+      throw std::runtime_error("K2 RAWINT4 SFT async backward repack is not implemented yet");
+    }
 
     // Join any previous repack first
     if (repack_thread_.joinable()) repack_thread_.join();

@@ -89,6 +89,21 @@ EOF
 install_dependencies() {
   echo "Checking and installing system dependencies..."
 
+  if command -v cmake &> /dev/null; then
+    echo "cmake already available at $(command -v cmake). Skipping conda cmake install."
+  elif command -v conda &> /dev/null; then
+    echo "Installing cmake via conda..."
+    conda install -y cmake
+  else
+    echo "Warning: conda not found. Skipping cmake installation via conda."
+    echo "Please install conda or manually install cmake."
+  fi
+
+  if command -v pkg-config &> /dev/null && pkg-config --exists hwloc; then
+    echo "pkg-config and hwloc development files are already available. Skipping OS package install."
+    return 0
+  fi
+
   # Determine if we need to use sudo
   SUDO=""
   if [ "${EUID:-0}" -ne 0 ]; then
@@ -98,14 +113,6 @@ install_dependencies() {
       echo "Warning: Not running as root and sudo not found. Package installation may fail."
       echo "Please run as root or install sudo."
     fi
-  fi
-
-  if command -v conda &> /dev/null; then
-    echo "Installing cmake via conda..."
-    conda install -y cmake
-  else
-    echo "Warning: conda not found. Skipping cmake installation via conda."
-    echo "Please install conda or manually install cmake."
   fi
 
   # Detect OS type
@@ -399,10 +406,15 @@ echo "  CPUINFER_PARALLEL            = ${CPUINFER_PARALLEL:-AUTO}"
 echo "  CPUINFER_VERBOSE             = ${CPUINFER_VERBOSE:-1}"
 echo ""
 
+local pip_args=(".")
+if [ "${KT_KERNEL_PIP_NO_BUILD_ISOLATION:-0}" = "1" ]; then
+  pip_args+=("--no-build-isolation")
+fi
+
 if [ ${CPUINFER_VERBOSE:-1} = "0" ]; then
-  python3 -m pip install .
+  python3 -m pip install "${pip_args[@]}"
 else
-  python3 -m pip install . -v
+  python3 -m pip install "${pip_args[@]}" -v
 fi
 }
 

@@ -23,9 +23,11 @@ try:
         AMXBF16_SFT_MOE,
         AMXInt8_SFT_MOE,
         AMXInt4_SFT_MOE,
+        AMXInt4_KGroup_SFT_MOE,
         AMXBF16_SFT_MOE_SkipLoRA,
         AMXInt8_SFT_MOE_SkipLoRA,
         AMXInt4_SFT_MOE_SkipLoRA,
+        AMXInt4_KGroup_SFT_MOE_SkipLoRA,
     )
 
     _HAS_AMX_SFT_SUPPORT = True
@@ -34,9 +36,11 @@ except (ImportError, AttributeError):
     AMXBF16_SFT_MOE = None
     AMXInt8_SFT_MOE = None
     AMXInt4_SFT_MOE = None
+    AMXInt4_KGroup_SFT_MOE = None
     AMXBF16_SFT_MOE_SkipLoRA = None
     AMXInt8_SFT_MOE_SkipLoRA = None
     AMXInt4_SFT_MOE_SkipLoRA = None
+    AMXInt4_KGroup_SFT_MOE_SkipLoRA = None
 
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 
@@ -46,9 +50,11 @@ _SFT_METHOD_TO_CLASS = {
     "AMXBF16_SFT": AMXBF16_SFT_MOE,
     "AMXINT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
+    "AMXINT4_KGroup_SFT": AMXInt4_KGroup_SFT_MOE,
     "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
     "AMXINT8_SFT_SkipLoRA": AMXInt8_SFT_MOE_SkipLoRA,
     "AMXINT4_SFT_SkipLoRA": AMXInt4_SFT_MOE_SkipLoRA,
+    "AMXINT4_KGroup_SFT_SkipLoRA": AMXInt4_KGroup_SFT_MOE_SkipLoRA,
 }
 
 
@@ -103,9 +109,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
 
         self.method = method
+        self._is_kgroup = "KGroup" in method
         self._is_skip_lora = "SkipLoRA" in method
         self.group_size = group_size
-        self.zero_point = zero_point
+        self.zero_point = False if self._is_kgroup else zero_point
+        self._supports_tp1_packed_backward = self._is_kgroup and threadpool_count == 1
 
         if method not in _SFT_METHOD_TO_CLASS:
             raise ValueError(f"Unknown SFT method: {method}. Supported: {list(_SFT_METHOD_TO_CLASS.keys())}")
@@ -117,6 +125,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.gate_proj: Optional[torch.Tensor] = None
         self.up_proj: Optional[torch.Tensor] = None
         self.down_proj: Optional[torch.Tensor] = None
+        self.gate_scale: Optional[torch.Tensor] = None
+        self.up_scale: Optional[torch.Tensor] = None
+        self.down_scale: Optional[torch.Tensor] = None
+        self.gate_bwd_shadow: Optional[torch.Tensor] = None
+        self.up_bwd_shadow: Optional[torch.Tensor] = None
+        self.down_bwd_shadow: Optional[torch.Tensor] = None
 
         self._moe_class = moe_class
 
@@ -200,6 +214,15 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             config.gate_proj = self.gate_proj.data_ptr()
             config.up_proj = self.up_proj.data_ptr()
             config.down_proj = self.down_proj.data_ptr()
+            if getattr(self, "_use_kgroup_tensor_path", False):
+                config.gate_scale = self.gate_scale.data_ptr()
+                config.up_scale = self.up_scale.data_ptr()
+                config.down_scale = self.down_scale.data_ptr()
+
+        if self.gate_bwd_shadow is not None and not self._is_kgroup:
+            config.gate_bwd_shadow = self.gate_bwd_shadow.data_ptr()
+            config.up_bwd_shadow = self.up_bwd_shadow.data_ptr()
+            config.down_bwd_shadow = self.down_bwd_shadow.data_ptr()
 
         if self._lora_initialized:
             config.gate_lora_a = self.gate_lora_a.data_ptr()
@@ -211,7 +234,8 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         config.pool = self.cpu_infer.backend_
 
-        if self.method in ("AMXINT4_KGroup_SFT", "AMXINT4_1KGroup_SFT"):
+        if self._is_kgroup:
+            config.quant_config.bits = 4
             config.quant_config.group_size = self.group_size
             config.quant_config.zero_point = self.zero_point
 
@@ -227,6 +251,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.gate_proj = None
         self.up_proj = None
         self.down_proj = None
+        self.gate_scale = None
+        self.up_scale = None
+        self.down_scale = None
+        self.gate_bwd_shadow = None
+        self.up_bwd_shadow = None
+        self.down_bwd_shadow = None
 
         if getattr(self, "_bf16_gate_proj", None) is not None:
             self._bf16_gate_proj = None
@@ -252,6 +282,35 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         self._weights_loaded = True
 
+    def set_backward_shadow_weights(
+        self,
+        gate_proj: torch.Tensor,
+        up_proj: torch.Tensor,
+        down_proj: torch.Tensor,
+    ) -> None:
+        if self._is_kgroup:
+            raise RuntimeError(
+                "KGroup SFT TP=1 backward uses packed weights directly; BF16 shadow weights are debug-only."
+            )
+
+        expected_shapes = {
+            "gate_proj": (self.num_experts, self.moe_intermediate_size, self.hidden_size),
+            "up_proj": (self.num_experts, self.moe_intermediate_size, self.hidden_size),
+            "down_proj": (self.num_experts, self.hidden_size, self.moe_intermediate_size),
+        }
+        provided = {
+            "gate_proj": gate_proj,
+            "up_proj": up_proj,
+            "down_proj": down_proj,
+        }
+        for name, tensor in provided.items():
+            if tuple(tensor.shape) != expected_shapes[name]:
+                raise ValueError(f"{name} shape mismatch: expected {expected_shapes[name]}, got {tuple(tensor.shape)}")
+
+        self.gate_bwd_shadow = gate_proj.cpu().to(torch.bfloat16).contiguous()
+        self.up_bwd_shadow = up_proj.cpu().to(torch.bfloat16).contiguous()
+        self.down_bwd_shadow = down_proj.cpu().to(torch.bfloat16).contiguous()
+
     def load_weights_from_tensors(
         self,
         gate_proj: torch.Tensor,
@@ -259,11 +318,62 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         down_proj: torch.Tensor,
         physical_to_logical_map_cpu: torch.Tensor,
     ) -> None:
+        if self._is_kgroup:
+            raise RuntimeError(
+                "KGroup SFT tensor loading requires packed weights and scales. "
+                "Call load_kgroup_weights_from_tensors() instead."
+            )
         self.gate_proj = gate_proj.contiguous()
         self.up_proj = up_proj.contiguous()
         self.down_proj = down_proj.contiguous()
         self.load_weights(physical_to_logical_map_cpu)
         del gate_proj, up_proj, down_proj
+
+    def load_kgroup_weights_from_tensors(
+        self,
+        gate_proj: torch.Tensor,
+        gate_scale: torch.Tensor,
+        up_proj: torch.Tensor,
+        up_scale: torch.Tensor,
+        down_proj: torch.Tensor,
+        down_scale: torch.Tensor,
+        physical_to_logical_map_cpu: torch.Tensor,
+    ) -> None:
+        if not self._is_kgroup:
+            raise RuntimeError("load_kgroup_weights_from_tensors() is only valid for KGroup SFT methods.")
+
+        packed_elems = self.num_experts * self.moe_intermediate_size * self.hidden_size // 2
+        gate_up_scale_elems = self.num_experts * self.moe_intermediate_size * (self.hidden_size // self.group_size)
+        down_scale_elems = self.num_experts * self.hidden_size * (self.moe_intermediate_size // self.group_size)
+
+        expected = {
+            "gate_proj": packed_elems,
+            "up_proj": packed_elems,
+            "down_proj": packed_elems,
+            "gate_scale": gate_up_scale_elems,
+            "up_scale": gate_up_scale_elems,
+            "down_scale": down_scale_elems,
+        }
+        provided = {
+            "gate_proj": gate_proj,
+            "up_proj": up_proj,
+            "down_proj": down_proj,
+            "gate_scale": gate_scale,
+            "up_scale": up_scale,
+            "down_scale": down_scale,
+        }
+        for name, tensor in provided.items():
+            if tensor.numel() != expected[name]:
+                raise ValueError(f"{name} numel mismatch: expected {expected[name]}, got {tensor.numel()}")
+
+        self.gate_proj = gate_proj.cpu().to(torch.uint8).contiguous()
+        self.up_proj = up_proj.cpu().to(torch.uint8).contiguous()
+        self.down_proj = down_proj.cpu().to(torch.uint8).contiguous()
+        self.gate_scale = gate_scale.cpu().to(torch.bfloat16).contiguous()
+        self.up_scale = up_scale.cpu().to(torch.bfloat16).contiguous()
+        self.down_scale = down_scale.cpu().to(torch.bfloat16).contiguous()
+        self._use_kgroup_tensor_path = True
+        self.load_weights(physical_to_logical_map_cpu)
 
     def _load_base_weights_from_file(self) -> None:
         if not hasattr(self, "weight_path") or self.weight_path is None:

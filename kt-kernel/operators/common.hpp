@@ -269,6 +269,13 @@ struct GeneralMOEConfig {
   void* up_zero = nullptr;
   void* down_zero = nullptr;
 
+  // Optional BF16 shadow weights for backward-only math when forward uses a packed format.
+  // Layout: gate/up [expert_num, intermediate_size, hidden_size],
+  // down [expert_num, hidden_size, intermediate_size].
+  void* gate_bwd_shadow = nullptr;
+  void* up_bwd_shadow = nullptr;
+  void* down_bwd_shadow = nullptr;
+
   QuantConfig quant_config;
 
   // for amx
@@ -290,6 +297,11 @@ struct GeneralMOEConfig {
   std::vector<std::vector<void*>> gate_bwd_scales;
   std::vector<std::vector<void*>> up_bwd_scales;
   std::vector<std::vector<void*>> down_bwd_scales;
+
+  // Optional per-TP/per-expert BF16 shadow weights for packed forward backends.
+  std::vector<std::vector<void*>> gate_bwd_shadow_projs;
+  std::vector<std::vector<void*>> up_bwd_shadow_projs;
+  std::vector<std::vector<void*>> down_bwd_shadow_projs;
 
   std::string path;
   bool save = false;

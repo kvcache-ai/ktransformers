@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from .arch import MOEArchConfig
+from .arch import KTAMXConfigError, MOEArchConfig
 from .dist_utils import _maybe_zero3_gathered_parameters
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,260 @@ def extract_moe_weights(
     down_proj = torch.stack(down_weights, dim=0)
 
     return gate_proj, up_proj, down_proj
+
+
+@dataclass
+class KGroupExpertWeights:
+    gate_proj: torch.Tensor
+    gate_scale: torch.Tensor
+    up_proj: torch.Tensor
+    up_scale: torch.Tensor
+    down_proj: torch.Tensor
+    down_scale: torch.Tensor
+    gate_bwd_shadow: torch.Tensor | None = None
+    up_bwd_shadow: torch.Tensor | None = None
+    down_bwd_shadow: torch.Tensor | None = None
+
+
+def extract_kgroup_moe_weights(
+    moe_module: nn.Module,
+    moe_config: MOEArchConfig,
+    hidden_size: int,
+    group_size: int,
+) -> KGroupExpertWeights:
+    """
+    Extract pre-packed KGroup tensors from a wrapped MoE module.
+
+    The source module may expose ``_kt_kgroup_tensors`` as a dict with:
+      gate_proj, gate_scale, up_proj, up_scale, down_proj, down_scale
+
+    Optional BF16 shadow keys retained for archived/debug-only inspection:
+      gate_bwd_shadow/up_bwd_shadow/down_bwd_shadow
+    """
+    tensors = getattr(moe_module, "_kt_kgroup_tensors", None)
+    if tensors is None:
+        raise KTAMXConfigError(
+            "AMXINT4_KGroup SFT tensor wrapping requires pre-packed KGroup tensors on "
+            "moe_module._kt_kgroup_tensors, or a kt_weight_path for direct C++ loading."
+        )
+    if not isinstance(tensors, dict):
+        raise KTAMXConfigError("moe_module._kt_kgroup_tensors must be a dict.")
+
+    def require_tensor(name: str) -> torch.Tensor:
+        value = tensors.get(name)
+        if not isinstance(value, torch.Tensor):
+            raise KTAMXConfigError(f"moe_module._kt_kgroup_tensors[{name!r}] must be a torch.Tensor.")
+        return value
+
+    def optional_tensor(*names: str) -> torch.Tensor | None:
+        for name in names:
+            value = tensors.get(name)
+            if value is None:
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise KTAMXConfigError(f"moe_module._kt_kgroup_tensors[{name!r}] must be a torch.Tensor.")
+            return value
+        return None
+
+    if hidden_size % group_size != 0 or moe_config.intermediate_size % group_size != 0:
+        raise KTAMXConfigError(
+            f"KGroup group_size={group_size} must divide hidden_size={hidden_size} "
+            f"and intermediate_size={moe_config.intermediate_size}."
+        )
+
+    expert_num = moe_config.expert_num
+    intermediate_size = moe_config.intermediate_size
+    packed_elems = expert_num * intermediate_size * hidden_size // 2
+    gate_up_scale_elems = expert_num * intermediate_size * (hidden_size // group_size)
+    down_scale_elems = expert_num * hidden_size * (intermediate_size // group_size)
+    expected_numel = {
+        "gate_proj": packed_elems,
+        "up_proj": packed_elems,
+        "down_proj": packed_elems,
+        "gate_scale": gate_up_scale_elems,
+        "up_scale": gate_up_scale_elems,
+        "down_scale": down_scale_elems,
+    }
+
+    required = {name: require_tensor(name) for name in expected_numel}
+    for name, tensor in required.items():
+        if tensor.numel() != expected_numel[name]:
+            raise KTAMXConfigError(
+                f"KGroup tensor {name} numel mismatch: expected {expected_numel[name]}, got {tensor.numel()}."
+            )
+
+    gate_bwd_shadow = optional_tensor("gate_bwd_shadow", "gate_bwd")
+    up_bwd_shadow = optional_tensor("up_bwd_shadow", "up_bwd")
+    down_bwd_shadow = optional_tensor("down_bwd_shadow", "down_bwd")
+    shadows = (gate_bwd_shadow, up_bwd_shadow, down_bwd_shadow)
+    if any(tensor is not None for tensor in shadows) and not all(tensor is not None for tensor in shadows):
+        raise KTAMXConfigError(
+            "KGroup debug-only BF16 shadow tensors must be provided all together: "
+            "gate_bwd_shadow, up_bwd_shadow, and down_bwd_shadow."
+        )
+
+    return KGroupExpertWeights(
+        gate_proj=required["gate_proj"],
+        gate_scale=required["gate_scale"],
+        up_proj=required["up_proj"],
+        up_scale=required["up_scale"],
+        down_proj=required["down_proj"],
+        down_scale=required["down_scale"],
+        gate_bwd_shadow=gate_bwd_shadow,
+        up_bwd_shadow=up_bwd_shadow,
+        down_bwd_shadow=down_bwd_shadow,
+    )
+
+
+def _load_safetensors_index(weight_path: str) -> tuple[dict[str, str], str]:
+    index_path = os.path.join(weight_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        weight_map = metadata.get("weight_map")
+        if not isinstance(weight_map, dict):
+            raise KTAMXConfigError(f"{index_path} does not contain a valid weight_map.")
+        return weight_map, weight_path
+
+    safetensor_files = _find_safetensor_files(weight_path)
+    index: dict[str, str] = {}
+    for file_path in safetensor_files:
+        with safe_open(file_path, framework="pt") as f:
+            for key in f.keys():
+                index[key] = os.path.basename(file_path)
+    return index, weight_path
+
+
+def has_kgroup_experts_in_kt_weight_path(
+    kt_weight_path: str,
+    layers_prefix: str,
+    moe_config: MOEArchConfig,
+    layer_idx: int,
+) -> bool:
+    if not os.path.isdir(kt_weight_path):
+        return False
+    if not SAFETENSORS_AVAILABLE:
+        return False
+    try:
+        weight_map, _ = _load_safetensors_index(kt_weight_path)
+    except Exception:
+        return False
+    gate_name, _, _ = moe_config.weight_names
+    key = (
+        f"{layers_prefix}.{layer_idx}.{moe_config.moe_layer_attr}.{moe_config.experts_attr}."
+        f"0.{gate_name}.weight_packed"
+    )
+    return key in weight_map
+
+
+def load_kgroup_experts_from_kt_weight_path(
+    kt_weight_path: str,
+    layers_prefix: str,
+    moe_config: MOEArchConfig,
+    layer_idx: int,
+    hidden_size: int,
+    group_size: int,
+) -> KGroupExpertWeights:
+    """Load compressed-tensors RAWINT4 KGroup expert tensors for one MoE layer."""
+    if not SAFETENSORS_AVAILABLE:
+        raise ImportError("safetensors is required for loading KGroup kt_weight_path")
+    if hidden_size % group_size != 0 or moe_config.intermediate_size % group_size != 0:
+        raise KTAMXConfigError(
+            f"KGroup group_size={group_size} must divide hidden_size={hidden_size} "
+            f"and intermediate_size={moe_config.intermediate_size}."
+        )
+
+    t0 = time.time()
+    weight_map, base_dir = _load_safetensors_index(kt_weight_path)
+    gate_name, up_name, down_name = moe_config.weight_names
+    experts_prefix = f"{layers_prefix}.{layer_idx}.{moe_config.moe_layer_attr}.{moe_config.experts_attr}"
+    proj_specs = {
+        "gate": (gate_name, moe_config.intermediate_size, hidden_size, moe_config.intermediate_size, hidden_size // group_size),
+        "up": (up_name, moe_config.intermediate_size, hidden_size, moe_config.intermediate_size, hidden_size // group_size),
+        "down": (down_name, hidden_size, moe_config.intermediate_size, hidden_size, moe_config.intermediate_size // group_size),
+    }
+
+    keys: list[str] = []
+    for expert_idx in range(moe_config.expert_num):
+        for proj_name, (weight_name, *_shape) in proj_specs.items():
+            base = f"{experts_prefix}.{expert_idx}.{weight_name}"
+            keys.extend([f"{base}.weight_packed", f"{base}.weight_scale", f"{base}.weight_shape"])
+
+    missing = [key for key in keys if key not in weight_map]
+    if missing:
+        preview = ", ".join(missing[:3])
+        raise FileNotFoundError(
+            f"Missing KGroup compressed tensor keys for layer {layer_idx}: {preview}"
+            + (" ..." if len(missing) > 3 else "")
+        )
+
+    keys_by_file: dict[str, list[str]] = {}
+    for key in keys:
+        keys_by_file.setdefault(os.path.join(base_dir, weight_map[key]), []).append(key)
+
+    tensor_map: dict[str, torch.Tensor] = {}
+    for file_path, file_keys in keys_by_file.items():
+        with safe_open(file_path, framework="pt") as f:
+            for key in file_keys:
+                tensor_map[key] = f.get_tensor(key)
+
+    def packed_as_uint8(tensor: torch.Tensor, rows: int, cols: int, key: str) -> torch.Tensor:
+        if tensor.dtype == torch.int32:
+            expected_shape = (rows, cols // 8)
+            if tuple(tensor.shape) != expected_shape:
+                raise KTAMXConfigError(f"{key} shape mismatch: expected {expected_shape}, got {tuple(tensor.shape)}")
+            return tensor.cpu().contiguous().view(torch.uint8).reshape(-1).contiguous()
+        if tensor.dtype == torch.uint8:
+            expected_numel = rows * cols // 2
+            if tensor.numel() != expected_numel:
+                raise KTAMXConfigError(f"{key} numel mismatch: expected {expected_numel}, got {tensor.numel()}")
+            return tensor.cpu().contiguous().reshape(-1)
+        raise KTAMXConfigError(f"{key} dtype mismatch: expected int32 packed or uint8, got {tensor.dtype}")
+
+    def load_projection(proj_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+        weight_name, rows, cols, scale_rows, scale_cols = proj_specs[proj_name]
+        packed_rows = []
+        scale_rows_list = []
+        expected_shape = [rows, cols]
+        expected_scale_shape = (scale_rows, scale_cols)
+        for expert_idx in range(moe_config.expert_num):
+            base = f"{experts_prefix}.{expert_idx}.{weight_name}"
+            packed_key = f"{base}.weight_packed"
+            scale_key = f"{base}.weight_scale"
+            shape_key = f"{base}.weight_shape"
+            shape = tensor_map[shape_key].cpu().tolist()
+            if [int(x) for x in shape] != expected_shape:
+                raise KTAMXConfigError(
+                    f"{shape_key} mismatch: expected {expected_shape}, got {[int(x) for x in shape]}"
+                )
+            scale = tensor_map[scale_key].cpu().to(torch.bfloat16).contiguous()
+            if tuple(scale.shape) != expected_scale_shape:
+                raise KTAMXConfigError(
+                    f"{scale_key} shape mismatch: expected {expected_scale_shape}, got {tuple(scale.shape)}"
+                )
+            packed_rows.append(packed_as_uint8(tensor_map[packed_key], rows, cols, packed_key))
+            scale_rows_list.append(scale)
+        return torch.stack(packed_rows, dim=0).contiguous(), torch.stack(scale_rows_list, dim=0).contiguous()
+
+    gate_proj, gate_scale = load_projection("gate")
+    up_proj, up_scale = load_projection("up")
+    down_proj, down_scale = load_projection("down")
+    logger.info(
+        "Loaded KGroup compressed experts from kt_weight_path layer=%d experts=%d files=%d total=%.1fs",
+        layer_idx,
+        moe_config.expert_num,
+        len(keys_by_file),
+        time.time() - t0,
+    )
+
+    return KGroupExpertWeights(
+        gate_proj=gate_proj,
+        gate_scale=gate_scale,
+        up_proj=up_proj,
+        up_scale=up_scale,
+        down_proj=down_proj,
+        down_scale=down_scale,
+    )
 
 
 def _clear_original_expert_weights(moe_module: nn.Module, moe_config: MOEArchConfig) -> None:

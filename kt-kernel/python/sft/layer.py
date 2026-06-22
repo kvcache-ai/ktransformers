@@ -84,6 +84,49 @@ class KTMoELayerWrapper(nn.Module):
         self._peft_lora_modules: dict[int, dict[str, tuple[nn.Module, nn.Module]]] | None = None
         self._lora_pointers_dirty = False
 
+    def _ensure_peft_lora_grad_buffers(self) -> None:
+        if self.wrapper is None or not self._peft_lora_modules:
+            return
+
+        gate_name, up_name, down_name = self.moe_config.weight_names
+        grad_sources = {
+            gate_name: (
+                getattr(self.wrapper, "grad_gate_lora_a", None),
+                getattr(self.wrapper, "grad_gate_lora_b", None),
+            ),
+            up_name: (
+                getattr(self.wrapper, "grad_up_lora_a", None),
+                getattr(self.wrapper, "grad_up_lora_b", None),
+            ),
+            down_name: (
+                getattr(self.wrapper, "grad_down_lora_a", None),
+                getattr(self.wrapper, "grad_down_lora_b", None),
+            ),
+        }
+
+        for expert_idx, expert_loras in self._peft_lora_modules.items():
+            for proj_name, lora_pair in expert_loras.items():
+                if proj_name not in grad_sources:
+                    continue
+                grad_pair = grad_sources[proj_name]
+                for lora_module, expected_grad in zip(lora_pair, grad_pair):
+                    if expected_grad is None or not hasattr(lora_module, "weight"):
+                        continue
+                    expected_slice = expected_grad[expert_idx]
+                    current_grad = lora_module.weight.grad
+                    if current_grad is None:
+                        expected_slice.zero_()
+                        lora_module.weight.grad = expected_slice
+                        continue
+                    if tuple(current_grad.shape) != tuple(expected_slice.shape):
+                        raise RuntimeError(
+                            f"Layer {self.layer_idx}: LoRA grad shape mismatch for {proj_name} expert {expert_idx}: "
+                            f"expected {tuple(expected_slice.shape)}, got {tuple(current_grad.shape)}"
+                        )
+                    if current_grad.data_ptr() != expected_slice.data_ptr():
+                        expected_slice.copy_(current_grad.to(device=expected_slice.device, dtype=expected_slice.dtype))
+                        lora_module.weight.grad = expected_slice
+
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
         saved_experts = None
@@ -126,6 +169,9 @@ class KTMoELayerWrapper(nn.Module):
         if train_lora and self._lora_pointers_dirty:
             self.update_lora_pointers()
             self._lora_pointers_dirty = False
+
+        if train_lora:
+            self._ensure_peft_lora_grad_buffers()
 
         gpu_output, all_qlens = self._submit_and_compute_gpu(
             hidden_states,

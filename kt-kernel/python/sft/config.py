@@ -62,6 +62,8 @@ class KTConfig:
     # Weight loading
     kt_weight_path: str | None = None
     kt_expert_checkpoint_path: str | None = None
+    kt_group_size: int | None = None
+    kt_zero_point: bool | None = None
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
     kt_share_backward_bb: bool | None = None  # default True — always saves memory
@@ -112,6 +114,10 @@ class KTConfig:
             self.kt_weight_path = os.environ.get("ACCELERATE_KT_WEIGHT_PATH", None)
         if self.kt_expert_checkpoint_path is None:
             self.kt_expert_checkpoint_path = os.environ.get("ACCELERATE_KT_EXPERT_CHECKPOINT_PATH", None)
+        if self.kt_group_size is None:
+            self.kt_group_size = _env_int("ACCELERATE_KT_GROUP_SIZE", None)
+        if self.kt_zero_point is None and "ACCELERATE_KT_ZERO_POINT" in os.environ:
+            self.kt_zero_point = _env_bool("ACCELERATE_KT_ZERO_POINT", False)
         if self.kt_num_gpu_experts is None:
             self.kt_num_gpu_experts = _env_int("ACCELERATE_KT_NUM_GPU_EXPERTS", 0)
         if self.kt_max_cache_depth is None:

@@ -49,6 +49,7 @@ static const bool _is_plain_ = false;
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
+#include "operators/amx/sft-k2-moe.hpp"
 #include "operators/amx/sft_moe.hpp"
 #include "operators/moe-sft-tp.hpp"
 #endif
@@ -392,6 +393,17 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
       .def("forward_sft", &MoeClass::forward_sft_binding)
       .def("backward", &MoeClass::backward_binding)
       .def("update_lora_weights", &MoeClass::update_lora_weights_binding)
+      .def("debug_cache_summary", &MoeClass::debug_cache_summary)
+      .def("debug_copy_forward_cache", &MoeClass::debug_copy_forward_cache)
+      .def("debug_remerge_forward_cache", &MoeClass::debug_remerge_forward_cache)
+      .def("debug_bwd_shadow_summary", &MoeClass::debug_bwd_shadow_summary)
+      .def("debug_copy_bwd_shadow", &MoeClass::debug_copy_bwd_shadow)
+      .def("debug_packed_weight_summary", &MoeClass::debug_packed_weight_summary)
+      .def("debug_copy_packed_weights", &MoeClass::debug_copy_packed_weights)
+      .def("debug_backward_sample", &MoeClass::debug_backward_sample)
+      .def("debug_backward_down_sample", &MoeClass::debug_backward_down_sample)
+      .def("debug_backward_activation_sample", &MoeClass::debug_backward_activation_sample)
+      .def("debug_backward_gate_up_sample", &MoeClass::debug_backward_gate_up_sample)
       .def("prepare_and_save_bwd",
            [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down, const std::string& path) {
              self.prepare_and_save_bwd((void*)gate, (void*)up, (void*)down, path);
@@ -717,6 +729,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_PROPERTY(GeneralMOEConfig, up_zero)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, down_zero)
 
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_bwd_shadow)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, up_bwd_shadow)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, down_bwd_shadow)
+
       .def_readwrite("quant_config", &GeneralMOEConfig::quant_config)
 
       .def_readwrite("max_len", &GeneralMOEConfig::max_len)
@@ -739,6 +755,10 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, gate_bwd_scales)
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, up_bwd_scales)
       .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, down_bwd_scales)
+
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, gate_bwd_shadow_projs)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, up_bwd_shadow_projs)
+      .DEF_PTR_2D_PROPERTY(GeneralMOEConfig, down_bwd_shadow_projs)
 
       .def_readwrite("path", &GeneralMOEConfig::path)
       .def_readwrite("save", &GeneralMOEConfig::save)
@@ -794,8 +814,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_SFT_MOE");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup, AMX_AWQ_MOE_TP>>(moe_module,
   //                                                                                         "AMXInt4_1KGroup_SFT_MOE");
-  // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4SmallKGroup, AMX_K2_MOE_TP>>(moe_module,
-  //                                                                                       "AMXInt4_KGroup_SFT_MOE");
+  bind_moe_sft_module<AMX_K2_SFT_MOE_TP<>>(moe_module, "AMXInt4_KGroup_SFT_MOE");
   // SFT MoE with SkipLoRA=true (skip all LoRA computation in backward, only compute base weight grad_input)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF, AMX_MOE_TP, true>>(moe_module, "AMXBF16_SFT_MOE_SkipLoRA");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int8, AMX_MOE_TP, true>>(moe_module, "AMXInt8_SFT_MOE_SkipLoRA");
@@ -804,8 +823,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   //                                                                                 "AMXInt4_1_SFT_MOE_SkipLoRA");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup, AMX_AWQ_MOE_TP, true>>(
   //     moe_module, "AMXInt4_1KGroup_SFT_MOE_SkipLoRA");
-  // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4SmallKGroup, AMX_K2_MOE_TP, true>>(
-  //     moe_module, "AMXInt4_KGroup_SFT_MOE_SkipLoRA");
+  bind_moe_sft_module<AMX_K2_SFT_MOE_TP<amx::GemmKernel224Int4SmallKGroup, true>>(moe_module,
+                                                                                  "AMXInt4_KGroup_SFT_MOE_SkipLoRA");
 #endif
 // AVX2 backends — available on all x86_64 (no AMX/AVX512 requirement)
 #if defined(__x86_64__)

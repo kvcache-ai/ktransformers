@@ -25,7 +25,10 @@ from .layer import KTMoELayerWrapper
 from .lora import LoRAExperts
 from .weights import (
     _clear_original_expert_weights,
+    extract_kgroup_moe_weights,
     extract_moe_weights,
+    has_kgroup_experts_in_kt_weight_path,
+    load_kgroup_experts_from_kt_weight_path,
     load_experts_from_checkpoint_files,
 )
 
@@ -41,6 +44,26 @@ if KT_KERNEL_AVAILABLE:
         KT_KERNEL_AVAILABLE = False
 else:
     KTMoEWrapper = None
+
+
+def _is_kgroup_sft_method(method: str) -> bool:
+    return "KGroup" in method
+
+
+def _log_kgroup_backward_capability(layer_idx: int | None, threadpool_count: int) -> None:
+    label = "KGroup SFT" if layer_idx is None else f"Layer {layer_idx}: KGroup SFT"
+    if threadpool_count == 1:
+        logger.info(
+            "%s TP=1 packed-dequant backward uses packed weights directly.",
+            label,
+        )
+    else:
+        logger.warning(
+            "%s packed backward is only enabled for TP=1; "
+            "TP=%s remains pending.",
+            label,
+            threadpool_count,
+        )
 
 
 # =============================================================================
@@ -185,9 +208,11 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         "AMXBF16": "AMXBF16_SFT",
         "AMXINT8": "AMXINT8_SFT",
         "AMXINT4": "AMXINT4_SFT",
+        "AMXINT4_KGroup": "AMXINT4_KGroup_SFT",
         "AMXBF16_SkipLoRA": "AMXBF16_SFT_SkipLoRA",
         "AMXINT8_SkipLoRA": "AMXINT8_SFT_SkipLoRA",
         "AMXINT4_SkipLoRA": "AMXINT4_SFT_SkipLoRA",
+        "AMXINT4_KGroup_SkipLoRA": "AMXINT4_KGroup_SFT_SkipLoRA",
     }
     # Build case-insensitive lookup to handle common typos like "SkipLora" vs "SkipLoRA"
     _kt_backend_map_lower = {k.lower(): v for k, v in kt_backend_map.items()}
@@ -202,20 +227,34 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
 
+    is_kgroup_method = _is_kgroup_sft_method(kt_method)
+    group_size = getattr(cfg, "kt_group_size", None)
+    if group_size is None:
+        group_size = 32 if is_kgroup_method else 128
+    zero_point = getattr(cfg, "kt_zero_point", None)
+    if zero_point is None:
+        zero_point = False if is_kgroup_method else True
+    if is_kgroup_method and getattr(cfg, "kt_share_backward_bb", False):
+        logger.warning("KGroup SFT uses packed weights directly for TP=1 backward; disabling kt_share_backward_bb.")
+        cfg.kt_share_backward_bb = False
+
     threadpool_count = getattr(cfg, "kt_threadpool_count", 1) if getattr(cfg, "kt_tp_enabled", False) else 1
+    if is_kgroup_method:
+        _log_kgroup_backward_capability(None, threadpool_count)
 
     kt_weight_path = getattr(cfg, "kt_weight_path", None)
     use_kt_weight_path = kt_weight_path is not None
     if use_kt_weight_path:
-        logger.info(f"Loading INT8 weights from kt_weight_path: {kt_weight_path}")
+        weight_kind = "KGroup packed" if is_kgroup_method else "INT8"
+        logger.info(f"Loading {weight_kind} weights from kt_weight_path: {kt_weight_path}")
 
     checkpoint_files = getattr(cfg, "kt_checkpoint_files", None)
     sharded_metadata = getattr(cfg, "kt_sharded_metadata", None)
 
-    # When kt_expert_checkpoint_path is set, always resolve from it (overrides any existing
-    # checkpoint_files which may come from AttnOnlyBf16 and lack expert weights).
+    # Non-KGroup backends may resolve kt_expert_checkpoint_path for BF16 backward weights.
+    # KGroup TP=1 training uses packed weights directly and intentionally skips BF16 shadow loading.
     kt_expert_checkpoint_path = getattr(cfg, "kt_expert_checkpoint_path", None)
-    if kt_expert_checkpoint_path:
+    if kt_expert_checkpoint_path and not is_kgroup_method:
         logger.info(f"Resolving expert checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}")
         resolved_files, resolved_meta = _resolve_checkpoint_files(model_name_or_path=kt_expert_checkpoint_path)
         if resolved_files and all(f.endswith(".safetensors") for f in resolved_files):
@@ -226,6 +265,10 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             logger.info(f"Resolved {len(checkpoint_files)} checkpoint files from kt_expert_checkpoint_path")
         else:
             logger.warning(f"Failed to resolve checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}")
+    elif kt_expert_checkpoint_path and is_kgroup_method:
+        logger.info(
+            "Ignoring kt_expert_checkpoint_path for KGroup SFT; TP=1 packed backward reads KGroup weights directly."
+        )
 
     use_checkpoint_files = bool(checkpoint_files) and not use_kt_weight_path
 
@@ -236,10 +279,14 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         f"use_kt_weight_path={use_kt_weight_path}, use_checkpoint_files={use_checkpoint_files}"
     )
 
-    if use_checkpoint_files:
+    if use_checkpoint_files and not is_kgroup_method:
         logger.info("Loading expert weights from checkpoint files (online conversion).")
-    elif use_kt_weight_path and bool(checkpoint_files):
+    elif use_checkpoint_files and is_kgroup_method:
+        logger.info("KGroup SFT uses packed tensors directly; BF16 checkpoint files will not be loaded for backward.")
+    elif use_kt_weight_path and bool(checkpoint_files) and not is_kgroup_method:
         logger.info("BF16 checkpoint files available for backward gradient computation.")
+    elif use_kt_weight_path and bool(checkpoint_files) and is_kgroup_method:
+        logger.info("KGroup SFT packed backward uses packed weights directly; BF16 checkpoint files are ignored.")
     elif (not use_kt_weight_path) and bool(getattr(cfg, "kt_skip_expert_loading", False)):
         # If HF expert weights were skipped during `from_pretrained`, we must source expert weights externally.
         model_name_or_path = getattr(getattr(model, "config", None), "name_or_path", None)
@@ -279,6 +326,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
+        kgroup_weights = None
+        bwd_gate_proj, bwd_up_proj, bwd_down_proj = None, None, None
         wrapper = None
 
         if is_rank_0:
@@ -288,7 +337,43 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             if _quant_cfg is not None:
                 _block_size = getattr(_quant_cfg, "weight_block_size", None)
 
-            if use_kt_weight_path:
+            if is_kgroup_method and use_kt_weight_path and has_kgroup_experts_in_kt_weight_path(
+                kt_weight_path,
+                _get_layers_prefix(model.config),
+                moe_config,
+                layer_idx,
+            ):
+                logger.debug(f"Layer {layer_idx}: loading KGroup compressed tensors from kt_weight_path")
+                kgroup_weights = load_kgroup_experts_from_kt_weight_path(
+                    kt_weight_path=kt_weight_path,
+                    layers_prefix=_get_layers_prefix(model.config),
+                    moe_config=moe_config,
+                    layer_idx=layer_idx,
+                    hidden_size=hidden_size,
+                    group_size=group_size,
+                )
+                logger.info("Layer %s: loaded KGroup compressed tensors from kt_weight_path.", layer_idx)
+                _log_kgroup_backward_capability(layer_idx, threadpool_count)
+            elif is_kgroup_method and not use_kt_weight_path:
+                kgroup_weights = extract_kgroup_moe_weights(
+                    moe_module=moe_module,
+                    moe_config=moe_config,
+                    hidden_size=hidden_size,
+                    group_size=group_size,
+                )
+                if any(
+                    shadow is not None
+                    for shadow in (
+                        kgroup_weights.gate_bwd_shadow,
+                        kgroup_weights.up_bwd_shadow,
+                        kgroup_weights.down_bwd_shadow,
+                    )
+                ):
+                    logger.debug(
+                        "Layer %s: ignoring KGroup BF16 shadow tensors; packed backward is the training path.",
+                        layer_idx,
+                    )
+            elif use_kt_weight_path:
                 logger.debug(f"Layer {layer_idx}: forward + backward from kt_weight_path (.kt files)")
             elif use_checkpoint_files:
                 layers_prefix = _get_layers_prefix(model.config)
@@ -329,15 +414,38 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 lora_rank=lora_rank,
                 lora_alpha=lora_alpha,
                 max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
+                group_size=group_size,
+                zero_point=zero_point,
             )
 
             # Set share_backward_bb and share_cache_pool BEFORE load_weights (config is built during load)
             wrapper.share_backward_bb = cfg.kt_share_backward_bb
             wrapper.share_cache_pool = cfg.kt_share_cache_pool
 
+            if bwd_gate_proj is not None and "KGroup" not in kt_method:
+                wrapper.set_backward_shadow_weights(
+                    gate_proj=bwd_gate_proj,
+                    up_proj=bwd_up_proj,
+                    down_proj=bwd_down_proj,
+                )
+
             physical_to_logical_map = torch.arange(moe_config.expert_num, dtype=torch.int64, device="cpu")
 
-            if use_kt_weight_path:
+            if kgroup_weights is not None:
+                logger.debug(
+                    f"Layer {layer_idx}: calling wrapper.load_kgroup_weights_from_tensors() "
+                    f"(packed KGroup tensor path, gate_proj numel={kgroup_weights.gate_proj.numel()})"
+                )
+                wrapper.load_kgroup_weights_from_tensors(
+                    gate_proj=kgroup_weights.gate_proj,
+                    gate_scale=kgroup_weights.gate_scale,
+                    up_proj=kgroup_weights.up_proj,
+                    up_scale=kgroup_weights.up_scale,
+                    down_proj=kgroup_weights.down_proj,
+                    down_scale=kgroup_weights.down_scale,
+                    physical_to_logical_map_cpu=physical_to_logical_map,
+                )
+            elif use_kt_weight_path:
                 logger.debug(f"Layer {layer_idx}: calling wrapper.load_weights() (C++ direct .kt load)")
                 wrapper.load_weights(physical_to_logical_map)
             else:
@@ -382,7 +490,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
         # Do not hold a Python-side reference --- it wastes ~1 GB/layer.
-        del gate_proj, up_proj, down_proj
+        del gate_proj, up_proj, down_proj, kgroup_weights, bwd_gate_proj, bwd_up_proj, bwd_down_proj
 
         wrappers.append(layer_wrapper)
         moe_layer_count += 1
@@ -429,6 +537,8 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_num_gpu_experts=getattr(model_args, "kt_num_gpu_experts", None),
         kt_weight_path=getattr(model_args, "kt_weight_path", None),
         kt_expert_checkpoint_path=getattr(model_args, "kt_expert_checkpoint_path", None),
+        kt_group_size=getattr(model_args, "kt_group_size", None),
+        kt_zero_point=getattr(model_args, "kt_zero_point", None),
         kt_use_lora_experts=getattr(model_args, "kt_use_lora_experts", None),
         kt_lora_expert_num=getattr(model_args, "kt_lora_expert_num", None),
         kt_lora_expert_intermediate_size=getattr(model_args, "kt_lora_expert_intermediate_size", None),

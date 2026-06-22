@@ -3,14 +3,14 @@ set -euo pipefail
 shopt -s nullglob
 
 PY_LIST=${PY_LIST:-"3.11 3.12 3.13"}
-TORCH_LIST=${TORCH_LIST:-"2.11.0"}
+TORCH_LIST=${TORCH_LIST:-"2.9.1"}
 WORK_ROOT=${WORK_ROOT:-/mnt/data3/lpl/kt-kernel-autosetup}
 WHEELS_DIR=${WHEELS_DIR:-"$PWD/wheels"}
 PIP_CACHE_DIR=${PIP_CACHE_DIR:-/mnt/data3/lpl/pip-cache}
 TMP_ROOT=${TMP_ROOT:-/mnt/data3/lpl/tmp}
 FORCE=${FORCE:-0}
 REPAIR=${REPAIR:-0}
-AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT:-manylinux_2_28_x86_64}
+AUDITWHEEL_PLAT=${AUDITWHEEL_PLAT:-manylinux_2_35_x86_64}
 CPUINFER_ENABLE_CPPTRACE=${CPUINFER_ENABLE_CPPTRACE:-OFF}
 
 mkdir -p "$WORK_ROOT" "$WHEELS_DIR" "$PIP_CACHE_DIR" "$TMP_ROOT"
@@ -23,7 +23,7 @@ index_for_torch_version() {
     2.6.*) echo "https://download.pytorch.org/whl/cu124" ;;
     2.7.*) echo "https://download.pytorch.org/whl/cu126" ;;
     2.8.*) echo "https://download.pytorch.org/whl/cu128" ;;
-    2.9.*) echo "https://download.pytorch.org/whl/cu128" ;;
+    2.9.*) echo "https://download.pytorch.org/whl/cu130" ;;
     2.10.*) echo "" ;;
     2.11.*) echo "" ;;
     *)     echo "https://download.pytorch.org/whl/cu124" ;;
@@ -73,9 +73,16 @@ for key, (pkg, ver) in sorted(expected.items()):
     if installed != ver:
         mismatch.append(f'{pkg}: installed {installed}, expected {ver}')
 
-cusparselt = sp / 'cusparselt' / 'lib' / 'libcusparseLt.so.0'
-if not cusparselt.exists():
-    mismatch.append(f'cusparselt layout missing: expected {cusparselt}')
+cusparselt_candidates = [
+    sp / 'cusparselt' / 'lib' / 'libcusparseLt.so.0',
+    sp / 'nvidia' / 'cusparselt' / 'lib' / 'libcusparseLt.so.0',
+]
+cusparselt = next((path for path in cusparselt_candidates if path.exists()), None)
+if cusparselt is None:
+    mismatch.append(
+        'cusparselt layout missing: expected one of '
+        + ', '.join(str(path) for path in cusparselt_candidates)
+    )
 
 if mismatch:
     print('Torch CUDA runtime stack is inconsistent:', file=sys.stderr)
