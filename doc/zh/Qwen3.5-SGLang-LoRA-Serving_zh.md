@@ -24,7 +24,7 @@ KT SFT 原始输出
 - KT expert 权重：AMX/BF16 SFT 兼容的 KT CPU expert 路径
 - 用户侧 serving 输入：一个 converted merged adapter 目录
 - Runtime 内部仍会 split：expert LoRA 走 KT CPU expert path，non-expert LoRA 走 SGLang LoRA manager，但这一步对用户不可见
-- 这条 workflow 面向 KT MoE expert LoRA 产物；普通 dense 模型的标准 PEFT LoRA 通常不需要这个 converter。
+- 该工作流面向 KT MoE expert LoRA 产物；普通 dense 模型的标准 PEFT LoRA 通常不需要使用此转换器（converter）。
 
 ## 2. 各阶段产物
 
