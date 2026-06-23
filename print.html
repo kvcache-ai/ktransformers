@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6ba77b97.js";
+            window.path_to_searchindex_js = "searchindex-869816a2.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c2917af9.js"></script>
@@ -1336,14 +1336,14 @@ chunk_size: 8192
 <ul>
 <li><a href="en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">v0.6.1 Quick Start</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">Fine-Tuning User Guide</a></li>
-<li><a href="#kt-ft-fine-tuning-and-inference-loop">KT-FT Fine-Tuning and Inference Loop</a></li>
+<li><a href="#qwen35-moe-kt-lora-serving-with-sglang-kt">KT-FT Fine-Tuning and Inference Loop</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--developer-technical-notes">Developer Technical Notes</a></li>
 <li><a href="#dpo-training-with-llama-factory">DPO Tutorial</a></li>
 <li><a href="#tutorial-inject-operator-step-by-step">Injection Tutorial</a></li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
-<h1 id="kt-ft-fine-tuning-and-inference-loop"><a class="header" href="#kt-ft-fine-tuning-and-inference-loop">KT-FT Fine-Tuning and Inference Loop</a></h1>
-<p>Last updated: 2026-06-01</p>
+<h1 id="qwen35-moe-kt-lora-serving-with-sglang-kt"><a class="header" href="#qwen35-moe-kt-lora-serving-with-sglang-kt">Qwen3.5 MoE KT LoRA Serving with SGLang-KT</a></h1>
+<p>Last updated: 2026-06-23</p>
 <p>This guide documents the current KT-FT loop for Qwen3.5 MoE: train with KT SFT, convert the output once, and serve the fine-tuned result through SGLang with a single merged adapter path.</p>
 <pre><code class="language-text">KT SFT raw output
   -&gt; convert_kt_to_sglang_adapter.py
@@ -1357,9 +1357,11 @@ chunk_size: 8192
 <p>Current supported and validated workflow:</p>
 <ul>
 <li>Base model: Qwen3.5 MoE, for example <code>Qwen3.5-35B-A3B</code></li>
+<li>KTransformers version: v0.6.3 or newer</li>
 <li>KT expert weights: AMX/BF16 SFT-compatible KT CPU expert path</li>
 <li>User-facing serving input: one converted merged adapter directory</li>
 <li>Runtime split: expert LoRA goes to the KT CPU expert path; non-expert LoRA goes to SGLang’s LoRA manager. This split happens automatically at server startup.</li>
+<li>This workflow is for KT MoE expert LoRA artifacts. Standard dense-model PEFT LoRA adapters usually do not need this converter.</li>
 </ul>
 <h2 id="2-artifacts-at-each-stage"><a class="header" href="#2-artifacts-at-each-stage">2. Artifacts At Each Stage</a></h2>
 <h3 id="raw-kt-sft-output"><a class="header" href="#raw-kt-sft-output">Raw KT SFT output</a></h3>
@@ -1386,12 +1388,13 @@ chunk_size: 8192
 </code></pre>
 <p>Example:</p>
 <pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
-  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240 \
-  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  saves/KT_FT_qwen35B_Moe_custom \
+  saves/KT_FT_qwen35B_Moe_custom_sglang \
   --base-model-name-or-path /mnt/data3/models/Qwen3.5-35B-A3B \
   --overwrite
 </code></pre>
 <p>The converter reads <code>fused_expert_lora.safetensors</code> and the existing non-expert <code>adapter_model.safetensors</code>, then writes one merged adapter directory.</p>
+<p>If the raw KT SFT output does not contain an <code>adapter_config.json</code> with <code>lora_alpha</code>, pass <code>--lora-alpha &lt;value&gt;</code> explicitly. The converter does not fold LoRA scaling into the tensors; runtime scaling remains <code>lora_alpha / r</code>.</p>
 <p>Optional split outputs for debugging:</p>
 <pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
   &lt;KT_SFT_OUTPUT_DIR&gt; \
@@ -1432,7 +1435,7 @@ python -m sglang.launch_server \
   --disable-custom-all-reduce \
   --enable-lora \
   --lora-backend triton \
-  --lora-paths qwen35b_neko=/path/to/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  --lora-paths qwen35b_lora=/path/to/KT_FT_qwen35B_Moe_custom_sglang \
   --log-level info
 </code></pre>
 <p>Important points:</p>
@@ -1448,27 +1451,29 @@ python -m sglang.launch_server \
 <li><code>--kt-num-gpu-experts 0</code></li>
 <li>do not enable <code>--kt-enable-dynamic-expert-update</code></li>
 <li>do not use <code>--kt-gpu-prefill-token-threshold</code></li>
+<li><code>--max-running-requests</code> must be at least 2</li>
 <li>use an AMX/BF16 SFT-compatible KT method such as <code>AMXINT4</code>, <code>AMXINT8</code>, <code>AMXBF16</code>, or <code>BF16</code></li>
 </ul>
 <h2 id="5-request-semantics"><a class="header" href="#5-request-semantics">5. Request Semantics</a></h2>
 <p>The OpenAI-compatible request <code>model</code> field uses names, not paths.</p>
 <pre><code class="language-text">--served-model-name qwen3.5-kt-ft
---lora-paths qwen35b_neko=/path/to/merged_adapter
+--lora-paths qwen35b_lora=/path/to/merged_adapter
 </code></pre>
 <p>Request behavior in the current single-adapter implementation:</p>
 <pre><code class="language-text">model=qwen3.5-kt-ft
 =&gt; base + KT expert LoRA
 
-model=qwen3.5-kt-ft:qwen35b_neko
+model=qwen3.5-kt-ft:qwen35b_lora
 =&gt; base + KT expert LoRA + SGLang non-expert LoRA
 </code></pre>
 <p>The suffix after <code>:</code> must match the left-side name in <code>--lora-paths</code>.</p>
+<p>If you need a true base-only comparison, launch a separate server without <code>--lora-paths</code>.</p>
 <h2 id="6-smoke-test"><a class="header" href="#6-smoke-test">6. Smoke Test</a></h2>
 <pre><code class="language-bash">curl -sS http://127.0.0.1:30006/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-kt-ft:qwen35b_neko",
-    "messages": [{"role": "user", "content": "我回来了，你在干嘛？"}],
+    "model": "qwen3.5-kt-ft:qwen35b_lora",
+    "messages": [{"role": "user", "content": "Explain what LoRA is in one sentence."}],
     "temperature": 0.7,
     "max_tokens": 160,
     "chat_template_kwargs": {"enable_thinking": false}
@@ -1488,9 +1493,9 @@ Using triton as backend of LoRA kernels.
 <p>This is not the recommended user-facing path. Normal users should pass one merged adapter directory through <code>--lora-paths</code> only.</p>
 <h2 id="8-troubleshooting"><a class="header" href="#8-troubleshooting">8. Troubleshooting</a></h2>
 <h3 id="got-lora-adapter-that-has-never-been-loaded-lora0"><a class="header" href="#got-lora-adapter-that-has-never-been-loaded-lora0"><code>Got LoRA adapter that has never been loaded: lora0</code></a></h3>
-<p>The adapter name in the request must match the left side of <code>--lora-paths</code>. If you launched with <code>qwen35b_neko=...</code>, request <code>model=qwen3.5-kt-ft:qwen35b_neko</code>, not <code>:lora0</code>.</p>
+<p>The adapter name in the request must match the left side of <code>--lora-paths</code>. If you launched with <code>qwen35b_lora=...</code>, request <code>model=qwen3.5-kt-ft:qwen35b_lora</code>, not <code>:lora0</code>.</p>
 <h3 id="no-visible-adapter-effect"><a class="header" href="#no-visible-adapter-effect">No visible adapter effect</a></h3>
-<p>Make sure you are serving the intended merged adapter directory. For example, use the Neko adapter at <code>..._nekoqa_eod_240_sglang</code>, not a generic sanity adapter such as <code>..._Moe_sglang</code>.</p>
+<p>Make sure you are serving the converted merged adapter directory produced by the converter, not the raw KT SFT output directory or a different test adapter.</p>
 <h3 id="connection-refused"><a class="header" href="#connection-refused"><code>connection refused</code></a></h3>
 <p>Check that the server is listening on the port you curl, and remember the example above binds to <code>127.0.0.1</code>, not <code>0.0.0.0</code>.</p>
 <h3 id="server-resolves-upstream-sglang-instead-of-this-checkout"><a class="header" href="#server-resolves-upstream-sglang-instead-of-this-checkout">Server resolves upstream SGLang instead of this checkout</a></h3>
@@ -1502,8 +1507,8 @@ PY
 </code></pre>
 <p>The path should come from this repository’s <code>third_party/sglang</code>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
-<h1 id="kt-ft-微调推理闭环"><a class="header" href="#kt-ft-微调推理闭环">KT-FT 微调推理闭环</a></h1>
-<p>最后更新：2026-06-01</p>
+<h1 id="qwen35-moe-kt-lora-的-sglang-kt-serving"><a class="header" href="#qwen35-moe-kt-lora-的-sglang-kt-serving">Qwen3.5 MoE KT LoRA 的 SGLang-KT Serving</a></h1>
+<p>最后更新：2026-06-23</p>
 <p>本文档描述当前 Qwen3.5 MoE 的 KT-FT 闭环：用 KT SFT 完成微调，转换一次输出，再通过 SGLang 用单个 merged adapter path 把微调结果服务化。</p>
 <pre><code class="language-text">KT SFT 原始输出
   -&gt; convert_kt_to_sglang_adapter.py
@@ -1517,9 +1522,11 @@ PY
 <p>当前已验证路径：</p>
 <ul>
 <li>基座模型：Qwen3.5 MoE，例如 <code>Qwen3.5-35B-A3B</code></li>
+<li>KTransformers 版本：v0.6.3 或更新版本</li>
 <li>KT expert 权重：AMX/BF16 SFT 兼容的 KT CPU expert 路径</li>
 <li>用户侧 serving 输入：一个 converted merged adapter 目录</li>
 <li>Runtime 内部仍会 split：expert LoRA 走 KT CPU expert path，non-expert LoRA 走 SGLang LoRA manager，但这一步对用户不可见</li>
+<li>该工作流面向 KT MoE expert LoRA 产物；普通 dense 模型的标准 PEFT LoRA 通常不需要使用此转换器（converter）。</li>
 </ul>
 <h2 id="2-各阶段产物"><a class="header" href="#2-各阶段产物">2. 各阶段产物</a></h2>
 <h3 id="原始-kt-sft-输出"><a class="header" href="#原始-kt-sft-输出">原始 KT SFT 输出</a></h3>
@@ -1546,12 +1553,13 @@ PY
 </code></pre>
 <p>示例：</p>
 <pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
-  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240 \
-  saves/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  saves/KT_FT_qwen35B_Moe_custom \
+  saves/KT_FT_qwen35B_Moe_custom_sglang \
   --base-model-name-or-path /mnt/data3/models/Qwen3.5-35B-A3B \
   --overwrite
 </code></pre>
 <p>converter 会读取 <code>fused_expert_lora.safetensors</code> 和已有的 non-expert <code>adapter_model.safetensors</code>，写出一个 merged adapter 目录。</p>
+<p>如果原始 KT SFT 输出目录没有包含带 <code>lora_alpha</code> 的 <code>adapter_config.json</code>，需要显式传入 <code>--lora-alpha &lt;value&gt;</code>。converter 不会把 LoRA scaling 折进 tensor；运行时 scaling 仍然是 <code>lora_alpha / r</code>。</p>
 <p>如需调试，也可以额外输出 split 目录：</p>
 <pre><code class="language-bash">python kt-kernel/scripts/convert_kt_to_sglang_adapter.py \
   &lt;KT_SFT_OUTPUT_DIR&gt; \
@@ -1592,7 +1600,7 @@ python -m sglang.launch_server \
   --disable-custom-all-reduce \
   --enable-lora \
   --lora-backend triton \
-  --lora-paths qwen35b_neko=/path/to/KT_FT_qwen35B_Moe_nekoqa_eod_240_sglang \
+  --lora-paths qwen35b_lora=/path/to/KT_FT_qwen35B_Moe_custom_sglang \
   --log-level info
 </code></pre>
 <p>要点：</p>
@@ -1608,27 +1616,29 @@ python -m sglang.launch_server \
 <li><code>--kt-num-gpu-experts 0</code></li>
 <li>不启用 <code>--kt-enable-dynamic-expert-update</code></li>
 <li>不使用 <code>--kt-gpu-prefill-token-threshold</code></li>
+<li><code>--max-running-requests</code> 必须至少为 2</li>
 <li>使用 AMX/BF16 SFT 兼容 KT method，例如 <code>AMXINT4</code>、<code>AMXINT8</code>、<code>AMXBF16</code>、<code>BF16</code></li>
 </ul>
 <h2 id="5-请求语义"><a class="header" href="#5-请求语义">5. 请求语义</a></h2>
 <p>OpenAI-compatible 请求里的 <code>model</code> 字段用 name，不用 path。</p>
 <pre><code class="language-text">--served-model-name qwen3.5-kt-ft
---lora-paths qwen35b_neko=/path/to/merged_adapter
+--lora-paths qwen35b_lora=/path/to/merged_adapter
 </code></pre>
 <p>当前 single-adapter 实现的请求语义：</p>
 <pre><code class="language-text">model=qwen3.5-kt-ft
 =&gt; base + KT expert LoRA
 
-model=qwen3.5-kt-ft:qwen35b_neko
+model=qwen3.5-kt-ft:qwen35b_lora
 =&gt; base + KT expert LoRA + SGLang non-expert LoRA
 </code></pre>
 <p>冒号后的 adapter 名必须和 <code>--lora-paths</code> 左侧注册名一致。</p>
+<p>如果需要 true base-only 对照，请单独启动一个不带 <code>--lora-paths</code> 的服务。</p>
 <h2 id="6-smoke-test-1"><a class="header" href="#6-smoke-test-1">6. Smoke Test</a></h2>
 <pre><code class="language-bash">curl -sS http://127.0.0.1:30006/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-kt-ft:qwen35b_neko",
-    "messages": [{"role": "user", "content": "我回来了，你在干嘛？"}],
+    "model": "qwen3.5-kt-ft:qwen35b_lora",
+    "messages": [{"role": "user", "content": "用一句话解释什么是 LoRA。"}],
     "temperature": 0.7,
     "max_tokens": 160,
     "chat_template_kwargs": {"enable_thinking": false}
@@ -1648,9 +1658,9 @@ Using triton as backend of LoRA kernels.
 <p>这不是推荐的用户路径。正常用户只需要通过 <code>--lora-paths</code> 传一个 merged adapter 目录。</p>
 <h2 id="8-troubleshooting-1"><a class="header" href="#8-troubleshooting-1">8. Troubleshooting</a></h2>
 <h3 id="got-lora-adapter-that-has-never-been-loaded-lora0-1"><a class="header" href="#got-lora-adapter-that-has-never-been-loaded-lora0-1"><code>Got LoRA adapter that has never been loaded: lora0</code></a></h3>
-<p>请求里的 adapter 名必须和 <code>--lora-paths</code> 左侧一致。如果启动时写的是 <code>qwen35b_neko=...</code>，请求应使用 <code>model=qwen3.5-kt-ft:qwen35b_neko</code>，而不是 <code>:lora0</code>。</p>
+<p>请求里的 adapter 名必须和 <code>--lora-paths</code> 左侧一致。如果启动时写的是 <code>qwen35b_lora=...</code>，请求应使用 <code>model=qwen3.5-kt-ft:qwen35b_lora</code>，而不是 <code>:lora0</code>。</p>
 <h3 id="看不出-adapter-效果"><a class="header" href="#看不出-adapter-效果">看不出 adapter 效果</a></h3>
-<p>确认 serving 用的是目标 merged adapter。例如 Neko 风格应使用 <code>..._nekoqa_eod_240_sglang</code>，而不是通用 sanity adapter <code>..._Moe_sglang</code>。</p>
+<p>确认 serving 使用的是 converter 生成的 merged adapter 目录，而不是原始 KT SFT 输出目录或其他测试 adapter。</p>
 <h3 id="connection-refused-1"><a class="header" href="#connection-refused-1"><code>connection refused</code></a></h3>
 <p>确认 server 监听的端口与 curl 一致；上面的示例绑定的是 <code>127.0.0.1</code>，不是 <code>0.0.0.0</code>。</p>
 <h3 id="server-解析到了上游-sglang而不是当前-checkout"><a class="header" href="#server-解析到了上游-sglang而不是当前-checkout">Server 解析到了上游 SGLang，而不是当前 checkout</a></h3>
