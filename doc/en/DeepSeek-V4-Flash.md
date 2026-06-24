@@ -25,7 +25,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 - **RAM**: ≥256GB system memory
 - **Storage**: ~340GB for model weights
 
-**Supported GPU architectures** (auto-detected at startup; non-validated configurations should work but have not been benchmarked end-to-end):
+**architectures** (auto-detected at startup; non-validated configurations should work but have not been benchmarked end-to-end):
 
 | Arch | Compute Cap | MXFP4 MoE | NSA sparse MLA | Validated |
 |------|------------|-----------|----------------|-----------|
@@ -33,7 +33,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 | Datacenter Blackwell (B100 / B200) | SM_100 | trtllm-fp4 | Triton fallback | — |
 | Consumer Blackwell (RTX 5090) | SM_120 | triton_kernels | Triton fallback | ✓ |
 | Ada Lovelace (RTX 4090 / L20 / L40) | SM_89 | triton_kernels | Triton fallback | ✓ |
-| Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | ✗ (not supported) |
+| Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | Now supported |
 
 
 ## Prerequisites
