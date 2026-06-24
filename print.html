@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-869816a2.js";
+            window.path_to_searchindex_js = "searchindex-f30480f6.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c2917af9.js"></script>
@@ -2524,7 +2524,7 @@ curl http://localhost:30000/v1/chat/completions \
 <li>Reduce <code>--kt-num-gpu-experts</code>, <code>--chunked-prefill-size</code>, <code>--max-total-tokens</code></li>
 <li>Lower <code>--mem-fraction-static</code></li>
 </ul>
-<p>For more questions, see <a href="#see-the-issue-faq-page">FAQ</a>.</p>
+<p>For more questions, see <a href="#frequently-asked-questions">FAQ</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="在-avx2-cpu-上使用-ktransformers"><a class="header" href="#在-avx2-cpu-上使用-ktransformers">在 AVX2 CPU 上使用 KTransformers</a></h1>
 <p>本教程介绍如何在仅支持 AVX2 的机器上运行 KTransformers（无需 AVX512 或 AMX）。</p>
@@ -2719,9 +2719,17 @@ curl http://localhost:30000/v1/chat/completions \
 <li>减小 <code>--kt-num-gpu-experts</code>、<code>--chunked-prefill-size</code>、<code>--max-total-tokens</code></li>
 <li>降低 <code>--mem-fraction-static</code></li>
 </ul>
-<p>更多问题参见 <a href="#see-the-issue-faq-page">FAQ</a>。</p>
-<div style="break-before: page; page-break-before: always;"></div><!-- omit in toc -->
-<h1 id="see-the-issue-faq-page"><a class="header" href="#see-the-issue-faq-page">see the issue <a href="https://github.com/kvcache-ai/ktransformers/issues/1608">FAQ page</a></a></h1>
+<p>更多问题参见 <a href="#frequently-asked-questions">FAQ</a>。</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="frequently-asked-questions"><a class="header" href="#frequently-asked-questions">Frequently Asked Questions</a></h1>
+<h2 id="1-sglang-using-default-moe-kernel-config-warning-at-startup"><a class="header" href="#1-sglang-using-default-moe-kernel-config-warning-at-startup">1. SGLang “Using default MoE kernel config” warning at startup</a></h2>
+<p>When using kt-kernel with SGLang, you may see a warning like:</p>
+<pre><code>[2026-05-15 20:31:38] Using default MoE kernel config. Performance might be sub-optimal!
+Config file not found at .../fused_moe_triton/configs/...
+</code></pre>
+<p>This warning is <strong>expected and can be safely ignored</strong>. kt-kernel replaces SGLang’s built-in MoE implementation with its own CPU/GPU hybrid dispatch, so SGLang’s fused-MoE Triton kernel configuration is never used. The warning is emitted by SGLang before kt-kernel takes over MoE execution and has no impact on performance or correctness.</p>
+<h2 id="2-where-can-i-find-more-help"><a class="header" href="#2-where-can-i-find-more-help">2. Where can I find more help?</a></h2>
+<p>Check the <a href="https://github.com/kvcache-ai/ktransformers/issues">existing issues</a> or open a <a href="https://github.com/kvcache-ai/ktransformers/issues/new">new one</a>.</p>
 
                     </main>
 
