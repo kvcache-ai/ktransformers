@@ -543,8 +543,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
         numa_nodes: Optional[List[int]] = None,
         swiglu_limit: float = 0.0,
         swiglu_alpha: float = 0.0,
+        skip_gpu_expert_cpu_copy: bool = False,
     ):
         self._swiglu_alpha = float(swiglu_alpha)
+        self.skip_gpu_expert_cpu_copy = skip_gpu_expert_cpu_copy
         # Defence in depth: reject swiglu_limit on non-MXFP4/MXFP8 methods even
         # if the experts.py guard is bypassed (e.g., by a future caller
         # that constructs NativeMoEWrapper directly). Origin: kt-sglang 耦合.
@@ -788,6 +790,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        moe_config.skip_gpu_expert_cpu_copy = self.skip_gpu_expert_cpu_copy
         # V4-Flash 2604B SwiGLU clamp; 0.0 = disabled (default for non-MXFP4
         # paths). Read by `act_fn` in operators/amx/la/amx.hpp via
         # `apply_activation` in operators/amx/moe_base.hpp. Re-checked here

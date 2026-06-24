@@ -514,6 +514,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id / nth;
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // gate part
@@ -534,6 +535,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
             nth * config_.expert_num, nullptr,
             [this, nth, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id / nth;
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               int ith = task_id % nth;
               // down part
@@ -548,6 +550,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
             config_.expert_num, nullptr,
             [this, physical_to_logical_map](int task_id) {
               uint64_t expert_idx = task_id;
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               size_t scale_elem_count =
                   (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
@@ -579,6 +582,9 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
         // Save offline quantization data if requested
         if (config_.save) {
           for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
+            if (should_skip_expert(expert_idx)) {
+              continue;
+            }
             write_weights(prefix, "_gate_", gate_bb_[expert_idx].get(), expert_idx, "OFFLINE");
             write_weights(prefix, "_up_", up_bb_[expert_idx].get(), expert_idx, "OFFLINE");
             write_weights(prefix, "_down_", down_bb_[expert_idx].get(), expert_idx, "OFFLINE");
@@ -594,6 +600,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)logical_expert_id)) return;
               int ith = task_id % nth;
               // gate part
               gate_bb_[logical_expert_id]->from_mat(
@@ -613,6 +620,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)logical_expert_id)) return;
               int ith = task_id % nth;
               // down part
               down_bb_[logical_expert_id]->from_mat(
@@ -625,6 +633,9 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
         // Save online quantization data if requested
         if (config_.save) {
           for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
+            if (should_skip_expert(expert_idx)) {
+              continue;
+            }
             write_weights(prefix, "_gate_", gate_bb_[expert_idx].get(), expert_idx, "ONLINE");
             write_weights(prefix, "_up_", up_bb_[expert_idx].get(), expert_idx, "ONLINE");
             write_weights(prefix, "_down_", down_bb_[expert_idx].get(), expert_idx, "ONLINE");
