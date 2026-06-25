@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - "third_party/sglang"
-      - "version.py"
   workflow_dispatch:
     inputs:
       test_pypi:

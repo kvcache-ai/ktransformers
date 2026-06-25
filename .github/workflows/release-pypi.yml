@@ -101,7 +101,7 @@ jobs:
         run: |
           apt-get update && apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
           python -m pip install --upgrade pip
-          pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu118
+          pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu128
 
       - name: Build kt-kernel wheel
         working-directory: kt-kernel
@@ -109,15 +109,15 @@ jobs:
           CPUINFER_BUILD_ALL_VARIANTS: '1'
           CPUINFER_ENABLE_CPPTRACE: '0'
           CPUINFER_USE_CUDA: '1'
-          CPUINFER_CUDA_ARCHS: '80;86;89;90'
+          CPUINFER_CUDA_ARCHS: '80;86;89;90;120'
           CPUINFER_CUDA_STATIC_RUNTIME: '1'
           CPUINFER_BUILD_TYPE: 'Release'
           CPUINFER_PARALLEL: '4'
           CPUINFER_FORCE_REBUILD: '1'
-          CUDA_HOME: '/usr/local/cuda-11.8'
+          CUDA_HOME: '/usr/local/cuda-12.8'
         run: |
           echo "Building kt-kernel with:"
-          echo "  - CUDA support (SM 80, 86, 89, 90)"
+          echo "  - CUDA support (SM 80, 86, 89, 90, 120)"
           echo "  - CPU multi-variant (AMX, AVX512, AVX2)"
           python -m build --wheel -v
 
