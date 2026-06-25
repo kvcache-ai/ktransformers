@@ -197,6 +197,11 @@ jobs:
         with:
           path: artifacts/
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
       - name: Organize wheels into dist/
         run: |
           mkdir -p dist/
