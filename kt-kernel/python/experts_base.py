@@ -17,59 +17,63 @@ import ctypes
 
 from kt_kernel import kt_kernel_ext
 
+try:
+    from .expert_placement import plan_gpu_expert_placement
+except ImportError:
+    # Keep compatibility with existing direct test imports that put
+    # kt-kernel/python on sys.path and import experts_base as a top-level module.
+    from expert_placement import plan_gpu_expert_placement
 
 def generate_gpu_experts_masks(
     activation_freq: torch.Tensor,
     num_gpu_experts: int,
-) -> torch.Tensor:
+    strategy: str = "frequency",
+    *,
+    min_experts_per_layer: int = 0,
+    max_experts_per_layer: Optional[int] = None,
+    previous_scores: Optional[torch.Tensor] = None,
+    alpha: float = 0.8,
+    return_report: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict]:
     """
-    Generate GPU experts masks based on activation frequency.
+    Generate GPU expert masks from activation statistics.
 
-    Selects the top `num_gpu_experts` experts with highest activation frequency
-    across all layers to be placed on GPU.
+    By default, this preserves the original behavior: globally select the top
+    ``num_gpu_experts`` experts by activation frequency.
+
+    The optional ``score_aware_layer_balanced`` strategy uses EMA-smoothed
+    scores and layer coverage bounds to avoid over-concentrating GPU experts in
+    only a few MoE layers.
 
     Args:
-        activation_freq: Activation frequency table of shape (num_layers, num_experts).
-                         Higher values indicate more frequently activated experts.
-        num_gpu_experts: Total number of experts to place on GPU across all layers.
+        activation_freq: Activation frequency table of shape
+            ``(num_layers, num_experts)``.
+        num_gpu_experts: Total number of experts to place on GPU.
+        strategy: ``frequency`` or ``score_aware_layer_balanced``.
+        min_experts_per_layer: Minimum GPU experts per layer for the
+            score-aware layer-balanced strategy.
+        max_experts_per_layer: Maximum GPU experts per layer for the
+            score-aware layer-balanced strategy.
+        previous_scores: Optional previous activation scores for EMA smoothing.
+        alpha: EMA coefficient for current scores when previous_scores is set.
+        return_report: If True, return ``(mask, report)``.
 
     Returns:
-        gpu_experts_masks: Boolean mask of shape (num_layers, num_experts) on CPU.
-                           True means the expert should be on GPU.
-
-    Example:
-        >>> activation_freq = torch.tensor([
-        ...     [0.1, 0.5, 0.3, 0.8],  # layer 0
-        ...     [0.2, 0.4, 0.9, 0.1],  # layer 1
-        ... ])
-        >>> masks = generate_gpu_experts_masks(activation_freq, num_gpu_experts=3)
-        >>> # Top 3: layer0-expert3 (0.8), layer1-expert2 (0.9), layer0-expert1 (0.5)
-        >>> masks
-        tensor([[False,  True, False,  True],
-                [False, False,  True, False]])
+        Boolean mask of shape ``(num_layers, num_experts)`` on CPU, or
+        ``(mask, report)`` when return_report=True.
     """
-    num_layers, num_experts_per_layer = activation_freq.shape
-    total_experts = num_layers * num_experts_per_layer
-
-    # Clamp num_gpu_experts to valid range
-    num_gpu_experts = min(num_gpu_experts, total_experts)
-    num_gpu_experts = max(num_gpu_experts, 0)
-
-    if num_gpu_experts == 0:
-        return torch.zeros(num_layers, num_experts_per_layer, dtype=torch.bool, device="cpu")
-
-    # Flatten and find top-k indices
-    flat_freq = activation_freq.view(-1).to(device="cpu")
-    _, top_indices = torch.topk(flat_freq, k=num_gpu_experts, largest=True, sorted=False)
-
-    # Create mask
-    gpu_experts_masks = torch.zeros(total_experts, dtype=torch.bool, device="cpu")
-    gpu_experts_masks[top_indices] = True
-
-    # Reshape to (num_layers, num_experts)
-    gpu_experts_masks = gpu_experts_masks.view(num_layers, num_experts_per_layer)
-
-    return gpu_experts_masks
+    mask, report = plan_gpu_expert_placement(
+        activation_freq=activation_freq,
+        num_gpu_experts=num_gpu_experts,
+        strategy=strategy,
+        min_experts_per_layer=min_experts_per_layer,
+        max_experts_per_layer=max_experts_per_layer,
+        previous_scores=previous_scores,
+        alpha=alpha,
+    )
+    if return_report:
+        return mask, report
+    return mask
 
 
 class KExpertsCPUBuffer:
