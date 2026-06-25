@@ -99,9 +99,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt-get update && apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
+          # System packages (cmake/libhwloc-dev/pkg-config/libnuma-dev) are expected to be
+          # preinstalled on self-hosted runners. Skip apt-get to avoid sudo dependency.
+          for pkg in cmake pkg-config; do command -v $pkg >/dev/null || { echo "ERROR: $pkg missing on runner"; exit 1; }; done
           python -m pip install --upgrade pip
-          pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu128
+          pip install build wheel setuptools
+          pip install torch --index-url https://download.pytorch.org/whl/cu128
 
       - name: Build kt-kernel wheel
         working-directory: kt-kernel
@@ -148,10 +151,13 @@ jobs:
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx512" && echo "✓ AVX512 variants found" || echo "Note: AVX512 variants missing"
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "Note: AVX2 variant missing"
 
-          # Verify static linking (should NOT depend on libcudart.so)
-          rm -rf /tmp/check
-          unzip -q dist/*.whl -d /tmp/check
-          if ldd /tmp/check/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
+          # Verify static linking (should NOT depend on libcudart.so).
+          # Use $RUNNER_TEMP (honors TMPDIR redirect to /mnt) — /tmp is the
+          # system disk on self-hosted runners and can be tight.
+          CHECK_DIR="${RUNNER_TEMP:-/tmp}/check"
+          rm -rf "$CHECK_DIR"
+          unzip -q dist/*.whl -d "$CHECK_DIR"
+          if ldd "$CHECK_DIR"/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
             echo "ERROR: Dynamic cudart found, should be statically linked"
             exit 1
           else
@@ -164,8 +170,7 @@ jobs:
           pip install auditwheel patchelf
           mkdir -p wheelhouse
           for wheel in dist/*.whl; do
-            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 --exclude libcuda.so.1 -w wheelhouse/ || \
-              cp "$wheel" wheelhouse/$(basename "$wheel" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+            auditwheel repair "$wheel" --plat manylinux_2_35_x86_64 --exclude libcuda.so.1 -w wheelhouse/
           done
           rm -f dist/*.whl && cp wheelhouse/*.whl dist/
 
