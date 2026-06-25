@@ -99,9 +99,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          apt-get update && apt-get install -y cmake libhwloc-dev pkg-config libnuma-dev
+          # System packages (cmake/libhwloc-dev/pkg-config/libnuma-dev) are expected to be
+          # preinstalled on self-hosted runners. Skip apt-get to avoid sudo dependency.
+          for pkg in cmake pkg-config; do command -v $pkg >/dev/null || { echo "ERROR: $pkg missing on runner"; exit 1; }; done
           python -m pip install --upgrade pip
-          pip install build wheel setuptools torch --index-url https://download.pytorch.org/whl/cu128
+          pip install build wheel setuptools
+          pip install torch --index-url https://download.pytorch.org/whl/cu128
 
       - name: Build kt-kernel wheel
         working-directory: kt-kernel
