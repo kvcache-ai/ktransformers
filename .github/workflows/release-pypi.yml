@@ -151,10 +151,13 @@ jobs:
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx512" && echo "✓ AVX512 variants found" || echo "Note: AVX512 variants missing"
           python -m zipfile -l dist/*.whl | grep "_kt_kernel_ext_avx2.cpython" && echo "✓ AVX2 variant found" || echo "Note: AVX2 variant missing"
 
-          # Verify static linking (should NOT depend on libcudart.so)
-          rm -rf /tmp/check
-          unzip -q dist/*.whl -d /tmp/check
-          if ldd /tmp/check/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
+          # Verify static linking (should NOT depend on libcudart.so).
+          # Use $RUNNER_TEMP (honors TMPDIR redirect to /mnt) — /tmp is the
+          # system disk on self-hosted runners and can be tight.
+          CHECK_DIR="${RUNNER_TEMP:-/tmp}/check"
+          rm -rf "$CHECK_DIR"
+          unzip -q dist/*.whl -d "$CHECK_DIR"
+          if ldd "$CHECK_DIR"/kt_kernel/*.so 2>/dev/null | grep -q "libcudart.so"; then
             echo "ERROR: Dynamic cudart found, should be statically linked"
             exit 1
           else
