@@ -170,8 +170,7 @@ jobs:
           pip install auditwheel patchelf
           mkdir -p wheelhouse
           for wheel in dist/*.whl; do
-            auditwheel repair "$wheel" --plat manylinux_2_17_x86_64 --exclude libcuda.so.1 -w wheelhouse/ || \
-              cp "$wheel" wheelhouse/$(basename "$wheel" | sed 's/linux_x86_64/manylinux_2_17_x86_64/')
+            auditwheel repair "$wheel" --plat manylinux_2_35_x86_64 --exclude libcuda.so.1 -w wheelhouse/
           done
           rm -f dist/*.whl && cp wheelhouse/*.whl dist/
 
