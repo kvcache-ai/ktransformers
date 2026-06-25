@@ -30,7 +30,12 @@ jobs:
 
       - name: Create and push tag
         run: |
+          TAG=${{ steps.get_version.outputs.TAG }}
           git config user.name "ktransformers-bot"
           git config user.email "ktransformers-bot@users.noreply.github.com"
-          git tag ${{ steps.get_version.outputs.TAG }}
-          git push origin ${{ steps.get_version.outputs.TAG }}
+          if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" > /dev/null 2>&1; then
+            echo "Tag ${TAG} already exists on origin, skipping."
+            exit 0
+          fi
+          git tag "${TAG}"
+          git push origin "${TAG}"
