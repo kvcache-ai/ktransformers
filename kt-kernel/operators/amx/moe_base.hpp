@@ -10,7 +10,7 @@
 #ifndef CPUINFER_OPERATOR_AMX_MOE_BASE_H
 #define CPUINFER_OPERATOR_AMX_MOE_BASE_H
 
-// #define FORWARD_TIME_PROFILE
+#define FORWARD_TIME_PROFILE
 
 #include <immintrin.h>
 
@@ -34,6 +34,7 @@
 #include "../moe-tp.hpp"
 #include "la/amx.hpp"
 #include "llama.cpp/ggml.h"
+#include "../mesh/mesh_hook.hpp"
 
 template <class T, class Derived>
 class AMX_MOE_BASE {
@@ -269,12 +270,32 @@ class AMX_MOE_BASE {
       used_pool_bytes_bc_down += bc_down_size;
     }
 
-    assert(used_pool_m <= pool_count_);
-    assert(used_pool_bytes_a <= gate_up_ba_pool_bytes_);
-    assert(used_pool_bytes_bc_gate <= gate_bc_pool_bytes_);
-    assert(used_pool_bytes_bc_up <= up_bc_pool_bytes_);
-    assert(used_pool_bytes_ba_down <= down_ba_pool_bytes_);
-    assert(used_pool_bytes_bc_down <= down_bc_pool_bytes_);
+    // 显式边界检查（Release 中 assert 被禁用，用 fprintf + abort 替代）
+    if (used_pool_m > pool_count_ || used_pool_bytes_a > gate_up_ba_pool_bytes_ ||
+        used_pool_bytes_bc_gate > gate_bc_pool_bytes_ || used_pool_bytes_bc_up > up_bc_pool_bytes_ ||
+        used_pool_bytes_ba_down > down_ba_pool_bytes_ || used_pool_bytes_bc_down > down_bc_pool_bytes_) {
+      fprintf(stderr, "[MESH POOL OVERFLOW prefill] qlen=%d k=%d activated=%d max_len=%d "
+              "M_STEP=%d pool_count=%zu used_m=%zu\n",
+              qlen, k, activated_expert, config_.max_len, (int)M_STEP,
+              pool_count_, used_pool_m);
+      fprintf(stderr, "  ba_a: used=%zu pool=%zu\n", used_pool_bytes_a, gate_up_ba_pool_bytes_);
+      fprintf(stderr, "  bc_gate: used=%zu pool=%zu\n", used_pool_bytes_bc_gate, gate_bc_pool_bytes_);
+      fprintf(stderr, "  bc_up: used=%zu pool=%zu\n", used_pool_bytes_bc_up, up_bc_pool_bytes_);
+      fprintf(stderr, "  ba_down: used=%zu pool=%zu\n", used_pool_bytes_ba_down, down_ba_pool_bytes_);
+      fprintf(stderr, "  bc_down: used=%zu pool=%zu\n", used_pool_bytes_bc_down, down_bc_pool_bytes_);
+      abort();
+    }
+    // 检查 m_local_output_ 缓冲区是否足够
+    size_t total_offset = offset;
+    size_t gate_out_needed = total_offset * config_.intermediate_size * sizeof(ggml_bf16_t);
+    size_t gate_out_have = sizeof(ggml_bf16_t) * config_.num_experts_per_tok * config_.max_len * config_.intermediate_size;
+    if (gate_out_needed > gate_out_have) {
+      fprintf(stderr, "[MESH OUTPUT OVERFLOW prefill] gate_out: needed=%zu have=%zu "
+              "offset=%zu I=%d k_tok=%d ml=%d\n",
+              gate_out_needed, gate_out_have, total_offset,
+              config_.intermediate_size, config_.num_experts_per_tok, config_.max_len);
+      abort();
+    }
 
 #ifdef FORWARD_TIME_PROFILE
     {
@@ -507,11 +528,20 @@ class AMX_MOE_BASE {
       used_pool_bytes_ba_down += ba_down_size;
       used_pool_bytes_bc_down += bc_down_size;
     }
-    assert(used_pool_m <= pool_count_);
-    assert(used_pool_bytes_bc_gate <= gate_bc_pool_bytes_);
-    assert(used_pool_bytes_bc_up <= up_bc_pool_bytes_);
-    assert(used_pool_bytes_ba_down <= down_ba_pool_bytes_);
-    assert(used_pool_bytes_bc_down <= down_bc_pool_bytes_);
+    // 显式边界检查（Release 中 assert 被禁用）
+    if (used_pool_m > pool_count_ || used_pool_bytes_bc_gate > gate_bc_pool_bytes_ ||
+        used_pool_bytes_bc_up > up_bc_pool_bytes_ || used_pool_bytes_ba_down > down_ba_pool_bytes_ ||
+        used_pool_bytes_bc_down > down_bc_pool_bytes_) {
+      fprintf(stderr, "[MESH POOL OVERFLOW decode] k=%d activated=%d max_len=%d "
+              "M_STEP=%d pool_count=%zu used_m=%zu\n",
+              k, activated_expert, config_.max_len, (int)M_STEP,
+              pool_count_, used_pool_m);
+      fprintf(stderr, "  bc_gate: used=%zu pool=%zu\n", used_pool_bytes_bc_gate, gate_bc_pool_bytes_);
+      fprintf(stderr, "  bc_up: used=%zu pool=%zu\n", used_pool_bytes_bc_up, up_bc_pool_bytes_);
+      fprintf(stderr, "  ba_down: used=%zu pool=%zu\n", used_pool_bytes_ba_down, down_ba_pool_bytes_);
+      fprintf(stderr, "  bc_down: used=%zu pool=%zu\n", used_pool_bytes_bc_down, down_bc_pool_bytes_);
+      abort();
+    }
 
     void* gate_up_ba_pool_ptr = gate_up_ba_pool_;
     for (int i = 0; i < activated_expert; i++) {
@@ -531,6 +561,16 @@ class AMX_MOE_BASE {
       last = now_time;
     }
 #endif
+
+    // Bug 1 fix: 提交异步预取 + 更新 Heat/Markov
+    // 在 GEMM 之前调用 on_decode_layer，让 missing 专家的 io_uring 异步读提前提交，
+    // 同时逐层更新 Heat/Markov 使驱逐策略生效（Bug 2）
+    if (config_.mesh_enabled && config_.mesh_residency) {
+      // expert_ids 是 int64_t*，需要转为 int*
+      std::vector<int> topk_int(expert_ids, expert_ids + k);
+      mesh::hook::on_decode_layer(config_.mesh_residency, config_.layer_idx, tp_part_idx,
+                                  topk_int.data(), k, weights, config_.expert_num);
+    }
 
     int nth = T::recommended_nth(config_.intermediate_size);
     pool->do_work_stealing_job(

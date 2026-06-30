@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include "mesh_config.hpp"
@@ -45,103 +46,92 @@ class MeshDecode {
 
   // immediate/deferred 分组结果
   struct SplitResult {
-    std::vector<int> immediate;  // 本层立即计算
-    std::vector<int> deferred;   // 推迟到下一层计算
+    std::vector<int> immediate;           // 本层立即计算（CACHED + GPU + 阻塞读完成的 missing）
+    std::vector<int> deferred;            // 推迟到下一层计算（cached + missing）
+    std::vector<int> blocking_missing;    // SKILL.md 第 282 行：需要阻塞读补充 immediate 组的 missing 专家
+    std::vector<int> deferred_missing;    // SKILL.md 第 284 行：deferred 组中需要提交异步 io_uring 的 missing 专家
   };
 
   /**
-   * @brief 对 top-k 专家进行 immediate/deferred 分组
+   * @brief 对 top-k 专家进行 immediate/deferred 分组（SKILL.md 第 280-284 行）
    *
-   * B6 fix: 入口先过滤 GPU 专家（GPU 专家不参与 slot 调度）
+   * 分组逻辑（与 KTransformers select_deferred_experts 一致）：
+   * - target_immediate = original_k - defer_count（= KTransformers 的 protected_k）
+   * - 按 score 降序排序整个 topk，取 score 最高的 target_immediate 个作为 immediate 候选
+   *   （与 KTransformers 的 torch.topk(expert_scores, k=protected_k) 一致）
+   * - immediate 候选中：GPU 专家直接进 immediate；CPU 已 CACHED 进 immediate；
+   *   CPU 未 CACHED 加入 blocking_missing 阻塞读后进 immediate（SKILL.md 第 282 行）
+   * - 其余 topk 走 deferred，其中未 CACHED 的提交异步 io_uring（SKILL.md 第 284 行）
    *
-   * @param topk 当前层 top-k 专家 ID
-   * @param scores 各专家的 router score（全长 expert_num）
-   * @param slot_pool 该层 slot 池
-   * @param scheduler 调度器
-   * @param layer_idx 当前层
-   * @param tp_part_idx TP 分片
-   * @param get_dst_ptrs 获取 slot buffer 指针的回调
-   * @param is_gpu_expert 判断专家是否在 GPU 上的回调
-   * @return SplitResult
+   * 一致性保证：MESH 的 immediate 组 = KTransformers 的 immediate 组，
+   * GEMM 计算的 CPU 专家都已 CACHED（未 CACHED 的会被阻塞读补充），
+   * 不会走同步 SSD 加载路径。
+   *
+   * 注意：split 只负责分组，不提交 io_uring。blocking_missing 由 on_decode_layer 阻塞读处理，
+   * deferred_missing 由 on_decode_layer 异步提交 io_uring。
+   *
+   * @param topk effective_topk（含上一层层 deferred 已 CACHED 的专家）
+   * @param original_k 原始 top-k 数（当前 token 路由选出的，不含 prev_layer_deferred_）
    */
   SplitResult split(const std::vector<int>& topk,
                     const std::vector<float>& scores,
                     MeshSlotPool& slot_pool,
-                    MeshScheduler& scheduler,
-                    int layer_idx, int tp_part_idx,
-                    std::function<std::vector<void*>(int)> get_dst_ptrs,
+                    int layer_idx,
+                    int original_k,
                     std::function<bool(int)> is_gpu_expert = nullptr) {
-    int k = static_cast<int>(topk.size());
-    int target_immediate = std::max(0, k - defer_count_);
+    // SKILL.md 第 280 行：target_immediate 基于原始 top-k 数，不是 effective_topk.size()
+    // = KTransformers 的 protected_k = num_experts_per_tok - max_deferred_experts_per_token
+    int target_immediate = std::max(0, original_k - defer_count_);
 
-    // B6 fix: 过滤 GPU 专家，GPU 专家直接进 immediate（由 GPU 计算，不需 slot）
-    std::vector<int> cpu_topk;
-    std::vector<int> gpu_experts;
+    // 过滤掉 -1（KTransformers select_deferred_experts 把 deferred 位置填 -1）
+    // on_decode_layer hook 接收 GEMM 的 expert_ids，defer 模式下含 -1
+    // -1 不是有效专家 ID，提交 io_uring 会报 Bad file descriptor
+    std::vector<int> valid_topk;
+    valid_topk.reserve(topk.size());
     for (int eid : topk) {
-      if (is_gpu_expert && is_gpu_expert(eid)) {
-        gpu_experts.push_back(eid);
-      } else {
-        cpu_topk.push_back(eid);
+      if (eid >= 0) {
+        valid_topk.push_back(eid);
       }
     }
 
-    // 区分已缓存和缺失（仅 CPU 专家）
-    std::vector<int> cached, missing;
-    for (int eid : cpu_topk) {
-      if (slot_pool.is_cached(eid)) {
-        cached.push_back(eid);
-      } else {
-        missing.push_back(eid);
-      }
-    }
+    // 与 KTransformers select_deferred_experts 一致：按 score 降序排序整个 topk，
+    // 取 score 最高的 target_immediate 个作为 immediate 候选。
+    // KTransformers 用 torch.topk(expert_scores, k=protected_k) 选 score 最高的位置，
+    // MESH 用 scores[expert_id] 排序（top-k 无重复时两者等价）。
+    std::sort(valid_topk.begin(), valid_topk.end(),
+              [&scores](int a, int b) {
+                float sa = (a < (int)scores.size()) ? scores[a] : 0.0f;
+                float sb = (b < (int)scores.size()) ? scores[b] : 0.0f;
+                return sa > sb;  // 降序
+              });
+
+    int n_immediate = std::min(static_cast<int>(valid_topk.size()), target_immediate);
 
     SplitResult result;
-    // GPU 专家直接进 immediate
-    result.immediate = gpu_experts;
-
-    if (static_cast<int>(cached.size()) > target_immediate) {
-      // immediate 数 > k-defer：按 router score 排序取前 target_immediate 个
-      std::sort(cached.begin(), cached.end(),
-                [&scores](int a, int b) {
-                  float sa = (a < (int)scores.size()) ? scores[a] : 0.0f;
-                  float sb = (b < (int)scores.size()) ? scores[b] : 0.0f;
-                  return sa > sb;  // 降序
-                });
-      result.immediate.insert(result.immediate.end(), cached.begin(), cached.begin() + target_immediate);
-      result.deferred.assign(cached.begin() + target_immediate, cached.end());
-      // 缺失专家全部进 deferred
-      result.deferred.insert(result.deferred.end(), missing.begin(), missing.end());
-
-      // 为缺失专家提交 deferred 异步读
-      for (int eid : missing) {
-        auto ptrs = get_dst_ptrs(eid);
-        scheduler.submit_decode_deferred(layer_idx, eid, tp_part_idx,
-                                         ptrs[0], ptrs[1], ptrs[2]);
-      }
-    } else {
-      // immediate 数 < k-defer：阻塞读缺失专家直到 immediate 数量够
-      result.immediate.insert(result.immediate.end(), cached.begin(), cached.end());
-      int need = target_immediate - static_cast<int>(cached.size());
-
-      for (int i = 0; i < need && i < static_cast<int>(missing.size()); i++) {
-        int eid = missing[i];
-        auto ptrs = get_dst_ptrs(eid);
-        // 提交 immediate 异步读（schedule_key = 当前层）
-        scheduler.submit_decode_immediate(layer_idx, eid, tp_part_idx,
-                                          ptrs[0], ptrs[1], ptrs[2]);
-        // 阻塞等待读取完成
-        // 实际实现需要与 MeshIoUring 配合等待 CQE
-        // io_.wait_expert(eid, n_reqs);
+    // 遍历 immediate 候选，区分 GPU/CPU 和 CACHED/missing
+    for (int i = 0; i < n_immediate; i++) {
+      int eid = valid_topk[i];
+      if (is_gpu_expert && is_gpu_expert(eid)) {
+        // GPU 专家直接进 immediate（由 GPU 计算，不需 slot）
         result.immediate.push_back(eid);
+      } else if (slot_pool.is_cached(eid)) {
+        // CPU 专家已 CACHED，进 immediate
+        result.immediate.push_back(eid);
+      } else {
+        // CPU 专家未 CACHED，阻塞读后进 immediate（SKILL.md 第 282 行）
+        result.blocking_missing.push_back(eid);
+        result.immediate.push_back(eid);  // 阻塞读完成后会 CACHED
       }
+    }
 
-      // 剩余缺失专家走 deferred
-      for (int i = need; i < static_cast<int>(missing.size()); i++) {
-        int eid = missing[i];
-        auto ptrs = get_dst_ptrs(eid);
-        scheduler.submit_decode_deferred(layer_idx, eid, tp_part_idx,
-                                         ptrs[0], ptrs[1], ptrs[2]);
-        result.deferred.push_back(eid);
+    // 其余 topk 走 deferred（SKILL.md 第 284 行）
+    for (int i = n_immediate; i < static_cast<int>(valid_topk.size()); i++) {
+      int eid = valid_topk[i];
+      result.deferred.push_back(eid);
+      if (!is_gpu_expert || !is_gpu_expert(eid)) {
+        if (!slot_pool.is_cached(eid)) {
+          result.deferred_missing.push_back(eid);
+        }
       }
     }
 
@@ -156,6 +146,10 @@ class MeshDecode {
    * 2. 查 victim 的 slot_idx
    * 3. 调用 overwrite(slot_idx, new_expert_id)
    *
+   * 引用计数保护：overwrite 内部 CV 等待 active_readers 归零，
+   * GEMM 时 acquire_reader 持有的专家不会被驱逐（SKILL.md 第 62/125 行）。
+   * immediate 组是 score 最高的 CACHED 专家，evict 选 score 最低的，不会选 immediate 组。
+   *
    * @param slot_pool 该层 slot 池
    * @param scorer 驱逐评分器
    * @param layer_idx 当前层
@@ -165,11 +159,11 @@ class MeshDecode {
   int evict_for_new_expert(MeshSlotPool& slot_pool,
                            const EvictionScorer& scorer,
                            int layer_idx, int new_expert_id) {
-    // 前五层满配检查
+    // 前五层满配检查：用实际 slot 数量判断
+    // 当 slot_pool.cap() < expert_num_ 时，前 5 层也无法容纳所有专家，必须允许驱逐
     if (is_front_layer(layer_idx)) {
-      int cap = get_effective_cap(layer_idx, slot_pool.cap());
-      if (cap >= expert_num_) {
-        return -1;  // 满配，无需驱逐
+      if (slot_pool.cap() >= expert_num_) {
+        return -1;  // 实际 slot 数 >= 专家总数，满配无需驱逐
       }
     }
 

@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <functional>
 #include <liburing.h>
+#include <mutex>
 #include <numa.h>
 // liburing.h 定义了 BLOCK_SIZE 等宏，会污染全局命名空间，
 // 与 amx_raw_kernels.hpp / fp8-moe.hpp 中的 BLOCK_SIZE 变量冲突
@@ -97,12 +98,19 @@ class MeshIoUring {
         total_up_mins += layouts_tp[tp][e].up_mins_bytes;
         total_down_mins += layouts_tp[tp][e].down_mins_bytes;
       }
-      cache.gate_scale = numa_alloc_onnode(total_gate, numa_node);
-      cache.up_scale = numa_alloc_onnode(total_up, numa_node);
-      cache.down_scale = numa_alloc_onnode(total_down, numa_node);
-      cache.gate_mins = numa_alloc_onnode(total_gate_mins, numa_node);
-      cache.up_mins = numa_alloc_onnode(total_up_mins, numa_node);
-      cache.down_mins = numa_alloc_onnode(total_down_mins, numa_node);
+      cache.gate_scale = total_gate > 0 ? numa_alloc_onnode(total_gate, numa_node) : nullptr;
+      cache.up_scale = total_up > 0 ? numa_alloc_onnode(total_up, numa_node) : nullptr;
+      cache.down_scale = total_down > 0 ? numa_alloc_onnode(total_down, numa_node) : nullptr;
+      cache.gate_mins = total_gate_mins > 0 ? numa_alloc_onnode(total_gate_mins, numa_node) : nullptr;
+      cache.up_mins = total_up_mins > 0 ? numa_alloc_onnode(total_up_mins, numa_node) : nullptr;
+      cache.down_mins = total_down_mins > 0 ? numa_alloc_onnode(total_down_mins, numa_node) : nullptr;
+      if ((total_gate > 0 && !cache.gate_scale) || (total_up > 0 && !cache.up_scale) ||
+          (total_down > 0 && !cache.down_scale)) {
+        fprintf(stderr, "[MESH] preload_scale_cache: numa_alloc_onnode FAILED! "
+                "layer=%d tp=%d numa=%d total_gate=%zu total_up=%zu total_down=%zu\n",
+                layer_idx, tp, numa_node, total_gate, total_up, total_down);
+        throw std::runtime_error("preload_scale_cache: numa_alloc_onnode failed (OOM?)");
+      }
       cache.gate_scale_total = total_gate;
       cache.up_scale_total = total_up;
       cache.down_scale_total = total_down;
@@ -226,51 +234,86 @@ class MeshIoUring {
       layer_idx, tp_part_idx, expert_id, n_reqs, 0, std::move(on_complete)
     };
 
+    // SQ ring 互斥锁保护：liburing 的 io_uring_get_sqe / io_uring_submit 不是线程安全的。
+    // 多 TP 线程并发 submit_load 会导致 SQ ring tail 指针竞争，SQE 丢失，CQE 永远不回来。
+    // 锁范围：从 get_sqe 到 io_uring_submit，down_scattered 的 pread 在锁外执行。
+    std::lock_guard<std::mutex> sq_lock(sq_mutex_);
+
+    // submit_load nullptr fix: 检查 io_uring_get_sqe 返回值，SQ ring 满时先 submit 再重试
+    // 避免 nullptr 解引用 segfault
+    auto get_sqe = [this]() -> io_uring_sqe* {
+      io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+      if (sqe) return sqe;
+      // SQ ring 满，先 submit 释放空间
+      io_uring_submit(&ring_);
+      sqe = io_uring_get_sqe(&ring_);
+      if (!sqe) {
+        fprintf(stderr, "[MESH] submit_load: SQ ring full after submit, aborting\n");
+        std::abort();
+      }
+      return sqe;
+    };
+
     // 提交 SQE，user_data 指向 pending
-    auto* sqe = io_uring_get_sqe(&ring_);
+    auto* sqe = get_sqe();
     io_uring_prep_read(sqe, layout.fd, gate_dst, layout.gate_bytes, layout.gate_offset);
     io_uring_sqe_set_data(sqe, pending);
 
-    sqe = io_uring_get_sqe(&ring_);
+    sqe = get_sqe();
     io_uring_prep_read(sqe, layout.fd, up_dst, layout.up_bytes, layout.up_offset);
     io_uring_sqe_set_data(sqe, pending);
 
     // Bug 5 fix: 先提交 gate/up SQE，再 pread down，让 io_uring 与 pread 并行
     // 原代码 pread 在 io_uring_submit 之前，阻塞期间 io_uring 空闲
     if (!down_scattered) {
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, down_dst, layout.down_bytes, layout.down_offset);
       io_uring_sqe_set_data(sqe, pending);
     }
 
     if (!layer_scale_loaded && has_scale) {
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, gate_scale_dst, layout.gate_scale_bytes, layout.gate_scale_offset);
       io_uring_sqe_set_data(sqe, pending);
 
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, up_scale_dst, layout.up_scale_bytes, layout.up_scale_offset);
       io_uring_sqe_set_data(sqe, pending);
 
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, down_scale_dst, layout.down_scale_bytes, layout.down_scale_offset);
       io_uring_sqe_set_data(sqe, pending);
 
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, gate_mins_dst, layout.gate_mins_bytes, layout.gate_mins_offset);
       io_uring_sqe_set_data(sqe, pending);
 
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, up_mins_dst, layout.up_mins_bytes, layout.up_mins_offset);
       io_uring_sqe_set_data(sqe, pending);
 
-      sqe = io_uring_get_sqe(&ring_);
+      sqe = get_sqe();
       io_uring_prep_read(sqe, layout.fd, down_mins_dst, layout.down_mins_bytes, layout.down_mins_offset);
       io_uring_sqe_set_data(sqe, pending);
     }
 
     // Bug 5 fix: 先 submit 所有 SQE，让 io_uring 开始 DMA
-    io_uring_submit(&ring_);
+    // submit_and_wait fix: 记录 inflight SQE 数，供 submit_and_wait 等待
+    // 引用计数设计（SKILL.md 第 62/122-126 行）：deferred_missing 提交的 io_uring 读取，
+    // 即使目标 slot 需要 evict，overwrite 会 CV 等待 active_readers 归零，
+    // GEMM 中 acquire_reader 持有的专家不会被驱逐。不需要阻塞等待。
+    inflight_count_.fetch_add(n_reqs, std::memory_order_release);
+    int submit_ret = io_uring_submit(&ring_);
+    if (submit_ret < 0) {
+      // io_uring_submit 失败：SQEs 仍在 SQ ring 中（未被内核消费），
+      // 后续 io_uring_submit（get_sqe 或下一个 submit_load）会重新提交它们。
+      // 绝对不能 delete pending（SQEs 的 user_data 指向它，CQE 回来时会访问），
+      // 也不能回滚 inflight_count_（SQEs 后续会提交，CQE 会回来，process_cqes 会递减）。
+      // 否则会导致 use-after-free → segfault。
+      fprintf(stderr, "[MESH] io_uring_submit failed: ret=%d errno=%d (%s), expert=%d "
+              "(SQEs remain in ring, will retry on next submit)\n",
+              submit_ret, errno, strerror(errno), expert_id);
+    }
 
     // Bug 5 fix: down_scattered 的 pread 在 submit 之后执行，与 io_uring 并行
     if (down_scattered) {
@@ -313,26 +356,41 @@ class MeshIoUring {
 
   // A6: 处理已完成的 CQE，触发 on_complete 回调
   // 非阻塞：只处理当前已有的 CQE，不等待
+  // 根因修复：当 cqe->res < 0 时不调用 on_complete，避免标记垃圾 slot 为 CACHED
+  // Bug 1 fix: 加 mutex 保护，允许多个 worker 线程在 GEMM 期间并发调用
+
+  // 诊断：返回当前 inflight SQE 数
+  int inflight_count() const { return inflight_count_.load(std::memory_order_acquire); }
+
   void process_cqes() {
+    std::lock_guard<std::mutex> lock(cq_mutex_);
     unsigned head;
     unsigned count = 0;
     io_uring_cqe* cqe;
 
     io_uring_for_each_cqe(&ring_, head, cqe) {
       auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
+      // submit_and_wait fix: 每个 CQE 对应一个已完成的 SQE
+      inflight_count_.fetch_sub(1, std::memory_order_release);
       if (pending) {
-        // 检查读取错误
         if (cqe->res < 0) {
-          fprintf(stderr, "[MESH] io_uring read error: expert=%d tp=%d res=%d (%s)\n",
+          // 读取失败：不调用 on_complete，不标记 CACHED
+          fprintf(stderr, "[MESH] io_uring read error: expert=%d tp=%d res=%d (%s), "
+                  "slot will NOT be marked cached\n",
                   pending->expert_id, pending->tp_part_idx, cqe->res, strerror(-cqe->res));
-        }
-        int completed = pending->completed_reqs.fetch_add(1) + 1;
-        if (completed == pending->total_reqs) {
-          // 所有 SQE 完成，触发回调
-          if (pending->on_complete) {
-            pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+          int completed = pending->completed_reqs.fetch_add(1) + 1;
+          if (completed == pending->total_reqs) {
+            delete pending;
           }
-          delete pending;
+        } else {
+          int completed = pending->completed_reqs.fetch_add(1) + 1;
+          if (completed == pending->total_reqs) {
+            // 所有 SQE 完成，触发回调
+            if (pending->on_complete) {
+              pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+            }
+            delete pending;
+          }
         }
       }
       count++;
@@ -344,22 +402,34 @@ class MeshIoUring {
 
   // 阻塞等待某专家的读请求完成（通过 CQE 计数）
   // A6: 改为处理 CQE 并触发回调
+  // 根因修复：当 cqe->res < 0 时不调用 on_complete
   void wait_expert(int expert_id, int n_reqs) {
     for (int i = 0; i < n_reqs; i++) {
       io_uring_cqe* cqe;
-      io_uring_wait_cqe(&ring_, &cqe);
+      // 处理 EINTR：信号中断时重试
+      int wait_ret;
+      do {
+        wait_ret = io_uring_wait_cqe(&ring_, &cqe);
+      } while (wait_ret == -EINTR);
       auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
       if (pending) {
         if (cqe->res < 0) {
-          fprintf(stderr, "[MESH] io_uring read error in wait_expert: expert=%d res=%d (%s)\n",
+          // 读取失败：不调用 on_complete，不标记 CACHED
+          fprintf(stderr, "[MESH] io_uring read error in wait_expert: expert=%d res=%d (%s), "
+                  "slot will NOT be marked cached\n",
                   pending->expert_id, cqe->res, strerror(-cqe->res));
-        }
-        int completed = pending->completed_reqs.fetch_add(1) + 1;
-        if (completed == pending->total_reqs) {
-          if (pending->on_complete) {
-            pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+          int completed = pending->completed_reqs.fetch_add(1) + 1;
+          if (completed == pending->total_reqs) {
+            delete pending;
           }
-          delete pending;
+        } else {
+          int completed = pending->completed_reqs.fetch_add(1) + 1;
+          if (completed == pending->total_reqs) {
+            if (pending->on_complete) {
+              pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+            }
+            delete pending;
+          }
         }
       }
       io_uring_cqe_seen(&ring_, cqe);
@@ -384,45 +454,75 @@ class MeshIoUring {
 
   // 提交并等待全部完成（同步接口，启动阶段用）
   // A6: 处理 CQE 并触发 on_complete 回调
+  // 根因修复：当 cqe->res < 0（读取失败/EINTR）时，不调用 on_complete，
+  // 不标记 slot 为 CACHED，避免 AMX kernel 读取垃圾数据导致内存损坏。
+  // submit_and_wait fix: 用 inflight_count_ 追踪已提交 SQE 数，
+  // 等待所有 CQE 到达后才返回。旧代码用 io_uring_sq_ready 判断，
+  // 但 io_uring_submit 后 sq_ready=0（SQE 已提交给内核），导致立即返回，
+  // on_complete 回调从未被调用，slot 永远停留在 LOADING 状态。
   void submit_and_wait() {
+    std::lock_guard<std::mutex> lock(cq_mutex_);
     io_uring_submit(&ring_);
-    // 等待所有 inflight 完成，处理回调
-    while (true) {
+    // 等待所有 inflight SQE 完成
+    while (inflight_count_.load(std::memory_order_acquire) > 0) {
       unsigned head;
       unsigned count = 0;
       io_uring_cqe* cqe;
       io_uring_for_each_cqe(&ring_, head, cqe) {
         auto* pending = static_cast<PendingRequest*>(io_uring_cqe_get_data(cqe));
+        // submit_and_wait fix: 每个 CQE 对应一个已完成的 SQE
+        inflight_count_.fetch_sub(1, std::memory_order_release);
         if (pending) {
           if (cqe->res < 0) {
-            fprintf(stderr, "[MESH] io_uring read error in submit_and_wait: expert=%d res=%d (%s)\n",
+            // 读取失败（EINTR/IO 错误等）：不调用 on_complete，不标记 CACHED
+            // 避免垃圾数据被 AMX kernel 消费导致 double free
+            fprintf(stderr, "[MESH] io_uring read error in submit_and_wait: expert=%d res=%d (%s), "
+                    "slot will NOT be marked cached\n",
                     pending->expert_id, cqe->res, strerror(-cqe->res));
-          }
-          int completed = pending->completed_reqs.fetch_add(1) + 1;
-          if (completed == pending->total_reqs) {
-            if (pending->on_complete) {
-              pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+            // 仍然计入完成数（否则 pending 永远不会被释放），但不调用 on_complete
+            int completed = pending->completed_reqs.fetch_add(1) + 1;
+            if (completed == pending->total_reqs) {
+              // 读取失败，不调用 on_complete，直接释放 pending
+              delete pending;
             }
-            delete pending;
+          } else {
+            int completed = pending->completed_reqs.fetch_add(1) + 1;
+            if (completed == pending->total_reqs) {
+              if (pending->on_complete) {
+                pending->on_complete(pending->layer_idx, pending->tp_part_idx, pending->expert_id);
+              }
+              delete pending;
+            }
           }
         }
         count++;
       }
-      if (count == 0) {
-        // 没有更多 CQE，检查是否还有 inflight SQE
-        unsigned inflight = io_uring_sq_ready(&ring_);
-        if (inflight == 0) break;
-        // 还有 inflight，等待一个 CQE
-        io_uring_cqe* wait_cqe;
-        io_uring_wait_cqe(&ring_, &wait_cqe);
-        continue;
+      if (count > 0) {
+        io_uring_cq_advance(&ring_, count);
       }
-      io_uring_cq_advance(&ring_, count);
+      // 还有 inflight，阻塞等待下一个 CQE
+      if (inflight_count_.load(std::memory_order_acquire) > 0) {
+        io_uring_cqe* wait_cqe;
+        int wait_ret;
+        do {
+          wait_ret = io_uring_wait_cqe(&ring_, &wait_cqe);
+        } while (wait_ret == -EINTR);
+      }
     }
   }
 
  private:
   io_uring ring_;
+  // Bug 1 fix: 保护 CQ 访问的互斥锁 — process_cqes 可能在 GEMM 期间被多个 worker 线程并发调用
+  std::mutex cq_mutex_;
+  // SQ ring 互斥锁：保护 io_uring_get_sqe + io_uring_prep_read + io_uring_submit 序列。
+  // liburing 的 SQ ring 操作不是线程安全的，多 TP 线程并发 submit_load 会导致 SQ ring 损坏，
+  // SQE 丢失，CQE 永远不回来，blocking_load_experts 超时。
+  std::mutex sq_mutex_;
+  // submit_and_wait fix: 跟踪已提交但未完成的 SQE 数量
+  // io_uring_sq_ready() 在 io_uring_submit 后返回 0（所有 SQE 已提交给内核），
+  // 但内核可能尚未完成任何读取。用此计数器追踪 inflight 请求数。
+  std::atomic<int> inflight_count_{0};
 
   // Scale Cache（A4 fix: [layer][tp] 每层独立）
   struct ScaleCacheTP {
@@ -447,11 +547,18 @@ class MeshIoUring {
   // 同步读取（启动阶段用，pread + O_DIRECT）
   void sync_read_to(int fd, off_t offset, size_t bytes, void* dst) {
     if (bytes == 0) return;
+    if (!dst) {
+      fprintf(stderr, "[MESH] sync_read_to: dst is NULL! fd=%d offset=%ld bytes=%zu — aborting\n",
+              fd, (long)offset, bytes);
+      std::abort();
+    }
     size_t done = 0;
     while (done < bytes) {
       ssize_t n = pread(fd, (char*)dst + done, bytes - done, offset + done);
       if (n < 0) {
-        throw std::runtime_error("MeshIoUring: pread failed, errno=" + std::to_string(errno));
+        fprintf(stderr, "[MESH] sync_read_to: pread failed errno=%d (%s) fd=%d offset=%ld bytes=%zu done=%zu — aborting\n",
+                errno, strerror(errno), fd, (long)offset, bytes, done);
+        std::abort();
       }
       done += n;
     }

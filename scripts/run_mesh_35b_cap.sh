@@ -10,6 +10,7 @@ source /mnt/data2/tmp/qujing_mesh/.venv/bin/activate
 export TMPDIR=/mnt/data2/tmp/qujing_mesh/.tmp
 export TRITON_CACHE_DIR=/mnt/data2/tmp/qujing_mesh/.triton_cache
 export SGLANG_DISABLE_CUDNN_CHECK=1
+export SGLANG_DISABLE_BALANCE_CHECK=1
 export CUDA_VISIBLE_DEVICES=$CUDA
 export KT_ENABLE_MESH=1
 export KT_MESH_CAP=$CAP

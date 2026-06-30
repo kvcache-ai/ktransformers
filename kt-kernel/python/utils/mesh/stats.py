@@ -72,6 +72,24 @@ class MeshStats:
             f"{self.decode_deferred_count} deferred"
         )
 
+    def to_kv(self) -> str:
+        """返回单行 key=value 格式，方便从日志 grep 解析。"""
+        return (
+            f"hit_rate={self.cache_hit_rate:.4f} "
+            f"hit_count={self.cache_hit_count} "
+            f"miss_count={self.cache_miss_count} "
+            f"iouring_read_gib={self.io_uring_read_gib:.2f} "
+            f"iouring_read_count={self.io_uring_read_count} "
+            f"eviction_count={self.eviction_count} "
+            f"defer_count={self.defer_count} "
+            f"defer_overflow={self.defer_overflow_count} "
+            f"prefill_layers={self.prefill_layer_count} "
+            f"prefill_swaps={self.prefill_temporal_swap_count} "
+            f"decode_tokens={self.decode_token_count} "
+            f"decode_immediate={self.decode_immediate_count} "
+            f"decode_deferred={self.decode_deferred_count}"
+        )
+
 
 class MeshStatsCollector:
     """从 C++ 侧读取统计信息。"""

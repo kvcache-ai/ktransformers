@@ -141,6 +141,33 @@ class MeshScheduler {
     return result;
   }
 
+  // SKILL.md 第 54 行：驱逐和覆盖只影响本 TP 的本地 shard，不跨 NUMA 操作
+  // 只取走指定 TP 的请求，其余放回队列，避免 TP0 操作 TP1 的 pool
+  std::vector<ScheduledRequest> drain_all_for_tp(int tp_part_idx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ScheduledRequest> result;
+    std::vector<ScheduledRequest> remaining;
+    while (!pq_.empty()) {
+      auto req = std::move(const_cast<ScheduledRequest&>(pq_.top()));
+      pq_.pop();
+      if (req.tp_part_idx == tp_part_idx) {
+        result.push_back(std::move(req));
+      } else {
+        remaining.push_back(std::move(req));
+      }
+    }
+    // 把不属于该 TP 的请求放回队列
+    for (auto& req : remaining) {
+      pq_.push(std::move(req));
+    }
+    // result 按 schedule_key 升序排列
+    std::sort(result.begin(), result.end(),
+              [](const ScheduledRequest& a, const ScheduledRequest& b) {
+                return a.schedule_key < b.schedule_key;
+              });
+    return result;
+  }
+
   // 取出 schedule_key 最小的请求（非阻塞）
   bool try_pop(ScheduledRequest& out) {
     std::lock_guard<std::mutex> lock(mutex_);

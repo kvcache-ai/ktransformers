@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 import torch
 from typing import List, Optional
 
 from .config import MeshConfig
 from .residency import MeshResidencyManager
+from .stats import MeshStatsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -82,29 +85,55 @@ class MeshMoEWrapper:
             # 如果未设置，需要外部补充（通常由调用者设置）
             logger.warning("mesh_config.total_layers not set, MESH schedule_key may be incorrect")
 
-        # 1. 创建 AMXMoEWrapper，注入 mesh_enabled=True
-        #    AMX 内核代码完全复用，load_weights() 会走 mesh 分支（直接 return）
-        from ..amx import AMXMoEWrapper
-        self._inner = AMXMoEWrapper(
-            layer_idx=layer_idx,
-            num_experts=num_experts,
-            num_experts_per_tok=num_experts_per_tok,
-            hidden_size=hidden_size,
-            moe_intermediate_size=moe_intermediate_size,
-            gpu_experts_mask=gpu_experts_mask,
-            cpuinfer_threads=cpuinfer_threads,
-            threadpool_count=threadpool_count,
-            weight_path=weight_path,
-            chunked_prefill_size=chunked_prefill_size,
-            cpu_save=cpu_save,
-            max_deferred_experts_per_token=max_deferred_experts_per_token,
-            method=method,
-            numa_nodes=numa_nodes,
-            # A2: mesh_enabled 暂不开启（避免 load_weights 跳过导致 gate_bb_ 为空崩溃）
-            # 仅注入 mesh_residency 指针，让 do_gate_up_gemm 的 hook 可被调用
-            mesh_enabled=False,
-            mesh_residency_ptr=0,
-        )
+        # 1. 创建内部 Wrapper
+        #    BF16 模式：使用 NativeMoEWrapper（支持 BF16 kernel + MESH hooks）
+        #    AMXINT4 模式：使用 AMXMoEWrapper（AMX INT4 kernel + MESH hooks）
+        from ..amx import AMXMoEWrapper, NativeMoEWrapper
+
+        is_bf16 = (method.upper() == "BF16")
+        if is_bf16:
+            # BF16 MESH 模式：NativeMoEWrapper + mesh_enabled=True
+            # C++ load_weights 会跳过，forward 时由 MESH hook 提供权重
+            self._inner = NativeMoEWrapper(
+                layer_idx=layer_idx,
+                num_experts=num_experts,
+                num_experts_per_tok=num_experts_per_tok,
+                hidden_size=hidden_size,
+                moe_intermediate_size=moe_intermediate_size,
+                gpu_experts_mask=gpu_experts_mask,
+                cpuinfer_threads=cpuinfer_threads,
+                threadpool_count=threadpool_count,
+                weight_path=weight_path,
+                chunked_prefill_size=chunked_prefill_size,
+                cpu_save=cpu_save,
+                max_deferred_experts_per_token=max_deferred_experts_per_token,
+                method=method,
+                numa_nodes=numa_nodes,
+                mesh_enabled=True,
+                mesh_residency_ptr=0,  # 稍后注入
+            )
+        else:
+            # AMXINT4 MESH 模式：AMXMoEWrapper + mesh_enabled=True
+            # C++ load_weights 会跳过全量加载，forward 时由 MESH hook 提供权重
+            # slot 未命中时通过 get_or_load_*_ptr 同步加载（而非回退到空的 gate_bb_）
+            self._inner = AMXMoEWrapper(
+                layer_idx=layer_idx,
+                num_experts=num_experts,
+                num_experts_per_tok=num_experts_per_tok,
+                hidden_size=hidden_size,
+                moe_intermediate_size=moe_intermediate_size,
+                gpu_experts_mask=gpu_experts_mask,
+                cpuinfer_threads=cpuinfer_threads,
+                threadpool_count=threadpool_count,
+                weight_path=weight_path,
+                chunked_prefill_size=chunked_prefill_size,
+                cpu_save=cpu_save,
+                max_deferred_experts_per_token=max_deferred_experts_per_token,
+                method=method,
+                numa_nodes=numa_nodes,
+                mesh_enabled=True,
+                mesh_residency_ptr=0,
+            )
 
         # 2. 创建/复用 ResidencyManager（进程级单例，避免 40× 内存重复）
         if numa_nodes is None:
@@ -144,9 +173,31 @@ class MeshMoEWrapper:
         self._mesh_config = mesh_config
         self._layer_idx = layer_idx
 
-        # A2: 注入 mesh_residency 指针到 inner AMXMoEWrapper
+        # A2: 注入 mesh_residency 指针到 inner Wrapper
         # 这样 do_gate_up_gemm/do_down_gemm 中的 mesh hook 可以调用 ResidencyManager
         self._inner.mesh_residency_ptr = self._residency.raw_ptr()
+
+        # Stats 收集：只在 layer 0 创建 collector，启动后台线程定期输出
+        if layer_idx == 0:
+            self._stats_collector = MeshStatsCollector(self._residency)
+            self._stats_stop_event = threading.Event()
+            self._stats_thread = threading.Thread(
+                target=self._stats_loop, args=(self._stats_stop_event,), daemon=True
+            )
+            self._stats_thread.start()
+            logger.info("MeshMoEWrapper: stats background thread started (interval=10s)")
+        else:
+            self._stats_collector = None
+            self._stats_stop_event = None
+            self._stats_thread = None
+
+    def _stats_loop(self, stop_event):
+        """后台线程：每 10 秒输出一次 MESH stats 到日志。"""
+        while not stop_event.is_set():
+            stop_event.wait(10)
+            if stop_event.is_set():
+                break
+            self.dump_stats()
 
     def _inject_file_layouts(
         self,
@@ -228,16 +279,17 @@ class MeshMoEWrapper:
         - blk.{L}.ffn_up_exps.{E}.numa.{N}.weight / .scale
         - blk.{L}.ffn_down_exps.{E}.numa.{N}.weight / .scale
         """
-        # 收集所有需要打开的文件，用 O_DIRECT 打开
+        # 收集所有需要打开的文件，用 O_DIRECT 打开（绕过 page cache）
         file_fds: dict[str, int] = {}
 
         def get_fd(fpath: str) -> int:
             if fpath not in file_fds:
-                # O_DIRECT 需要对齐读取，但 safetensors 偏移可能不对齐
-                # 先用 O_RDONLY 打开，O_DIRECT 对齐问题在 io_uring 层处理
-                fd = os.open(fpath, os.O_RDONLY)
+                # O_DIRECT：SSD 直接 DMA 到 NUMA buffer，不经过 page cache
+                # SKILL.md 第11行：MESH 核心设计原则，禁止使用 page cache
+                # MoE 专家权重已验证全部 512 对齐（offset 和 size）
+                fd = os.open(fpath, os.O_RDONLY | os.O_DIRECT)
                 file_fds[fpath] = fd
-                logger.debug("_inject_amxint4_layouts: opened %s as fd=%d", fpath, fd)
+                logger.debug("_inject_amxint4_layouts: opened %s as fd=%d (O_DIRECT)", fpath, fd)
             return file_fds[fpath]
 
         injected = 0
@@ -311,7 +363,7 @@ class MeshMoEWrapper:
 
         logger.info(
             "_inject_amxint4_layouts: injected %d layouts (missing %d), "
-            "opened %d files with O_RDONLY",
+            "opened %d files with O_DIRECT",
             injected, missing, len(file_fds),
         )
 
@@ -341,19 +393,26 @@ class MeshMoEWrapper:
 
         def get_fd(fpath: str) -> int:
             if fpath not in file_fds:
-                fd = os.open(fpath, os.O_RDONLY)
+                # O_DIRECT：绕过 page cache，SSD 直接 DMA 到 NUMA buffer
+                fd = os.open(fpath, os.O_RDONLY | os.O_DIRECT)
                 file_fds[fpath] = fd
             return file_fds[fpath]
 
         injected = 0
         missing = 0
+        # 支持两种前缀：model.layers.{L}（标准）和 model.language_model.layers.{L}（VL 模型 TEXTONLY）
         for layer in range(total_layers):
             gate_up_key = f"model.layers.{layer}.mlp.experts.gate_up_proj"
             down_key = f"model.layers.{layer}.mlp.experts.down_proj"
-
             if gate_up_key not in tensor_map or down_key not in tensor_map:
-                missing += 1
-                continue
+                lm_key = f"model.language_model.layers.{layer}.mlp.experts.gate_up_proj"
+                lm_down = f"model.language_model.layers.{layer}.mlp.experts.down_proj"
+                if lm_key in tensor_map and lm_down in tensor_map:
+                    gate_up_key = lm_key
+                    down_key = lm_down
+                else:
+                    missing += 1
+                    continue
 
             gu_fpath, gu_base, _ = tensor_map[gate_up_key]
             d_fpath, d_base, _ = tensor_map[down_key]
@@ -425,20 +484,20 @@ class MeshMoEWrapper:
     # ===== forward 委托 =====
 
     def forward(self, *args, **kwargs):
-        """forward 委托给 AMXMoEWrapper。
+        """forward 委托给内部 Wrapper（AMXMoEWrapper 或 NativeMoEWrapper）。
 
-        MESH 通过 hook 在 AMX 内核中重定向权重指针，
+        MESH 通过 hook 在内核中重定向权重指针，
         Python 侧无需特殊处理。
         """
         return self._inner.forward(*args, **kwargs)
 
     def load_weights(self, physical_to_logical_map_cpu=None):
-        """load_weights：委托给内部 AMXMoEWrapper 加载全量权重。
+        """load_weights：委托给内部 Wrapper。
 
-        TODO: MESH 模式的最终目标是跳过全量加载，仅由 ResidencyManager 的
-        slot pool 管理 cap 个专家（io_uring 按需加载）。但当前 io_uring 按需
-        加载和 AMX 内核 hook 尚未实现，self.moe 为 None 会导致 submit_forward
-        崩溃。暂时先正常加载权重以保证推理可用，slot pool 作为额外开销。
+        - BF16 模式：NativeMoEWrapper 的 load_weights 会跳过磁盘加载，
+          C++ load_weights 也跳过，forward 时由 MESH hook 提供权重。
+        - AMXINT4 模式：AMXMoEWrapper 正常加载全量权重，
+          forward 时 MESH hook 重定向到 slot pool。
         """
         return self._inner.load_weights(physical_to_logical_map_cpu)
 
@@ -478,3 +537,13 @@ class MeshMoEWrapper:
     def on_decode_token_end(self, all_layers_topk: List[List[int]],
                             all_layers_scores: List[List[float]]) -> None:
         self._residency.on_decode_token_end(all_layers_topk, all_layers_scores)
+
+    def dump_stats(self) -> None:
+        """输出 MESH stats 到日志。benchmark 脚本从日志 grep 获取。"""
+        if self._stats_collector is None:
+            return
+        try:
+            stats = self._stats_collector.collect()
+            logger.info("[MESH_STATS_KV] %s", stats.to_kv())
+        except Exception as e:
+            logger.warning("Failed to dump MESH stats: %s", e)

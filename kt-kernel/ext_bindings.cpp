@@ -1161,15 +1161,49 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
         }, py::return_value_policy::reference_internal);
 
     // 注册 hook 函数指针（让 mesh_hook.hpp 的 inline 函数能调用 ResidencyManager）
+    // get_*_ptr hook 使用 with_reader 版本：返回非 nullptr 时 reader 已持有
     mesh::hook::HookRegistry registry;
     registry.get_gate_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
-      return ((mesh::MeshResidencyManager*)mgr)->get_gate_ptr(layer, tp, eid);
+      return ((mesh::MeshResidencyManager*)mgr)->get_gate_ptr_with_reader(layer, tp, eid);
     };
     registry.get_up_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
-      return ((mesh::MeshResidencyManager*)mgr)->get_up_ptr(layer, tp, eid);
+      return ((mesh::MeshResidencyManager*)mgr)->get_up_ptr_with_reader(layer, tp, eid);
     };
     registry.get_down_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
-      return ((mesh::MeshResidencyManager*)mgr)->get_down_ptr(layer, tp, eid);
+      return ((mesh::MeshResidencyManager*)mgr)->get_down_ptr_with_reader(layer, tp, eid);
+    };
+    // 同步加载版本：slot 未命中时阻塞从 SSD 加载到 slot（内联 acquire_reader）
+    registry.load_gate_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_gate_ptr(layer, tp, eid);
+    };
+    registry.load_up_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_up_ptr(layer, tp, eid);
+    };
+    registry.load_down_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_down_ptr(layer, tp, eid);
+    };
+    // acquire_reader 已内联到 get/load hook 中，此处为 no-op
+    registry.acquire_reader = [](void* mgr, int layer, int tp, int eid) -> void {
+      (void)mgr; (void)layer; (void)tp; (void)eid;
+    };
+    registry.release_reader = [](void* mgr, int layer, int tp, int eid) -> void {
+      ((mesh::MeshResidencyManager*)mgr)->release_reader(layer, tp, eid);
+    };
+    // decode 层级回调：调用完整 defer 调度路径（on_decode_layer）
+    // on_decode_layer 会：process_cqes → split(immediate/deferred) → drain_and_submit(异步io_uring)
+    // missing 专家走 deferred 异步读取，I/O 与 GEMM 重叠（SKILL.md 第 96-100 行）
+    registry.on_decode_layer = [](void* mgr, int layer, int tp,
+                                  const int* topk, int k, const float* weights, int expert_num) -> void {
+      // 构造 topk 和 scores（全长，top-k 位置填入 weights，其余 0）
+      std::vector<int> topk_vec(topk, topk + k);
+      std::vector<float> scores_vec(expert_num, 0.0f);
+      for (int i = 0; i < k; i++) {
+        int eid = topk[i];
+        if (eid >= 0 && eid < expert_num) {
+          scores_vec[eid] = weights[i];
+        }
+      }
+      ((mesh::MeshResidencyManager*)mgr)->on_decode_layer(layer, topk_vec, scores_vec, tp);
     };
     mesh::hook::register_hooks(registry);
 

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -57,6 +58,29 @@ class HeatTracker {
     }
 
     // 跨 token 全局衰减：heat_new = beta * heat_old + (1-beta) * token_heat
+    for (int e = 0; e < expert_num_; e++) {
+      global_heat_[e] = beta_ * global_heat_[e] + (1.0f - beta_) * token_layer_heat_[e];
+    }
+  }
+
+  // 逐层更新层内 EMA（在 on_decode_layer 中调用）
+  // 只更新 token_layer_heat_，不更新 global_heat_。
+  // global_heat_ 的 beta_ 衰减是"跨 token"语义，每 token 只更新一次。
+  // 注意：commit_token（GPU 回调路径）当前未集成（submit_gating_scores_with_cuda_stream
+  // 从未被调用），所以 global_heat_ 的更新由 update_global_heat() 在最后一层时触发。
+  void commit_layer(const std::vector<float>& layer_scores) {
+    // 层内 EMA：gamma_ 衰减，每层更新一次
+    for (int e = 0; e < expert_num_ && e < (int)layer_scores.size(); e++) {
+      token_layer_heat_[e] = gamma_ * token_layer_heat_[e] + (1.0f - gamma_) * layer_scores[e];
+    }
+  }
+
+  // 跨 token 全局 EMA 更新（每 token 调用一次，由 EvictionScorer::commit_layer
+  // 在最后一层 layer_idx == num_layers-1 时触发）
+  // 之前的 bug：commit_layer 每层都应用 beta_，导致一个 token（40 层）内
+  // global_heat_ 被衰减 40 次（0.5^40 ≈ 0），历史 heat 信息全部丢失，
+  // select_victim 退化为随机选择，高频专家被错误驱逐 → SLOT MISS → pread。
+  void update_global_heat() {
     for (int e = 0; e < expert_num_; e++) {
       global_heat_[e] = beta_ * global_heat_[e] + (1.0f - beta_) * token_layer_heat_[e];
     }
@@ -293,6 +317,27 @@ class EvictionScorer {
     }
   }
 
+  // 逐层更新 Heat 和 Markov（在 on_decode_layer 中调用）
+  // 加锁保护：多个 TP 并发调用 on_decode_layer，scorer_ 是共享对象
+  // 关键：global_heat_ 的 beta_ 衰减只在最后一层（layer_idx == num_layers_-1）时更新一次，
+  // 而不是每层都更新。之前每层都更新导致 beta_ 被应用 40 次（0.5^40≈0），heat 信息丢失。
+  // 注意：commit_token（GPU 回调路径）当前未集成，所以 global_heat_ 更新放在这里。
+  void commit_layer(int layer_idx,
+                    const std::vector<int>& topk,
+                    const std::vector<float>& scores,
+                    const std::vector<int>& prev_topk,
+                    const std::vector<float>& prev_scores) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    heat_.commit_layer(scores);
+    if (layer_idx > 0 && !prev_topk.empty()) {
+      markov_.update(layer_idx - 1, prev_topk, prev_scores, topk, scores);
+    }
+    // 只在最后一层结束时更新 global_heat_（每 token 一次，正确的 beta_ 衰减语义）
+    if (layer_idx == num_layers_ - 1) {
+      heat_.update_global_heat();
+    }
+  }
+
   /**
    * @brief B2: 在第 layer_idx 层结束时，预测第 layer_idx+1 层的 cross_layer_prior
    *
@@ -305,6 +350,7 @@ class EvictionScorer {
   void predict_next_layer(int layer_idx, const std::vector<int>& topk,
                           const std::vector<float>& scores) {
     if (layer_idx < 0 || layer_idx + 1 >= num_layers_) return;
+    std::lock_guard<std::mutex> lock(mtx_);
     std::vector<float> predicted;
     markov_.predict(layer_idx, topk, scores, predicted);
     auto& prior = cross_layer_prior_[layer_idx + 1];
@@ -359,6 +405,9 @@ class EvictionScorer {
   int expert_num_;
   // B2: [layer][expert] 的 Markov 先验，由 predict_next_layer 累积
   std::vector<std::vector<float>> cross_layer_prior_;
+  // 多 TP 并发保护：commit_layer/predict_next_layer 是写操作，需加锁
+  // score/select_victim 是读操作，float 读写通常原子，不加锁（驱逐评分不需要精确）
+  mutable std::mutex mtx_;
 };
 
 }  // namespace mesh

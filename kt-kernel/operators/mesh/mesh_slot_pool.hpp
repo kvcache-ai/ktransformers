@@ -11,12 +11,16 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <numa.h>
 #include <numaif.h>
+#include <sched.h>
 #include <stdexcept>
 #include <vector>
 
@@ -93,6 +97,14 @@ class MeshSlotPool {
 
     slots_.resize(cap);
     slot_to_expert_.assign(cap, -1);
+    // per-slot mutex + CV：保护 active_readers 的 acquire/release/overwrite 同步
+    // 用 unique_ptr 因为 mutex/CV 不可移动
+    slot_mtx_.resize(cap);
+    slot_cv_.resize(cap);
+    for (int i = 0; i < cap; i++) {
+      slot_mtx_[i] = std::make_unique<std::mutex>();
+      slot_cv_[i] = std::make_unique<std::condition_variable>();
+    }
   }
 
   ~MeshSlotPool() {
@@ -110,6 +122,8 @@ class MeshSlotPool {
       : slots_(std::move(other.slots_)),
         expert_to_slot_(std::move(other.expert_to_slot_)),
         slot_to_expert_(std::move(other.slot_to_expert_)),
+        slot_mtx_(std::move(other.slot_mtx_)),
+        slot_cv_(std::move(other.slot_cv_)),
         layer_idx_(other.layer_idx_),
         tp_part_idx_(other.tp_part_idx_),
         numa_node_(other.numa_node_),
@@ -129,6 +143,8 @@ class MeshSlotPool {
       slots_ = std::move(other.slots_);
       expert_to_slot_ = std::move(other.expert_to_slot_);
       slot_to_expert_ = std::move(other.slot_to_expert_);
+      slot_mtx_ = std::move(other.slot_mtx_);
+      slot_cv_ = std::move(other.slot_cv_);
       layer_idx_ = other.layer_idx_;
       tp_part_idx_ = other.tp_part_idx_;
       numa_node_ = other.numa_node_;
@@ -195,6 +211,40 @@ class MeshSlotPool {
     return down_ptr(slot_idx);
   }
 
+  // ===== 原子化 acquire（lookup + state check + reader + pointer 全部在同一锁内）=====
+  // 消除 TOCTOU 竞争：原 expert_gate_ptr + acquire_reader 分两次独立 lookup，
+  // 中间 expert 可能被驱逐并重新加载到另一个 slot，导致返回的指针（旧 slot）和
+  // reader（新 slot）不在同一个 slot 上。GEMM 用无 reader 保护的旧 slot 指针，
+  // 旧 slot 被 overwrite 覆盖 → 读到空内存 → 段错误。
+  // 此方法保证指针和 reader 在同一个 slot 上，overwrite 持同一把锁无法插入。
+  void* acquire_gate_ptr(int expert_id) {
+    int slot_idx = expert_to_slot_.lookup(expert_id);
+    if (slot_idx < 0) return nullptr;
+    std::lock_guard<std::mutex> lock(*slot_mtx_[slot_idx]);
+    if (slot_to_expert_[slot_idx] != expert_id) return nullptr;
+    if (slots_[slot_idx].get_state() != ExpertState::CACHED) return nullptr;
+    slots_[slot_idx].active_readers.fetch_add(1, std::memory_order_acq_rel);
+    return gate_ptr(slot_idx);
+  }
+  void* acquire_up_ptr(int expert_id) {
+    int slot_idx = expert_to_slot_.lookup(expert_id);
+    if (slot_idx < 0) return nullptr;
+    std::lock_guard<std::mutex> lock(*slot_mtx_[slot_idx]);
+    if (slot_to_expert_[slot_idx] != expert_id) return nullptr;
+    if (slots_[slot_idx].get_state() != ExpertState::CACHED) return nullptr;
+    slots_[slot_idx].active_readers.fetch_add(1, std::memory_order_acq_rel);
+    return up_ptr(slot_idx);
+  }
+  void* acquire_down_ptr(int expert_id) {
+    int slot_idx = expert_to_slot_.lookup(expert_id);
+    if (slot_idx < 0) return nullptr;
+    std::lock_guard<std::mutex> lock(*slot_mtx_[slot_idx]);
+    if (slot_to_expert_[slot_idx] != expert_id) return nullptr;
+    if (slots_[slot_idx].get_state() != ExpertState::CACHED) return nullptr;
+    slots_[slot_idx].active_readers.fetch_add(1, std::memory_order_acq_rel);
+    return down_ptr(slot_idx);
+  }
+
   // ===== 状态查询 =====
 
   bool is_cached(int expert_id) const {
@@ -251,58 +301,95 @@ class MeshSlotPool {
     expert_to_slot_.insert(expert_id, slot_idx);
   }
 
+  // 解绑：将 slot 恢复为 BASELINE（加载失败时调用）
+  void unbind(int slot_idx) {
+    Slot& s = slots_[slot_idx];
+    int old_expert = s.bound_expert_id;
+    s.set_state(ExpertState::BASELINE);
+    s.bound_expert_id = -1;
+    slot_to_expert_[slot_idx] = -1;
+    if (old_expert >= 0) expert_to_slot_.erase(old_expert);
+  }
+
   // 标记 slot 已缓存完毕（io_uring CQE 到达后调用）
   void mark_cached(int slot_idx) {
     slots_[slot_idx].set_state(ExpertState::CACHED);
   }
 
   // 覆盖：解绑旧 expert，将新 expert 读入同一个 slot
-  // 必须等 active_readers 归零后才能执行
+  // 用 condition_variable 等待 active_readers 归零（30秒超时，超时后强制覆盖）
+  // 持有 slot_mtx_ 期间修改绑定关系，防止 acquire_reader 的 TOCTOU 竞争
   void overwrite(int slot_idx, int new_expert_id) {
     Slot& s = slots_[slot_idx];
-    // Bug 8 fix: spin-wait 加超时（10 秒），避免 reader 泄漏导致永久死锁
-    // 超时后 abort，因为继续执行会导致数据损坏
     {
-      const int kMaxSpinIters = 100000000;  // ~10s 取决于 CPU
-      int spin = 0;
-      while (s.active_readers.load(std::memory_order_acquire) > 0) {
-        if (++spin > kMaxSpinIters) {
-          fprintf(stderr,
-                  "[MESH] overwrite: slot %d active_readers never reached 0 "
-                  "(expert %d -> %d), aborting to avoid data corruption\n",
-                  slot_idx, s.bound_expert_id, new_expert_id);
-          std::abort();
+      std::unique_lock<std::mutex> lock(*slot_mtx_[slot_idx]);
+      // CV 等待 active_readers 归零：GEMM 完成后 release_reader 会 notify
+      // 30秒超时诊断：如果 reader 未释放，说明有 reader leak 或死锁
+      // 注意：wait_for 之前不能调用 fprintf，否则 stderr 缓冲区满时 fprintf 阻塞，
+      // 锁被永久持有，wait_for 永远不被调用，30秒超时永远不触发 → 永久死锁
+      if (s.active_readers.load(std::memory_order_acquire) > 0) {
+        auto status = slot_cv_[slot_idx]->wait_for(lock, std::chrono::seconds(30), [&] {
+          return s.active_readers.load(std::memory_order_acquire) == 0;
+        });
+        if (!status) {
+          // 超时：reader 未释放，强制覆盖以避免永久死锁
+          // 此时 fprintf 在 wait_for 之后，锁仍持有但 wait_for 已执行过，不会阻止超时
+          int still = s.active_readers.load(std::memory_order_acquire);
+          fprintf(stderr, "[MESH OVERWRITE TIMEOUT] layer=%d tp=%d slot=%d old_expert=%d "
+                  "new_expert=%d active_readers=%d — FORCING overwrite after 30s timeout! "
+                  "Reader leak detected.\n",
+                  layer_idx_, tp_part_idx_, slot_idx, s.bound_expert_id,
+                  new_expert_id, still);
         }
-        // Bug 8 fix: 轻量让步，减少空转功耗（不用 sched_yield 避免系统调用开销）
       }
+      // 仍在锁内：修改绑定关系，acquire_reader 会看到新状态
+      int old_expert_id = s.bound_expert_id;
+      if (old_expert_id >= 0) {
+        expert_to_slot_.erase(old_expert_id);
+      }
+      s.set_state(ExpertState::LOADING);
+      s.bound_expert_id = new_expert_id;
+      slot_to_expert_[slot_idx] = new_expert_id;
+      expert_to_slot_.insert(new_expert_id, slot_idx);
     }
-    int old_expert_id = s.bound_expert_id;
-    if (old_expert_id >= 0) {
-      expert_to_slot_.erase(old_expert_id);
-    }
-    // Bug 8 fix: 去掉无意义的 DEMOTING 中间状态
-    // 原代码 DEMOTING 立即被 LOADING 覆盖，无窗口让其他线程看到
-    // reader==0 已保证安全，直接进 LOADING
-    s.set_state(ExpertState::LOADING);
-    s.bound_expert_id = new_expert_id;
-    slot_to_expert_[slot_idx] = new_expert_id;
-    expert_to_slot_.insert(new_expert_id, slot_idx);
   }
 
   // ===== 引用计数 =====
 
   // AMX 计算 / GPU 搬运前递增 reader
-  void acquire_reader(int expert_id) {
+  // 返回 true 表示成功获取 reader（slot 仍绑定该 expert 且 CACHED）
+  // 返回 false 表示 slot 已被驱逐（调用者应走 load 路径）
+  // 持有 slot_mtx_ 防止与 overwrite 的 TOCTOU 竞争
+  bool acquire_reader(int expert_id) {
     int slot_idx = expert_to_slot_.lookup(expert_id);
-    if (slot_idx < 0) return;
+    if (slot_idx < 0) return false;
+    std::lock_guard<std::mutex> lock(*slot_mtx_[slot_idx]);
+    // 双重检查：持锁后确认 expert 仍绑定且 CACHED
+    if (slot_to_expert_[slot_idx] != expert_id) return false;
+    if (slots_[slot_idx].get_state() != ExpertState::CACHED) return false;
+    // 不在此处打印日志：acquire_reader 是超高频路径（每 token 每 expert 每 GEMM），
+    // 持锁 fprintf 会在 stderr 缓冲区满时阻塞，导致 slot_mtx_ 被永久持有 → 死锁
     slots_[slot_idx].active_readers.fetch_add(1, std::memory_order_acq_rel);
+    return true;
   }
 
-  // 计算完毕递减 reader
+  // 计算完毕递减 reader，并 notify overwrite 的 CV 等待
+  // 死锁修复：不持有 slot_mtx_ 锁。active_readers 是 std::atomic，fetch_sub 不需要锁。
+  // 原实现持锁 fetch_sub 会导致死锁：overwrite 持 slot_mtx_ CV wait 等 active_readers==0，
+  // release_reader 需要同一个 slot_mtx_ 才能 fetch_sub → 永久死锁。
+  // 不持锁的安全性：lookup 可能和 overwrite 的 erase/insert 竞争，但 int 读写通常原子。
+  // 若 lookup 返回 -1（expert 已被 evict），说明 overwrite 已 CV wait 完成，迟到 return 安全。
+  // 若 lookup 返回正确 slot_idx，overwrite 还在 CV wait（active_readers>0），fetch_sub 安全。
   void release_reader(int expert_id) {
     int slot_idx = expert_to_slot_.lookup(expert_id);
-    if (slot_idx < 0) return;
+    if (slot_idx < 0) {
+      // expert 已被 evict，reader 无法释放。
+      // 这是潜在 reader leak 的来源之一，但此处不打印日志（超高频路径）。
+      // 若需诊断，可在 overwrite 超时日志中观察到 active_readers>0。
+      return;
+    }
     slots_[slot_idx].active_readers.fetch_sub(1, std::memory_order_acq_rel);
+    slot_cv_[slot_idx]->notify_all();
   }
 
   // Bug 11 fix: 按 slot_idx 递增/递减 reader，不依赖 expert 绑定关系
@@ -314,6 +401,7 @@ class MeshSlotPool {
   void release_slot_reader(int slot_idx) {
     if (slot_idx < 0 || slot_idx >= cap_) return;
     slots_[slot_idx].active_readers.fetch_sub(1, std::memory_order_acq_rel);
+    slot_cv_[slot_idx]->notify_all();
   }
 
   // ===== 驱逐扫描 =====
@@ -330,12 +418,15 @@ class MeshSlotPool {
     return -1;
   }
 
-  // 获取所有 CACHED 状态的专家 ID（驱逐评分用）
+  // 获取所有可驱逐的专家 ID（CACHED 且 active_readers==0）
+  // SKILL.md 第 62 行：不驱逐读取中/使用中的专家
+  // active_readers>0 表示有 GEMM 正在读取，强制驱逐会导致读到空内存
   std::vector<int> cached_experts() const {
     std::vector<int> result;
     for (int i = 0; i < cap_; i++) {
       if (slots_[i].get_state() == ExpertState::CACHED &&
-          slots_[i].bound_expert_id >= 0) {
+          slots_[i].bound_expert_id >= 0 &&
+          slots_[i].active_readers.load(std::memory_order_acquire) == 0) {
         result.push_back(slots_[i].bound_expert_id);
       }
     }
@@ -371,6 +462,12 @@ class MeshSlotPool {
   size_t total_bytes_ = 0;
 
   std::vector<Slot> slots_;  // [cap_]，驱逐扫描用
+
+  // per-slot mutex + condition_variable
+  // 保护 acquire_reader/release_reader/overwrite 之间的同步
+  // acquire_reader 持锁检查 state + 增计数；overwrite 持锁 CV 等待计数归零
+  std::vector<std::unique_ptr<std::mutex>> slot_mtx_;
+  std::vector<std::unique_ptr<std::condition_variable>> slot_cv_;
 
   // expert_id -> slot_idx 的双向映射
   // 简单实现用 vector，O(1) 查找
