@@ -139,6 +139,10 @@ class MeshMoEWrapper:
         if numa_nodes is None:
             numa_nodes = list(range(threadpool_count))
 
+        # 方案 A: 记录本进程的 NUMA 节点列表，供 _inject_file_layouts 使用
+        # 每进程 numa_nodes = [tp_rank]，例如 tensor_parallel0 → [0]，tensor_parallel1 → [1]
+        self._numa_nodes = numa_nodes
+
         if MeshMoEWrapper._shared_residency is None:
             # 第一层：创建并初始化共享 ResidencyManager
             self._residency = MeshResidencyManager()
@@ -294,72 +298,75 @@ class MeshMoEWrapper:
 
         injected = 0
         missing = 0
+        # 方案 A: 每进程只加载自己 NUMA shard
+        # self._numa_nodes = [tp_rank]，tensor 名用 numa.{local_numa_id}
+        # tp_part_idx=0（进程内只有 1 个分片）
+        local_numa_id = self._numa_nodes[0] if self._numa_nodes else 0
         for layer in range(total_layers):
-            for tp in range(tp_count):
-                for expert in range(expert_num):
-                    # AMXINT4 NUMA-sharded tensor 名
-                    gate_w_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{tp}.weight"
-                    gate_s_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{tp}.scale"
-                    up_w_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{tp}.weight"
-                    up_s_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{tp}.scale"
-                    down_w_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{tp}.weight"
-                    down_s_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{tp}.scale"
+            for expert in range(expert_num):
+                # AMXINT4 NUMA-sharded tensor 名（用本进程 NUMA ID）
+                gate_w_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{local_numa_id}.weight"
+                gate_s_key = f"blk.{layer}.ffn_gate_exps.{expert}.numa.{local_numa_id}.scale"
+                up_w_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{local_numa_id}.weight"
+                up_s_key = f"blk.{layer}.ffn_up_exps.{expert}.numa.{local_numa_id}.scale"
+                down_w_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{local_numa_id}.weight"
+                down_s_key = f"blk.{layer}.ffn_down_exps.{expert}.numa.{local_numa_id}.scale"
 
-                    # 检查必需的 tensor 是否存在
-                    required = [gate_w_key, up_w_key, down_w_key]
-                    if not all(k in tensor_map for k in required):
-                        missing += 1
-                        continue
+                # 检查必需的 tensor 是否存在
+                required = [gate_w_key, up_w_key, down_w_key]
+                if not all(k in tensor_map for k in required):
+                    missing += 1
+                    continue
 
-                    # 获取 gate 布局
-                    g_fpath, g_off, g_bytes = tensor_map[gate_w_key]
-                    fd = get_fd(g_fpath)
+                # 获取 gate 布局
+                g_fpath, g_off, g_bytes = tensor_map[gate_w_key]
+                fd = get_fd(g_fpath)
 
-                    # 获取 up 布局
-                    u_fpath, u_off, u_bytes = tensor_map[up_w_key]
-                    if u_fpath != g_fpath:
-                        fd = get_fd(u_fpath)  # 不同文件需要不同 fd
+                # 获取 up 布局
+                u_fpath, u_off, u_bytes = tensor_map[up_w_key]
+                if u_fpath != g_fpath:
+                    fd = get_fd(u_fpath)  # 不同文件需要不同 fd
 
-                    # 获取 down 布局
-                    d_fpath, d_off, d_bytes = tensor_map[down_w_key]
-                    if d_fpath not in file_fds:
-                        fd = get_fd(d_fpath)
+                # 获取 down 布局
+                d_fpath, d_off, d_bytes = tensor_map[down_w_key]
+                if d_fpath not in file_fds:
+                    fd = get_fd(d_fpath)
 
-                    # scale 偏移（AMXINT4 专用）
-                    g_s_off = g_s_bytes = 0
-                    u_s_off = u_s_bytes = 0
-                    d_s_off = d_s_bytes = 0
-                    if gate_s_key in tensor_map:
-                        _, g_s_off, g_s_bytes = tensor_map[gate_s_key]
-                    if up_s_key in tensor_map:
-                        _, u_s_off, u_s_bytes = tensor_map[up_s_key]
-                    if down_s_key in tensor_map:
-                        _, d_s_off, d_s_bytes = tensor_map[down_s_key]
+                # scale 偏移（AMXINT4 专用）
+                g_s_off = g_s_bytes = 0
+                u_s_off = u_s_bytes = 0
+                d_s_off = d_s_bytes = 0
+                if gate_s_key in tensor_map:
+                    _, g_s_off, g_s_bytes = tensor_map[gate_s_key]
+                if up_s_key in tensor_map:
+                    _, u_s_off, u_s_bytes = tensor_map[up_s_key]
+                if down_s_key in tensor_map:
+                    _, d_s_off, d_s_bytes = tensor_map[down_s_key]
 
-                    # 注意：fd 取 gate 所在文件的 fd。如果 up/down 在不同文件，
-                    # io_uring 的 submit_load 会用 layout.fd 读取所有三个矩阵，
-                    # 这要求三个矩阵在同一文件。safetensors 通常如此（同层同 NUMA 在同一文件）。
-                    # 如果跨文件，需要后续拆分为多次 submit_load。
-                    self._residency.set_file_layout(
-                        layer_idx=layer,
-                        tp_part_idx=tp,
-                        expert_id=expert,
-                        fd=fd,
-                        gate_offset=g_off,
-                        up_offset=u_off,
-                        down_offset=d_off,
-                        gate_bytes=g_bytes,
-                        up_bytes=u_bytes,
-                        down_bytes=d_bytes,
-                        gate_scale_offset=g_s_off,
-                        up_scale_offset=u_s_off,
-                        down_scale_offset=d_s_off,
-                        gate_scale_bytes=g_s_bytes,
-                        up_scale_bytes=u_s_bytes,
-                        down_scale_bytes=d_s_bytes,
-                        # AMXINT4 对称量化无 mins，保持 0
-                    )
-                    injected += 1
+                # 注意：fd 取 gate 所在文件的 fd。如果 up/down 在不同文件，
+                # io_uring 的 submit_load 会用 layout.fd 读取所有三个矩阵，
+                # 这要求三个矩阵在同一文件。safetensors 通常如此（同层同 NUMA 在同一文件）。
+                # 如果跨文件，需要后续拆分为多次 submit_load。
+                self._residency.set_file_layout(
+                    layer_idx=layer,
+                    tp_part_idx=0,  # 方案 A: 进程内只有 1 个分片
+                    expert_id=expert,
+                    fd=fd,
+                    gate_offset=g_off,
+                    up_offset=u_off,
+                    down_offset=d_off,
+                    gate_bytes=g_bytes,
+                    up_bytes=u_bytes,
+                    down_bytes=d_bytes,
+                    gate_scale_offset=g_s_off,
+                    up_scale_offset=u_s_off,
+                    down_scale_offset=d_s_off,
+                    gate_scale_bytes=g_s_bytes,
+                    up_scale_bytes=u_s_bytes,
+                    down_scale_bytes=d_s_bytes,
+                    # AMXINT4 对称量化无 mins，保持 0
+                )
+                injected += 1
 
         logger.info(
             "_inject_amxint4_layouts: injected %d layouts (missing %d), "
