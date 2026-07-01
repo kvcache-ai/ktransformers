@@ -544,6 +544,19 @@ message(STATUS "SOURCE_DIR7: ${SOURCE_DIR7}")
 
 set(ALL_SOURCES ${SOURCE_DIR1} ${SOURCE_DIR2} ${SOURCE_DIR3} ${SOURCE_DIR4} ${SOURCE_DIR5} ${SOURCE_DIR6} ${SOURCE_DIR7})
 
+# ===== MESH 插件（可选）=====
+option(KT_ENABLE_MESH "Enable MESH io_uring resident-cache plugin" OFF)
+if(KT_ENABLE_MESH)
+    add_compile_definitions(KT_ENABLE_MESH=1)
+    aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/operators/mesh MESH_SOURCES)
+    list(APPEND ALL_SOURCES ${MESH_SOURCES})
+
+    # 查找 liburing
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBURING REQUIRED liburing)
+    message(STATUS "MESH: enabled (liburing found at ${LIBURING_INCLUDE_DIRS})")
+endif()
+
 file(GLOB_RECURSE FMT_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp"
@@ -685,6 +698,12 @@ if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     target_compile_definitions(${PROJECT_NAME} PRIVATE CPU_USE_KML)
 endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE llama PkgConfig::HWLOC OpenMP::OpenMP_CXX)
+
+# MESH 插件链接 liburing + numa
+if(KT_ENABLE_MESH)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${LIBURING_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${LIBURING_LIBRARIES} numa)
+endif()
 if(NOT HOST_IS_X86 AND KTRANSFORMERS_CPU_USE_KML)
     if(KTRANSFORMERS_CPU_DEBUG)
         # add_executable(convert-test ${CMAKE_CURRENT_SOURCE_DIR}/operators/kml/convert-test.cpp)

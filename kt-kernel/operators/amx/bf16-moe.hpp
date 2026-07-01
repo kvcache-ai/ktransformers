@@ -18,6 +18,7 @@
 #include "la/amx_raw_kernels.hpp"
 #include "la/amx_utils.hpp"  // For transpose_16x16_32bit
 #include "moe_base.hpp"
+#include "../mesh/mesh_hook.hpp"
 
 /**
  * @brief BF16 MoE operator using CRTP pattern
@@ -94,26 +95,97 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = gate_up_ba_[expert_idx];
-    auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
-    // Use vec_mul/mat_mul (no group_size)
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+    // MESH hook: 返回非 nullptr 时 reader 已自动持有
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = do_up
+          ? mesh::hook::get_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::get_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+
+    if (slot_ptr) {
+      // MESH 路径：slot 命中，reader 已持有
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.intermediate_size, config_.hidden_size, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      }
+      mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    } else if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式 slot 未命中：同步从 SSD 加载到 slot（gate_bb_ 为空，不能回退）
+      slot_ptr = do_up
+          ? mesh::hook::load_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::load_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      if (slot_ptr) {
+        // 加载成功，reader 已持有
+        auto bb = std::make_shared<typename T::BufferB>(
+            config_.intermediate_size, config_.hidden_size, slot_ptr);
+        if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+          amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+        } else {
+          amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+        }
+        mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      }
     } else {
-      amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      // 原版路径
+      auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      }
     }
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
+    auto& ba = down_ba_[expert_idx];
+    auto& bc = down_bc_[expert_idx];
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx], down_bb_[expert_idx],
-                   down_bc_[expert_idx], ith, nth);
+    // MESH hook: 返回非 nullptr 时 reader 已持有
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = mesh::hook::get_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+
+    if (slot_ptr) {
+      // MESH 路径：slot 命中，reader 已持有
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.hidden_size, config_.intermediate_size, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      }
+      mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    } else if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式 slot 未命中：同步从 SSD 加载到 slot（down_bb_ 为空，不能回退）
+      slot_ptr = mesh::hook::load_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      if (slot_ptr) {
+        // 加载成功，reader 已持有
+        auto bb = std::make_shared<typename T::BufferB>(
+            config_.hidden_size, config_.intermediate_size, slot_ptr);
+        if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+          amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+        } else {
+          amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+        }
+        mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      }
     } else {
-      amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx], down_bb_[expert_idx],
-                   down_bc_[expert_idx], ith, nth);
+      // 原版路径
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx], down_bb_[expert_idx],
+                     down_bc_[expert_idx], ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, down_ba_[expert_idx], down_bb_[expert_idx],
+                     down_bc_[expert_idx], ith, nth);
+      }
     }
   }
 
@@ -161,6 +233,10 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
    * Loads weights from config_.gate_proj, up_proj, down_proj (no scales).
    */
   void load_weights() {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (config_.mesh_enabled && config_.mesh_residency) {
+      return;
+    }
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -439,6 +515,14 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP
   using Base::Base;
 
   void load_weights() override {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (this->config.mesh_enabled && this->config.mesh_residency) {
+      for (auto i = 0; i < this->tp_count; i++) {
+        this->tps[i]->load_weights();  // 各 TP 走 mesh 分支
+      }
+      this->weights_loaded = true;
+      return;
+    }
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;

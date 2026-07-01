@@ -23,7 +23,7 @@
 #include <thread>
 #include <vector>
 
-// #define PROFILE_BALANCE
+#define PROFILE_BALANCE
 
 inline void set_to_numa(int this_numa) {
   struct bitmask* mask = numa_bitmask_alloc(numa_num_configured_nodes());
@@ -66,6 +66,11 @@ struct alignas(64) ThreadState {
   std::condition_variable cv;
 #ifdef PROFILE_BALANCE
   size_t finish_ns;
+  size_t init_ns;
+  size_t compute_ns;
+  size_t finalize_ns;
+  size_t work_set_ns;  // do_work_stealing_job_async 设置 WORKING 的绝对时刻(ns since epoch)
+  size_t detect_ns;    // worker 在 process_tasks 开头记录的绝对时刻(ns since epoch)
 #endif
 };
 

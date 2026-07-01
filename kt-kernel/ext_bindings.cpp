@@ -12,6 +12,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <numeric>
+
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)
 #include <cpptrace/cpptrace.hpp>
 #endif
@@ -22,6 +25,43 @@
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
 #include "operators/common.hpp"
+
+// MESH 插件（仅在 KT_ENABLE_MESH 编译时生效）
+#if defined(KT_ENABLE_MESH)
+#include "operators/mesh/mesh.hpp"
+
+// B8: Heat 批量传输回调 — 由 cpuinfer.h 的 submit_gating_scores_ 调用
+// 把 GPU 传来的扁平 gating scores 组织成 [layer][expert_num] 并计算 top-k，
+// 然后调用 MeshResidencyManager::on_decode_token_end 更新 Heat 和 Markov
+extern "C" void mesh_on_gating_scores_ready(void* mesh_residency,
+                                              const float* gating_scores_cpu,
+                                              int num_layers, int expert_num, int topk) {
+  if (!mesh_residency || !gating_scores_cpu) return;
+  auto* mgr = static_cast<mesh::MeshResidencyManager*>(mesh_residency);
+
+  // 组织成 [layer][expert_num]
+  std::vector<std::vector<float>> all_layers_scores(num_layers);
+  for (int l = 0; l < num_layers; l++) {
+    all_layers_scores[l].assign(
+        gating_scores_cpu + l * expert_num,
+        gating_scores_cpu + (l + 1) * expert_num);
+  }
+
+  // 从 scores 计算 top-k（每层取分数最高的 topk 个专家）
+  std::vector<std::vector<int>> all_layers_topk(num_layers);
+  int k = std::min(topk, expert_num);
+  for (int l = 0; l < num_layers; l++) {
+    const auto& scores = all_layers_scores[l];
+    std::vector<int> indices(scores.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                      [&scores](int a, int b) { return scores[a] > scores[b]; });
+    all_layers_topk[l].assign(indices.begin(), indices.begin() + k);
+  }
+
+  mgr->on_decode_token_end(all_layers_topk, all_layers_scores);
+}
+#endif
 
 #if defined(USE_MOE_KERNEL)
 #include "operators/moe_kernel/la/kernel.hpp"
@@ -763,6 +803,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       // V4-Flash 2604B SwiGLU clamp limit (0.0 = disabled). See common.hpp.
       .def_readwrite("swiglu_limit", &GeneralMOEConfig::swiglu_limit)
       .def_readwrite("swiglu_alpha", &GeneralMOEConfig::swiglu_alpha)
+      // MESH 插件接入点
+      .def_readwrite("mesh_enabled", &GeneralMOEConfig::mesh_enabled)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, mesh_residency)
 
       ;
 
@@ -992,6 +1035,181 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   utils.def("from_float", &from_float_ptr, "Convert tensor from float32 to any GGML type", py::arg("input"),
             py::arg("size"), py::arg("type"));
+
+  // ===== MESH 插件子模块 =====
+#if defined(KT_ENABLE_MESH)
+  {
+    auto mesh_module = m.def_submodule("mesh");
+
+    // WeightType 枚举
+    py::enum_<mesh::WeightType>(mesh_module, "WeightType")
+        .value("AMXINT4", mesh::WeightType::AMXINT4)
+        .value("BF16", mesh::WeightType::BF16)
+        .export_values();
+
+    // MeshConfig
+    py::class_<mesh::MeshConfig>(mesh_module, "MeshConfig")
+        .def(py::init<>())
+        .def_readwrite("enabled", &mesh::MeshConfig::enabled)
+        .def_readwrite("cap", &mesh::MeshConfig::cap)
+        .def_readwrite("num_gpu_experts", &mesh::MeshConfig::num_gpu_experts)
+        .def_readwrite("max_deferred_per_token", &mesh::MeshConfig::max_deferred_per_token)
+        .def_readwrite("decode_front_layers", &mesh::MeshConfig::decode_front_layers)
+        .def_readwrite("decode_front_layer_cap", &mesh::MeshConfig::decode_front_layer_cap)
+        .def_readwrite("total_layers", &mesh::MeshConfig::total_layers)
+        .def_readwrite("prefill_window", &mesh::MeshConfig::prefill_window)
+        .def_readwrite("heat_gamma", &mesh::MeshConfig::heat_gamma)
+        .def_readwrite("heat_beta", &mesh::MeshConfig::heat_beta)
+        .def_readwrite("markov_alpha", &mesh::MeshConfig::markov_alpha)
+        .def_readwrite("markov_topk", &mesh::MeshConfig::markov_topk)
+        .def_readwrite("lookahead_weight", &mesh::MeshConfig::lookahead_weight)
+        .def_readwrite("weight_type", &mesh::MeshConfig::weight_type)
+        .def_readwrite("hidden_size", &mesh::MeshConfig::hidden_size)
+        .def_readwrite("intermediate_size", &mesh::MeshConfig::intermediate_size)
+        .def_readwrite("expert_num", &mesh::MeshConfig::expert_num)
+        .def_readwrite("tp_count", &mesh::MeshConfig::tp_count);
+
+    // ExpertFileLayout
+    py::class_<mesh::ExpertFileLayout>(mesh_module, "ExpertFileLayout")
+        .def(py::init<>())
+        .def_readwrite("fd", &mesh::ExpertFileLayout::fd)
+        .def_readwrite("gate_offset", &mesh::ExpertFileLayout::gate_offset)
+        .def_readwrite("up_offset", &mesh::ExpertFileLayout::up_offset)
+        .def_readwrite("down_offset", &mesh::ExpertFileLayout::down_offset)
+        .def_readwrite("gate_bytes", &mesh::ExpertFileLayout::gate_bytes)
+        .def_readwrite("up_bytes", &mesh::ExpertFileLayout::up_bytes)
+        .def_readwrite("down_bytes", &mesh::ExpertFileLayout::down_bytes)
+        // A3 fix: 暴露 AMXINT4 专用 scale/mins 字段
+        .def_readwrite("gate_scale_offset", &mesh::ExpertFileLayout::gate_scale_offset)
+        .def_readwrite("up_scale_offset", &mesh::ExpertFileLayout::up_scale_offset)
+        .def_readwrite("down_scale_offset", &mesh::ExpertFileLayout::down_scale_offset)
+        .def_readwrite("gate_scale_bytes", &mesh::ExpertFileLayout::gate_scale_bytes)
+        .def_readwrite("up_scale_bytes", &mesh::ExpertFileLayout::up_scale_bytes)
+        .def_readwrite("down_scale_bytes", &mesh::ExpertFileLayout::down_scale_bytes)
+        .def_readwrite("gate_mins_offset", &mesh::ExpertFileLayout::gate_mins_offset)
+        .def_readwrite("up_mins_offset", &mesh::ExpertFileLayout::up_mins_offset)
+        .def_readwrite("down_mins_offset", &mesh::ExpertFileLayout::down_mins_offset)
+        .def_readwrite("gate_mins_bytes", &mesh::ExpertFileLayout::gate_mins_bytes)
+        .def_readwrite("up_mins_bytes", &mesh::ExpertFileLayout::up_mins_bytes)
+        .def_readwrite("down_mins_bytes", &mesh::ExpertFileLayout::down_mins_bytes)
+        // Bug 1 fix: BF16 down_proj 不连续读取支持
+        .def_readwrite("down_stride", &mesh::ExpertFileLayout::down_stride)
+        .def_readwrite("down_rows", &mesh::ExpertFileLayout::down_rows);
+
+    // B9: MeshStats 绑定
+    py::class_<mesh::MeshStats>(mesh_module, "MeshStats")
+        .def_readwrite("cache_hit_count", &mesh::MeshStats::cache_hit_count)
+        .def_readwrite("cache_miss_count", &mesh::MeshStats::cache_miss_count)
+        .def_readwrite("io_uring_read_bytes", &mesh::MeshStats::io_uring_read_bytes)
+        .def_readwrite("io_uring_read_count", &mesh::MeshStats::io_uring_read_count)
+        .def_readwrite("eviction_count", &mesh::MeshStats::eviction_count)
+        .def_readwrite("eviction_blocked_wait_us", &mesh::MeshStats::eviction_blocked_wait_us)
+        .def_readwrite("defer_count", &mesh::MeshStats::defer_count)
+        .def_readwrite("defer_overflow_count", &mesh::MeshStats::defer_overflow_count)
+        .def_readwrite("prefill_layer_count", &mesh::MeshStats::prefill_layer_count)
+        .def_readwrite("prefill_temporal_swap_count", &mesh::MeshStats::prefill_temporal_swap_count)
+        .def_readwrite("decode_token_count", &mesh::MeshStats::decode_token_count)
+        .def_readwrite("decode_immediate_count", &mesh::MeshStats::decode_immediate_count)
+        .def_readwrite("decode_deferred_count", &mesh::MeshStats::decode_deferred_count);
+
+    // MeshResidencyManager
+    py::class_<mesh::MeshResidencyManager, std::shared_ptr<mesh::MeshResidencyManager>>(
+        mesh_module, "ResidencyManager")
+        .def(py::init<>())
+        .def("init", &mesh::MeshResidencyManager::init,
+             py::arg("config"), py::arg("numa_nodes"))
+        .def("set_file_layout", &mesh::MeshResidencyManager::set_file_layout,
+             py::arg("layer_idx"), py::arg("tp_part_idx"), py::arg("expert_id"), py::arg("layout"))
+        .def("set_gpu_experts_mask",
+             [](mesh::MeshResidencyManager& mgr, py::list mask_list) {
+               std::vector<uint8_t> mask;
+               mask.reserve(py::len(mask_list));
+               for (auto item : mask_list) {
+                 mask.push_back(static_cast<uint8_t>(py::cast<int>(item)));
+               }
+               mgr.set_gpu_experts_mask(mask.data(), static_cast<int>(mask.size()));
+             },
+             py::arg("mask"))
+        .def("bootstrap", &mesh::MeshResidencyManager::bootstrap)
+        .def("get_gate_ptr", &mesh::MeshResidencyManager::get_gate_ptr)
+        .def("get_up_ptr", &mesh::MeshResidencyManager::get_up_ptr)
+        .def("get_down_ptr", &mesh::MeshResidencyManager::get_down_ptr)
+        .def("on_prefill_layer_start", &mesh::MeshResidencyManager::on_prefill_layer_start)
+        .def("on_prefill_layer_done", &mesh::MeshResidencyManager::on_prefill_layer_done)
+        .def("on_prefill_to_decode", &mesh::MeshResidencyManager::on_prefill_to_decode)
+        .def("on_decode_token_start", &mesh::MeshResidencyManager::on_decode_token_start)
+        .def("on_decode_layer", &mesh::MeshResidencyManager::on_decode_layer)
+        .def("on_decode_token_end", &mesh::MeshResidencyManager::on_decode_token_end)
+        .def("config", [](mesh::MeshResidencyManager& mgr) -> const mesh::MeshConfig& {
+          return mgr.config();
+        }, py::return_value_policy::reference)
+        // A2: 获取原始 C++ 指针，用于注入 MOEConfig.mesh_residency
+        .def("raw_ptr", [](mesh::MeshResidencyManager& mgr) -> uintptr_t {
+          return reinterpret_cast<uintptr_t>(&mgr);
+        })
+        // A6: io_uring CQE 到达后标记 slot 已缓存
+        .def("mark_slot_cached", [](mesh::MeshResidencyManager& mgr, int layer, int tp, int slot_idx) {
+          mgr.pool(layer, tp).mark_cached(slot_idx);
+        }, py::arg("layer"), py::arg("tp"), py::arg("slot_idx"))
+        // A6: 查询专家是否已缓存
+        .def("is_cached", [](mesh::MeshResidencyManager& mgr, int layer, int tp, int expert_id) -> bool {
+          return mgr.pool(layer, tp).is_cached(expert_id);
+        }, py::arg("layer"), py::arg("tp"), py::arg("expert_id"))
+        // B9: 统计接口
+        .def("stats", [](mesh::MeshResidencyManager& mgr) -> const mesh::MeshStats& {
+          return mgr.stats();
+        }, py::return_value_policy::reference_internal);
+
+    // 注册 hook 函数指针（让 mesh_hook.hpp 的 inline 函数能调用 ResidencyManager）
+    // get_*_ptr hook 使用 with_reader 版本：返回非 nullptr 时 reader 已持有
+    mesh::hook::HookRegistry registry;
+    registry.get_gate_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_gate_ptr_with_reader(layer, tp, eid);
+    };
+    registry.get_up_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_up_ptr_with_reader(layer, tp, eid);
+    };
+    registry.get_down_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_down_ptr_with_reader(layer, tp, eid);
+    };
+    // 同步加载版本：slot 未命中时阻塞从 SSD 加载到 slot（内联 acquire_reader）
+    registry.load_gate_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_gate_ptr(layer, tp, eid);
+    };
+    registry.load_up_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_up_ptr(layer, tp, eid);
+    };
+    registry.load_down_ptr = [](void* mgr, int layer, int tp, int eid) -> void* {
+      return ((mesh::MeshResidencyManager*)mgr)->get_or_load_down_ptr(layer, tp, eid);
+    };
+    // acquire_reader 已内联到 get/load hook 中，此处为 no-op
+    registry.acquire_reader = [](void* mgr, int layer, int tp, int eid) -> void {
+      (void)mgr; (void)layer; (void)tp; (void)eid;
+    };
+    registry.release_reader = [](void* mgr, int layer, int tp, int eid) -> void {
+      ((mesh::MeshResidencyManager*)mgr)->release_reader(layer, tp, eid);
+    };
+    // decode 层级回调：调用完整 defer 调度路径（on_decode_layer）
+    // on_decode_layer 会：process_cqes → split(immediate/deferred) → drain_and_submit(异步io_uring)
+    // missing 专家走 deferred 异步读取，I/O 与 GEMM 重叠（SKILL.md 第 96-100 行）
+    registry.on_decode_layer = [](void* mgr, int layer, int tp,
+                                  const int* topk, int k, const float* weights, int expert_num) -> void {
+      // 构造 topk 和 scores（全长，top-k 位置填入 weights，其余 0）
+      std::vector<int> topk_vec(topk, topk + k);
+      std::vector<float> scores_vec(expert_num, 0.0f);
+      for (int i = 0; i < k; i++) {
+        int eid = topk[i];
+        if (eid >= 0 && eid < expert_num) {
+          scores_vec[eid] = weights[i];
+        }
+      }
+      ((mesh::MeshResidencyManager*)mgr)->on_decode_layer(layer, topk_vec, scores_vec, tp);
+    };
+    mesh::hook::register_hooks(registry);
+
+    printf("MESH plugin: bindings registered\n");
+  }
+#endif
 }
 
 #if defined(KTRANSFORMERS_ENABLE_CPPTRACE)

@@ -15,6 +15,7 @@
 
 #include "avx2_bf16_gemm.hpp"
 #include "moe_base.hpp"
+#include "../mesh/mesh_hook.hpp"
 
 template <class T = avx2::GemmKernelAVX2BF16>
 class AVX2_BF16_MOE_TP : public AVX2_MOE_BASE<T, AVX2_BF16_MOE_TP<T>> {
@@ -64,16 +65,45 @@ class AVX2_BF16_MOE_TP : public AVX2_MOE_BASE<T, AVX2_BF16_MOE_TP<T>> {
   void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = gate_up_ba_[expert_idx];
-    auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
-    avx2::gemm_bf16(m, config_.intermediate_size, config_.hidden_size, *ba, *bb, *bc, ith, nth);
+    // MESH hook
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = do_up
+          ? mesh::hook::get_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::get_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+
+    if (slot_ptr) {
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.intermediate_size, config_.hidden_size, slot_ptr);
+      avx2::gemm_bf16(m, config_.intermediate_size, config_.hidden_size, *ba, *bb, *bc, ith, nth);
+    } else {
+      auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+      avx2::gemm_bf16(m, config_.intermediate_size, config_.hidden_size, *ba, *bb, *bc, ith, nth);
+    }
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
-    avx2::gemm_bf16(m, config_.hidden_size, config_.intermediate_size,
-                    *down_ba_[expert_idx], *down_bb_[expert_idx], *down_bc_[expert_idx], ith, nth);
+    auto& ba = down_ba_[expert_idx];
+    auto& bc = down_bc_[expert_idx];
+
+    // MESH hook
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = mesh::hook::get_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+
+    if (slot_ptr) {
+      auto bb = std::make_shared<typename T::BufferB>(
+          config_.hidden_size, config_.intermediate_size, slot_ptr);
+      avx2::gemm_bf16(m, config_.hidden_size, config_.intermediate_size, *ba, *bb, *bc, ith, nth);
+    } else {
+      avx2::gemm_bf16(m, config_.hidden_size, config_.intermediate_size,
+                      *down_ba_[expert_idx], *down_bb_[expert_idx], *down_bc_[expert_idx], ith, nth);
+    }
   }
 
   /**
@@ -81,6 +111,10 @@ class AVX2_BF16_MOE_TP : public AVX2_MOE_BASE<T, AVX2_BF16_MOE_TP<T>> {
    * BufferB::from_mat is a trivial memcpy for AVX2 (no AMX transpose).
    */
   void load_weights() {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (config_.mesh_enabled && config_.mesh_residency) {
+      return;
+    }
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -228,6 +262,14 @@ class TP_MOE<AVX2_BF16_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX2_BF16_MOE
   using Base::Base;
 
   void load_weights() override {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (this->config.mesh_enabled && this->config.mesh_residency) {
+      for (auto i = 0; i < this->tp_count; i++) {
+        this->tps[i]->load_weights();
+      }
+      this->weights_loaded = true;
+      return;
+    }
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;

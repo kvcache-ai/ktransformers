@@ -243,6 +243,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
+        mesh_enabled: bool = False,
+        mesh_residency_ptr: int = 0,
     ):
         """
         Initialize AMX MoE Wrapper.
@@ -317,6 +319,10 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.up_scales = None
         self.down_scales = None
 
+        # MESH 插件接入点
+        self.mesh_enabled = mesh_enabled
+        self.mesh_residency_ptr = mesh_residency_ptr
+
     def load_weights_from_tensors(
         self,
         gate_proj: torch.Tensor,
@@ -381,6 +387,35 @@ class AMXMoEWrapper(BaseMoEWrapper):
         Args:
             physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
         """
+        # MESH 模式：跳过全量权重加载，仅创建 MoE 模块（权重由 slot pool 提供）
+        # C++ load_weights 会因 mesh_enabled=True 跳过，gate_bb_ 保持空分配
+        # forward 时 slot 未命中通过 get_or_load_*_ptr 同步加载
+        if self.mesh_enabled and self.mesh_residency_ptr:
+            moe_config = MOEConfig(
+                self.num_experts,
+                self.num_experts_per_tok,
+                self.hidden_size,
+                self.moe_intermediate_size,
+                self.gpu_experts_mask.data_ptr(),
+            )
+            moe_config.layer_idx = self.layer_idx
+            moe_config.pool = self.cpu_infer.backend_
+            moe_config.max_len = self.chunked_prefill_size
+            moe_config.mesh_enabled = self.mesh_enabled
+            moe_config.mesh_residency = self.mesh_residency_ptr
+            moe_config.load = False
+
+            if self.method == "AMXINT4":
+                self.moe = AMXInt4_MOE(moe_config)
+            elif self.method == "AMXINT8":
+                self.moe = AMXInt8_MOE(moe_config)
+            else:
+                raise NotImplementedError(f"Unsupported AMX method: {self.method}")
+
+            self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
+            self.cpu_infer.sync()
+            return
+
         gate_ptr = 0
         up_ptr = 0
         down_ptr = 0
@@ -464,6 +499,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        # A2: 注入 MESH 配置
+        moe_config.mesh_enabled = self.mesh_enabled
+        moe_config.mesh_residency = self.mesh_residency_ptr
 
         moe_config.gate_proj = gate_ptr
         moe_config.up_proj = up_ptr
@@ -543,6 +581,8 @@ class NativeMoEWrapper(BaseMoEWrapper):
         numa_nodes: Optional[List[int]] = None,
         swiglu_limit: float = 0.0,
         swiglu_alpha: float = 0.0,
+        mesh_enabled: bool = False,
+        mesh_residency_ptr: int = 0,
     ):
         self._swiglu_alpha = float(swiglu_alpha)
         # Defence in depth: reject swiglu_limit on non-MXFP4/MXFP8 methods even
@@ -634,6 +674,10 @@ class NativeMoEWrapper(BaseMoEWrapper):
         self.up_scales = None
         self.down_scales = None
 
+        # MESH 插件参数
+        self.mesh_enabled = mesh_enabled
+        self.mesh_residency_ptr = mesh_residency_ptr
+
     @staticmethod
     def _create_loader(method: str, weight_path: str):
         if method == "RAWINT4":
@@ -683,6 +727,36 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         import time
+
+        # MESH 模式：跳过磁盘权重加载，仅创建 MoE 模块
+        # C++ load_weights 会因 mesh_enabled=True 跳过，forward 时由 MESH hook 提供权重
+        if self.mesh_enabled and self.mesh_residency_ptr:
+            moe_config = MOEConfig(
+                self.num_experts,
+                self.num_experts_per_tok,
+                self.hidden_size,
+                self.moe_intermediate_size,
+                self.gpu_experts_mask.data_ptr(),
+            )
+            moe_config.layer_idx = self.layer_idx
+            moe_config.pool = self.cpu_infer.backend_
+            moe_config.max_len = self.chunked_prefill_size
+            moe_config.mesh_enabled = self.mesh_enabled
+            moe_config.mesh_residency = self.mesh_residency_ptr
+
+            if self.method == "BF16":
+                if _HAS_BF16_SUPPORT:
+                    self.moe = AMXBF16_MOE(moe_config)
+                else:
+                    self.moe = AVX2BF16_MOE(moe_config)
+            else:
+                raise NotImplementedError(
+                    f"MESH mode not supported for method={self.method!r} in NativeMoEWrapper"
+                )
+
+            self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
+            self.cpu_infer.sync()
+            return
 
         if NativeMoEWrapper._native_loader_instance is None:
             t_recreate_start = time.time()
@@ -788,6 +862,9 @@ class NativeMoEWrapper(BaseMoEWrapper):
         moe_config.layer_idx = self.layer_idx
         moe_config.pool = self.cpu_infer.backend_
         moe_config.max_len = self.chunked_prefill_size
+        # MESH 插件：注入 mesh 参数
+        moe_config.mesh_enabled = self.mesh_enabled
+        moe_config.mesh_residency = self.mesh_residency_ptr
         # V4-Flash 2604B SwiGLU clamp; 0.0 = disabled (default for non-MXFP4
         # paths). Read by `act_fn` in operators/amx/la/amx.hpp via
         # `apply_activation` in operators/amx/moe_base.hpp. Re-checked here
