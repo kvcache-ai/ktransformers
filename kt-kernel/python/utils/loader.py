@@ -679,6 +679,49 @@ class BF16SafeTensorLoader(SafeTensorLoader):
 class CompressedSafeTensorLoader(SafeTensorLoader):
     """Loader for compressed SafeTensor layouts (RAWINT4 weights)."""
 
+    @staticmethod
+    def _normalize_rawint4_weight(weight_tensor, scale_tensor, shape_tensor=None, key: str = "weight_packed"):
+        """Return byte-packed uint8 RAWINT4 weights expected by kt_kernel_ext."""
+        if weight_tensor.dtype == torch.int32:
+            # compressed-tensors pack-quantized stores 8 int4 values per int32.
+            # The RAWINT4 kernels consume the same bytes as uint8, two int4 values per byte.
+            rows, int32_cols = weight_tensor.shape
+            weight_tensor = weight_tensor.contiguous().view(torch.uint8).view(rows, int32_cols * 4).contiguous()
+        elif weight_tensor.dtype == torch.uint8:
+            weight_tensor = weight_tensor.contiguous()
+        else:
+            raise TypeError(f"{key} must be torch.uint8 or torch.int32, got {weight_tensor.dtype}")
+
+        if shape_tensor is None:
+            return weight_tensor
+
+        shape_values = shape_tensor.detach().cpu().tolist()
+        if len(shape_values) != 2:
+            raise ValueError(f"{key}.weight_shape must contain [out_features, in_features], got {shape_values}")
+
+        out_features, in_features = (int(shape_values[0]), int(shape_values[1]))
+        if out_features <= 0 or in_features <= 0:
+            return weight_tensor
+
+        if in_features % 2 != 0:
+            return weight_tensor
+
+        expected_weight_shape = (out_features, in_features // 2)
+        if tuple(weight_tensor.shape) != expected_weight_shape:
+            return weight_tensor
+
+        if scale_tensor.dim() != 2 or scale_tensor.shape[0] != out_features or scale_tensor.shape[1] <= 0:
+            raise ValueError(
+                f"{key} scale shape {tuple(scale_tensor.shape)} is incompatible with weight_shape={shape_values}"
+            )
+
+        if in_features % int(scale_tensor.shape[1]) != 0:
+            raise ValueError(
+                f"{key} in_features={in_features} is not divisible by scale columns={scale_tensor.shape[1]}"
+            )
+
+        return weight_tensor
+
     def load_experts(self, base_key: str, device: str = "cpu"):
         """Load raw expert weights stored in compressed safetensor format."""
 
@@ -703,6 +746,7 @@ class CompressedSafeTensorLoader(SafeTensorLoader):
             for exp_id in range(expert_idx):
                 weight_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_packed"
                 scale_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_scale"
+                shape_key = f"{experts_prefix}.{exp_id}.{proj_name}_proj.weight_shape"
 
                 if not self.has_tensor(weight_key):
                     raise KeyError(f"Missing tensor: {weight_key}")
@@ -711,6 +755,8 @@ class CompressedSafeTensorLoader(SafeTensorLoader):
 
                 weight_tensor = self.load_tensor(weight_key, device).contiguous()
                 scale_tensor = self.load_tensor(scale_key, device).contiguous()
+                shape_tensor = self.load_tensor(shape_key, "cpu") if self.has_tensor(shape_key) else None
+                weight_tensor = self._normalize_rawint4_weight(weight_tensor, scale_tensor, shape_tensor, weight_key)
 
                 weight_entries.append(weight_tensor)
                 scale_entries.append(scale_tensor)
