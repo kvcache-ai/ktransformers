@@ -3,6 +3,7 @@ Port availability checking utilities.
 """
 
 import socket
+import sys
 from typing import Tuple
 
 
@@ -19,6 +20,8 @@ def is_port_available(host: str, port: int) -> bool:
     try:
         bind_host = "" if host == "0.0.0.0" else host
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((bind_host, port))
         return True
 

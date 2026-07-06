@@ -2,6 +2,7 @@ import importlib.util
 import socket
 from pathlib import Path
 import unittest
+from unittest.mock import MagicMock, patch
 
 from ci.ci_register import register_cpu_ci
 
@@ -27,6 +28,17 @@ class TestPortChecker(unittest.TestCase):
             self.assertEqual(port_checker.find_available_port("127.0.0.1", port, max_attempts=1), (False, port))
         finally:
             holder.close()
+
+    def test_non_windows_bind_check_uses_reuseaddr(self):
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+
+        with patch.object(port_checker.sys, "platform", "linux"):
+            with patch.object(port_checker.socket, "socket", return_value=sock):
+                self.assertTrue(port_checker.is_port_available("127.0.0.1", 12345))
+
+        sock.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind.assert_called_once_with(("127.0.0.1", 12345))
 
 
 if __name__ == "__main__":
