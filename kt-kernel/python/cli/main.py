@@ -378,9 +378,9 @@ def _prompt_custom_path(console, settings) -> str:
                 console.print(f"[red]{t('setup_path_no_write')}[/red]")
         else:
             # Check if we can create it (parent writable)
-            parent = str(Path(custom_path).parent)
-            while not os.path.exists(parent) and parent != "/":
-                parent = str(Path(parent).parent)
+            from kt_kernel.cli.utils.path_utils import find_existing_parent
+
+            parent = find_existing_parent(custom_path)
 
             if os.access(parent, os.W_OK):
                 return custom_path
