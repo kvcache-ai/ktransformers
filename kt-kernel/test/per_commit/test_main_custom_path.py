@@ -29,7 +29,7 @@ path_utils = _load_path_utils()
 
 
 class TestPromptCustomPath(unittest.TestCase):
-    @patch.object(path_utils.Path, "exists", return_value=False)
+    @patch.object(path_utils.os.path, "exists", return_value=False)
     def test_missing_windows_drive_root_does_not_loop_forever(self, mock_exists):
         expected_parent = Path("Z:\\models").parent
         while True:
