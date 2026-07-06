@@ -721,6 +721,18 @@ pip install -e .
 pip install .
 ```
 
+> **ROCm / vendor-provided PyTorch users:** the default build uses pip's
+> [build isolation](https://pip.pypa.io/en/stable/reference/build-system/pyproject-toml/#build-isolation),
+> which resolves a stock CPU/CUDA `torch` from PyPI into an isolated build
+> environment. On ROCm — or any vendor torch, e.g. a Hygon DCU DTK build — this
+> shadows the ROCm/vendor `torch` you already have installed, so the kernel is
+> linked against the wrong PyTorch. Build against your in-environment torch
+> instead:
+>
+> ```bash
+> pip install . --no-build-isolation --no-deps
+> ```
+
 ## Error Troubleshooting
 
 ### CUDA Not Found
