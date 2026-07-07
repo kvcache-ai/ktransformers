@@ -78,6 +78,12 @@ class TestRunSglangArgs(unittest.TestCase):
         with self.assertRaises(click.BadParameter):
             build_command({"log-level": "warning"})
 
+    def test_unmatched_quotes_in_string_are_rejected(self):
+        with self.assertRaises(click.BadParameter) as exc:
+            build_command("--log-level 'warning")
+
+        self.assertIn("No closing quotation", str(exc.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
