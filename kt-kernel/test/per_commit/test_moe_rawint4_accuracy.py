@@ -66,20 +66,20 @@ def load_amx_utils():
     return sys.modules["kt_kernel.utils.amx"]
 
 
-def rawint4_quantize(weight_bf16):
+def rawint4_quantize(weight_bf16, quant_group_size=group_size):
     """Quantize [N, K] BF16 weight to RAWINT4 layout."""
     n, k = weight_bf16.shape
     assert k % 2 == 0
-    assert k % group_size == 0
+    assert k % quant_group_size == 0
 
     weight_fp32 = weight_bf16.float()
     qweight = torch.zeros((n, k // 2), dtype=torch.uint8)
-    scales = torch.zeros((n, k // group_size), dtype=torch.bfloat16)
+    scales = torch.zeros((n, k // quant_group_size), dtype=torch.bfloat16)
 
     for ni in range(n):
-        for g in range(k // group_size):
-            k_start = g * group_size
-            k_end = k_start + group_size
+        for g in range(k // quant_group_size):
+            k_start = g * quant_group_size
+            k_end = k_start + quant_group_size
             block = weight_fp32[ni, k_start:k_end]
             amax = block.abs().max().item()
             scale = amax / 7.0 if amax > 0 else 1.0
@@ -95,14 +95,14 @@ def rawint4_quantize(weight_bf16):
     return qweight, scales
 
 
-def rawint4_dequantize(qweight, scales, out_features, in_features):
+def rawint4_dequantize(qweight, scales, out_features, in_features, quant_group_size=group_size):
     """Dequantize RAWINT4 qweight/scales back to fp32 [N, K]."""
     result = torch.zeros((out_features, in_features), dtype=torch.float32)
     for ni in range(out_features):
-        for g in range(in_features // group_size):
+        for g in range(in_features // quant_group_size):
             scale = scales[ni, g].float().item()
-            k_start = g * group_size
-            k_end = k_start + group_size
+            k_start = g * quant_group_size
+            k_end = k_start + quant_group_size
             for kk in range(k_start, k_end, 2):
                 packed = int(qweight[ni, kk // 2].item())
                 result[ni, kk] = ((packed & 0x0F) - 8) * scale
@@ -160,7 +160,7 @@ def available_backends():
     return backends
 
 
-def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
+def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen, quant_group_size=group_size):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
     cpu_infer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
@@ -180,15 +180,15 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
         down_qw_list, down_scale_list = [], []
 
         for e in range(expert_num):
-            qw, sc = rawint4_quantize(gate_bf16[e])
+            qw, sc = rawint4_quantize(gate_bf16[e], quant_group_size)
             gate_qw_list.append(qw)
             gate_scale_list.append(sc)
 
-            qw, sc = rawint4_quantize(up_bf16[e])
+            qw, sc = rawint4_quantize(up_bf16[e], quant_group_size)
             up_qw_list.append(qw)
             up_scale_list.append(sc)
 
-            qw, sc = rawint4_quantize(down_bf16[e])
+            qw, sc = rawint4_quantize(down_bf16[e], quant_group_size)
             down_qw_list.append(qw)
             down_scale_list.append(sc)
 
@@ -201,19 +201,19 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
 
         gate_deq = torch.stack(
             [
-                rawint4_dequantize(gate_qw_list[e], gate_scale_list[e], intermediate_size, hidden_size)
+                rawint4_dequantize(gate_qw_list[e], gate_scale_list[e], intermediate_size, hidden_size, quant_group_size)
                 for e in range(expert_num)
             ]
         )
         up_deq = torch.stack(
             [
-                rawint4_dequantize(up_qw_list[e], up_scale_list[e], intermediate_size, hidden_size)
+                rawint4_dequantize(up_qw_list[e], up_scale_list[e], intermediate_size, hidden_size, quant_group_size)
                 for e in range(expert_num)
             ]
         )
         down_deq = torch.stack(
             [
-                rawint4_dequantize(down_qw_list[e], down_scale_list[e], hidden_size, intermediate_size)
+                rawint4_dequantize(down_qw_list[e], down_scale_list[e], hidden_size, intermediate_size, quant_group_size)
                 for e in range(expert_num)
             ]
         )
@@ -227,7 +227,7 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
         config.up_scale = up_scales.data_ptr()
         config.down_scale = down_scales.data_ptr()
         config.quant_config.bits = 4
-        config.quant_config.group_size = group_size
+        config.quant_config.group_size = quant_group_size
         config.quant_config.zero_point = False
         config.pool = cpu_infer.backend_
 
@@ -277,6 +277,15 @@ def test_rawint4_accuracy():
     for backend_name, backend_cls, threshold in backends:
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=1)
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=16)
+
+
+def test_amxint4_kgroup_accuracy():
+    if not hasattr(kt_kernel_ext.moe, "AMXInt4_KGroup_MOE"):
+        pytest.skip("AMXInt4_KGroup_MOE is not available")
+
+    backend_cls = kt_kernel_ext.moe.AMXInt4_KGroup_MOE
+    run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=1, quant_group_size=32)
+    run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=32, quant_group_size=32)
 
 
 def test_rawint4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):
