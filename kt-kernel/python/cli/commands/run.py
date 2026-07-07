@@ -5,6 +5,7 @@ Starts the model inference server using SGLang + kt-kernel.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -758,6 +759,10 @@ def _build_sglang_command(
     # Add extra args from settings
     extra_args = settings.get("advanced.sglang_args", [])
     if extra_args:
+        if isinstance(extra_args, str):
+            extra_args = shlex.split(extra_args)
+        elif not isinstance(extra_args, list) or not all(isinstance(arg, str) for arg in extra_args):
+            raise click.BadParameter("advanced.sglang_args must be a string or a list of strings")
         cmd.extend(extra_args)
 
     # Add extra CLI args (user-provided options not defined in kt CLI)
