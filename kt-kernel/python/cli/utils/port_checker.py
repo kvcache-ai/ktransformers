@@ -3,6 +3,7 @@ Port availability checking utilities.
 """
 
 import socket
+import sys
 from typing import Tuple
 
 
@@ -17,22 +18,14 @@ def is_port_available(host: str, port: int) -> bool:
         True if port is available, False if occupied
     """
     try:
-        # Try to bind to the port
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
+        bind_host = "" if host == "0.0.0.0" else host
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            if sys.platform != "win32":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((bind_host, port))
+        return True
 
-        # Use SO_REUSEADDR to allow binding to recently closed ports
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # Try to bind
-        result = sock.connect_ex((host if host != "0.0.0.0" else "127.0.0.1", port))
-        sock.close()
-
-        # If connect_ex returns 0, port is occupied
-        # If it returns error (non-zero), port is available
-        return result != 0
-
-    except Exception:
+    except OSError:
         # If any error occurs, assume port is not available
         return False
 

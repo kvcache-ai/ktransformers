@@ -110,6 +110,13 @@ def rawint4_dequantize(qweight, scales, out_features, in_features, quant_group_s
     return result
 
 
+def pack_rawint4_uint8_as_int32(qweight):
+    """Pack byte RAWINT4 layout into compressed-tensors int32 storage."""
+    assert qweight.dtype == torch.uint8
+    assert qweight.shape[1] % 4 == 0
+    return qweight.contiguous().view(torch.int32).contiguous()
+
+
 def act_fn(x):
     return x / (1.0 + torch.exp(-x))
 
@@ -286,6 +293,77 @@ def test_amxint4_kgroup_accuracy():
     backend_cls = kt_kernel_ext.moe.AMXInt4_KGroup_MOE
     run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=1, quant_group_size=32)
     run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=32, quant_group_size=32)
+
+
+def test_compressed_loader_normalizes_int32_pack_quantized_weights():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    weight_shape = torch.tensor([intermediate_size, hidden_size], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, weight_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_accepts_uint8_rawint4_weights():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    weight_shape = torch.tensor([intermediate_size, hidden_size], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        qweight, scales, weight_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_ignores_invalid_weight_shape_metadata():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    invalid_shape = torch.tensor([-1752796263, -1707567530], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, invalid_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_ignores_odd_weight_shape_metadata():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    invalid_shape = torch.tensor([241597647, 1216029047], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, invalid_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
 
 
 def test_rawint4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):
