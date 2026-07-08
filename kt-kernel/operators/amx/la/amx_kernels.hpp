@@ -3486,22 +3486,55 @@ struct GemmKernel224Int4SmallKGroupBlocked : public GemmKernel224Int4SmallKGroup
   static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
                                             BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+
+    constexpr int NB = 4;
+    const int k_blocks = k / 64;
     for (int m_begin = 0; m_begin < m; m_begin++) {
       float* c = bc->get_submat(m, n, m_begin, n_start);
       __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
       float* as = (float*)ba->get_scale(m, m_begin, k, 0);
 
-      for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin++) {
-        float* bs = (float*)bb->get_scale(n, n_block_begin, k, 0);
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+        __m512 acc[NB] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
+
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          const int k_begin = k_block * 64;
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 0, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 1, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 2, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 3, k_begin)),
+          };
+
+          for (int j = 0; j < NB; j++) {
+            __m512 abscale = make_scale_pair(as[k_block * 2] * bs[j][k_block * 2],
+                                             as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
+            acc[j] = _mm512_add_ps(acc[j], dot_scaled_decoded_kblock(a512[k_block], w[j], abscale));
+          }
+        }
+
+        store4_reduce_div16(acc[0], acc[1], acc[2], acc[3], c + (n_pos - n_start));
+      }
+
+      for (; n_pos < n_end; n_pos++) {
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
 
         __m512 sum = _mm512_setzero_ps();
-        for (int k_block = 0; k_block < k / 64; k_block++) {
-          __m256i b256 = load_packed_kblock(bb, n_block_begin, k_block * 64);
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          __m256i b256 = load_packed_kblock(bb, n_pos, k_block * 64);
           sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256, as[k_block * 2] * bs[k_block * 2],
                                                      as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
         }
 
-        c[n_block_begin - n_start] = _mm512_reduce_add_ps(sum) / 16;
+        c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
       }
     }
   }
