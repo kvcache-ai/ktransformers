@@ -3272,13 +3272,20 @@ struct GemmKernel224Int4SmallKGroup {
     const __m512i lane_shuffle = _mm512_set_epi64(7, 6, 3, 2, 5, 4, 1, 0);
     return _mm512_permutexvar_epi64(lane_shuffle, result);
   }
-  static inline __m512 dot_scaled_kblock(__m512i a512, __m256i b256, float scale0, float scale1) {
+  static inline __m512 make_scale_pair(float scale0, float scale1) {
     __m256 abscale0 = _mm256_set1_ps(scale0);
     __m256 abscale1 = _mm256_set1_ps(scale1);
-    __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
+    return _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
+  }
+
+  static inline __m512 dot_scaled_decoded_kblock(__m512i a512, __m512i w512, __m512 abscale) {
     __m512i mul = _mm512_setzero_si512();
-    mul = _mm512_dpbssd_epi32(mul, a512, compressed_int4_to_int8_avx512(b256));
+    mul = _mm512_dpbssd_epi32(mul, a512, w512);
     return _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul));
+  }
+
+  static inline __m512 dot_scaled_kblock(__m512i a512, __m256i b256, float scale0, float scale1) {
+    return dot_scaled_decoded_kblock(a512, compressed_int4_to_int8_avx512(b256), make_scale_pair(scale0, scale1));
   }
 
   static inline void store4_reduce_div16(__m512 s0, __m512 s1, __m512 s2, __m512 s3, float* dst) {
@@ -3286,6 +3293,14 @@ struct GemmKernel224Int4SmallKGroup {
     dst[1] = _mm512_reduce_add_ps(s1) / 16;
     dst[2] = _mm512_reduce_add_ps(s2) / 16;
     dst[3] = _mm512_reduce_add_ps(s3) / 16;
+  }
+
+  static inline void accumulate_row4(__m512* acc, __m512i a512, __m512i w0, __m512i w1, __m512i w2, __m512i w3,
+                                     __m512 abscale0, __m512 abscale1, __m512 abscale2, __m512 abscale3) {
+    acc[0] = _mm512_add_ps(acc[0], dot_scaled_decoded_kblock(a512, w0, abscale0));
+    acc[1] = _mm512_add_ps(acc[1], dot_scaled_decoded_kblock(a512, w1, abscale1));
+    acc[2] = _mm512_add_ps(acc[2], dot_scaled_decoded_kblock(a512, w2, abscale2));
+    acc[3] = _mm512_add_ps(acc[3], dot_scaled_decoded_kblock(a512, w3, abscale3));
   }
 
   static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
@@ -3363,16 +3378,23 @@ struct GemmKernel224Int4SmallKGroup {
               compressed_int4_to_int8_avx512(b_rows[3][k_block]),
           };
 
-          for (int i = 0; i < MB; i++) {
-            for (int j = 0; j < NB; j++) {
-              __m256 abscale0 = _mm256_set1_ps(as[i][k_block * 2] * bs[j][k_block * 2]);
-              __m256 abscale1 = _mm256_set1_ps(as[i][k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
-              __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
-              __m512i mul = _mm512_setzero_si512();
-              mul = _mm512_dpbssd_epi32(mul, a_rows[i][k_block], w[j]);
-              acc[i][j] = _mm512_add_ps(acc[i][j], _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));
-            }
-          }
+#define K2_INT4_ACCUM_ROW4(M_I)                                                                          \
+  do {                                                                                                    \
+    const __m512 ab0 = make_scale_pair(as[M_I][k_block * 2] * bs[0][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[0][k_block * 2 + 1]);                 \
+    const __m512 ab1 = make_scale_pair(as[M_I][k_block * 2] * bs[1][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[1][k_block * 2 + 1]);                 \
+    const __m512 ab2 = make_scale_pair(as[M_I][k_block * 2] * bs[2][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[2][k_block * 2 + 1]);                 \
+    const __m512 ab3 = make_scale_pair(as[M_I][k_block * 2] * bs[3][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[3][k_block * 2 + 1]);                 \
+    accumulate_row4(acc[M_I], a_rows[M_I][k_block], w[0], w[1], w[2], w[3], ab0, ab1, ab2, ab3);           \
+  } while (0)
+          K2_INT4_ACCUM_ROW4(0);
+          K2_INT4_ACCUM_ROW4(1);
+          K2_INT4_ACCUM_ROW4(2);
+          K2_INT4_ACCUM_ROW4(3);
+#undef K2_INT4_ACCUM_ROW4
         }
 
         for (int i = 0; i < MB; i++) {
