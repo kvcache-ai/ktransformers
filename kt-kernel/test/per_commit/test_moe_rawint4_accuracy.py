@@ -25,7 +25,7 @@ expert_num = 8
 hidden_size = 256
 intermediate_size = 512
 num_experts_per_tok = 2
-max_len = 128
+max_len = 512
 group_size = 128
 validation_iter = 3
 CPUINFER_PARAM = 16
@@ -108,6 +108,13 @@ def rawint4_dequantize(qweight, scales, out_features, in_features, quant_group_s
                 result[ni, kk] = ((packed & 0x0F) - 8) * scale
                 result[ni, kk + 1] = (((packed >> 4) & 0x0F) - 8) * scale
     return result
+
+
+def pack_rawint4_uint8_as_int32(qweight):
+    """Pack byte RAWINT4 layout into compressed-tensors int32 storage."""
+    assert qweight.dtype == torch.uint8
+    assert qweight.shape[1] % 4 == 0
+    return qweight.contiguous().view(torch.int32).contiguous()
 
 
 def act_fn(x):
@@ -219,7 +226,7 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen, quant_
         )
 
         config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
-        config.max_len = max_len
+        config.max_len = max(max_len, qlen)
         config.gate_proj = gate_qw.data_ptr()
         config.up_proj = up_qw.data_ptr()
         config.down_proj = down_qw.data_ptr()
@@ -289,6 +296,184 @@ def test_amxint4_kgroup_accuracy():
     run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=128, quant_group_size=32)
 
 
+def test_amxint4_kgroup_blocked_accuracy():
+    if not hasattr(kt_kernel_ext.moe, "AMXInt4_KGroupBlocked_MOE"):
+        pytest.skip("AMXInt4_KGroupBlocked_MOE is not available")
+
+    backend_cls = kt_kernel_ext.moe.AMXInt4_KGroupBlocked_MOE
+    run_backend_accuracy_test("AMXInt4_KGroupBlocked_MOE", backend_cls, 0.20, qlen=1, quant_group_size=32)
+    run_backend_accuracy_test("AMXInt4_KGroupBlocked_MOE", backend_cls, 0.20, qlen=32, quant_group_size=32)
+    run_backend_accuracy_test("AMXInt4_KGroupBlocked_MOE", backend_cls, 0.20, qlen=128, quant_group_size=32)
+    run_backend_accuracy_test("AMXInt4_KGroupBlocked_MOE", backend_cls, 0.20, qlen=512, quant_group_size=32)
+
+
+def _make_writer_inputs(quant_group_size=32):
+    torch.manual_seed(1234)
+    gate_qw = torch.randint(0, 256, (expert_num, intermediate_size, hidden_size // 2), dtype=torch.uint8).contiguous()
+    up_qw = torch.randint(0, 256, (expert_num, intermediate_size, hidden_size // 2), dtype=torch.uint8).contiguous()
+    down_qw = torch.randint(0, 256, (expert_num, hidden_size, intermediate_size // 2), dtype=torch.uint8).contiguous()
+    gate_scales = torch.rand((expert_num, intermediate_size, hidden_size // quant_group_size), dtype=torch.float32).to(
+        torch.bfloat16
+    ).contiguous()
+    up_scales = torch.rand((expert_num, intermediate_size, hidden_size // quant_group_size), dtype=torch.float32).to(
+        torch.bfloat16
+    ).contiguous()
+    down_scales = torch.rand((expert_num, hidden_size, intermediate_size // quant_group_size), dtype=torch.float32).to(
+        torch.bfloat16
+    ).contiguous()
+    return gate_qw, up_qw, down_qw, gate_scales, up_scales, down_scales
+
+
+def _load_writer_backend(backend_cls, tensors, quant_group_size=32):
+    gate_qw, up_qw, down_qw, gate_scales, up_scales, down_scales = tensors
+    cpu_infer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
+    config = kt_kernel_ext.moe.MOEConfig(expert_num, num_experts_per_tok, hidden_size, intermediate_size, 0)
+    config.max_len = max_len
+    config.gate_proj = gate_qw.data_ptr()
+    config.up_proj = up_qw.data_ptr()
+    config.down_proj = down_qw.data_ptr()
+    config.gate_scale = gate_scales.data_ptr()
+    config.up_scale = up_scales.data_ptr()
+    config.down_scale = down_scales.data_ptr()
+    config.quant_config.bits = 4
+    config.quant_config.group_size = quant_group_size
+    config.quant_config.zero_point = False
+    config.pool = cpu_infer.backend_
+
+    moe = backend_cls(config)
+    physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
+    cpu_infer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
+    cpu_infer.sync()
+    return cpu_infer, moe
+
+
+def _export_writer_buffers(cpu_infer, moe, gpu_tp_count, quant_group_size=32, gpu_experts=2):
+    per_mat_weight_bytes = intermediate_size * hidden_size // 2
+    per_mat_scale_elems = intermediate_size * (hidden_size // quant_group_size)
+    weight_bytes_per_expert_per_tp = per_mat_weight_bytes // gpu_tp_count
+    scale_elems_per_expert_per_tp = per_mat_scale_elems // gpu_tp_count
+
+    w13_weight_bufs = [torch.empty(2 * gpu_experts * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w13_scale_bufs = [torch.empty(2 * gpu_experts * scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+    w2_weight_bufs = [torch.empty(gpu_experts * weight_bytes_per_expert_per_tp, dtype=torch.uint8) for _ in range(gpu_tp_count)]
+    w2_scale_bufs = [torch.empty(gpu_experts * scale_elems_per_expert_per_tp, dtype=torch.bfloat16) for _ in range(gpu_tp_count)]
+
+    for expert_id in range(gpu_experts):
+        w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs = [], [], [], []
+        for tp_idx in range(gpu_tp_count):
+            w13_weight_ptrs.append(w13_weight_bufs[tp_idx].data_ptr() + expert_id * 2 * weight_bytes_per_expert_per_tp)
+            w13_scale_ptrs.append(
+                w13_scale_bufs[tp_idx].data_ptr() + expert_id * 2 * scale_elems_per_expert_per_tp * 2
+            )
+            w2_weight_ptrs.append(w2_weight_bufs[tp_idx].data_ptr() + expert_id * weight_bytes_per_expert_per_tp)
+            w2_scale_ptrs.append(w2_scale_bufs[tp_idx].data_ptr() + expert_id * scale_elems_per_expert_per_tp * 2)
+
+        cpu_infer.submit(
+            moe.write_weight_scale_to_buffer_task(
+                gpu_tp_count=gpu_tp_count,
+                expert_id=expert_id,
+                w13_weight_ptrs=w13_weight_ptrs,
+                w13_scale_ptrs=w13_scale_ptrs,
+                w2_weight_ptrs=w2_weight_ptrs,
+                w2_scale_ptrs=w2_scale_ptrs,
+            )
+        )
+        cpu_infer.sync()
+
+    return w13_weight_bufs, w13_scale_bufs, w2_weight_bufs, w2_scale_bufs
+
+
+def test_amxint4_kgroup_blocked_write_buffer_matches_rowmajor_backend():
+    if not hasattr(kt_kernel_ext.moe, "AMXInt4_KGroup_MOE") or not hasattr(
+        kt_kernel_ext.moe, "AMXInt4_KGroupBlocked_MOE"
+    ):
+        pytest.skip("AMX RAWINT4 row-major and blocked backends are both required")
+
+    tensors = _make_writer_inputs(quant_group_size=32)
+    old_cpu, old_moe = _load_writer_backend(kt_kernel_ext.moe.AMXInt4_KGroup_MOE, tensors, quant_group_size=32)
+    blocked_cpu, blocked_moe = _load_writer_backend(
+        kt_kernel_ext.moe.AMXInt4_KGroupBlocked_MOE, tensors, quant_group_size=32
+    )
+
+    for gpu_tp_count in (1, 2, 4):
+        old_buffers = _export_writer_buffers(old_cpu, old_moe, gpu_tp_count, quant_group_size=32)
+        blocked_buffers = _export_writer_buffers(blocked_cpu, blocked_moe, gpu_tp_count, quant_group_size=32)
+        for old_group, blocked_group in zip(old_buffers, blocked_buffers):
+            for old_buf, blocked_buf in zip(old_group, blocked_group):
+                assert torch.equal(blocked_buf, old_buf)
+
+
+def test_compressed_loader_normalizes_int32_pack_quantized_weights():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    weight_shape = torch.tensor([intermediate_size, hidden_size], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, weight_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_accepts_uint8_rawint4_weights():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    weight_shape = torch.tensor([intermediate_size, hidden_size], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        qweight, scales, weight_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_ignores_invalid_weight_shape_metadata():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    invalid_shape = torch.tensor([-1752796263, -1707567530], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, invalid_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
+def test_compressed_loader_ignores_odd_weight_shape_metadata():
+    load_amx_utils()
+    loader_mod = sys.modules["kt_kernel.utils.loader"]
+
+    weight_bf16 = (torch.randn((intermediate_size, hidden_size), dtype=torch.float32) / 10.0).to(torch.bfloat16)
+    qweight, scales = rawint4_quantize(weight_bf16)
+    packed_int32 = pack_rawint4_uint8_as_int32(qweight)
+    invalid_shape = torch.tensor([241597647, 1216029047], dtype=torch.int32)
+
+    normalized = loader_mod.CompressedSafeTensorLoader._normalize_rawint4_weight(
+        packed_int32, scales, invalid_shape, "test.weight_packed"
+    )
+
+    assert normalized.dtype == torch.uint8
+    assert normalized.shape == qweight.shape
+    assert torch.equal(normalized, qweight)
+
+
 def test_rawint4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):
     amx_utils = load_amx_utils()
     fake_amx_backend = object()
@@ -306,6 +491,17 @@ def test_rawint4_backend_selection_falls_back_to_avx2_for_large_group_size(monke
 
     assert amx_utils._select_rawint4_backend(512) is fake_avx2_backend
     assert amx_utils._select_rawint4_backend(128) is fake_avxvnni_backend
+
+
+def test_rawint4_backend_selection_accepts_forced_blocked_amx(monkeypatch):
+    amx_utils = load_amx_utils()
+    fake_blocked_backend = object()
+
+    monkeypatch.setattr(amx_utils, "AMXInt4_KGroupBlocked_MOE", fake_blocked_backend)
+    monkeypatch.setattr(amx_utils, "_HAS_RAWINT4_BLOCKED_SUPPORT", True)
+    monkeypatch.setenv("KT_RAWINT4_BACKEND", "amx_blocked")
+
+    assert amx_utils._select_rawint4_backend(32) is fake_blocked_backend
 
 
 def test_rawint4_backend_selection_rejects_forced_avxvnni_with_large_group_size(monkeypatch):
