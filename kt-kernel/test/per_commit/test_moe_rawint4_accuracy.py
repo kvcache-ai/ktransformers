@@ -293,6 +293,7 @@ def test_amxint4_kgroup_accuracy():
     backend_cls = kt_kernel_ext.moe.AMXInt4_KGroup_MOE
     run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=1, quant_group_size=32)
     run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=32, quant_group_size=32)
+    run_backend_accuracy_test("AMXInt4_KGroup_MOE", backend_cls, 0.20, qlen=128, quant_group_size=32)
 
 
 def test_compressed_loader_normalizes_int32_pack_quantized_weights():
