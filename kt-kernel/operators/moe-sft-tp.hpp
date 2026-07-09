@@ -628,6 +628,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     int qlen = *qlen_ptr;
     auto pool = config.pool;
+    if (const char* trace = std::getenv("KT_K2_SFT_TRACE_FWD_VERBOSE");
+        trace != nullptr && trace[0] != '\0' && trace[0] != '0') {
+      fprintf(stderr,
+              "[KT_K2_SFT_FWD_TRACE] layer=%d tp_wrapper qlen=%d k=%d save=%d tp_count=%d step=tp_wrapper_enter\n",
+              config.layer_idx, qlen, k, save_for_backward ? 1 : 0, tp_count);
+      fflush(stderr);
+    }
 
     // Reset forward timing before computation
     // Reset per-thread counters in each subpool (to accumulate all do_work_stealing_job calls)

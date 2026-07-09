@@ -631,6 +631,81 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return enabled;
   }
 
+  static bool trace_forward_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_TRACE_FWD_VERBOSE");
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool profile_forward_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_PROFILE_FWD");
+      if (value == nullptr || value[0] == '\0') {
+        value = std::getenv("KT_K2_SFT_TRACE_FWD");
+      }
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  void trace_forward_step(const char* step, int qlen, int k, int activated_expert, bool save_for_backward) const {
+    if (!trace_forward_enabled()) return;
+    fprintf(stderr,
+            "[KT_K2_SFT_FWD_TRACE] layer=%d tp_part=%d qlen=%d k=%d active=%d save=%d lora=%d cache_top=%d step=%s\n",
+            config_.layer_idx, tp_part_idx, qlen, k, activated_expert, save_for_backward ? 1 : 0,
+            has_any_lora() ? 1 : 0, cache_stack_top_, step);
+    fflush(stderr);
+  }
+
+  struct ForwardProfile {
+    using Clock = std::chrono::high_resolution_clock;
+    bool enabled = false;
+    Clock::time_point start;
+    Clock::time_point last;
+    long long base_forward_us = 0;
+    long long route_us = 0;
+    long long setup_us = 0;
+    long long copy_input_us = 0;
+    long long q_input_us = 0;
+    long long gate_up_base_us = 0;
+    long long gate_up_lora_us = 0;
+    long long save_gate_up_us = 0;
+    long long act_us = 0;
+    long long save_intermediate_us = 0;
+    long long q_intermediate_us = 0;
+    long long down_base_us = 0;
+    long long down_lora_us = 0;
+    long long save_down_us = 0;
+    long long merge_us = 0;
+
+    explicit ForwardProfile(bool enabled_) : enabled(enabled_) {
+      if (enabled) {
+        start = Clock::now();
+        last = start;
+      }
+    }
+
+    void reset() {
+      if (!enabled) return;
+      start = Clock::now();
+      last = start;
+    }
+
+    void mark(long long& slot) {
+      if (!enabled) return;
+      auto now = Clock::now();
+      slot = std::chrono::duration_cast<std::chrono::microseconds>(now - last).count();
+      last = now;
+    }
+
+    long long total_us() const {
+      if (!enabled) return 0;
+      return std::chrono::duration_cast<std::chrono::microseconds>(last - start).count();
+    }
+  };
+
   static inline void bf16_dot2_scalar(const ggml_bf16_t* input, const ggml_bf16_t* a0, const ggml_bf16_t* a1,
                                       int hidden, float& out0, float& out1) {
     float acc0 = 0.0f;
@@ -2942,29 +3017,50 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
+    trace_forward_step("enter", qlen, k, -1, save_for_backward);
     if (qlen > config_.max_len) {
       throw std::runtime_error("K2 RAWINT4 SFT qlen exceeds max_len");
     }
 
+    ForwardProfile profile(profile_forward_enabled());
+
     // K2 fast path: with no LoRA and no backward cache, delegate to the native packed KGroup forward.
     if (!save_for_backward && !has_any_lora()) {
+      trace_forward_step("fast_path_base_forward", qlen, k, -1, save_for_backward);
       Base::forward(qlen, k, expert_ids, weights, input, output);
+      profile.mark(profile.base_forward_us);
+      if (profile.enabled) {
+        fprintf(stderr,
+                "[KT_K2_SFT_FWD_PROFILE] layer=%d tp_part=%d qlen=%d k=%d active=-1 save=%d lora=0 cache_top=%d "
+                "fast_path=1 base_forward_us=%lld total_us=%lld\n",
+                config_.layer_idx, tp_part_idx, qlen, k, save_for_backward ? 1 : 0, cache_stack_top_,
+                profile.base_forward_us, profile.total_us());
+        fflush(stderr);
+      }
+      trace_forward_step("done", qlen, k, -1, save_for_backward);
       return;
     }
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
+    profile.reset();
 
     // Step 1: Expert routing (reuse base class logic)
     // K2 factors the equivalent routing loop into route_tokens(); it also uses should_skip_expert()
     // so invalid experts and GPU-resident experts follow the shared GeneralMOEConfig skip rule.
+    trace_forward_step("step1_route_tokens", qlen, k, -1, save_for_backward);
     int activated_expert = route_tokens(qlen, k, expert_ids);
+    profile.mark(profile.route_us);
 
     // Step 2: Buffer pool allocation (reuse base class logic)
     // K2 keeps the same per-expert buffer layout, but the allocation math is factored into a helper.
+    trace_forward_step("step2_setup_expert_buffers", qlen, k, activated_expert, save_for_backward);
     setup_expert_buffers();
+    profile.mark(profile.setup_us);
 
     // Step 3: Copy input to expert buffers
+    trace_forward_step("step3_copy_inputs", qlen, k, activated_expert, save_for_backward);
     copy_inputs_to_expert_buffers(qlen, k, expert_ids, input);
+    profile.mark(profile.copy_input_us);
 
     // Small-q_len runs inline to avoid thread-pool overhead; this is a scheduling detail, not a forward step.
     auto direct_or_pool = [&](int count, auto&& fn) {
@@ -2977,14 +3073,17 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     };
 
     // Step 4: Quantize input
+    trace_forward_step("step4_quantize_input", qlen, k, activated_expert, save_for_backward);
     direct_or_pool(activated_expert, [this](int task_id) {
       int expert_idx = this->m_expert_id_map_[task_id];
       this->gate_up_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx], this->m_local_input_ptr_[expert_idx], 0,
                                               1);
     });
+    profile.mark(profile.q_input_us);
 
     // Step 5: Gate + Up GEMM (base projection)
     // K2's do_gate_up_gemm dispatches packed int4 KGroup GEMM instead of the generic AMX BufferB path.
+    trace_forward_step("step5_gate_up_base_gemm", qlen, k, activated_expert, save_for_backward);
     int nth = T::recommended_nth(config_.intermediate_size);
     if (activated_expert > 0) {
       pool->do_work_stealing_job(
@@ -3005,38 +3104,50 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           },
           nullptr);
     }
+    profile.mark(profile.gate_up_base_us);
 
     // Step 5.5: Gate + Up LoRA (AVX512 BF16 - no BufferB conversion needed)
+    trace_forward_step("step5_5_gate_up_lora", qlen, k, activated_expert, save_for_backward);
     compute_lora_gate_up(activated_expert);
+    profile.mark(profile.gate_up_lora_us);
 
     K2ForwardCache* cache_ptr = nullptr;
     if (save_for_backward) {
       // Save gate/up outputs before activation (for backward).
       // Checkpoint recompute overwrites the latest valid cache instead of pushing a duplicate.
+      trace_forward_step("step5_6_save_gate_up_cache", qlen, k, activated_expert, save_for_backward);
       K2ForwardCache& cache = (cache_stack_top_ > 0 && cache_stack_[cache_stack_top_ - 1].valid)
                                   ? cache_stack_[cache_stack_top_ - 1]
                                   : push_cache();
       save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
       cache_ptr = &cache;
+      profile.mark(profile.save_gate_up_us);
     }
 
     // Step 6: Activation (silu(gate) * up)
+    trace_forward_step("step6_activation", qlen, k, activated_expert, save_for_backward);
     this->apply_activation(activated_expert, nth, qlen);
+    profile.mark(profile.act_us);
 
     if (save_for_backward && cache_ptr != nullptr) {
       // Save intermediate AFTER activation for backward_down.
+      trace_forward_step("step6_5_save_intermediate_cache", qlen, k, activated_expert, save_for_backward);
       save_intermediate_to_cache(*cache_ptr, activated_expert);
+      profile.mark(profile.save_intermediate_us);
     }
 
     // Step 7: Quantize intermediate for down projection
+    trace_forward_step("step7_quantize_intermediate", qlen, k, activated_expert, save_for_backward);
     direct_or_pool(activated_expert, [this](int task_id) {
       int expert_idx = this->m_expert_id_map_[task_id];
       this->down_ba_[expert_idx]->from_mat(this->m_local_num_[expert_idx], this->m_local_gate_output_ptr_[expert_idx],
                                            0, 1);
     });
+    profile.mark(profile.q_intermediate_us);
 
     // Step 8: Down GEMM
     // K2's do_down_gemm dispatches packed int4 KGroup GEMM.
+    trace_forward_step("step8_down_base_gemm", qlen, k, activated_expert, save_for_backward);
     nth = T::recommended_nth(config_.hidden_size);
     if (activated_expert > 0) {
       pool->do_work_stealing_job(
@@ -3050,16 +3161,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           },
           nullptr);
     }
+    profile.mark(profile.down_base_us);
 
     // Step 8.5: Down LoRA (AVX512 BF16 - no BufferB conversion needed)
+    trace_forward_step("step8_5_down_lora", qlen, k, activated_expert, save_for_backward);
     compute_lora_down(activated_expert, cache_ptr);
+    profile.mark(profile.down_lora_us);
 
     if (save_for_backward && cache_ptr != nullptr) {
       // Save down_output for grad_weights computation.
+      trace_forward_step("step8_6_save_down_cache", qlen, k, activated_expert, save_for_backward);
       save_down_output_to_cache(*cache_ptr, activated_expert);
+      profile.mark(profile.save_down_us);
     }
 
     // Step 9: Weighted merge
+    trace_forward_step("step9_weighted_merge", qlen, k, activated_expert, save_for_backward);
     direct_or_pool(qlen, [this, output, k, expert_ids, weights](int i) {
       for (int e = 0; e < config_.hidden_size; e += 32) {
         __m512 x0 = _mm512_setzero_ps();
@@ -3081,6 +3198,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         f32out[1] = x1;
       }
     });
+    profile.mark(profile.merge_us);
+    if (profile.enabled) {
+      fprintf(stderr,
+              "[KT_K2_SFT_FWD_PROFILE] layer=%d tp_part=%d qlen=%d k=%d active=%d save=%d lora=%d cache_top=%d "
+              "fast_path=0 route_us=%lld setup_us=%lld copy_input_us=%lld q_input_us=%lld "
+              "gate_up_base_us=%lld gate_up_lora_us=%lld save_gate_up_us=%lld act_us=%lld "
+              "save_intermediate_us=%lld q_intermediate_us=%lld down_base_us=%lld down_lora_us=%lld "
+              "save_down_us=%lld merge_us=%lld total_us=%lld\n",
+              config_.layer_idx, tp_part_idx, qlen, k, activated_expert, save_for_backward ? 1 : 0,
+              has_any_lora() ? 1 : 0, cache_stack_top_, profile.route_us, profile.setup_us, profile.copy_input_us,
+              profile.q_input_us, profile.gate_up_base_us, profile.gate_up_lora_us, profile.save_gate_up_us,
+              profile.act_us, profile.save_intermediate_us, profile.q_intermediate_us, profile.down_base_us,
+              profile.down_lora_us, profile.save_down_us, profile.merge_us, profile.total_us());
+      fflush(stderr);
+    }
+    trace_forward_step("done", qlen, k, activated_expert, save_for_backward);
   }
 
   void set_weight_pointers_for_forward(void* gate_proj, void* up_proj, void* down_proj) {
