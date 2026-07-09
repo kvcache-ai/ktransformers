@@ -1872,6 +1872,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
+  // Build the compact expert-packed token layout used by backward helpers.
+  // Rows are ordered by active expert, then local token position within that expert.
   TP1BackwardLayout make_tp1_backward_layout(const K2ForwardCache& cache) const {
     TP1BackwardLayout layout;
     layout.expert_base.assign(static_cast<size_t>(config_.expert_num), 0);
@@ -1919,6 +1921,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return out;
   }
 
+  // Reverse of the forward weighted merge:
+  //   output[token] += weight[token, route] * down_output[token, route].
+  // Therefore dL/dweight is dot(grad_output[token], cached_down_output[token, route]).
+  // Python passes a null grad_weights pointer when topk weights do not require gradients.
   void compute_tp1_grad_weights(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                 void* grad_weights) const {
     if (grad_weights == nullptr) return;
@@ -1952,6 +1958,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
+  // Down projection backward in expert-packed token order.
+  //
+  // K2 base backward reads packed signed-int4 KGroup rows plus BF16 group
+  // scales directly. It does not use BF16 shadow weights or AMX transposed
+  // BufferB objects.
+  //
+  // Data flow:
+  //   1. Scatter token-order grad_output to per-expert grad_down, multiplying
+  //      by saved router weights.
+  //   2. Use packed down weights to compute grad_intermediate.
+  //   3. If down LoRA is active, add the LoRA contribution to grad_intermediate.
+  //   4. If requested, compute down LoRA A/B gradients.
+  //
+  // In the normal TP autograd path, down LoRA B is accumulated in a sparse
+  // FP32 side buffer outside this helper. Dense BF16 grad_down_lora_b is mainly
+  // used by TP=1 direct/debug.
   void compute_tp1_down_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                  void* grad_down, std::vector<float>* grad_down_fp32_out, void* grad_intermediate,
                                  std::vector<float>* grad_inter_fp32_out, void* grad_down_lora_a,
@@ -2201,6 +2223,19 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
+  // Gate/up projection backward in expert-packed token order.
+  //
+  // Base path reads packed gate/up KGroup rows and accumulates token-order
+  // grad_input. LoRA path computes:
+  //   u = input @ A^T
+  //   grad_B += grad_projection^T @ u
+  //   grad_times_B = grad_projection @ B
+  //   grad_A += grad_times_B^T @ input
+  //   grad_input += grad_times_B @ A
+  //
+  // This helper writes dense BF16 LoRA gradients for TP=1 direct/debug. The
+  // normal TP autograd path below has an inlined variant to write sparse FP32
+  // LoRA A / down B buffers.
   void compute_tp1_gate_up_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
                                     const float* grad_gate, const float* grad_up, void* grad_input,
                                     void* grad_gate_lora_a, void* grad_gate_lora_b, void* grad_up_lora_a,
@@ -2471,6 +2506,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     write_bf16_vector(grad_up_lora_b, grad_up_b_fp32);
   }
 
+  // TP=1 direct/debug backward. It exercises the packed base-weight math and
+  // returns all LoRA gradients through dense BF16 buffers, which makes tests and
+  // debug dumps easier to compare tensor-by-tensor.
   void run_tp1_packed_backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a,
                                void* grad_gate_lora_b, void* grad_up_lora_a, void* grad_up_lora_b,
                                void* grad_down_lora_a, void* grad_down_lora_b, void* grad_weights) {
@@ -2530,6 +2568,15 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
+  // Normal SFT autograd backward for K2 packed weights.
+  //
+  // Python uses a mixed gradient transport contract:
+  //   - grad_down_lora_a, grad_gate_lora_b, grad_up_lora_b are dense BF16 outputs.
+  //   - fp32_grad_down_lora_b, fp32_grad_gate_lora_a, fp32_grad_up_lora_a are
+  //     sparse FP32 outputs indexed by active expert task.
+  //
+  // The base path still reads packed signed-int4 KGroup rows directly for
+  // down/gate/up; only trainable LoRA gradients are materialized.
   void run_tp_packed_backward(const void* grad_output, void* grad_input, void* grad_gate_lora_b, void* grad_up_lora_b,
                               void* grad_down_lora_a, void* grad_weights, int full_intermediate_size,
                               float* fp32_grad_down_lora_b, float* fp32_grad_gate_lora_a, float* fp32_grad_up_lora_a) {
@@ -3243,6 +3290,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                 float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr) {
+    // Normal TP path uses sparse FP32 side buffers for gate/up LoRA A and down
+    // LoRA B. These dense BF16 arguments are kept for the shared binding ABI.
     (void)grad_gate_lora_a;
     (void)grad_up_lora_a;
     (void)grad_down_lora_b;
