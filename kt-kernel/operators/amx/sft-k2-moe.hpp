@@ -707,6 +707,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return enabled;
   }
 
+  static bool rank8_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_RANK8_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
   static bool bf16_write_vec_enabled() {
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_BF16_WRITE_VEC");
@@ -837,6 +845,75 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return _mm512_castsi512_ps(_mm512_slli_epi32(expanded, 16));
   }
 
+  static inline void bf16_dot8_scalar(const ggml_bf16_t* input, const ggml_bf16_t* lora_a, int hidden, float* out) {
+    for (int r = 0; r < 8; r++) {
+      const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+      float acc = 0.0f;
+      for (int h = 0; h < hidden; h++) {
+        acc += GGML_BF16_TO_FP32(input[h]) * GGML_BF16_TO_FP32(a_row[h]);
+      }
+      out[r] = acc;
+    }
+  }
+
+  static inline void bf16_dot8_lora_u(const ggml_bf16_t* input, const ggml_bf16_t* lora_a, int hidden, float* out) {
+    if (!rank8_vec_enabled()) {
+      bf16_dot8_scalar(input, lora_a, hidden, out);
+      return;
+    }
+#if defined(__AVX512BF16__)
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    __m512 acc4 = _mm512_setzero_ps();
+    __m512 acc5 = _mm512_setzero_ps();
+    __m512 acc6 = _mm512_setzero_ps();
+    __m512 acc7 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 31 < hidden; h += 32) {
+      const __m512bh x = (__m512bh)_mm512_loadu_si512(reinterpret_cast<const __m512i*>(input + h));
+      acc0 = _mm512_dpbf16_ps(acc0, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(0) * hidden + h)));
+      acc1 = _mm512_dpbf16_ps(acc1, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(1) * hidden + h)));
+      acc2 = _mm512_dpbf16_ps(acc2, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(2) * hidden + h)));
+      acc3 = _mm512_dpbf16_ps(acc3, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(3) * hidden + h)));
+      acc4 = _mm512_dpbf16_ps(acc4, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(4) * hidden + h)));
+      acc5 = _mm512_dpbf16_ps(acc5, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(5) * hidden + h)));
+      acc6 = _mm512_dpbf16_ps(acc6, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(6) * hidden + h)));
+      acc7 = _mm512_dpbf16_ps(acc7, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(7) * hidden + h)));
+    }
+    out[0] = _mm512_reduce_add_ps(acc0);
+    out[1] = _mm512_reduce_add_ps(acc1);
+    out[2] = _mm512_reduce_add_ps(acc2);
+    out[3] = _mm512_reduce_add_ps(acc3);
+    out[4] = _mm512_reduce_add_ps(acc4);
+    out[5] = _mm512_reduce_add_ps(acc5);
+    out[6] = _mm512_reduce_add_ps(acc6);
+    out[7] = _mm512_reduce_add_ps(acc7);
+    for (; h < hidden; h++) {
+      const float x = GGML_BF16_TO_FP32(input[h]);
+      out[0] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(0) * hidden + h]);
+      out[1] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(1) * hidden + h]);
+      out[2] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(2) * hidden + h]);
+      out[3] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(3) * hidden + h]);
+      out[4] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(4) * hidden + h]);
+      out[5] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(5) * hidden + h]);
+      out[6] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(6) * hidden + h]);
+      out[7] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(7) * hidden + h]);
+    }
+#else
+    bf16_dot8_scalar(input, lora_a, hidden, out);
+#endif
+  }
+
   static inline void down_bprop_rank2_scalar(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
                                              float& out0, float& out1) {
     float gb0 = 0.0f;
@@ -896,6 +973,108 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 #endif
   }
 
+  static inline void down_bprop_rank8_scalar(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                             float* out) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    float gb2 = 0.0f;
+    float gb3 = 0.0f;
+    float gb4 = 0.0f;
+    float gb5 = 0.0f;
+    float gb6 = 0.0f;
+    float gb7 = 0.0f;
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = expert_down_b + static_cast<size_t>(h) * 8;
+      gb0 += g * GGML_BF16_TO_FP32(b[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b[1]);
+      gb2 += g * GGML_BF16_TO_FP32(b[2]);
+      gb3 += g * GGML_BF16_TO_FP32(b[3]);
+      gb4 += g * GGML_BF16_TO_FP32(b[4]);
+      gb5 += g * GGML_BF16_TO_FP32(b[5]);
+      gb6 += g * GGML_BF16_TO_FP32(b[6]);
+      gb7 += g * GGML_BF16_TO_FP32(b[7]);
+    }
+    out[0] = gb0;
+    out[1] = gb1;
+    out[2] = gb2;
+    out[3] = gb3;
+    out[4] = gb4;
+    out[5] = gb5;
+    out[6] = gb6;
+    out[7] = gb7;
+  }
+
+  static inline __m512 bf16_pair_lo_to_fp32(__m512i v) {
+    return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_and_si512(v, _mm512_set1_epi32(0xffff)), 16));
+  }
+
+  static inline __m512 bf16_pair_hi_to_fp32(__m512i v) {
+    return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_srli_epi32(v, 16), 16));
+  }
+
+  static inline void down_bprop_rank8_vec(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                          float* out) {
+    if (!rank8_vec_enabled()) {
+      down_bprop_rank8_scalar(grad_down_row, expert_down_b, hidden, out);
+      return;
+    }
+#if defined(__AVX512F__)
+    alignas(64) static const int32_t byte_offsets_values[16] = {0,   16,  32,  48,  64,  80,  96,  112,
+                                                                128, 144, 160, 176, 192, 208, 224, 240};
+    const __m512i byte_offsets = _mm512_load_si512(reinterpret_cast<const __m512i*>(byte_offsets_values));
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    __m512 acc4 = _mm512_setzero_ps();
+    __m512 acc5 = _mm512_setzero_ps();
+    __m512 acc6 = _mm512_setzero_ps();
+    __m512 acc7 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 15 < hidden; h += 16) {
+      const __m512 g = _mm512_loadu_ps(grad_down_row + h);
+      const ggml_bf16_t* base = expert_down_b + static_cast<size_t>(h) * 8;
+      const __m512i b01 = _mm512_i32gather_epi32(byte_offsets, base + 0, 1);
+      const __m512i b23 = _mm512_i32gather_epi32(byte_offsets, base + 2, 1);
+      const __m512i b45 = _mm512_i32gather_epi32(byte_offsets, base + 4, 1);
+      const __m512i b67 = _mm512_i32gather_epi32(byte_offsets, base + 6, 1);
+      acc0 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b01), acc0);
+      acc1 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b01), acc1);
+      acc2 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b23), acc2);
+      acc3 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b23), acc3);
+      acc4 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b45), acc4);
+      acc5 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b45), acc5);
+      acc6 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b67), acc6);
+      acc7 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b67), acc7);
+    }
+    out[0] = _mm512_reduce_add_ps(acc0);
+    out[1] = _mm512_reduce_add_ps(acc1);
+    out[2] = _mm512_reduce_add_ps(acc2);
+    out[3] = _mm512_reduce_add_ps(acc3);
+    out[4] = _mm512_reduce_add_ps(acc4);
+    out[5] = _mm512_reduce_add_ps(acc5);
+    out[6] = _mm512_reduce_add_ps(acc6);
+    out[7] = _mm512_reduce_add_ps(acc7);
+    for (; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = expert_down_b + static_cast<size_t>(h) * 8;
+      out[0] += g * GGML_BF16_TO_FP32(b[0]);
+      out[1] += g * GGML_BF16_TO_FP32(b[1]);
+      out[2] += g * GGML_BF16_TO_FP32(b[2]);
+      out[3] += g * GGML_BF16_TO_FP32(b[3]);
+      out[4] += g * GGML_BF16_TO_FP32(b[4]);
+      out[5] += g * GGML_BF16_TO_FP32(b[5]);
+      out[6] += g * GGML_BF16_TO_FP32(b[6]);
+      out[7] += g * GGML_BF16_TO_FP32(b[7]);
+    }
+#else
+    down_bprop_rank8_scalar(grad_down_row, expert_down_b, hidden, out);
+#endif
+  }
+
   static inline void accumulate_down_lora_b_rank2_scalar(const float* grad_down_row, float u0_scaled, float u1_scaled,
                                                          int hidden, float* grad_b) {
     for (int h = 0; h < hidden; h++) {
@@ -941,6 +1120,42 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
 #else
     accumulate_down_lora_b_rank2_scalar(grad_down_row, u0_scaled, u1_scaled, hidden, grad_b);
+#endif
+  }
+
+  static inline void accumulate_down_lora_b_rank8_scalar(const float* grad_down_row, const float* u_scaled, int hidden,
+                                                         float* grad_b) {
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* row = grad_b + static_cast<size_t>(h) * 8;
+      row[0] += g * u_scaled[0];
+      row[1] += g * u_scaled[1];
+      row[2] += g * u_scaled[2];
+      row[3] += g * u_scaled[3];
+      row[4] += g * u_scaled[4];
+      row[5] += g * u_scaled[5];
+      row[6] += g * u_scaled[6];
+      row[7] += g * u_scaled[7];
+    }
+  }
+
+  static inline void accumulate_down_lora_b_rank8_vec(const float* grad_down_row, const float* u_scaled, int hidden,
+                                                      float* grad_b) {
+    if (!rank8_vec_enabled()) {
+      accumulate_down_lora_b_rank8_scalar(grad_down_row, u_scaled, hidden, grad_b);
+      return;
+    }
+#if defined(__AVX2__)
+    const __m256 u = _mm256_loadu_ps(u_scaled);
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* row = grad_b + static_cast<size_t>(h) * 8;
+      _mm256_storeu_ps(row, _mm256_fmadd_ps(_mm256_set1_ps(g), u, _mm256_loadu_ps(row)));
+    }
+#else
+    accumulate_down_lora_b_rank8_scalar(grad_down_row, u_scaled, hidden, grad_b);
 #endif
   }
 
@@ -1030,6 +1245,84 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 #endif
   }
 
+  static inline __m256 bf16x8_to_fp32(__m128i v) {
+    const __m256i expanded = _mm256_cvtepu16_epi32(v);
+    return _mm256_castsi256_ps(_mm256_slli_epi32(expanded, 16));
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank8_scalar(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                            const float* u_scaled, int inter_size, float* grad_b,
+                                                            float* out) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    float gb2 = 0.0f;
+    float gb3 = 0.0f;
+    float gb4 = 0.0f;
+    float gb5 = 0.0f;
+    float gb6 = 0.0f;
+    float gb7 = 0.0f;
+    for (int i = 0; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = lora_b + static_cast<size_t>(i) * 8;
+      if (grad_b != nullptr) {
+        float* row = grad_b + static_cast<size_t>(i) * 8;
+        row[0] += g * u_scaled[0];
+        row[1] += g * u_scaled[1];
+        row[2] += g * u_scaled[2];
+        row[3] += g * u_scaled[3];
+        row[4] += g * u_scaled[4];
+        row[5] += g * u_scaled[5];
+        row[6] += g * u_scaled[6];
+        row[7] += g * u_scaled[7];
+      }
+      gb0 += g * GGML_BF16_TO_FP32(b[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b[1]);
+      gb2 += g * GGML_BF16_TO_FP32(b[2]);
+      gb3 += g * GGML_BF16_TO_FP32(b[3]);
+      gb4 += g * GGML_BF16_TO_FP32(b[4]);
+      gb5 += g * GGML_BF16_TO_FP32(b[5]);
+      gb6 += g * GGML_BF16_TO_FP32(b[6]);
+      gb7 += g * GGML_BF16_TO_FP32(b[7]);
+    }
+    out[0] = gb0;
+    out[1] = gb1;
+    out[2] = gb2;
+    out[3] = gb3;
+    out[4] = gb4;
+    out[5] = gb5;
+    out[6] = gb6;
+    out[7] = gb7;
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank8_vec(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                         const float* u_scaled, int inter_size, float* grad_b,
+                                                         float* out) {
+    if (!rank8_vec_enabled()) {
+      accumulate_gate_up_lora_b_rank8_scalar(grad_row, lora_b, u_scaled, inter_size, grad_b, out);
+      return;
+    }
+#if defined(__AVX2__)
+    const __m256 u = _mm256_loadu_ps(u_scaled);
+    __m256 acc = _mm256_setzero_ps();
+    for (int i = 0; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const __m256 gv = _mm256_set1_ps(g);
+      acc = _mm256_fmadd_ps(gv, bf16x8_to_fp32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(
+                                       lora_b + static_cast<size_t>(i) * 8))),
+                            acc);
+      if (grad_b != nullptr) {
+        float* row = grad_b + static_cast<size_t>(i) * 8;
+        _mm256_storeu_ps(row, _mm256_fmadd_ps(gv, u, _mm256_loadu_ps(row)));
+      }
+    }
+    _mm256_storeu_ps(out, acc);
+#else
+    accumulate_gate_up_lora_b_rank8_scalar(grad_row, lora_b, u_scaled, inter_size, grad_b, out);
+#endif
+  }
+
   static inline void accumulate_gate_up_a_input_rank2_scalar(const ggml_bf16_t* input_row, const ggml_bf16_t* a0,
                                                              const ggml_bf16_t* a1, float gu0, float gu1, int hidden,
                                                              float* grad_input_row, float* grad_a0, float* grad_a1) {
@@ -1097,6 +1390,113 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
 #else
     accumulate_gate_up_a_input_rank2_scalar(input_row, a0, a1, gu0, gu1, hidden, grad_input_row, grad_a0, grad_a1);
+#endif
+  }
+
+  static inline void accumulate_lora_a_input_rank8_scalar(const ggml_bf16_t* input_row, const ggml_bf16_t* lora_a,
+                                                          const float* gu_scaled, int width, float* grad_dst,
+                                                          float* grad_a) {
+    for (int r = 0; r < 8; r++) {
+      const float gu = gu_scaled[r];
+      const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * width;
+      float* grad_a_row = grad_a == nullptr ? nullptr : grad_a + static_cast<size_t>(r) * width;
+      for (int h = 0; h < width; h++) {
+        if (grad_a_row != nullptr) {
+          grad_a_row[h] += gu * GGML_BF16_TO_FP32(input_row[h]);
+        }
+        if (grad_dst != nullptr) {
+          grad_dst[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+        }
+      }
+    }
+  }
+
+  static inline void accumulate_lora_a_input_rank8_vec(const ggml_bf16_t* input_row, const ggml_bf16_t* lora_a,
+                                                       const float* gu_scaled, int width, float* grad_dst,
+                                                       float* grad_a) {
+    if (!rank8_vec_enabled()) {
+      accumulate_lora_a_input_rank8_scalar(input_row, lora_a, gu_scaled, width, grad_dst, grad_a);
+      return;
+    }
+#if defined(__AVX512F__)
+    const __m512 gu0 = _mm512_set1_ps(gu_scaled[0]);
+    const __m512 gu1 = _mm512_set1_ps(gu_scaled[1]);
+    const __m512 gu2 = _mm512_set1_ps(gu_scaled[2]);
+    const __m512 gu3 = _mm512_set1_ps(gu_scaled[3]);
+    const __m512 gu4 = _mm512_set1_ps(gu_scaled[4]);
+    const __m512 gu5 = _mm512_set1_ps(gu_scaled[5]);
+    const __m512 gu6 = _mm512_set1_ps(gu_scaled[6]);
+    const __m512 gu7 = _mm512_set1_ps(gu_scaled[7]);
+    int h = 0;
+    for (; h + 15 < width; h += 16) {
+      const __m512 x = grad_a == nullptr
+                           ? _mm512_setzero_ps()
+                           : bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(input_row + h)));
+      const __m512 a0 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(0) * width + h)));
+      const __m512 a1 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(1) * width + h)));
+      const __m512 a2 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(2) * width + h)));
+      const __m512 a3 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(3) * width + h)));
+      const __m512 a4 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(4) * width + h)));
+      const __m512 a5 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(5) * width + h)));
+      const __m512 a6 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(6) * width + h)));
+      const __m512 a7 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(7) * width + h)));
+
+      if (grad_a != nullptr) {
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(0) * width + h,
+                         _mm512_fmadd_ps(gu0, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(0) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(1) * width + h,
+                         _mm512_fmadd_ps(gu1, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(1) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(2) * width + h,
+                         _mm512_fmadd_ps(gu2, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(2) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(3) * width + h,
+                         _mm512_fmadd_ps(gu3, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(3) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(4) * width + h,
+                         _mm512_fmadd_ps(gu4, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(4) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(5) * width + h,
+                         _mm512_fmadd_ps(gu5, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(5) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(6) * width + h,
+                         _mm512_fmadd_ps(gu6, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(6) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(7) * width + h,
+                         _mm512_fmadd_ps(gu7, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(7) * width + h)));
+      }
+      if (grad_dst != nullptr) {
+        __m512 dst = _mm512_loadu_ps(grad_dst + h);
+        dst = _mm512_fmadd_ps(gu0, a0, dst);
+        dst = _mm512_fmadd_ps(gu1, a1, dst);
+        dst = _mm512_fmadd_ps(gu2, a2, dst);
+        dst = _mm512_fmadd_ps(gu3, a3, dst);
+        dst = _mm512_fmadd_ps(gu4, a4, dst);
+        dst = _mm512_fmadd_ps(gu5, a5, dst);
+        dst = _mm512_fmadd_ps(gu6, a6, dst);
+        dst = _mm512_fmadd_ps(gu7, a7, dst);
+        _mm512_storeu_ps(grad_dst + h, dst);
+      }
+    }
+    if (h < width) {
+      for (int r = 0; r < 8; r++) {
+        const float gu = gu_scaled[r];
+        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * width;
+        float* grad_a_row = grad_a == nullptr ? nullptr : grad_a + static_cast<size_t>(r) * width;
+        for (int tail = h; tail < width; tail++) {
+          if (grad_a_row != nullptr) {
+            grad_a_row[tail] += gu * GGML_BF16_TO_FP32(input_row[tail]);
+          }
+          if (grad_dst != nullptr) {
+            grad_dst[tail] += gu * GGML_BF16_TO_FP32(a_row[tail]);
+          }
+        }
+      }
+    }
+#else
+    accumulate_lora_a_input_rank8_scalar(input_row, lora_a, gu_scaled, width, grad_dst, grad_a);
 #endif
   }
 
@@ -2198,6 +2598,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
             grad_times_b[0] = gb0;
             grad_times_b[1] = gb1;
+          } else if (rank == 8) {
+            down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
           } else {
             for (int h = 0; h < hidden; h++) {
               const float g = grad_down_row[h];
@@ -2217,11 +2619,18 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           {
             KT_SFT_NVTX_RANGE(bwd_down_lora_a_input_label.c_str());
-            for (int r = 0; r < rank; r++) {
-              const float gu = grad_times_b[r] * lora_scaling_;
-              const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
-              for (int i = 0; i < inter_size; i++) {
-                grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+            if (rank == 8) {
+              alignas(32) float gu_scaled[8];
+              for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+              accumulate_lora_a_input_rank8_vec(nullptr, expert_down_a, gu_scaled, inter_size, grad_inter_row,
+                                                nullptr);
+            } else {
+              for (int r = 0; r < rank; r++) {
+                const float gu = grad_times_b[r] * lora_scaling_;
+                const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
+                for (int i = 0; i < inter_size; i++) {
+                  grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+                }
               }
             }
           }
@@ -2234,11 +2643,18 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           float* grad_a = grad_down_a_fp32.data() + static_cast<size_t>(expert_idx) * rank * inter_size;
           {
             KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
-            for (int r = 0; r < rank; r++) {
-              const float gu = grad_times_b[r] * lora_scaling_;
-              float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
-              for (int i = 0; i < inter_size; i++) {
-                grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+            if (rank == 8) {
+              alignas(32) float gu_scaled[8];
+              for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+              accumulate_lora_a_input_rank8_vec(intermediate_row, expert_down_a, gu_scaled, inter_size, nullptr,
+                                                grad_a);
+            } else {
+              for (int r = 0; r < rank; r++) {
+                const float gu = grad_times_b[r] * lora_scaling_;
+                float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
+                for (int i = 0; i < inter_size; i++) {
+                  grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+                }
               }
             }
           }
@@ -2254,6 +2670,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             if (rank == 2) {
               accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
                                                down_u_row[1] * lora_scaling_, hidden, grad_b);
+            } else if (rank == 8) {
+              alignas(32) float u_scaled[8];
+              for (int r = 0; r < 8; r++) u_scaled[r] = down_u_row[r] * lora_scaling_;
+              accumulate_down_lora_b_rank8_vec(grad_down_row, u_scaled, hidden, grad_b);
             } else {
               for (int h = 0; h < hidden; h++) {
                 const float g = grad_down_row[h] * lora_scaling_;
@@ -2476,6 +2896,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         bf16_dot2_lora_u(input_row, a0, a1, hidden, acc0, acc1);
         lora_u[0] = acc0;
         lora_u[1] = acc1;
+      } else if (rank == 8) {
+        bf16_dot8_lora_u(input_row, lora_a, hidden, lora_u.data());
       } else {
         for (int r = 0; r < rank; r++) {
           const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
@@ -2499,6 +2921,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
         grad_times_b[0] = gb0;
         grad_times_b[1] = gb1;
+      } else if (rank == 8) {
+        alignas(32) float u_scaled[8];
+        for (int r = 0; r < 8; r++) u_scaled[r] = lora_u[r] * lora_scaling_;
+        float* grad_b = grad_lora_b == nullptr ? nullptr
+                                                : grad_lora_b + static_cast<size_t>(expert_idx) * inter_size * 8;
+        accumulate_gate_up_lora_b_rank8_vec(grad_row, lora_b, u_scaled, inter_size, grad_b, grad_times_b.data());
       } else {
         for (int i = 0; i < inter_size; i++) {
           const float g = grad_row[i];
@@ -2528,6 +2956,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
                                              grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0, grad_a1);
+      } else if (rank == 8) {
+        alignas(32) float gu_scaled[8];
+        for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+        float* grad_a = grad_lora_a == nullptr ? nullptr
+                                               : grad_lora_a + static_cast<size_t>(expert_idx) * 8 * hidden;
+        accumulate_lora_a_input_rank8_vec(input_row, lora_a, gu_scaled, hidden, grad_input_row, grad_a);
       } else {
         for (int r = 0; r < rank; r++) {
           const float gu = grad_times_b[r] * lora_scaling_;
@@ -2761,6 +3195,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                 down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
                 grad_times_b[0] = gb0;
                 grad_times_b[1] = gb1;
+              } else if (rank == 8) {
+                down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
               } else {
                 for (int h = 0; h < hidden; h++) {
                   const float g = grad_down_row[h];
@@ -2802,6 +3238,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                 if (rank == 2) {
                   accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
                                                    down_u_row[1] * lora_scaling_, hidden, grad_b);
+                } else if (rank == 8) {
+                  alignas(32) float u_scaled[8];
+                  for (int r = 0; r < 8; r++) u_scaled[r] = down_u_row[r] * lora_scaling_;
+                  accumulate_down_lora_b_rank8_vec(grad_down_row, u_scaled, hidden, grad_b);
                 } else {
                   for (int h = 0; h < hidden; h++) {
                     const float g = grad_down_row[h] * lora_scaling_;
@@ -2940,6 +3380,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           bf16_dot2_scalar(input_row, a0, a1, hidden, acc0, acc1);
           lora_u[0] = acc0;
           lora_u[1] = acc1;
+        } else if (rank == 8) {
+          bf16_dot8_lora_u(input_row, lora_a, hidden, lora_u.data());
         } else {
           for (int r = 0; r < rank; r++) {
             const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
@@ -2981,6 +3423,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             }
             grad_times_b[0] = gb0;
             grad_times_b[1] = gb1;
+          } else if (rank == 8 && fp32_grad_lora_b != nullptr) {
+            alignas(32) float u_scaled[8];
+            for (int r = 0; r < 8; r++) u_scaled[r] = lora_u[r] * lora_scaling_;
+            float* grad_b = fp32_grad_lora_b + static_cast<size_t>(task) * inter_size * 8;
+            accumulate_gate_up_lora_b_rank8_vec(grad_row, lora_b, u_scaled, inter_size, grad_b,
+                                                grad_times_b.data());
           } else {
             for (int i = 0; i < inter_size; i++) {
               const float g = grad_row[i];
@@ -3021,6 +3469,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
                                                  grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0,
                                                  grad_a1, false);
+          } else if (rank == 8) {
+            alignas(32) float gu_scaled[8];
+            for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+            float* grad_a =
+                fp32_grad_lora_a == nullptr ? nullptr : fp32_grad_lora_a + static_cast<size_t>(task) * 8 * hidden;
+            accumulate_lora_a_input_rank8_vec(input_row, lora_a, gu_scaled, hidden, grad_input_row, grad_a);
           } else {
             for (int r = 0; r < rank; r++) {
               const float gu = grad_times_b[r] * lora_scaling_;
