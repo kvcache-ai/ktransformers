@@ -229,6 +229,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
     part_grad_input_.assign(tp_count, nullptr);
     part_grad_weights_.assign(tp_count, nullptr);
 
+    // TP_MOE stores GeneralMOEConfig and slices off SFT-only fields.
+    for (int i = 0; i < tp_count; i++) {
+      tps[i]->set_full_weight_grad(config.full_weight_grad);
+    }
+
     if constexpr (!kSkipLoRA) {
       // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
       // LoRA pointers. We need to propagate LoRA pointers to all NUMA node instances.
@@ -562,6 +567,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     int k = sft_config.num_experts_per_tok;
     const bool need_grad_weights = (grad_weights != nullptr);
+    const bool need_base_weight_grad = sft_config.full_weight_grad && grad_gate_proj != nullptr &&
+                                       grad_up_proj != nullptr && grad_down_proj != nullptr;
 
     // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
     if constexpr (kSkipLoRA) lora_rank = 0;
@@ -628,8 +635,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       clear_bytes[i] = offset;
     }
 
-    // Parallel memset: zero only per-TP sparse partials and per-TP grad_input/grad_weights partials.
-    // The caller is responsible for passing zero-initialized final grad tensors.
+    // Parallel memset for per-TP partials and final base-weight gradients.
     struct ClearSeg {
       uint8_t* ptr;
       size_t len;
@@ -650,6 +656,20 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
+    if (need_base_weight_grad) {
+      const size_t base_grad_bytes = (size_t)expert_num * full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
+      auto append_clear_segments = [&](void* ptr) {
+        auto* base = static_cast<uint8_t*>(ptr);
+        for (size_t off = 0; off < base_grad_bytes; off += kChunkBytes) {
+          size_t len = std::min(kChunkBytes, base_grad_bytes - off);
+          clear_segs.push_back(ClearSeg{base + off, len});
+        }
+      };
+      append_clear_segments(grad_gate_proj);
+      append_clear_segments(grad_up_proj);
+      append_clear_segments(grad_down_proj);
+    }
+
     pool->do_work_stealing_job((int)clear_segs.size(), nullptr,
                                [&](int seg_idx) {
                                  const auto& seg = clear_segs[(size_t)seg_idx];
@@ -665,6 +685,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     std::vector<float*> tp_fp32_down_b(tp_count);
     std::vector<float*> tp_fp32_gate_a(tp_count);
     std::vector<float*> tp_fp32_up_a(tp_count);
+    std::vector<ggml_bf16_t*> tp_grad_gate_proj(tp_count, nullptr);
+    std::vector<ggml_bf16_t*> tp_grad_up_proj(tp_count, nullptr);
+    std::vector<ggml_bf16_t*> tp_grad_down_proj(tp_count, nullptr);
 
     if constexpr (!kSkipLoRA) {
       int tp_offset = 0;
@@ -683,6 +706,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
+    int tp_offset = 0;
+    for (int i = 0; i < tp_count; i++) {
+      if (need_base_weight_grad) {
+        tp_grad_gate_proj[i] = static_cast<ggml_bf16_t*>(grad_gate_proj) + (size_t)tp_offset * hidden_size;
+        tp_grad_up_proj[i] = static_cast<ggml_bf16_t*>(grad_up_proj) + (size_t)tp_offset * hidden_size;
+        tp_grad_down_proj[i] = static_cast<ggml_bf16_t*>(grad_down_proj) + tp_offset;
+      }
+      tp_offset += tp_configs[i].intermediate_size;
+    }
+    if (tp_offset != full_intermediate_size) {
+      throw std::runtime_error("TP intermediate_size slices do not cover the full intermediate_size");
+    }
+
     // Run backward on each NUMA node
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
@@ -694,8 +730,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              tp_down_a_ptr[numa_id], /* copy-type: direct write */
                              nullptr,                /* grad_down_lora_b — unused, FP32 path below */
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
-                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id], grad_gate_proj, grad_up_proj,
-                             grad_down_proj);
+                             tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id], tp_grad_gate_proj[numa_id],
+                             tp_grad_up_proj[numa_id], tp_grad_down_proj[numa_id]);
     });
 
     // // Collect per-thread timing from all NUMA subpools

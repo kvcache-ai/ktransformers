@@ -712,6 +712,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     work_required += round_up(lora_bc_out_pool_bytes_, kAmxAlignment);
     work_required += round_up(lora_intermediate_bf16_pool_bytes_, kAmxAlignment);
 
+    // Base-weight gradients reuse the forward pool after LoRA backward is complete.
+    if (sft_config_.full_weight_grad) {
+      const size_t base_grad_accumulator_bytes =
+          3 * (size_t)config_.intermediate_size * config_.hidden_size * sizeof(float);
+      work_required = std::max(work_required, base_grad_accumulator_bytes);
+    }
+
     alloc_or_resize_forward_pool(work_required);
 
     SFT_POOL_LOG("fwd_work", config_.layer_idx, tp_part_idx, 0, cache_stack_top_, forward_pool_bytes_,
@@ -897,8 +904,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void set_lora_params(int rank, float alpha) {
     lora_rank_ = rank;
-    lora_scaling_ = alpha / rank;
+    lora_scaling_ = rank > 0 ? alpha / rank : 0.0f;
   }
+
+  void set_full_weight_grad(bool enabled) { sft_config_.full_weight_grad = enabled; }
 
   /**
    * @brief SFT Forward pass with optional caching for backward.
@@ -1883,7 +1892,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Step 5: Base weight gradient accumulation (full weight grad mode)
     // =====================================================================
     if (sft_config_.full_weight_grad && grad_gate_proj && grad_up_proj && grad_down_proj) {
-      backward_base_weight_grad(cache, grad_output, grad_gate_proj, grad_up_proj, grad_down_proj);
+      backward_base_weight_grad(cache, grad_output, full_intermediate_size, grad_gate_proj, grad_up_proj,
+                                grad_down_proj);
     }
 
     // \u2605 Cache pool is NOT freed here \u2014 kept for reuse across steps.
@@ -1905,16 +1915,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    *
    * Uses FP32 accumulator for precision, writes BF16 output.
    */
-  void backward_base_weight_grad(const ForwardCache& cache, const void* grad_output, void* grad_gate_proj,
-                                 void* grad_up_proj, void* grad_down_proj) {
+  void backward_base_weight_grad(const ForwardCache& cache, const void* grad_output, int full_intermediate_size,
+                                 void* grad_gate_proj, void* grad_up_proj, void* grad_down_proj) {
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
-    const int E = config_.expert_num;
+    const int F = full_intermediate_size;
     int activated_expert = cache.activated_expert_cache;
 
-    auto* ggp = static_cast<ggml_bf16_t*>(grad_gate_proj);    // [E, I, H]
-    auto* gup_ptr = static_cast<ggml_bf16_t*>(grad_up_proj);  // [E, I, H]
-    auto* gdp = static_cast<ggml_bf16_t*>(grad_down_proj);    // [E, H, I]
+    if (F < I) {
+      throw std::runtime_error("full_intermediate_size must be at least the TP-local intermediate_size");
+    }
+
+    auto* ggp = static_cast<ggml_bf16_t*>(grad_gate_proj);    // TP slice of [E, F, H]
+    auto* gup_ptr = static_cast<ggml_bf16_t*>(grad_up_proj);  // TP slice of [E, F, H]
+    auto* gdp = static_cast<ggml_bf16_t*>(grad_down_proj);    // TP slice of [E, H, F]
     auto* grad_out_bf16 = static_cast<const ggml_bf16_t*>(grad_output);
 
     for (int task_id = 0; task_id < activated_expert; task_id++) {
@@ -1969,13 +1983,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       // Convert FP32 accumulators to BF16 and store
       for (int i = 0; i < I; i++) {
         for (int h = 0; h < H; h++) {
-          ggp[(size_t)expert_idx * I * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_gate[i * H + h]);
-          gup_ptr[(size_t)expert_idx * I * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_up[i * H + h]);
+          ggp[(size_t)expert_idx * F * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_gate[i * H + h]);
+          gup_ptr[(size_t)expert_idx * F * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_up[i * H + h]);
         }
       }
       for (int h = 0; h < H; h++) {
         for (int i = 0; i < I; i++) {
-          gdp[(size_t)expert_idx * H * I + (size_t)h * I + i] = GGML_FP32_TO_BF16(acc_down[h * I + i]);
+          gdp[(size_t)expert_idx * H * F + (size_t)h * F + i] = GGML_FP32_TO_BF16(acc_down[h * I + i]);
         }
       }
     }
