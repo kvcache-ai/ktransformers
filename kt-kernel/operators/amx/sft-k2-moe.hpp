@@ -1921,7 +1921,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return out;
   }
 
-  // Reverse of the forward weighted merge:
+  // Backward Step 2.1: router/topk-weight gradient for forward Step 9 weighted merge:
   //   output[token] += weight[token, route] * down_output[token, route].
   // Therefore dL/dweight is dot(grad_output[token], cached_down_output[token, route]).
   // Python passes a null grad_weights pointer when topk weights do not require gradients.
@@ -1958,22 +1958,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-  // Down projection backward in expert-packed token order.
-  //
-  // K2 base backward reads packed signed-int4 KGroup rows plus BF16 group
-  // scales directly. It does not use BF16 shadow weights or AMX transposed
-  // BufferB objects.
-  //
-  // Data flow:
-  //   1. Scatter token-order grad_output to per-expert grad_down, multiplying
-  //      by saved router weights.
-  //   2. Use packed down weights to compute grad_intermediate.
-  //   3. If down LoRA is active, add the LoRA contribution to grad_intermediate.
-  //   4. If requested, compute down LoRA A/B gradients.
-  //
-  // In the normal TP autograd path, down LoRA B is accumulated in a sparse
-  // FP32 side buffer outside this helper. Dense BF16 grad_down_lora_b is mainly
-  // used by TP=1 direct/debug.
+  // Backward Steps 2 -> 3 for expert-packed rows:
+  //   Backward Step 2.2: scatter token grad_output to grad_down for forward Step 9.
+  //   Backward Step 3.1: down base backward for forward Step 8.
+  //   Backward Step 3.2: down LoRA B backward produces rank-space grad_times_b.
+  //   Backward Step 3.3: down LoRA A contributes to grad_intermediate.
+  //   Backward Step 3.4/3.5: optional down LoRA A/B parameter gradients.
   void compute_tp1_down_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                  void* grad_down, std::vector<float>* grad_down_fp32_out, void* grad_intermediate,
                                  std::vector<float>* grad_inter_fp32_out, void* grad_down_lora_a,
@@ -2002,6 +1992,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
     std::vector<float> grad_down_fp32(layout.total_tokens * hidden, 0.0f);
 
+    // Backward Step 2.2: Backprop through forward Step 9 weighted merge.
+    // grad_down[token, route] += grad_output[token] * router_weight[token, route].
     auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     for (int token_idx = 0; token_idx < qlen; token_idx++) {
       const ggml_bf16_t* token_grad = grad_out + static_cast<size_t>(token_idx) * hidden;
@@ -2020,6 +2012,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
     if (profile != nullptr) profile->add_since(section_start, profile->down_route_us);
 
+    // Backward Step 2.3: Optional debug/TP=1 materialization of grad_down as dense BF16.
     section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_down, grad_down_fp32);
     if (profile != nullptr) profile->add_since(section_start, profile->down_write_us);
@@ -2043,6 +2036,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     const bool parallel_base = need_grad_intermediate && layout.total_tokens >= 10 && config_.pool != nullptr;
     if (parallel_base) {
+      // Backward Step 3.1: Down base backward, parallel form.
+      // This is grad_intermediate += grad_down @ packed_down_weight.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       std::vector<int> row_to_expert(layout.total_tokens, -1);
       for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
@@ -2082,6 +2077,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         const float* grad_down_row = grad_down_fp32.data() + row * hidden;
 
         if (need_grad_intermediate && !parallel_base) {
+          // Backward Step 3.1: Down base backward, serial/small-q_len form.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
@@ -2093,6 +2089,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
         if (!need_down_lora_path) continue;
 
+        // Backward Step 3.2: Backprop through down LoRA B.
+        // grad_times_b is the rank-space gradient before applying down LoRA A.
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
         const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
         section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
@@ -2116,6 +2114,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
         const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
         if (need_grad_intermediate) {
+          // Backward Step 3.3: Add down LoRA contribution to grad_intermediate.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           for (int r = 0; r < rank; r++) {
@@ -2129,6 +2128,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
 
         if (grad_down_lora_a != nullptr) {
+          // Backward Step 3.4: Accumulate down LoRA A gradient.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
           float* grad_a = grad_down_a_fp32.data() + static_cast<size_t>(expert_idx) * rank * inter_size;
@@ -2143,6 +2143,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
 
         if (grad_down_lora_b != nullptr) {
+          // Backward Step 3.5: Accumulate down LoRA B gradient for TP=1 direct/debug.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const float* down_u_row = cache.down_lora_u_cache + row * rank;
           float* grad_b = grad_down_b_fp32.data() + static_cast<size_t>(expert_idx) * hidden * rank;
@@ -2164,6 +2165,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
     }
 
+    // Backward Step 3.9: Write optional dense BF16 outputs for callers that request them.
     write_bf16_vector(grad_intermediate, grad_inter_fp32);
     if (grad_down_lora_a != nullptr && rank > 0) write_bf16_vector(grad_down_lora_a, grad_down_a_fp32);
     if (grad_down_lora_b != nullptr && rank > 0) write_bf16_vector(grad_down_lora_b, grad_down_b_fp32);
@@ -2183,6 +2185,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* out_grad_up = reinterpret_cast<ggml_bf16_t*>(grad_up);
     const size_t elems = layout.total_tokens * static_cast<size_t>(config_.intermediate_size);
 
+    // Backward Step 4.1: Backprop through forward Step 6 activation, silu(gate) * up.
     for (size_t idx = 0; idx < elems; idx++) {
       const float grad_inter = GGML_BF16_TO_FP32(grad_intermediate[idx]);
       const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
@@ -2211,6 +2214,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     grad_gate.assign(elems, 0.0f);
     grad_up.assign(elems, 0.0f);
 
+    // Backward Step 4.1: Backprop through forward Step 6 activation, keeping FP32 grads for packed base math.
     for (size_t idx = 0; idx < elems; idx++) {
       const float grad_inter = grad_intermediate[idx];
       const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
@@ -2223,19 +2227,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-  // Gate/up projection backward in expert-packed token order.
-  //
-  // Base path reads packed gate/up KGroup rows and accumulates token-order
-  // grad_input. LoRA path computes:
-  //   u = input @ A^T
-  //   grad_B += grad_projection^T @ u
-  //   grad_times_B = grad_projection @ B
-  //   grad_A += grad_times_B^T @ input
-  //   grad_input += grad_times_B @ A
-  //
-  // This helper writes dense BF16 LoRA gradients for TP=1 direct/debug. The
-  // normal TP autograd path below has an inlined variant to write sparse FP32
-  // LoRA A / down B buffers.
+  // Backward Step 5 for expert-packed rows, undoing forward Step 5 gate/up:
+  //   Backward Step 5.1: gate/up base backward reads packed KGroup rows and accumulates grad_input.
+  //   Backward Step 5.2: recompute LoRA u = input @ A^T from the cached input.
+  //   Backward Step 5.3: accumulate LoRA B gradient and propagate through B.
+  //   Backward Step 5.4: accumulate LoRA A gradient and add the LoRA contribution to grad_input.
+  //   Backward Step 5.9: write dense BF16 outputs for TP=1 direct/debug.
   void compute_tp1_gate_up_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
                                     const float* grad_gate, const float* grad_up, void* grad_input,
                                     void* grad_gate_lora_a, void* grad_gate_lora_b, void* grad_up_lora_a,
@@ -2274,6 +2271,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
     std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
 
+    // Backward Step 5.1 helper: base gate/up dInput from packed KGroup rows.
     auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
       if (grad_input == nullptr) return;
       float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
@@ -2345,6 +2343,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
 
       if (do_base && grad_input != nullptr) {
+        // Backward Step 5.1: grad_input += grad_projection @ packed_base_weight.
         const auto section_start = profile_base_inside && profile != nullptr
                                        ? profile->section_start()
                                        : TP1BackwardProfile::disabled_time_point();
@@ -2361,6 +2360,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::fill(lora_u.begin(), lora_u.end(), 0.0f);
       std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
 
+      // Backward Step 5.2: Recompute the LoRA down-rank activation u = input @ A^T.
       auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       if (rank == 2) {
         const ggml_bf16_t* a0 = lora_a;
@@ -2382,6 +2382,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_u_us);
 
+      // Backward Step 5.3: Accumulate LoRA B gradient and compute grad_times_b = grad_projection @ B.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       if (rank == 2) {
         const float u0_scaled = lora_u[0] * lora_scaling_;
@@ -2412,6 +2413,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_b_us);
 
+      // Backward Step 5.4: Accumulate LoRA A gradient and add LoRA's contribution to grad_input.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       if (rank == 2) {
         float* grad_a0 = nullptr;
@@ -2444,6 +2446,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_a_input_us);
     };
 
+    // Backward Step 5.5: Walk token routes and apply Backward Steps 5.1-5.4 to gate and up projections.
     auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
       for (int route_idx = 0; route_idx < k; route_idx++) {
         const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
@@ -2481,6 +2484,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     const bool parallel_base = grad_input != nullptr && qlen >= 10 && config_.pool != nullptr;
     if (parallel_base) {
+      // Backward Step 5.6: Parallelize base grad_input first; run LoRA serial afterward to avoid write races.
       const auto section_start =
           profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       auto pool = config_.pool->get_subpool(tp_part_idx);
@@ -2496,6 +2500,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
     }
 
+    // Backward Step 5.9: Write TP=1 dense BF16 outputs.
     const auto section_start =
         profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_input, grad_input_fp32);
@@ -2516,15 +2521,18 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       throw std::runtime_error("K2 RAWINT4 SFT TP=1 backward requires grad_output and grad_input");
     }
 
+    // Backward Step 1: Restore the latest forward cache and compact it into expert-packed row order.
     const K2ForwardCache& cache = latest_cache();
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
 
     try {
+      // Backward Step 2.1: Backprop through forward Step 9 weighted merge into router/topk weights.
       compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
       profile.mark(profile.grad_weights_us);
 
+      // Backward Steps 2.2 -> 3.5: weighted-merge grad_down, down base backward, and dense down LoRA grads.
       std::vector<float> grad_inter_fp32;
       compute_tp1_down_backward(cache, layout, grad_output, nullptr, nullptr, nullptr, &grad_inter_fp32,
                                 grad_down_lora_a, grad_down_lora_b, &profile);
@@ -2533,8 +2541,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::vector<float> grad_gate_fp32;
       std::vector<float> grad_up_fp32;
 
+      // Backward Step 4.1: Activation backward produces grad_gate and grad_up.
       compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
       profile.mark(profile.activation_us);
+      // Backward Steps 5.1 -> 5.9: Gate/up base backward plus dense gate/up LoRA grads.
       compute_tp1_gate_up_backward(cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input,
                                    grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b, &profile);
       profile.mark(profile.gate_up_us);
@@ -2555,6 +2565,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      profile.gate_up_write_us, profile.total_us());
       }
 
+      // Backward Step 6: Release the forward cache consumed by this backward.
       pop_latest_cache();
       should_pop_cache = false;
     } catch (...) {
@@ -2586,6 +2597,17 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     ensure_packed_weight_buffers_ready();
 
+    // Backward Step 1: Restore the latest forward cache and compact it into expert-packed row order.
+    //
+    // Execution order intentionally differs from forward numbering:
+    //   Backward Step 2 undoes forward Step 9 weighted merge.
+    //   Backward Step 3 undoes forward Step 8 down projection.
+    //   Backward Step 4 undoes forward Step 6 activation.
+    //   Backward Step 5 undoes forward Step 5 gate/up projection.
+    //
+    // Forward Steps 1-4 and 7 are routing, buffer setup/copies, and quantization staging.
+    // They have no separate differentiable backward kernel here; routing is reused to
+    // place gradients, and packed base-weight math writes the token-order gradients directly.
     const K2ForwardCache& cache = latest_cache();
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
     const int qlen = cache.qlen_cache;
@@ -2602,6 +2624,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
     try {
+      // Backward Step 3.0: Decide which down LoRA gradients this TP shard must materialize.
       const bool use_down_lora = rank > 0 && has_down_lora();
       const bool need_down_a = grad_down_lora_a != nullptr;
       const bool need_down_b = fp32_grad_down_lora_b != nullptr;
@@ -2612,9 +2635,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         throw std::runtime_error("K2 RAWINT4 SFT TP backward requires cached down LoRA activations");
       }
 
+      // Backward Step 2.1: Backprop through forward Step 9 weighted merge into router/topk weights.
       compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
       profile.mark(profile.grad_weights_us);
 
+      // Backward Steps 2.2 -> 3.1: Scatter grad_output to grad_down, then run down base backward.
       std::vector<float> grad_down_fp32;
       std::vector<float> grad_inter_fp32;
       compute_tp1_down_backward(cache, layout, grad_output, nullptr,
@@ -2623,6 +2648,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       profile.mark(profile.down_us);
 
       if (use_down_lora && (need_down_a || need_down_b)) {
+        // Backward Steps 3.4/3.5: Normal TP path writes down LoRA A directly to dense BF16
+        // and down LoRA B to sparse FP32 side buffers indexed by active expert task.
         std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
 
         for (int task = 0; task < cache.activated_expert_cache; task++) {
@@ -2695,11 +2722,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
       profile.mark(profile.down_lora_grads_us);
 
+      // Backward Step 4.1: Backprop through silu(gate) * up.
       std::vector<float> grad_gate_fp32;
       std::vector<float> grad_up_fp32;
       compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
       profile.mark(profile.activation_us);
 
+      // Backward Step 5.0: Decide which gate/up LoRA gradients are requested by the TP wrapper.
       const bool use_gate_up_lora = rank > 0 && has_gate_up_lora();
       const bool need_gate_up_lora = grad_gate_lora_b != nullptr || grad_up_lora_b != nullptr ||
                                      fp32_grad_gate_lora_a != nullptr || fp32_grad_up_lora_a != nullptr;
@@ -2707,6 +2736,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         throw std::runtime_error("K2 RAWINT4 SFT TP backward requires gate/up LoRA weights");
       }
 
+      // Backward Step 5.1 setup: accumulate token-order grad_input in FP32 before the final BF16 write.
       std::vector<float> grad_input_fp32(static_cast<size_t>(qlen) * hidden, 0.0f);
       std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
       std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
@@ -2720,6 +2750,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         grad_up_b_fp32.assign(static_cast<size_t>(cache.activated_expert_cache) * inter_size * rank, 0.0f);
       }
 
+      // Backward Step 5.1 helper: base gate/up dInput from packed KGroup rows.
       auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
         float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
         const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
@@ -2786,6 +2817,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
 
         if (do_base) {
+          // Backward Step 5.1: grad_input += grad_projection @ packed_base_weight.
           auto section_start =
               profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
           for (int i = 0; i < inter_size; i++) {
@@ -2801,6 +2833,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         std::fill(lora_u.begin(), lora_u.end(), 0.0f);
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
 
+        // Backward Step 5.2: Recompute LoRA u = input @ A^T from the cached forward input.
         auto section_start = profile.section_start();
         if (rank == 2) {
           const ggml_bf16_t* a0 = lora_a;
@@ -2822,6 +2855,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         profile.add_since(section_start, profile.gate_up_lora_u_us);
 
+        // Backward Step 5.3: Accumulate LoRA B gradient and compute grad_times_b = grad_projection @ B.
         auto* out_lora_b = reinterpret_cast<ggml_bf16_t*>(grad_lora_b);
         section_start = profile.section_start();
         if (rank == 2) {
@@ -2875,6 +2909,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         profile.add_since(section_start, profile.gate_up_lora_b_us);
 
+        // Backward Step 5.4: Accumulate sparse FP32 LoRA A gradient and add LoRA dInput.
         section_start = profile.section_start();
         if (rank == 2 && tp_gate_up_a_input_rank2_vec_enabled()) {
           float* grad_a0 = nullptr;
@@ -2907,6 +2942,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         profile.add_since(section_start, profile.gate_up_lora_a_input_us);
       };
 
+      // Backward Step 5.5: Walk token routes and apply Backward Steps 5.1-5.4 to gate and up projections.
       auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
         for (int route_idx = 0; route_idx < k; route_idx++) {
           const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
@@ -2944,6 +2980,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       const bool parallel_base = qlen >= 10 && config_.pool != nullptr;
       if (parallel_base) {
+        // Backward Step 5.6: Parallelize base dInput first; run LoRA serial afterward to avoid write races.
         auto section_start = profile.section_start();
         auto pool = config_.pool->get_subpool(tp_part_idx);
         pool->do_work_stealing_job(
@@ -2960,6 +2997,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       if ((grad_gate_lora_b != nullptr && !grad_gate_b_fp32.empty()) ||
           (grad_up_lora_b != nullptr && !grad_up_b_fp32.empty())) {
+        // Backward Step 5.7: Convert sparse gate/up LoRA B partials to final dense BF16 TP slices.
         auto section_start = profile.section_start();
         auto write_sparse_lora_b = [&](void* dst_ptr, const std::vector<float>& src) {
           if (dst_ptr == nullptr || src.empty()) return;
@@ -2976,6 +3014,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         profile.add_since(section_start, profile.gate_up_lora_b_write_us);
       }
 
+      // Backward Step 5.9: Write final grad_input for this TP shard.
       auto section_start = profile.section_start();
       write_bf16_vector(grad_input, grad_input_fp32);
       profile.add_since(section_start, profile.gate_up_write_us);
@@ -2997,6 +3036,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us, profile.gate_up_write_us,
                      profile.total_us());
       }
+      // Backward Step 6: Release the forward cache consumed by this backward.
       pop_latest_cache();
       should_pop_cache = false;
     } catch (...) {
@@ -3290,6 +3330,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                 float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr) {
+    // Backward entry for the normal TP path. The actual step breakdown lives in run_tp_packed_backward().
     // Normal TP path uses sparse FP32 side buffers for gate/up LoRA A and down
     // LoRA B. These dense BF16 arguments are kept for the shared binding ABI.
     (void)grad_gate_lora_a;
