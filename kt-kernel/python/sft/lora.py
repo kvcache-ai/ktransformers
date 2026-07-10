@@ -98,14 +98,9 @@ def _find_kt_wrappers(model: nn.Module):
     return wrappers
 
 
-def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
-    """Get all MoE LoRA parameters from KT model.
-
-    Returns PEFT LoRA parameters from expert modules and lora_experts parameters.
-    """
+def _collect_kt_lora_params(wrappers) -> list[nn.Parameter]:
+    """Collect LoRA-only trainable parameters from KT wrappers."""
     params: list[nn.Parameter] = []
-
-    wrappers = _find_kt_wrappers(model)
 
     if wrappers:
         for wrapper in wrappers:
@@ -114,9 +109,9 @@ def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
             if peft_lora_modules is not None:
                 for expert_loras in peft_lora_modules.values():
                     for lora_A, lora_B in expert_loras.values():
-                        if hasattr(lora_A, 'weight') and lora_A.weight.requires_grad:
+                        if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
                             params.append(lora_A.weight)
-                        if hasattr(lora_B, 'weight') and lora_B.weight.requires_grad:
+                        if hasattr(lora_B, "weight") and lora_B.weight.requires_grad:
                             params.append(lora_B.weight)
             # Fused expert LoRA parameters (KT-managed, not PEFT)
             fused_params = getattr(wrapper, "_fused_expert_lora_params", None)
@@ -127,6 +122,61 @@ def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
                 params.extend(wrapper.lora_experts.parameters())
 
     return params
+
+
+def _collect_kt_full_weight_params(wrappers) -> list[nn.Parameter]:
+    """Collect optimizer-visible base expert parameters for full/hybrid KT SFT."""
+    params: list[nn.Parameter] = []
+
+    if wrappers:
+        for wrapper in wrappers:
+            if getattr(wrapper, "_full_weight_grad", False) and wrapper.wrapper is not None:
+                if wrapper.wrapper.gate_proj_buf is not None:
+                    params.append(wrapper.wrapper.gate_proj_buf)
+                if wrapper.wrapper.up_proj_buf is not None:
+                    params.append(wrapper.wrapper.up_proj_buf)
+                if wrapper.wrapper.down_proj_buf is not None:
+                    params.append(wrapper.wrapper.down_proj_buf)
+
+    return params
+
+
+def get_kt_lora_params(model: nn.Module) -> list[nn.Parameter]:
+    """Get KT parameters for legacy Trainer optimizer injection.
+
+    Historically the patched Trainer calls this function after optimizer
+    creation. In full_weight_grad mode, returning only LoRA params silently
+    drops expert base weights from the optimizer, so this compatibility entry
+    point delegates to the full trainable collector when needed.
+    """
+    wrappers = _find_kt_wrappers(model)
+    if not wrappers:
+        return []
+
+    if any(getattr(w, "_full_weight_grad", False) for w in wrappers):
+        return _collect_kt_full_weight_params(wrappers) + _collect_kt_lora_params(wrappers)
+
+    return _collect_kt_lora_params(wrappers)
+
+
+def get_kt_trainable_params(model: nn.Module) -> list[nn.Parameter]:
+    """Get all trainable parameters from KT model based on training mode.
+
+    In full mode: returns base weight nn.Parameter buffers from wrappers.
+    In LoRA mode: returns LoRA parameters (same as get_kt_lora_params).
+    """
+    wrappers = _find_kt_wrappers(model)
+    if not wrappers:
+        return []
+
+    # Check if any wrapper is in full_weight_grad mode
+    has_full_weight_grad = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
+
+    if has_full_weight_grad:
+        return _collect_kt_full_weight_params(wrappers) + _collect_kt_lora_params(wrappers)
+    else:
+        # LoRA mode: return LoRA parameters
+        return _collect_kt_lora_params(wrappers)
 
 
 # =============================================================================
@@ -175,8 +225,24 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         # wrap as nn.Parameter for optimizer, and pre-assign .grad for C++ backward.
         if getattr(wrapper, "_fused_experts", False):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
+
+            # In full mode (lora_rank=0), skip LoRA buffer creation entirely.
+            # C++ kernel will not compute LoRA contributions when lora_rank=0.
+            if lora_rank == 0:
+                wrapper._fused_expert_lora_params = []
+                wrapper._peft_lora_modules = None
+                logger.info(
+                    f"[kt_adapt_peft_lora] Layer {layer_idx}: fused expert, "
+                    f"full mode (lora_rank=0, no LoRA buffers)"
+                )
+                adapted_count += 1
+                continue
+
             lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
-                wrapper, moe_config, lora_rank, torch.bfloat16,
+                wrapper,
+                moe_config,
+                lora_rank,
+                torch.bfloat16,
             )
 
             if is_rank_0 and wrapper.wrapper is not None:
@@ -195,6 +261,18 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             continue
 
         if len(experts) == 0:
+            continue
+
+        # In full mode (lora_rank=0), PEFT does not inject LoRA on experts.
+        # Skip LoRA detection and initialization entirely.
+        if getattr(wrapper, "_lora_rank", 1) == 0:
+            wrapper._peft_lora_modules = None
+            wrapper._fused_expert_lora_params = []
+            logger.info(
+                f"[kt_adapt_peft_lora] Layer {layer_idx}: non-fused expert, "
+                f"full mode (lora_rank=0, no LoRA)"
+            )
+            adapted_count += 1
             continue
 
         # Collect references to PEFT LoRA modules for each expert
@@ -228,7 +306,16 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         # Store PEFT LoRA references on wrapper
         wrapper._peft_lora_modules = peft_lora_modules
 
+        # In full_weight_grad mode, PEFT LoRA is not injected by LlamaFactory,
+        # so no PEFT LoRA found is expected — skip the error.
         if not peft_lora_modules:
+            if getattr(wrapper, "_full_weight_grad", False):
+                logger.info(
+                    f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found "
+                    f"(full_weight_grad mode — expected, skipping)"
+                )
+                adapted_count += 1
+                continue
             raise RuntimeError(
                 f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found on any expert. "
                 f"Check that PEFT lora_target includes expert modules."
@@ -510,9 +597,16 @@ def _replace_peft_weights_with_views(
                     "[_replace_peft_weights_with_views] first param: "
                     "id %s->%s (same=%s) data_ptr %s->%s buf_ptr=%s (match=%s) "
                     "has_grad=%s requires_grad=%s shape=%s",
-                    _old_id_a, _new_id_a, _old_id_a == _new_id_a,
-                    _old_ptr_a, _new_ptr_a, _buf_ptr_a, _new_ptr_a == _buf_ptr_a,
-                    _has_grad, lora_A.weight.requires_grad, tuple(lora_A.weight.shape),
+                    _old_id_a,
+                    _new_id_a,
+                    _old_id_a == _new_id_a,
+                    _old_ptr_a,
+                    _new_ptr_a,
+                    _buf_ptr_a,
+                    _new_ptr_a == _buf_ptr_a,
+                    _has_grad,
+                    lora_A.weight.requires_grad,
+                    tuple(lora_A.weight.shape),
                 )
                 _first_logged = True
             _replaced += 1
@@ -526,12 +620,15 @@ def _replace_peft_weights_with_views(
 
 
 def update_kt_lora_pointers(model: nn.Module):
-    """Mark KT wrapper LoRA pointers as dirty after optimizer.step()."""
+    """Mark KT wrapper LoRA pointers and base weight pointers as dirty after optimizer.step()."""
     wrappers = _find_kt_wrappers(model)
 
     if wrappers:
         for wrapper in wrappers:
             wrapper._lora_pointers_dirty = True
+            # In full mode, base weights also need re-sync after optimizer step
+            if getattr(wrapper, "_full_weight_grad", False) and wrapper.wrapper is not None:
+                wrapper.wrapper._base_weights_dirty = True
 
 
 # =============================================================================
@@ -541,12 +638,10 @@ def update_kt_lora_pointers(model: nn.Module):
 
 def sync_kt_lora_gradients(model: nn.Module) -> None:
     """
-    Synchronize KT-managed LoRA gradients across ranks.
+    Synchronize KT-managed gradients across ranks.
 
-    KT computes expert LoRA gradients only on rank 0 (gather/scatter path). This function broadcasts the
-    per-layer contiguous grad buffers from rank 0 to all ranks so that:
-      - gradient clipping sees identical grads on every rank
-      - optimizer.step() applies identical updates
+    In LoRA mode: synchronizes LoRA gradients only.
+    In full mode: synchronizes both base weight and LoRA gradients.
     """
     import torch.distributed as dist
 
@@ -557,17 +652,36 @@ def sync_kt_lora_gradients(model: nn.Module) -> None:
     if world_size <= 1:
         return
 
-    params = get_kt_lora_params(model)
+    # Sync base weight gradients in full mode
+    wrappers = _find_kt_wrappers(model)
+    if wrappers:
+        for wrapper in wrappers:
+            if not getattr(wrapper, "_full_weight_grad", False):
+                continue
+            if wrapper.wrapper is None:
+                continue
+            for grad_buf in (
+                wrapper.wrapper.grad_gate_proj_buf,
+                wrapper.wrapper.grad_up_proj_buf,
+                wrapper.wrapper.grad_down_proj_buf,
+            ):
+                if grad_buf is not None:
+                    grad_gpu = grad_buf.cuda()
+                    dist.all_reduce(grad_gpu, op=dist.ReduceOp.SUM)
+                    grad_gpu.div_(world_size)
+                    grad_buf.copy_(grad_gpu.cpu())
+
+    # Sync LoRA gradients. Use the LoRA-only helper here because base gradients
+    # were synchronized above and get_kt_lora_params() is full-aware for legacy
+    # optimizer injection compatibility.
+    params = _collect_kt_lora_params(wrappers)
     if not params:
         return
 
     for param in params:
         if param.grad is not None:
-            # Move grad to the same device as the parameter for all-reduce
-            # Then move back to CPU
             original_device = param.grad.device
             if original_device.type == "cpu":
-                # All-reduce on CPU might be slow; consider using a GPU buffer
                 grad_gpu = param.grad.cuda()
                 dist.all_reduce(grad_gpu, op=dist.ReduceOp.SUM)
                 grad_gpu.div_(world_size)

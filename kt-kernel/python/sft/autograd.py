@@ -38,12 +38,17 @@ class KTMoEFunction(torch.autograd.Function):
         training: bool,
         train_lora: bool,
         all_qlens: list[int] | tuple[int, ...] | None,
+        gate_proj_param: torch.Tensor | None = None,
+        up_proj_param: torch.Tensor | None = None,
+        down_proj_param: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         if _KT_SFT_DEBUG:
             logging.debug(
                 "KTMoEFunction.forward: layer=%d training=%s train_lora=%s",
-                layer_idx, training, train_lora,
+                layer_idx,
+                training,
+                train_lora,
             )
 
         original_device = hidden_states.device
@@ -52,6 +57,7 @@ class KTMoEFunction(torch.autograd.Function):
         qlen = batch_size * seq_len
 
         import torch.distributed as dist
+
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist_on else 1
@@ -65,13 +71,9 @@ class KTMoEFunction(torch.autograd.Function):
             else:
                 all_qlens_list = [int(q) for q in all_qlens]
                 if len(all_qlens_list) != world_size:
-                    raise RuntimeError(
-                        f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}"
-                    )
+                    raise RuntimeError(f"all_qlens length mismatch: got {len(all_qlens_list)}, expected {world_size}")
             if int(all_qlens_list[rank]) != qlen:
-                raise RuntimeError(
-                    f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}"
-                )
+                raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens_list[rank]}")
             total_qlen = sum(all_qlens_list)
 
             # Rank 0: sync CPU result and split by real lengths
@@ -100,9 +102,7 @@ class KTMoEFunction(torch.autograd.Function):
             output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
         else:
             # Broadcast-only rank (no wrapper)
-            output = torch.empty(
-                batch_size, seq_len, hidden_size, device=original_device, dtype=original_dtype
-            )
+            output = torch.empty(batch_size, seq_len, hidden_size, device=original_device, dtype=original_dtype)
 
         ctx.wrapper = wrapper
         ctx.hidden_size = hidden_size
@@ -120,6 +120,11 @@ class KTMoEFunction(torch.autograd.Function):
         ctx.num_experts_per_tok = num_experts_per_tok
         ctx.layer_idx = layer_idx
 
+        # Store base weight param references for gradient flow in full mode
+        ctx.full_weight_grad = (
+            wrapper is not None and getattr(wrapper, "_full_weight_grad", False) and gate_proj_param is not None
+        )
+
         # Save a sentinel tensor so non-reentrant checkpoint's saved_tensors
         # hooks can intercept it.  When backward accesses ctx.saved_tensors,
         # the checkpoint unpack hook triggers a full recompute of the decoder
@@ -135,7 +140,7 @@ class KTMoEFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         # Wait for any in-flight async repack before recompute forward uses the pool
-        if getattr(ctx.wrapper, 'share_backward_bb', False):
+        if getattr(ctx.wrapper, "share_backward_bb", False):
             ctx.wrapper.wait_backward_repack()
 
         # Access saved_tensors FIRST — under non-reentrant checkpoint this
@@ -152,12 +157,15 @@ class KTMoEFunction(torch.autograd.Function):
         num_experts_per_tok = ctx.num_experts_per_tok
 
         import torch.distributed as dist
+
         rank = dist.get_rank() if dist.is_initialized() else 0
 
         if _KT_SFT_DEBUG:
             logging.debug(
                 "KTMoEFunction.backward: layer=%d dist_on=%s qlen=%d",
-                getattr(ctx, "layer_idx", -1), dist_on, qlen,
+                getattr(ctx, "layer_idx", -1),
+                dist_on,
+                qlen,
             )
 
         if dist_on:
@@ -243,12 +251,39 @@ class KTMoEFunction(torch.autograd.Function):
             grad_weights = grad_weights.to(dtype=torch.bfloat16)
         else:
             # No wrapper, no dist — shouldn't happen in normal flow
-            grad_input = torch.zeros(batch_size, seq_len, hidden_size, device=ctx.original_device, dtype=ctx.original_dtype)
+            grad_input = torch.zeros(
+                batch_size, seq_len, hidden_size, device=ctx.original_device, dtype=ctx.original_dtype
+            )
             grad_weights = torch.zeros(ctx.weights_shape, device=ctx.weights_device, dtype=ctx.weights_dtype)
 
         # Trigger async repack for next MoE layer in backward order
-        next_bwd = getattr(ctx.wrapper, '_next_backward_wrapper', None)
-        if next_bwd is not None and getattr(next_bwd, 'share_backward_bb', False):
+        next_bwd = getattr(ctx.wrapper, "_next_backward_wrapper", None)
+        if next_bwd is not None and getattr(next_bwd, "share_backward_bb", False):
             next_bwd.submit_backward_repack()
 
-        return grad_input, None, grad_weights, None, None, None, None, None, None, None, None
+        # Base weight gradients: return C++-written grad buffers in full mode, None otherwise
+        if ctx.full_weight_grad and ctx.wrapper is not None:
+            grad_gate_proj = ctx.wrapper.grad_gate_proj_buf
+            grad_up_proj = ctx.wrapper.grad_up_proj_buf
+            grad_down_proj = ctx.wrapper.grad_down_proj_buf
+        else:
+            grad_gate_proj = None
+            grad_up_proj = None
+            grad_down_proj = None
+
+        return (
+            grad_input,
+            None,
+            grad_weights,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            grad_gate_proj,
+            grad_up_proj,
+            grad_down_proj,
+        )

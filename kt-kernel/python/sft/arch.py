@@ -110,6 +110,18 @@ def get_moe_arch_config(config) -> MOEArchConfig:
             num_experts_per_tok=cfg.num_experts_per_tok,
             has_shared_experts=getattr(cfg, "shared_expert_intermediate_size", 0) > 0,
         )
+    if "Glm4Moe" in arch:
+        return MOEArchConfig(
+            moe_layer_attr="mlp",
+            router_attr="gate",
+            experts_attr="experts",
+            weight_names=("gate_proj", "up_proj", "down_proj"),
+            expert_num=config.n_routed_experts,
+            intermediate_size=config.moe_intermediate_size,
+            num_experts_per_tok=config.num_experts_per_tok,
+            has_shared_experts=getattr(config, "n_shared_experts", 0) > 0,
+            router_type="glm4_moe_gate",
+        )
     if "Mixtral" in arch:
         return MOEArchConfig(
             moe_layer_attr="block_sparse_moe",
@@ -124,7 +136,7 @@ def get_moe_arch_config(config) -> MOEArchConfig:
 
     raise KTAMXModelNotSupportedError(
         f"Model architecture {arch} not supported for KT AMX. "
-        "Supported architectures: DeepseekV2, DeepseekV3, Qwen2Moe, Qwen3Moe, Qwen3_5Moe, Mixtral"
+        "Supported architectures: DeepseekV2, DeepseekV3, Qwen2Moe, Qwen3Moe, Qwen3_5Moe, Glm4Moe, Mixtral"
     )
 
 
