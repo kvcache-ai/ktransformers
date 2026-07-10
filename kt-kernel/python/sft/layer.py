@@ -28,6 +28,7 @@ from .dist_utils import (
     _dist_scatter_varlen_from_rank0,
     _qlen_offsets,
 )
+from .profile import profile_scope
 
 logger = logging.getLogger(__name__)
 _KT_SFT_DEBUG = os.environ.get("KT_SFT_DEBUG", "0") == "1"
@@ -144,6 +145,20 @@ class KTMoELayerWrapper(nn.Module):
         return result
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden_states.shape
+        qlen = batch_size * seq_len
+        with profile_scope(
+            "kt_moe_layer_forward",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            nvtx_name=f"KT_MOE_FWD_L{self.layer_idx}",
+            device=hidden_states.device,
+            qlen=qlen,
+            hidden_size=self.hidden_size,
+        ):
+            return self._forward_impl(hidden_states)
+
+    def _forward_impl(self, hidden_states: torch.Tensor) -> torch.Tensor:
 
         import torch.distributed as dist
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
@@ -152,7 +167,13 @@ class KTMoELayerWrapper(nn.Module):
         # Check if we need to use distributed broadcast (only rank 0 has KT kernel)
         use_broadcast = dist_on and self.wrapper is None
 
-        topk_ids, topk_weights = self._compute_routing(hidden_states)
+        with profile_scope(
+            "kt_moe_forward_routing",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            device=hidden_states.device,
+        ):
+            topk_ids, topk_weights = self._compute_routing(hidden_states)
 
         train_lora = self._peft_lora_modules is not None and len(self._peft_lora_modules) > 0
 
@@ -173,12 +194,18 @@ class KTMoELayerWrapper(nn.Module):
         if train_lora:
             self._ensure_peft_lora_grad_buffers()
 
-        gpu_output, all_qlens = self._submit_and_compute_gpu(
-            hidden_states,
-            topk_ids,
-            topk_weights,
-            save_for_backward_submit,
-        )
+        with profile_scope(
+            "kt_moe_forward_submit_and_gpu",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            device=hidden_states.device,
+        ):
+            gpu_output, all_qlens = self._submit_and_compute_gpu(
+                hidden_states,
+                topk_ids,
+                topk_weights,
+                save_for_backward_submit,
+            )
 
         # Use KTMoEFunction whenever backward is needed so KT backward and LoRA
         # gradient paths remain connected.
@@ -193,19 +220,25 @@ class KTMoELayerWrapper(nn.Module):
                     if lora_ref.numel() > 0:
                         break
 
-            moe_output = KTMoEFunction.apply(
-                hidden_states,
-                topk_ids,
-                topk_weights,
-                self.wrapper,
-                lora_ref,
-                self.hidden_size,
-                self.moe_config.num_experts_per_tok,
-                self.layer_idx,
-                save_for_backward,
-                train_lora,
-                all_qlens,
-            )
+            with profile_scope(
+                "kt_moe_forward_autograd_apply",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=hidden_states.device,
+            ):
+                moe_output = KTMoEFunction.apply(
+                    hidden_states,
+                    topk_ids,
+                    topk_weights,
+                    self.wrapper,
+                    lora_ref,
+                    self.hidden_size,
+                    self.moe_config.num_experts_per_tok,
+                    self.layer_idx,
+                    save_for_backward,
+                    train_lora,
+                    all_qlens,
+                )
         else:
             moe_output = self._sync_forward_output_no_autograd(
                 hidden_states=hidden_states,
@@ -343,7 +376,14 @@ class KTMoELayerWrapper(nn.Module):
         qlen = batch_size * seq_len
 
         if dist_on:
-            all_qlens = _all_gather_qlens(qlen, original_device, world_size)
+            with profile_scope(
+                "kt_moe_forward_all_gather_qlens",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=original_device,
+                qlen=qlen,
+            ):
+                all_qlens = _all_gather_qlens(qlen, original_device, world_size)
             if int(all_qlens[rank]) != qlen:
                 raise RuntimeError(
                     f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}"
@@ -358,45 +398,68 @@ class KTMoELayerWrapper(nn.Module):
             submit_ids = expert_ids.detach()
             submit_wts = weights.detach()
 
-            gathered_hs = _dist_gather_varlen_to_rank0(
-                submit_hs,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-            gathered_ids = _dist_gather_varlen_to_rank0(
-                submit_ids,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-            gathered_wts = _dist_gather_varlen_to_rank0(
-                submit_wts,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-
-            if rank == 0:
-                all_hs = torch.cat(gathered_hs, dim=0)
-                all_ids = torch.cat(gathered_ids, dim=0)
-                all_wts = torch.cat(gathered_wts, dim=0)
-                self.wrapper.submit_forward(
-                    all_hs,
-                    all_ids,
-                    all_wts,
-                    save_for_backward=save_for_backward,
+            with profile_scope(
+                "kt_moe_forward_gather_inputs_to_rank0",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=original_device,
+                qlen=qlen,
+                total_qlen=total_qlen,
+            ):
+                gathered_hs = _dist_gather_varlen_to_rank0(
+                    submit_hs,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                )
+                gathered_ids = _dist_gather_varlen_to_rank0(
+                    submit_ids,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                )
+                gathered_wts = _dist_gather_varlen_to_rank0(
+                    submit_wts,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
                 )
 
-            # Keep shared/lora experts local to avoid qlen_max-style amplification.
-            gpu_output = None
-            if self.shared_experts is not None:
-                gpu_output = self.shared_experts(hidden_states)
-                gpu_output = gpu_output.to(dtype=original_dtype)
+            if rank == 0:
+                with profile_scope(
+                    "kt_moe_forward_rank0_submit_forward",
+                    direction="forward",
+                    layer_idx=self.layer_idx,
+                    device=original_device,
+                    qlen=qlen,
+                    total_qlen=total_qlen,
+                ):
+                    all_hs = torch.cat(gathered_hs, dim=0)
+                    all_ids = torch.cat(gathered_ids, dim=0)
+                    all_wts = torch.cat(gathered_wts, dim=0)
+                    self.wrapper.submit_forward(
+                        all_hs,
+                        all_ids,
+                        all_wts,
+                        save_for_backward=save_for_backward,
+                    )
 
-            if self.lora_experts is not None:
-                lora_out = self.lora_experts(hidden_states)
-                gpu_output = lora_out if gpu_output is None else gpu_output + lora_out
+            # Keep shared/lora experts local to avoid qlen_max-style amplification.
+            with profile_scope(
+                "kt_moe_forward_gpu_experts",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=original_device,
+                qlen=qlen,
+            ):
+                gpu_output = None
+                if self.shared_experts is not None:
+                    gpu_output = self.shared_experts(hidden_states)
+                    gpu_output = gpu_output.to(dtype=original_dtype)
+
+                if self.lora_experts is not None:
+                    lora_out = self.lora_experts(hidden_states)
+                    gpu_output = lora_out if gpu_output is None else gpu_output + lora_out
 
             return gpu_output, all_qlens
 
@@ -410,20 +473,34 @@ class KTMoELayerWrapper(nn.Module):
             submit_hs = input_flat.detach()
             submit_ids = expert_ids.detach()
             submit_wts = weights.detach()
-            self.wrapper.submit_forward(
-                submit_hs,
-                submit_ids,
-                submit_wts,
-                save_for_backward=save_for_backward,
-            )
+            with profile_scope(
+                "kt_moe_forward_single_submit_forward",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=original_device,
+                qlen=qlen,
+            ):
+                self.wrapper.submit_forward(
+                    submit_hs,
+                    submit_ids,
+                    submit_wts,
+                    save_for_backward=save_for_backward,
+                )
 
             # GPU compute: shared_experts + lora_experts
-            gpu_output = None
-            if self.shared_experts is not None:
-                gpu_output = self.shared_experts(hidden_states)
-            if self.lora_experts is not None:
-                lora_out = self.lora_experts(hidden_states)
-                gpu_output = lora_out if gpu_output is None else gpu_output + lora_out
+            with profile_scope(
+                "kt_moe_forward_gpu_experts",
+                direction="forward",
+                layer_idx=self.layer_idx,
+                device=original_device,
+                qlen=qlen,
+            ):
+                gpu_output = None
+                if self.shared_experts is not None:
+                    gpu_output = self.shared_experts(hidden_states)
+                if self.lora_experts is not None:
+                    lora_out = self.lora_experts(hidden_states)
+                    gpu_output = lora_out if gpu_output is None else gpu_output + lora_out
 
             return gpu_output, None
 

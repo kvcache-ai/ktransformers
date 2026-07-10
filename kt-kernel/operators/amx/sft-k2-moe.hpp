@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,61 @@
 
 #include "k2-moe.hpp"
 #include "la/avx_kernels.hpp"
+
+namespace kt_sft_nvtx {
+inline bool enabled() {
+  static const bool value = []() {
+    const char* env = std::getenv("KT_SFT_NVTX_CPP");
+    if (env == nullptr || env[0] == '\0') env = std::getenv("KT_SFT_NVTX");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+  }();
+  return value;
+}
+
+using PushFn = int (*)(const char*);
+using PopFn = int (*)();
+
+inline void* load_symbol(const char* name) {
+  void* symbol = dlsym(RTLD_DEFAULT, name);
+  if (symbol != nullptr) return symbol;
+
+  void* handle = dlopen("libnvToolsExt.so.1", RTLD_LAZY | RTLD_GLOBAL);
+  if (handle == nullptr) handle = dlopen("libnvToolsExt.so", RTLD_LAZY | RTLD_GLOBAL);
+  if (handle == nullptr) return nullptr;
+  return dlsym(handle, name);
+}
+
+inline PushFn push_fn() {
+  static PushFn fn = reinterpret_cast<PushFn>(load_symbol("nvtxRangePushA"));
+  return fn;
+}
+
+inline PopFn pop_fn() {
+  static PopFn fn = reinterpret_cast<PopFn>(load_symbol("nvtxRangePop"));
+  return fn;
+}
+
+struct Range {
+  bool active = false;
+  explicit Range(const char* name) {
+    PushFn push = push_fn();
+    if (enabled() && push != nullptr) {
+      push(name);
+      active = true;
+    }
+  }
+  ~Range() {
+    PopFn pop = pop_fn();
+    if (active && pop != nullptr) pop();
+  }
+  Range(const Range&) = delete;
+  Range& operator=(const Range&) = delete;
+};
+}  // namespace kt_sft_nvtx
+
+#define KT_SFT_NVTX_CONCAT_INNER(a, b) a##b
+#define KT_SFT_NVTX_CONCAT(a, b) KT_SFT_NVTX_CONCAT_INNER(a, b)
+#define KT_SFT_NVTX_RANGE(name) ::kt_sft_nvtx::Range KT_SFT_NVTX_CONCAT(_kt_sft_nvtx_range_, __LINE__)(name)
 
 /**
  * @brief K2 RAWINT4 SFT MoE operator.
@@ -338,11 +394,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
           int local_num_tokens = t_end - t_start;
           std::vector<float> local_intermediate(static_cast<size_t>(local_num_tokens) * rank);
-          avx::lora_bf16_matmul_t4r4(this->m_local_input_ptr_[expert_idx] + static_cast<size_t>(t_start) * hidden,
-                                     expert_lora_a, local_intermediate.data(), local_num_tokens, hidden, rank);
-          avx::lora_fp32_bf16_fused_add_transposed(local_intermediate.data(), expert_lora_b_t,
-                                                   output + static_cast<size_t>(t_start) * inter_size, local_num_tokens,
-                                                   rank, inter_size, scale);
+          {
+            KT_SFT_NVTX_RANGE(do_up ? "up_lora_matmul" : "gate_lora_matmul");
+            avx::lora_bf16_matmul_t4r4(this->m_local_input_ptr_[expert_idx] + static_cast<size_t>(t_start) * hidden,
+                                       expert_lora_a, local_intermediate.data(), local_num_tokens, hidden, rank);
+            avx::lora_fp32_bf16_fused_add_transposed(local_intermediate.data(), expert_lora_b_t,
+                                                     output + static_cast<size_t>(t_start) * inter_size, local_num_tokens,
+                                                     rank, inter_size, scale);
+          }
         },
         nullptr);
   }
@@ -379,20 +438,23 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
           int local_num_tokens = t_end - t_start;
           std::vector<float> local_intermediate(static_cast<size_t>(local_num_tokens) * rank);
-          avx::lora_bf16_matmul_t4r4(
-              this->m_local_gate_output_ptr_[expert_idx] + static_cast<size_t>(t_start) * inter_size, expert_lora_a,
-              local_intermediate.data(), local_num_tokens, inter_size, rank);
+          {
+            KT_SFT_NVTX_RANGE("down_lora_matmul");
+            avx::lora_bf16_matmul_t4r4(
+                this->m_local_gate_output_ptr_[expert_idx] + static_cast<size_t>(t_start) * inter_size, expert_lora_a,
+                local_intermediate.data(), local_num_tokens, inter_size, rank);
 
-          if (cache != nullptr && cache->down_lora_u_cache != nullptr) {
-            float* cache_u = cache->down_lora_u_cache + (cache_offsets_[expert_task] + t_start) * rank;
-            std::memcpy(cache_u, local_intermediate.data(),
-                        static_cast<size_t>(local_num_tokens) * rank * sizeof(float));
+            if (cache != nullptr && cache->down_lora_u_cache != nullptr) {
+              float* cache_u = cache->down_lora_u_cache + (cache_offsets_[expert_task] + t_start) * rank;
+              std::memcpy(cache_u, local_intermediate.data(),
+                          static_cast<size_t>(local_num_tokens) * rank * sizeof(float));
+            }
+
+            avx::lora_fp32_bf16_fused_add_transposed(
+                local_intermediate.data(), expert_lora_b_t,
+                this->m_local_down_output_ptr_[expert_idx] + static_cast<size_t>(t_start) * hidden, local_num_tokens,
+                rank, hidden, scale);
           }
-
-          avx::lora_fp32_bf16_fused_add_transposed(
-              local_intermediate.data(), expert_lora_b_t,
-              this->m_local_down_output_ptr_[expert_idx] + static_cast<size_t>(t_start) * hidden, local_num_tokens,
-              rank, hidden, scale);
         },
         nullptr);
   }
@@ -3140,13 +3202,16 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             bool do_up = task_id2 % 2;
             int expert_idx = this->m_expert_id_map_[task_id / nth];
             int ith = task_id % nth;
-            this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
-            if (do_up) {
-              this->up_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx], this->m_local_up_output_ptr_[expert_idx],
-                                               ith, nth);
-            } else {
-              this->gate_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
-                                                 this->m_local_gate_output_ptr_[expert_idx], ith, nth);
+            {
+              KT_SFT_NVTX_RANGE(do_up ? "up_base_matmul" : "gate_base_matmul");
+              this->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
+              if (do_up) {
+                this->up_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx], this->m_local_up_output_ptr_[expert_idx],
+                                                 ith, nth);
+              } else {
+                this->gate_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                                   this->m_local_gate_output_ptr_[expert_idx], ith, nth);
+              }
             }
           },
           nullptr);
@@ -3202,9 +3267,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           [this, nth, qlen](int task_id) {
             int expert_idx = this->m_expert_id_map_[task_id / nth];
             int ith = task_id % nth;
-            this->do_down_gemm(expert_idx, ith, nth, qlen);
-            this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
-                                               this->m_local_down_output_ptr_[expert_idx], ith, nth);
+            {
+              KT_SFT_NVTX_RANGE("down_base_matmul");
+              this->do_down_gemm(expert_idx, ith, nth, qlen);
+              this->down_bc_[expert_idx]->to_mat(this->m_local_num_[expert_idx],
+                                                 this->m_local_down_output_ptr_[expert_idx], ith, nth);
+            }
           },
           nullptr);
     }

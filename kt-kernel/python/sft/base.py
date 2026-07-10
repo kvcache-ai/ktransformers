@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import _MoEBase
+from .profile import profile_scope
 
 
 class KExpertsSFTBuffer:
@@ -242,36 +243,64 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def _copy_inputs_to_buffer(self, buffer: KExpertsSFTBuffer, hidden_states: torch.Tensor,
                                expert_ids: torch.Tensor, weights: torch.Tensor, qlen: int) -> torch.device:
         """Copy inputs to CPU buffer, return input device."""
-        input_device = hidden_states.device
-        buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
-        buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=True)
-        buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=True)
-        buffer.bsz_tensor[0] = qlen
-        if input_device.type == "cuda":
-            torch.cuda.synchronize(input_device)
-        return input_device
+        with profile_scope(
+            "kt_moe_base_copy_inputs_to_cpu",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            device=hidden_states.device,
+            qlen=qlen,
+        ):
+            input_device = hidden_states.device
+            buffer.input_cpu[:qlen].copy_(hidden_states.to(torch.bfloat16), non_blocking=True)
+            buffer.expert_ids_cpu[:qlen].copy_(expert_ids.to(torch.int64), non_blocking=True)
+            buffer.weights_cpu[:qlen].copy_(weights.to(torch.float32), non_blocking=True)
+            buffer.bsz_tensor[0] = qlen
+            if input_device.type == "cuda":
+                torch.cuda.synchronize(input_device)
+            return input_device
 
     def _copy_grad_output_to_cpu(self, buffer: KExpertsSFTBuffer, grad_output: torch.Tensor, qlen: int):
         """Copy grad_output to CPU buffer."""
-        input_device = grad_output.device
-        if input_device.type == "cuda":
-            torch.cuda.synchronize(input_device)
-        buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16))
+        with profile_scope(
+            "kt_moe_base_copy_grad_output_to_cpu",
+            direction="backward",
+            layer_idx=self.layer_idx,
+            device=grad_output.device,
+            qlen=qlen,
+        ):
+            input_device = grad_output.device
+            if input_device.type == "cuda":
+                torch.cuda.synchronize(input_device)
+            buffer.grad_output_cpu[:qlen].copy_(grad_output.to(torch.bfloat16))
 
     def _return_output(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
-        if output_device is not None:
-            return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
-        else:
-            return buffer.output_cpu[:qlen].clone()
+        with profile_scope(
+            "kt_moe_base_return_output",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            device=output_device,
+            qlen=qlen,
+        ):
+            if output_device is not None:
+                return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
+            else:
+                return buffer.output_cpu[:qlen].clone()
 
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
-        if output_device is not None:
-            grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
-            grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
-        else:
-            grad_input = buffer.grad_input_cpu[:qlen].clone()
-            grad_weights = buffer.grad_weights[:qlen].clone()
-        return grad_input, grad_weights
+        with profile_scope(
+            "kt_moe_base_return_grads",
+            direction="backward",
+            layer_idx=self.layer_idx,
+            device=output_device,
+            qlen=qlen,
+        ):
+            if output_device is not None:
+                grad_input = buffer.grad_input_cpu[:qlen].to(device=output_device, non_blocking=True)
+                grad_weights = buffer.grad_weights[:qlen].to(device=output_device, non_blocking=True)
+            else:
+                grad_input = buffer.grad_input_cpu[:qlen].clone()
+                grad_weights = buffer.grad_weights[:qlen].clone()
+            return grad_input, grad_weights
 
     # ========== Concrete forward/backward ==========
 
@@ -289,8 +318,20 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer = self._get_buffer(qlen)
         self._copy_inputs_to_buffer(buffer, hidden_states, expert_ids, weights, qlen)
 
-        self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
-        self.cpu_infer.sync()
+        with profile_scope(
+            "kt_moe_base_forward_submit",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            qlen=qlen,
+        ):
+            self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
+        with profile_scope(
+            "kt_moe_base_forward_sync",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            qlen=qlen,
+        ):
+            self.cpu_infer.sync()
 
         if save_for_backward and self._cache_depth == 0:
             self._cache_depth += 1
@@ -311,8 +352,22 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer = self._get_buffer(qlen)
         self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
-        self.cpu_infer.submit(self._make_backward_task(buffer, compute_grad_weights=compute_grad_weights))
-        self.cpu_infer.sync()
+        with profile_scope(
+            "kt_moe_base_backward_submit",
+            direction="backward",
+            layer_idx=self.layer_idx,
+            qlen=qlen,
+            compute_grad_weights=compute_grad_weights,
+        ):
+            self.cpu_infer.submit(self._make_backward_task(buffer, compute_grad_weights=compute_grad_weights))
+        with profile_scope(
+            "kt_moe_base_backward_sync",
+            direction="backward",
+            layer_idx=self.layer_idx,
+            qlen=qlen,
+            compute_grad_weights=compute_grad_weights,
+        ):
+            self.cpu_infer.sync()
 
         self._cache_depth -= 1
         grad_input, grad_weights = self._return_grads(buffer, qlen, output_device)
@@ -339,14 +394,26 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._pending_save_for_backward = save_for_backward
         self._pending_qlen = qlen
 
-        self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
+        with profile_scope(
+            "kt_moe_base_forward_submit",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            qlen=qlen,
+        ):
+            self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
 
     def sync_forward(self, output_device: Optional[torch.device] = None) -> torch.Tensor:
         """Synchronize and retrieve forward results. Must be called after submit_forward()."""
         if not hasattr(self, "_pending_buffer") or self._pending_buffer is None:
             raise RuntimeError("No pending forward. Call submit_forward() first.")
 
-        self.cpu_infer.sync()
+        with profile_scope(
+            "kt_moe_base_forward_sync",
+            direction="forward",
+            layer_idx=self.layer_idx,
+            qlen=getattr(self, "_pending_qlen", None),
+        ):
+            self.cpu_infer.sync()
 
         buffer = self._pending_buffer
         save_for_backward = self._pending_save_for_backward

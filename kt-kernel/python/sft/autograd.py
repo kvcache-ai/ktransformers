@@ -15,6 +15,7 @@ from .dist_utils import (
     _dist_gather_varlen_to_rank0,
     _dist_scatter_varlen_from_rank0,
 )
+from .profile import profile_scope
 
 _KT_SFT_DEBUG = os.environ.get("KT_SFT_DEBUG", "0") == "1"
 
@@ -76,28 +77,51 @@ class KTMoEFunction(torch.autograd.Function):
 
             # Rank 0: sync CPU result and split by real lengths
             if rank == 0:
-                cpu_output = wrapper.sync_forward(output_device=original_device)
-                cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, hidden_size)
-                offsets = _qlen_offsets(all_qlens_list)
-                scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
+                with profile_scope(
+                    "kt_moe_forward_sync_forward",
+                    direction="forward",
+                    layer_idx=layer_idx,
+                    device=original_device,
+                    qlen=qlen,
+                    total_qlen=total_qlen,
+                ):
+                    cpu_output = wrapper.sync_forward(output_device=original_device)
+                    cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, hidden_size)
+                    offsets = _qlen_offsets(all_qlens_list)
+                    scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
             else:
                 scatter_list = None
 
-            output_flat = _dist_scatter_varlen_from_rank0(
-                rank0_chunks=scatter_list,
-                all_qlens=all_qlens_list,
-                rank=rank,
-                world_size=world_size,
-                feature_shape=(hidden_size,),
+            with profile_scope(
+                "kt_moe_forward_scatter_output",
+                direction="forward",
+                layer_idx=layer_idx,
                 device=original_device,
-                dtype=original_dtype,
-            )
+                qlen=qlen,
+                total_qlen=total_qlen,
+            ):
+                output_flat = _dist_scatter_varlen_from_rank0(
+                    rank0_chunks=scatter_list,
+                    all_qlens=all_qlens_list,
+                    rank=rank,
+                    world_size=world_size,
+                    feature_shape=(hidden_size,),
+                    device=original_device,
+                    dtype=original_dtype,
+                )
             output = output_flat.view(batch_size, seq_len, hidden_size)
             del output_flat
         elif wrapper is not None:
             # Single-GPU: sync directly
-            cpu_output = wrapper.sync_forward(output_device=original_device)
-            output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
+            with profile_scope(
+                "kt_moe_forward_sync_forward",
+                direction="forward",
+                layer_idx=layer_idx,
+                device=original_device,
+                qlen=qlen,
+            ):
+                cpu_output = wrapper.sync_forward(output_device=original_device)
+                output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
         else:
             # Broadcast-only rank (no wrapper)
             output = torch.empty(
@@ -135,6 +159,19 @@ class KTMoEFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        layer_idx = getattr(ctx, "layer_idx", None)
+        with profile_scope(
+            "kt_moe_autograd_backward",
+            direction="backward",
+            layer_idx=layer_idx,
+            nvtx_name=f"KT_MOE_BWD_L{layer_idx}" if layer_idx is not None else "KT_MOE_BWD",
+            device=getattr(ctx, "original_device", None),
+            qlen=getattr(ctx, "qlen", None),
+        ):
+            return KTMoEFunction._backward_impl(ctx, grad_output)
+
+    @staticmethod
+    def _backward_impl(ctx, grad_output: torch.Tensor):
         # Wait for any in-flight async repack before recompute forward uses the pool
         if getattr(ctx.wrapper, 'share_backward_bb', False):
             ctx.wrapper.wait_backward_repack()
@@ -142,7 +179,13 @@ class KTMoEFunction(torch.autograd.Function):
         # Access saved_tensors FIRST — under non-reentrant checkpoint this
         # triggers the unpack hook which runs a full decoder-layer recompute,
         # populating the C++ cache before we call wrapper.backward().
-        _ = ctx.saved_tensors
+        with profile_scope(
+            "kt_moe_backward_checkpoint_unpack",
+            direction="backward",
+            layer_idx=getattr(ctx, "layer_idx", None),
+            device=getattr(ctx, "original_device", None),
+        ):
+            _ = ctx.saved_tensors
 
         qlen = ctx.qlen
         hidden_size = ctx.hidden_size
@@ -175,21 +218,36 @@ class KTMoEFunction(torch.autograd.Function):
 
             grad_out_flat = grad_output.view(qlen, hidden_size).contiguous()
 
-            gathered_go = _dist_gather_varlen_to_rank0(
-                grad_out_flat,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
+            with profile_scope(
+                "kt_moe_backward_gather_grad_output",
+                direction="backward",
+                layer_idx=getattr(ctx, "layer_idx", None),
+                device=ctx.original_device,
+                qlen=qlen,
+            ):
+                gathered_go = _dist_gather_varlen_to_rank0(
+                    grad_out_flat,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                )
             if rank == 0:
                 all_go = torch.cat(gathered_go, dim=0)
                 total_qlen = int(all_go.shape[0])
 
-                backward_out = ctx.wrapper.backward(
-                    all_go,
-                    output_device=ctx.original_device,
-                    compute_grad_weights=compute_grad_weights,
-                )
+                with profile_scope(
+                    "kt_moe_backward_rank0_wrapper_backward",
+                    direction="backward",
+                    layer_idx=getattr(ctx, "layer_idx", None),
+                    device=ctx.original_device,
+                    qlen=qlen,
+                    total_qlen=total_qlen,
+                ):
+                    backward_out = ctx.wrapper.backward(
+                        all_go,
+                        output_device=ctx.original_device,
+                        compute_grad_weights=compute_grad_weights,
+                    )
                 if isinstance(backward_out, tuple) and len(backward_out) == 2:
                     all_grad_input, all_grad_weights = backward_out
                 elif isinstance(backward_out, tuple) and len(backward_out) == 3:
@@ -214,26 +272,40 @@ class KTMoEFunction(torch.autograd.Function):
                 scatter_gi = None
                 scatter_gw = None
 
-            grad_input_flat = _dist_scatter_varlen_from_rank0(
-                rank0_chunks=scatter_gi,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-                feature_shape=(hidden_size,),
+            with profile_scope(
+                "kt_moe_backward_scatter_grad_input",
+                direction="backward",
+                layer_idx=getattr(ctx, "layer_idx", None),
                 device=ctx.original_device,
-                dtype=ctx.original_dtype,
-            )
-            grad_input = grad_input_flat.view(batch_size, seq_len, hidden_size)
-            if compute_grad_weights:
-                grad_weights_flat = _dist_scatter_varlen_from_rank0(
-                    rank0_chunks=scatter_gw,
+                qlen=qlen,
+            ):
+                grad_input_flat = _dist_scatter_varlen_from_rank0(
+                    rank0_chunks=scatter_gi,
                     all_qlens=all_qlens,
                     rank=rank,
                     world_size=world_size,
-                    feature_shape=(num_experts_per_tok,),
-                    device=ctx.weights_device,
-                    dtype=torch.bfloat16,
+                    feature_shape=(hidden_size,),
+                    device=ctx.original_device,
+                    dtype=ctx.original_dtype,
                 )
+            grad_input = grad_input_flat.view(batch_size, seq_len, hidden_size)
+            if compute_grad_weights:
+                with profile_scope(
+                    "kt_moe_backward_scatter_grad_weights",
+                    direction="backward",
+                    layer_idx=getattr(ctx, "layer_idx", None),
+                    device=ctx.weights_device,
+                    qlen=qlen,
+                ):
+                    grad_weights_flat = _dist_scatter_varlen_from_rank0(
+                        rank0_chunks=scatter_gw,
+                        all_qlens=all_qlens,
+                        rank=rank,
+                        world_size=world_size,
+                        feature_shape=(num_experts_per_tok,),
+                        device=ctx.weights_device,
+                        dtype=torch.bfloat16,
+                    )
                 grad_weights = grad_weights_flat.view(ctx.weights_shape).to(dtype=ctx.weights_dtype)
             else:
                 grad_weights = None
@@ -241,11 +313,18 @@ class KTMoEFunction(torch.autograd.Function):
         elif not ctx.use_broadcast:
             # ---- Single-GPU path ----
             grad_output_flat = grad_output.view(qlen, hidden_size)
-            backward_out = ctx.wrapper.backward(
-                grad_output_flat,
-                output_device=ctx.original_device,
-                compute_grad_weights=compute_grad_weights,
-            )
+            with profile_scope(
+                "kt_moe_backward_wrapper_backward",
+                direction="backward",
+                layer_idx=getattr(ctx, "layer_idx", None),
+                device=ctx.original_device,
+                qlen=qlen,
+            ):
+                backward_out = ctx.wrapper.backward(
+                    grad_output_flat,
+                    output_device=ctx.original_device,
+                    compute_grad_weights=compute_grad_weights,
+                )
             ctx.wrapper._kt_has_cached_forward = False
             if isinstance(backward_out, tuple) and len(backward_out) == 2:
                 grad_input, grad_weights = backward_out
