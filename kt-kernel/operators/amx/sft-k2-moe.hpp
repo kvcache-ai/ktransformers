@@ -715,6 +715,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return enabled;
   }
 
+  static bool reuse_down_lora_bprop_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_REUSE_DOWN_BPROP");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
   static bool bf16_write_vec_enabled() {
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_BF16_WRITE_VEC");
@@ -2461,7 +2469,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   void compute_tp1_down_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                  void* grad_down, std::vector<float>* grad_down_fp32_out, void* grad_intermediate,
                                  std::vector<float>* grad_inter_fp32_out, void* grad_down_lora_a,
-                                 void* grad_down_lora_b, TP1BackwardProfile* profile = nullptr) const {
+                                 void* grad_down_lora_b, TP1BackwardProfile* profile = nullptr,
+                                 std::vector<float>* down_lora_grad_times_b_out = nullptr) const {
     if (grad_output == nullptr) {
       throw std::runtime_error("K2 RAWINT4 SFT TP=1 down backward requires grad_output");
     }
@@ -2527,6 +2536,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     if (need_lora_grads && rank > 0) {
       grad_down_a_fp32.assign(static_cast<size_t>(config_.expert_num) * rank * inter_size, 0.0f);
       grad_down_b_fp32.assign(static_cast<size_t>(config_.expert_num) * hidden * rank, 0.0f);
+    }
+    if (down_lora_grad_times_b_out != nullptr) {
+      if (need_down_lora_path && rank > 0) {
+        down_lora_grad_times_b_out->assign(layout.total_tokens * static_cast<size_t>(rank), 0.0f);
+      } else {
+        down_lora_grad_times_b_out->clear();
+      }
     }
 
     const bool parallel_base = need_grad_intermediate && layout.total_tokens >= 10 && config_.pool != nullptr;
@@ -2612,6 +2628,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           }
         }
         if (profile != nullptr) profile->add_since(section_start, profile->down_lora_bprop_us);
+        if (down_lora_grad_times_b_out != nullptr && !down_lora_grad_times_b_out->empty()) {
+          float* cached_grad_times_b = down_lora_grad_times_b_out->data() + row * static_cast<size_t>(rank);
+          std::copy(grad_times_b.begin(), grad_times_b.end(), cached_grad_times_b);
+        }
 
         const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
         if (need_grad_intermediate) {
@@ -3166,14 +3186,21 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       std::vector<float> grad_down_fp32;
       std::vector<float> grad_inter_fp32;
+      std::vector<float> down_lora_grad_times_b_cache;
+      const bool use_down_lora_bprop_cache =
+          reuse_down_lora_bprop_enabled() && use_down_lora && (need_down_a || need_down_b);
       compute_tp1_down_backward(cache, layout, grad_output, nullptr,
                                 (need_down_a || need_down_b) ? &grad_down_fp32 : nullptr, nullptr, &grad_inter_fp32,
-                                nullptr, nullptr, &profile);
+                                nullptr, nullptr, &profile,
+                                use_down_lora_bprop_cache ? &down_lora_grad_times_b_cache : nullptr);
       profile.mark(profile.down_us);
 
       if (use_down_lora && (need_down_a || need_down_b)) {
         KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
         std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+        const bool have_down_lora_bprop_cache =
+            use_down_lora_bprop_cache &&
+            down_lora_grad_times_b_cache.size() == layout.total_tokens * static_cast<size_t>(rank);
 
         for (int task = 0; task < cache.activated_expert_cache; task++) {
           const int expert_idx = cache.m_expert_id_map_cache[task];
@@ -3187,28 +3214,34 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
             std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
             auto section_start = profile.section_start();
-            {
-              KT_SFT_NVTX_RANGE(bwd_down_lora_bprop_label.c_str());
-              if (rank == 2) {
-                float gb0;
-                float gb1;
-                down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
-                grad_times_b[0] = gb0;
-                grad_times_b[1] = gb1;
-              } else if (rank == 8) {
-                down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
-              } else {
-                for (int h = 0; h < hidden; h++) {
-                  const float g = grad_down_row[h];
-                  if (g == 0.0f) continue;
-                  const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-                  for (int r = 0; r < rank; r++) {
-                    grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+            if (have_down_lora_bprop_cache) {
+              const float* cached_grad_times_b =
+                  down_lora_grad_times_b_cache.data() + row * static_cast<size_t>(rank);
+              std::copy(cached_grad_times_b, cached_grad_times_b + rank, grad_times_b.begin());
+            } else {
+              {
+                KT_SFT_NVTX_RANGE(bwd_down_lora_bprop_label.c_str());
+                if (rank == 2) {
+                  float gb0;
+                  float gb1;
+                  down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+                  grad_times_b[0] = gb0;
+                  grad_times_b[1] = gb1;
+                } else if (rank == 8) {
+                  down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
+                } else {
+                  for (int h = 0; h < hidden; h++) {
+                    const float g = grad_down_row[h];
+                    if (g == 0.0f) continue;
+                    const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+                    for (int r = 0; r < rank; r++) {
+                      grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+                    }
                   }
                 }
               }
+              profile.add_since(section_start, profile.down_lora_bprop_us);
             }
-            profile.add_since(section_start, profile.down_lora_bprop_us);
 
             if (need_down_a) {
               section_start = profile.section_start();
