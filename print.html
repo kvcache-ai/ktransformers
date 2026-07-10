@@ -16,8 +16,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-0392ca55.css">
-        <link rel="stylesheet" href="css/chrome-fc474251.css">
+        <link rel="stylesheet" href="css/general-e96d0476.css">
+        <link rel="stylesheet" href="css/chrome-d279d366.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f30480f6.js";
+            window.path_to_searchindex_js = "searchindex-6a9ea63d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c2917af9.js"></script>
@@ -271,7 +271,7 @@ pip install .
 <hr>
 <h3 id="-sft---fine-tuning-with-llama-factory"><a class="header" href="#-sft---fine-tuning-with-llama-factory">🎓 <a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a> - Fine-Tuning with LLaMA-Factory</a></h3>
 <p>KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.</p>
-<p><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"><span class="img-wrapper"><img src="https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png" alt="KTransformers SFT"></span></label></p>
 <p><strong>Key Features:</strong></p>
 <ul>
 <li><strong>Multi-Backend Support</strong>: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization</li>
@@ -1096,7 +1096,7 @@ rm -rf build
 <p>From <strong>DeepSeek-V3/R1</strong> to <strong>Qwen3-MoE</strong> and <strong>Kimi-K2</strong>, each wave of open-sourced large models brings leaps in performance and scale. However, many researchers and developers are constrained by expensive GPUs and models with tens or even hundreds of billions of parameters, making it <strong>hard to fine-tune very large models under limited resources</strong>. To bridge this gap, we propose a practical approach: combining <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong>. With just <strong>2–4 RTX 4090s</strong> and a high-memory CPU, you can fine-tune ultra-large MoE models like DeepSeek-671B.</p>
 <p>Our goal is to give resource-constrained researchers a <strong>local path to explore fine-tuning ultra-large models</strong>, and also a fast way to customize smaller models (e.g., 14B/30B) for specific scenarios. We validate the setup using <strong>stylized dialogue</strong>, <strong>Westernized translation tone</strong>, and <strong>medical Q&amp;A</strong> as representative tasks, showing that <strong>personalized adaptation can be achieved within hours</strong>.</p>
 <p>As shown below, LLaMA-Factory is the unified orchestration/configuration layer for the whole fine-tuning workflow—handling data, training scheduling, LoRA injection, and inference interfaces. <strong>KTransformers</strong> acts as a pluggable high-performance backend that takes over core operators like Attention/MoE under the same training configs, enabling efficient <strong>GPU+CPU heterogeneous cooperation</strong>.</p>
-<p><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"><span class="img-wrapper"><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"></span></label></p>
 <p>Within LLaMA-Factory, we compared LoRA fine-tuning with <strong>HuggingFace</strong>, <strong>Unsloth</strong>, and <strong>KTransformers</strong> backends. KTransformers is the <strong>only workable 4090-class solution</strong> for ultra-large MoE models (e.g., 671B) and also delivers higher throughput and lower GPU memory on smaller MoE models (e.g., DeepSeek-14B).</p>
 <div class="table-wrapper">
 <table>
@@ -1112,12 +1112,12 @@ rm -rf build
 </table>
 </div>
 <p>† <strong>1400 GB</strong> is a <strong>theoretical</strong> FP16 full-parameter resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT strategy (Attention on GPU + layered MoE offload).</p>
-<p><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"><span class="img-wrapper"><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"></span></label></p>
 <h3 id="fine-tuning-results-examples"><a class="header" href="#fine-tuning-results-examples">Fine-Tuning Results (Examples)</a></h3>
 <h4 id="stylized-dialogue-catgirl-tone"><a class="header" href="#stylized-dialogue-catgirl-tone">Stylized Dialogue (CatGirl tone)</a></h4>
 <p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. Goal: improve style consistency and recognizability.</p>
 <p>The figure compares responses from the base vs. fine-tuned models. The fine-tuned model maintains the target tone and address terms more consistently (red boxes), validating the effectiveness of <strong>style-transfer fine-tuning</strong>.</p>
-<p><img src="assets/image-20251016175046882.png" alt="image-20251016175046882"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016175046882.png" alt="image-20251016175046882"><span class="img-wrapper"><img src="assets/image-20251016175046882.png" alt="image-20251016175046882"></span></label></p>
 <h4 id="benchmarks"><a class="header" href="#benchmarks">Benchmarks</a></h4>
 <p>We use:</p>
 <p>(1) <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>, which asks for an exaggerated, Westernized translation tone—clear, stylized customization.</p>
@@ -1278,7 +1278,7 @@ chunk_size: 8192
       backend: "AMXInt8" # or "AMXBF16" or "llamafile" (default)
 </code></pre>
 <p>Outputs go to <code>output_dir</code> in safetensors format plus adapter metadata for later loading.</p>
-<p><img src="assets/image-20251016171537997.png" alt="image-20251016171537997"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016171537997.png" alt="image-20251016171537997"><span class="img-wrapper"><img src="assets/image-20251016171537997.png" alt="image-20251016171537997"></span></label></p>
 <h3 id="core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter"><a class="header" href="#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter">Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)</a></h3>
 <p>Run the command: <code>llamafactory-cli chat examples/inference/qwen3_lora_sft.yaml</code>.</p>
 <p>Use the safetensors adapter trained with KT for inference.</p>
@@ -1295,7 +1295,7 @@ chunk_size: 8192
 </code></pre>
 <p>We also support <strong>GGUF</strong> adapters: for safetensors, set the <strong>directory</strong>; for GGUF, set the <strong>file path</strong> in <code>adapter_name_or_path</code>.</p>
 <p>During loading, LLaMA-Factory maps layer names to KT’s naming. You’ll see logs like <code>Loaded adapter weight: XXX -&gt; XXX</code>:</p>
-<p><img src="assets/image-20251016171526210.png" alt="image-20251016171526210"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016171526210.png" alt="image-20251016171526210"><span class="img-wrapper"><img src="assets/image-20251016171526210.png" alt="image-20251016171526210"></span></label></p>
 <h3 id="core-feature-3-batch-inference--metrics-base--lora-adapter"><a class="header" href="#core-feature-3-batch-inference--metrics-base--lora-adapter">Core Feature 3: Batch inference + metrics (base + LoRA adapter)</a></h3>
 <p>Run the command: <code>API_PORT=8000 llamafactory-cli api examples/inference/qwen3_lora_sft.yaml</code>.
 Invoke the KT fine-tuned adapter to provide the API; the usage logic of other APIs is consistent with the native LLaMA-Factory approach.</p>
@@ -2004,7 +2004,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <p>Recent open-source LLMs—from DeepSeek-V3/R1 to Qwen-MoE and Kimi-K2—have surged in performance and scale. Yet due to <strong>compute and memory constraints</strong>, it is difficult for typical researchers to fine-tune trillion-parameter-class models. We therefore integrate <strong>KTransformers</strong> with <strong>LLaMA-Factory</strong> so that, with <strong>2–4 RTX 4090 GPUs</strong> and sufficient CPU memory, one can fine-tune ultra-large Mixture-of-Experts (MoE) models such as DeepSeek-671B.</p>
 <p>This architecture bridges resource gaps, enabling <strong>local fine-tuning of ultra-large models</strong>, while also supporting <strong>efficient scenario customization</strong> at 14B/30B scales. We validate on stylized dialogue, Westernized translation tone, and medical Q&amp;A, achieving rapid adaptation within hours.</p>
 <p>Architecturally, LLaMA-Factory orchestrates data/config/training, LoRA insertion, and inference; KTransformers is a pluggable, high-performance operator backend that takes over Attention and MoE under the same training code, enabling <strong>GPU+CPU heterogeneity</strong> to accelerate training and reduce GPU memory.</p>
-<p><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"><span class="img-wrapper"><img src="assets/image-20251011010558909.png" alt="image-20251011010558909"></span></label></p>
 <p>We evaluated LoRA fine-tuning with HuggingFace default, Unsloth, and KTransformers backends (same settings and data). <strong>KTransformers</strong> is currently the only solution feasible on <strong>2–4×24GB 4090s</strong> for <strong>671B-scale MoE</strong>, and also shows higher throughput and lower GPU memory for 14B MoEs.</p>
 <div class="table-wrapper">
 <table>
@@ -2021,7 +2021,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 </div>
 <p>† The <strong>1400 GB</strong> is the <strong>theoretical</strong> FP16 full-resident footprint (not runnable). <strong>70 GB</strong> is the <strong>measured peak</strong> with KT (Attention on GPU + layered MoE offload).</p>
 <p>From the table above, it can be seen that for the 14B model, the KTransformers backend achieves approximately 75% higher throughput than the default HuggingFace solution, while using only about one-fifth of the GPU memory. For the 671B model, both HuggingFace and Unsloth fail to run on a single 4090 GPU, whereas KTransformers is able to perform LoRA fine-tuning at 40 tokens/s, keeping the GPU memory usage within 70 GB.</p>
-<p><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"><span class="img-wrapper"><img src="assets/image-compare_model.png" alt="按照模型划分的对比图_02"></span></label></p>
 <h2 id="overall-view-of-the-kt-fine-tuning-framework"><a class="header" href="#overall-view-of-the-kt-fine-tuning-framework">Overall View of the KT Fine-Tuning Framework</a></h2>
 <p>We detail how KTransformers takes over core operators in LLaMA-Factory’s fine-tuning framework to optimize Attention and MoE.</p>
 <p>DeepSeek-V3/V2 MoE models comprise a small-parameter dense Attention part and a large-parameter sparse MoE part. For illustration, consider layer 2 of DeepSeek-V2-Lite-Chat (from which each layer includes both Attention and MoE). Attention compute and KV cache mainly reside on the GPU; the heavyweight MoE part is primarily executed on the CPU. We first cover <strong>Attention replacement and inheritance</strong>, then <strong>MoE encapsulation and backend interfacing</strong>, and finally <strong>multi-GPU placement</strong>.</p>
@@ -2031,9 +2031,9 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <li><strong>Inheritance:</strong> <code>KTransformersLinearLora</code> retains KT’s high-performance paths (<code>prefill_linear</code>/<code>generate_linear</code>) while accepting LoRA parameters (<code>lora_A/lora_B</code>).</li>
 <li><strong>Replacement:</strong> During preparation, we replace original <code>KTransformersLinear</code> layers (Q/K/V/O) with <code>KTransformersLinearLora</code>, preserving KT optimizations while enabling LoRA trainability.</li>
 </ul>
-<p><img src="assets/image-20251016182810716.png" alt="image-20251016182810716"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016182810716.png" alt="image-20251016182810716"><span class="img-wrapper"><img src="assets/image-20251016182810716.png" alt="image-20251016182810716"></span></label></p>
 <p>After replacement, LoRA is inserted at Q/K/V/O linear transforms (left), and <code>KTransformersLinearLora</code> contains both KT fast paths and LoRA matrices (right).</p>
-<p><img src="assets/image-20251016182920722.png" alt="image-20251016182920722"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016182920722.png" alt="image-20251016182920722"><span class="img-wrapper"><img src="assets/image-20251016182920722.png" alt="image-20251016182920722"></span></label></p>
 <h3 id="moe-operator-encapsulation--backward"><a class="header" href="#moe-operator-encapsulation--backward">MoE (operator encapsulation + backward)</a></h3>
 <h4 id="encapsulation"><a class="header" href="#encapsulation">Encapsulation</a></h4>
 <p>Given large parameters and sparse compute, we encapsulate the expert computation as a <strong>differentiable black-box operator</strong>—transparent upstream, replaceable downstream.</p>
@@ -2041,7 +2041,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <li><strong>Upstream (PyTorch graph):</strong> we register a custom Autograd Function so the MoE layer appears as <strong>a single node</strong>. In the left figure (red box), only <code>KSFTExpertsCPU</code> is visible; on the right, the unencapsulated graph expands routing, dispatch, and FFN experts. Encapsulation makes the MoE layer behave like a standard <code>nn.Module</code> with gradients.</li>
 <li><strong>Downstream (backend):</strong> inside the Autograd Function, pybind11 calls C++ extensions for forward/backward. Multiple <strong>pluggable backends</strong> exist (AMX BF16/INT8; <strong>llamafile</strong>). The backend can be switched via YAML (e.g., <code>"backend": "AMXBF16"</code> vs. <code>"llamafile"</code>).</li>
 </ul>
-<p><img src="assets/image-20250801174623919.png" alt="image-20250801174623919"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20250801174623919.png" alt="image-20250801174623919"><span class="img-wrapper"><img src="assets/image-20250801174623919.png" alt="image-20250801174623919"></span></label></p>
 <h4 id="backward-cpu"><a class="header" href="#backward-cpu">Backward (CPU)</a></h4>
 <p>MoE backward frequently needs the transposed weights $W^\top$. To avoid repeated runtime transposes, we <strong>precompute/cache</strong> $W^\top$ at load time (blue box). We also <strong>cache necessary intermediate activations</strong> (e.g., expert projections, red box) to reuse in backward and reduce recomputation. We provide backward implementations for <strong>llamafile</strong> and <strong>AMX (INT8/BF16)</strong>, with NUMA-aware optimizations.</p>
 <img src="assets/image-20251016182942726.png" alt="image-20251016182942726" style="zoom:33%;" />
@@ -2060,7 +2060,7 @@ DeepseekV2-Chat got 60 layers, if we got 2 GPUs, we can allocate 30 layers to ea
 <h3 id="results"><a class="header" href="#results">Results</a></h3>
 <h4 id="stylized-dialogue-catgirl-tone-1"><a class="header" href="#stylized-dialogue-catgirl-tone-1">Stylized Dialogue (CatGirl tone)</a></h4>
 <p>Dataset: <a href="https://zhuanlan.zhihu.com/p/1934983798233231689">NekoQA-10K</a>. The fine-tuned model consistently exhibits the target style (red boxes) versus neutral/rational base (blue). This shows <strong>KT-LoRA injects style features</strong> into the generation distribution with low GPU cost.</p>
-<p><img src="assets/image-20251016175848143.png" alt="image-20251016175848143"></p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/image-20251016175848143.png" alt="image-20251016175848143"><span class="img-wrapper"><img src="assets/image-20251016175848143.png" alt="image-20251016175848143"></span></label></p>
 <h4 id="translational-style-benchmark-generative"><a class="header" href="#translational-style-benchmark-generative">Translational-Style benchmark (generative)</a></h4>
 <p>Dataset: <a href="https://github.com/Benson114/Translational-Style-ChatLLM">Translational-Style-ChatLLM</a>. Metrics: BLEU-1/2/3/4, ROUGE-1/2/L.</p>
 <div class="table-wrapper">
@@ -2772,7 +2772,7 @@ Config file not found at .../fused_moe_triton/configs/...
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-c22b7243.js"></script>
+        <script src="book-609e4cb8.js"></script>
 
         <!-- Custom JS scripts -->
 
