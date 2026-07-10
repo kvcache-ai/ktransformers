@@ -60,6 +60,24 @@ inline PopFn pop_fn() {
   return fn;
 }
 
+inline int process_rank() {
+  static const int value = []() {
+    const char* env_names[] = {"RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK", "PMI_RANK"};
+    for (const char* name : env_names) {
+      const char* env = std::getenv(name);
+      if (env != nullptr && env[0] != '\0') return std::atoi(env);
+    }
+    return -1;
+  }();
+  return value;
+}
+
+inline std::string label(const char* range_name, int layer, int tp) {
+  char buffer[160];
+  std::snprintf(buffer, sizeof(buffer), "%s layer=%d tp=%d rank=%d", range_name, layer, tp, process_rank());
+  return std::string(buffer);
+}
+
 struct Range {
   bool active = false;
   explicit Range(const char* name) {
@@ -114,6 +132,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   ggml_bf16_t* gate_bwd_shadow_ = nullptr;
   ggml_bf16_t* up_bwd_shadow_ = nullptr;
   ggml_bf16_t* down_bwd_shadow_ = nullptr;
+
+  std::string nvtx_label(const char* range_name) const {
+    return kt_sft_nvtx::label(range_name, sft_config_.layer_idx, tp_part_idx);
+  }
   std::vector<ggml_bf16_t> gate_bwd_shadow_storage_;
   std::vector<ggml_bf16_t> up_bwd_shadow_storage_;
   std::vector<ggml_bf16_t> down_bwd_shadow_storage_;
@@ -2049,6 +2071,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const int hidden = config_.hidden_size;
     const int inter_size = config_.intermediate_size;
     const int rank = lora_rank_;
+    const std::string bwd_down_base_label = nvtx_label("bwd_down_base_matmul");
+    const std::string bwd_down_lora_bprop_label = nvtx_label("bwd_down_lora_bprop");
+    const std::string bwd_down_lora_a_input_label = nvtx_label("bwd_down_lora_a_input");
+    const std::string bwd_down_lora_grads_label = nvtx_label("bwd_down_lora_grads");
     const bool need_grad_intermediate = grad_intermediate != nullptr || grad_inter_fp32_out != nullptr;
     const bool need_lora_grads = grad_down_lora_a != nullptr || grad_down_lora_b != nullptr;
     const bool need_down_lora_path = rank > 0 && has_down_lora() && (need_grad_intermediate || need_lora_grads);
@@ -2126,8 +2152,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             float* grad_inter_row = grad_inter_fp32.data() + static_cast<size_t>(row_idx) * inter_size;
             const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
             const float* down_scales = this->down_bb_[expert_idx]->d;
-            add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
-                                       true);
+            {
+              KT_SFT_NVTX_RANGE(bwd_down_base_label.c_str());
+              add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
+                                         true);
+            }
           },
           nullptr);
       if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
@@ -2148,8 +2177,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
           const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
           const float* down_scales = this->down_bb_[expert_idx]->d;
-          add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
-                                     layout.total_tokens >= 10 || short_base_fastpath_enabled());
+          {
+            KT_SFT_NVTX_RANGE(bwd_down_base_label.c_str());
+            add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
+                                       layout.total_tokens >= 10 || short_base_fastpath_enabled());
+          }
           if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
         }
 
@@ -2158,19 +2190,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
         const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
         section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-        if (rank == 2) {
-          float gb0;
-          float gb1;
-          down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
-          grad_times_b[0] = gb0;
-          grad_times_b[1] = gb1;
-        } else {
-          for (int h = 0; h < hidden; h++) {
-            const float g = grad_down_row[h];
-            if (g == 0.0f) continue;
-            const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-            for (int r = 0; r < rank; r++) {
-              grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+        {
+          KT_SFT_NVTX_RANGE(bwd_down_lora_bprop_label.c_str());
+          if (rank == 2) {
+            float gb0;
+            float gb1;
+            down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+            grad_times_b[0] = gb0;
+            grad_times_b[1] = gb1;
+          } else {
+            for (int h = 0; h < hidden; h++) {
+              const float g = grad_down_row[h];
+              if (g == 0.0f) continue;
+              const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+              for (int r = 0; r < rank; r++) {
+                grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+              }
             }
           }
         }
@@ -2180,11 +2215,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         if (need_grad_intermediate) {
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
-            for (int i = 0; i < inter_size; i++) {
-              grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+          {
+            KT_SFT_NVTX_RANGE(bwd_down_lora_a_input_label.c_str());
+            for (int r = 0; r < rank; r++) {
+              const float gu = grad_times_b[r] * lora_scaling_;
+              const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
+              for (int i = 0; i < inter_size; i++) {
+                grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+              }
             }
           }
           if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
@@ -2194,11 +2232,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
           float* grad_a = grad_down_a_fp32.data() + static_cast<size_t>(expert_idx) * rank * inter_size;
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
-            for (int i = 0; i < inter_size; i++) {
-              grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+          {
+            KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
+            for (int r = 0; r < rank; r++) {
+              const float gu = grad_times_b[r] * lora_scaling_;
+              float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
+              for (int i = 0; i < inter_size; i++) {
+                grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+              }
             }
           }
           if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
@@ -2208,16 +2249,19 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const float* down_u_row = cache.down_lora_u_cache + row * rank;
           float* grad_b = grad_down_b_fp32.data() + static_cast<size_t>(expert_idx) * hidden * rank;
-          if (rank == 2) {
-            accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
-                                             down_u_row[1] * lora_scaling_, hidden, grad_b);
-          } else {
-            for (int h = 0; h < hidden; h++) {
-              const float g = grad_down_row[h] * lora_scaling_;
-              if (g == 0.0f) continue;
-              float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
-              for (int r = 0; r < rank; r++) {
-                grad_b_row[r] += g * down_u_row[r];
+          {
+            KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
+            if (rank == 2) {
+              accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
+                                               down_u_row[1] * lora_scaling_, hidden, grad_b);
+            } else {
+              for (int h = 0; h < hidden; h++) {
+                const float g = grad_down_row[h] * lora_scaling_;
+                if (g == 0.0f) continue;
+                float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
+                for (int r = 0; r < rank; r++) {
+                  grad_b_row[r] += g * down_u_row[r];
+                }
               }
             }
           }
@@ -2656,6 +2700,15 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const int inter_size = config_.intermediate_size;
     const int full_inter = full_intermediate_size > 0 ? full_intermediate_size : inter_size;
     const int rank = lora_rank_;
+    const std::string bwd_gate_base_label = nvtx_label("bwd_gate_base_matmul");
+    const std::string bwd_up_base_label = nvtx_label("bwd_up_base_matmul");
+    const std::string bwd_gate_lora_bprop_label = nvtx_label("bwd_gate_lora_bprop");
+    const std::string bwd_up_lora_bprop_label = nvtx_label("bwd_up_lora_bprop");
+    const std::string bwd_gate_lora_a_input_label = nvtx_label("bwd_gate_lora_a_input");
+    const std::string bwd_up_lora_a_input_label = nvtx_label("bwd_up_lora_a_input");
+    const std::string bwd_down_lora_bprop_label = nvtx_label("bwd_down_lora_bprop");
+    const std::string bwd_down_lora_a_input_label = nvtx_label("bwd_down_lora_a_input");
+    const std::string bwd_down_lora_grads_label = nvtx_label("bwd_down_lora_grads");
 
     if (full_inter < inter_size) {
       throw std::runtime_error("K2 RAWINT4 SFT TP backward full_intermediate_size is smaller than TP local size");
@@ -2685,6 +2738,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       profile.mark(profile.down_us);
 
       if (use_down_lora && (need_down_a || need_down_b)) {
+        KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
         std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
 
         for (int task = 0; task < cache.activated_expert_cache; task++) {
@@ -2699,19 +2753,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
             std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
             auto section_start = profile.section_start();
-            if (rank == 2) {
-              float gb0;
-              float gb1;
-              down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
-              grad_times_b[0] = gb0;
-              grad_times_b[1] = gb1;
-            } else {
-              for (int h = 0; h < hidden; h++) {
-                const float g = grad_down_row[h];
-                if (g == 0.0f) continue;
-                const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-                for (int r = 0; r < rank; r++) {
-                  grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+            {
+              KT_SFT_NVTX_RANGE(bwd_down_lora_bprop_label.c_str());
+              if (rank == 2) {
+                float gb0;
+                float gb1;
+                down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+                grad_times_b[0] = gb0;
+                grad_times_b[1] = gb1;
+              } else {
+                for (int h = 0; h < hidden; h++) {
+                  const float g = grad_down_row[h];
+                  if (g == 0.0f) continue;
+                  const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+                  for (int r = 0; r < rank; r++) {
+                    grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+                  }
                 }
               }
             }
@@ -2721,13 +2778,16 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               section_start = profile.section_start();
               auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
               const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
-              for (int r = 0; r < rank; r++) {
-                const float gu = grad_times_b[r] * lora_scaling_;
-                ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
-                for (int i = 0; i < inter_size; i++) {
-                  const float old_v = GGML_BF16_TO_FP32(out_row[i]);
-                  const float add_v = gu * GGML_BF16_TO_FP32(intermediate_row[i]);
-                  out_row[i] = GGML_FP32_TO_BF16(old_v + add_v);
+              {
+                KT_SFT_NVTX_RANGE(bwd_down_lora_a_input_label.c_str());
+                for (int r = 0; r < rank; r++) {
+                  const float gu = grad_times_b[r] * lora_scaling_;
+                  ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
+                  for (int i = 0; i < inter_size; i++) {
+                    const float old_v = GGML_BF16_TO_FP32(out_row[i]);
+                    const float add_v = gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+                    out_row[i] = GGML_FP32_TO_BF16(old_v + add_v);
+                  }
                 }
               }
               profile.add_since(section_start, profile.down_lora_a_us);
@@ -2737,16 +2797,19 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               section_start = profile.section_start();
               const float* down_u_row = cache.down_lora_u_cache + row * rank;
               float* grad_b = fp32_grad_down_lora_b + static_cast<size_t>(task) * hidden * rank;
-              if (rank == 2) {
-                accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
-                                                 down_u_row[1] * lora_scaling_, hidden, grad_b);
-              } else {
-                for (int h = 0; h < hidden; h++) {
-                  const float g = grad_down_row[h] * lora_scaling_;
-                  if (g == 0.0f) continue;
-                  float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
-                  for (int r = 0; r < rank; r++) {
-                    grad_b_row[r] += g * down_u_row[r];
+              {
+                KT_SFT_NVTX_RANGE(bwd_down_lora_grads_label.c_str());
+                if (rank == 2) {
+                  accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
+                                                   down_u_row[1] * lora_scaling_, hidden, grad_b);
+                } else {
+                  for (int h = 0; h < hidden; h++) {
+                    const float g = grad_down_row[h] * lora_scaling_;
+                    if (g == 0.0f) continue;
+                    float* grad_b_row = grad_b + static_cast<size_t>(h) * rank;
+                    for (int r = 0; r < rank; r++) {
+                      grad_b_row[r] += g * down_u_row[r];
+                    }
                   }
                 }
               }
@@ -2843,17 +2906,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       auto backward_one_projection = [&](int task, int expert_idx, int token_idx, const float* grad_row,
                                          const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
                                          const ggml_bf16_t* lora_b, float* fp32_grad_lora_a, float* fp32_grad_lora_b,
-                                         void* grad_lora_b, bool do_base, bool do_lora, bool profile_base_inside) {
+                                         void* grad_lora_b, bool do_base, bool do_lora, bool profile_base_inside,
+                                         const char* base_label, const char* lora_bprop_label,
+                                         const char* lora_a_input_label) {
         float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
         const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
 
         if (do_base) {
           auto section_start =
               profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
-          for (int i = 0; i < inter_size; i++) {
-            const float g = grad_row[i];
-            if (g == 0.0f) continue;
-            add_scaled_packed_row_f32(packed_weight, scales, i, hidden, g, grad_input_row);
+          {
+            KT_SFT_NVTX_RANGE(base_label);
+            for (int i = 0; i < inter_size; i++) {
+              const float g = grad_row[i];
+              if (g == 0.0f) continue;
+              add_scaled_packed_row_f32(packed_weight, scales, i, hidden, g, grad_input_row);
+            }
           }
           if (profile_base_inside) profile.add_since(section_start, profile.gate_up_base_us);
         }
@@ -2886,82 +2954,88 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
         auto* out_lora_b = reinterpret_cast<ggml_bf16_t*>(grad_lora_b);
         section_start = profile.section_start();
-        if (rank == 2) {
-          const float u0_scaled = lora_u[0] * lora_scaling_;
-          const float u1_scaled = lora_u[1] * lora_scaling_;
-          float gb0 = 0.0f;
-          float gb1 = 0.0f;
-          if (fp32_grad_lora_b != nullptr) {
-            float* grad_b = fp32_grad_lora_b + static_cast<size_t>(task) * inter_size * 2;
-            accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
+        {
+          KT_SFT_NVTX_RANGE(lora_bprop_label);
+          if (rank == 2) {
+            const float u0_scaled = lora_u[0] * lora_scaling_;
+            const float u1_scaled = lora_u[1] * lora_scaling_;
+            float gb0 = 0.0f;
+            float gb1 = 0.0f;
+            if (fp32_grad_lora_b != nullptr) {
+              float* grad_b = fp32_grad_lora_b + static_cast<size_t>(task) * inter_size * 2;
+              accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
+            } else {
+              for (int i = 0; i < inter_size; i++) {
+                const float g = grad_row[i];
+                if (g == 0.0f) continue;
+                const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * 2;
+                if (out_lora_b != nullptr) {
+                  ggml_bf16_t* out_b_row =
+                      out_lora_b + static_cast<size_t>(expert_idx) * full_inter * 2 + static_cast<size_t>(i) * 2;
+                  out_b_row[0] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[0]) + g * u0_scaled);
+                  out_b_row[1] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[1]) + g * u1_scaled);
+                }
+                gb0 += g * GGML_BF16_TO_FP32(b_row[0]);
+                gb1 += g * GGML_BF16_TO_FP32(b_row[1]);
+              }
+            }
+            grad_times_b[0] = gb0;
+            grad_times_b[1] = gb1;
           } else {
             for (int i = 0; i < inter_size; i++) {
               const float g = grad_row[i];
               if (g == 0.0f) continue;
-              const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * 2;
-              if (out_lora_b != nullptr) {
+              const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
+              if (fp32_grad_lora_b != nullptr) {
+                float* out_b_row =
+                    fp32_grad_lora_b + (static_cast<size_t>(task) * inter_size + static_cast<size_t>(i)) * rank;
+                for (int r = 0; r < rank; r++) {
+                  out_b_row[r] += g * lora_u[r] * lora_scaling_;
+                }
+              } else if (out_lora_b != nullptr) {
                 ggml_bf16_t* out_b_row =
-                    out_lora_b + static_cast<size_t>(expert_idx) * full_inter * 2 + static_cast<size_t>(i) * 2;
-                out_b_row[0] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[0]) + g * u0_scaled);
-                out_b_row[1] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(out_b_row[1]) + g * u1_scaled);
+                    out_lora_b + static_cast<size_t>(expert_idx) * full_inter * rank + static_cast<size_t>(i) * rank;
+                for (int r = 0; r < rank; r++) {
+                  const float old_v = GGML_BF16_TO_FP32(out_b_row[r]);
+                  out_b_row[r] = GGML_FP32_TO_BF16(old_v + g * lora_u[r] * lora_scaling_);
+                }
               }
-              gb0 += g * GGML_BF16_TO_FP32(b_row[0]);
-              gb1 += g * GGML_BF16_TO_FP32(b_row[1]);
-            }
-          }
-          grad_times_b[0] = gb0;
-          grad_times_b[1] = gb1;
-        } else {
-          for (int i = 0; i < inter_size; i++) {
-            const float g = grad_row[i];
-            if (g == 0.0f) continue;
-            const ggml_bf16_t* b_row = lora_b + static_cast<size_t>(i) * rank;
-            if (fp32_grad_lora_b != nullptr) {
-              float* out_b_row =
-                  fp32_grad_lora_b + (static_cast<size_t>(task) * inter_size + static_cast<size_t>(i)) * rank;
               for (int r = 0; r < rank; r++) {
-                out_b_row[r] += g * lora_u[r] * lora_scaling_;
+                grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
               }
-            } else if (out_lora_b != nullptr) {
-              ggml_bf16_t* out_b_row =
-                  out_lora_b + static_cast<size_t>(expert_idx) * full_inter * rank + static_cast<size_t>(i) * rank;
-              for (int r = 0; r < rank; r++) {
-                const float old_v = GGML_BF16_TO_FP32(out_b_row[r]);
-                out_b_row[r] = GGML_FP32_TO_BF16(old_v + g * lora_u[r] * lora_scaling_);
-              }
-            }
-            for (int r = 0; r < rank; r++) {
-              grad_times_b[r] += g * GGML_BF16_TO_FP32(b_row[r]);
             }
           }
         }
         profile.add_since(section_start, profile.gate_up_lora_b_us);
 
         section_start = profile.section_start();
-        if (rank == 2 && tp_gate_up_a_input_rank2_vec_enabled()) {
-          float* grad_a0 = nullptr;
-          float* grad_a1 = nullptr;
-          if (fp32_grad_lora_a != nullptr) {
-            grad_a0 = fp32_grad_lora_a + static_cast<size_t>(task) * 2 * hidden;
-            grad_a1 = grad_a0 + hidden;
-          }
-          accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
-                                               grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0,
-                                               grad_a1, false);
-        } else {
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+        {
+          KT_SFT_NVTX_RANGE(lora_a_input_label);
+          if (rank == 2 && tp_gate_up_a_input_rank2_vec_enabled()) {
+            float* grad_a0 = nullptr;
+            float* grad_a1 = nullptr;
             if (fp32_grad_lora_a != nullptr) {
-              float* grad_a_row = fp32_grad_lora_a + (static_cast<size_t>(task) * rank + r) * hidden;
-              for (int h = 0; h < hidden; h++) {
-                const float x = GGML_BF16_TO_FP32(input_row[h]);
-                grad_a_row[h] += gu * x;
-                grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
-              }
-            } else {
-              for (int h = 0; h < hidden; h++) {
-                grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+              grad_a0 = fp32_grad_lora_a + static_cast<size_t>(task) * 2 * hidden;
+              grad_a1 = grad_a0 + hidden;
+            }
+            accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
+                                                 grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0,
+                                                 grad_a1, false);
+          } else {
+            for (int r = 0; r < rank; r++) {
+              const float gu = grad_times_b[r] * lora_scaling_;
+              const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+              if (fp32_grad_lora_a != nullptr) {
+                float* grad_a_row = fp32_grad_lora_a + (static_cast<size_t>(task) * rank + r) * hidden;
+                for (int h = 0; h < hidden; h++) {
+                  const float x = GGML_BF16_TO_FP32(input_row[h]);
+                  grad_a_row[h] += gu * x;
+                  grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+                }
+              } else {
+                for (int h = 0; h < hidden; h++) {
+                  grad_input_row[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+                }
               }
             }
           }
@@ -2982,7 +3056,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           if (do_base) {
             auto section_start =
                 profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
-            add_gate_up_base(expert_idx, token_idx, row);
+            {
+              KT_SFT_NVTX_RANGE(bwd_gate_base_label.c_str());
+              KT_SFT_NVTX_RANGE(bwd_up_base_label.c_str());
+              add_gate_up_base(expert_idx, token_idx, row);
+            }
             if (profile_base_inside) profile.add_since(section_start, profile.gate_up_base_us);
           }
           if (!do_lora) continue;
@@ -2993,14 +3071,17 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
               use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
               fp32_grad_gate_lora_a, grad_gate_b_fp32.empty() ? nullptr : grad_gate_b_fp32.data(),
-              grad_gate_b_fp32.empty() ? grad_gate_lora_b : nullptr, false, true, false);
+              grad_gate_b_fp32.empty() ? grad_gate_lora_b : nullptr, false, true, false,
+              bwd_gate_base_label.c_str(), bwd_gate_lora_bprop_label.c_str(),
+              bwd_gate_lora_a_input_label.c_str());
           backward_one_projection(
               task, expert_idx, token_idx, grad_up_fp32.data() + row * inter_size,
               reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
               use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
               use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
               fp32_grad_up_lora_a, grad_up_b_fp32.empty() ? nullptr : grad_up_b_fp32.data(),
-              grad_up_b_fp32.empty() ? grad_up_lora_b : nullptr, false, true, false);
+              grad_up_b_fp32.empty() ? grad_up_lora_b : nullptr, false, true, false, bwd_up_base_label.c_str(),
+              bwd_up_lora_bprop_label.c_str(), bwd_up_lora_a_input_label.c_str());
         }
       };
 
