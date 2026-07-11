@@ -658,6 +658,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return enabled;
   }
 
+  static bool lora_backward_matmat_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_LORA_BWD_MATMAT");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
   static bool reuse_down_lora_bprop_enabled() {
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_REUSE_DOWN_BPROP");
@@ -2415,6 +2423,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     long long down_lora_bprop_us = 0;
     long long down_lora_a_us = 0;
     long long down_lora_b_us = 0;
+    long long down_lora_matmat_du_dx_us = 0;
+    long long down_lora_matmat_da_db_us = 0;
     long long activation_us = 0;
     long long gate_up_us = 0;
     long long gate_up_base_us = 0;
@@ -2422,6 +2432,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     long long gate_up_lora_b_us = 0;
     long long gate_up_lora_b_write_us = 0;
     long long gate_up_lora_a_input_us = 0;
+    long long gate_up_lora_matmat_du_dx_us = 0;
+    long long gate_up_lora_matmat_da_db_us = 0;
     long long gate_up_write_us = 0;
 
     explicit TP1BackwardProfile(bool enabled_) : enabled(enabled_) {
@@ -2810,11 +2822,51 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
     }
 
+    std::vector<uint8_t> down_lora_matmat_expert(static_cast<size_t>(config_.expert_num), 0);
+    std::vector<float> down_lora_matmat_du;
+    const bool try_down_lora_matmat = need_down_lora_path && rank == 8 && lora_backward_matmat_enabled() &&
+                                         !down_lora_b_transposed_.empty();
+    if (try_down_lora_matmat) {
+      down_lora_matmat_du.assign(layout.total_tokens * 8, 0.0f);
+      const auto matmat_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
+      auto compute_expert_lora = [&](int expert_task) {
+        const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+        const int num_tokens = cache.m_local_num_cache[expert_idx];
+        if (num_tokens < 4) return;
+        const size_t row_base = layout.expert_base[expert_idx];
+        float* du = down_lora_matmat_du.data() + row_base * 8;
+        const ggml_bf16_t* down_b_t =
+            down_lora_b_transposed_.data() + static_cast<size_t>(expert_idx) * 8 * hidden;
+        avx::lora_backward_du_rank8_matmat(grad_down_fp32.data() + row_base * hidden, down_b_t, du, num_tokens,
+                                          hidden);
+        if (need_grad_intermediate) {
+          const ggml_bf16_t* down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * 8 * inter_size;
+          avx::lora_backward_dx_rank8_matmat(du, down_a, grad_inter_fp32.data() + row_base * inter_size, num_tokens,
+                                            inter_size, lora_scaling_);
+        }
+        if (down_lora_grad_times_b_out != nullptr && !down_lora_grad_times_b_out->empty()) {
+          std::copy(du, du + static_cast<size_t>(num_tokens) * 8,
+                    down_lora_grad_times_b_out->data() + row_base * 8);
+        }
+        down_lora_matmat_expert[static_cast<size_t>(expert_idx)] = 1;
+      };
+      if (layout.total_tokens >= 10 && config_.pool != nullptr) {
+        auto pool = config_.pool->get_subpool(tp_part_idx);
+        pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_lora, nullptr);
+      } else {
+        for (int task = 0; task < cache.activated_expert_cache; task++) compute_expert_lora(task);
+      }
+      if (profile != nullptr) {
+        profile->add_since(matmat_start, profile->down_lora_matmat_du_dx_us);
+      }
+    }
+
     for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
       const int expert_idx = cache.m_expert_id_map_cache[expert_task];
       const int num_tokens = cache.m_local_num_cache[expert_idx];
       const size_t row_base = layout.expert_base[expert_idx];
       std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+      const bool used_matmat = down_lora_matmat_expert[static_cast<size_t>(expert_idx)] != 0;
 
       for (int local_t = 0; local_t < num_tokens; local_t++) {
         const size_t row = row_base + static_cast<size_t>(local_t);
@@ -2827,7 +2879,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
         const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
         section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-        if (rank == 2) {
+        if (used_matmat) {
+          const float* cached_du = down_lora_matmat_du.data() + row * 8;
+          std::copy(cached_du, cached_du + 8, grad_times_b.begin());
+        } else if (rank == 2) {
           float gb0;
           float gb1;
           down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
@@ -2845,14 +2900,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             }
           }
         }
-        if (profile != nullptr) profile->add_since(section_start, profile->down_lora_bprop_us);
-        if (down_lora_grad_times_b_out != nullptr && !down_lora_grad_times_b_out->empty()) {
+        if (!used_matmat && profile != nullptr) profile->add_since(section_start, profile->down_lora_bprop_us);
+        if (!used_matmat && down_lora_grad_times_b_out != nullptr && !down_lora_grad_times_b_out->empty()) {
           float* cached_grad_times_b = down_lora_grad_times_b_out->data() + row * static_cast<size_t>(rank);
           std::copy(grad_times_b.begin(), grad_times_b.end(), cached_grad_times_b);
         }
 
         const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
-        if (need_grad_intermediate) {
+        if (need_grad_intermediate && !used_matmat) {
           // Shared Backward Step 3.3: Add down LoRA contribution to grad_intermediate.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
@@ -3281,6 +3336,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     const K2ForwardCache& cache = latest_cache();
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
+    if (lora_rank_ == 8 && lora_backward_matmat_enabled()) prepare_lora_b_transposed();
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
 
@@ -3306,15 +3362,19 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         std::fprintf(stderr,
                      "[KT_K2_SFT_PROFILE] layer=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld down_us=%lld "
                      "down_route_us=%lld down_write_us=%lld down_base_us=%lld down_lora_bprop_us=%lld "
-                     "down_lora_a_us=%lld down_lora_b_us=%lld activation_us=%lld gate_up_us=%lld "
+                     "down_lora_a_us=%lld down_lora_b_us=%lld down_lora_matmat_du_dx_us=%lld "
+                     "down_lora_matmat_da_db_us=%lld activation_us=%lld gate_up_us=%lld "
                      "gate_up_base_us=%lld gate_up_lora_u_us=%lld "
                      "gate_up_lora_b_us=%lld gate_up_lora_b_write_us=%lld "
-                     "gate_up_lora_a_input_us=%lld gate_up_write_us=%lld total_us=%lld\n",
+                     "gate_up_lora_a_input_us=%lld gate_up_lora_matmat_du_dx_us=%lld "
+                     "gate_up_lora_matmat_da_db_us=%lld gate_up_write_us=%lld total_us=%lld\n",
                      sft_config_.layer_idx, cache.qlen_cache, cache.activated_expert_cache, layout.total_tokens,
                      profile.grad_weights_us, profile.down_us, profile.down_route_us, profile.down_write_us,
                      profile.down_base_us, profile.down_lora_bprop_us, profile.down_lora_a_us, profile.down_lora_b_us,
-                     profile.activation_us, profile.gate_up_us, profile.gate_up_base_us, profile.gate_up_lora_u_us,
+                     profile.down_lora_matmat_du_dx_us, profile.down_lora_matmat_da_db_us, profile.activation_us,
+                     profile.gate_up_us, profile.gate_up_base_us, profile.gate_up_lora_u_us,
                      profile.gate_up_lora_b_us, profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us,
+                     profile.gate_up_lora_matmat_du_dx_us, profile.gate_up_lora_matmat_da_db_us,
                      profile.gate_up_write_us, profile.total_us());
       }
 
@@ -3369,6 +3429,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const int full_inter = full_intermediate_size > 0 ? full_intermediate_size : inter_size;
     const int rank = lora_rank_;
 
+    if (rank == 8 && lora_backward_matmat_enabled()) prepare_lora_b_transposed();
+
     if (full_inter < inter_size) {
       throw std::runtime_error("K2 RAWINT4 SFT TP backward full_intermediate_size is smaller than TP local size");
     }
@@ -3414,8 +3476,53 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
         std::vector<float> grad_down_a_fp32;
 
+        std::vector<uint8_t> down_weight_matmat_expert(static_cast<size_t>(config_.expert_num), 0);
+        const bool try_down_weight_matmat = rank == 8 && lora_backward_matmat_enabled() &&
+                                            have_down_lora_bprop_cache;
+        if (try_down_weight_matmat) {
+          const auto matmat_start = profile.section_start();
+          auto compute_expert_lora_grads = [&](int task) {
+            const int expert_idx = cache.m_expert_id_map_cache[task];
+            const int num_tokens = cache.m_local_num_cache[expert_idx];
+            if (num_tokens < 4) return;
+            const size_t row_base = layout.expert_base[expert_idx];
+            const float* du = down_lora_grad_times_b_cache.data() + row_base * 8;
+            if (need_down_a) {
+              std::vector<float> grad_a(static_cast<size_t>(8) * inter_size, 0.0f);
+              for (int r = 0; r < 8; r++) {
+                const ggml_bf16_t* old_row =
+                    out_down_a + (static_cast<size_t>(expert_idx) * 8 + r) * full_inter;
+                float* dst = grad_a.data() + static_cast<size_t>(r) * inter_size;
+                for (int i = 0; i < inter_size; i++) dst[i] = GGML_BF16_TO_FP32(old_row[i]);
+              }
+              avx::lora_backward_da_rank8_matmat(cache.intermediate_cache + row_base * inter_size, nullptr, du,
+                                                 grad_a.data(), num_tokens, inter_size, lora_scaling_);
+              for (int r = 0; r < 8; r++) {
+                ggml_bf16_t* out_row =
+                    out_down_a + (static_cast<size_t>(expert_idx) * 8 + r) * full_inter;
+                write_bf16_array(out_row, grad_a.data() + static_cast<size_t>(r) * inter_size, inter_size);
+              }
+            }
+            if (need_down_b) {
+              avx::lora_backward_db_rank8_matmat(
+                  cache.down_lora_u_cache + row_base * 8, grad_down_fp32.data() + row_base * hidden,
+                  fp32_grad_down_lora_b + static_cast<size_t>(task) * hidden * 8, num_tokens, hidden,
+                  lora_scaling_);
+            }
+            down_weight_matmat_expert[static_cast<size_t>(expert_idx)] = 1;
+          };
+          if (layout.total_tokens >= 10 && config_.pool != nullptr) {
+            auto pool = config_.pool->get_subpool(tp_part_idx);
+            pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_lora_grads, nullptr);
+          } else {
+            for (int task = 0; task < cache.activated_expert_cache; task++) compute_expert_lora_grads(task);
+          }
+          profile.add_since(matmat_start, profile.down_lora_matmat_da_db_us);
+        }
+
         for (int task = 0; task < cache.activated_expert_cache; task++) {
           const int expert_idx = cache.m_expert_id_map_cache[task];
+          if (down_weight_matmat_expert[static_cast<size_t>(expert_idx)] != 0) continue;
           const int num_tokens = cache.m_local_num_cache[expert_idx];
           const size_t row_base = layout.expert_base[expert_idx];
           const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
@@ -3539,6 +3646,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
       std::vector<float> grad_gate_b_fp32;
       std::vector<float> grad_up_b_fp32;
+      std::vector<uint8_t> gate_up_lora_matmat_expert(static_cast<size_t>(config_.expert_num), 0);
       const bool use_sparse_lora_b = sparse_lora_b_accum_enabled();
       if (use_sparse_lora_b && use_gate_up_lora && grad_gate_lora_b != nullptr) {
         grad_gate_b_fp32.assign(static_cast<size_t>(cache.activated_expert_cache) * inter_size * rank, 0.0f);
@@ -3774,6 +3882,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             if (profile_base_inside) profile.add_since(section_start, profile.gate_up_base_us);
           }
           if (!do_lora) continue;
+          if (gate_up_lora_matmat_expert[static_cast<size_t>(expert_idx)] != 0) continue;
 
           backward_one_projection(
               task, expert_idx, token_idx, grad_gate_fp32.data() + row * inter_size,
@@ -3799,9 +3908,111 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       auto gate_up_base_start = profile.section_start();
       const bool expert_matmat_base = compute_gate_up_base_expert_matmat(
           cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input_fp32);
+      if (expert_matmat_base) profile.add_since(gate_up_base_start, profile.gate_up_base_us);
+
+      const bool gate_b_sparse_ok = grad_gate_lora_b == nullptr || !grad_gate_b_fp32.empty();
+      const bool up_b_sparse_ok = grad_up_lora_b == nullptr || !grad_up_b_fp32.empty();
+      const bool try_gate_up_lora_matmat =
+          use_gate_up_lora && rank == 8 && lora_backward_matmat_enabled() && gate_b_sparse_ok && up_b_sparse_ok &&
+          cache.gate_lora_u_cache != nullptr && cache.up_lora_u_cache != nullptr &&
+          !gate_lora_b_transposed_.empty() && !up_lora_b_transposed_.empty();
+      if (try_gate_up_lora_matmat) {
+        std::vector<float> gate_du(layout.total_tokens * 8, 0.0f);
+        std::vector<float> up_du(layout.total_tokens * 8, 0.0f);
+        gate_up_route_grad_scratch_.resize(layout.total_tokens * static_cast<size_t>(hidden));
+
+        auto du_dx_start = profile.section_start();
+        auto compute_expert_du_dx = [&](int task) {
+          const int expert_idx = cache.m_expert_id_map_cache[task];
+          const int num_tokens = cache.m_local_num_cache[expert_idx];
+          if (num_tokens < 4) return;
+          const size_t row_base = layout.expert_base[expert_idx];
+          float* gate_du_expert = gate_du.data() + row_base * 8;
+          float* up_du_expert = up_du.data() + row_base * 8;
+          avx::lora_backward_du_rank8_matmat(
+              grad_gate_fp32.data() + row_base * inter_size,
+              gate_lora_b_transposed_.data() + static_cast<size_t>(expert_idx) * 8 * inter_size, gate_du_expert,
+              num_tokens, inter_size);
+          avx::lora_backward_du_rank8_matmat(
+              grad_up_fp32.data() + row_base * inter_size,
+              up_lora_b_transposed_.data() + static_cast<size_t>(expert_idx) * 8 * inter_size, up_du_expert,
+              num_tokens, inter_size);
+
+          std::vector<float> route_dx(static_cast<size_t>(num_tokens) * hidden, 0.0f);
+          avx::lora_backward_dx_rank8_matmat(
+              gate_du_expert, gate_lora_a_ + static_cast<size_t>(expert_idx) * 8 * hidden, route_dx.data(),
+              num_tokens, hidden, lora_scaling_);
+          avx::lora_backward_dx_rank8_matmat(
+              up_du_expert, up_lora_a_ + static_cast<size_t>(expert_idx) * 8 * hidden, route_dx.data(), num_tokens,
+              hidden, lora_scaling_);
+          write_bf16_array(gate_up_route_grad_scratch_.data() + row_base * hidden, route_dx.data(),
+                           static_cast<size_t>(num_tokens) * hidden);
+          gate_up_lora_matmat_expert[static_cast<size_t>(expert_idx)] = 1;
+        };
+        if (layout.total_tokens >= 10 && config_.pool != nullptr) {
+          auto pool = config_.pool->get_subpool(tp_part_idx);
+          pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_du_dx, nullptr);
+        } else {
+          for (int task = 0; task < cache.activated_expert_cache; task++) compute_expert_du_dx(task);
+        }
+
+        for (int token_idx = 0; token_idx < qlen; token_idx++) {
+          float* dst = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
+          for (int route_idx = 0; route_idx < k; route_idx++) {
+            const int expert_idx = static_cast<int>(cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx]);
+            if (config_.should_skip_expert(expert_idx) ||
+                gate_up_lora_matmat_expert[static_cast<size_t>(expert_idx)] == 0) {
+              continue;
+            }
+            const size_t row = layout.expert_base[expert_idx] +
+                               static_cast<size_t>(cache.m_local_pos_cache[token_idx][route_idx]);
+            const ggml_bf16_t* src = gate_up_route_grad_scratch_.data() + row * hidden;
+            for (int h = 0; h < hidden; h++) dst[h] += GGML_BF16_TO_FP32(src[h]);
+          }
+        }
+        profile.add_since(du_dx_start, profile.gate_up_lora_matmat_du_dx_us);
+
+        auto da_db_start = profile.section_start();
+        auto compute_expert_da_db = [&](int task) {
+          const int expert_idx = cache.m_expert_id_map_cache[task];
+          if (gate_up_lora_matmat_expert[static_cast<size_t>(expert_idx)] == 0) return;
+          const int num_tokens = cache.m_local_num_cache[expert_idx];
+          const size_t row_base = layout.expert_base[expert_idx];
+          const int* row_indices = layout.row_to_token.data() + row_base;
+          if (fp32_grad_gate_lora_a != nullptr) {
+            avx::lora_backward_da_rank8_matmat(
+                cache.input_cache, row_indices, gate_du.data() + row_base * 8,
+                fp32_grad_gate_lora_a + static_cast<size_t>(task) * 8 * hidden, num_tokens, hidden, lora_scaling_);
+          }
+          if (fp32_grad_up_lora_a != nullptr) {
+            avx::lora_backward_da_rank8_matmat(
+                cache.input_cache, row_indices, up_du.data() + row_base * 8,
+                fp32_grad_up_lora_a + static_cast<size_t>(task) * 8 * hidden, num_tokens, hidden, lora_scaling_);
+          }
+          if (!grad_gate_b_fp32.empty()) {
+            avx::lora_backward_db_rank8_matmat(
+                cache.gate_lora_u_cache + row_base * 8, grad_gate_fp32.data() + row_base * inter_size,
+                grad_gate_b_fp32.data() + static_cast<size_t>(task) * inter_size * 8, num_tokens, inter_size,
+                lora_scaling_);
+          }
+          if (!grad_up_b_fp32.empty()) {
+            avx::lora_backward_db_rank8_matmat(
+                cache.up_lora_u_cache + row_base * 8, grad_up_fp32.data() + row_base * inter_size,
+                grad_up_b_fp32.data() + static_cast<size_t>(task) * inter_size * 8, num_tokens, inter_size,
+                lora_scaling_);
+          }
+        };
+        if (layout.total_tokens >= 10 && config_.pool != nullptr) {
+          auto pool = config_.pool->get_subpool(tp_part_idx);
+          pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_da_db, nullptr);
+        } else {
+          for (int task = 0; task < cache.activated_expert_cache; task++) compute_expert_da_db(task);
+        }
+        profile.add_since(da_db_start, profile.gate_up_lora_matmat_da_db_us);
+      }
+
       if (expert_matmat_base) {
         // Normal TP Backward Step 5.6: expert mat-mat base dInput first; LoRA remains race-free afterward.
-        profile.add_since(gate_up_base_start, profile.gate_up_base_us);
         if (use_gate_up_lora) {
           for (int token_idx = 0; token_idx < qlen; token_idx++) run_token_routes(token_idx, false, true, false);
         }
@@ -3840,17 +4051,21 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      "[KT_K2_SFT_PROFILE] layer=%d tp_part=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld "
                      "down_us=%lld down_lora_grads_us=%lld down_route_us=%lld down_write_us=%lld "
                      "down_base_us=%lld down_lora_bprop_us=%lld down_lora_a_us=%lld down_lora_b_us=%lld "
+                     "down_lora_matmat_du_dx_us=%lld down_lora_matmat_da_db_us=%lld "
                      "activation_us=%lld gate_up_us=%lld "
                      "gate_up_base_us=%lld gate_up_lora_u_us=%lld gate_up_lora_b_us=%lld "
                      "gate_up_lora_b_write_us=%lld gate_up_lora_a_input_us=%lld "
+                     "gate_up_lora_matmat_du_dx_us=%lld gate_up_lora_matmat_da_db_us=%lld "
                      "gate_up_write_us=%lld total_us=%lld\n",
                      sft_config_.layer_idx, tp_part_idx, cache.qlen_cache, cache.activated_expert_cache,
                      layout.total_tokens, profile.grad_weights_us, profile.down_us, profile.down_lora_grads_us,
                      profile.down_route_us, profile.down_write_us, profile.down_base_us, profile.down_lora_bprop_us,
-                     profile.down_lora_a_us, profile.down_lora_b_us, profile.activation_us, profile.gate_up_us,
+                     profile.down_lora_a_us, profile.down_lora_b_us, profile.down_lora_matmat_du_dx_us,
+                     profile.down_lora_matmat_da_db_us, profile.activation_us, profile.gate_up_us,
                      profile.gate_up_base_us, profile.gate_up_lora_u_us, profile.gate_up_lora_b_us,
-                     profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us, profile.gate_up_write_us,
-                     profile.total_us());
+                     profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us,
+                     profile.gate_up_lora_matmat_du_dx_us, profile.gate_up_lora_matmat_da_db_us,
+                     profile.gate_up_write_us, profile.total_us());
       }
       // Normal TP Backward Step 6: Release the forward cache consumed by this backward.
       pop_latest_cache();

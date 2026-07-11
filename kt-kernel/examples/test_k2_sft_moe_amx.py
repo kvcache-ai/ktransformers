@@ -1128,7 +1128,7 @@ def run_bench_2x2(args) -> None:
     max_len = qlen
     scaling = 1.0
 
-    cpuinfer = make_cpuinfer(args.threads)
+    cpuinfer = make_cpuinfer(args.threads, args.tp_count)
     weights = make_weights(args.expert_num)
     lora = make_lora(args.expert_num, args.rank, scale=0.03, seed_offset=0)
     zero_lora = zero_lora_like(lora)

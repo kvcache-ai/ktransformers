@@ -176,6 +176,8 @@ def summarize_profiles(cases: Iterable[dict]) -> list[dict]:
         "down_lora_bprop_us",
         "down_lora_a_us",
         "down_lora_b_us",
+        "down_lora_matmat_du_dx_us",
+        "down_lora_matmat_da_db_us",
         "activation_us",
         "gate_up_us",
         "gate_up_base_us",
@@ -183,6 +185,8 @@ def summarize_profiles(cases: Iterable[dict]) -> list[dict]:
         "gate_up_lora_b_us",
         "gate_up_lora_b_write_us",
         "gate_up_lora_a_input_us",
+        "gate_up_lora_matmat_du_dx_us",
+        "gate_up_lora_matmat_da_db_us",
         "gate_up_write_us",
         "total_us",
     ]
