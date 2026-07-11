@@ -18,6 +18,7 @@ import kt_kernel_ext.moe as _moe_mod
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
 AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
 AMXInt4_KGroup_MOE = getattr(_moe_mod, "AMXInt4_KGroup_MOE", None)
+AMXInt4_KGroupBlocked_MOE = getattr(_moe_mod, "AMXInt4_KGroupBlocked_MOE", None)
 AMXFP8_MOE = getattr(_moe_mod, "AMXFP8_MOE", None)
 AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
 AMXFP8PerChannel_MOE = getattr(_moe_mod, "AMXFP8PerChannel_MOE", None)
@@ -29,6 +30,7 @@ AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
 _HAS_RAWINT4_SUPPORT = AMXInt4_KGroup_MOE is not None
+_HAS_RAWINT4_BLOCKED_SUPPORT = AMXInt4_KGroupBlocked_MOE is not None
 _HAS_FP8_SUPPORT = AMXFP8_MOE is not None
 _HAS_BF16_SUPPORT = AMXBF16_MOE is not None
 _HAS_FP8_PERCHANNEL_SUPPORT = AMXFP8PerChannel_MOE is not None
@@ -86,6 +88,33 @@ def _select_gptq_int4_backend(group_size: Optional[int] = None):
         return AVXVNNI256GPTQInt4_MOE
     if _HAS_AVX2_GPTQ_INT4_SUPPORT:
         return AVX2GPTQInt4_MOE
+    return None
+
+
+def _select_rawint4_backend(group_size: Optional[int] = None):
+    forced = os.getenv("KT_RAWINT4_BACKEND", "").strip().lower()
+
+    if forced in {"amx_blocked", "blocked"}:
+        if not _HAS_RAWINT4_BLOCKED_SUPPORT:
+            raise RuntimeError(
+                "KT_RAWINT4_BACKEND=blocked requested, but AMXInt4_KGroupBlocked_MOE is not compiled in."
+            )
+        return AMXInt4_KGroupBlocked_MOE
+
+    if forced == "amx":
+        if not _HAS_RAWINT4_SUPPORT:
+            raise RuntimeError("KT_RAWINT4_BACKEND=amx requested, but AMXInt4_KGroup_MOE is not compiled in.")
+        return AMXInt4_KGroup_MOE
+
+    if forced:
+        raise RuntimeError(
+            f"Unsupported KT_RAWINT4_BACKEND={forced!r}. Supported values are: amx, blocked, amx_blocked."
+        )
+
+    if _HAS_RAWINT4_SUPPORT:
+        return AMXInt4_KGroup_MOE
+    if _HAS_RAWINT4_BLOCKED_SUPPORT:
+        return AMXInt4_KGroupBlocked_MOE
     return None
 
 
@@ -589,7 +618,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
             moe_config.quant_config.bits = 4
             moe_config.quant_config.group_size = group_size
             moe_config.quant_config.zero_point = False
-            self.moe = AMXInt4_KGroup_MOE(moe_config)
+            backend_cls = _select_rawint4_backend(group_size)
+            if backend_cls is None:
+                raise RuntimeError(
+                    "No RAWINT4 backend is available after runtime selection for "
+                    f"group_size={group_size}."
+                )
+            self.moe = backend_cls(moe_config)
         elif self.method == "FP8":
             moe_config.quant_config.bits = 8
             moe_config.quant_config.group_size = 128

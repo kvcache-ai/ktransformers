@@ -802,6 +802,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
+  bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroupBlocked>>(moe_module, "AMXInt4_KGroupBlocked_MOE");
 #if defined(__AVX512F__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
