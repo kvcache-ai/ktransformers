@@ -71,6 +71,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     ggml_bf16_t* intermediate_cache = nullptr;
     ggml_bf16_t* down_output_cache = nullptr;
     float* down_lora_u_cache = nullptr;
+    float* gate_lora_u_cache = nullptr;
+    float* up_lora_u_cache = nullptr;
 
     std::vector<ggml_bf16_t> input_storage;
     std::vector<ggml_bf16_t> gate_output_storage;
@@ -78,6 +80,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     std::vector<ggml_bf16_t> intermediate_storage;
     std::vector<ggml_bf16_t> down_output_storage;
     std::vector<float> down_lora_u_storage;
+    std::vector<float> gate_lora_u_storage;
+    std::vector<float> up_lora_u_storage;
 
     std::vector<int64_t> expert_ids_cache;
     std::vector<float> weights_cache;
@@ -93,6 +97,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   std::vector<K2ForwardCache> cache_stack_;
   int cache_stack_top_ = 0;
   std::vector<size_t> cache_offsets_;
+  mutable std::vector<ggml_bf16_t> gate_up_route_grad_scratch_;
 
   std::vector<ggml_bf16_t> gate_lora_b_transposed_;
   std::vector<ggml_bf16_t> up_lora_b_transposed_;
@@ -189,14 +194,16 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const size_t input_elems = static_cast<size_t>(qlen) * config_.hidden_size;
     const size_t inter_elems = static_cast<size_t>(total_tokens) * config_.intermediate_size;
     const size_t down_elems = static_cast<size_t>(total_tokens) * config_.hidden_size;
-    const size_t down_lora_u_elems = static_cast<size_t>(total_tokens) * std::max(lora_rank_, 0);
+    const size_t lora_u_elems = static_cast<size_t>(total_tokens) * std::max(lora_rank_, 0);
 
     cache.input_storage.resize(input_elems);
     cache.gate_output_storage.resize(inter_elems);
     cache.up_output_storage.resize(inter_elems);
     cache.intermediate_storage.resize(inter_elems);
     cache.down_output_storage.resize(down_elems);
-    cache.down_lora_u_storage.resize(down_lora_u_elems);
+    cache.down_lora_u_storage.resize(lora_u_elems);
+    cache.gate_lora_u_storage.resize(lora_u_elems);
+    cache.up_lora_u_storage.resize(lora_u_elems);
 
     cache.input_cache = cache.input_storage.data();
     cache.gate_output_cache = cache.gate_output_storage.data();
@@ -204,6 +211,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     cache.intermediate_cache = cache.intermediate_storage.data();
     cache.down_output_cache = cache.down_output_storage.data();
     cache.down_lora_u_cache = cache.down_lora_u_storage.empty() ? nullptr : cache.down_lora_u_storage.data();
+    cache.gate_lora_u_cache = cache.gate_lora_u_storage.empty() ? nullptr : cache.gate_lora_u_storage.data();
+    cache.up_lora_u_cache = cache.up_lora_u_storage.empty() ? nullptr : cache.up_lora_u_storage.data();
 
     cache.expert_ids_cache.resize(static_cast<size_t>(qlen) * k);
     cache.weights_cache.resize(static_cast<size_t>(qlen) * k);
@@ -299,7 +308,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-  void compute_lora_gate_up(int activated_expert) {
+  void compute_lora_gate_up(int activated_expert, K2ForwardCache* cache) {
     if (!has_gate_up_lora()) return;
     prepare_lora_b_transposed();
 
@@ -312,7 +321,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     pool->do_work_stealing_job(
         activated_expert * 2 * nth, nullptr,
-        [this, hidden, inter_size, rank, scale, nth](int task_id) {
+        [this, cache, hidden, inter_size, rank, scale, nth](int task_id) {
           bool do_up = (task_id / nth) % 2;
           int expert_task = task_id / (2 * nth);
           int ith = task_id % nth;
@@ -340,6 +349,14 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           std::vector<float> local_intermediate(static_cast<size_t>(local_num_tokens) * rank);
           avx::lora_bf16_matmul_t4r4(this->m_local_input_ptr_[expert_idx] + static_cast<size_t>(t_start) * hidden,
                                      expert_lora_a, local_intermediate.data(), local_num_tokens, hidden, rank);
+          if (cache != nullptr) {
+            float* cache_u = do_up ? cache->up_lora_u_cache : cache->gate_lora_u_cache;
+            if (cache_u != nullptr) {
+              float* dst_u = cache_u + (cache_offsets_[expert_task] + t_start) * static_cast<size_t>(rank);
+              std::memcpy(dst_u, local_intermediate.data(),
+                          static_cast<size_t>(local_num_tokens) * rank * sizeof(float));
+            }
+          }
           avx::lora_fp32_bf16_fused_add_transposed(local_intermediate.data(), expert_lora_b_t,
                                                    output + static_cast<size_t>(t_start) * inter_size, local_num_tokens,
                                                    rank, inter_size, scale);
@@ -397,11 +414,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         nullptr);
   }
 
-  void save_to_cache(K2ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
-                     int activated_expert, const void* input) {
+  void prepare_cache_for_backward(K2ForwardCache& cache, int qlen, int k, const int64_t* expert_ids,
+                                  const float* weights, int activated_expert, const void* input) {
     cache.qlen_cache = qlen;
     cache.k_cache = k;
     cache.activated_expert_cache = activated_expert;
+    cache.valid = false;
 
     cache_offsets_.assign(static_cast<size_t>(activated_expert) + 1, 0);
     for (int i = 0; i < activated_expert; i++) {
@@ -422,6 +440,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
 
     std::memcpy(cache.input_cache, input, static_cast<size_t>(qlen) * config_.hidden_size * sizeof(ggml_bf16_t));
+  }
+
+  void save_gate_up_to_cache(K2ForwardCache& cache, int activated_expert) {
     for (int i = 0; i < activated_expert; i++) {
       int expert_idx = this->m_expert_id_map_[i];
       int num_tokens = this->m_local_num_[expert_idx];
@@ -433,8 +454,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::memcpy(cache.up_output_cache + offset * config_.intermediate_size, this->m_local_up_output_ptr_[expert_idx],
                   static_cast<size_t>(num_tokens) * config_.intermediate_size * sizeof(ggml_bf16_t));
     }
-
     cache.valid = true;
+  }
+
+  void save_to_cache(K2ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
+                     int activated_expert, const void* input) {
+    prepare_cache_for_backward(cache, qlen, k, expert_ids, weights, activated_expert, input);
+    save_gate_up_to_cache(cache, activated_expert);
   }
 
   void save_intermediate_to_cache(K2ForwardCache& cache, int activated_expert) {
@@ -520,6 +546,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   struct TP1BackwardLayout {
     std::vector<size_t> expert_base;
     std::vector<int> expert_task_index;
+    std::vector<int> row_to_token;
     size_t total_tokens = 0;
   };
 
@@ -618,6 +645,22 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   static bool tp_gate_up_a_input_rank2_vec_enabled() {
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_TP_GATE_UP_A_INPUT_RANK2_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool rank8_vec_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_RANK8_VEC");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+  }
+
+  static bool reuse_down_lora_bprop_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_REUSE_DOWN_BPROP");
       return value == nullptr || value[0] == '\0' || value[0] != '0';
     }();
     return enabled;
@@ -753,6 +796,75 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return _mm512_castsi512_ps(_mm512_slli_epi32(expanded, 16));
   }
 
+  static inline void bf16_dot8_scalar(const ggml_bf16_t* input, const ggml_bf16_t* lora_a, int hidden, float* out) {
+    for (int r = 0; r < 8; r++) {
+      const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
+      float acc = 0.0f;
+      for (int h = 0; h < hidden; h++) {
+        acc += GGML_BF16_TO_FP32(input[h]) * GGML_BF16_TO_FP32(a_row[h]);
+      }
+      out[r] = acc;
+    }
+  }
+
+  static inline void bf16_dot8_lora_u(const ggml_bf16_t* input, const ggml_bf16_t* lora_a, int hidden, float* out) {
+    if (!rank8_vec_enabled()) {
+      bf16_dot8_scalar(input, lora_a, hidden, out);
+      return;
+    }
+#if defined(__AVX512BF16__)
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    __m512 acc4 = _mm512_setzero_ps();
+    __m512 acc5 = _mm512_setzero_ps();
+    __m512 acc6 = _mm512_setzero_ps();
+    __m512 acc7 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 31 < hidden; h += 32) {
+      const __m512bh x = (__m512bh)_mm512_loadu_si512(reinterpret_cast<const __m512i*>(input + h));
+      acc0 = _mm512_dpbf16_ps(acc0, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(0) * hidden + h)));
+      acc1 = _mm512_dpbf16_ps(acc1, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(1) * hidden + h)));
+      acc2 = _mm512_dpbf16_ps(acc2, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(2) * hidden + h)));
+      acc3 = _mm512_dpbf16_ps(acc3, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(3) * hidden + h)));
+      acc4 = _mm512_dpbf16_ps(acc4, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(4) * hidden + h)));
+      acc5 = _mm512_dpbf16_ps(acc5, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(5) * hidden + h)));
+      acc6 = _mm512_dpbf16_ps(acc6, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(6) * hidden + h)));
+      acc7 = _mm512_dpbf16_ps(acc7, x, (__m512bh)_mm512_loadu_si512(
+                                           reinterpret_cast<const __m512i*>(lora_a + static_cast<size_t>(7) * hidden + h)));
+    }
+    out[0] = _mm512_reduce_add_ps(acc0);
+    out[1] = _mm512_reduce_add_ps(acc1);
+    out[2] = _mm512_reduce_add_ps(acc2);
+    out[3] = _mm512_reduce_add_ps(acc3);
+    out[4] = _mm512_reduce_add_ps(acc4);
+    out[5] = _mm512_reduce_add_ps(acc5);
+    out[6] = _mm512_reduce_add_ps(acc6);
+    out[7] = _mm512_reduce_add_ps(acc7);
+    for (; h < hidden; h++) {
+      const float x = GGML_BF16_TO_FP32(input[h]);
+      out[0] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(0) * hidden + h]);
+      out[1] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(1) * hidden + h]);
+      out[2] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(2) * hidden + h]);
+      out[3] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(3) * hidden + h]);
+      out[4] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(4) * hidden + h]);
+      out[5] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(5) * hidden + h]);
+      out[6] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(6) * hidden + h]);
+      out[7] += x * GGML_BF16_TO_FP32(lora_a[static_cast<size_t>(7) * hidden + h]);
+    }
+#else
+    bf16_dot8_scalar(input, lora_a, hidden, out);
+#endif
+  }
+
   static inline void down_bprop_rank2_scalar(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
                                              float& out0, float& out1) {
     float gb0 = 0.0f;
@@ -812,6 +924,108 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 #endif
   }
 
+  static inline void down_bprop_rank8_scalar(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                             float* out) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    float gb2 = 0.0f;
+    float gb3 = 0.0f;
+    float gb4 = 0.0f;
+    float gb5 = 0.0f;
+    float gb6 = 0.0f;
+    float gb7 = 0.0f;
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = expert_down_b + static_cast<size_t>(h) * 8;
+      gb0 += g * GGML_BF16_TO_FP32(b[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b[1]);
+      gb2 += g * GGML_BF16_TO_FP32(b[2]);
+      gb3 += g * GGML_BF16_TO_FP32(b[3]);
+      gb4 += g * GGML_BF16_TO_FP32(b[4]);
+      gb5 += g * GGML_BF16_TO_FP32(b[5]);
+      gb6 += g * GGML_BF16_TO_FP32(b[6]);
+      gb7 += g * GGML_BF16_TO_FP32(b[7]);
+    }
+    out[0] = gb0;
+    out[1] = gb1;
+    out[2] = gb2;
+    out[3] = gb3;
+    out[4] = gb4;
+    out[5] = gb5;
+    out[6] = gb6;
+    out[7] = gb7;
+  }
+
+  static inline __m512 bf16_pair_lo_to_fp32(__m512i v) {
+    return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_and_si512(v, _mm512_set1_epi32(0xffff)), 16));
+  }
+
+  static inline __m512 bf16_pair_hi_to_fp32(__m512i v) {
+    return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_srli_epi32(v, 16), 16));
+  }
+
+  static inline void down_bprop_rank8_vec(const float* grad_down_row, const ggml_bf16_t* expert_down_b, int hidden,
+                                          float* out) {
+    if (!rank8_vec_enabled()) {
+      down_bprop_rank8_scalar(grad_down_row, expert_down_b, hidden, out);
+      return;
+    }
+#if defined(__AVX512F__)
+    alignas(64) static const int32_t byte_offsets_values[16] = {0,   16,  32,  48,  64,  80,  96,  112,
+                                                                128, 144, 160, 176, 192, 208, 224, 240};
+    const __m512i byte_offsets = _mm512_load_si512(reinterpret_cast<const __m512i*>(byte_offsets_values));
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    __m512 acc2 = _mm512_setzero_ps();
+    __m512 acc3 = _mm512_setzero_ps();
+    __m512 acc4 = _mm512_setzero_ps();
+    __m512 acc5 = _mm512_setzero_ps();
+    __m512 acc6 = _mm512_setzero_ps();
+    __m512 acc7 = _mm512_setzero_ps();
+    int h = 0;
+    for (; h + 15 < hidden; h += 16) {
+      const __m512 g = _mm512_loadu_ps(grad_down_row + h);
+      const ggml_bf16_t* base = expert_down_b + static_cast<size_t>(h) * 8;
+      const __m512i b01 = _mm512_i32gather_epi32(byte_offsets, base + 0, 1);
+      const __m512i b23 = _mm512_i32gather_epi32(byte_offsets, base + 2, 1);
+      const __m512i b45 = _mm512_i32gather_epi32(byte_offsets, base + 4, 1);
+      const __m512i b67 = _mm512_i32gather_epi32(byte_offsets, base + 6, 1);
+      acc0 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b01), acc0);
+      acc1 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b01), acc1);
+      acc2 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b23), acc2);
+      acc3 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b23), acc3);
+      acc4 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b45), acc4);
+      acc5 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b45), acc5);
+      acc6 = _mm512_fmadd_ps(g, bf16_pair_lo_to_fp32(b67), acc6);
+      acc7 = _mm512_fmadd_ps(g, bf16_pair_hi_to_fp32(b67), acc7);
+    }
+    out[0] = _mm512_reduce_add_ps(acc0);
+    out[1] = _mm512_reduce_add_ps(acc1);
+    out[2] = _mm512_reduce_add_ps(acc2);
+    out[3] = _mm512_reduce_add_ps(acc3);
+    out[4] = _mm512_reduce_add_ps(acc4);
+    out[5] = _mm512_reduce_add_ps(acc5);
+    out[6] = _mm512_reduce_add_ps(acc6);
+    out[7] = _mm512_reduce_add_ps(acc7);
+    for (; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = expert_down_b + static_cast<size_t>(h) * 8;
+      out[0] += g * GGML_BF16_TO_FP32(b[0]);
+      out[1] += g * GGML_BF16_TO_FP32(b[1]);
+      out[2] += g * GGML_BF16_TO_FP32(b[2]);
+      out[3] += g * GGML_BF16_TO_FP32(b[3]);
+      out[4] += g * GGML_BF16_TO_FP32(b[4]);
+      out[5] += g * GGML_BF16_TO_FP32(b[5]);
+      out[6] += g * GGML_BF16_TO_FP32(b[6]);
+      out[7] += g * GGML_BF16_TO_FP32(b[7]);
+    }
+#else
+    down_bprop_rank8_scalar(grad_down_row, expert_down_b, hidden, out);
+#endif
+  }
+
   static inline void accumulate_down_lora_b_rank2_scalar(const float* grad_down_row, float u0_scaled, float u1_scaled,
                                                          int hidden, float* grad_b) {
     for (int h = 0; h < hidden; h++) {
@@ -857,6 +1071,42 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
 #else
     accumulate_down_lora_b_rank2_scalar(grad_down_row, u0_scaled, u1_scaled, hidden, grad_b);
+#endif
+  }
+
+  static inline void accumulate_down_lora_b_rank8_scalar(const float* grad_down_row, const float* u_scaled, int hidden,
+                                                         float* grad_b) {
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* row = grad_b + static_cast<size_t>(h) * 8;
+      row[0] += g * u_scaled[0];
+      row[1] += g * u_scaled[1];
+      row[2] += g * u_scaled[2];
+      row[3] += g * u_scaled[3];
+      row[4] += g * u_scaled[4];
+      row[5] += g * u_scaled[5];
+      row[6] += g * u_scaled[6];
+      row[7] += g * u_scaled[7];
+    }
+  }
+
+  static inline void accumulate_down_lora_b_rank8_vec(const float* grad_down_row, const float* u_scaled, int hidden,
+                                                      float* grad_b) {
+    if (!rank8_vec_enabled()) {
+      accumulate_down_lora_b_rank8_scalar(grad_down_row, u_scaled, hidden, grad_b);
+      return;
+    }
+#if defined(__AVX2__)
+    const __m256 u = _mm256_loadu_ps(u_scaled);
+    for (int h = 0; h < hidden; h++) {
+      const float g = grad_down_row[h];
+      if (g == 0.0f) continue;
+      float* row = grad_b + static_cast<size_t>(h) * 8;
+      _mm256_storeu_ps(row, _mm256_fmadd_ps(_mm256_set1_ps(g), u, _mm256_loadu_ps(row)));
+    }
+#else
+    accumulate_down_lora_b_rank8_scalar(grad_down_row, u_scaled, hidden, grad_b);
 #endif
   }
 
@@ -946,6 +1196,84 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 #endif
   }
 
+  static inline __m256 bf16x8_to_fp32(__m128i v) {
+    const __m256i expanded = _mm256_cvtepu16_epi32(v);
+    return _mm256_castsi256_ps(_mm256_slli_epi32(expanded, 16));
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank8_scalar(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                            const float* u_scaled, int inter_size, float* grad_b,
+                                                            float* out) {
+    float gb0 = 0.0f;
+    float gb1 = 0.0f;
+    float gb2 = 0.0f;
+    float gb3 = 0.0f;
+    float gb4 = 0.0f;
+    float gb5 = 0.0f;
+    float gb6 = 0.0f;
+    float gb7 = 0.0f;
+    for (int i = 0; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const ggml_bf16_t* b = lora_b + static_cast<size_t>(i) * 8;
+      if (grad_b != nullptr) {
+        float* row = grad_b + static_cast<size_t>(i) * 8;
+        row[0] += g * u_scaled[0];
+        row[1] += g * u_scaled[1];
+        row[2] += g * u_scaled[2];
+        row[3] += g * u_scaled[3];
+        row[4] += g * u_scaled[4];
+        row[5] += g * u_scaled[5];
+        row[6] += g * u_scaled[6];
+        row[7] += g * u_scaled[7];
+      }
+      gb0 += g * GGML_BF16_TO_FP32(b[0]);
+      gb1 += g * GGML_BF16_TO_FP32(b[1]);
+      gb2 += g * GGML_BF16_TO_FP32(b[2]);
+      gb3 += g * GGML_BF16_TO_FP32(b[3]);
+      gb4 += g * GGML_BF16_TO_FP32(b[4]);
+      gb5 += g * GGML_BF16_TO_FP32(b[5]);
+      gb6 += g * GGML_BF16_TO_FP32(b[6]);
+      gb7 += g * GGML_BF16_TO_FP32(b[7]);
+    }
+    out[0] = gb0;
+    out[1] = gb1;
+    out[2] = gb2;
+    out[3] = gb3;
+    out[4] = gb4;
+    out[5] = gb5;
+    out[6] = gb6;
+    out[7] = gb7;
+  }
+
+  static inline void accumulate_gate_up_lora_b_rank8_vec(const float* grad_row, const ggml_bf16_t* lora_b,
+                                                         const float* u_scaled, int inter_size, float* grad_b,
+                                                         float* out) {
+    if (!rank8_vec_enabled()) {
+      accumulate_gate_up_lora_b_rank8_scalar(grad_row, lora_b, u_scaled, inter_size, grad_b, out);
+      return;
+    }
+#if defined(__AVX2__)
+    const __m256 u = _mm256_loadu_ps(u_scaled);
+    __m256 acc = _mm256_setzero_ps();
+    for (int i = 0; i < inter_size; i++) {
+      const float g = grad_row[i];
+      if (g == 0.0f) continue;
+      const __m256 gv = _mm256_set1_ps(g);
+      acc = _mm256_fmadd_ps(gv, bf16x8_to_fp32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(
+                                       lora_b + static_cast<size_t>(i) * 8))),
+                            acc);
+      if (grad_b != nullptr) {
+        float* row = grad_b + static_cast<size_t>(i) * 8;
+        _mm256_storeu_ps(row, _mm256_fmadd_ps(gv, u, _mm256_loadu_ps(row)));
+      }
+    }
+    _mm256_storeu_ps(out, acc);
+#else
+    accumulate_gate_up_lora_b_rank8_scalar(grad_row, lora_b, u_scaled, inter_size, grad_b, out);
+#endif
+  }
+
   static inline void accumulate_gate_up_a_input_rank2_scalar(const ggml_bf16_t* input_row, const ggml_bf16_t* a0,
                                                              const ggml_bf16_t* a1, float gu0, float gu1, int hidden,
                                                              float* grad_input_row, float* grad_a0, float* grad_a1) {
@@ -1016,6 +1344,113 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 #endif
   }
 
+  static inline void accumulate_lora_a_input_rank8_scalar(const ggml_bf16_t* input_row, const ggml_bf16_t* lora_a,
+                                                          const float* gu_scaled, int width, float* grad_dst,
+                                                          float* grad_a) {
+    for (int r = 0; r < 8; r++) {
+      const float gu = gu_scaled[r];
+      const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * width;
+      float* grad_a_row = grad_a == nullptr ? nullptr : grad_a + static_cast<size_t>(r) * width;
+      for (int h = 0; h < width; h++) {
+        if (grad_a_row != nullptr) {
+          grad_a_row[h] += gu * GGML_BF16_TO_FP32(input_row[h]);
+        }
+        if (grad_dst != nullptr) {
+          grad_dst[h] += gu * GGML_BF16_TO_FP32(a_row[h]);
+        }
+      }
+    }
+  }
+
+  static inline void accumulate_lora_a_input_rank8_vec(const ggml_bf16_t* input_row, const ggml_bf16_t* lora_a,
+                                                       const float* gu_scaled, int width, float* grad_dst,
+                                                       float* grad_a) {
+    if (!rank8_vec_enabled()) {
+      accumulate_lora_a_input_rank8_scalar(input_row, lora_a, gu_scaled, width, grad_dst, grad_a);
+      return;
+    }
+#if defined(__AVX512F__)
+    const __m512 gu0 = _mm512_set1_ps(gu_scaled[0]);
+    const __m512 gu1 = _mm512_set1_ps(gu_scaled[1]);
+    const __m512 gu2 = _mm512_set1_ps(gu_scaled[2]);
+    const __m512 gu3 = _mm512_set1_ps(gu_scaled[3]);
+    const __m512 gu4 = _mm512_set1_ps(gu_scaled[4]);
+    const __m512 gu5 = _mm512_set1_ps(gu_scaled[5]);
+    const __m512 gu6 = _mm512_set1_ps(gu_scaled[6]);
+    const __m512 gu7 = _mm512_set1_ps(gu_scaled[7]);
+    int h = 0;
+    for (; h + 15 < width; h += 16) {
+      const __m512 x = grad_a == nullptr
+                           ? _mm512_setzero_ps()
+                           : bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(input_row + h)));
+      const __m512 a0 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(0) * width + h)));
+      const __m512 a1 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(1) * width + h)));
+      const __m512 a2 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(2) * width + h)));
+      const __m512 a3 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(3) * width + h)));
+      const __m512 a4 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(4) * width + h)));
+      const __m512 a5 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(5) * width + h)));
+      const __m512 a6 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(6) * width + h)));
+      const __m512 a7 = bf16x16_to_fp32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(lora_a + static_cast<size_t>(7) * width + h)));
+
+      if (grad_a != nullptr) {
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(0) * width + h,
+                         _mm512_fmadd_ps(gu0, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(0) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(1) * width + h,
+                         _mm512_fmadd_ps(gu1, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(1) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(2) * width + h,
+                         _mm512_fmadd_ps(gu2, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(2) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(3) * width + h,
+                         _mm512_fmadd_ps(gu3, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(3) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(4) * width + h,
+                         _mm512_fmadd_ps(gu4, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(4) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(5) * width + h,
+                         _mm512_fmadd_ps(gu5, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(5) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(6) * width + h,
+                         _mm512_fmadd_ps(gu6, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(6) * width + h)));
+        _mm512_storeu_ps(grad_a + static_cast<size_t>(7) * width + h,
+                         _mm512_fmadd_ps(gu7, x, _mm512_loadu_ps(grad_a + static_cast<size_t>(7) * width + h)));
+      }
+      if (grad_dst != nullptr) {
+        __m512 dst = _mm512_loadu_ps(grad_dst + h);
+        dst = _mm512_fmadd_ps(gu0, a0, dst);
+        dst = _mm512_fmadd_ps(gu1, a1, dst);
+        dst = _mm512_fmadd_ps(gu2, a2, dst);
+        dst = _mm512_fmadd_ps(gu3, a3, dst);
+        dst = _mm512_fmadd_ps(gu4, a4, dst);
+        dst = _mm512_fmadd_ps(gu5, a5, dst);
+        dst = _mm512_fmadd_ps(gu6, a6, dst);
+        dst = _mm512_fmadd_ps(gu7, a7, dst);
+        _mm512_storeu_ps(grad_dst + h, dst);
+      }
+    }
+    if (h < width) {
+      for (int r = 0; r < 8; r++) {
+        const float gu = gu_scaled[r];
+        const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * width;
+        float* grad_a_row = grad_a == nullptr ? nullptr : grad_a + static_cast<size_t>(r) * width;
+        for (int tail = h; tail < width; tail++) {
+          if (grad_a_row != nullptr) {
+            grad_a_row[tail] += gu * GGML_BF16_TO_FP32(input_row[tail]);
+          }
+          if (grad_dst != nullptr) {
+            grad_dst[tail] += gu * GGML_BF16_TO_FP32(a_row[tail]);
+          }
+        }
+      }
+    }
+#else
+    accumulate_lora_a_input_rank8_scalar(input_row, lora_a, gu_scaled, width, grad_dst, grad_a);
+#endif
+  }
+
   static inline void fmadd_int4_group32(const uint8_t* group_packed, __m512 scale_vec, __m512i zero_point,
                                         __m128i nibble_mask, __m512& f0, __m512& f1) {
     const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
@@ -1027,6 +1462,194 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     const __m512i vals1 = _mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point);
     f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
     f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
+  }
+
+  // Compute eight expert-packed rows together so each RAWINT4 KGroup=32
+  // weight tile is unpacked and dequantized once, then reused by all rows.
+  // Accumulation stays in FP32 registers for the full K dimension.  This is
+  // the production large-M backward path; smaller expert batches keep the
+  // existing packed GEMV helpers below.
+  void rawint4_backward_matmat_m8_f32(const uint8_t* packed, const float* scales, const float* input, int rows,
+                                      int cols, float* output) const {
+    const int group_size = config_.quant_config.group_size;
+    if (group_size != 32 || (cols % 32) != 0) {
+      for (int m = 0; m < 8; m++) {
+        add_scaled_packed_rows_f32(packed, scales, input + static_cast<size_t>(m) * rows, rows, cols,
+                                   output + static_cast<size_t>(m) * cols, true);
+      }
+      return;
+    }
+
+    const int groups_per_row = cols / 32;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      const int col = group * 32;
+      __m512 acc0_lo = _mm512_loadu_ps(output + col);
+      __m512 acc0_hi = _mm512_loadu_ps(output + col + 16);
+      __m512 acc1_lo = _mm512_loadu_ps(output + static_cast<size_t>(1) * cols + col);
+      __m512 acc1_hi = _mm512_loadu_ps(output + static_cast<size_t>(1) * cols + col + 16);
+      __m512 acc2_lo = _mm512_loadu_ps(output + static_cast<size_t>(2) * cols + col);
+      __m512 acc2_hi = _mm512_loadu_ps(output + static_cast<size_t>(2) * cols + col + 16);
+      __m512 acc3_lo = _mm512_loadu_ps(output + static_cast<size_t>(3) * cols + col);
+      __m512 acc3_hi = _mm512_loadu_ps(output + static_cast<size_t>(3) * cols + col + 16);
+      __m512 acc4_lo = _mm512_loadu_ps(output + static_cast<size_t>(4) * cols + col);
+      __m512 acc4_hi = _mm512_loadu_ps(output + static_cast<size_t>(4) * cols + col + 16);
+      __m512 acc5_lo = _mm512_loadu_ps(output + static_cast<size_t>(5) * cols + col);
+      __m512 acc5_hi = _mm512_loadu_ps(output + static_cast<size_t>(5) * cols + col + 16);
+      __m512 acc6_lo = _mm512_loadu_ps(output + static_cast<size_t>(6) * cols + col);
+      __m512 acc6_hi = _mm512_loadu_ps(output + static_cast<size_t>(6) * cols + col + 16);
+      __m512 acc7_lo = _mm512_loadu_ps(output + static_cast<size_t>(7) * cols + col);
+      __m512 acc7_hi = _mm512_loadu_ps(output + static_cast<size_t>(7) * cols + col + 16);
+
+      for (int row = 0; row < rows; row++) {
+        const uint8_t* group_packed =
+            packed + static_cast<size_t>(row) * (cols / 2) + static_cast<size_t>(group) * 16;
+        const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(group_packed));
+        const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+        const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+        const __m128i interleaved_lo = _mm_unpacklo_epi8(low4, high4);
+        const __m128i interleaved_hi = _mm_unpackhi_epi8(low4, high4);
+        const __m512 scale = _mm512_set1_ps(scales[static_cast<size_t>(row) * groups_per_row + group]);
+        const __m512 weight_lo = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_lo), zero_point)), scale);
+        const __m512 weight_hi = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(interleaved_hi), zero_point)), scale);
+
+#define KT_K2_SFT_M8_FMA(M)                                                                                       \
+  do {                                                                                                             \
+    const __m512 coeff = _mm512_set1_ps(input[static_cast<size_t>(M) * rows + row]);                               \
+    acc##M##_lo = _mm512_fmadd_ps(weight_lo, coeff, acc##M##_lo);                                                  \
+    acc##M##_hi = _mm512_fmadd_ps(weight_hi, coeff, acc##M##_hi);                                                  \
+  } while (0)
+        KT_K2_SFT_M8_FMA(0);
+        KT_K2_SFT_M8_FMA(1);
+        KT_K2_SFT_M8_FMA(2);
+        KT_K2_SFT_M8_FMA(3);
+        KT_K2_SFT_M8_FMA(4);
+        KT_K2_SFT_M8_FMA(5);
+        KT_K2_SFT_M8_FMA(6);
+        KT_K2_SFT_M8_FMA(7);
+#undef KT_K2_SFT_M8_FMA
+      }
+
+      _mm512_storeu_ps(output + col, acc0_lo);
+      _mm512_storeu_ps(output + col + 16, acc0_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(1) * cols + col, acc1_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(1) * cols + col + 16, acc1_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(2) * cols + col, acc2_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(2) * cols + col + 16, acc2_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(3) * cols + col, acc3_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(3) * cols + col + 16, acc3_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(4) * cols + col, acc4_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(4) * cols + col + 16, acc4_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(5) * cols + col, acc5_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(5) * cols + col + 16, acc5_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(6) * cols + col, acc6_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(6) * cols + col + 16, acc6_hi);
+      _mm512_storeu_ps(output + static_cast<size_t>(7) * cols + col, acc7_lo);
+      _mm512_storeu_ps(output + static_cast<size_t>(7) * cols + col + 16, acc7_hi);
+    }
+  }
+
+  // Fused gate/up backward for eight expert-packed route rows.  Gate and up
+  // share the K/N traversal and the FP32 accumulators; every packed weight
+  // tile is unpacked once for the eight routes.  The route result is stored as
+  // BF16 for the subsequent contention-free top-k token reduction.
+  void rawint4_gate_up_backward_matmat_m8_bf16(
+      const uint8_t* gate_packed, const float* gate_scales, const uint8_t* up_packed, const float* up_scales,
+      const float* grad_gate, const float* grad_up, int rows, int cols, ggml_bf16_t* output) const {
+    const int groups_per_row = cols / 32;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    for (int group = 0; group < groups_per_row; group++) {
+      const int col = group * 32;
+      __m512 acc0_lo = _mm512_setzero_ps();
+      __m512 acc0_hi = _mm512_setzero_ps();
+      __m512 acc1_lo = _mm512_setzero_ps();
+      __m512 acc1_hi = _mm512_setzero_ps();
+      __m512 acc2_lo = _mm512_setzero_ps();
+      __m512 acc2_hi = _mm512_setzero_ps();
+      __m512 acc3_lo = _mm512_setzero_ps();
+      __m512 acc3_hi = _mm512_setzero_ps();
+      __m512 acc4_lo = _mm512_setzero_ps();
+      __m512 acc4_hi = _mm512_setzero_ps();
+      __m512 acc5_lo = _mm512_setzero_ps();
+      __m512 acc5_hi = _mm512_setzero_ps();
+      __m512 acc6_lo = _mm512_setzero_ps();
+      __m512 acc6_hi = _mm512_setzero_ps();
+      __m512 acc7_lo = _mm512_setzero_ps();
+      __m512 acc7_hi = _mm512_setzero_ps();
+
+      for (int row = 0; row < rows; row++) {
+        const size_t packed_offset = static_cast<size_t>(row) * (cols / 2) + static_cast<size_t>(group) * 16;
+        const size_t scale_offset = static_cast<size_t>(row) * groups_per_row + group;
+        const __m128i gate16 =
+            _mm_loadu_si128(reinterpret_cast<const __m128i*>(gate_packed + packed_offset));
+        const __m128i up16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(up_packed + packed_offset));
+
+        const __m128i gate_low4 = _mm_and_si128(gate16, nibble_mask);
+        const __m128i gate_high4 = _mm_and_si128(_mm_srli_epi16(gate16, 4), nibble_mask);
+        const __m128i up_low4 = _mm_and_si128(up16, nibble_mask);
+        const __m128i up_high4 = _mm_and_si128(_mm_srli_epi16(up16, 4), nibble_mask);
+        const __m512 gate_scale = _mm512_set1_ps(gate_scales[scale_offset]);
+        const __m512 up_scale = _mm512_set1_ps(up_scales[scale_offset]);
+
+        const __m512 gate_weight_lo = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(_mm512_sub_epi32(
+                _mm512_cvtepu8_epi32(_mm_unpacklo_epi8(gate_low4, gate_high4)), zero_point)),
+            gate_scale);
+        const __m512 gate_weight_hi = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(_mm512_sub_epi32(
+                _mm512_cvtepu8_epi32(_mm_unpackhi_epi8(gate_low4, gate_high4)), zero_point)),
+            gate_scale);
+        const __m512 up_weight_lo = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(
+                _mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_unpacklo_epi8(up_low4, up_high4)), zero_point)),
+            up_scale);
+        const __m512 up_weight_hi = _mm512_mul_ps(
+            _mm512_cvtepi32_ps(
+                _mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_unpackhi_epi8(up_low4, up_high4)), zero_point)),
+            up_scale);
+
+#define KT_K2_SFT_GATE_UP_M8_FMA(M)                                                                               \
+  do {                                                                                                             \
+    const __m512 gate_coeff = _mm512_set1_ps(grad_gate[static_cast<size_t>(M) * rows + row]);                      \
+    const __m512 up_coeff = _mm512_set1_ps(grad_up[static_cast<size_t>(M) * rows + row]);                          \
+    acc##M##_lo = _mm512_fmadd_ps(gate_weight_lo, gate_coeff, acc##M##_lo);                                        \
+    acc##M##_lo = _mm512_fmadd_ps(up_weight_lo, up_coeff, acc##M##_lo);                                            \
+    acc##M##_hi = _mm512_fmadd_ps(gate_weight_hi, gate_coeff, acc##M##_hi);                                        \
+    acc##M##_hi = _mm512_fmadd_ps(up_weight_hi, up_coeff, acc##M##_hi);                                            \
+  } while (0)
+        KT_K2_SFT_GATE_UP_M8_FMA(0);
+        KT_K2_SFT_GATE_UP_M8_FMA(1);
+        KT_K2_SFT_GATE_UP_M8_FMA(2);
+        KT_K2_SFT_GATE_UP_M8_FMA(3);
+        KT_K2_SFT_GATE_UP_M8_FMA(4);
+        KT_K2_SFT_GATE_UP_M8_FMA(5);
+        KT_K2_SFT_GATE_UP_M8_FMA(6);
+        KT_K2_SFT_GATE_UP_M8_FMA(7);
+#undef KT_K2_SFT_GATE_UP_M8_FMA
+      }
+
+#define KT_K2_SFT_GATE_UP_M8_STORE(M)                                                                             \
+  do {                                                                                                             \
+    ggml_bf16_t* dst = output + static_cast<size_t>(M) * cols + col;                                               \
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), (__m256i)_mm512_cvtneps_pbh(acc##M##_lo));                \
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 16), (__m256i)_mm512_cvtneps_pbh(acc##M##_hi));           \
+  } while (0)
+      KT_K2_SFT_GATE_UP_M8_STORE(0);
+      KT_K2_SFT_GATE_UP_M8_STORE(1);
+      KT_K2_SFT_GATE_UP_M8_STORE(2);
+      KT_K2_SFT_GATE_UP_M8_STORE(3);
+      KT_K2_SFT_GATE_UP_M8_STORE(4);
+      KT_K2_SFT_GATE_UP_M8_STORE(5);
+      KT_K2_SFT_GATE_UP_M8_STORE(6);
+      KT_K2_SFT_GATE_UP_M8_STORE(7);
+#undef KT_K2_SFT_GATE_UP_M8_STORE
+    }
   }
 
   void add_scaled_packed_row_f32(const uint8_t* packed, const float* scales, int row, int cols, float coeff,
@@ -1885,6 +2508,17 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       layout.expert_task_index[expert_idx] = task;
       layout.total_tokens += static_cast<size_t>(cache.m_local_num_cache[expert_idx]);
     }
+    layout.row_to_token.assign(layout.total_tokens, -1);
+    for (int token_idx = 0; token_idx < cache.qlen_cache; token_idx++) {
+      for (int route_idx = 0; route_idx < cache.k_cache; route_idx++) {
+        const int64_t expert_id =
+            cache.expert_ids_cache[static_cast<size_t>(token_idx) * cache.k_cache + route_idx];
+        if (config_.should_skip_expert(expert_id)) continue;
+        const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
+        const size_t row = layout.expert_base[static_cast<size_t>(expert_id)] + static_cast<size_t>(local_pos);
+        layout.row_to_token[row] = token_idx;
+      }
+    }
     return layout;
   }
 
@@ -1921,7 +2555,104 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return out;
   }
 
-  // Backward Step 2.1: router/topk-weight gradient for forward Step 9 weighted merge:
+  // Large-M gate/up base backward.  Phase one writes disjoint
+  // expert-packed route rows, so expert work stealing has no output races.
+  // Phase two assigns one task per token and reduces its top-k routes into the
+  // final dX row.  The two pool jobs are sequential, never nested.
+  bool compute_gate_up_base_expert_matmat(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
+                                          const float* grad_gate, const float* grad_up,
+                                          std::vector<float>& grad_input_fp32) const {
+    const int qlen = cache.qlen_cache;
+    const int hidden = config_.hidden_size;
+    const int inter_size = config_.intermediate_size;
+    if (qlen < 10 || config_.pool == nullptr || config_.quant_config.group_size != 32 || (hidden % 32) != 0) {
+      return false;
+    }
+
+    gate_up_route_grad_scratch_.resize(layout.total_tokens * static_cast<size_t>(hidden));
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+    pool->do_work_stealing_job(
+        cache.activated_expert_cache, nullptr,
+        [&](int expert_task) {
+          const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+          const int num_tokens = cache.m_local_num_cache[expert_idx];
+          const size_t row_base = layout.expert_base[expert_idx];
+          const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
+          const auto* up_packed = reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b);
+          const float* gate_scales = this->gate_bb_[expert_idx]->d;
+          const float* up_scales = this->up_bb_[expert_idx]->d;
+
+          int local_t = 0;
+          for (; local_t + 7 < num_tokens; local_t += 8) {
+            const size_t row = row_base + static_cast<size_t>(local_t);
+            rawint4_gate_up_backward_matmat_m8_bf16(
+                gate_packed, gate_scales, up_packed, up_scales, grad_gate + row * inter_size,
+                grad_up + row * inter_size, inter_size, hidden,
+                gate_up_route_grad_scratch_.data() + row * hidden);
+          }
+
+          const int tail_tokens = num_tokens - local_t;
+          if (tail_tokens <= 0) return;
+          std::vector<float> tail_scratch(static_cast<size_t>(tail_tokens) * hidden, 0.0f);
+          for (int tail_t = 0; tail_t < tail_tokens; tail_t++) {
+            const size_t row = row_base + static_cast<size_t>(local_t + tail_t);
+            const float* gate_row = grad_gate + row * inter_size;
+            const float* up_row = grad_up + row * inter_size;
+            float* dst = tail_scratch.data() + static_cast<size_t>(tail_t) * hidden;
+            int i = 0;
+            for (; i + 15 < inter_size; i += 16) {
+              add_scaled_sixteen_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, gate_row + i,
+                                                  up_row + i, hidden, dst);
+            }
+            for (; i + 7 < inter_size; i += 8) {
+              add_scaled_eight_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, gate_row + i,
+                                                up_row + i, hidden, dst);
+            }
+            for (; i + 3 < inter_size; i += 4) {
+              add_scaled_four_gate_up_rows_f32(gate_packed, gate_scales, up_packed, up_scales, i, gate_row + i,
+                                               up_row + i, hidden, dst);
+            }
+            for (; i + 1 < inter_size; i += 2) {
+              add_scaled_four_packed_rows_f32(
+                  gate_packed, gate_scales, i, gate_row[i], up_packed, up_scales, i, up_row[i], gate_packed,
+                  gate_scales, i + 1, gate_row[i + 1], up_packed, up_scales, i + 1, up_row[i + 1], hidden, dst);
+            }
+            if (i < inter_size) {
+              add_scaled_two_packed_rows_f32(gate_packed, gate_scales, i, gate_row[i], up_packed, up_scales, i,
+                                             up_row[i], hidden, dst);
+            }
+            write_bf16_array(gate_up_route_grad_scratch_.data() + row * hidden, dst, hidden);
+          }
+        },
+        nullptr);
+
+    pool->do_work_stealing_job(
+        qlen, nullptr,
+        [&](int token_idx) {
+          float* dst = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
+          for (int route_idx = 0; route_idx < cache.k_cache; route_idx++) {
+            const int64_t expert_id =
+                cache.expert_ids_cache[static_cast<size_t>(token_idx) * cache.k_cache + route_idx];
+            if (config_.should_skip_expert(expert_id)) continue;
+            const int local_pos = cache.m_local_pos_cache[token_idx][route_idx];
+            const size_t row =
+                layout.expert_base[static_cast<size_t>(expert_id)] + static_cast<size_t>(local_pos);
+            if (layout.row_to_token[row] != token_idx) continue;
+            const ggml_bf16_t* src = gate_up_route_grad_scratch_.data() + row * hidden;
+            int h = 0;
+            for (; h + 15 < hidden; h += 16) {
+              const __m512 route =
+                  bf16x16_to_fp32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + h)));
+              _mm512_storeu_ps(dst + h, _mm512_add_ps(_mm512_loadu_ps(dst + h), route));
+            }
+            for (; h < hidden; h++) dst[h] += GGML_BF16_TO_FP32(src[h]);
+          }
+        },
+        nullptr);
+    return true;
+  }
+
+  // Shared Backward Step 2.1: router/topk-weight gradient for forward Step 9 weighted merge:
   //   output[token] += weight[token, route] * down_output[token, route].
   // Therefore dL/dweight is dot(grad_output[token], cached_down_output[token, route]).
   // Python passes a null grad_weights pointer when topk weights do not require gradients.
@@ -1958,16 +2689,16 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-  // Backward Steps 2 -> 3 for expert-packed rows:
-  //   Backward Step 2.2: scatter token grad_output to grad_down for forward Step 9.
-  //   Backward Step 3.1: down base backward for forward Step 8.
-  //   Backward Step 3.2: down LoRA B backward produces rank-space grad_times_b.
-  //   Backward Step 3.3: down LoRA A contributes to grad_intermediate.
-  //   Backward Step 3.4/3.5: optional down LoRA A/B parameter gradients.
+  // Shared Backward Steps 2 -> 3 for expert-packed rows:
+  //   Shared Backward Step 2.2: scatter token grad_output to grad_down for forward Step 9.
+  //   Shared Backward Step 3.1: down base backward for forward Step 8.
+  //   Shared Backward Step 3.2: down LoRA B backward produces rank-space grad_times_b.
+  //   Shared Backward Step 3.3: down LoRA A contributes to grad_intermediate.
   void compute_tp1_down_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout, const void* grad_output,
                                  void* grad_down, std::vector<float>* grad_down_fp32_out, void* grad_intermediate,
                                  std::vector<float>* grad_inter_fp32_out, void* grad_down_lora_a,
-                                 void* grad_down_lora_b, TP1BackwardProfile* profile = nullptr) const {
+                                 void* grad_down_lora_b, TP1BackwardProfile* profile = nullptr,
+                                 std::vector<float>* down_lora_grad_times_b_out = nullptr) const {
     if (grad_output == nullptr) {
       throw std::runtime_error("K2 RAWINT4 SFT TP=1 down backward requires grad_output");
     }
@@ -1992,7 +2723,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* grad_out = reinterpret_cast<const ggml_bf16_t*>(grad_output);
     std::vector<float> grad_down_fp32(layout.total_tokens * hidden, 0.0f);
 
-    // Backward Step 2.2: Backprop through forward Step 9 weighted merge.
+    // Shared Backward Step 2.2: Backprop through forward Step 9 weighted merge.
     // grad_down[token, route] += grad_output[token] * router_weight[token, route].
     auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     for (int token_idx = 0; token_idx < qlen; token_idx++) {
@@ -2012,7 +2743,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
     if (profile != nullptr) profile->add_since(section_start, profile->down_route_us);
 
-    // Backward Step 2.3: Optional debug/TP=1 materialization of grad_down as dense BF16.
     section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_down, grad_down_fp32);
     if (profile != nullptr) profile->add_since(section_start, profile->down_write_us);
@@ -2033,36 +2763,50 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       grad_down_a_fp32.assign(static_cast<size_t>(config_.expert_num) * rank * inter_size, 0.0f);
       grad_down_b_fp32.assign(static_cast<size_t>(config_.expert_num) * hidden * rank, 0.0f);
     }
+    if (down_lora_grad_times_b_out != nullptr) {
+      if (need_down_lora_path && rank > 0) {
+        down_lora_grad_times_b_out->assign(layout.total_tokens * static_cast<size_t>(rank), 0.0f);
+      } else {
+        down_lora_grad_times_b_out->clear();
+      }
+    }
 
-    const bool parallel_base = need_grad_intermediate && layout.total_tokens >= 10 && config_.pool != nullptr;
-    if (parallel_base) {
-      // Backward Step 3.1: Down base backward, parallel form.
-      // This is grad_intermediate += grad_down @ packed_down_weight.
+    if (need_grad_intermediate) {
+      // Shared Backward Step 3.1: expert-packed down base backward.
+      // Experts with M>=8 use an M8xKxN RAWINT4 mat-mat tile; small experts
+      // retain the established packed GEMV path as the correctness/latency
+      // fallback.  Work stealing is over experts, never a nested pool.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-      std::vector<int> row_to_expert(layout.total_tokens, -1);
-      for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
+      auto compute_expert_base = [&](int expert_task) {
         const int expert_idx = cache.m_expert_id_map_cache[expert_task];
         const int num_tokens = cache.m_local_num_cache[expert_idx];
         const size_t row_base = layout.expert_base[expert_idx];
-        for (int local_t = 0; local_t < num_tokens; local_t++) {
-          row_to_expert[row_base + static_cast<size_t>(local_t)] = expert_idx;
+        const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
+        const float* down_scales = this->down_bb_[expert_idx]->d;
+
+        int local_t = 0;
+        for (; local_t + 7 < num_tokens; local_t += 8) {
+          const size_t row = row_base + static_cast<size_t>(local_t);
+          rawint4_backward_matmat_m8_f32(down_packed, down_scales, grad_down_fp32.data() + row * hidden, hidden,
+                                         inter_size, grad_inter_fp32.data() + row * inter_size);
+        }
+        for (; local_t < num_tokens; local_t++) {
+          const size_t row = row_base + static_cast<size_t>(local_t);
+          const float* grad_down_row = grad_down_fp32.data() + row * hidden;
+          float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
+          add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
+                                     layout.total_tokens >= 10 || short_base_fastpath_enabled());
+        }
+      };
+
+      if (layout.total_tokens >= 10 && config_.pool != nullptr) {
+        auto pool = config_.pool->get_subpool(tp_part_idx);
+        pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_base, nullptr);
+      } else {
+        for (int expert_task = 0; expert_task < cache.activated_expert_cache; expert_task++) {
+          compute_expert_base(expert_task);
         }
       }
-
-      auto pool = config_.pool->get_subpool(tp_part_idx);
-      pool->do_work_stealing_job(
-          static_cast<int>(layout.total_tokens), nullptr,
-          [&](int row_idx) {
-            const int expert_idx = row_to_expert[static_cast<size_t>(row_idx)];
-            if (expert_idx < 0) return;
-            const float* grad_down_row = grad_down_fp32.data() + static_cast<size_t>(row_idx) * hidden;
-            float* grad_inter_row = grad_inter_fp32.data() + static_cast<size_t>(row_idx) * inter_size;
-            const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
-            const float* down_scales = this->down_bb_[expert_idx]->d;
-            add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
-                                       true);
-          },
-          nullptr);
       if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
     }
 
@@ -2076,20 +2820,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         const size_t row = row_base + static_cast<size_t>(local_t);
         const float* grad_down_row = grad_down_fp32.data() + row * hidden;
 
-        if (need_grad_intermediate && !parallel_base) {
-          // Backward Step 3.1: Down base backward, serial/small-q_len form.
-          section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-          float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
-          const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
-          const float* down_scales = this->down_bb_[expert_idx]->d;
-          add_scaled_packed_rows_f32(down_packed, down_scales, grad_down_row, hidden, inter_size, grad_inter_row,
-                                     layout.total_tokens >= 10 || short_base_fastpath_enabled());
-          if (profile != nullptr) profile->add_since(section_start, profile->down_base_us);
-        }
-
         if (!need_down_lora_path) continue;
 
-        // Backward Step 3.2: Backprop through down LoRA B.
+        // Shared Backward Step 3.2: Backprop through down LoRA B.
         // grad_times_b is the rank-space gradient before applying down LoRA A.
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
         const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
@@ -2100,6 +2833,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
           grad_times_b[0] = gb0;
           grad_times_b[1] = gb1;
+        } else if (rank == 8) {
+          down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
         } else {
           for (int h = 0; h < hidden; h++) {
             const float g = grad_down_row[h];
@@ -2111,45 +2846,65 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           }
         }
         if (profile != nullptr) profile->add_since(section_start, profile->down_lora_bprop_us);
+        if (down_lora_grad_times_b_out != nullptr && !down_lora_grad_times_b_out->empty()) {
+          float* cached_grad_times_b = down_lora_grad_times_b_out->data() + row * static_cast<size_t>(rank);
+          std::copy(grad_times_b.begin(), grad_times_b.end(), cached_grad_times_b);
+        }
 
         const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
         if (need_grad_intermediate) {
-          // Backward Step 3.3: Add down LoRA contribution to grad_intermediate.
+          // Shared Backward Step 3.3: Add down LoRA contribution to grad_intermediate.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           float* grad_inter_row = grad_inter_fp32.data() + row * inter_size;
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
-            for (int i = 0; i < inter_size; i++) {
-              grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+          if (rank == 8) {
+            alignas(32) float gu_scaled[8];
+            for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+            accumulate_lora_a_input_rank8_vec(nullptr, expert_down_a, gu_scaled, inter_size, grad_inter_row,
+                                              nullptr);
+          } else {
+            for (int r = 0; r < rank; r++) {
+              const float gu = grad_times_b[r] * lora_scaling_;
+              const ggml_bf16_t* down_a_row = expert_down_a + static_cast<size_t>(r) * inter_size;
+              for (int i = 0; i < inter_size; i++) {
+                grad_inter_row[i] += gu * GGML_BF16_TO_FP32(down_a_row[i]);
+              }
             }
           }
           if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
         }
 
         if (grad_down_lora_a != nullptr) {
-          // Backward Step 3.4: Accumulate down LoRA A gradient.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
           float* grad_a = grad_down_a_fp32.data() + static_cast<size_t>(expert_idx) * rank * inter_size;
-          for (int r = 0; r < rank; r++) {
-            const float gu = grad_times_b[r] * lora_scaling_;
-            float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
-            for (int i = 0; i < inter_size; i++) {
-              grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+          if (rank == 8) {
+            alignas(32) float gu_scaled[8];
+            for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+            accumulate_lora_a_input_rank8_vec(intermediate_row, expert_down_a, gu_scaled, inter_size, nullptr,
+                                              grad_a);
+          } else {
+            for (int r = 0; r < rank; r++) {
+              const float gu = grad_times_b[r] * lora_scaling_;
+              float* grad_a_row = grad_a + static_cast<size_t>(r) * inter_size;
+              for (int i = 0; i < inter_size; i++) {
+                grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+              }
             }
           }
           if (profile != nullptr) profile->add_since(section_start, profile->down_lora_a_us);
         }
 
         if (grad_down_lora_b != nullptr) {
-          // Backward Step 3.5: Accumulate down LoRA B gradient for TP=1 direct/debug.
           section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
           const float* down_u_row = cache.down_lora_u_cache + row * rank;
           float* grad_b = grad_down_b_fp32.data() + static_cast<size_t>(expert_idx) * hidden * rank;
           if (rank == 2) {
             accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
                                              down_u_row[1] * lora_scaling_, hidden, grad_b);
+          } else if (rank == 8) {
+            alignas(32) float u_scaled[8];
+            for (int r = 0; r < 8; r++) u_scaled[r] = down_u_row[r] * lora_scaling_;
+            accumulate_down_lora_b_rank8_vec(grad_down_row, u_scaled, hidden, grad_b);
           } else {
             for (int h = 0; h < hidden; h++) {
               const float g = grad_down_row[h] * lora_scaling_;
@@ -2165,7 +2920,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
     }
 
-    // Backward Step 3.9: Write optional dense BF16 outputs for callers that request them.
     write_bf16_vector(grad_intermediate, grad_inter_fp32);
     if (grad_down_lora_a != nullptr && rank > 0) write_bf16_vector(grad_down_lora_a, grad_down_a_fp32);
     if (grad_down_lora_b != nullptr && rank > 0) write_bf16_vector(grad_down_lora_b, grad_down_b_fp32);
@@ -2185,7 +2939,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     auto* out_grad_up = reinterpret_cast<ggml_bf16_t*>(grad_up);
     const size_t elems = layout.total_tokens * static_cast<size_t>(config_.intermediate_size);
 
-    // Backward Step 4.1: Backprop through forward Step 6 activation, silu(gate) * up.
     for (size_t idx = 0; idx < elems; idx++) {
       const float grad_inter = GGML_BF16_TO_FP32(grad_intermediate[idx]);
       const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
@@ -2214,7 +2967,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     grad_gate.assign(elems, 0.0f);
     grad_up.assign(elems, 0.0f);
 
-    // Backward Step 4.1: Backprop through forward Step 6 activation, keeping FP32 grads for packed base math.
+    // Shared Backward Step 4.1: Backprop through forward Step 6 activation, keeping FP32 grads for packed base math.
     for (size_t idx = 0; idx < elems; idx++) {
       const float grad_inter = grad_intermediate[idx];
       const float gate = GGML_BF16_TO_FP32(cache.gate_output_cache[idx]);
@@ -2227,12 +2980,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
   }
 
-  // Backward Step 5 for expert-packed rows, undoing forward Step 5 gate/up:
-  //   Backward Step 5.1: gate/up base backward reads packed KGroup rows and accumulates grad_input.
-  //   Backward Step 5.2: recompute LoRA u = input @ A^T from the cached input.
-  //   Backward Step 5.3: accumulate LoRA B gradient and propagate through B.
-  //   Backward Step 5.4: accumulate LoRA A gradient and add the LoRA contribution to grad_input.
-  //   Backward Step 5.9: write dense BF16 outputs for TP=1 direct/debug.
   void compute_tp1_gate_up_backward(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
                                     const float* grad_gate, const float* grad_up, void* grad_input,
                                     void* grad_gate_lora_a, void* grad_gate_lora_b, void* grad_up_lora_a,
@@ -2271,7 +3018,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
     std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
 
-    // Backward Step 5.1 helper: base gate/up dInput from packed KGroup rows.
     auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
       if (grad_input == nullptr) return;
       float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
@@ -2337,13 +3083,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     auto backward_one_projection = [&](int expert_idx, int token_idx, const float* grad_row,
                                        const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
-                                       const ggml_bf16_t* lora_b, float* grad_lora_a, float* grad_lora_b, bool do_base,
-                                       bool do_lora, bool profile_base_inside) {
+                                       const ggml_bf16_t* lora_b, float* grad_lora_a, float* grad_lora_b,
+                                       const float* cached_lora_u, bool do_base, bool do_lora,
+                                       bool profile_base_inside) {
       float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
       const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
 
       if (do_base && grad_input != nullptr) {
-        // Backward Step 5.1: grad_input += grad_projection @ packed_base_weight.
         const auto section_start = profile_base_inside && profile != nullptr
                                        ? profile->section_start()
                                        : TP1BackwardProfile::disabled_time_point();
@@ -2360,9 +3106,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::fill(lora_u.begin(), lora_u.end(), 0.0f);
       std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
 
-      // Backward Step 5.2: Recompute the LoRA down-rank activation u = input @ A^T.
       auto section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-      if (rank == 2) {
+      if (cached_lora_u != nullptr) {
+        std::copy(cached_lora_u, cached_lora_u + rank, lora_u.begin());
+      } else if (rank == 2) {
         const ggml_bf16_t* a0 = lora_a;
         const ggml_bf16_t* a1 = lora_a + hidden;
         float acc0;
@@ -2370,6 +3117,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         bf16_dot2_lora_u(input_row, a0, a1, hidden, acc0, acc1);
         lora_u[0] = acc0;
         lora_u[1] = acc1;
+      } else if (rank == 8) {
+        bf16_dot8_lora_u(input_row, lora_a, hidden, lora_u.data());
       } else {
         for (int r = 0; r < rank; r++) {
           const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
@@ -2382,7 +3131,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_u_us);
 
-      // Backward Step 5.3: Accumulate LoRA B gradient and compute grad_times_b = grad_projection @ B.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       if (rank == 2) {
         const float u0_scaled = lora_u[0] * lora_scaling_;
@@ -2394,6 +3142,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         accumulate_gate_up_lora_b_rank2_vec(grad_row, lora_b, u0_scaled, u1_scaled, inter_size, grad_b, gb0, gb1);
         grad_times_b[0] = gb0;
         grad_times_b[1] = gb1;
+      } else if (rank == 8) {
+        alignas(32) float u_scaled[8];
+        for (int r = 0; r < 8; r++) u_scaled[r] = lora_u[r] * lora_scaling_;
+        float* grad_b = grad_lora_b == nullptr ? nullptr
+                                                : grad_lora_b + static_cast<size_t>(expert_idx) * inter_size * 8;
+        accumulate_gate_up_lora_b_rank8_vec(grad_row, lora_b, u_scaled, inter_size, grad_b, grad_times_b.data());
       } else {
         for (int i = 0; i < inter_size; i++) {
           const float g = grad_row[i];
@@ -2413,7 +3167,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_b_us);
 
-      // Backward Step 5.4: Accumulate LoRA A gradient and add LoRA's contribution to grad_input.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       if (rank == 2) {
         float* grad_a0 = nullptr;
@@ -2424,6 +3177,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
                                              grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0, grad_a1);
+      } else if (rank == 8) {
+        alignas(32) float gu_scaled[8];
+        for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+        float* grad_a = grad_lora_a == nullptr ? nullptr
+                                               : grad_lora_a + static_cast<size_t>(expert_idx) * 8 * hidden;
+        accumulate_lora_a_input_rank8_vec(input_row, lora_a, gu_scaled, hidden, grad_input_row, grad_a);
       } else {
         for (int r = 0; r < rank; r++) {
           const float gu = grad_times_b[r] * lora_scaling_;
@@ -2446,7 +3205,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       if (profile != nullptr) profile->add_since(section_start, profile->gate_up_lora_a_input_us);
     };
 
-    // Backward Step 5.5: Walk token routes and apply Backward Steps 5.1-5.4 to gate and up projections.
     auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
       for (int route_idx = 0; route_idx < k; route_idx++) {
         const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
@@ -2471,26 +3229,30 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
             use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
             grad_gate_lora_a != nullptr ? grad_gate_a_fp32.data() : nullptr,
-            grad_gate_lora_b != nullptr ? grad_gate_b_fp32.data() : nullptr, false, true, false);
+            grad_gate_lora_b != nullptr ? grad_gate_b_fp32.data() : nullptr,
+            cache.gate_lora_u_cache == nullptr ? nullptr : cache.gate_lora_u_cache + row * static_cast<size_t>(rank),
+            false, true, false);
         backward_one_projection(
             expert_idx, token_idx, grad_up + row * inter_size,
             reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
             use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
             use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
             grad_up_lora_a != nullptr ? grad_up_a_fp32.data() : nullptr,
-            grad_up_lora_b != nullptr ? grad_up_b_fp32.data() : nullptr, false, true, false);
+            grad_up_lora_b != nullptr ? grad_up_b_fp32.data() : nullptr,
+            cache.up_lora_u_cache == nullptr ? nullptr : cache.up_lora_u_cache + row * static_cast<size_t>(rank), false,
+            true, false);
       }
     };
 
-    const bool parallel_base = grad_input != nullptr && qlen >= 10 && config_.pool != nullptr;
-    if (parallel_base) {
-      // Backward Step 5.6: Parallelize base grad_input first; run LoRA serial afterward to avoid write races.
+    bool expert_matmat_base = false;
+    if (grad_input != nullptr) {
       const auto section_start =
           profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
-      auto pool = config_.pool->get_subpool(tp_part_idx);
-      pool->do_work_stealing_job(
-          qlen, nullptr, [&](int token_idx) { run_token_routes(token_idx, true, false, false); }, nullptr);
-      if (profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
+      expert_matmat_base =
+          compute_gate_up_base_expert_matmat(cache, layout, grad_gate, grad_up, grad_input_fp32);
+      if (expert_matmat_base && profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
+    }
+    if (expert_matmat_base) {
       if (use_gate_up_lora) {
         for (int token_idx = 0; token_idx < qlen; token_idx++) run_token_routes(token_idx, false, true, false);
       }
@@ -2500,7 +3262,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       }
     }
 
-    // Backward Step 5.9: Write TP=1 dense BF16 outputs.
     const auto section_start =
         profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
     write_bf16_vector(grad_input, grad_input_fp32);
@@ -2511,9 +3272,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     write_bf16_vector(grad_up_lora_b, grad_up_b_fp32);
   }
 
-  // TP=1 direct/debug backward. It exercises the packed base-weight math and
-  // returns all LoRA gradients through dense BF16 buffers, which makes tests and
-  // debug dumps easier to compare tensor-by-tensor.
   void run_tp1_packed_backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a,
                                void* grad_gate_lora_b, void* grad_up_lora_a, void* grad_up_lora_b,
                                void* grad_down_lora_a, void* grad_down_lora_b, void* grad_weights) {
@@ -2521,18 +3279,15 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       throw std::runtime_error("K2 RAWINT4 SFT TP=1 backward requires grad_output and grad_input");
     }
 
-    // Backward Step 1: Restore the latest forward cache and compact it into expert-packed row order.
     const K2ForwardCache& cache = latest_cache();
     const TP1BackwardLayout layout = make_tp1_backward_layout(cache);
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
 
     try {
-      // Backward Step 2.1: Backprop through forward Step 9 weighted merge into router/topk weights.
       compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
       profile.mark(profile.grad_weights_us);
 
-      // Backward Steps 2.2 -> 3.5: weighted-merge grad_down, down base backward, and dense down LoRA grads.
       std::vector<float> grad_inter_fp32;
       compute_tp1_down_backward(cache, layout, grad_output, nullptr, nullptr, nullptr, &grad_inter_fp32,
                                 grad_down_lora_a, grad_down_lora_b, &profile);
@@ -2541,10 +3296,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       std::vector<float> grad_gate_fp32;
       std::vector<float> grad_up_fp32;
 
-      // Backward Step 4.1: Activation backward produces grad_gate and grad_up.
       compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
       profile.mark(profile.activation_us);
-      // Backward Steps 5.1 -> 5.9: Gate/up base backward plus dense gate/up LoRA grads.
       compute_tp1_gate_up_backward(cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input,
                                    grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b, &profile);
       profile.mark(profile.gate_up_us);
@@ -2565,7 +3318,6 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      profile.gate_up_write_us, profile.total_us());
       }
 
-      // Backward Step 6: Release the forward cache consumed by this backward.
       pop_latest_cache();
       should_pop_cache = false;
     } catch (...) {
@@ -2597,13 +3349,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     ensure_packed_weight_buffers_ready();
 
-    // Backward Step 1: Restore the latest forward cache and compact it into expert-packed row order.
+    // Normal TP Backward Step 1: Restore the latest forward cache and compact it into expert-packed row order.
     //
     // Execution order intentionally differs from forward numbering:
-    //   Backward Step 2 undoes forward Step 9 weighted merge.
-    //   Backward Step 3 undoes forward Step 8 down projection.
-    //   Backward Step 4 undoes forward Step 6 activation.
-    //   Backward Step 5 undoes forward Step 5 gate/up projection.
+    //   Normal TP Backward Step 2 undoes forward Step 9 weighted merge.
+    //   Normal TP Backward Step 3 undoes forward Step 8 down projection.
+    //   Normal TP Backward Step 4 undoes forward Step 6 activation.
+    //   Normal TP Backward Step 5 undoes forward Step 5 gate/up projection.
     //
     // Forward Steps 1-4 and 7 are routing, buffer setup/copies, and quantization staging.
     // They have no separate differentiable backward kernel here; routing is reused to
@@ -2624,7 +3376,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     bool should_pop_cache = true;
     TP1BackwardProfile profile(tp1_backward_profile_enabled());
     try {
-      // Backward Step 3.0: Decide which down LoRA gradients this TP shard must materialize.
+      // Normal TP Backward Step 3.0: Decide which down LoRA gradients this TP shard must materialize.
       const bool use_down_lora = rank > 0 && has_down_lora();
       const bool need_down_a = grad_down_lora_a != nullptr;
       const bool need_down_b = fp32_grad_down_lora_b != nullptr;
@@ -2635,28 +3387,48 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         throw std::runtime_error("K2 RAWINT4 SFT TP backward requires cached down LoRA activations");
       }
 
-      // Backward Step 2.1: Backprop through forward Step 9 weighted merge into router/topk weights.
+      // Normal TP Backward Step 2.1: Backprop through forward Step 9 weighted merge into router/topk weights.
       compute_tp1_grad_weights(cache, layout, grad_output, grad_weights);
       profile.mark(profile.grad_weights_us);
 
-      // Backward Steps 2.2 -> 3.1: Scatter grad_output to grad_down, then run down base backward.
+      // Normal TP Backward Steps 2.2 -> 3.1: Scatter grad_output to grad_down, then run down base backward.
       std::vector<float> grad_down_fp32;
       std::vector<float> grad_inter_fp32;
+      std::vector<float> down_lora_grad_times_b_cache;
+      const bool use_down_lora_bprop_cache =
+          reuse_down_lora_bprop_enabled() && use_down_lora && (need_down_a || need_down_b);
       compute_tp1_down_backward(cache, layout, grad_output, nullptr,
                                 (need_down_a || need_down_b) ? &grad_down_fp32 : nullptr, nullptr, &grad_inter_fp32,
-                                nullptr, nullptr, &profile);
+                                nullptr, nullptr, &profile,
+                                use_down_lora_bprop_cache ? &down_lora_grad_times_b_cache : nullptr);
       profile.mark(profile.down_us);
 
       if (use_down_lora && (need_down_a || need_down_b)) {
-        // Backward Steps 3.4/3.5: Normal TP path writes down LoRA A directly to dense BF16
+        // Normal TP Backward Steps 3.4/3.5: write down LoRA A directly to dense BF16
         // and down LoRA B to sparse FP32 side buffers indexed by active expert task.
         std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
+        const bool have_down_lora_bprop_cache =
+            use_down_lora_bprop_cache &&
+            down_lora_grad_times_b_cache.size() == layout.total_tokens * static_cast<size_t>(rank);
+
+        auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
+        std::vector<float> grad_down_a_fp32;
 
         for (int task = 0; task < cache.activated_expert_cache; task++) {
           const int expert_idx = cache.m_expert_id_map_cache[task];
           const int num_tokens = cache.m_local_num_cache[expert_idx];
           const size_t row_base = layout.expert_base[expert_idx];
           const ggml_bf16_t* expert_down_b = down_lora_b_ + static_cast<size_t>(expert_idx) * hidden * rank;
+          const ggml_bf16_t* expert_down_a = down_lora_a_ + static_cast<size_t>(expert_idx) * rank * inter_size;
+
+          if (need_down_a) {
+            grad_down_a_fp32.assign(static_cast<size_t>(rank) * inter_size, 0.0f);
+            for (int r = 0; r < rank; r++) {
+              const ggml_bf16_t* old_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
+              float* dst_row = grad_down_a_fp32.data() + static_cast<size_t>(r) * inter_size;
+              for (int i = 0; i < inter_size; i++) dst_row[i] = GGML_BF16_TO_FP32(old_row[i]);
+            }
+          }
 
           for (int local_t = 0; local_t < num_tokens; local_t++) {
             const size_t row = row_base + static_cast<size_t>(local_t);
@@ -2664,35 +3436,47 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
             std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
             auto section_start = profile.section_start();
-            if (rank == 2) {
-              float gb0;
-              float gb1;
-              down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
-              grad_times_b[0] = gb0;
-              grad_times_b[1] = gb1;
+            if (have_down_lora_bprop_cache) {
+              const float* cached_grad_times_b =
+                  down_lora_grad_times_b_cache.data() + row * static_cast<size_t>(rank);
+              std::copy(cached_grad_times_b, cached_grad_times_b + rank, grad_times_b.begin());
             } else {
-              for (int h = 0; h < hidden; h++) {
-                const float g = grad_down_row[h];
-                if (g == 0.0f) continue;
-                const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
-                for (int r = 0; r < rank; r++) {
-                  grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+              if (rank == 2) {
+                float gb0;
+                float gb1;
+                down_bprop_rank2_vec(grad_down_row, expert_down_b, hidden, gb0, gb1);
+                grad_times_b[0] = gb0;
+                grad_times_b[1] = gb1;
+              } else if (rank == 8) {
+                down_bprop_rank8_vec(grad_down_row, expert_down_b, hidden, grad_times_b.data());
+              } else {
+                for (int h = 0; h < hidden; h++) {
+                  const float g = grad_down_row[h];
+                  if (g == 0.0f) continue;
+                  const ggml_bf16_t* down_b_row = expert_down_b + static_cast<size_t>(h) * rank;
+                  for (int r = 0; r < rank; r++) {
+                    grad_times_b[r] += g * GGML_BF16_TO_FP32(down_b_row[r]);
+                  }
                 }
               }
+              profile.add_since(section_start, profile.down_lora_bprop_us);
             }
-            profile.add_since(section_start, profile.down_lora_bprop_us);
 
             if (need_down_a) {
               section_start = profile.section_start();
-              auto* out_down_a = reinterpret_cast<ggml_bf16_t*>(grad_down_lora_a);
               const ggml_bf16_t* intermediate_row = cache.intermediate_cache + row * inter_size;
-              for (int r = 0; r < rank; r++) {
-                const float gu = grad_times_b[r] * lora_scaling_;
-                ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
-                for (int i = 0; i < inter_size; i++) {
-                  const float old_v = GGML_BF16_TO_FP32(out_row[i]);
-                  const float add_v = gu * GGML_BF16_TO_FP32(intermediate_row[i]);
-                  out_row[i] = GGML_FP32_TO_BF16(old_v + add_v);
+              if (rank == 8) {
+                alignas(32) float gu_scaled[8];
+                for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+                accumulate_lora_a_input_rank8_vec(intermediate_row, expert_down_a, gu_scaled, inter_size, nullptr,
+                                                  grad_down_a_fp32.data());
+              } else {
+                for (int r = 0; r < rank; r++) {
+                  const float gu = grad_times_b[r] * lora_scaling_;
+                  float* grad_a_row = grad_down_a_fp32.data() + static_cast<size_t>(r) * inter_size;
+                  for (int i = 0; i < inter_size; i++) {
+                    grad_a_row[i] += gu * GGML_BF16_TO_FP32(intermediate_row[i]);
+                  }
                 }
               }
               profile.add_since(section_start, profile.down_lora_a_us);
@@ -2705,6 +3489,10 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               if (rank == 2) {
                 accumulate_down_lora_b_rank2_vec(grad_down_row, down_u_row[0] * lora_scaling_,
                                                  down_u_row[1] * lora_scaling_, hidden, grad_b);
+              } else if (rank == 8) {
+                alignas(32) float u_scaled[8];
+                for (int r = 0; r < 8; r++) u_scaled[r] = down_u_row[r] * lora_scaling_;
+                accumulate_down_lora_b_rank8_vec(grad_down_row, u_scaled, hidden, grad_b);
               } else {
                 for (int h = 0; h < hidden; h++) {
                   const float g = grad_down_row[h] * lora_scaling_;
@@ -2718,17 +3506,26 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               profile.add_since(section_start, profile.down_lora_b_us);
             }
           }
+
+          if (need_down_a) {
+            auto section_start = profile.section_start();
+            for (int r = 0; r < rank; r++) {
+              ggml_bf16_t* out_row = out_down_a + (static_cast<size_t>(expert_idx) * rank + r) * full_inter;
+              write_bf16_array(out_row, grad_down_a_fp32.data() + static_cast<size_t>(r) * inter_size, inter_size);
+            }
+            profile.add_since(section_start, profile.down_lora_a_us);
+          }
         }
       }
       profile.mark(profile.down_lora_grads_us);
 
-      // Backward Step 4.1: Backprop through silu(gate) * up.
+      // Normal TP Backward Step 4.1: Backprop through silu(gate) * up.
       std::vector<float> grad_gate_fp32;
       std::vector<float> grad_up_fp32;
       compute_tp1_activation_backward_fp32(cache, layout, grad_inter_fp32.data(), grad_gate_fp32, grad_up_fp32);
       profile.mark(profile.activation_us);
 
-      // Backward Step 5.0: Decide which gate/up LoRA gradients are requested by the TP wrapper.
+      // Normal TP Backward Step 5.0: Decide which gate/up LoRA gradients are requested by the TP wrapper.
       const bool use_gate_up_lora = rank > 0 && has_gate_up_lora();
       const bool need_gate_up_lora = grad_gate_lora_b != nullptr || grad_up_lora_b != nullptr ||
                                      fp32_grad_gate_lora_a != nullptr || fp32_grad_up_lora_a != nullptr;
@@ -2736,7 +3533,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         throw std::runtime_error("K2 RAWINT4 SFT TP backward requires gate/up LoRA weights");
       }
 
-      // Backward Step 5.1 setup: accumulate token-order grad_input in FP32 before the final BF16 write.
+      // Normal TP Backward Step 5.1 setup: accumulate token-order grad_input in FP32 before the final BF16 write.
       std::vector<float> grad_input_fp32(static_cast<size_t>(qlen) * hidden, 0.0f);
       std::vector<float> lora_u(static_cast<size_t>(rank), 0.0f);
       std::vector<float> grad_times_b(static_cast<size_t>(rank), 0.0f);
@@ -2750,7 +3547,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         grad_up_b_fp32.assign(static_cast<size_t>(cache.activated_expert_cache) * inter_size * rank, 0.0f);
       }
 
-      // Backward Step 5.1 helper: base gate/up dInput from packed KGroup rows.
+      // Normal TP Backward Step 5.1 helper: base gate/up dInput from packed KGroup rows.
       auto add_gate_up_base = [&](int expert_idx, int token_idx, size_t row) {
         float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
         const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
@@ -2812,12 +3609,13 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       auto backward_one_projection = [&](int task, int expert_idx, int token_idx, const float* grad_row,
                                          const uint8_t* packed_weight, const float* scales, const ggml_bf16_t* lora_a,
                                          const ggml_bf16_t* lora_b, float* fp32_grad_lora_a, float* fp32_grad_lora_b,
-                                         void* grad_lora_b, bool do_base, bool do_lora, bool profile_base_inside) {
+                                         void* grad_lora_b, const float* cached_lora_u, bool do_base, bool do_lora,
+                                         bool profile_base_inside) {
         float* grad_input_row = grad_input_fp32.data() + static_cast<size_t>(token_idx) * hidden;
         const ggml_bf16_t* input_row = cache.input_cache + static_cast<size_t>(token_idx) * hidden;
 
         if (do_base) {
-          // Backward Step 5.1: grad_input += grad_projection @ packed_base_weight.
+          // Normal TP Backward Step 5.1: grad_input += grad_projection @ packed_base_weight.
           auto section_start =
               profile_base_inside ? profile.section_start() : TP1BackwardProfile::disabled_time_point();
           for (int i = 0; i < inter_size; i++) {
@@ -2833,9 +3631,11 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         std::fill(lora_u.begin(), lora_u.end(), 0.0f);
         std::fill(grad_times_b.begin(), grad_times_b.end(), 0.0f);
 
-        // Backward Step 5.2: Recompute LoRA u = input @ A^T from the cached forward input.
+        // Normal TP Backward Step 5.2: Reuse forward LoRA u = input @ A^T when available.
         auto section_start = profile.section_start();
-        if (rank == 2) {
+        if (cached_lora_u != nullptr) {
+          std::copy(cached_lora_u, cached_lora_u + rank, lora_u.begin());
+        } else if (rank == 2) {
           const ggml_bf16_t* a0 = lora_a;
           const ggml_bf16_t* a1 = lora_a + hidden;
           float acc0;
@@ -2843,6 +3643,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           bf16_dot2_scalar(input_row, a0, a1, hidden, acc0, acc1);
           lora_u[0] = acc0;
           lora_u[1] = acc1;
+        } else if (rank == 8) {
+          bf16_dot8_lora_u(input_row, lora_a, hidden, lora_u.data());
         } else {
           for (int r = 0; r < rank; r++) {
             const ggml_bf16_t* a_row = lora_a + static_cast<size_t>(r) * hidden;
@@ -2855,7 +3657,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         profile.add_since(section_start, profile.gate_up_lora_u_us);
 
-        // Backward Step 5.3: Accumulate LoRA B gradient and compute grad_times_b = grad_projection @ B.
+        // Normal TP Backward Step 5.3: Accumulate LoRA B gradient and compute grad_times_b = grad_projection @ B.
         auto* out_lora_b = reinterpret_cast<ggml_bf16_t*>(grad_lora_b);
         section_start = profile.section_start();
         if (rank == 2) {
@@ -2883,6 +3685,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           }
           grad_times_b[0] = gb0;
           grad_times_b[1] = gb1;
+        } else if (rank == 8 && fp32_grad_lora_b != nullptr) {
+          alignas(32) float u_scaled[8];
+          for (int r = 0; r < 8; r++) u_scaled[r] = lora_u[r] * lora_scaling_;
+          float* grad_b = fp32_grad_lora_b + static_cast<size_t>(task) * inter_size * 8;
+          accumulate_gate_up_lora_b_rank8_vec(grad_row, lora_b, u_scaled, inter_size, grad_b,
+                                              grad_times_b.data());
         } else {
           for (int i = 0; i < inter_size; i++) {
             const float g = grad_row[i];
@@ -2909,7 +3717,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
         profile.add_since(section_start, profile.gate_up_lora_b_us);
 
-        // Backward Step 5.4: Accumulate sparse FP32 LoRA A gradient and add LoRA dInput.
+        // Normal TP Backward Step 5.4: Accumulate sparse FP32 LoRA A gradient and add LoRA dInput.
         section_start = profile.section_start();
         if (rank == 2 && tp_gate_up_a_input_rank2_vec_enabled()) {
           float* grad_a0 = nullptr;
@@ -2921,6 +3729,12 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
           accumulate_gate_up_a_input_rank2_vec(input_row, lora_a, lora_a + hidden, grad_times_b[0] * lora_scaling_,
                                                grad_times_b[1] * lora_scaling_, hidden, grad_input_row, grad_a0,
                                                grad_a1, false);
+        } else if (rank == 8) {
+          alignas(32) float gu_scaled[8];
+          for (int r = 0; r < 8; r++) gu_scaled[r] = grad_times_b[r] * lora_scaling_;
+          float* grad_a =
+              fp32_grad_lora_a == nullptr ? nullptr : fp32_grad_lora_a + static_cast<size_t>(task) * 8 * hidden;
+          accumulate_lora_a_input_rank8_vec(input_row, lora_a, gu_scaled, hidden, grad_input_row, grad_a);
         } else {
           for (int r = 0; r < rank; r++) {
             const float gu = grad_times_b[r] * lora_scaling_;
@@ -2942,7 +3756,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         profile.add_since(section_start, profile.gate_up_lora_a_input_us);
       };
 
-      // Backward Step 5.5: Walk token routes and apply Backward Steps 5.1-5.4 to gate and up projections.
+      // Normal TP Backward Step 5.5: Walk token routes and apply Backward Steps 5.1-5.4 to gate and up projections.
       auto run_token_routes = [&](int token_idx, bool do_base, bool do_lora, bool profile_base_inside) {
         for (int route_idx = 0; route_idx < k; route_idx++) {
           const int64_t expert_id = cache.expert_ids_cache[static_cast<size_t>(token_idx) * k + route_idx];
@@ -2967,25 +3781,27 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
               use_gate_up_lora ? gate_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
               use_gate_up_lora ? gate_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
               fp32_grad_gate_lora_a, grad_gate_b_fp32.empty() ? nullptr : grad_gate_b_fp32.data(),
-              grad_gate_b_fp32.empty() ? grad_gate_lora_b : nullptr, false, true, false);
+              grad_gate_b_fp32.empty() ? grad_gate_lora_b : nullptr,
+              cache.gate_lora_u_cache == nullptr ? nullptr : cache.gate_lora_u_cache + row * static_cast<size_t>(rank),
+              false, true, false);
           backward_one_projection(
               task, expert_idx, token_idx, grad_up_fp32.data() + row * inter_size,
               reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b), this->up_bb_[expert_idx]->d,
               use_gate_up_lora ? up_lora_a_ + static_cast<size_t>(expert_idx) * rank * hidden : nullptr,
               use_gate_up_lora ? up_lora_b_ + static_cast<size_t>(expert_idx) * inter_size * rank : nullptr,
               fp32_grad_up_lora_a, grad_up_b_fp32.empty() ? nullptr : grad_up_b_fp32.data(),
-              grad_up_b_fp32.empty() ? grad_up_lora_b : nullptr, false, true, false);
+              grad_up_b_fp32.empty() ? grad_up_lora_b : nullptr,
+              cache.up_lora_u_cache == nullptr ? nullptr : cache.up_lora_u_cache + row * static_cast<size_t>(rank), false,
+              true, false);
         }
       };
 
-      const bool parallel_base = qlen >= 10 && config_.pool != nullptr;
-      if (parallel_base) {
-        // Backward Step 5.6: Parallelize base dInput first; run LoRA serial afterward to avoid write races.
-        auto section_start = profile.section_start();
-        auto pool = config_.pool->get_subpool(tp_part_idx);
-        pool->do_work_stealing_job(
-            qlen, nullptr, [&](int token_idx) { run_token_routes(token_idx, true, false, false); }, nullptr);
-        profile.add_since(section_start, profile.gate_up_base_us);
+      auto gate_up_base_start = profile.section_start();
+      const bool expert_matmat_base = compute_gate_up_base_expert_matmat(
+          cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input_fp32);
+      if (expert_matmat_base) {
+        // Normal TP Backward Step 5.6: expert mat-mat base dInput first; LoRA remains race-free afterward.
+        profile.add_since(gate_up_base_start, profile.gate_up_base_us);
         if (use_gate_up_lora) {
           for (int token_idx = 0; token_idx < qlen; token_idx++) run_token_routes(token_idx, false, true, false);
         }
@@ -2997,7 +3813,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       if ((grad_gate_lora_b != nullptr && !grad_gate_b_fp32.empty()) ||
           (grad_up_lora_b != nullptr && !grad_up_b_fp32.empty())) {
-        // Backward Step 5.7: Convert sparse gate/up LoRA B partials to final dense BF16 TP slices.
+        // Normal TP Backward Step 5.7: Convert sparse gate/up LoRA B partials to final dense BF16 TP slices.
         auto section_start = profile.section_start();
         auto write_sparse_lora_b = [&](void* dst_ptr, const std::vector<float>& src) {
           if (dst_ptr == nullptr || src.empty()) return;
@@ -3014,7 +3830,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         profile.add_since(section_start, profile.gate_up_lora_b_write_us);
       }
 
-      // Backward Step 5.9: Write final grad_input for this TP shard.
+      // Normal TP Backward Step 5.9: Write final grad_input for this TP shard.
       auto section_start = profile.section_start();
       write_bf16_vector(grad_input, grad_input_fp32);
       profile.add_since(section_start, profile.gate_up_write_us);
@@ -3036,7 +3852,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      profile.gate_up_lora_b_write_us, profile.gate_up_lora_a_input_us, profile.gate_up_write_us,
                      profile.total_us());
       }
-      // Backward Step 6: Release the forward cache consumed by this backward.
+      // Normal TP Backward Step 6: Release the forward cache consumed by this backward.
       pop_latest_cache();
       should_pop_cache = false;
     } catch (...) {
@@ -3193,21 +4009,27 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     }
     profile.mark(profile.gate_up_base_us);
 
-    // Step 5.5: Gate + Up LoRA (AVX512 BF16 - no BufferB conversion needed)
-    trace_forward_step("step5_5_gate_up_lora", qlen, k, activated_expert, save_for_backward);
-    compute_lora_gate_up(activated_expert);
-    profile.mark(profile.gate_up_lora_us);
-
     K2ForwardCache* cache_ptr = nullptr;
     if (save_for_backward) {
-      // Save gate/up outputs before activation (for backward).
       // Checkpoint recompute overwrites the latest valid cache instead of pushing a duplicate.
-      trace_forward_step("step5_6_save_gate_up_cache", qlen, k, activated_expert, save_for_backward);
+      trace_forward_step("step5_4_prepare_backward_cache", qlen, k, activated_expert, save_for_backward);
       K2ForwardCache& cache = (cache_stack_top_ > 0 && cache_stack_[cache_stack_top_ - 1].valid)
                                   ? cache_stack_[cache_stack_top_ - 1]
                                   : push_cache();
-      save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
+      prepare_cache_for_backward(cache, qlen, k, expert_ids, weights, activated_expert, input);
       cache_ptr = &cache;
+      profile.mark(profile.save_gate_up_us);
+    }
+
+    // Step 5.5: Gate + Up LoRA (AVX512 BF16 - no BufferB conversion needed)
+    trace_forward_step("step5_5_gate_up_lora", qlen, k, activated_expert, save_for_backward);
+    compute_lora_gate_up(activated_expert, cache_ptr);
+    profile.mark(profile.gate_up_lora_us);
+
+    if (save_for_backward && cache_ptr != nullptr) {
+      // Save gate/up outputs before activation (for backward).
+      trace_forward_step("step5_6_save_gate_up_cache", qlen, k, activated_expert, save_for_backward);
+      save_gate_up_to_cache(*cache_ptr, activated_expert);
       profile.mark(profile.save_gate_up_us);
     }
 
