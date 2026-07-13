@@ -10,7 +10,9 @@ Full Fine-Tuning（Full FT）功能。重点是专家基座权重的梯度、opt
 - Full FT 基线提交：`e99b5e1`，基于上游 `8e46e58`
 - Full FT 来源：poryfly 的 `239bac5`、`25fa2fd`
 - 当前状态：TP 子核配置、梯度分片/stride、临时区容量和逐步清零已修复；GDB 已将
-  首步 SIGSEGV 定位为 base-weight backward 错用路由表，现改用 expert-major packed buffer
+  首步 SIGSEGV 定位为 base-weight backward 错用路由表，现改用 expert-major packed buffer；
+  down 梯度为零进一步定位为 route-weighted `grad_output` 被 gate/up backward 临时区覆盖，
+  现以独立只读快照保留，并用 NUMA 子线程池并行计算 AMX BF16 基座梯度
 
 ## 1. 开发前先确认
 
@@ -150,6 +152,12 @@ router weight，因而同时保证 down projection 基座梯度的权重语义�
 6. `lora_rank=0` 时 scaling 明确为 0，避免纯 Full FT 产生 Inf。
 7. 基座梯度读取 expert-major packed input/grad-output，不把
    `m_local_pos_cache[token][route]` 误当作 expert token 列表。
+8. down 基座梯度读取独立的 route-weighted `grad_output` 快照；工作用
+   `grad_output_bf16_ptr_` 后续可继续被 gate/up grad-input 路径复用。
+9. AMX BF16 基座梯度按 expert、projection 和 `32x32` 输出 tile 提交给当前 NUMA
+   subpool。gate/up 共用输入 tile，AMX BF16 乘法以 FP32 累加，每个任务独占输出区域。
+10. `lora_rank=0` 在完成 gate/up 基座 grad-input 后直接跳过 LoRA remainder，避免纯 Full FT
+    进入零秩 LoRA 临时区路径。
 
 ### 6.2 `operators/moe-sft-tp.hpp`
 
@@ -165,8 +173,10 @@ router weight，因而同时保证 down projection 基座梯度的权重语义�
 
 ## 7. 验证顺序
 
-当前已通过 `clang-format --dry-run --Werror` 和 AMX/CUDA Release
-`build_ext --inplace`。但当前 Kllama 环境中的 `kt_kernel_ext` 已 stripped，
+当前已通过 `clang-format --dry-run --Werror`、AMX/CUDA Release
+`build_ext --inplace`，以及 AMX BF16 `32x32x37` 分块乘法与标量 BF16 参考的独立校验
+（`max_abs_error=0`）。端到端短训练仍须确认 gate/up/down 三组梯度均非零且有限。
+但当前 Kllama 环境中的 `kt_kernel_ext` 已 stripped，
 普通 GDB 只能得到地址或有限符号；定位 SIGSEGV 前应使用相同 Python 环境重新构建
 并安装带符号的 `RelWithDebInfo` 版本：
 
