@@ -255,7 +255,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             config_.expert_num * mat_type_all * mat_split,
             [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
               int64_t expert_idx = task_id / (mat_type_all * mat_split);
-              if (should_skip_expert(expert_idx)) {
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert(expert_idx)) {
                 return;
               }
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);

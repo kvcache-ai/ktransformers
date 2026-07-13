@@ -582,7 +582,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
         // Save offline quantization data if requested
         if (config_.save) {
           for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
-            if (should_skip_expert(expert_idx)) {
+            if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert(expert_idx)) {
               continue;
             }
             write_weights(prefix, "_gate_", gate_bb_[expert_idx].get(), expert_idx, "OFFLINE");
@@ -633,7 +633,7 @@ class AMX_AWQ_MOE_TP : public AMX_MOE_BASE<T, AMX_AWQ_MOE_TP<T>> {
         // Save online quantization data if requested
         if (config_.save) {
           for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
-            if (should_skip_expert(expert_idx)) {
+            if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert(expert_idx)) {
               continue;
             }
             write_weights(prefix, "_gate_", gate_bb_[expert_idx].get(), expert_idx, "ONLINE");
