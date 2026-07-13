@@ -1892,8 +1892,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Step 5: Base weight gradient accumulation (full weight grad mode)
     // =====================================================================
     if (sft_config_.full_weight_grad && grad_gate_proj && grad_up_proj && grad_down_proj) {
-      backward_base_weight_grad(cache, grad_output, full_intermediate_size, grad_gate_proj, grad_up_proj,
-                                grad_down_proj);
+      backward_base_weight_grad(cache, full_intermediate_size, grad_gate_proj, grad_up_proj, grad_down_proj);
     }
 
     // \u2605 Cache pool is NOT freed here \u2014 kept for reuse across steps.
@@ -1915,8 +1914,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    *
    * Uses FP32 accumulator for precision, writes BF16 output.
    */
-  void backward_base_weight_grad(const ForwardCache& cache, const void* grad_output, int full_intermediate_size,
-                                 void* grad_gate_proj, void* grad_up_proj, void* grad_down_proj) {
+  void backward_base_weight_grad(const ForwardCache& cache, int full_intermediate_size, void* grad_gate_proj,
+                                 void* grad_up_proj, void* grad_down_proj) {
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
     const int F = full_intermediate_size;
@@ -1929,7 +1928,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     auto* ggp = static_cast<ggml_bf16_t*>(grad_gate_proj);    // TP slice of [E, F, H]
     auto* gup_ptr = static_cast<ggml_bf16_t*>(grad_up_proj);  // TP slice of [E, F, H]
     auto* gdp = static_cast<ggml_bf16_t*>(grad_down_proj);    // TP slice of [E, H, F]
-    auto* grad_out_bf16 = static_cast<const ggml_bf16_t*>(grad_output);
 
     for (int task_id = 0; task_id < activated_expert; task_id++) {
       int expert_idx = cache.m_expert_id_map_cache[task_id];
@@ -1941,8 +1939,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         pos_start += cache.m_local_num_cache[cache.m_expert_id_map_cache[prev_id]];
       }
 
-      const auto& local_pos = cache.m_local_pos_cache[expert_idx];
-
       // Allocate FP32 accumulators from forward pool (safe during backward)
       float* acc_gate = static_cast<float*>(forward_pool_);  // [I, H]
       float* acc_up = acc_gate + (size_t)I * H;              // [I, H]
@@ -1953,12 +1949,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       std::memset(acc_down, 0, (size_t)H * I * sizeof(float));
 
       for (int t = 0; t < m; t++) {
-        int tok_pos = local_pos[t];
-        const ggml_bf16_t* input_row = cache.input_cache + (size_t)tok_pos * H;
+        const ggml_bf16_t* input_row = m_local_input_ptr_[expert_idx] + (size_t)t * H;
         const ggml_bf16_t* gate_grad_row = grad_gate_output_ + (size_t)(pos_start + t) * I;
         const ggml_bf16_t* up_grad_row = grad_up_output_ + (size_t)(pos_start + t) * I;
         const ggml_bf16_t* inter_row = cache.intermediate_cache + (size_t)(pos_start + t) * I;
-        const ggml_bf16_t* grad_out_row = grad_out_bf16 + (size_t)tok_pos * H;
+        const ggml_bf16_t* grad_out_row = grad_output_bf16_ptr_[expert_idx] + (size_t)t * H;
 
         // gate_proj grad: [I, H] += grad_gate_out[t]^T @ input[t]
         for (int i = 0; i < I; i++) {

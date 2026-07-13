@@ -9,7 +9,8 @@ Full Fine-Tuning（Full FT）功能。重点是专家基座权重的梯度、opt
 - 仓库：`Illumination111/ktransformers-fullFT_development`
 - Full FT 基线提交：`e99b5e1`，基于上游 `8e46e58`
 - Full FT 来源：poryfly 的 `239bac5`、`25fa2fd`
-- 当前状态：TP 子核配置、梯度分片/stride、临时区容量和逐步清零已修复；等待修复后训练验证
+- 当前状态：TP 子核配置、梯度分片/stride、临时区容量和逐步清零已修复；GDB 已将
+  首步 SIGSEGV 定位为 base-weight backward 错用路由表，现改用 expert-major packed buffer
 
 ## 1. 开发前先确认
 
@@ -116,6 +117,24 @@ GeneralMOEConfig tp_config = config;
 `grad_norm=0`，step 0 到 step 15 的 probe 为 `changed=0/12`、
 `max_abs_delta=0`。720 次 requant 不能证明权重更新。
 
+修复后的 `20260710_192456_1gpu_AMX_BF16_FULLFT_EXPERTONLY` run 未进入
+第一个训练 step。`phase4/train.log` 记录训练子进程 PID 3296907 在
+`2026-07-10 19:27:33 +08:00` 以 `exitcode=-11` 退出，并明确报告
+`Signal 11 (SIGSEGV)`；外层 `accelerate` 的 `exit_code.txt=1` 只是 launcher
+退出码。`phase4/log_analysis.txt` 正确识别到崩溃，但旧 `summary.md` 的
+“未检测到崩溃”是汇总脚本误判，不得作为反证。该 run 没有 C++ backtrace、
+源码行号或 core，因而“C++ 梯度索引越界”目前只是诊断假设，并非已确认根因。
+
+带符号 GDB 的 `20260713_105328_1gpu_AMX_BF16_FULLFT_EXPERTONLY` run
+确认根因位于 `backward_base_weight_grad`：`m_local_pos_cache` 的真实布局是
+`[token_idx][route_slot]`，内层长度为 `k=8`，旧代码却按
+`m_local_pos_cache[expert_idx][t]` 访问。首个 expert 执行到 `t=8` 时越界，
+读出垃圾 `tok_pos=81349952`，最终在读取 `input_row[0]` 时于
+`operators/amx/sft_moe.hpp:1968` 触发 SIGSEGV。两个 NUMA 子核均进入同一错误路径。
+最小修复不再反查路由表，而是直接使用 backward 已恢复/生成的
+`m_local_input_ptr_[expert_idx]` 和 `grad_output_bf16_ptr_[expert_idx]`；后者已包含
+router weight，因而同时保证 down projection 基座梯度的权重语义正确。
+
 ## 6. 当前两文件实现
 
 生产代码限制在两个文件，未修改 Python 接口。
@@ -129,6 +148,8 @@ GeneralMOEConfig tp_config = config;
 4. 门控要求开关为 true 且三个梯度指针均非空。
 5. `forward_pool_` 保证至少 `3 * I * H * sizeof(float)` 字节。
 6. `lora_rank=0` 时 scaling 明确为 0，避免纯 Full FT 产生 Inf。
+7. 基座梯度读取 expert-major packed input/grad-output，不把
+   `m_local_pos_cache[token][route]` 误当作 expert token 列表。
 
 ### 6.2 `operators/moe-sft-tp.hpp`
 
@@ -145,7 +166,23 @@ GeneralMOEConfig tp_config = config;
 ## 7. 验证顺序
 
 当前已通过 `clang-format --dry-run --Werror` 和 AMX/CUDA Release
-`build_ext --inplace`。修复后的 expert-only 短训练仍是必需验收项。
+`build_ext --inplace`。但当前 Kllama 环境中的 `kt_kernel_ext` 已 stripped，
+普通 GDB 只能得到地址或有限符号；定位 SIGSEGV 前应使用相同 Python 环境重新构建
+并安装带符号的 `RelWithDebInfo` 版本：
+
+```bash
+cd /mnt/data2/wbw/ktransformers
+CPUINFER_BUILD_TYPE=RelWithDebInfo \
+  /mnt/data2/wbw/conda/envs/Kllama/bin/python3.12 \
+  kt-kernel/setup.py build_ext --inplace
+CPUINFER_BUILD_TYPE=RelWithDebInfo \
+  /mnt/data2/wbw/conda/envs/Kllama/bin/python3.12 -m pip install \
+  --no-build-isolation --no-deps --force-reinstall ./kt-kernel
+```
+
+确认测试实际 import 的 `.so` 含 `.debug_info`/`.debug_line`。然后使用 expert-only
+runner 的 `--gdb`；只有磁盘空间足够时才使用 `--gdb-core`。修复后的 expert-only
+短训练仍是必需验收项。
 
 1. **静态检查**：确认 setter 不在 LoRA 条件分支内；确认所有指针先判空再偏移。
 2. **构建**：重新编译并安装 `kt_kernel_ext`。
@@ -183,8 +220,22 @@ FFTtest/Qwen3-30B-A3B/test_log/20260710_103230_1gpu_AMX_BF16_FULLFT_EXPERTONLY/
   phase4/expert_buf_probe.json
   phase4/train.log
 
+FFTtest/Qwen3-30B-A3B/test_log/20260710_192456_1gpu_AMX_BF16_FULLFT_EXPERTONLY/
+  phase4/train.log          # exitcode=-11，Signal 11 (SIGSEGV)
+  phase4/log_analysis.txt   # 正确检测到 SIGSEGV
+  phase4/exit_code.txt      # 外层 launcher 退出码 1
+  summary.md                # P5 旧结论错误，不得作为崩溃判据
+
+FFTtest/Qwen3-30B-A3B/test_log/20260713_105328_1gpu_AMX_BF16_FULLFT_EXPERTONLY/
+  phase4/gdb_sigsegv.log    # t=8 越界、非法 tok_pos 和双 NUMA 原生栈
+  phase4/train.log
+  summary.md
+
 FFTtest/Qwen3-30B-A3B/expert_buf_probe.py
+FFTtest/Qwen3-30B-A3B/gdb_sigsegv.gdb
+FFTtest/Qwen3-30B-A3B/run_full_ft_test_1gpu_bf16_frozen.sh --gdb
 ```
 
 该 run 的直接证据是 `changed=0/12`、`max_abs_delta=0`；训练 loss
-仍下降不能否定 expert 基座梯度失效。
+仍下降不能否定 expert 基座梯度失效。后续 run 的直接崩溃证据必须以原始
+`phase4/train.log` 和 `phase4/gdb_sigsegv.log` 为准，不能只依赖生成的 summary。
