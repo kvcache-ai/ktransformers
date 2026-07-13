@@ -14,10 +14,11 @@ embedding 等参数的更新当作 expert Full FT 已生效的证据。
 
 截至 2026-07-13，本地比较对象为：
 
-- 官方仓库：`kvcache-ai/ktransformers`，remote 名为 `origin`。
+- 官方仓库：`kvcache-ai/ktransformers`，remote 名为 `upstream`。
 - 个人仓库：`Illumination111/ktransformers-fullFT_development`，remote 名为
-  `development`。
-- 个人开发分支：`fullft-development`，当前提交 `5ce0767`。
+  `origin`。
+- 个人开发分支：`fullft-development`；Full-FT 核心生产代码截止 `5ce0767`，
+  后续纯文档提交不改变该代码基线。
 - 共同基线：官方提交 `8e46e58`。
 - Full FT 初始快照：`e99b5e1`，来源包含 poryfly 的 `239bac5`、`25fa2fd`。
 - 后续修复：`2d81e86`、`20f645c`、`5ce0767`。
