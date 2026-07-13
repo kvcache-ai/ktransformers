@@ -171,6 +171,31 @@ def test_moe_amx_skip_gpu_expert_cpu_copy_parity():
             assert diff < 0.35, f"skip path accuracy failed at qlen={qlen}: diff={float(diff):.6f} >= 0.35"
 
 
+def test_skip_gpu_expert_cpu_copy_rejected_in_sft_mode():
+    """SFT trains every expert on CPU and needs full host copies; the factory
+    must refuse the inference-only skip before any backend is constructed."""
+    if not HAS_DEPS:
+        pytest.skip(f"Dependencies not available: {import_error}")
+    from kt_kernel.experts import KTMoEWrapper
+
+    with pytest.raises(ValueError, match="skip_gpu_expert_cpu_copy"):
+        KTMoEWrapper(
+            layer_idx=0,
+            num_experts=expert_num,
+            num_experts_per_tok=num_experts_per_tok,
+            hidden_size=hidden_size,
+            moe_intermediate_size=intermediate_size,
+            gpu_experts_mask=None,
+            cpuinfer_threads=2,
+            threadpool_count=1,
+            weight_path="/nonexistent",
+            chunked_prefill_size=max_len,
+            skip_gpu_expert_cpu_copy=True,
+            method="AMXBF16_SFT",
+            mode="sft",
+        )
+
+
 def run_all_tests():
     if not HAS_DEPS:
         print(f"Dependencies not available: {import_error}")
@@ -178,6 +203,8 @@ def run_all_tests():
     try:
         test_moe_amx_skip_gpu_expert_cpu_copy_parity()
         print("skip_gpu_expert_cpu_copy parity test passed")
+        test_skip_gpu_expert_cpu_copy_rejected_in_sft_mode()
+        print("skip_gpu_expert_cpu_copy sft-mode rejection test passed")
     except Exception as e:
         print(f"Test failed: {e}")
         import traceback

@@ -237,6 +237,15 @@ class KTMoEWrapper:
                     f"mode='sft' (method={method!r}); SFT backends do not "
                     f"implement the V4-2604B clamp."
                 )
+            # SFT trains every expert on CPU and needs full host copies of all
+            # expert weights, including GPU-resident ones; the inference-only
+            # CPU-copy skip must never reach a training run.
+            if skip_gpu_expert_cpu_copy:
+                raise ValueError(
+                    "skip_gpu_expert_cpu_copy=True is not supported in "
+                    "mode='sft'; SFT requires full CPU copies of all expert "
+                    "weights (GPU-resident experts included)."
+                )
             return _create_sft_wrapper(
                 layer_idx=layer_idx,
                 num_experts=num_experts,
