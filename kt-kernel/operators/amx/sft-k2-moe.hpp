@@ -666,6 +666,30 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     return enabled;
   }
 
+  static bool down_base_backward_bf16_matmat_enabled() {
+#if defined(__AVX512BF16__)
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_DOWN_BASE_BWD_BF16_MATMAT");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+  }
+
+  static bool gate_up_base_backward_bf16_matmat_enabled() {
+#if defined(__AVX512BF16__)
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_GATE_UP_BASE_BWD_BF16_MATMAT");
+      return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+  }
+
   static bool reuse_down_lora_bprop_enabled() {
     static const bool enabled = []() {
       const char* value = std::getenv("KT_K2_SFT_REUSE_DOWN_BPROP");
@@ -1471,6 +1495,178 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     f0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals0), scale_vec, f0);
     f1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(vals1), scale_vec, f1);
   }
+
+#if defined(__AVX512BF16__)
+  static inline __m512bh interleave_bf16_pairs(__m512bh values) {
+    alignas(64) static constexpr uint16_t pair_indices[32] = {
+        0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23,
+        8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31,
+    };
+    const __m512i indices = _mm512_load_si512(reinterpret_cast<const __m512i*>(pair_indices));
+    return (__m512bh)_mm512_permutexvar_epi16(indices, (__m512i)values);
+  }
+
+  static inline __m512bh fp32_pair_to_bf16(float value0, float value1) {
+    return interleave_bf16_pairs(_mm512_cvtne2ps_pbh(_mm512_set1_ps(value1), _mm512_set1_ps(value0)));
+  }
+
+  static inline void rawint4_weight_pair_bf16(const uint8_t* packed, const float* scales, int row0, int row1,
+                                               int cols, int group, __m512bh& weight_lo,
+                                               __m512bh& weight_hi) {
+    const int groups_per_row = cols / 32;
+    const size_t row_bytes = static_cast<size_t>(cols) / 2;
+    const __m512i zero_point = _mm512_set1_epi32(8);
+    const __m128i nibble_mask = _mm_set1_epi8(0x0f);
+
+    auto decode = [&](int row, __m512& lo, __m512& hi) {
+      const uint8_t* src = packed + static_cast<size_t>(row) * row_bytes + static_cast<size_t>(group) * 16;
+      const __m128i packed16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+      const __m128i low4 = _mm_and_si128(packed16, nibble_mask);
+      const __m128i high4 = _mm_and_si128(_mm_srli_epi16(packed16, 4), nibble_mask);
+      const __m512 scale = _mm512_set1_ps(scales[static_cast<size_t>(row) * groups_per_row + group]);
+      lo = _mm512_mul_ps(
+          _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_unpacklo_epi8(low4, high4)), zero_point)),
+          scale);
+      hi = _mm512_mul_ps(
+          _mm512_cvtepi32_ps(_mm512_sub_epi32(_mm512_cvtepu8_epi32(_mm_unpackhi_epi8(low4, high4)), zero_point)),
+          scale);
+    };
+
+    __m512 row0_lo, row0_hi, row1_lo, row1_hi;
+    decode(row0, row0_lo, row0_hi);
+    decode(row1, row1_lo, row1_hi);
+    weight_lo = interleave_bf16_pairs(_mm512_cvtne2ps_pbh(row1_lo, row0_lo));
+    weight_hi = interleave_bf16_pairs(_mm512_cvtne2ps_pbh(row1_hi, row0_hi));
+  }
+
+  void rawint4_backward_matmat_bf16(const uint8_t* packed, const float* scales, const float* input, int m,
+                                    int rows, int cols, int col_begin, int col_end, float* output) const {
+    for (int m_begin = 0; m_begin < m; m_begin += 8) {
+      const int m_count = std::min(8, m - m_begin);
+      for (int col = col_begin; col < col_end; col += 32) {
+        const int group = col / 32;
+        __m512 acc0_lo = _mm512_setzero_ps(), acc0_hi = _mm512_setzero_ps();
+        __m512 acc1_lo = _mm512_setzero_ps(), acc1_hi = _mm512_setzero_ps();
+        __m512 acc2_lo = _mm512_setzero_ps(), acc2_hi = _mm512_setzero_ps();
+        __m512 acc3_lo = _mm512_setzero_ps(), acc3_hi = _mm512_setzero_ps();
+        __m512 acc4_lo = _mm512_setzero_ps(), acc4_hi = _mm512_setzero_ps();
+        __m512 acc5_lo = _mm512_setzero_ps(), acc5_hi = _mm512_setzero_ps();
+        __m512 acc6_lo = _mm512_setzero_ps(), acc6_hi = _mm512_setzero_ps();
+        __m512 acc7_lo = _mm512_setzero_ps(), acc7_hi = _mm512_setzero_ps();
+
+        for (int row = 0; row < rows; row += 2) {
+          __m512bh weight_lo, weight_hi;
+          rawint4_weight_pair_bf16(packed, scales, row, row + 1, cols, group, weight_lo, weight_hi);
+
+#define KT_K2_SFT_BF16_BWD_ACC(M)                                                                                  \
+  do {                                                                                                              \
+    if (m_count > M) {                                                                                              \
+      const float* input_row = input + static_cast<size_t>(m_begin + M) * rows;                                    \
+      const __m512bh coeff = fp32_pair_to_bf16(input_row[row], input_row[row + 1]);                                \
+      acc##M##_lo = _mm512_dpbf16_ps(acc##M##_lo, coeff, weight_lo);                                               \
+      acc##M##_hi = _mm512_dpbf16_ps(acc##M##_hi, coeff, weight_hi);                                               \
+    }                                                                                                               \
+  } while (0)
+          KT_K2_SFT_BF16_BWD_ACC(0);
+          KT_K2_SFT_BF16_BWD_ACC(1);
+          KT_K2_SFT_BF16_BWD_ACC(2);
+          KT_K2_SFT_BF16_BWD_ACC(3);
+          KT_K2_SFT_BF16_BWD_ACC(4);
+          KT_K2_SFT_BF16_BWD_ACC(5);
+          KT_K2_SFT_BF16_BWD_ACC(6);
+          KT_K2_SFT_BF16_BWD_ACC(7);
+#undef KT_K2_SFT_BF16_BWD_ACC
+        }
+
+#define KT_K2_SFT_BF16_BWD_STORE(M)                                                                                \
+  do {                                                                                                              \
+    if (m_count > M) {                                                                                              \
+      float* dst = output + static_cast<size_t>(m_begin + M) * cols + col;                                         \
+      _mm512_storeu_ps(dst, acc##M##_lo);                                                                           \
+      _mm512_storeu_ps(dst + 16, acc##M##_hi);                                                                      \
+    }                                                                                                               \
+  } while (0)
+        KT_K2_SFT_BF16_BWD_STORE(0);
+        KT_K2_SFT_BF16_BWD_STORE(1);
+        KT_K2_SFT_BF16_BWD_STORE(2);
+        KT_K2_SFT_BF16_BWD_STORE(3);
+        KT_K2_SFT_BF16_BWD_STORE(4);
+        KT_K2_SFT_BF16_BWD_STORE(5);
+        KT_K2_SFT_BF16_BWD_STORE(6);
+        KT_K2_SFT_BF16_BWD_STORE(7);
+#undef KT_K2_SFT_BF16_BWD_STORE
+      }
+    }
+  }
+
+  void rawint4_gate_up_backward_matmat_bf16(
+      const uint8_t* gate_packed, const float* gate_scales, const uint8_t* up_packed, const float* up_scales,
+      const float* grad_gate, const float* grad_up, int m, int rows, int cols, int col_begin, int col_end,
+      ggml_bf16_t* output) const {
+    for (int m_begin = 0; m_begin < m; m_begin += 8) {
+      const int m_count = std::min(8, m - m_begin);
+      for (int col = col_begin; col < col_end; col += 32) {
+        const int group = col / 32;
+        __m512 acc0_lo = _mm512_setzero_ps(), acc0_hi = _mm512_setzero_ps();
+        __m512 acc1_lo = _mm512_setzero_ps(), acc1_hi = _mm512_setzero_ps();
+        __m512 acc2_lo = _mm512_setzero_ps(), acc2_hi = _mm512_setzero_ps();
+        __m512 acc3_lo = _mm512_setzero_ps(), acc3_hi = _mm512_setzero_ps();
+        __m512 acc4_lo = _mm512_setzero_ps(), acc4_hi = _mm512_setzero_ps();
+        __m512 acc5_lo = _mm512_setzero_ps(), acc5_hi = _mm512_setzero_ps();
+        __m512 acc6_lo = _mm512_setzero_ps(), acc6_hi = _mm512_setzero_ps();
+        __m512 acc7_lo = _mm512_setzero_ps(), acc7_hi = _mm512_setzero_ps();
+
+        for (int row = 0; row < rows; row += 2) {
+          __m512bh gate_weight_lo, gate_weight_hi, up_weight_lo, up_weight_hi;
+          rawint4_weight_pair_bf16(gate_packed, gate_scales, row, row + 1, cols, group, gate_weight_lo,
+                                   gate_weight_hi);
+          rawint4_weight_pair_bf16(up_packed, up_scales, row, row + 1, cols, group, up_weight_lo, up_weight_hi);
+
+#define KT_K2_SFT_BF16_GATE_UP_ACC(M)                                                                              \
+  do {                                                                                                              \
+    if (m_count > M) {                                                                                              \
+      const float* gate_row = grad_gate + static_cast<size_t>(m_begin + M) * rows;                                 \
+      const float* up_row = grad_up + static_cast<size_t>(m_begin + M) * rows;                                     \
+      const __m512bh gate_coeff = fp32_pair_to_bf16(gate_row[row], gate_row[row + 1]);                             \
+      const __m512bh up_coeff = fp32_pair_to_bf16(up_row[row], up_row[row + 1]);                                   \
+      acc##M##_lo = _mm512_dpbf16_ps(acc##M##_lo, gate_coeff, gate_weight_lo);                                     \
+      acc##M##_lo = _mm512_dpbf16_ps(acc##M##_lo, up_coeff, up_weight_lo);                                         \
+      acc##M##_hi = _mm512_dpbf16_ps(acc##M##_hi, gate_coeff, gate_weight_hi);                                     \
+      acc##M##_hi = _mm512_dpbf16_ps(acc##M##_hi, up_coeff, up_weight_hi);                                         \
+    }                                                                                                               \
+  } while (0)
+          KT_K2_SFT_BF16_GATE_UP_ACC(0);
+          KT_K2_SFT_BF16_GATE_UP_ACC(1);
+          KT_K2_SFT_BF16_GATE_UP_ACC(2);
+          KT_K2_SFT_BF16_GATE_UP_ACC(3);
+          KT_K2_SFT_BF16_GATE_UP_ACC(4);
+          KT_K2_SFT_BF16_GATE_UP_ACC(5);
+          KT_K2_SFT_BF16_GATE_UP_ACC(6);
+          KT_K2_SFT_BF16_GATE_UP_ACC(7);
+#undef KT_K2_SFT_BF16_GATE_UP_ACC
+        }
+
+#define KT_K2_SFT_BF16_GATE_UP_STORE(M)                                                                            \
+  do {                                                                                                              \
+    if (m_count > M) {                                                                                              \
+      ggml_bf16_t* dst = output + static_cast<size_t>(m_begin + M) * cols + col;                                   \
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), (__m256i)_mm512_cvtneps_pbh(acc##M##_lo));              \
+      _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 16), (__m256i)_mm512_cvtneps_pbh(acc##M##_hi));         \
+    }                                                                                                               \
+  } while (0)
+        KT_K2_SFT_BF16_GATE_UP_STORE(0);
+        KT_K2_SFT_BF16_GATE_UP_STORE(1);
+        KT_K2_SFT_BF16_GATE_UP_STORE(2);
+        KT_K2_SFT_BF16_GATE_UP_STORE(3);
+        KT_K2_SFT_BF16_GATE_UP_STORE(4);
+        KT_K2_SFT_BF16_GATE_UP_STORE(5);
+        KT_K2_SFT_BF16_GATE_UP_STORE(6);
+        KT_K2_SFT_BF16_GATE_UP_STORE(7);
+#undef KT_K2_SFT_BF16_GATE_UP_STORE
+      }
+    }
+  }
+#endif
 
   // Compute eight expert-packed rows together so each RAWINT4 KGroup=32
   // weight tile is unpacked and dequantized once, then reused by all rows.
@@ -2435,6 +2631,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
     long long gate_up_lora_matmat_du_dx_us = 0;
     long long gate_up_lora_matmat_da_db_us = 0;
     long long gate_up_write_us = 0;
+    const char* down_base_kernel = "fp32_m8";
+    const char* gate_up_base_kernel = "fp32_m8";
 
     explicit TP1BackwardProfile(bool enabled_) : enabled(enabled_) {
       if (enabled) {
@@ -2573,7 +2771,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
   // final dX row.  The two pool jobs are sequential, never nested.
   bool compute_gate_up_base_expert_matmat(const K2ForwardCache& cache, const TP1BackwardLayout& layout,
                                           const float* grad_gate, const float* grad_up,
-                                          std::vector<float>& grad_input_fp32) const {
+                                          std::vector<float>& grad_input_fp32,
+                                          TP1BackwardProfile* profile = nullptr) const {
     const int qlen = cache.qlen_cache;
     const int hidden = config_.hidden_size;
     const int inter_size = config_.intermediate_size;
@@ -2583,9 +2782,37 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     gate_up_route_grad_scratch_.resize(layout.total_tokens * static_cast<size_t>(hidden));
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    pool->do_work_stealing_job(
-        cache.activated_expert_cache, nullptr,
-        [&](int expert_task) {
+    const bool use_bf16_matmat = gate_up_base_backward_bf16_matmat_enabled();
+    if (profile != nullptr && use_bf16_matmat) profile->gate_up_base_kernel = "bf16_matmat";
+
+#if defined(__AVX512BF16__)
+    if (use_bf16_matmat) {
+      const int nth = T::recommended_nth(hidden);
+      pool->do_work_stealing_job(
+          nth * cache.activated_expert_cache, nullptr,
+          [&](int task_id) {
+            const int expert_task = task_id / nth;
+            const int ith = task_id % nth;
+            const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+            const int num_tokens = cache.m_local_num_cache[expert_idx];
+            const size_t row_base = layout.expert_base[expert_idx];
+            const auto* gate_packed = reinterpret_cast<const uint8_t*>(this->gate_bb_[expert_idx]->b);
+            const auto* up_packed = reinterpret_cast<const uint8_t*>(this->up_bb_[expert_idx]->b);
+            const float* gate_scales = this->gate_bb_[expert_idx]->d;
+            const float* up_scales = this->up_bb_[expert_idx]->d;
+            const auto [col_begin, col_end] = T::split_range_n(hidden, ith, nth);
+            rawint4_gate_up_backward_matmat_bf16(
+                gate_packed, gate_scales, up_packed, up_scales, grad_gate + row_base * inter_size,
+                grad_up + row_base * inter_size, num_tokens, inter_size, hidden, col_begin, col_end,
+                gate_up_route_grad_scratch_.data() + row_base * hidden);
+          },
+          nullptr);
+    } else
+#endif
+    {
+      pool->do_work_stealing_job(
+          cache.activated_expert_cache, nullptr,
+          [&](int expert_task) {
           const int expert_idx = cache.m_expert_id_map_cache[expert_task];
           const int num_tokens = cache.m_local_num_cache[expert_idx];
           const size_t row_base = layout.expert_base[expert_idx];
@@ -2635,8 +2862,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
             }
             write_bf16_array(gate_up_route_grad_scratch_.data() + row * hidden, dst, hidden);
           }
-        },
-        nullptr);
+          },
+          nullptr);
+    }
 
     pool->do_work_stealing_job(
         qlen, nullptr,
@@ -2785,9 +3013,9 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
     if (need_grad_intermediate) {
       // Shared Backward Step 3.1: expert-packed down base backward.
-      // Experts with M>=8 use an M8xKxN RAWINT4 mat-mat tile; small experts
-      // retain the established packed GEMV path as the correctness/latency
-      // fallback.  Work stealing is over experts, never a nested pool.
+      // Large batches split each expert over the same 256-column partitions
+      // used by forward.  The BF16 path decodes two RAWINT4 reduction rows at
+      // a time and reuses the weight pair across eight routed tokens.
       section_start = profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       auto compute_expert_base = [&](int expert_task) {
         const int expert_idx = cache.m_expert_id_map_cache[expert_task];
@@ -2811,6 +3039,31 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
         }
       };
 
+      const bool use_bf16_matmat = layout.total_tokens >= 10 && config_.pool != nullptr &&
+                                      down_base_backward_bf16_matmat_enabled();
+      if (profile != nullptr && use_bf16_matmat) profile->down_base_kernel = "bf16_matmat";
+#if defined(__AVX512BF16__)
+      if (use_bf16_matmat) {
+        auto pool = config_.pool->get_subpool(tp_part_idx);
+        const int nth = T::recommended_nth(inter_size);
+        pool->do_work_stealing_job(
+            nth * cache.activated_expert_cache, nullptr,
+            [&](int task_id) {
+              const int expert_task = task_id / nth;
+              const int ith = task_id % nth;
+              const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+              const int num_tokens = cache.m_local_num_cache[expert_idx];
+              const size_t row_base = layout.expert_base[expert_idx];
+              const auto* down_packed = reinterpret_cast<const uint8_t*>(this->down_bb_[expert_idx]->b);
+              const float* down_scales = this->down_bb_[expert_idx]->d;
+              const auto [col_begin, col_end] = T::split_range_n(inter_size, ith, nth);
+              rawint4_backward_matmat_bf16(
+                  down_packed, down_scales, grad_down_fp32.data() + row_base * hidden, num_tokens, hidden,
+                  inter_size, col_begin, col_end, grad_inter_fp32.data() + row_base * inter_size);
+            },
+            nullptr);
+      } else
+#endif
       if (layout.total_tokens >= 10 && config_.pool != nullptr) {
         auto pool = config_.pool->get_subpool(tp_part_idx);
         pool->do_work_stealing_job(cache.activated_expert_cache, nullptr, compute_expert_base, nullptr);
@@ -3304,7 +3557,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       const auto section_start =
           profile != nullptr ? profile->section_start() : TP1BackwardProfile::disabled_time_point();
       expert_matmat_base =
-          compute_gate_up_base_expert_matmat(cache, layout, grad_gate, grad_up, grad_input_fp32);
+          compute_gate_up_base_expert_matmat(cache, layout, grad_gate, grad_up, grad_input_fp32, profile);
       if (expert_matmat_base && profile != nullptr) profile->add_since(section_start, profile->gate_up_base_us);
     }
     if (expert_matmat_base) {
@@ -3360,7 +3613,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       if (profile.enabled) {
         std::fprintf(stderr,
-                     "[KT_K2_SFT_PROFILE] layer=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld down_us=%lld "
+                     "[KT_K2_SFT_PROFILE] layer=%d qlen=%d active=%d tokens=%zu down_base_kernel=%s "
+                     "gate_up_base_kernel=%s grad_weights_us=%lld down_us=%lld "
                      "down_route_us=%lld down_write_us=%lld down_base_us=%lld down_lora_bprop_us=%lld "
                      "down_lora_a_us=%lld down_lora_b_us=%lld down_lora_matmat_du_dx_us=%lld "
                      "down_lora_matmat_da_db_us=%lld activation_us=%lld gate_up_us=%lld "
@@ -3369,6 +3623,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      "gate_up_lora_a_input_us=%lld gate_up_lora_matmat_du_dx_us=%lld "
                      "gate_up_lora_matmat_da_db_us=%lld gate_up_write_us=%lld total_us=%lld\n",
                      sft_config_.layer_idx, cache.qlen_cache, cache.activated_expert_cache, layout.total_tokens,
+                     profile.down_base_kernel, profile.gate_up_base_kernel,
                      profile.grad_weights_us, profile.down_us, profile.down_route_us, profile.down_write_us,
                      profile.down_base_us, profile.down_lora_bprop_us, profile.down_lora_a_us, profile.down_lora_b_us,
                      profile.down_lora_matmat_du_dx_us, profile.down_lora_matmat_da_db_us, profile.activation_us,
@@ -3907,7 +4162,7 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
 
       auto gate_up_base_start = profile.section_start();
       const bool expert_matmat_base = compute_gate_up_base_expert_matmat(
-          cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input_fp32);
+          cache, layout, grad_gate_fp32.data(), grad_up_fp32.data(), grad_input_fp32, &profile);
       if (expert_matmat_base) profile.add_since(gate_up_base_start, profile.gate_up_base_us);
 
       const bool gate_b_sparse_ok = grad_gate_lora_b == nullptr || !grad_gate_b_fp32.empty();
@@ -4048,7 +4303,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
       profile.mark(profile.gate_up_us);
       if (profile.enabled) {
         std::fprintf(stderr,
-                     "[KT_K2_SFT_PROFILE] layer=%d tp_part=%d qlen=%d active=%d tokens=%zu grad_weights_us=%lld "
+                     "[KT_K2_SFT_PROFILE] layer=%d tp_part=%d qlen=%d active=%d tokens=%zu down_base_kernel=%s "
+                     "gate_up_base_kernel=%s grad_weights_us=%lld "
                      "down_us=%lld down_lora_grads_us=%lld down_route_us=%lld down_write_us=%lld "
                      "down_base_us=%lld down_lora_bprop_us=%lld down_lora_a_us=%lld down_lora_b_us=%lld "
                      "down_lora_matmat_du_dx_us=%lld down_lora_matmat_da_db_us=%lld "
@@ -4058,7 +4314,8 @@ class AMX_K2_SFT_MOE_TP : public AMX_K2_MOE_TP<T> {
                      "gate_up_lora_matmat_du_dx_us=%lld gate_up_lora_matmat_da_db_us=%lld "
                      "gate_up_write_us=%lld total_us=%lld\n",
                      sft_config_.layer_idx, tp_part_idx, cache.qlen_cache, cache.activated_expert_cache,
-                     layout.total_tokens, profile.grad_weights_us, profile.down_us, profile.down_lora_grads_us,
+                     layout.total_tokens, profile.down_base_kernel, profile.gate_up_base_kernel,
+                     profile.grad_weights_us, profile.down_us, profile.down_lora_grads_us,
                      profile.down_route_us, profile.down_write_us, profile.down_base_us, profile.down_lora_bprop_us,
                      profile.down_lora_a_us, profile.down_lora_b_us, profile.down_lora_matmat_du_dx_us,
                      profile.down_lora_matmat_da_db_us, profile.activation_us, profile.gate_up_us,
