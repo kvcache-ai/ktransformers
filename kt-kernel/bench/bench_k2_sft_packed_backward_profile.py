@@ -20,7 +20,7 @@ from statistics import mean, median
 from typing import Iterable
 
 
-PROFILE_RE = re.compile(r"\[KT_K2_SFT_PROFILE\]\s+(?P<body>.*)")
+PROFILE_RE = re.compile(r"\[(?P<tag>KT_K2_SFT_PROFILE|KT_K2_SFT_TP_PROFILE)\]\s+(?P<body>.*)")
 
 
 def parse_csv_ints(value: str) -> list[int]:
@@ -65,7 +65,11 @@ def parse_profile_line(line: str) -> dict[str, int | float | str] | None:
         parsed[key] = _coerce_profile_value(value)
     if not parsed:
         return None
-    parsed["profile_kind"] = "tp_shard" if "tp_part" in parsed else "single_tp"
+    parsed["profile_kind"] = (
+        "tp_wrapper"
+        if match.group("tag") == "KT_K2_SFT_TP_PROFILE"
+        else ("tp_shard" if "tp_part" in parsed else "single_tp")
+    )
     return parsed
 
 
@@ -168,6 +172,7 @@ def summarize_profiles(cases: Iterable[dict]) -> list[dict]:
     summaries = []
     stage_keys = [
         "grad_weights_us",
+        "workspace_setup_us",
         "down_us",
         "down_lora_grads_us",
         "down_route_us",
@@ -188,6 +193,14 @@ def summarize_profiles(cases: Iterable[dict]) -> list[dict]:
         "gate_up_lora_matmat_du_dx_us",
         "gate_up_lora_matmat_da_db_us",
         "gate_up_write_us",
+        "gate_up_direct_us",
+        "pool_acquire_us",
+        "pool_clear_us",
+        "shard_us",
+        "grad_input_merge_us",
+        "lora_merge_us",
+        "grad_weights_merge_us",
+        "barrier_us",
         "total_us",
     ]
     for (qlen, tp_count, rank, profile_kind, tp_part), rows in sorted(groups.items()):

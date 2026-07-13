@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 TOKEN_FIELDS = ("label_tokens_global", "attention_tokens_global", "input_tokens_global")
-PROFILE_RE = re.compile(r"\[(?P<tag>KT_K2_SFT_FWD_PROFILE|KT_K2_SFT_PROFILE)\]\s+(?P<body>.*)")
+PROFILE_RE = re.compile(
+    r"\[(?P<tag>KT_K2_SFT_FWD_PROFILE|KT_K2_SFT_PROFILE|KT_K2_SFT_TP_PROFILE)\]\s+(?P<body>.*)"
+)
 
 
 def read_jsonl(path: Path | None) -> list[dict[str, Any]]:
@@ -116,7 +118,11 @@ def parse_profile_line(line: str) -> dict[str, Any] | None:
             continue
         key, value = part.split("=", 1)
         row[key] = coerce(value)
-    row["profile_kind"] = "tp_shard" if "tp_part" in row else "single_tp"
+    row["profile_kind"] = (
+        "tp_wrapper"
+        if match.group("tag") == "KT_K2_SFT_TP_PROFILE"
+        else ("tp_shard" if "tp_part" in row else "single_tp")
+    )
     return row
 
 

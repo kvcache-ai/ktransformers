@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -209,6 +210,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
+  static bool tp_backward_profile_enabled() {
+    static const bool enabled = []() {
+      const char* value = std::getenv("KT_K2_SFT_PROFILE_PACKED_BWD");
+      if (value == nullptr || value[0] == '\0') value = std::getenv("KT_K2_SFT_PROFILE_TP_BWD");
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+  }
+
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
     required_bytes = round_up(required_bytes, kAmxAlignment);
     if (required_bytes == 0) {
@@ -252,6 +262,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> part_grad_up_lora_a_;
   std::vector<ggml_bf16_t*> part_grad_input_;
   std::vector<float*> part_grad_weights_;
+  std::vector<void*> part_kernel_workspace_;
+  std::vector<size_t> part_kernel_workspace_bytes_;
 
  public:
   TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
@@ -266,6 +278,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
     part_grad_up_lora_a_.assign(tp_count, nullptr);
     part_grad_input_.assign(tp_count, nullptr);
     part_grad_weights_.assign(tp_count, nullptr);
+    part_kernel_workspace_.assign(tp_count, nullptr);
+    part_kernel_workspace_bytes_.assign(tp_count, 0);
 
     if constexpr (!kSkipLoRA) {
       // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
@@ -861,6 +875,16 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     auto pool = config.pool;
+    using ProfileClock = std::chrono::high_resolution_clock;
+    const bool profile_tp = tp_backward_profile_enabled();
+    const auto profile_total_start = ProfileClock::now();
+    auto profile_last = profile_total_start;
+    auto profile_mark = [&]() {
+      const auto now = ProfileClock::now();
+      const long long elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - profile_last).count();
+      profile_last = now;
+      return elapsed;
+    };
 
     // Get full intermediate_size (before TP partitioning)
     int full_intermediate_size = sft_config.intermediate_size;
@@ -874,6 +898,17 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
     if constexpr (kSkipLoRA) lora_rank = 0;
+
+    bool use_external_workspace = false;
+    bool partials_overwrite = false;
+    if constexpr (requires(const T& t) {
+                    t.backward_workspace_v2_enabled();
+                    t.backward_partials_overwrite_enabled();
+                    t.backward_workspace_bytes(0);
+                  }) {
+      use_external_workspace = tps[0]->backward_workspace_v2_enabled();
+      partials_overwrite = use_external_workspace && tps[0]->backward_partials_overwrite_enabled();
+    }
 
     // Snapshot active expert metadata before dispatch (cache is popped inside backward())
     int active_count = tps[0]->get_cache_activated_expert_count();
@@ -896,6 +931,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     const size_t down_b_sparse_elems = (size_t)active_count * (size_t)hidden_size * (size_t)lora_rank;
 
     std::vector<size_t> clear_bytes(tp_count, 0);
+    std::vector<size_t> kernel_workspace_bytes(tp_count, 0);
     for (int i = 0; i < tp_count; i++) {
       const size_t grad_input_elems = (size_t)qlen * (size_t)hidden_size;
       const size_t grad_weights_elems = need_grad_weights ? ((size_t)qlen * (size_t)k) : 0;
@@ -911,6 +947,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
       required += round_up(grad_input_bytes, kAmxAlignment);
       if (need_grad_weights) {
         required += round_up(grad_weights_bytes, kAmxAlignment);
+      }
+      if constexpr (requires(const T& t) { t.backward_workspace_bytes(0); }) {
+        if (use_external_workspace) {
+          kernel_workspace_bytes[i] = tps[i]->backward_workspace_bytes(qlen);
+          required += round_up(kernel_workspace_bytes[i], kAmxAlignment);
+        }
       }
 
       alloc_or_resize_backward_pool(i, required);
@@ -934,8 +976,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
       // grad_input and grad_weights: per-TP as before
       part_grad_input_[i] = (ggml_bf16_t*)slice(grad_input_bytes);
       part_grad_weights_[i] = need_grad_weights ? (float*)slice(grad_weights_bytes) : nullptr;
-      clear_bytes[i] = offset;
+      clear_bytes[i] = partials_overwrite ? 0 : offset;
+      part_kernel_workspace_[i] = slice(kernel_workspace_bytes[i]);
+      part_kernel_workspace_bytes_[i] = kernel_workspace_bytes[i];
     }
+    const long long profile_pool_acquire_us = profile_mark();
 
     // Parallel memset: zero only per-TP sparse partials and per-TP grad_input/grad_weights partials.
     // The caller is responsible for passing zero-initialized final grad tensors.
@@ -965,6 +1010,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  std::memset(seg.ptr, 0, seg.len);
                                },
                                nullptr);
+    const long long profile_pool_clear_us = profile_mark();
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
@@ -994,6 +1040,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Run backward on each NUMA node
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
+      if constexpr (requires(T& t) {
+                      t.backward_with_workspace(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                                nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, size_t{0});
+                    }) {
+        if (use_external_workspace) {
+          tps[numa_id]->backward_with_workspace(
+              grad_output, part_grad_input_[numa_id], nullptr, tp_gate_b_ptr[numa_id], nullptr,
+              tp_up_b_ptr[numa_id], tp_down_a_ptr[numa_id], nullptr, part_grad_weights_[numa_id],
+              full_intermediate_size, tp_fp32_down_b[numa_id], tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id],
+              part_kernel_workspace_[numa_id], part_kernel_workspace_bytes_[numa_id]);
+          return;
+        }
+      }
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
                              nullptr,                /* grad_gate_lora_a — unused, FP32 path below */
@@ -1005,6 +1064,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
                              tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id]);
     });
+    const long long profile_shard_us = profile_mark();
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
@@ -1061,6 +1121,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
           },
           nullptr);
     }
+    const long long profile_grad_input_merge_us = profile_mark();
 
     // Merge reduce-type LoRA gradients: sparse FP32 sum across TPs → BF16 final output
     // Copy-type grads (gate/up_lora_b, down_lora_a) were written directly — no merge needed.
@@ -1137,6 +1198,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
             nullptr);
       }
     }  // if constexpr (!kSkipLoRA)
+    const long long profile_lora_merge_us = profile_mark();
 
     // Merge grad_weights from all NUMA nodes (sum them together)
     // Each NUMA computes partial grad_weights based on its down_output partition
@@ -1170,8 +1232,24 @@ class TP_MOE_SFT : public TP_MOE<T> {
           },
           nullptr);
     }
+    const long long profile_grad_weights_merge_us = profile_mark();
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {});
+    const long long profile_barrier_us = profile_mark();
+    if (profile_tp) {
+      const long long total_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(ProfileClock::now() - profile_total_start).count();
+      std::fprintf(stderr,
+                   "[KT_K2_SFT_TP_PROFILE] layer=%d qlen=%d active=%d tp_count=%d workspace_v2=%d "
+                   "partials_overwrite=%d workspace_bytes=%zu pool_acquire_us=%lld pool_clear_us=%lld "
+                   "shard_us=%lld grad_input_merge_us=%lld lora_merge_us=%lld grad_weights_merge_us=%lld "
+                   "barrier_us=%lld total_us=%lld\n",
+                   config.layer_idx, qlen, active_count, tp_count, use_external_workspace ? 1 : 0,
+                   partials_overwrite ? 1 : 0,
+                   kernel_workspace_bytes.empty() ? 0 : kernel_workspace_bytes[0], profile_pool_acquire_us,
+                   profile_pool_clear_us, profile_shard_us, profile_grad_input_merge_us, profile_lora_merge_us,
+                   profile_grad_weights_merge_us, profile_barrier_us, total_us);
+    }
   }
 
   /**
