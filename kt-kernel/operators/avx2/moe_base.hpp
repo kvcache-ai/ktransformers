@@ -81,6 +81,11 @@ class AVX2_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
+  // Decode-specialized backends may keep per-instance state here. The storage
+  // must live in the base because TP_MOE_Common constructs the CRTP base type
+  // directly; adding data members only to Derived would be unsafe.
+  std::shared_ptr<void> backend_scratch_;
+
   AVX2_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
     derived()->derived_init();
@@ -189,6 +194,12 @@ class AVX2_MOE_BASE {
   void write_weights_to_buffer(Args&&... args) const {
     derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
   }
+
+  // Optional decode hooks. CPU backends inherit these no-op defaults.
+  bool use_fused_gate_up_decode() const { return false; }
+  void decode_gate_up_activation(int, int) {}
+  bool use_fused_down_decode() const { return false; }
+  void decode_down_projection(int, int) {}
 
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {
@@ -378,20 +389,23 @@ class AVX2_MOE_BASE {
     void* down_bc_pool_ptr = down_bc_pool_;
     constexpr size_t M_STEP = T::M_STEP;
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
+    const bool gate_up_fused = activated_expert > 0 && derived()->use_fused_gate_up_decode();
 
     for (int i = 0; i < activated_expert; i++) {
       auto expert_idx = m_expert_id_map_[i];
       size_t max_m = (qlen + M_STEP - 1) / M_STEP * M_STEP;
 
-      gate_bc_[expert_idx]->max_m = max_m;
-      gate_bc_[expert_idx]->set_data(gate_bc_pool_ptr);
-      gate_bc_pool_ptr =
-          (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      if (!gate_up_fused) {
+        gate_bc_[expert_idx]->max_m = max_m;
+        gate_bc_[expert_idx]->set_data(gate_bc_pool_ptr);
+        gate_bc_pool_ptr =
+            (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
-      up_bc_[expert_idx]->max_m = max_m;
-      up_bc_[expert_idx]->set_data(up_bc_pool_ptr);
-      up_bc_pool_ptr =
-          (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+        up_bc_[expert_idx]->max_m = max_m;
+        up_bc_[expert_idx]->set_data(up_bc_pool_ptr);
+        up_bc_pool_ptr =
+            (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      }
 
       down_ba_[expert_idx]->max_m = max_m;
       down_ba_[expert_idx]->set_data(down_ba_pool_ptr);
@@ -418,45 +432,53 @@ class AVX2_MOE_BASE {
 
     // Gate + Up GEMM
     int nth = T::recommended_nth(config_.intermediate_size);
-    pool->do_work_stealing_job(
-        nth * activated_expert * 2, [](int) { T::config(); },
-        [this, nth, qlen](int task_id2) {
-          int task_id = task_id2 / 2;
-          bool do_up = task_id2 % 2;
-          int expert_idx = m_expert_id_map_[task_id / nth];
-          int ith = task_id % nth;
-          derived()->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
-          if (do_up) {
-            up_bc_[expert_idx]->to_mat(qlen, m_local_up_output_ptr_[expert_idx], ith, nth);
-          } else {
-            gate_bc_[expert_idx]->to_mat(qlen, m_local_gate_output_ptr_[expert_idx], ith, nth);
-          }
-        },
-        nullptr);
+    if (gate_up_fused) {
+      derived()->decode_gate_up_activation(activated_expert, qlen);
+    } else {
+      pool->do_work_stealing_job(
+          nth * activated_expert * 2, [](int) { T::config(); },
+          [this, nth, qlen](int task_id2) {
+            int task_id = task_id2 / 2;
+            bool do_up = task_id2 % 2;
+            int expert_idx = m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            derived()->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
+            if (do_up) {
+              up_bc_[expert_idx]->to_mat(qlen, m_local_up_output_ptr_[expert_idx], ith, nth);
+            } else {
+              gate_bc_[expert_idx]->to_mat(qlen, m_local_gate_output_ptr_[expert_idx], ith, nth);
+            }
+          },
+          nullptr);
 
-    // Activation
-    apply_activation(activated_expert, nth, qlen);
+      // Activation
+      apply_activation(activated_expert, nth, qlen);
 
-    // Pack for down projection
-    pool->do_work_stealing_job(
-        activated_expert, nullptr,
-        [this, qlen](int task_id) {
-          int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(qlen, m_local_gate_output_ptr_[expert_idx], 0, 1);
-        },
-        nullptr);
+      // Pack for down projection
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [this, qlen](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            down_ba_[expert_idx]->from_mat(qlen, m_local_gate_output_ptr_[expert_idx], 0, 1);
+          },
+          nullptr);
+    }
 
     // Down GEMM
     nth = T::recommended_nth(config_.hidden_size);
-    pool->do_work_stealing_job(
-        nth * activated_expert, [](int) { T::config(); },
-        [this, nth, qlen](int task_id) {
-          int expert_idx = m_expert_id_map_[task_id / nth];
-          int ith = task_id % nth;
-          derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
-        },
-        nullptr);
+    if (activated_expert > 0 && derived()->use_fused_down_decode()) {
+      derived()->decode_down_projection(activated_expert, qlen);
+    } else {
+      pool->do_work_stealing_job(
+          nth * activated_expert, [](int) { T::config(); },
+          [this, nth, qlen](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            derived()->do_down_gemm(expert_idx, ith, nth, qlen);
+            down_bc_[expert_idx]->to_mat(qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
+          },
+          nullptr);
+    }
 
     // Weighted sum — AVX2 (16 BF16 at a time)
     for (int e = 0; e < config_.hidden_size; e += 16) {

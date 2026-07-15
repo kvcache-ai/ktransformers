@@ -17,6 +17,7 @@ option(KTRANSFORMERS_USE_CUDA "ktransformers: use CUDA" OFF)
 option(KTRANSFORMERS_USE_MUSA "ktransformers: use MUSA" OFF)
 option(KTRANSFORMERS_USE_ROCM "ktransformers: use ROCM" OFF)
 option(KTRANSFORMERS_USE_MACA "ktransformers: use MACA" OFF)
+option(KTRANSFORMERS_USE_SYCL "ktransformers: use SYCL GPTQ INT4 MoE" OFF)
 option(KTRANSFORMERS_CUDA_STATIC_RUNTIME "ktransformers: statically link CUDA runtime" ON)
 option(KTRANSFORMERS_CPU_USE_KML "ktransformers: CPU use KML" OFF)
 option(KTRANSFORMERS_CPU_USE_AMX_AVX512 "ktransformers: CPU use AMX or AVX512" OFF)
@@ -29,15 +30,19 @@ option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" 
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
-project(kt_kernel_ext VERSION 0.6.1)
-
-# Auto-detect CPU features early (unless building with LLAMA_NATIVE)
-if(NOT LLAMA_NATIVE AND NOT MSVC)
-    include(cmake/DetectCPU.cmake)
-endif()
-
 # Choose compilers BEFORE project() so CMake honors them
-if(USE_CONDA_TOOLCHAIN)
+if(KTRANSFORMERS_USE_SYCL)
+    find_program(SYCL_CXX_COMPILER NAMES icpx dpcpp)
+    if(NOT SYCL_CXX_COMPILER)
+        message(FATAL_ERROR "KTRANSFORMERS_USE_SYCL=ON but no SYCL C++ compiler was found (expected icpx or dpcpp). Source the oneAPI environment before configuring.")
+    endif()
+    find_program(SYCL_C_COMPILER NAMES icx clang gcc)
+    if(SYCL_C_COMPILER)
+        set(CMAKE_C_COMPILER ${SYCL_C_COMPILER} CACHE FILEPATH "C compiler" FORCE)
+    endif()
+    set(CMAKE_CXX_COMPILER ${SYCL_CXX_COMPILER} CACHE FILEPATH "C++ compiler" FORCE)
+    message(STATUS "SYCL GPTQ INT4 enabled: using CXX compiler ${SYCL_CXX_COMPILER}")
+elseif(USE_CONDA_TOOLCHAIN)
     if(NOT DEFINED ENV{CONDA_PREFIX} OR NOT EXISTS "$ENV{CONDA_PREFIX}")
         message(FATAL_ERROR "USE_CONDA_TOOLCHAIN=ON but CONDA_PREFIX is not set. Activate your conda env or pass -DCONDA_PREFIX=/path")
     endif()
@@ -55,6 +60,13 @@ else()
         set(CMAKE_C_COMPILER   "/usr/bin/gcc" CACHE FILEPATH "C compiler" FORCE)
         set(CMAKE_CXX_COMPILER "/usr/bin/g++" CACHE FILEPATH "C++ compiler" FORCE)
     endif()
+endif()
+
+project(kt_kernel_ext VERSION 0.6.1)
+
+# Auto-detect CPU features early (unless building with LLAMA_NATIVE)
+if(NOT LLAMA_NATIVE AND NOT MSVC)
+    include(cmake/DetectCPU.cmake)
 endif()
 
 
@@ -501,6 +513,8 @@ elseif(KTRANSFORMERS_USE_MACA)
     message(STATUS "MACA BLAS: ${MACA_BLAS_LIBRARY}")
     include_directories(${MACA_INCLUDE_DIR})
     add_compile_definitions(KTRANSFORMERS_USE_MACA=1)
+elseif(KTRANSFORMERS_USE_SYCL)
+    message(STATUS "SYCL GPTQ INT4 support enabled")
 elseif(KTRANSFORMERS_CPU_USE_KML)
     message(STATUS "KML CPU detected")
 else()
@@ -630,6 +644,28 @@ else()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
     pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
     message(STATUS "LTO: disabled")
+endif()
+
+if(KTRANSFORMERS_USE_SYCL)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_SYCL=1)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:-fsycl>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-fsycl-targets=spir64>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-fp-model=precise>"
+    )
+    target_link_options(${PROJECT_NAME} PRIVATE -fsycl -fsycl-targets=spir64)
+
+    # The Python MoE path schedules CPUInfer work from a CUDA stream. SYCL
+    # supplies the expert kernels, while cudart supplies only this host callback
+    # bridge; no CUDA kernels or CUDA language compilation are enabled here.
+    find_package(CUDAToolkit QUIET)
+    if(NOT CUDAToolkit_FOUND)
+        message(FATAL_ERROR "KTRANSFORMERS_USE_SYCL=ON requires the CUDA toolkit for CPUInfer host-stream scheduling. Set CUDAToolkit_ROOT or CUDA_HOME.")
+    endif()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KTRANSFORMERS_USE_CUDA=1 USE_CUDA=1)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
+    message(STATUS "SYCL GPTQ INT4: CUDA host-stream bridge enabled with cudart ${CUDAToolkit_VERSION}")
 endif()
 
 if(KTRANSFORMERS_ENABLE_CPPTRACE)

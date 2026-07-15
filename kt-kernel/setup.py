@@ -36,6 +36,7 @@ Environment knobs (export before running pip install .):
 
 GPU backends:
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA
+  CPUINFER_USE_SYCL=0/1           -DKTRANSFORMERS_USE_SYCL (GPTQ INT4 MoE)
   CPUINFER_USE_ROCM=0/1           -DKTRANSFORMERS_USE_ROCM
   CPUINFER_USE_MUSA=0/1           -DKTRANSFORMERS_USE_MUSA
   CPUINFER_USE_MACA=0/1           -DKTRANSFORMERS_USE_MACA
@@ -48,6 +49,7 @@ Or build wheel:
 
 Resulting wheel exposes a top-level package `kt_kernel` with AMXMoEWrapper and other kernel wrappers.
 """
+
 from __future__ import annotations
 import os
 import re
@@ -520,7 +522,7 @@ class CMakeBuild(build_ext):
         if cuda_env is None:
             requested_non_cuda_gpu = any(
                 _env_get_bool(name, False)
-                for name in ("CPUINFER_USE_ROCM", "CPUINFER_USE_MUSA", "CPUINFER_USE_MACA")
+                for name in ("CPUINFER_USE_SYCL", "CPUINFER_USE_ROCM", "CPUINFER_USE_MUSA", "CPUINFER_USE_MACA")
             )
             if requested_non_cuda_gpu:
                 os.environ["CPUINFER_USE_CUDA"] = "0"
@@ -534,6 +536,7 @@ class CMakeBuild(build_ext):
             name
             for name, env_name in (
                 ("CUDA", "CPUINFER_USE_CUDA"),
+                ("SYCL", "CPUINFER_USE_SYCL"),
                 ("ROCM", "CPUINFER_USE_ROCM"),
                 ("MUSA", "CPUINFER_USE_MUSA"),
                 ("MACA", "CPUINFER_USE_MACA"),
@@ -659,6 +662,9 @@ class CMakeBuild(build_ext):
         _forward_bool_env(cmake_args, "CPUINFER_CUDA_STATIC_RUNTIME", "KTRANSFORMERS_CUDA_STATIC_RUNTIME")
 
         # GPU backends (mutually exclusive expected)
+        if _env_get_bool("CPUINFER_USE_SYCL", False):
+            cmake_args.append("-DKTRANSFORMERS_USE_SYCL=ON")
+            print("-- Enabling SYCL GPTQ INT4 backend (-DKTRANSFORMERS_USE_SYCL=ON)")
         if _env_get_bool("CPUINFER_USE_CUDA", False):
             cmake_args.append("-DKTRANSFORMERS_USE_CUDA=ON")
             print("-- Enabling CUDA backend (-DKTRANSFORMERS_USE_CUDA=ON)")
@@ -764,6 +770,7 @@ PACKAGE_NAME = "kt-kernel"
 gpu_backend = None
 for _backend_name, _env_name in (
     ("CUDA", "CPUINFER_USE_CUDA"),
+    ("SYCL", "CPUINFER_USE_SYCL"),
     ("ROCM", "CPUINFER_USE_ROCM"),
     ("MUSA", "CPUINFER_USE_MUSA"),
     ("MACA", "CPUINFER_USE_MACA"),

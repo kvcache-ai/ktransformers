@@ -29,7 +29,6 @@ from .utils.amx import AMXMoEWrapper, NativeMoEWrapper
 from .utils.llamafile import LlamafileMoEWrapper
 from .utils.moe_kernel import GeneralMoEWrapper
 
-
 # Valid methods for each mode
 INFERENCE_METHODS = frozenset(
     [
@@ -40,6 +39,7 @@ INFERENCE_METHODS = frozenset(
         "BF16",  # BF16 native MoE
         "FP8_PERCHANNEL",  # Per-channel FP8
         "GPTQ_INT4",  # GPTQ INT4
+        "SYCL_GPTQ_INT4",  # GPTQ INT4 experts on a SYCL device
         "MXFP4",  # MXFP4 (E2M1 nibble + ue8m0 group scale, e.g. DeepSeek-V4-Flash routed experts)
         "MXFP8",  # MXFP8 (E4M3fn byte + ue8m0 group scale, e.g. MiniMax-M3-Preview)
         "LLAMAFILE",  # GGUF format
@@ -297,6 +297,7 @@ class KTMoEWrapper:
         to reset the buffer state or free memory during SFT.
         """
         from .sft.base import KExpertsSFTBuffer
+
         KExpertsSFTBuffer.clear_cache()
 
 
@@ -335,7 +336,16 @@ def _create_inference_wrapper(
     # Select backend based on method
     if method in ["AMXINT4", "AMXINT8"]:
         backend_cls = AMXMoEWrapper
-    elif method in ["RAWINT4", "FP8", "BF16", "FP8_PERCHANNEL", "GPTQ_INT4", "MXFP4", "MXFP8"]:
+    elif method in [
+        "RAWINT4",
+        "FP8",
+        "BF16",
+        "FP8_PERCHANNEL",
+        "GPTQ_INT4",
+        "SYCL_GPTQ_INT4",
+        "MXFP4",
+        "MXFP8",
+    ]:
         backend_cls = NativeMoEWrapper
     elif method == "LLAMAFILE":
         backend_cls = LlamafileMoEWrapper
