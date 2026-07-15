@@ -12,9 +12,16 @@ KTransformersPlugin.kt_config (similar to DeepSpeedPlugin.hf_ds_config).
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
+
+
+logger = logging.getLogger(__name__)
+
+_CPU_TOPOLOGY_ROOT = Path("/sys/devices/system/cpu")
 
 
 def _env_int(key: str, default: int | None) -> int | None:
@@ -36,6 +43,83 @@ def _env_bool(key: str, default: bool) -> bool:
     if value is None or value == "":
         return default
     return value.lower() in ("1", "true", "yes")
+
+
+def _available_cpu_ids() -> set[int]:
+    """Return CPUs available to this process, respecting affinity/cpuset limits."""
+    try:
+        return set(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return set(range(os.cpu_count() or 1))
+
+
+def _read_cpu_topology(cpu_id: int) -> tuple[int, int] | None:
+    topology = _CPU_TOPOLOGY_ROOT / f"cpu{cpu_id}" / "topology"
+    try:
+        package_id = int((topology / "physical_package_id").read_text().strip())
+        core_id = int((topology / "core_id").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return package_id, core_id
+
+
+def detect_physical_cpu_count() -> int:
+    """Count physical cores available to the current process.
+
+    Linux exposes a stable ``(physical_package_id, core_id)`` pair for every
+    logical CPU. Counting those pairs avoids assigning one OpenMP worker to
+    each SMT sibling. If topology is unavailable, fall back to the number of
+    affinity-visible logical CPUs.
+    """
+    cpu_ids = _available_cpu_ids()
+    physical_cores = {
+        topology
+        for cpu_id in cpu_ids
+        if (topology := _read_cpu_topology(cpu_id)) is not None
+    }
+    return max(1, len(physical_cores) if physical_cores else len(cpu_ids))
+
+
+def _set_torch_num_threads(num_threads: int) -> None:
+    try:
+        import torch
+    except ImportError:
+        return
+    torch.set_num_threads(num_threads)
+
+
+def configure_omp_threads() -> int:
+    """Configure OpenMP for KT SFT CPU tensor work.
+
+    ``accelerate launch`` defaults GPU jobs to ``OMP_NUM_THREADS=1`` when the
+    caller did not choose a value. That makes Full-FT CPU gradient accumulation,
+    AdamW, and zeroing effectively serial. Treat that value as the launcher
+    default and select the affinity-visible physical core count instead.
+
+    ``ACCELERATE_KT_OMP_NUM_THREADS`` is the unambiguous KT-specific override,
+    including when an intentional single-thread run is required. An existing
+    generic ``OMP_NUM_THREADS`` value greater than one is also preserved.
+    """
+    kt_override = _env_int("ACCELERATE_KT_OMP_NUM_THREADS", None)
+    current_omp = _env_int("OMP_NUM_THREADS", None)
+
+    if kt_override is not None:
+        num_threads = kt_override
+        source = "ACCELERATE_KT_OMP_NUM_THREADS"
+    elif current_omp is not None and current_omp > 1:
+        num_threads = current_omp
+        source = "OMP_NUM_THREADS"
+    else:
+        num_threads = detect_physical_cpu_count()
+        source = "available physical cores"
+
+    if num_threads < 1:
+        raise ValueError(f"OpenMP thread count must be positive, got {num_threads}")
+
+    os.environ["OMP_NUM_THREADS"] = str(num_threads)
+    _set_torch_num_threads(num_threads)
+    logger.info("KT SFT configured OMP_NUM_THREADS=%d from %s", num_threads, source)
+    return num_threads
 
 
 @dataclass
@@ -104,6 +188,7 @@ class KTConfig:
         return cls(**kwargs)
 
     def __post_init__(self):
+        configure_omp_threads()
         if self.kt_backend is None:
             self.kt_backend = os.environ.get("ACCELERATE_KT_BACKEND", "AMXBF16")
         if self.kt_num_threads is None:
