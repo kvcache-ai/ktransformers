@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-"""GPTQ INT4 MoE accuracy tests for KT-Kernel x86 backends."""
+"""GPTQ INT4 MoE accuracy tests for KT-Kernel backends."""
 
 import importlib.util
 import os
@@ -160,10 +160,12 @@ def available_backends():
             has_avx_vnni = False
         if has_avx_vnni:
             backends.append(("AVXVNNI256GPTQInt4_MOE", kt_kernel_ext.moe.AVXVNNI256GPTQInt4_MOE, 0.20))
+    if os.environ.get("KT_TEST_SYCL_GPTQ_INT4") == "1" and hasattr(kt_kernel_ext.moe, "SYCLGPTQInt4_MOE"):
+        backends.append(("SYCLGPTQInt4_MOE", kt_kernel_ext.moe.SYCLGPTQInt4_MOE, 0.12))
     return backends
 
 
-def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
+def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen, force_dense_experts=False):
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
     cpu_infer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
@@ -240,9 +242,12 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
 
         print(f"\n--- {backend_name} (qlen={qlen}) ---")
         for i in range(validation_iter):
-            expert_ids = torch.stack(
-                [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
-            ).contiguous()
+            if force_dense_experts:
+                expert_ids = torch.tensor([[0, 1]] * qlen, dtype=torch.int64).contiguous()
+            else:
+                expert_ids = torch.stack(
+                    [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
+                ).contiguous()
             weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
             input_data = (torch.randn((qlen, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16).contiguous()
             output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
@@ -274,12 +279,22 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
 def test_gptq_int4_accuracy():
     backends = available_backends()
     if not backends:
-        print("Skipping GPTQ INT4 accuracy tests: no x86 GPTQ backend available")
+        print("Skipping GPTQ INT4 accuracy tests: no GPTQ backend available")
         return
 
     for backend_name, backend_cls, threshold in backends:
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=1)
         run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=16)
+        if backend_name == "SYCLGPTQInt4_MOE":
+            # Each selected expert receives 40 rows, crossing the production
+            # dense threshold and exercising Q8 gate/up plus BF16 down.
+            run_backend_accuracy_test(
+                backend_name,
+                backend_cls,
+                threshold,
+                qlen=40,
+                force_dense_experts=True,
+            )
 
 
 def test_gptq_int4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):

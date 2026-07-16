@@ -81,7 +81,7 @@ class AVX2_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
-  // Decode-specialized backends may keep per-instance state here. The storage
+  // Specialized backends may keep per-instance state here. The storage
   // must live in the base because TP_MOE_Common constructs the CRTP base type
   // directly; adding data members only to Derived would be unsafe.
   std::shared_ptr<void> backend_scratch_;
@@ -200,6 +200,8 @@ class AVX2_MOE_BASE {
   void decode_gate_up_activation(int, int) {}
   bool use_fused_down_decode() const { return false; }
   void decode_down_projection(int, int) {}
+  bool use_fused_prefill() const { return false; }
+  void fused_prefill_experts(int, int) {}
 
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {
@@ -222,6 +224,7 @@ class AVX2_MOE_BASE {
         activated_expert++;
       }
     }
+    const bool fused_prefill = activated_expert > 0 && derived()->use_fused_prefill();
 
     // Assign pool memory to buffers
     size_t offset = 0;
@@ -248,15 +251,17 @@ class AVX2_MOE_BASE {
       gate_up_ba_pool_ptr =
           (void*)((uintptr_t)gate_up_ba_pool_ptr + align64(buffer_a_required_size(max_m, config_.hidden_size)));
 
-      gate_bc_[i]->max_m = max_m;
-      gate_bc_[i]->set_data(gate_bc_pool_ptr);
-      gate_bc_pool_ptr =
-          (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      if (!fused_prefill) {
+        gate_bc_[i]->max_m = max_m;
+        gate_bc_[i]->set_data(gate_bc_pool_ptr);
+        gate_bc_pool_ptr =
+            (void*)((uintptr_t)gate_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
 
-      up_bc_[i]->max_m = max_m;
-      up_bc_[i]->set_data(up_bc_pool_ptr);
-      up_bc_pool_ptr =
-          (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+        up_bc_[i]->max_m = max_m;
+        up_bc_[i]->set_data(up_bc_pool_ptr);
+        up_bc_pool_ptr =
+            (void*)((uintptr_t)up_bc_pool_ptr + align64(buffer_c_required_size(max_m, config_.intermediate_size)));
+      }
 
       down_ba_[i]->max_m = max_m;
       down_ba_[i]->set_data(down_ba_pool_ptr);
@@ -292,47 +297,51 @@ class AVX2_MOE_BASE {
       gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
     });
 
-    // Gate + Up GEMM
-    int nth = T::recommended_nth(config_.intermediate_size);
-    pool->do_work_stealing_job(
-        nth * activated_expert * 2, [](int) { T::config(); },
-        [this, nth, qlen](int task_id2) {
-          int task_id = task_id2 / 2;
-          bool do_up = task_id2 % 2;
-          int expert_idx = m_expert_id_map_[task_id / nth];
-          int ith = task_id % nth;
-          derived()->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
-          if (do_up) {
-            up_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_up_output_ptr_[expert_idx], ith, nth);
-          } else {
-            gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
-          }
-        },
-        nullptr);
+    if (fused_prefill) {
+      derived()->fused_prefill_experts(activated_expert, qlen);
+    } else {
+      // Gate + Up GEMM
+      int nth = T::recommended_nth(config_.intermediate_size);
+      pool->do_work_stealing_job(
+          nth * activated_expert * 2, [](int) { T::config(); },
+          [this, nth, qlen](int task_id2) {
+            int task_id = task_id2 / 2;
+            bool do_up = task_id2 % 2;
+            int expert_idx = m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            derived()->do_gate_up_gemm(do_up, expert_idx, ith, nth, qlen);
+            if (do_up) {
+              up_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_up_output_ptr_[expert_idx], ith, nth);
+            } else {
+              gate_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], ith, nth);
+            }
+          },
+          nullptr);
 
-    // Activation: SiLU(gate) * up — AVX2 version (8 elements at a time)
-    apply_activation(activated_expert, nth, qlen);
+      // Activation: SiLU(gate) * up — AVX2 version (8 elements at a time)
+      apply_activation(activated_expert, nth, qlen);
 
-    // Pack activation output into BufferA for down projection
-    pool->do_work_stealing_job(
-        activated_expert, nullptr,
-        [this](int task_id) {
-          int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
-        },
-        nullptr);
+      // Pack activation output into BufferA for down projection
+      pool->do_work_stealing_job(
+          activated_expert, nullptr,
+          [this](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id];
+            down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
+          },
+          nullptr);
 
-    // Down GEMM
-    nth = T::recommended_nth(config_.hidden_size);
-    pool->do_work_stealing_job(
-        nth * activated_expert, [](int) { T::config(); },
-        [this, nth, qlen](int task_id) {
-          int expert_idx = m_expert_id_map_[task_id / nth];
-          int ith = task_id % nth;
-          derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
-        },
-        nullptr);
+      // Down GEMM
+      nth = T::recommended_nth(config_.hidden_size);
+      pool->do_work_stealing_job(
+          nth * activated_expert, [](int) { T::config(); },
+          [this, nth, qlen](int task_id) {
+            int expert_idx = m_expert_id_map_[task_id / nth];
+            int ith = task_id % nth;
+            derived()->do_down_gemm(expert_idx, ith, nth, qlen);
+            down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
+          },
+          nullptr);
+    }
 
     // Weighted sum of expert outputs — AVX2 version (16 BF16 = 2x8 FP32 at a time)
     pool->do_work_stealing_job(

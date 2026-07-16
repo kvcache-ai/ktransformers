@@ -6,6 +6,8 @@
  * scales [K/group_size, N]. Weights are reordered once at load time to an
  * output-major layout. Decode uses packed SG16 gate/up kernels, per-expert
  * asynchronous submission, and a two-subgroup down-projection work-group.
+ * Prefill batches routed rows across experts, using row-pair kernels for sparse
+ * experts and a W4A8 row8 kernel for dense gate/up projections.
  */
 #ifndef CPUINFER_OPERATOR_SYCL_GPTQ_INT4_MOE_H
 #define CPUINFER_OPERATOR_SYCL_GPTQ_INT4_MOE_H
@@ -13,12 +15,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <sycl/ext/oneapi/dot_product.hpp>
 #include <sycl/sycl.hpp>
 #include <utility>
 #include <vector>
@@ -29,6 +31,9 @@ namespace sycl_int4 {
 
 constexpr int kSubgroupSize = 16;
 constexpr int kDownRowsPerWorkGroup = 2;
+constexpr int kPrefillSparseRows = 2;
+constexpr int kPrefillDenseRows = 8;
+constexpr int kPrefillDenseThreshold = 33;
 
 inline sycl::queue& queue() {
   static sycl::queue q([] {
@@ -43,11 +48,6 @@ inline sycl::queue& queue() {
     };
 
     try {
-      const char* filter = std::getenv("KT_SYCL_DEVICE_FILTER");
-      if (filter != nullptr && filter[0] != '\0') {
-        return sycl::queue(sycl::ext::oneapi::filter_selector(filter), async_handler);
-      }
-
       const auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
       if (devices.empty()) {
         throw std::runtime_error("No SYCL GPU device is available");
@@ -59,10 +59,9 @@ inline sycl::queue& queue() {
       }
       return sycl::queue(devices.front(), async_handler);
     } catch (const sycl::exception& error) {
-      throw std::runtime_error(
-          std::string("Failed to create the SYCL GPTQ INT4 queue. Check sycl-ls, "
-                      "the render-group permission, or set KT_SYCL_DEVICE_FILTER. Original error: ") +
-          error.what());
+      throw std::runtime_error(std::string("Failed to create the SYCL GPTQ INT4 queue. Check sycl-ls, "
+                                           "the render-group permission, or ONEAPI_DEVICE_SELECTOR. Original error: ") +
+                               error.what());
     }
   }());
   return q;
@@ -91,7 +90,16 @@ inline uint16_t fp32_to_bf16(float value) {
   return static_cast<uint16_t>(bits >> 16);
 }
 
-struct DecodeScratch {
+inline int32_t unpack_i4x4_to_i8x4(uint32_t packed) {
+  uint32_t value = packed & 0xffffu;
+  value = (value | (value << 8)) & 0x00ff00ffu;
+  value = (value | (value << 4)) & 0x0f0f0f0fu;
+  const uint32_t negative = (~value) & 0x08080808u;
+  value = (value & 0x07070707u) | negative | (negative << 1) | (negative << 2) | (negative << 3) | (negative << 4);
+  return sycl::bit_cast<int32_t>(value);
+}
+
+struct BackendScratch {
   std::vector<sycl::event> gate_up_events;
   std::vector<int> gate_up_experts;
   int active_experts = 0;
@@ -108,6 +116,36 @@ struct DecodeScratch {
   size_t down_qweight_stride = 0;
   size_t down_scale_stride = 0;
   bool weights_ready = false;
+
+  uint16_t** prefill_inputs = nullptr;
+  uint16_t** prefill_activations = nullptr;
+  uint32_t** prefill_gate_qweights = nullptr;
+  uint32_t** prefill_up_qweights = nullptr;
+  uint32_t** prefill_down_qweights = nullptr;
+  float** prefill_gate_scales = nullptr;
+  float** prefill_up_scales = nullptr;
+  float** prefill_down_scales = nullptr;
+  float** prefill_q8_scratch = nullptr;
+  int* prefill_row_counts = nullptr;
+  int* prefill_tile_experts = nullptr;
+  int* prefill_tile_rows = nullptr;
+  int prefill_expert_capacity = 0;
+  int prefill_tile_capacity = 0;
+
+  ~BackendScratch() {
+    usm_free(prefill_inputs);
+    usm_free(prefill_activations);
+    usm_free(prefill_gate_qweights);
+    usm_free(prefill_up_qweights);
+    usm_free(prefill_down_qweights);
+    usm_free(prefill_gate_scales);
+    usm_free(prefill_up_scales);
+    usm_free(prefill_down_scales);
+    usm_free(prefill_q8_scratch);
+    usm_free(prefill_row_counts);
+    usm_free(prefill_tile_experts);
+    usm_free(prefill_tile_rows);
+  }
 };
 
 struct GemmKernelSYCLGPTQInt4 {
@@ -471,6 +509,333 @@ inline sycl::event submit_down_decode(int m, int n, int k, GemmKernelSYCLGPTQInt
   });
 }
 
+inline float prefill_swiglu(float gate, float up, float swiglu_limit, float swiglu_alpha) {
+  if (swiglu_alpha > 0.0f) {
+    if (swiglu_limit > 0.0f) {
+      gate = sycl::fmin(sycl::fmax(gate, -swiglu_limit), swiglu_limit);
+      up = sycl::fmin(sycl::fmax(up, -swiglu_limit), swiglu_limit);
+    }
+    const float sigmoid = 1.0f / (1.0f + sycl::native::exp(-gate * swiglu_alpha));
+    return gate * sigmoid * (up + 1.0f);
+  }
+  if (swiglu_limit > 0.0f) {
+    gate = sycl::fmin(gate, swiglu_limit);
+    up = sycl::fmin(sycl::fmax(up, -swiglu_limit), swiglu_limit);
+  }
+  return gate * (1.0f / (1.0f + sycl::native::exp(-gate))) * up;
+}
+
+// Sparse experts use a two-row register tile. One subgroup loads each packed
+// weight once and reuses it for both routed rows without local memory.
+inline sycl::event submit_prefill_gate_up_sparse(int tile_count, int n, int k, const int* row_counts,
+                                                 const int* tile_experts, const int* tile_rows,
+                                                 uint16_t** input_pointers, uint32_t** gate_qweight_pointers,
+                                                 uint32_t** up_qweight_pointers, float** gate_scale_pointers,
+                                                 float** up_scale_pointers, uint16_t** output_pointers, int group_size,
+                                                 float swiglu_limit, float swiglu_alpha) {
+  if (tile_count <= 0 || n <= 0 || k <= 0) return sycl::event{};
+  constexpr int subgroup_size = kSubgroupSize;
+  const int num_groups = k / group_size;
+  const int k_packed = k / 8;
+  const int packed_per_group = group_size / 8;
+  const size_t work_groups = static_cast<size_t>(tile_count) * n;
+
+  return queue().submit([&](sycl::handler& handler) {
+    handler.parallel_for(
+        sycl::nd_range<1>(work_groups * subgroup_size, subgroup_size),
+        [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(subgroup_size)]] {
+          const size_t group_id = item.get_group(0);
+          const int tile = static_cast<int>(group_id / static_cast<size_t>(n));
+          const int output = static_cast<int>(group_id - static_cast<size_t>(tile) * n);
+          const int active_expert = tile_experts[tile];
+          const int row0 = tile_rows[tile];
+          const int row1 = row0 + 1;
+          const int lane = static_cast<int>(item.get_sub_group().get_local_linear_id());
+          const bool valid0 = row0 < row_counts[active_expert];
+          const bool valid1 = row1 < row_counts[active_expert];
+          const uint16_t* input = input_pointers[active_expert];
+          const uint32_t* gate_qweight = gate_qweight_pointers[active_expert];
+          const uint32_t* up_qweight = up_qweight_pointers[active_expert];
+          const float* gate_scales = gate_scale_pointers[active_expert];
+          const float* up_scales = up_scale_pointers[active_expert];
+          float gate_accumulator0 = 0.0f;
+          float up_accumulator0 = 0.0f;
+          float gate_accumulator1 = 0.0f;
+          float up_accumulator1 = 0.0f;
+
+          for (int group = 0; group < num_groups; ++group) {
+            const int packed_begin = group * packed_per_group;
+            float gate_partial0 = 0.0f;
+            float up_partial0 = 0.0f;
+            float gate_partial1 = 0.0f;
+            float up_partial1 = 0.0f;
+            for (int packed = lane; packed < packed_per_group; packed += subgroup_size) {
+              const int packed_k = packed_begin + packed;
+              const uint32_t gate_word = gate_qweight[static_cast<size_t>(output) * k_packed + packed_k];
+              const uint32_t up_word = up_qweight[static_cast<size_t>(output) * k_packed + packed_k];
+              if (valid0) {
+                const uint16_t* values = input + static_cast<size_t>(row0) * k + static_cast<size_t>(packed_k) * 8;
+#pragma unroll
+                for (int nibble = 0; nibble < 8; ++nibble) {
+                  const float value = bf16_to_fp32(values[nibble]);
+                  gate_partial0 += value * static_cast<float>(static_cast<int>((gate_word >> (nibble * 4)) & 0xfu) - 8);
+                  up_partial0 += value * static_cast<float>(static_cast<int>((up_word >> (nibble * 4)) & 0xfu) - 8);
+                }
+              }
+              if (valid1) {
+                const uint16_t* values = input + static_cast<size_t>(row1) * k + static_cast<size_t>(packed_k) * 8;
+#pragma unroll
+                for (int nibble = 0; nibble < 8; ++nibble) {
+                  const float value = bf16_to_fp32(values[nibble]);
+                  gate_partial1 += value * static_cast<float>(static_cast<int>((gate_word >> (nibble * 4)) & 0xfu) - 8);
+                  up_partial1 += value * static_cast<float>(static_cast<int>((up_word >> (nibble * 4)) & 0xfu) - 8);
+                }
+              }
+            }
+
+            const auto subgroup = item.get_sub_group();
+            const float gate_sum0 = sycl::reduce_over_group(subgroup, gate_partial0, sycl::plus<float>());
+            const float up_sum0 = sycl::reduce_over_group(subgroup, up_partial0, sycl::plus<float>());
+            const float gate_sum1 = sycl::reduce_over_group(subgroup, gate_partial1, sycl::plus<float>());
+            const float up_sum1 = sycl::reduce_over_group(subgroup, up_partial1, sycl::plus<float>());
+            if (lane == 0) {
+              const size_t scale_offset = static_cast<size_t>(output) * num_groups + group;
+              gate_accumulator0 += gate_sum0 * gate_scales[scale_offset];
+              up_accumulator0 += up_sum0 * up_scales[scale_offset];
+              gate_accumulator1 += gate_sum1 * gate_scales[scale_offset];
+              up_accumulator1 += up_sum1 * up_scales[scale_offset];
+            }
+          }
+
+          if (lane == 0) {
+            if (valid0) {
+              output_pointers[active_expert][static_cast<size_t>(row0) * n + output] =
+                  fp32_to_bf16(prefill_swiglu(gate_accumulator0, up_accumulator0, swiglu_limit, swiglu_alpha));
+            }
+            if (valid1) {
+              output_pointers[active_expert][static_cast<size_t>(row1) * n + output] =
+                  fp32_to_bf16(prefill_swiglu(gate_accumulator1, up_accumulator1, swiglu_limit, swiglu_alpha));
+            }
+          }
+        });
+  });
+}
+
+inline sycl::event submit_prefill_dense_quantization(int tile_count, int k, int group_size, const int* row_counts,
+                                                     const int* tile_experts, const int* tile_rows,
+                                                     uint16_t** input_pointers, float** scratch_pointers) {
+  if (tile_count <= 0 || k <= 0 || group_size <= 0) return sycl::event{};
+  constexpr int work_group_size = 128;
+  const int num_groups = k / group_size;
+  const size_t work_groups = static_cast<size_t>(tile_count) * kPrefillDenseRows;
+
+  return queue().submit([&](sycl::handler& handler) {
+    handler.parallel_for(sycl::nd_range<1>(work_groups * work_group_size, work_group_size), [=](sycl::nd_item<1> item) {
+      const size_t group_id = item.get_group(0);
+      const int tile = static_cast<int>(group_id / kPrefillDenseRows);
+      const int row_in_tile = static_cast<int>(group_id - static_cast<size_t>(tile) * kPrefillDenseRows);
+      const int active_expert = tile_experts[tile];
+      const int row = tile_rows[tile] + row_in_tile;
+      const int row_count = row_counts[active_expert];
+      if (row >= row_count) return;
+
+      const int lane = static_cast<int>(item.get_local_id(0));
+      const uint16_t* source = input_pointers[active_expert] + static_cast<size_t>(row) * k;
+      int8_t* quantized = reinterpret_cast<int8_t*>(scratch_pointers[active_expert]);
+      float* activation_scales = reinterpret_cast<float*>(quantized + static_cast<size_t>(row_count) * k);
+      int8_t* destination = quantized + static_cast<size_t>(row) * k;
+
+      for (int group = 0; group < num_groups; ++group) {
+        const int group_begin = group * group_size;
+        float maximum = 0.0f;
+        for (int offset = lane; offset < group_size; offset += work_group_size) {
+          maximum = sycl::fmax(maximum, sycl::fabs(bf16_to_fp32(source[group_begin + offset])));
+        }
+        maximum = sycl::reduce_over_group(item.get_group(), maximum, sycl::maximum<float>());
+        const float scale = maximum > 0.0f ? maximum / 127.0f : 0.0f;
+        if (lane == 0) {
+          activation_scales[static_cast<size_t>(row) * num_groups + group] = scale;
+        }
+        const float inverse_scale = scale > 0.0f ? 1.0f / scale : 0.0f;
+        for (int offset = lane; offset < group_size; offset += work_group_size) {
+          int value = static_cast<int>(sycl::rint(bf16_to_fp32(source[group_begin + offset]) * inverse_scale));
+          value = sycl::max(-127, sycl::min(127, value));
+          destination[group_begin + offset] = static_cast<int8_t>(value);
+        }
+      }
+    });
+  });
+}
+
+// Dense experts quantize their input once, then reuse each packed W4 word over
+// eight routed rows. DP4A amortizes the quantization over gate and up together.
+inline sycl::event submit_prefill_gate_up_dense_q8(int tile_count, int n, int k, const int* row_counts,
+                                                   const int* tile_experts, const int* tile_rows,
+                                                   float** scratch_pointers, uint32_t** gate_qweight_pointers,
+                                                   uint32_t** up_qweight_pointers, float** gate_scale_pointers,
+                                                   float** up_scale_pointers, uint16_t** output_pointers,
+                                                   int group_size, float swiglu_limit, float swiglu_alpha,
+                                                   const sycl::event& dependency) {
+  if (tile_count <= 0 || n <= 0 || k <= 0) return sycl::event{};
+  constexpr int subgroup_size = kSubgroupSize;
+  constexpr int rows = kPrefillDenseRows;
+  const int num_groups = k / group_size;
+  const int k_packed = k / 8;
+  const int packed_per_group = group_size / 8;
+  const size_t work_groups = static_cast<size_t>(tile_count) * n;
+
+  return queue().submit([&](sycl::handler& handler) {
+    handler.depends_on(dependency);
+    handler.parallel_for(
+        sycl::nd_range<1>(work_groups * subgroup_size, subgroup_size),
+        [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(subgroup_size)]] {
+          const size_t group_id = item.get_group(0);
+          const int tile = static_cast<int>(group_id / static_cast<size_t>(n));
+          const int output = static_cast<int>(group_id - static_cast<size_t>(tile) * n);
+          const int active_expert = tile_experts[tile];
+          const int row_begin = tile_rows[tile];
+          const int row_count = row_counts[active_expert];
+          const int lane = static_cast<int>(item.get_sub_group().get_local_linear_id());
+          const int8_t* input = reinterpret_cast<const int8_t*>(scratch_pointers[active_expert]);
+          const float* activation_scales = reinterpret_cast<const float*>(input + static_cast<size_t>(row_count) * k);
+          const uint32_t* gate_qweight = gate_qweight_pointers[active_expert];
+          const uint32_t* up_qweight = up_qweight_pointers[active_expert];
+          const float* gate_scales = gate_scale_pointers[active_expert];
+          const float* up_scales = up_scale_pointers[active_expert];
+          float gate_accumulators[rows] = {};
+          float up_accumulators[rows] = {};
+
+          for (int group = 0; group < num_groups; ++group) {
+            const int packed_begin = group * packed_per_group;
+            int gate_partials[rows] = {};
+            int up_partials[rows] = {};
+            for (int packed = lane; packed < packed_per_group; packed += subgroup_size) {
+              const int packed_k = packed_begin + packed;
+              const uint32_t gate_word = gate_qweight[static_cast<size_t>(output) * k_packed + packed_k];
+              const uint32_t up_word = up_qweight[static_cast<size_t>(output) * k_packed + packed_k];
+              const int32_t gate_low = unpack_i4x4_to_i8x4(gate_word);
+              const int32_t gate_high = unpack_i4x4_to_i8x4(gate_word >> 16);
+              const int32_t up_low = unpack_i4x4_to_i8x4(up_word);
+              const int32_t up_high = unpack_i4x4_to_i8x4(up_word >> 16);
+#pragma unroll
+              for (int row_offset = 0; row_offset < rows; ++row_offset) {
+                const int row = row_begin + row_offset;
+                if (row >= row_count) continue;
+                const int8_t* values = input + static_cast<size_t>(row) * k + static_cast<size_t>(packed_k) * 8;
+                const int32_t input_low = *reinterpret_cast<const int32_t*>(values);
+                const int32_t input_high = *reinterpret_cast<const int32_t*>(values + 4);
+                gate_partials[row_offset] = sycl::ext::oneapi::dot_acc(input_low, gate_low, gate_partials[row_offset]);
+                gate_partials[row_offset] =
+                    sycl::ext::oneapi::dot_acc(input_high, gate_high, gate_partials[row_offset]);
+                up_partials[row_offset] = sycl::ext::oneapi::dot_acc(input_low, up_low, up_partials[row_offset]);
+                up_partials[row_offset] = sycl::ext::oneapi::dot_acc(input_high, up_high, up_partials[row_offset]);
+              }
+            }
+
+            const auto subgroup = item.get_sub_group();
+            const size_t scale_offset = static_cast<size_t>(output) * num_groups + group;
+#pragma unroll
+            for (int row_offset = 0; row_offset < rows; ++row_offset) {
+              const int gate_sum = sycl::reduce_over_group(subgroup, gate_partials[row_offset], sycl::plus<int>());
+              const int up_sum = sycl::reduce_over_group(subgroup, up_partials[row_offset], sycl::plus<int>());
+              if (lane == 0) {
+                const int row = row_begin + row_offset;
+                if (row < row_count) {
+                  const float activation_scale = activation_scales[static_cast<size_t>(row) * num_groups + group];
+                  gate_accumulators[row_offset] +=
+                      static_cast<float>(gate_sum) * activation_scale * gate_scales[scale_offset];
+                  up_accumulators[row_offset] +=
+                      static_cast<float>(up_sum) * activation_scale * up_scales[scale_offset];
+                }
+              }
+            }
+          }
+
+          if (lane == 0) {
+#pragma unroll
+            for (int row_offset = 0; row_offset < rows; ++row_offset) {
+              const int row = row_begin + row_offset;
+              if (row >= row_count) continue;
+              output_pointers[active_expert][static_cast<size_t>(row) * n + output] = fp32_to_bf16(prefill_swiglu(
+                  gate_accumulators[row_offset], up_accumulators[row_offset], swiglu_limit, swiglu_alpha));
+            }
+          }
+        });
+  });
+}
+
+template <int Rows>
+inline sycl::event submit_prefill_down(int tile_count, int n, int k, const int* row_counts, const int* tile_experts,
+                                       const int* tile_rows, uint16_t** input_pointers, uint32_t** qweight_pointers,
+                                       float** scale_pointers, uint16_t** output_pointers, int group_size,
+                                       const sycl::event& dependency) {
+  static_assert(Rows == kPrefillSparseRows || Rows == kPrefillDenseRows);
+  if (tile_count <= 0 || n <= 0 || k <= 0) return sycl::event{};
+  constexpr int subgroup_size = kSubgroupSize;
+  const int num_groups = k / group_size;
+  const int k_packed = k / 8;
+  const int packed_per_group = group_size / 8;
+  const size_t work_groups = static_cast<size_t>(tile_count) * n;
+
+  return queue().submit([&](sycl::handler& handler) {
+    handler.depends_on(dependency);
+    handler.parallel_for(
+        sycl::nd_range<1>(work_groups * subgroup_size, subgroup_size),
+        [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(subgroup_size)]] {
+          const size_t group_id = item.get_group(0);
+          const int tile = static_cast<int>(group_id / static_cast<size_t>(n));
+          const int output = static_cast<int>(group_id - static_cast<size_t>(tile) * n);
+          const int active_expert = tile_experts[tile];
+          const int row_begin = tile_rows[tile];
+          const int row_count = row_counts[active_expert];
+          const int lane = static_cast<int>(item.get_sub_group().get_local_linear_id());
+          const uint16_t* input = input_pointers[active_expert];
+          const uint32_t* qweight = qweight_pointers[active_expert];
+          const float* scales = scale_pointers[active_expert];
+          float accumulators[Rows] = {};
+
+          for (int group = 0; group < num_groups; ++group) {
+            const int packed_begin = group * packed_per_group;
+            float partials[Rows] = {};
+            for (int packed = lane; packed < packed_per_group; packed += subgroup_size) {
+              const int packed_k = packed_begin + packed;
+              const uint32_t word = qweight[static_cast<size_t>(output) * k_packed + packed_k];
+#pragma unroll
+              for (int row_offset = 0; row_offset < Rows; ++row_offset) {
+                const int row = row_begin + row_offset;
+                if (row >= row_count) continue;
+                const uint16_t* values = input + static_cast<size_t>(row) * k + static_cast<size_t>(packed_k) * 8;
+#pragma unroll
+                for (int nibble = 0; nibble < 8; ++nibble) {
+                  partials[row_offset] += bf16_to_fp32(values[nibble]) *
+                                          static_cast<float>(static_cast<int>((word >> (nibble * 4)) & 0xfu) - 8);
+                }
+              }
+            }
+
+            const auto subgroup = item.get_sub_group();
+            const float scale = lane == 0 ? scales[static_cast<size_t>(output) * num_groups + group] : 0.0f;
+#pragma unroll
+            for (int row_offset = 0; row_offset < Rows; ++row_offset) {
+              const float sum = sycl::reduce_over_group(subgroup, partials[row_offset], sycl::plus<float>());
+              if (lane == 0) accumulators[row_offset] += sum * scale;
+            }
+          }
+
+          if (lane == 0) {
+#pragma unroll
+            for (int row_offset = 0; row_offset < Rows; ++row_offset) {
+              const int row = row_begin + row_offset;
+              if (row < row_count) {
+                output_pointers[active_expert][static_cast<size_t>(row) * n + output] =
+                    fp32_to_bf16(accumulators[row_offset]);
+              }
+            }
+          }
+        });
+  });
+}
+
 }  // namespace sycl_int4
 
 template <class T = sycl_int4::GemmKernelSYCLGPTQInt4>
@@ -532,6 +897,62 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
   void do_down_gemm(int expert_idx, int ith, int nth, int) {
     sycl_int4::gemm_generic(m_local_num_[expert_idx], config_.hidden_size, config_.intermediate_size,
                             *down_ba_[expert_idx], *down_bb_[expert_idx], *down_bc_[expert_idx], ith, nth);
+  }
+
+  bool use_fused_prefill() const { return true; }
+
+  void fused_prefill_experts(int activated_experts, int qlen) {
+    if (activated_experts <= 0 || qlen <= 1) return;
+    T::config();
+
+    int sparse_tiles = 0;
+    int dense_tiles = 0;
+    auto* scratch = prepare_prefill_tables(activated_experts, sparse_tiles, dense_tiles);
+    if (scratch == nullptr || sparse_tiles + dense_tiles == 0) return;
+
+    sycl::event sparse_gate_up_event;
+    sycl::event sparse_down_event;
+    if (sparse_tiles > 0) {
+      sparse_gate_up_event = sycl_int4::submit_prefill_gate_up_sparse(
+          sparse_tiles, config_.intermediate_size, config_.hidden_size, scratch->prefill_row_counts,
+          scratch->prefill_tile_experts, scratch->prefill_tile_rows, scratch->prefill_inputs,
+          scratch->prefill_gate_qweights, scratch->prefill_up_qweights, scratch->prefill_gate_scales,
+          scratch->prefill_up_scales, scratch->prefill_activations, config_.quant_config.group_size,
+          config_.swiglu_limit, config_.swiglu_alpha);
+      sparse_down_event = sycl_int4::submit_prefill_down<sycl_int4::kPrefillSparseRows>(
+          sparse_tiles, config_.hidden_size, config_.intermediate_size, scratch->prefill_row_counts,
+          scratch->prefill_tile_experts, scratch->prefill_tile_rows, scratch->prefill_activations,
+          scratch->prefill_down_qweights, scratch->prefill_down_scales, scratch->prefill_inputs,
+          config_.quant_config.group_size, sparse_gate_up_event);
+    }
+
+    sycl::event dense_down_event;
+    if (dense_tiles > 0) {
+      const int* dense_experts = scratch->prefill_tile_experts + sparse_tiles;
+      const int* dense_rows = scratch->prefill_tile_rows + sparse_tiles;
+      const sycl::event quantization_event = sycl_int4::submit_prefill_dense_quantization(
+          dense_tiles, config_.hidden_size, config_.quant_config.group_size, scratch->prefill_row_counts, dense_experts,
+          dense_rows, scratch->prefill_inputs, scratch->prefill_q8_scratch);
+      const sycl::event dense_gate_up_event = sycl_int4::submit_prefill_gate_up_dense_q8(
+          dense_tiles, config_.intermediate_size, config_.hidden_size, scratch->prefill_row_counts, dense_experts,
+          dense_rows, scratch->prefill_q8_scratch, scratch->prefill_gate_qweights, scratch->prefill_up_qweights,
+          scratch->prefill_gate_scales, scratch->prefill_up_scales, scratch->prefill_activations,
+          config_.quant_config.group_size, config_.swiglu_limit, config_.swiglu_alpha, quantization_event);
+      dense_down_event = sycl_int4::submit_prefill_down<sycl_int4::kPrefillDenseRows>(
+          dense_tiles, config_.hidden_size, config_.intermediate_size, scratch->prefill_row_counts, dense_experts,
+          dense_rows, scratch->prefill_activations, scratch->prefill_down_qweights, scratch->prefill_down_scales,
+          scratch->prefill_inputs, config_.quant_config.group_size, dense_gate_up_event);
+    }
+
+    if (sparse_tiles > 0) sparse_down_event.wait_and_throw();
+    if (dense_tiles > 0) dense_down_event.wait_and_throw();
+
+    // Down writes BF16 directly over the no-longer-needed packed input. The
+    // base merge can consume that storage without an FP32-to-BF16 host pass.
+    for (int task = 0; task < activated_experts; ++task) {
+      const int expert = m_expert_id_map_[task];
+      m_local_down_output_ptr_[expert] = reinterpret_cast<ggml_bf16_t*>(scratch->prefill_inputs[task]);
+    }
   }
 
   bool use_fused_gate_up_decode() const { return true; }
@@ -647,11 +1068,103 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
   }
 
  private:
-  sycl_int4::DecodeScratch* get_scratch() {
+  sycl_int4::BackendScratch* get_scratch() {
     if (!backend_scratch_) {
-      backend_scratch_ = std::make_shared<sycl_int4::DecodeScratch>();
+      backend_scratch_ = std::make_shared<sycl_int4::BackendScratch>();
     }
-    return static_cast<sycl_int4::DecodeScratch*>(backend_scratch_.get());
+    return static_cast<sycl_int4::BackendScratch*>(backend_scratch_.get());
+  }
+
+  sycl_int4::BackendScratch* prepare_prefill_tables(int activated_experts, int& sparse_tiles, int& dense_tiles) {
+    auto* scratch = get_scratch();
+    if (scratch->prefill_expert_capacity < activated_experts) {
+      sycl_int4::usm_free(scratch->prefill_inputs);
+      sycl_int4::usm_free(scratch->prefill_activations);
+      sycl_int4::usm_free(scratch->prefill_gate_qweights);
+      sycl_int4::usm_free(scratch->prefill_up_qweights);
+      sycl_int4::usm_free(scratch->prefill_down_qweights);
+      sycl_int4::usm_free(scratch->prefill_gate_scales);
+      sycl_int4::usm_free(scratch->prefill_up_scales);
+      sycl_int4::usm_free(scratch->prefill_down_scales);
+      sycl_int4::usm_free(scratch->prefill_q8_scratch);
+      sycl_int4::usm_free(scratch->prefill_row_counts);
+      scratch->prefill_inputs = nullptr;
+      scratch->prefill_activations = nullptr;
+      scratch->prefill_gate_qweights = nullptr;
+      scratch->prefill_up_qweights = nullptr;
+      scratch->prefill_down_qweights = nullptr;
+      scratch->prefill_gate_scales = nullptr;
+      scratch->prefill_up_scales = nullptr;
+      scratch->prefill_down_scales = nullptr;
+      scratch->prefill_q8_scratch = nullptr;
+      scratch->prefill_row_counts = nullptr;
+
+      scratch->prefill_inputs = sycl_int4::usm_alloc<uint16_t*>(activated_experts, "prefill input pointer table");
+      scratch->prefill_activations =
+          sycl_int4::usm_alloc<uint16_t*>(activated_experts, "prefill activation pointer table");
+      scratch->prefill_gate_qweights =
+          sycl_int4::usm_alloc<uint32_t*>(activated_experts, "prefill gate qweight pointer table");
+      scratch->prefill_up_qweights =
+          sycl_int4::usm_alloc<uint32_t*>(activated_experts, "prefill up qweight pointer table");
+      scratch->prefill_down_qweights =
+          sycl_int4::usm_alloc<uint32_t*>(activated_experts, "prefill down qweight pointer table");
+      scratch->prefill_gate_scales =
+          sycl_int4::usm_alloc<float*>(activated_experts, "prefill gate scale pointer table");
+      scratch->prefill_up_scales = sycl_int4::usm_alloc<float*>(activated_experts, "prefill up scale pointer table");
+      scratch->prefill_down_scales =
+          sycl_int4::usm_alloc<float*>(activated_experts, "prefill down scale pointer table");
+      scratch->prefill_q8_scratch = sycl_int4::usm_alloc<float*>(activated_experts, "prefill Q8 scratch pointer table");
+      scratch->prefill_row_counts = sycl_int4::usm_alloc<int>(activated_experts, "prefill row counts");
+      scratch->prefill_expert_capacity = activated_experts;
+    }
+
+    sparse_tiles = 0;
+    dense_tiles = 0;
+    for (int task = 0; task < activated_experts; ++task) {
+      const int expert = m_expert_id_map_[task];
+      const int rows = m_local_num_[expert];
+      scratch->prefill_inputs[task] = gate_up_ba_[expert]->data;
+      scratch->prefill_activations[task] = down_ba_[expert]->data;
+      scratch->prefill_gate_qweights[task] = gate_bb_[expert]->qweight;
+      scratch->prefill_up_qweights[task] = up_bb_[expert]->qweight;
+      scratch->prefill_down_qweights[task] = down_bb_[expert]->qweight;
+      scratch->prefill_gate_scales[task] = gate_bb_[expert]->scales;
+      scratch->prefill_up_scales[task] = up_bb_[expert]->scales;
+      scratch->prefill_down_scales[task] = down_bb_[expert]->scales;
+      scratch->prefill_q8_scratch[task] = down_bc_[expert]->data;
+      scratch->prefill_row_counts[task] = rows;
+      if (rows >= sycl_int4::kPrefillDenseThreshold) {
+        dense_tiles += (rows + sycl_int4::kPrefillDenseRows - 1) / sycl_int4::kPrefillDenseRows;
+      } else {
+        sparse_tiles += (rows + sycl_int4::kPrefillSparseRows - 1) / sycl_int4::kPrefillSparseRows;
+      }
+    }
+
+    const int tile_count = sparse_tiles + dense_tiles;
+    if (scratch->prefill_tile_capacity < tile_count) {
+      sycl_int4::usm_free(scratch->prefill_tile_experts);
+      sycl_int4::usm_free(scratch->prefill_tile_rows);
+      scratch->prefill_tile_experts = nullptr;
+      scratch->prefill_tile_rows = nullptr;
+      scratch->prefill_tile_experts = sycl_int4::usm_alloc<int>(tile_count, "prefill tile expert table");
+      scratch->prefill_tile_rows = sycl_int4::usm_alloc<int>(tile_count, "prefill tile row table");
+      scratch->prefill_tile_capacity = tile_count;
+    }
+
+    int sparse_tile = 0;
+    int dense_tile = sparse_tiles;
+    for (int task = 0; task < activated_experts; ++task) {
+      const int rows = scratch->prefill_row_counts[task];
+      const bool dense = rows >= sycl_int4::kPrefillDenseThreshold;
+      const int rows_per_tile = dense ? sycl_int4::kPrefillDenseRows : sycl_int4::kPrefillSparseRows;
+      int& tile = dense ? dense_tile : sparse_tile;
+      for (int row = 0; row < rows; row += rows_per_tile) {
+        scratch->prefill_tile_experts[tile] = task;
+        scratch->prefill_tile_rows[tile] = row;
+        ++tile;
+      }
+    }
+    return scratch;
   }
 
   void prepare_contiguous_weights() {
