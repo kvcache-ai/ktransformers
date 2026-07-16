@@ -26,6 +26,7 @@
 
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
+#include "sft_profile.hpp"
 
 struct TPBf16Stats {
   double abs_mean = 0.0;
@@ -201,6 +202,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
   // Async backward repack state (Phase 2: overlap repack with GPU attention backward)
   std::thread repack_thread_;
   std::atomic<bool> repack_in_flight_{false};
+  SFTProfiler profiler_;
 
   // Per-instance references to shared per-TP backward temporary pools.
   std::vector<void*> backward_temp_pools_;
@@ -250,6 +252,22 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
   }
 
+  std::map<std::string, double> get_profile_stats(bool reset_after = false) {
+    std::map<std::string, double> stats;
+    stats["layer_idx"] = static_cast<double>(config.layer_idx);
+    stats["tp_count"] = static_cast<double>(tp_count);
+    profiler_.append(stats, "wrapper.", reset_after);
+    for (int i = 0; i < tp_count; ++i) {
+      tps[i]->append_profile_stats(stats, "tp." + std::to_string(i) + ".", reset_after);
+    }
+    return stats;
+  }
+
+  void reset_profile_stats() {
+    profiler_.reset();
+    for (int i = 0; i < tp_count; ++i) tps[i]->reset_profile_stats();
+  }
+
   /**
    * @brief Load weights on all NUMA nodes with TP partitioning.
    *
@@ -259,6 +277,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    * resulting in 2x the expected output after merge.
    */
   void load_weights() override {
+    SFTProfileScope profile_scope(profiler_, SFTProfileStage::BaseWeightReload);
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
@@ -495,6 +514,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
   void forward_sft(int* qlen_ptr, int k, const int64_t* expert_ids, const float* weights, const void* input,
                    void* output, bool save_for_backward) {
+    SFTProfileScope total_scope(profiler_, SFTProfileStage::TpFwdTotal);
     if (weights_loaded == false) [[unlikely]] {
       throw std::runtime_error("Weights not loaded");
     }
@@ -508,10 +528,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     // Run forward on each NUMA node
+    auto stage_start = profiler_.start();
     pool->dispense_backend()->do_numa_job([this, qlen, k, expert_ids, input, weights, save_for_backward](int numa_id) {
       tps[numa_id]->forward_sft(qlen, k, expert_ids, weights, input, this->local_output_numa[numa_id],
                                 save_for_backward);
     });
+    profiler_.record(SFTProfileStage::TpFwdNumaCompute, stage_start);
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
@@ -520,7 +542,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // // Print per-thread forward timing
 
     // Merge results from all NUMA nodes
+    stage_start = profiler_.start();
     this->merge_results(qlen, output);
+    profiler_.record(SFTProfileStage::TpFwdMerge, stage_start);
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
@@ -556,6 +580,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
                 void* grad_down_proj = nullptr) {
+    SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
+    auto stage_start = profiler_.start();
     auto pool = config.pool;
 
     // Get full intermediate_size (before TP partitioning)
@@ -579,6 +605,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
     if (active_count > 0) {
       std::memcpy(active_expert_map.data(), tps[0]->get_cache_expert_id_map(), active_count * sizeof(int));
     }
+    profiler_.record_workload(static_cast<uint64_t>(qlen), static_cast<uint64_t>(qlen) * k,
+                              static_cast<uint64_t>(active_count));
 
     // =====================================================================
     // Allocate per-TP temporary buffers.
@@ -676,6 +704,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  std::memset(seg.ptr, 0, seg.len);
                                },
                                nullptr);
+    profiler_.record(SFTProfileStage::TpBwdBufferClear, stage_start);
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
@@ -720,6 +749,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     // Run backward on each NUMA node
+    stage_start = profiler_.start();
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
@@ -733,6 +763,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id], tp_grad_gate_proj[numa_id],
                              tp_grad_up_proj[numa_id], tp_grad_down_proj[numa_id]);
     });
+    profiler_.record(SFTProfileStage::TpBwdNumaCompute, stage_start);
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
@@ -758,6 +789,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // }
 
     // Bug #22 fix: Merge grad_input from all NUMA nodes (sum them together)
+    stage_start = profiler_.start();
     {
       auto* out = (ggml_bf16_t*)grad_input;
       pool->do_work_stealing_job(
@@ -804,9 +836,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
           },
           nullptr);
     }
+    profiler_.record(SFTProfileStage::TpBwdGradInputMerge, stage_start);
 
     // Merge reduce-type LoRA gradients: sparse FP32 sum across TPs → BF16 final output
     // Copy-type grads (gate/up_lora_b, down_lora_a) were written directly — no merge needed.
+    stage_start = profiler_.start();
     if constexpr (!kSkipLoRA) {
       // Sparse merge for gate_lora_a, up_lora_a: [active_count, r, H] FP32 → [E, r, H] BF16
       {
@@ -880,9 +914,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
             nullptr);
       }
     }  // if constexpr (!kSkipLoRA)
+    profiler_.record(SFTProfileStage::TpBwdLoraMerge, stage_start);
 
     // Merge grad_weights from all NUMA nodes (sum them together)
     // Each NUMA computes partial grad_weights based on its down_output partition
+    stage_start = profiler_.start();
     if (grad_weights != nullptr) {
       float* out_grad_weights = (float*)grad_weights;
       const size_t total = (size_t)qlen * (size_t)k;
@@ -918,6 +954,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
           },
           nullptr);
     }
+    profiler_.record(SFTProfileStage::TpBwdRouterGradMerge, stage_start);
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {});
   }
@@ -1107,6 +1144,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     repack_in_flight_.store(true, std::memory_order_release);
     repack_thread_ = std::thread([this]() {
+      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
       config.pool->dispense_backend()->do_numa_job(
           [this](int numa_id) { tps[numa_id]->prepare_backward_bb_for_async(); });
       repack_in_flight_.store(false, std::memory_order_release);

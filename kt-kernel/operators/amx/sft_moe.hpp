@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "../../cpu_backend/worker_pool.h"
+#include "../sft_profile.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
 #include "la/avx_kernels.hpp"
@@ -435,6 +436,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   // SFT configuration
   MOESFTConfig sft_config_;
+  SFTProfiler profiler_;
 
   // LoRA configuration (from MOESFTConfig)
   int lora_rank_;
@@ -703,6 +705,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     free_transposed_lora_weights();
   }
 
+  void append_profile_stats(std::map<std::string, double>& out, const std::string& prefix,
+                            bool reset_after = false) {
+    profiler_.append(out, prefix, reset_after);
+  }
+
+  void reset_profile_stats() { profiler_.reset(); }
+
   /**
    * @brief Allocate forward-phase buffers.
    * Called at the start of forward_sft.
@@ -934,7 +943,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
-    uint64_t _fwd_start_cycles = __rdtsc();
+    SFTProfileScope total_scope(profiler_, SFTProfileStage::FwdTotal);
+    auto stage_start = profiler_.start();
 
     SFT_POOL_LOG("fwd_enter", config_.layer_idx, tp_part_idx, qlen, cache_stack_top_, forward_pool_bytes_,
                  cache_pool_bytes_, backward_pool_bytes_, 0, "save_bwd=%d", (int)save_for_backward);
@@ -966,8 +976,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       transpose_lora_b_weights();
       lora_b_transposed_ = true;
     }
+    profiler_.record(SFTProfileStage::FwdSetup, stage_start);
 
     // Step 1: Expert routing (reuse base class logic)
+    stage_start = profiler_.start();
     int activated_expert = 0;
     std::fill(m_local_num_.begin(), m_local_num_.end(), 0);
     for (int i = 0; i < qlen; i++) {
@@ -985,8 +997,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         activated_expert++;
       }
     }
+    profiler_.record(SFTProfileStage::FwdRoute, stage_start);
+    profiler_.record_workload(static_cast<uint64_t>(qlen), static_cast<uint64_t>(qlen) * k,
+                              static_cast<uint64_t>(activated_expert));
 
     // Step 2: Buffer pool allocation (reuse base class logic)
+    stage_start = profiler_.start();
     size_t offset = 0;
     void* gate_up_ba_pool_ptr = Base::gate_up_ba_pool_;
     void* gate_bc_pool_ptr = Base::gate_bc_pool_;
@@ -1087,6 +1103,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         printf("[OVERFLOW DEBUG L%d] Total tokens processed: %zu (offset after loop)\n", config_.layer_idx, offset);
       }
     }
+    profiler_.record(SFTProfileStage::FwdBufferSetup, stage_start);
 
     // Step 3: Copy input to expert buffers
     auto direct_or_pool = [&](int count, auto&& fn) {
@@ -1099,6 +1116,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       }
     };
 
+    stage_start = profiler_.start();
     direct_or_pool(qlen, [&](int i) {
       for (int j = 0; j < k; j++) {
         if (expert_ids[i * k + j] < config_.num_gpu_experts || expert_ids[i * k + j] >= config_.expert_num) {
@@ -1108,6 +1126,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                (ggml_bf16_t*)input + i * config_.hidden_size, sizeof(ggml_bf16_t) * config_.hidden_size);
       }
     });
+    profiler_.record(SFTProfileStage::FwdInputScatter, stage_start);
 
     // NaN Check: Step 3 - Packed input
     if (is_nan_check_enabled()) {
@@ -1124,12 +1143,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Step 4: Quantize input
+    stage_start = profiler_.start();
     direct_or_pool(activated_expert, [this](int task_id) {
       int expert_idx = m_expert_id_map_[task_id];
       gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
     });
+    profiler_.record(SFTProfileStage::FwdInputPack, stage_start);
 
     // Step 5: Gate + Up GEMM (base projection)
+    stage_start = profiler_.start();
     int nth = T::recommended_nth(config_.intermediate_size);
     pool->do_work_stealing_job(
         nth * activated_expert * 2, [](int _) { T::config(); },
@@ -1146,6 +1168,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           }
         },
         nullptr);
+    profiler_.record(SFTProfileStage::FwdGateUpBase, stage_start);
 
     // NaN Check: Step 5 - Gate/Up GEMM output (before LoRA)
     if (is_nan_check_enabled()) {
@@ -1166,9 +1189,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Step 5.5: Gate + Up LoRA (AVX512 BF16 - no BufferB conversion needed)
+    stage_start = profiler_.start();
     if (!SkipLoRA) {
       compute_lora_gate_up(qlen, activated_expert);
     }
+    profiler_.record(SFTProfileStage::FwdGateUpLora, stage_start);
 
     // NaN Check: Step 5.5 - Gate/Up output (after LoRA)
     if (is_nan_check_enabled()) {
@@ -1189,6 +1214,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Save gate/up outputs before activation (for backward)
+    stage_start = profiler_.start();
     if (save_for_backward) {
       // If a cache entry already exists (checkpoint recompute scenario),
       // overwrite it instead of pushing a new one.  This keeps the cache
@@ -1233,9 +1259,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         check_cache_bf16("up_output_cache", cache.up_output_cache, total_tokens * config_.intermediate_size);
       }
     }
+    profiler_.record(SFTProfileStage::FwdCacheGateUp, stage_start);
 
     // Step 6: Activation (silu(gate) * up)
+    stage_start = profiler_.start();
     { Base::apply_activation(activated_expert, nth, qlen); }
+    profiler_.record(SFTProfileStage::FwdActivation, stage_start);
 
     // NaN Check: Step 6 - Activation output (silu(gate) * up)
     if (is_nan_check_enabled()) {
@@ -1252,6 +1281,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Save intermediate AFTER activation for backward_down (Bug #17c fix)
+    stage_start = profiler_.start();
     if (save_for_backward) {
       ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
       save_intermediate_to_cache(cache, activated_expert);
@@ -1288,8 +1318,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         }
       }
     }
+    profiler_.record(SFTProfileStage::FwdCacheIntermediate, stage_start);
 
     // Step 7: Quantize intermediate for down projection
+    stage_start = profiler_.start();
     pool->do_work_stealing_job(
         activated_expert, nullptr,
         [this](int task_id) {
@@ -1297,8 +1329,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
         },
         nullptr);
+    profiler_.record(SFTProfileStage::FwdDownPack, stage_start);
 
     // Step 8: Down GEMM
+    stage_start = profiler_.start();
     nth = T::recommended_nth(config_.hidden_size);
     pool->do_work_stealing_job(
         nth * activated_expert, [](int _) { T::config(); },
@@ -1309,6 +1343,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
+    profiler_.record(SFTProfileStage::FwdDownBase, stage_start);
 
     // NaN Check: Step 8 - Down GEMM output (before LoRA)
     if (is_nan_check_enabled()) {
@@ -1325,10 +1360,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Step 8.5: Down LoRA (AVX512 BF16 - no BufferB conversion needed)
+    stage_start = profiler_.start();
     if (down_lora_a_ != nullptr && down_lora_b_ != nullptr) {
       ForwardCache* cache_ptr = save_for_backward ? &cache_stack_[cache_stack_top_ - 1] : nullptr;
       compute_lora_down(qlen, activated_expert, cache_ptr);
     }
+    profiler_.record(SFTProfileStage::FwdDownLora, stage_start);
 
     // NaN Check: Step 8.5 - Down output (after LoRA)
     if (is_nan_check_enabled()) {
@@ -1345,12 +1382,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // Save down_output for grad_weights computation
+    stage_start = profiler_.start();
     if (save_for_backward) {
       ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
       save_down_output_to_cache(cache, activated_expert);
     }
+    profiler_.record(SFTProfileStage::FwdCacheDown, stage_start);
 
     // Step 9: Weighted merge
+    stage_start = profiler_.start();
     pool->do_work_stealing_job(
         qlen, nullptr,
         [this, output, k, expert_ids, weights](int i) {
@@ -1375,6 +1415,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           }
         },
         nullptr);
+    profiler_.record(SFTProfileStage::FwdWeightedMerge, stage_start);
 
     // NaN Check: Step 9 - Final output (after weighted merge)
     if (is_nan_check_enabled()) {
@@ -1414,6 +1455,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 void* grad_weights, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                 float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr,
                 void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr, void* grad_down_proj = nullptr) {
+    SFTProfileScope total_scope(profiler_, SFTProfileStage::BwdTotal);
+    auto stage_start = profiler_.start();
     // If full_intermediate_size not provided, use local (non-TP mode)
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
     SFT_POOL_LOG("bwd_enter", config_.layer_idx, tp_part_idx, 0, cache_stack_top_, forward_pool_bytes_,
@@ -1539,10 +1582,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       m_local_down_output_ptr_[i] = m_local_down_output_ + offset * config_.hidden_size;
       offset += m_local_num_[i];
     }
+    profiler_.record(SFTProfileStage::BwdSetup, stage_start);
 
     // Restore input data from cache into m_local_input_ (shared_mem_buffer may have been
     // overwritten by subsequent layers' forward passes). This is needed for gate/up LoRA
     // gradient computation which reads from m_local_input_ptr_.
+    stage_start = profiler_.start();
     auto pool_local = config_.pool->get_subpool(tp_part_idx);
     auto restore_input = [&](int i) {
       for (int j = 0; j < k; j++) {
@@ -1564,14 +1609,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     } else {
       pool_local->do_work_stealing_job(qlen, nullptr, restore_input, nullptr);
     }
+    profiler_.record(SFTProfileStage::BwdCacheRestore, stage_start);
 
     // Step 1: Down projection backward
+    stage_start = profiler_.start();
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_down_amx(cache, grad_output, grad_down_lora_a, grad_down_lora_b, full_intermediate_size,
                         fp32_grad_down_lora_b);
     } else {
       // backward_down(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
     }
+    profiler_.record(SFTProfileStage::BwdDownTotal, stage_start);
 
     // // Compute total tokens for debug
     // size_t total_tokens = 0;
@@ -1647,7 +1695,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //   }
     // }
 
+    stage_start = profiler_.start();
     backward_activation(cache);
+    profiler_.record(SFTProfileStage::BwdActivation, stage_start);
 
     // NaN Check: Step 2 - After backward_activation
     if (is_nan_check_enabled()) {
@@ -1687,12 +1737,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     //   }
     // }
 
+    stage_start = profiler_.start();
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_gate_up_amx(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
                            full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a);
     } else {
       // backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
     }
+    profiler_.record(SFTProfileStage::BwdGateUpTotal, stage_start);
 
     // NaN Check: Step 3 - After backward_gate_up
     if (is_nan_check_enabled()) {
@@ -1729,6 +1781,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Step 4: Compute grad_weights (gradient for routing weights)
     // grad_weights[token_idx, expert_pos] = dot(grad_output[token_idx], down_output[token, expert])
+    stage_start = profiler_.start();
     if (grad_weights != nullptr) {
       auto pool = config_.pool->get_subpool(tp_part_idx);
       float* grad_w = (float*)grad_weights;
@@ -1780,6 +1833,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         pool->do_work_stealing_job(qlen, nullptr, compute_grad_weight, nullptr);
       }
     }
+    profiler_.record(SFTProfileStage::BwdRouterGrad, stage_start);
 
     // NaN Check: Step 4 - After grad_weights computation
     if (is_nan_check_enabled() && grad_weights != nullptr) {
@@ -1900,9 +1954,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // =====================================================================
     // Step 5: Base weight gradient accumulation (full weight grad mode)
     // =====================================================================
+    stage_start = profiler_.start();
     if (sft_config_.full_weight_grad && grad_gate_proj && grad_up_proj && grad_down_proj) {
       backward_base_weight_grad(cache, full_intermediate_size, grad_gate_proj, grad_up_proj, grad_down_proj);
     }
+    profiler_.record(SFTProfileStage::BwdBaseWeightGrad, stage_start);
 
     // \u2605 Cache pool is NOT freed here \u2014 kept for reuse across steps.
     // alloc_or_resize_cache_pool() is grow-only, so same-seqlen steps
@@ -2606,6 +2662,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * and sets the owner layer on the shared pool.
    */
   void prepare_backward_bb_for_async() {
+    SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
     if constexpr (!supports_standard_mat_mul_v<T>) return;
     if (backward_bb_pool_bytes_ == 0) return;
 
@@ -4452,6 +4509,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void backward_down_amx(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
                          void* grad_down_lora_b, int full_intermediate_size = 0,
                          float* fp32_grad_down_lora_b = nullptr) {
+    auto stage_start = profiler_.start();
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
     int activated_expert = cache.activated_expert_cache;
@@ -4514,6 +4572,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     }
 
     // NOTE: no full-buffer memset here; grad_intermediate_ is overwritten by to_mat() for active tokens.
+    profiler_.record(SFTProfileStage::BwdDownSetup, stage_start);
+    stage_start = profiler_.start();
 
     // =====================================================
     // Step 1: Zero per-expert grad_output buffers
@@ -4580,6 +4640,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                     static_cast<size_t>(num_tokens) * config_.hidden_size * sizeof(ggml_bf16_t));
       });
     }
+    profiler_.record(SFTProfileStage::BwdDownScatter, stage_start);
+    stage_start = profiler_.start();
 
     // =====================================================
     // Step 3: Quantize scattered grad_output to BufferA
@@ -4635,6 +4697,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
         },
         nullptr);
+    profiler_.record(SFTProfileStage::BwdDownBaseDx, stage_start);
+    stage_start = profiler_.start();
 
     // =====================================================
     // Step 3.5: Add LoRA contribution to grad_intermediate (AVX512)
@@ -5076,6 +5140,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         }
       }
     }
+    profiler_.record(SFTProfileStage::BwdDownLora, stage_start);
   }
 
   void backward_activation(const ForwardCache& cache) {
@@ -5212,6 +5277,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void backward_gate_up_amx(const ForwardCache& cache, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                             void* grad_up_lora_a, void* grad_up_lora_b, int full_intermediate_size = 0,
                             float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr) {
+    auto stage_start = profiler_.start();
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
     int activated_expert = cache.activated_expert_cache;
@@ -5393,8 +5459,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       scatter_to_grad_input(1.0f);
     };
 
+    profiler_.record(SFTProfileStage::BwdGateUpSetup, stage_start);
+    stage_start = profiler_.start();
     base_pass(false);  // gate
     base_pass(true);   // up
+    profiler_.record(SFTProfileStage::BwdGateUpBaseDx, stage_start);
 
     // // DEBUG: Check m_local_input_ptr_ AFTER base_pass (before LoRA)
     // {
@@ -5423,6 +5492,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (SkipLoRA || lora_rank_ <= 0 || gate_lora_a_ == nullptr || gate_lora_b_ == nullptr) {
       return;
     }
+    stage_start = profiler_.start();
 
     const bool use_fp32_lora_a = (fp32_grad_gate_lora_a != nullptr);
 
@@ -5790,6 +5860,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     lora_pass_remainder(false);  // gate: gb_gradin_fused, scatter, gradA
     lora_pass_remainder(true);   // up: gb_gradin_fused, scatter, gradA
+    profiler_.record(SFTProfileStage::BwdGateUpLora, stage_start);
   }
 };
 

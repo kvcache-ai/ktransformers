@@ -52,6 +52,7 @@ from .wrapper import (
     get_kt_loading_kwargs,
     load_kt_model,
 )
+from .profiler import collect_kt_sft_profile, format_kt_sft_profile, reset_kt_sft_profile
 
 __all__ = [
     "KTConfig",
@@ -89,4 +90,7 @@ __all__ = [
     "build_kt_device_map_simplified",
     "get_kt_loading_kwargs",
     "load_kt_model",
+    "collect_kt_sft_profile",
+    "format_kt_sft_profile",
+    "reset_kt_sft_profile",
 ]

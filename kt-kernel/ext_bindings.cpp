@@ -411,6 +411,8 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
            })
       .def("submit_backward_repack", &MoeClass::submit_backward_repack)
       .def("wait_backward_repack", &MoeClass::wait_backward_repack)
+      .def("get_profile_stats", &MoeClass::get_profile_stats, py::arg("reset") = false)
+      .def("reset_profile_stats", &MoeClass::reset_profile_stats)
       // Update base weight BF16 pointers for reload_base_weights (full mode training)
       // After calling this, call load_weights_task() to re-quantize BF16->AMX
       .def("set_base_weight_pointers",
