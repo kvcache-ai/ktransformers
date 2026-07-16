@@ -14,6 +14,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1954,47 +1955,128 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       const int i_tiles = (I + TILE_M - 1) / TILE_M;
       const int h_tiles = (H + TILE_N - 1) / TILE_N;
-      const int tiles_per_projection = i_tiles * h_tiles;
-      const int tasks_per_expert = tiles_per_projection * 2;  // fused gate/up plus down
+      // Keep enough fixed-i strips for load balancing while amortizing task pickup and panel packing over H.
+      const int tasks_per_expert = i_tiles * 2;  // fixed-i strips for fused gate/up plus down
       const int total_tasks = activated_expert * tasks_per_expert;
       auto pool = config_.pool->get_subpool(tp_part_idx);
 
       pool->do_work_stealing_job(
           total_tasks, [](int _) { T::config(); },
-          [&, i_tiles, h_tiles, tiles_per_projection, tasks_per_expert](int task_id) {
+          [&, i_tiles, h_tiles, tasks_per_expert](int task_id) {
             const int expert_task = task_id / tasks_per_expert;
             const int local_task = task_id % tasks_per_expert;
-            const bool do_down = local_task >= tiles_per_projection;
-            const int tile_id = do_down ? local_task - tiles_per_projection : local_task;
+            const bool do_down = local_task >= i_tiles;
+            const int i_tile = local_task % i_tiles;
             const int expert_idx = cache.m_expert_id_map_cache[expert_task];
             const int m = cache.m_local_num_cache[expert_idx];
             if (m == 0) return;
 
             const size_t pos_start = expert_offsets[expert_task];
-            alignas(64) ggml_bf16_t a_tile[TILE_M * TILE_K];
-            alignas(64) ggml_bf16_t b_tile[TILE_N * TILE_K];
+            const int k_tiles = (m + TILE_K - 1) / TILE_K;
+            constexpr size_t A_TILE_ELEMENTS = TILE_M * TILE_K;
+            constexpr size_t B_TILE_ELEMENTS = TILE_N * TILE_K;
+            constexpr size_t TILE_ALIGNMENT = 64;
+            constexpr size_t ALIGNMENT_PADDING = TILE_ALIGNMENT / sizeof(ggml_bf16_t);
+            const size_t packed_a_elements = (size_t)k_tiles * A_TILE_ELEMENTS;
+            const size_t packed_b_elements = (size_t)k_tiles * B_TILE_ELEMENTS;
+
+            thread_local std::vector<ggml_bf16_t> packed_a0_storage;
+            thread_local std::vector<ggml_bf16_t> packed_a1_storage;
+            thread_local std::vector<ggml_bf16_t> packed_b_storage;
+            auto resize_aligned = [](std::vector<ggml_bf16_t>& storage, size_t elements) {
+              const size_t required = elements + ALIGNMENT_PADDING;
+              if (storage.size() < required) storage.resize(required);
+              const auto raw = reinterpret_cast<std::uintptr_t>(storage.data());
+              const auto aligned = (raw + TILE_ALIGNMENT - 1) & ~(std::uintptr_t)(TILE_ALIGNMENT - 1);
+              return reinterpret_cast<ggml_bf16_t*>(aligned);
+            };
+
+            ggml_bf16_t* packed_a0 = resize_aligned(packed_a0_storage, packed_a_elements);
+            ggml_bf16_t* packed_b = resize_aligned(packed_b_storage, packed_b_elements);
             alignas(64) float c0[TILE_M * TILE_N];
-            alignas(64) float c1[TILE_M * TILE_N];
 
-            if (!do_down) {
-              const int i_tile = tile_id / h_tiles;
-              const int h_tile = tile_id % h_tiles;
-              const int i_start = i_tile * TILE_M;
-              const int h_start = h_tile * TILE_N;
-              const int i_count = std::min(TILE_M, I - i_start);
-              const int h_count = std::min(TILE_N, H - h_start);
-              const ggml_bf16_t* input = m_local_input_ptr_[expert_idx];
+            const int i_start = i_tile * TILE_N;
+            const int i_count = std::min(TILE_N, I - i_start);
 
-              for (int k_start = 0; k_start < m; k_start += TILE_K) {
+            if (do_down) {
+              const ggml_bf16_t* grad_output = base_grad_output_bf16_ptr_[expert_idx];
+              const ggml_bf16_t* intermediate = cache.intermediate_cache + pos_start * I;
+              std::memset(packed_b, 0, packed_b_elements * sizeof(ggml_bf16_t));
+              for (int kt = 0; kt < k_tiles; kt++) {
+                const int k_start = kt * TILE_K;
                 const int k_count = std::min(TILE_K, m - k_start);
-                std::memset(a_tile, 0, sizeof(a_tile));
-                std::memset(b_tile, 0, sizeof(b_tile));
-
-                for (int row = 0; row < i_count; row++) {
+                ggml_bf16_t* b_tile = packed_b + (size_t)kt * B_TILE_ELEMENTS;
+                for (int col = 0; col < i_count; col++) {
                   for (int kk = 0; kk < k_count; kk++) {
-                    a_tile[row * TILE_K + kk] = grad_gate_output_[(pos_start + k_start + kk) * I + i_start + row];
+                    b_tile[col * TILE_K + kk] = intermediate[(size_t)(k_start + kk) * I + i_start + col];
                   }
                 }
+                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile));
+                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + amx::GemmKernel224BF::TILE_N * TILE_K));
+              }
+
+              ggml_bf16_t* down_dst = gdp + (size_t)expert_idx * H * F;
+              for (int h_tile = 0; h_tile < h_tiles; h_tile++) {
+                const int h_start = h_tile * TILE_M;
+                const int h_count = std::min(TILE_M, H - h_start);
+                std::memset(packed_a0, 0, packed_a_elements * sizeof(ggml_bf16_t));
+                for (int kt = 0; kt < k_tiles; kt++) {
+                  const int k_start = kt * TILE_K;
+                  const int k_count = std::min(TILE_K, m - k_start);
+                  ggml_bf16_t* a_tile = packed_a0 + (size_t)kt * A_TILE_ELEMENTS;
+                  for (int row = 0; row < h_count; row++) {
+                    for (int kk = 0; kk < k_count; kk++) {
+                      a_tile[row * TILE_K + kk] = grad_output[(size_t)(k_start + kk) * H + h_start + row];
+                    }
+                  }
+                }
+
+                // Keep the full 32x32 FP32 C tile resident for the complete K reduction.
+                T::clean_c();
+                for (int kt = 0; kt < k_tiles; kt++) {
+                  T::load_b(packed_b + (size_t)kt * B_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                  T::load_a(packed_a0 + (size_t)kt * A_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                  T::run_tile();
+                }
+                T::store_c(c0, TILE_N * sizeof(float));
+
+                for (int row = 0; row < h_count; row++) {
+                  for (int col = 0; col < i_count; col++) {
+                    down_dst[(size_t)(h_start + row) * F + i_start + col] = GGML_FP32_TO_BF16(c0[row * TILE_N + col]);
+                  }
+                }
+              }
+              return;
+            }
+
+            ggml_bf16_t* packed_a1 = resize_aligned(packed_a1_storage, packed_a_elements);
+            std::memset(packed_a0, 0, packed_a_elements * sizeof(ggml_bf16_t));
+            std::memset(packed_a1, 0, packed_a_elements * sizeof(ggml_bf16_t));
+            for (int kt = 0; kt < k_tiles; kt++) {
+              const int k_start = kt * TILE_K;
+              const int k_count = std::min(TILE_K, m - k_start);
+              ggml_bf16_t* gate_a_tile = packed_a0 + (size_t)kt * A_TILE_ELEMENTS;
+              ggml_bf16_t* up_a_tile = packed_a1 + (size_t)kt * A_TILE_ELEMENTS;
+              for (int row = 0; row < i_count; row++) {
+                for (int kk = 0; kk < k_count; kk++) {
+                  gate_a_tile[row * TILE_K + kk] = grad_gate_output_[(pos_start + k_start + kk) * I + i_start + row];
+                  up_a_tile[row * TILE_K + kk] = grad_up_output_[(pos_start + k_start + kk) * I + i_start + row];
+                }
+              }
+            }
+
+            const ggml_bf16_t* input = m_local_input_ptr_[expert_idx];
+            ggml_bf16_t* gate_dst = ggp + (size_t)expert_idx * F * H;
+            ggml_bf16_t* up_dst = gup_ptr + (size_t)expert_idx * F * H;
+            alignas(64) float c1[TILE_M * TILE_N];
+            for (int h_tile = 0; h_tile < h_tiles; h_tile++) {
+              const int h_start = h_tile * TILE_N;
+              const int h_count = std::min(TILE_N, H - h_start);
+              std::memset(packed_b, 0, packed_b_elements * sizeof(ggml_bf16_t));
+              for (int kt = 0; kt < k_tiles; kt++) {
+                const int k_start = kt * TILE_K;
+                const int k_count = std::min(TILE_K, m - k_start);
+                ggml_bf16_t* b_tile = packed_b + (size_t)kt * B_TILE_ELEMENTS;
                 for (int col = 0; col < h_count; col++) {
                   for (int kk = 0; kk < k_count; kk++) {
                     b_tile[col * TILE_K + kk] = input[(size_t)(k_start + kk) * H + h_start + col];
@@ -2002,85 +2084,30 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 }
                 amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile));
                 amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + amx::GemmKernel224BF::TILE_N * TILE_K));
-
-                T::load_b(b_tile, TILE_K * sizeof(ggml_bf16_t));
-                T::load_a(a_tile, TILE_K * sizeof(ggml_bf16_t));
-                if (k_start == 0) {
-                  T::clean_c();
-                } else {
-                  T::load_c(c0, TILE_N * sizeof(float));
-                }
-                T::run_tile();
-                T::store_c(c0, TILE_N * sizeof(float));
-
-                std::memset(a_tile, 0, sizeof(a_tile));
-                for (int row = 0; row < i_count; row++) {
-                  for (int kk = 0; kk < k_count; kk++) {
-                    a_tile[row * TILE_K + kk] = grad_up_output_[(pos_start + k_start + kk) * I + i_start + row];
-                  }
-                }
-                T::load_a(a_tile, TILE_K * sizeof(ggml_bf16_t));
-                if (k_start == 0) {
-                  T::clean_c();
-                } else {
-                  T::load_c(c1, TILE_N * sizeof(float));
-                }
-                T::run_tile();
-                T::store_c(c1, TILE_N * sizeof(float));
               }
 
-              ggml_bf16_t* gate_dst = ggp + (size_t)expert_idx * F * H;
-              ggml_bf16_t* up_dst = gup_ptr + (size_t)expert_idx * F * H;
+              // Gate and up each consume all four C tiles, so retain C across K in two separate passes.
+              T::clean_c();
+              for (int kt = 0; kt < k_tiles; kt++) {
+                T::load_b(packed_b + (size_t)kt * B_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                T::load_a(packed_a0 + (size_t)kt * A_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                T::run_tile();
+              }
+              T::store_c(c0, TILE_N * sizeof(float));
+
+              T::clean_c();
+              for (int kt = 0; kt < k_tiles; kt++) {
+                T::load_b(packed_b + (size_t)kt * B_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                T::load_a(packed_a1 + (size_t)kt * A_TILE_ELEMENTS, TILE_K * sizeof(ggml_bf16_t));
+                T::run_tile();
+              }
+              T::store_c(c1, TILE_N * sizeof(float));
+
               for (int row = 0; row < i_count; row++) {
                 for (int col = 0; col < h_count; col++) {
                   gate_dst[(size_t)(i_start + row) * H + h_start + col] = GGML_FP32_TO_BF16(c0[row * TILE_N + col]);
                   up_dst[(size_t)(i_start + row) * H + h_start + col] = GGML_FP32_TO_BF16(c1[row * TILE_N + col]);
                 }
-              }
-              return;
-            }
-
-            const int h_tile = tile_id / i_tiles;
-            const int i_tile = tile_id % i_tiles;
-            const int h_start = h_tile * TILE_M;
-            const int i_start = i_tile * TILE_N;
-            const int h_count = std::min(TILE_M, H - h_start);
-            const int i_count = std::min(TILE_N, I - i_start);
-            const ggml_bf16_t* grad_output = base_grad_output_bf16_ptr_[expert_idx];
-            const ggml_bf16_t* intermediate = cache.intermediate_cache + pos_start * I;
-
-            for (int k_start = 0; k_start < m; k_start += TILE_K) {
-              const int k_count = std::min(TILE_K, m - k_start);
-              std::memset(a_tile, 0, sizeof(a_tile));
-              std::memset(b_tile, 0, sizeof(b_tile));
-              for (int row = 0; row < h_count; row++) {
-                for (int kk = 0; kk < k_count; kk++) {
-                  a_tile[row * TILE_K + kk] = grad_output[(size_t)(k_start + kk) * H + h_start + row];
-                }
-              }
-              for (int col = 0; col < i_count; col++) {
-                for (int kk = 0; kk < k_count; kk++) {
-                  b_tile[col * TILE_K + kk] = intermediate[(size_t)(k_start + kk) * I + i_start + col];
-                }
-              }
-              amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile));
-              amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + amx::GemmKernel224BF::TILE_N * TILE_K));
-
-              T::load_b(b_tile, TILE_K * sizeof(ggml_bf16_t));
-              T::load_a(a_tile, TILE_K * sizeof(ggml_bf16_t));
-              if (k_start == 0) {
-                T::clean_c();
-              } else {
-                T::load_c(c0, TILE_N * sizeof(float));
-              }
-              T::run_tile();
-              T::store_c(c0, TILE_N * sizeof(float));
-            }
-
-            ggml_bf16_t* down_dst = gdp + (size_t)expert_idx * H * F;
-            for (int row = 0; row < h_count; row++) {
-              for (int col = 0; col < i_count; col++) {
-                down_dst[(size_t)(h_start + row) * F + i_start + col] = GGML_FP32_TO_BF16(c0[row * TILE_N + col]);
               }
             }
           },
