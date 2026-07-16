@@ -837,8 +837,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
                                                                                             "AVXVNNI256RawInt4_MOE");
 #endif
 #if defined(USE_SYCL)
-  bind_moe_module<SYCL_GPTQ_INT4_MOE_TP<sycl_int4::GemmKernelSYCLGPTQInt4>>(moe_module,
-                                                                            "SYCLGPTQInt4_MOE");
+  bind_moe_module<SYCL_GPTQ_INT4_MOE_TP<sycl_int4::GemmKernelSYCLGPTQInt4>>(moe_module, "SYCLGPTQInt4_MOE");
 #endif
 
 #if defined(USE_MOE_KERNEL)

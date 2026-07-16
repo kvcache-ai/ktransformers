@@ -12,92 +12,19 @@
 #ifndef CPUINFER_OPERATOR_SYCL_GPTQ_INT4_MOE_H
 #define CPUINFER_OPERATOR_SYCL_GPTQ_INT4_MOE_H
 
-#include <algorithm>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
-#include <string>
 #include <sycl/ext/oneapi/dot_product.hpp>
-#include <sycl/sycl.hpp>
 #include <utility>
 #include <vector>
 
 #include "../avx2/moe_base.hpp"
+#include "gptq_int4_sycl-runtime.hpp"
 
 namespace sycl_int4 {
-
-constexpr int kSubgroupSize = 16;
-constexpr int kDownRowsPerWorkGroup = 2;
-constexpr int kPrefillSparseRows = 2;
-constexpr int kPrefillDenseRows = 8;
-constexpr int kPrefillDenseThreshold = 33;
-
-inline sycl::queue& queue() {
-  static sycl::queue q([] {
-    auto async_handler = [](sycl::exception_list exceptions) {
-      for (const auto& exception : exceptions) {
-        try {
-          std::rethrow_exception(exception);
-        } catch (const sycl::exception& error) {
-          std::fprintf(stderr, "SYCL GPTQ INT4 asynchronous error: %s\n", error.what());
-        }
-      }
-    };
-
-    try {
-      const auto devices = sycl::device::get_devices(sycl::info::device_type::gpu);
-      if (devices.empty()) {
-        throw std::runtime_error("No SYCL GPU device is available");
-      }
-      for (const auto& device : devices) {
-        if (device.get_platform().get_backend() == sycl::backend::ext_oneapi_level_zero) {
-          return sycl::queue(device, async_handler);
-        }
-      }
-      return sycl::queue(devices.front(), async_handler);
-    } catch (const sycl::exception& error) {
-      throw std::runtime_error(std::string("Failed to create the SYCL GPTQ INT4 queue. Check sycl-ls, "
-                                           "the render-group permission, or ONEAPI_DEVICE_SELECTOR. Original error: ") +
-                               error.what());
-    }
-  }());
-  return q;
-}
-
-template <typename T>
-inline T* usm_alloc(size_t elements, const char* name) {
-  elements = std::max<size_t>(elements, 1);
-  T* pointer = sycl::malloc_shared<T>(elements, queue());
-  if (pointer == nullptr) {
-    throw std::runtime_error(std::string("SYCL shared-USM allocation failed for ") + name);
-  }
-  return pointer;
-}
-
-inline void usm_free(void* pointer) {
-  if (pointer != nullptr) sycl::free(pointer, queue());
-}
-
-inline float bf16_to_fp32(uint16_t value) { return sycl::bit_cast<float>(static_cast<uint32_t>(value) << 16); }
-
-inline uint16_t fp32_to_bf16(float value) {
-  uint32_t bits = sycl::bit_cast<uint32_t>(value);
-  const uint32_t lsb = (bits >> 16) & 1u;
-  bits += 0x7fffu + lsb;
-  return static_cast<uint16_t>(bits >> 16);
-}
-
-inline int32_t unpack_i4x4_to_i8x4(uint32_t packed) {
-  uint32_t value = packed & 0xffffu;
-  value = (value | (value << 8)) & 0x00ff00ffu;
-  value = (value | (value << 4)) & 0x0f0f0f0fu;
-  const uint32_t negative = (~value) & 0x08080808u;
-  value = (value & 0x07070707u) | negative | (negative << 1) | (negative << 2) | (negative << 3) | (negative << 4);
-  return sycl::bit_cast<int32_t>(value);
-}
 
 struct BackendScratch {
   std::vector<sycl::event> gate_up_events;
@@ -132,7 +59,27 @@ struct BackendScratch {
   int prefill_expert_capacity = 0;
   int prefill_tile_capacity = 0;
 
+  void reset_weights() noexcept {
+    usm_free(gate_qweight);
+    usm_free(up_qweight);
+    usm_free(down_qweight);
+    usm_free(gate_scales);
+    usm_free(up_scales);
+    usm_free(down_scales);
+    gate_qweight = nullptr;
+    up_qweight = nullptr;
+    down_qweight = nullptr;
+    gate_scales = nullptr;
+    up_scales = nullptr;
+    down_scales = nullptr;
+    weights_ready = false;
+  }
+
   ~BackendScratch() {
+    // A submit failure can leave a prefix of the decode pipeline in flight.
+    // Finish those commands before releasing weights or activation storage.
+    for (auto& event : gate_up_events) event.wait();
+    reset_weights();
     usm_free(prefill_inputs);
     usm_free(prefill_activations);
     usm_free(prefill_gate_qweights);
@@ -185,8 +132,9 @@ struct GemmKernelSYCLGPTQInt4 {
 
     void ensure(size_t m) {
       if (m <= capacity_m) return;
+      uint16_t* replacement = usm_alloc<uint16_t>(m * k, "GPTQ INT4 activation buffer");
       usm_free(data);
-      data = usm_alloc<uint16_t>(m * k, "GPTQ INT4 activation buffer");
+      data = replacement;
       capacity_m = m;
     }
 
@@ -238,14 +186,14 @@ struct GemmKernelSYCLGPTQInt4 {
     size_t qweight_elements() const { return static_cast<size_t>(n) * k_packed; }
     size_t scale_elements() const { return static_cast<size_t>(n) * num_groups; }
 
-    void bind_external(uint32_t* qweight_pointer, float* scale_pointer, bool take_ownership) {
+    void bind_view(uint32_t* qweight_pointer, float* scale_pointer) {
       if (owns_storage) {
         usm_free(qweight);
         usm_free(scales);
       }
       qweight = qweight_pointer;
       scales = scale_pointer;
-      owns_storage = take_ownership;
+      owns_storage = false;
     }
 
     void ensure() {
@@ -291,8 +239,9 @@ struct GemmKernelSYCLGPTQInt4 {
 
     void ensure(size_t m) {
       if (m <= capacity_m) return;
+      float* replacement = usm_alloc<float>(m * n, "GPTQ INT4 output buffer");
       usm_free(data);
-      data = usm_alloc<float>(m * n, "GPTQ INT4 output buffer");
+      data = replacement;
       capacity_m = m;
     }
 
@@ -311,50 +260,6 @@ struct GemmKernelSYCLGPTQInt4 {
     }
   };
 };
-
-// Correctness-oriented fallback used by the existing prefill flow.
-inline void gemm_generic(int m, int n, int k, GemmKernelSYCLGPTQInt4::BufferA& input,
-                         GemmKernelSYCLGPTQInt4::BufferB& weight, GemmKernelSYCLGPTQInt4::BufferC& output, int ith,
-                         int nth) {
-  if (m <= 0 || n <= 0 || k <= 0) return;
-  auto [begin, end] = avx2::split_range(n, ith, nth);
-  if (begin >= end) return;
-
-  const int num_groups = weight.num_groups;
-  const int group_size = weight.group_size;
-  const int k_packed = weight.k_packed;
-  const size_t input_stride = input.k;
-  const size_t output_stride = output.n;
-  const int output_count = end - begin;
-  const uint16_t* input_data = input.data;
-  const uint32_t* qweight = weight.qweight;
-  const float* scales = weight.scales;
-  float* output_data = output.data;
-
-  queue()
-      .submit([&](sycl::handler& handler) {
-        handler.parallel_for(sycl::range<2>(static_cast<size_t>(m), static_cast<size_t>(output_count)),
-                             [=](sycl::id<2> index) {
-                               const int row = static_cast<int>(index[0]);
-                               const int column = begin + static_cast<int>(index[1]);
-                               const uint16_t* row_input = input_data + static_cast<size_t>(row) * input_stride;
-                               float accumulator = 0.0f;
-                               for (int group = 0; group < num_groups; ++group) {
-                                 float group_sum = 0.0f;
-                                 const int group_begin = group * group_size;
-                                 for (int offset = 0; offset < group_size; ++offset) {
-                                   const int kk = group_begin + offset;
-                                   const uint32_t packed = qweight[static_cast<size_t>(column) * k_packed + (kk >> 3)];
-                                   const int quantized = static_cast<int>((packed >> ((kk & 7) * 4)) & 0x0fu) - 8;
-                                   group_sum += bf16_to_fp32(row_input[kk]) * static_cast<float>(quantized);
-                                 }
-                                 accumulator += group_sum * scales[static_cast<size_t>(column) * num_groups + group];
-                               }
-                               output_data[static_cast<size_t>(row) * output_stride + column] = accumulator;
-                             });
-      })
-      .wait_and_throw();
-}
 
 inline sycl::event submit_gate_up_decode(int m, int n, int k, GemmKernelSYCLGPTQInt4::BufferA& input,
                                          GemmKernelSYCLGPTQInt4::BufferB& gate_weight,
@@ -841,20 +746,17 @@ inline sycl::event submit_prefill_down(int tile_count, int n, int k, const int* 
 template <class T = sycl_int4::GemmKernelSYCLGPTQInt4>
 class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> {
   using Base = AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>>;
-  using Base::backend_scratch_;
   using Base::config_;
   using Base::down_ba_;
   using Base::down_bb_;
   using Base::down_bc_;
   using Base::gate_bb_;
-  using Base::gate_bc_;
   using Base::gate_up_ba_;
   using Base::m_expert_id_map_;
   using Base::m_local_down_output_ptr_;
   using Base::m_local_num_;
   using Base::tp_part_idx;
   using Base::up_bb_;
-  using Base::up_bc_;
 
  public:
   using typename Base::input_t;
@@ -886,20 +788,6 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
   std::shared_ptr<typename T::BufferC> make_buffer_c_impl(size_t m, size_t n, void* data) const {
     return std::make_shared<typename T::BufferC>(m, n, data);
   }
-
-  void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int) {
-    auto& weight = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
-    auto& output = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
-    sycl_int4::gemm_generic(m_local_num_[expert_idx], config_.intermediate_size, config_.hidden_size,
-                            *gate_up_ba_[expert_idx], *weight, *output, ith, nth);
-  }
-
-  void do_down_gemm(int expert_idx, int ith, int nth, int) {
-    sycl_int4::gemm_generic(m_local_num_[expert_idx], config_.hidden_size, config_.intermediate_size,
-                            *down_ba_[expert_idx], *down_bb_[expert_idx], *down_bc_[expert_idx], ith, nth);
-  }
-
-  bool use_fused_prefill() const { return true; }
 
   void fused_prefill_experts(int activated_experts, int qlen) {
     if (activated_experts <= 0 || qlen <= 1) return;
@@ -944,8 +832,8 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
           scratch->prefill_inputs, config_.quant_config.group_size, dense_gate_up_event);
     }
 
-    if (sparse_tiles > 0) sparse_down_event.wait_and_throw();
-    if (dense_tiles > 0) dense_down_event.wait_and_throw();
+    if (sparse_tiles > 0) sycl_int4::wait_and_throw(sparse_down_event);
+    if (dense_tiles > 0) sycl_int4::wait_and_throw(dense_down_event);
 
     // Down writes BF16 directly over the no-longer-needed packed input. The
     // base merge can consume that storage without an FP32-to-BF16 host pass.
@@ -955,14 +843,11 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
     }
   }
 
-  bool use_fused_gate_up_decode() const { return true; }
-  bool use_fused_down_decode() const { return true; }
-
   void decode_gate_up_activation(int activated_experts, int qlen) {
     if (qlen != 1 || activated_experts <= 0) return;
     auto* scratch = get_scratch();
     if (scratch->gate_up_pending) {
-      for (auto& event : scratch->gate_up_events) event.wait_and_throw();
+      for (auto& event : scratch->gate_up_events) sycl_int4::wait_and_throw(event);
     }
 
     scratch->gate_up_events.clear();
@@ -1001,7 +886,7 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
           m_local_num_[expert], config_.hidden_size, config_.intermediate_size, *down_ba_[expert], *down_bb_[expert],
           *down_bc_[expert], scratch->gate_up_events[task]));
     }
-    for (auto& event : down_events) event.wait_and_throw();
+    for (auto& event : down_events) sycl_int4::wait_and_throw(event);
 
     scratch->gate_up_pending = false;
     scratch->active_experts = 0;
@@ -1068,11 +953,13 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
   }
 
  private:
+  std::unique_ptr<sycl_int4::BackendScratch> backend_scratch_;
+
   sycl_int4::BackendScratch* get_scratch() {
     if (!backend_scratch_) {
-      backend_scratch_ = std::make_shared<sycl_int4::BackendScratch>();
+      backend_scratch_ = std::make_unique<sycl_int4::BackendScratch>();
     }
-    return static_cast<sycl_int4::BackendScratch*>(backend_scratch_.get());
+    return backend_scratch_.get();
   }
 
   sycl_int4::BackendScratch* prepare_prefill_tables(int activated_experts, int& sparse_tiles, int& dense_tiles) {
@@ -1177,12 +1064,19 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
     const size_t down_qweight_stride = down_bb_[0]->qweight_elements();
     const size_t down_scale_stride = down_bb_[0]->scale_elements();
 
-    scratch->gate_qweight = sycl_int4::usm_alloc<uint32_t>(experts * gate_up_qweight_stride, "contiguous gate qweight");
-    scratch->up_qweight = sycl_int4::usm_alloc<uint32_t>(experts * gate_up_qweight_stride, "contiguous up qweight");
-    scratch->down_qweight = sycl_int4::usm_alloc<uint32_t>(experts * down_qweight_stride, "contiguous down qweight");
-    scratch->gate_scales = sycl_int4::usm_alloc<float>(experts * gate_up_scale_stride, "contiguous gate scales");
-    scratch->up_scales = sycl_int4::usm_alloc<float>(experts * gate_up_scale_stride, "contiguous up scales");
-    scratch->down_scales = sycl_int4::usm_alloc<float>(experts * down_scale_stride, "contiguous down scales");
+    scratch->reset_weights();
+    try {
+      scratch->gate_qweight =
+          sycl_int4::usm_alloc<uint32_t>(experts * gate_up_qweight_stride, "contiguous gate qweight");
+      scratch->up_qweight = sycl_int4::usm_alloc<uint32_t>(experts * gate_up_qweight_stride, "contiguous up qweight");
+      scratch->down_qweight = sycl_int4::usm_alloc<uint32_t>(experts * down_qweight_stride, "contiguous down qweight");
+      scratch->gate_scales = sycl_int4::usm_alloc<float>(experts * gate_up_scale_stride, "contiguous gate scales");
+      scratch->up_scales = sycl_int4::usm_alloc<float>(experts * gate_up_scale_stride, "contiguous up scales");
+      scratch->down_scales = sycl_int4::usm_alloc<float>(experts * down_scale_stride, "contiguous down scales");
+    } catch (...) {
+      scratch->reset_weights();
+      throw;
+    }
 
     scratch->gate_up_qweight_stride = gate_up_qweight_stride;
     scratch->gate_up_scale_stride = gate_up_scale_stride;
@@ -1190,13 +1084,12 @@ class SYCL_GPTQ_INT4_MOE_TP : public AVX2_MOE_BASE<T, SYCL_GPTQ_INT4_MOE_TP<T>> 
     scratch->down_scale_stride = down_scale_stride;
 
     for (size_t expert = 0; expert < experts; ++expert) {
-      const bool owns_slab = expert == 0;
-      gate_bb_[expert]->bind_external(scratch->gate_qweight + expert * gate_up_qweight_stride,
-                                      scratch->gate_scales + expert * gate_up_scale_stride, owns_slab);
-      up_bb_[expert]->bind_external(scratch->up_qweight + expert * gate_up_qweight_stride,
-                                    scratch->up_scales + expert * gate_up_scale_stride, owns_slab);
-      down_bb_[expert]->bind_external(scratch->down_qweight + expert * down_qweight_stride,
-                                      scratch->down_scales + expert * down_scale_stride, owns_slab);
+      gate_bb_[expert]->bind_view(scratch->gate_qweight + expert * gate_up_qweight_stride,
+                                  scratch->gate_scales + expert * gate_up_scale_stride);
+      up_bb_[expert]->bind_view(scratch->up_qweight + expert * gate_up_qweight_stride,
+                                scratch->up_scales + expert * gate_up_scale_stride);
+      down_bb_[expert]->bind_view(scratch->down_qweight + expert * down_qweight_stride,
+                                  scratch->down_scales + expert * down_scale_stride);
     }
     scratch->weights_ready = true;
   }
@@ -1211,6 +1104,7 @@ class TP_MOE<SYCL_GPTQ_INT4_MOE_TP<Kernel>> : public TP_MOE<AVX2_MOE_BASE<Kernel
   void load_weights() override {
     auto& config = this->config;
     auto& tensor_parallel_backends = this->tps;
+    const int tensor_parallel_count = this->tp_count;
     auto pool = config.pool;
     const uint64_t* physical_to_logical = reinterpret_cast<const uint64_t*>(config.physical_to_logical_map);
     const int group_size = config.quant_config.group_size;
@@ -1233,22 +1127,59 @@ class TP_MOE<SYCL_GPTQ_INT4_MOE_TP<Kernel>> : public TP_MOE<AVX2_MOE_BASE<Kernel
     const size_t full_down_qweight = static_cast<size_t>(down_k_packed) * full_hidden;
     const size_t full_down_scales = static_cast<size_t>(down_num_groups) * full_hidden;
 
+    struct TPWeightStaging {
+      std::unique_ptr<uint32_t[]> gate_qweight;
+      std::unique_ptr<uint32_t[]> up_qweight;
+      std::unique_ptr<uint32_t[]> down_qweight;
+      std::unique_ptr<float[]> gate_scales;
+      std::unique_ptr<float[]> up_scales;
+      std::unique_ptr<float[]> down_scales;
+    };
+    std::vector<TPWeightStaging> staging(static_cast<size_t>(tensor_parallel_count));
+    std::vector<GeneralMOEConfig*> staging_configs(static_cast<size_t>(tensor_parallel_count), nullptr);
+    struct TPConfigPointerReset {
+      std::vector<GeneralMOEConfig*>& configs;
+      ~TPConfigPointerReset() {
+        for (auto* config : configs) {
+          if (config == nullptr) continue;
+          config->gate_proj = nullptr;
+          config->up_proj = nullptr;
+          config->down_proj = nullptr;
+          config->gate_scale = nullptr;
+          config->up_scale = nullptr;
+          config->down_scale = nullptr;
+        }
+      }
+    } reset_staging_pointers{staging_configs};
+
     pool->dispense_backend()->do_numa_job([&, this](int index) {
       auto& tp_config = tensor_parallel_backends[index]->config_;
+      staging_configs[index] = &tp_config;
+      auto& tp_staging = staging[index];
       const int tp_intermediate = tp_config.intermediate_size;
       const size_t tp_gate_up_qweight = static_cast<size_t>(gate_up_k_packed) * tp_intermediate;
       const size_t tp_gate_up_scales = static_cast<size_t>(gate_up_num_groups) * tp_intermediate;
-      tp_config.gate_proj = new uint32_t[static_cast<size_t>(tp_config.expert_num) * tp_gate_up_qweight];
-      tp_config.up_proj = new uint32_t[static_cast<size_t>(tp_config.expert_num) * tp_gate_up_qweight];
-      tp_config.gate_scale = new float[static_cast<size_t>(tp_config.expert_num) * tp_gate_up_scales];
-      tp_config.up_scale = new float[static_cast<size_t>(tp_config.expert_num) * tp_gate_up_scales];
+      tp_staging.gate_qweight =
+          std::make_unique<uint32_t[]>(static_cast<size_t>(tp_config.expert_num) * tp_gate_up_qweight);
+      tp_staging.up_qweight =
+          std::make_unique<uint32_t[]>(static_cast<size_t>(tp_config.expert_num) * tp_gate_up_qweight);
+      tp_staging.gate_scales = std::make_unique<float[]>(static_cast<size_t>(tp_config.expert_num) * tp_gate_up_scales);
+      tp_staging.up_scales = std::make_unique<float[]>(static_cast<size_t>(tp_config.expert_num) * tp_gate_up_scales);
 
       const int tp_down_k_packed = tp_intermediate / 8;
       const int tp_down_num_groups = tp_intermediate / group_size;
       const size_t tp_down_qweight = static_cast<size_t>(tp_down_k_packed) * full_hidden;
       const size_t tp_down_scales = static_cast<size_t>(tp_down_num_groups) * full_hidden;
-      tp_config.down_proj = new uint32_t[static_cast<size_t>(tp_config.expert_num) * tp_down_qweight];
-      tp_config.down_scale = new float[static_cast<size_t>(tp_config.expert_num) * tp_down_scales];
+      tp_staging.down_qweight =
+          std::make_unique<uint32_t[]>(static_cast<size_t>(tp_config.expert_num) * tp_down_qweight);
+      tp_staging.down_scales = std::make_unique<float[]>(static_cast<size_t>(tp_config.expert_num) * tp_down_scales);
+
+      tp_config.gate_proj = tp_staging.gate_qweight.get();
+      tp_config.up_proj = tp_staging.up_qweight.get();
+      tp_config.down_proj = tp_staging.down_qweight.get();
+      tp_config.gate_scale = tp_staging.gate_scales.get();
+      tp_config.up_scale = tp_staging.up_scales.get();
+      tp_config.down_scale = tp_staging.down_scales.get();
 
       const int gate_up_column_offset = index * tp_intermediate;
       const int down_packed_offset = index * tp_down_k_packed;
@@ -1324,15 +1255,6 @@ class TP_MOE<SYCL_GPTQ_INT4_MOE_TP<Kernel>> : public TP_MOE<AVX2_MOE_BASE<Kernel
     });
 
     pool->dispense_backend()->do_numa_job([&, this](int index) { tensor_parallel_backends[index]->load_weights(); });
-    pool->dispense_backend()->do_numa_job([&, this](int index) {
-      auto& tp_config = tensor_parallel_backends[index]->config_;
-      delete[] reinterpret_cast<uint32_t*>(tp_config.gate_proj);
-      delete[] reinterpret_cast<uint32_t*>(tp_config.up_proj);
-      delete[] reinterpret_cast<uint32_t*>(tp_config.down_proj);
-      delete[] reinterpret_cast<float*>(tp_config.gate_scale);
-      delete[] reinterpret_cast<float*>(tp_config.up_scale);
-      delete[] reinterpret_cast<float*>(tp_config.down_scale);
-    });
     this->weights_loaded = true;
   }
 

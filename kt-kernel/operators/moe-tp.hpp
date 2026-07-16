@@ -22,8 +22,11 @@ concept MOE_TP_PART = requires(T t, int qlen, int k, const int64_t* expert_ids, 
   // { t.load_weights() } -> std::same_as<void>;
 };
 
-template <MOE_TP_PART T>
+template <MOE_TP_PART T, typename Concrete = T>
 class TP_MOE_Common : public MoE_Interface {
+  static_assert(std::is_base_of_v<T, Concrete>);
+  static_assert(std::is_constructible_v<Concrete, GeneralMOEConfig, int>);
+
  protected:
   std::vector<GeneralMOEConfig> tp_configs;
   int tp_count;
@@ -120,7 +123,7 @@ class TP_MOE_Common : public MoE_Interface {
     }
 
     config.pool->dispense_backend()->do_numa_job(
-        [this, config](int i) { tps[i] = std::move(std::unique_ptr<T>(new T(tp_configs[i], i))); });
+        [this, config](int i) { tps[i] = std::unique_ptr<T>(new Concrete(tp_configs[i], i)); });
 
     local_output_numa.resize(tp_count, nullptr);
     MemoryRequest mem_requests;

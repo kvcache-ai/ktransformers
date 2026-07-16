@@ -23,6 +23,7 @@
   - [kt-cli](en/kt-kernel/kt-cli.md)
   - [AVX2 Backend Tutorial](en/kt-kernel/AVX2-Tutorial.md)
   - [AVX2 后端教程（中文）](zh/AVX2-Tutorial_zh.md)
+  - [SYCL GPTQ INT4 后端教程（中文）](zh/SYCL-GPTQ-INT4-Tutorial_zh.md)
 # FAQ
 - [FAQ](en/FAQ.md)
 <!-- # V3 Reproduction

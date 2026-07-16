@@ -30,6 +30,21 @@ option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" 
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
+set(_KT_GPU_BACKEND_COUNT 0)
+foreach(_KT_GPU_BACKEND IN ITEMS
+        KTRANSFORMERS_USE_CUDA
+        KTRANSFORMERS_USE_SYCL
+        KTRANSFORMERS_USE_ROCM
+        KTRANSFORMERS_USE_MUSA
+        KTRANSFORMERS_USE_MACA)
+    if(${_KT_GPU_BACKEND})
+        math(EXPR _KT_GPU_BACKEND_COUNT "${_KT_GPU_BACKEND_COUNT} + 1")
+    endif()
+endforeach()
+if(_KT_GPU_BACKEND_COUNT GREATER 1)
+    message(FATAL_ERROR "CUDA, SYCL, ROCm, MUSA, and MACA backends are mutually exclusive")
+endif()
+
 # Choose compilers BEFORE project() so CMake honors them
 if(KTRANSFORMERS_USE_SYCL)
     find_program(SYCL_CXX_COMPILER NAMES icpx dpcpp)
@@ -67,6 +82,16 @@ project(kt_kernel_ext VERSION 0.6.1)
 # Auto-detect CPU features early (unless building with LLAMA_NATIVE)
 if(NOT LLAMA_NATIVE AND NOT MSVC)
     include(cmake/DetectCPU.cmake)
+endif()
+
+if(KTRANSFORMERS_USE_SYCL)
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        message(FATAL_ERROR "The SYCL GPTQ INT4 backend currently requires an x86-64 host for AVX2 routing and result merging")
+    endif()
+    if(NOT LLAMA_NATIVE AND NOT LLAMA_AVX2)
+        set(LLAMA_AVX2 ON CACHE BOOL "Enable AVX2 required by the SYCL host path" FORCE)
+        message(STATUS "SYCL GPTQ INT4: enabling AVX2 for host routing and result merging")
+    endif()
 endif()
 
 
@@ -140,7 +165,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Use header-only fmt to avoid needing to link libfmt (fix undefined symbol vprint)
 add_compile_definitions(FMT_HEADER_ONLY)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+if(NOT KTRANSFORMERS_USE_SYCL)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+endif()
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -fsanitize=address -fno-omit-frame-pointer")
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -662,7 +690,7 @@ if(KTRANSFORMERS_USE_SYCL)
     if(NOT CUDAToolkit_FOUND)
         message(FATAL_ERROR "KTRANSFORMERS_USE_SYCL=ON requires the CUDA toolkit for CPUInfer host-stream scheduling. Set CUDAToolkit_ROOT or CUDA_HOME.")
     endif()
-    target_compile_definitions(${PROJECT_NAME} PRIVATE KTRANSFORMERS_USE_CUDA=1 USE_CUDA=1)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KTRANSFORMERS_USE_CUDA_HOST_CALLBACKS=1)
     target_include_directories(${PROJECT_NAME} PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
     message(STATUS "SYCL GPTQ INT4: CUDA host-stream bridge enabled with cudart ${CUDAToolkit_VERSION}")

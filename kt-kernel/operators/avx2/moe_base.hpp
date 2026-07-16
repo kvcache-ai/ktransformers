@@ -81,11 +81,6 @@ class AVX2_MOE_BASE {
   using output_t = float;
   static constexpr double ELEMENT_SIZE = T::ELEMENT_SIZE;
 
-  // Specialized backends may keep per-instance state here. The storage
-  // must live in the base because TP_MOE_Common constructs the CRTP base type
-  // directly; adding data members only to Derived would be unsafe.
-  std::shared_ptr<void> backend_scratch_;
-
   AVX2_MOE_BASE(GeneralMOEConfig config, int tp_part_idx_) : tp_part_idx(tp_part_idx_), config_(config) {
     init();
     derived()->derived_init();
@@ -160,7 +155,7 @@ class AVX2_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AVX2_MOE_BASE() {
+  virtual ~AVX2_MOE_BASE() {
     for (void* p : owned_aligned_allocs_) std::free(p);
   }
 
@@ -195,14 +190,6 @@ class AVX2_MOE_BASE {
     derived_const()->write_weights_to_buffer(std::forward<Args>(args)...);
   }
 
-  // Optional decode hooks. CPU backends inherit these no-op defaults.
-  bool use_fused_gate_up_decode() const { return false; }
-  void decode_gate_up_activation(int, int) {}
-  bool use_fused_down_decode() const { return false; }
-  void decode_down_projection(int, int) {}
-  bool use_fused_prefill() const { return false; }
-  void fused_prefill_experts(int, int) {}
-
   void forward_prefill(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
                        void* output) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
@@ -224,7 +211,7 @@ class AVX2_MOE_BASE {
         activated_expert++;
       }
     }
-    const bool fused_prefill = activated_expert > 0 && derived()->use_fused_prefill();
+    const bool fused_prefill = activated_expert > 0 && has_fused_prefill();
 
     // Assign pool memory to buffers
     size_t offset = 0;
@@ -297,8 +284,8 @@ class AVX2_MOE_BASE {
       gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
     });
 
-    if (fused_prefill) {
-      derived()->fused_prefill_experts(activated_expert, qlen);
+    if constexpr (has_fused_prefill()) {
+      if (activated_expert > 0) run_fused_prefill(activated_expert, qlen);
     } else {
       // Gate + Up GEMM
       int nth = T::recommended_nth(config_.intermediate_size);
@@ -398,7 +385,7 @@ class AVX2_MOE_BASE {
     void* down_bc_pool_ptr = down_bc_pool_;
     constexpr size_t M_STEP = T::M_STEP;
     auto align64 = [](size_t v) { return (v + 63) & (~(size_t)63); };
-    const bool gate_up_fused = activated_expert > 0 && derived()->use_fused_gate_up_decode();
+    const bool gate_up_fused = activated_expert > 0 && has_fused_gate_up_decode();
 
     for (int i = 0; i < activated_expert; i++) {
       auto expert_idx = m_expert_id_map_[i];
@@ -441,8 +428,8 @@ class AVX2_MOE_BASE {
 
     // Gate + Up GEMM
     int nth = T::recommended_nth(config_.intermediate_size);
-    if (gate_up_fused) {
-      derived()->decode_gate_up_activation(activated_expert, qlen);
+    if constexpr (has_fused_gate_up_decode()) {
+      if (activated_expert > 0) run_fused_gate_up_decode(activated_expert, qlen);
     } else {
       pool->do_work_stealing_job(
           nth * activated_expert * 2, [](int) { T::config(); },
@@ -475,8 +462,8 @@ class AVX2_MOE_BASE {
 
     // Down GEMM
     nth = T::recommended_nth(config_.hidden_size);
-    if (activated_expert > 0 && derived()->use_fused_down_decode()) {
-      derived()->decode_down_projection(activated_expert, qlen);
+    if constexpr (has_fused_down_decode()) {
+      if (activated_expert > 0) run_fused_down_decode(activated_expert, qlen);
     } else {
       pool->do_work_stealing_job(
           nth * activated_expert, [](int) { T::config(); },
@@ -511,6 +498,30 @@ class AVX2_MOE_BASE {
  protected:
   Derived* derived() { return static_cast<Derived*>(this); }
   const Derived* derived_const() const { return static_cast<const Derived*>(this); }
+
+  static constexpr bool has_fused_prefill() {
+    return requires(Derived& backend) { backend.fused_prefill_experts(0, 0); };
+  }
+
+  static constexpr bool has_fused_gate_up_decode() {
+    return requires(Derived& backend) { backend.decode_gate_up_activation(0, 0); };
+  }
+
+  static constexpr bool has_fused_down_decode() {
+    return requires(Derived& backend) { backend.decode_down_projection(0, 0); };
+  }
+
+  void run_fused_prefill(int activated_experts, int qlen) {
+    if constexpr (has_fused_prefill()) derived()->fused_prefill_experts(activated_experts, qlen);
+  }
+
+  void run_fused_gate_up_decode(int activated_experts, int qlen) {
+    if constexpr (has_fused_gate_up_decode()) derived()->decode_gate_up_activation(activated_experts, qlen);
+  }
+
+  void run_fused_down_decode(int activated_experts, int qlen) {
+    if constexpr (has_fused_down_decode()) derived()->decode_down_projection(activated_experts, qlen);
+  }
 
   void derived_init() {}
 
@@ -586,9 +597,9 @@ class AVX2_MOE_BASE {
 // ============================================================================
 
 template <class T, class Derived>
-class TP_MOE<AVX2_MOE_BASE<T, Derived>> : public TP_MOE_Common<AVX2_MOE_BASE<T, Derived>> {
+class TP_MOE<AVX2_MOE_BASE<T, Derived>> : public TP_MOE_Common<AVX2_MOE_BASE<T, Derived>, Derived> {
  public:
-  using TP_MOE_Common<AVX2_MOE_BASE<T, Derived>>::TP_MOE_Common;
+  using TP_MOE_Common<AVX2_MOE_BASE<T, Derived>, Derived>::TP_MOE_Common;
 
   void load_weights() override { throw std::runtime_error("Not Implemented"); }
 

@@ -76,9 +76,9 @@ def _host_has_cpu_flag(*flag_names: str) -> bool:
 _HOST_HAS_AVX_VNNI = _host_has_cpu_flag("avx_vnni", "avxvnni")
 
 
-def _preflight_sycl_device():
+def _preflight_sycl_device() -> None:
     """Report the common Linux render-node permission error before C++ initialization."""
-    if os.getenv("KT_SYCL_DEVICE_FILTER", "").strip():
+    if os.getenv("ONEAPI_DEVICE_SELECTOR", "").strip():
         return
 
     render_nodes = sorted(glob.glob("/dev/dri/renderD*"))
@@ -86,7 +86,7 @@ def _preflight_sycl_device():
         raise RuntimeError(
             "SYCL_GPTQ_INT4 selects a GPU by default, but the current user cannot access "
             "/dev/dri/renderD*. Add the user to the render group and re-login, or set "
-            "KT_SYCL_DEVICE_FILTER to an accessible SYCL device selector."
+            "ONEAPI_DEVICE_SELECTOR to an accessible SYCL GPU."
         )
 
 
