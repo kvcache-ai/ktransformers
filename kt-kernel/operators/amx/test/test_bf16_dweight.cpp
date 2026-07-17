@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -92,10 +94,82 @@ bool run_case(int routes, int rows, int columns) {
   return passed;
 }
 
+bool run_amx_benchmark() {
+  if constexpr (!amx::AMX_AVAILABLE) {
+    std::printf("BF16 dWeight AMX benchmark: SKIP (AMX unavailable)\n");
+    return true;
+  }
+
+  constexpr int routes = 1024;
+  constexpr int iterations = 20000;
+  constexpr int rounds = 7;
+  const int padded_k = DWeightKernel::padded_k(routes);
+  std::vector<ggml_bf16_t> lhs(static_cast<size_t>(routes) * Kernel::M_STEP);
+  std::vector<ggml_bf16_t> rhs(static_cast<size_t>(routes) * Kernel::N_STEP);
+  fill_random(lhs, 20260717);
+  fill_random(rhs, 20260718);
+
+  void* a_memory = alloc_buffer(Kernel::BufferA::required_size(Kernel::M_STEP, padded_k));
+  void* b_memory = alloc_buffer(Kernel::BufferB::required_size(Kernel::N_STEP, padded_k));
+  Kernel::BufferA a(Kernel::M_STEP, padded_k, a_memory);
+  Kernel::BufferB b(Kernel::N_STEP, padded_k, b_memory);
+  alignas(64) float accumulator[Kernel::M_STEP * Kernel::N_STEP];
+  DWeightKernel::pack_a_transposed(a, lhs.data(), Kernel::M_STEP, 0, Kernel::M_STEP, routes);
+  DWeightKernel::pack_b_transposed(b, rhs.data(), Kernel::N_STEP, 0, Kernel::N_STEP, routes);
+
+  auto legacy_tile_loop = [&] {
+    Kernel::clean_c();
+    for (int k_begin = 0; k_begin < padded_k; k_begin += Kernel::K_STEP) {
+      Kernel::load_b(b.get_submat(Kernel::N_STEP, padded_k, 0, k_begin),
+                     Kernel::K_STEP * sizeof(ggml_bf16_t));
+      Kernel::load_a(a.get_submat(Kernel::M_STEP, padded_k, 0, k_begin),
+                     Kernel::K_STEP * sizeof(ggml_bf16_t));
+      Kernel::run_tile();
+    }
+    Kernel::store_c(accumulator, Kernel::N_STEP * sizeof(float));
+  };
+  auto common_driver = [&] { DWeightKernel::multiply(padded_k, accumulator, a, b); };
+
+  for (int warmup = 0; warmup < 200; ++warmup) {
+    legacy_tile_loop();
+    common_driver();
+  }
+
+  auto measure = [&](auto&& operation) {
+    const auto begin = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < iterations; ++iteration) operation();
+    return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - begin).count() / iterations;
+  };
+  std::vector<double> legacy_ns;
+  std::vector<double> common_ns;
+  for (int round = 0; round < rounds; ++round) {
+    if (round % 2 == 0) {
+      legacy_ns.push_back(measure(legacy_tile_loop));
+      common_ns.push_back(measure(common_driver));
+    } else {
+      common_ns.push_back(measure(common_driver));
+      legacy_ns.push_back(measure(legacy_tile_loop));
+    }
+  }
+  std::sort(legacy_ns.begin(), legacy_ns.end());
+  std::sort(common_ns.begin(), common_ns.end());
+  const double legacy_median = legacy_ns[rounds / 2];
+  const double common_median = common_ns[rounds / 2];
+  const double ratio = common_median / legacy_median;
+  const bool passed = ratio <= 1.05;
+  std::printf("BF16 dWeight AMX kernel routes=%d: legacy=%.1f ns common=%.1f ns ratio=%.4f %s\n", routes,
+              legacy_median, common_median, ratio, passed ? "PASS" : "FAIL");
+
+  std::free(a_memory);
+  std::free(b_memory);
+  return passed;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   DWeightKernel::configure_worker();
+  if (argc == 2 && std::strcmp(argv[1], "--benchmark") == 0) return run_amx_benchmark() ? 0 : 1;
   bool passed = true;
   for (int routes : {1, 31, 32, 33, 65, 1792, 1825}) {
     passed = run_case(routes, 32, 32) && passed;
