@@ -673,21 +673,27 @@ class AMX_MOE_BASE {
   }
 
   void apply_activation(int activated_expert, int nth, int qlen) {
+    apply_activation_to(activated_expert, nth, qlen, m_local_gate_output_ptr_);
+  }
+
+  void apply_activation_to(int activated_expert, int nth, int qlen,
+                           const std::vector<ggml_bf16_t*>& destination_ptrs) {
     auto pool = config_.pool->get_subpool(tp_part_idx);
-    auto fn = [this, nth](int task_id) {
+    auto fn = [this, nth, &destination_ptrs](int task_id) {
       int expert_idx = m_expert_id_map_[task_id / nth];
       int ith = task_id % nth;
       auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
       for (int i = 0; i < m_local_num_[expert_idx]; i++) {
         ggml_bf16_t* gate_output_ptr = &m_local_gate_output_ptr_[expert_idx][i * config_.intermediate_size];
         ggml_bf16_t* up_output_ptr = &m_local_up_output_ptr_[expert_idx][i * config_.intermediate_size];
+        ggml_bf16_t* destination_ptr = &destination_ptrs[expert_idx][i * config_.intermediate_size];
         for (int j = n_start; j < n_end; j += 32) {
           __m512 gate_val0, gate_val1, up_val0, up_val1;
           avx512_32xbf16_to_32xfp32((__m512i*)(gate_output_ptr + j), &gate_val0, &gate_val1);
           avx512_32xbf16_to_32xfp32((__m512i*)(up_output_ptr + j), &up_val0, &up_val1);
           __m512 result0 = amx::act_fn(gate_val0, up_val0, config_.swiglu_limit, config_.swiglu_alpha);
           __m512 result1 = amx::act_fn(gate_val1, up_val1, config_.swiglu_limit, config_.swiglu_alpha);
-          avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i*)(gate_output_ptr + j));
+          avx512_32xfp32_to_32xbf16(&result0, &result1, (__m512i*)(destination_ptr + j));
         }
       }
     };

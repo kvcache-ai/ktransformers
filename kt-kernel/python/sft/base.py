@@ -194,6 +194,10 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._cache_depth: int = 0
         self._is_skip_lora: bool = False
         self._base_weights_dirty: bool = False
+        self.reuse_checkpoint_forward: bool = False
+        self._kt_has_cached_forward: bool = False
+        self._checkpoint_output_cpu: Optional[torch.Tensor] = None
+        self._checkpoint_output_qlen: int = 0
 
         self.moe = None
 
@@ -346,6 +350,30 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             return buffer.output_cpu[:qlen].to(device=output_device, non_blocking=True)
         else:
             return buffer.output_cpu[:qlen].clone()
+
+    def cache_checkpoint_output(self, output_cpu: torch.Tensor, qlen: int) -> None:
+        if output_cpu.device.type != "cpu":
+            raise ValueError("checkpoint CPU expert output must reside on CPU")
+        if output_cpu.shape[0] < qlen:
+            raise ValueError(f"checkpoint output is shorter than qlen: {output_cpu.shape[0]} < {qlen}")
+        self._checkpoint_output_cpu = output_cpu[:qlen].contiguous()
+        self._checkpoint_output_qlen = qlen
+        self._kt_has_cached_forward = True
+
+    def get_checkpoint_output(self, qlen: int, output_device: Optional[torch.device] = None) -> torch.Tensor:
+        if not self._kt_has_cached_forward or self._checkpoint_output_cpu is None:
+            raise RuntimeError("No cached checkpoint forward output is available.")
+        if qlen != self._checkpoint_output_qlen:
+            raise RuntimeError(f"Cached checkpoint qlen mismatch: cached={self._checkpoint_output_qlen}, requested={qlen}")
+        output = self._checkpoint_output_cpu
+        if output_device is not None:
+            return output.to(device=output_device, non_blocking=True)
+        return output
+
+    def clear_checkpoint_output(self) -> None:
+        self._checkpoint_output_cpu = None
+        self._checkpoint_output_qlen = 0
+        self._kt_has_cached_forward = False
 
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:

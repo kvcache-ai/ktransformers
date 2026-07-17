@@ -353,7 +353,18 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
             # Set share_backward_bb and share_cache_pool BEFORE load_weights (config is built during load)
             wrapper.share_backward_bb = cfg.kt_share_backward_bb
-            wrapper.share_cache_pool = cfg.kt_share_cache_pool
+            single_process = not dist.is_initialized() or dist.get_world_size() == 1
+            reuse_checkpoint_forward = (
+                single_process
+                and full_weight_grad
+                and lora_rank == 0
+                and kt_method == "AMXBF16_SFT"
+                and os.environ.get("KT_REUSE_CHECKPOINT_FORWARD", "1") != "0"
+            )
+            wrapper.reuse_checkpoint_forward = reuse_checkpoint_forward
+            # Reusing the first checkpoint forward requires each layer's C++
+            # activations to remain valid until its backward invocation.
+            wrapper.share_cache_pool = False if reuse_checkpoint_forward else cfg.kt_share_cache_pool
 
             physical_to_logical_map = torch.arange(moe_config.expert_num, dtype=torch.int64, device="cpu")
 

@@ -38,6 +38,8 @@ class KTMoEFunction(torch.autograd.Function):
         training: bool,
         train_lora: bool,
         all_qlens: list[int] | tuple[int, ...] | None,
+        cache_checkpoint_forward: bool = False,
+        reuse_cached_forward: bool = False,
         gate_proj_param: torch.Tensor | None = None,
         up_proj_param: torch.Tensor | None = None,
         down_proj_param: torch.Tensor | None = None,
@@ -78,8 +80,17 @@ class KTMoEFunction(torch.autograd.Function):
 
             # Rank 0: sync CPU result and split by real lengths
             if rank == 0:
-                with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
-                    cpu_output = wrapper.sync_forward(output_device=original_device)
+                if reuse_cached_forward:
+                    with torch.profiler.record_function("kt.sft.checkpoint_cached_cpu_moe"):
+                        cpu_output = wrapper.get_checkpoint_output(total_qlen, output_device=original_device)
+                elif cache_checkpoint_forward:
+                    with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                        cached_output = wrapper.sync_forward(output_device=None)
+                    wrapper.cache_checkpoint_output(cached_output, total_qlen)
+                    cpu_output = cached_output.to(device=original_device, non_blocking=True)
+                else:
+                    with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                        cpu_output = wrapper.sync_forward(output_device=original_device)
                 cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, hidden_size)
                 offsets = _qlen_offsets(all_qlens_list)
                 scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
@@ -99,8 +110,17 @@ class KTMoEFunction(torch.autograd.Function):
             del output_flat
         elif wrapper is not None:
             # Single-GPU: sync directly
-            with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
-                cpu_output = wrapper.sync_forward(output_device=original_device)
+            if reuse_cached_forward:
+                with torch.profiler.record_function("kt.sft.checkpoint_cached_cpu_moe"):
+                    cpu_output = wrapper.get_checkpoint_output(qlen, output_device=original_device)
+            elif cache_checkpoint_forward:
+                with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                    cached_output = wrapper.sync_forward(output_device=None)
+                wrapper.cache_checkpoint_output(cached_output, qlen)
+                cpu_output = cached_output.to(device=original_device, non_blocking=True)
+            else:
+                with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                    cpu_output = wrapper.sync_forward(output_device=original_device)
             output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
         else:
             # Broadcast-only rank (no wrapper)
@@ -241,12 +261,14 @@ class KTMoEFunction(torch.autograd.Function):
         elif not ctx.use_broadcast:
             # ---- Single-GPU path ----
             grad_output_flat = grad_output.view(qlen, hidden_size)
-            with torch.profiler.record_function("kt.sft.cpu_backward"):
-                backward_out = ctx.wrapper.backward(
-                    grad_output_flat,
-                    output_device=ctx.original_device,
-                )
-            ctx.wrapper._kt_has_cached_forward = False
+            try:
+                with torch.profiler.record_function("kt.sft.cpu_backward"):
+                    backward_out = ctx.wrapper.backward(
+                        grad_output_flat,
+                        output_device=ctx.original_device,
+                    )
+            finally:
+                ctx.wrapper.clear_checkpoint_output()
             if isinstance(backward_out, tuple) and len(backward_out) == 2:
                 grad_input, grad_weights = backward_out
             elif isinstance(backward_out, tuple) and len(backward_out) == 3:
@@ -282,6 +304,8 @@ class KTMoEFunction(torch.autograd.Function):
             grad_input,
             None,
             grad_weights,
+            None,
+            None,
             None,
             None,
             None,

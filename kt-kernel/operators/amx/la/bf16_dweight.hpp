@@ -17,6 +17,10 @@ struct BF16DWeightTimings {
   uint64_t pack_a_calls = 0;
   uint64_t pack_b_ns = 0;
   uint64_t pack_b_calls = 0;
+  uint64_t panel_input_ns = 0;
+  uint64_t panel_input_calls = 0;
+  uint64_t panel_grad_output_ns = 0;
+  uint64_t panel_grad_output_calls = 0;
   uint64_t kernel_gate_up_ns = 0;
   uint64_t kernel_gate_up_calls = 0;
   uint64_t kernel_down_ns = 0;
@@ -101,10 +105,12 @@ class BF16DWeightKernel {
   static void configure_worker() { Kernel::config(); }
 
   static void pack_a_transposed(BufferA& destination, const ggml_bf16_t* source, int source_stride, int source_column,
-                                int row_count, int routes) {
+                                int row_count, int routes, int destination_row = 0) {
+    assert(destination_row >= 0 && destination_row + row_count <= destination.max_m);
+    assert(destination_row % M_STEP == 0 && row_count <= M_STEP);
     const int k = destination.k;
     for (int k_begin = 0; k_begin < k; k_begin += K_STEP) {
-      ggml_bf16_t* tile = destination.get_submat(M_STEP, k, 0, k_begin);
+      ggml_bf16_t* tile = destination.get_submat(destination.max_m, k, destination_row, k_begin);
       std::memset(tile, 0, M_STEP * K_STEP * sizeof(ggml_bf16_t));
       const int valid_k = std::min(K_STEP, routes - k_begin);
       if (valid_k <= 0) continue;
@@ -117,10 +123,12 @@ class BF16DWeightKernel {
   }
 
   static void pack_b_transposed(BufferB& destination, const ggml_bf16_t* source, int source_stride, int source_column,
-                                int row_count, int routes) {
+                                int row_count, int routes, int destination_row = 0) {
+    assert(destination_row >= 0 && destination_row + row_count <= destination.n);
+    assert(destination_row % N_STEP == 0 && row_count <= N_STEP);
     const int k = destination.k;
     for (int k_begin = 0; k_begin < k; k_begin += K_STEP) {
-      ggml_bf16_t* tile = destination.get_submat(N_STEP, k, 0, k_begin);
+      ggml_bf16_t* tile = destination.get_submat(destination.n, k, destination_row, k_begin);
       std::memset(tile, 0, N_STEP * K_STEP * sizeof(ggml_bf16_t));
       const int valid_k = std::min(K_STEP, routes - k_begin);
       if (valid_k > 0) {
@@ -135,13 +143,60 @@ class BF16DWeightKernel {
     }
   }
 
-  static void multiply(int padded_k, float* destination, BufferA& a, BufferB& b) {
-    for (int k_block_begin = 0; k_block_begin < padded_k; k_block_begin += Kernel::K_BLOCK) {
-      if constexpr (AMX_AVAILABLE) {
-        Kernel::amx_kernel(M_STEP, N_STEP, padded_k, 0, 0, k_block_begin, destination, &a, &b);
-      } else {
-        Kernel::avx_kernel_4(M_STEP, N_STEP, padded_k, 0, 0, k_block_begin, destination, &a, &b);
+ private:
+  template <int ROWS>
+  static inline __attribute__((always_inline)) void multiply_avx_rows(
+      int padded_k, float* destination, BufferA& a, BufferB& b, int m_begin, int n_begin, int row_offset) {
+    static_assert(ROWS > 0 && ROWS <= M_STEP);
+    __m512 accum_lo[ROWS];
+    __m512 accum_hi[ROWS];
+
+#pragma GCC unroll 12
+    for (int row = 0; row < ROWS; ++row) {
+      accum_lo[row] = _mm512_setzero_ps();
+      accum_hi[row] = _mm512_setzero_ps();
+    }
+
+    for (int k_begin = 0; k_begin < padded_k; k_begin += K_STEP) {
+      const auto* a_pairs = reinterpret_cast<const int32_t*>(a.get_submat(a.max_m, padded_k, m_begin, k_begin));
+      const auto* b_vectors = reinterpret_cast<const __m512bh*>(b.get_submat(b.n, padded_k, n_begin, k_begin));
+
+      for (int k_pair = 0; k_pair < K_STEP / 2; ++k_pair) {
+        const __m512bh b_lo = b_vectors[k_pair];
+        const __m512bh b_hi = b_vectors[Kernel::TILE_N + k_pair];
+#pragma GCC unroll 12
+        for (int row = 0; row < ROWS; ++row) {
+          const __m512bh a_pair =
+              reinterpret_cast<__m512bh>(_mm512_set1_epi32(a_pairs[(row_offset + row) * (K_STEP / 2) + k_pair]));
+          accum_lo[row] = _mm512_dpbf16_ps(accum_lo[row], a_pair, b_lo);
+          accum_hi[row] = _mm512_dpbf16_ps(accum_hi[row], a_pair, b_hi);
+        }
       }
+    }
+
+#pragma GCC unroll 12
+    for (int row = 0; row < ROWS; ++row) {
+      _mm512_store_ps(destination + (row_offset + row) * N_STEP, accum_lo[row]);
+      _mm512_store_ps(destination + (row_offset + row) * N_STEP + Kernel::TILE_N, accum_hi[row]);
+    }
+  }
+
+ public:
+
+  static void multiply(int padded_k, float* destination, BufferA& a, BufferB& b, int m_begin = 0, int n_begin = 0) {
+    assert(m_begin >= 0 && m_begin + M_STEP <= a.max_m);
+    assert(n_begin >= 0 && n_begin + N_STEP <= b.n);
+    assert(m_begin % M_STEP == 0 && n_begin % N_STEP == 0);
+    if constexpr (AMX_AVAILABLE) {
+      for (int k_block_begin = 0; k_block_begin < padded_k; k_block_begin += Kernel::K_BLOCK) {
+        Kernel::amx_kernel(a.max_m, b.n, padded_k, m_begin, n_begin, k_block_begin, destination, &a, &b);
+      }
+    } else {
+      // Keep the complete 32x32 FP32 output tile in registers. The generic forward
+      // kernel spans all 32 rows at once and spills its 64 accumulators on AVX512.
+      multiply_avx_rows<12>(padded_k, destination, a, b, m_begin, n_begin, 0);
+      multiply_avx_rows<12>(padded_k, destination, a, b, m_begin, n_begin, 12);
+      multiply_avx_rows<8>(padded_k, destination, a, b, m_begin, n_begin, 24);
     }
   }
 

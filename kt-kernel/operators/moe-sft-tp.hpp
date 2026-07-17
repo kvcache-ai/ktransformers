@@ -217,6 +217,14 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> part_grad_input_;
   std::vector<float*> part_grad_weights_;
 
+  // Full-FT dWeight outputs persist across calls. Active experts are overwritten in full;
+  // only experts that became inactive need to be cleared after the first invocation.
+  std::vector<int> last_base_grad_active_experts_;
+  bool base_grad_outputs_initialized_ = false;
+  void* last_grad_gate_proj_ = nullptr;
+  void* last_grad_up_proj_ = nullptr;
+  void* last_grad_down_proj_ = nullptr;
+
  public:
   TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
@@ -724,18 +732,42 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
+    size_t base_grad_clear_bytes = 0;
+    const bool can_selectively_clear_base_grad =
+        need_base_weight_grad && T::kSupportsDirectBf16Reload && sft_config.lora_rank == 0 &&
+        config.num_gpu_experts == 0;
     if (need_base_weight_grad) {
       const size_t base_grad_bytes = (size_t)expert_num * full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
-      auto append_clear_segments = [&](void* ptr) {
-        auto* base = static_cast<uint8_t*>(ptr);
-        for (size_t off = 0; off < base_grad_bytes; off += kChunkBytes) {
-          size_t len = std::min(kChunkBytes, base_grad_bytes - off);
+      const size_t expert_grad_bytes = (size_t)full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
+      auto append_clear_segments = [&](void* ptr, size_t offset, size_t bytes) {
+        auto* base = static_cast<uint8_t*>(ptr) + offset;
+        for (size_t off = 0; off < bytes; off += kChunkBytes) {
+          size_t len = std::min(kChunkBytes, bytes - off);
           clear_segs.push_back(ClearSeg{base + off, len});
         }
       };
-      append_clear_segments(grad_gate_proj);
-      append_clear_segments(grad_up_proj);
-      append_clear_segments(grad_down_proj);
+
+      const bool pointers_unchanged = last_grad_gate_proj_ == grad_gate_proj && last_grad_up_proj_ == grad_up_proj &&
+                                      last_grad_down_proj_ == grad_down_proj;
+      if (!can_selectively_clear_base_grad || !base_grad_outputs_initialized_ || !pointers_unchanged) {
+        append_clear_segments(grad_gate_proj, 0, base_grad_bytes);
+        append_clear_segments(grad_up_proj, 0, base_grad_bytes);
+        append_clear_segments(grad_down_proj, 0, base_grad_bytes);
+        base_grad_clear_bytes = 3 * base_grad_bytes;
+      } else {
+        std::vector<uint8_t> active_mask(expert_num, 0);
+        for (int expert_idx : active_expert_map) {
+          if (expert_idx >= 0 && expert_idx < expert_num) active_mask[expert_idx] = 1;
+        }
+        for (int expert_idx : last_base_grad_active_experts_) {
+          if (expert_idx < 0 || expert_idx >= expert_num || active_mask[expert_idx]) continue;
+          const size_t expert_offset = static_cast<size_t>(expert_idx) * expert_grad_bytes;
+          append_clear_segments(grad_gate_proj, expert_offset, expert_grad_bytes);
+          append_clear_segments(grad_up_proj, expert_offset, expert_grad_bytes);
+          append_clear_segments(grad_down_proj, expert_offset, expert_grad_bytes);
+          base_grad_clear_bytes += 3 * expert_grad_bytes;
+        }
+      }
     }
 
     pool->do_work_stealing_job((int)clear_segs.size(), nullptr,
@@ -744,6 +776,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  std::memset(seg.ptr, 0, seg.len);
                                },
                                nullptr);
+    size_t partial_clear_bytes = 0;
+    for (size_t bytes : clear_bytes) partial_clear_bytes += bytes;
+    profiler_.record_bytes(SFTProfileStage::TpBwdBufferClear, partial_clear_bytes + base_grad_clear_bytes);
     profiler_.record(SFTProfileStage::TpBwdBufferClear, stage_start);
 
     // Compute TP-slice pointers for copy-type direct writes
@@ -788,6 +823,9 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("TP intermediate_size slices do not cover the full intermediate_size");
     }
 
+    // A failed dWeight computation must force a full clear on the next invocation.
+    if (can_selectively_clear_base_grad) base_grad_outputs_initialized_ = false;
+
     // Run backward on each NUMA node
     stage_start = profiler_.start();
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
@@ -804,6 +842,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              tp_grad_up_proj[numa_id], tp_grad_down_proj[numa_id]);
     });
     profiler_.record(SFTProfileStage::TpBwdNumaCompute, stage_start);
+    if (can_selectively_clear_base_grad) {
+      last_base_grad_active_experts_ = active_expert_map;
+      last_grad_gate_proj_ = grad_gate_proj;
+      last_grad_up_proj_ = grad_up_proj;
+      last_grad_down_proj_ = grad_down_proj;
+      base_grad_outputs_initialized_ = true;
+    }
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
@@ -1197,6 +1242,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void wait_backward_repack() {
     if (repack_thread_.joinable()) {
+      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepackWait);
       repack_thread_.join();
     }
   }

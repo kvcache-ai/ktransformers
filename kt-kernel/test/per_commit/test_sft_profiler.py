@@ -19,6 +19,7 @@ class _FakeMoe:
             "wrapper.tp.forward.total.calls": 2,
             "wrapper.tp.forward.numa_compute.total_ns": 1_500_000,
             "wrapper.tp.forward.numa_compute.calls": 2,
+            "wrapper.tp.forward.numa_compute.bytes": 2 * 1024 * 1024,
             "tp.0.enabled": 1,
             "tp.0.tokens": 8,
             "tp.0.forward.total.total_ns": 1_400_000,
@@ -57,6 +58,7 @@ def test_collect_and_format_profile():
     assert "tp.forward.numa_compute" in output
     assert "forward.route" in output
     assert "75.0%" in output
+    assert "2.00" in output
     assert "10.0%" in output
     assert "40.0%" in output
     worker_store = next(line for line in output.splitlines() if "worker_cpu.store" in line)

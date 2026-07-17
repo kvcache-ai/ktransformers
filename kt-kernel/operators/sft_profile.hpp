@@ -23,6 +23,8 @@ enum class SFTProfileStage : uint8_t {
   FwdBufferSetup,
   FwdInputScatter,
   FwdInputPack,
+  FwdCacheMetadata,
+  FwdCacheInput,
   FwdGateUpBase,
   FwdGateUpLora,
   FwdCacheGateUp,
@@ -51,6 +53,9 @@ enum class SFTProfileStage : uint8_t {
   BwdRouterGrad,
   BwdBaseWeightGrad,
   BwdBaseWeightGradOffsets,
+  BwdBaseWeightGradPanelPack,
+  BwdBaseWeightGradPanelInput,
+  BwdBaseWeightGradPanelGradOutput,
   BwdBaseWeightGradMatMat,
   BwdBaseWeightGradPackA,
   BwdBaseWeightGradPackB,
@@ -73,6 +78,7 @@ enum class SFTProfileStage : uint8_t {
   TpBwdLoraMerge,
   TpBwdRouterGradMerge,
   BackwardRepack,
+  BackwardRepackWait,
   BaseWeightReload,
   BaseWeightReloadPartition,
   BaseWeightReloadForwardPack,
@@ -92,6 +98,8 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "forward.buffer_setup",
     "forward.input_scatter",
     "forward.input_pack",
+    "forward.cache_metadata",
+    "forward.cache_input",
     "forward.gate_up_base",
     "forward.gate_up_lora",
     "forward.cache_gate_up",
@@ -118,6 +126,9 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "backward.router_grad",
     "backward.base_weight_grad",
     "backward.base_weight_grad.offsets",
+    "backward.base_weight_grad.panel_pack",
+    "backward.base_weight_grad.worker_cpu.panel_input",
+    "backward.base_weight_grad.worker_cpu.panel_grad_output",
     "backward.base_weight_grad.matmat",
     "backward.base_weight_grad.worker_cpu.pack_a",
     "backward.base_weight_grad.worker_cpu.pack_b",
@@ -138,6 +149,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "tp.backward.lora_merge",
     "tp.backward.router_grad_merge",
     "weights.backward_repack",
+    "weights.backward_repack_wait",
     "weights.base_reload",
     "weights.base_reload.partition",
     "weights.base_reload.forward_pack",
@@ -176,6 +188,11 @@ class SFTProfiler {
     calls_[idx].fetch_add(calls, std::memory_order_relaxed);
   }
 
+  void record_bytes(SFTProfileStage stage, uint64_t bytes) {
+    if (!enabled_) return;
+    bytes_[static_cast<size_t>(stage)].fetch_add(bytes, std::memory_order_relaxed);
+  }
+
   void record_workload(uint64_t tokens, uint64_t routed_rows, uint64_t active_experts) {
     if (!enabled_) return;
     tokens_.fetch_add(tokens, std::memory_order_relaxed);
@@ -194,12 +211,14 @@ class SFTProfiler {
       const std::string stage_prefix = prefix + kSFTProfileStageNames[i] + ".";
       out[stage_prefix + "total_ns"] = static_cast<double>(load_or_exchange(total_ns_[i], reset_after));
       out[stage_prefix + "calls"] = static_cast<double>(load_or_exchange(calls_[i], reset_after));
+      out[stage_prefix + "bytes"] = static_cast<double>(load_or_exchange(bytes_[i], reset_after));
     }
   }
 
   void reset() {
     for (auto& value : total_ns_) value.store(0, std::memory_order_relaxed);
     for (auto& value : calls_) value.store(0, std::memory_order_relaxed);
+    for (auto& value : bytes_) value.store(0, std::memory_order_relaxed);
     workloads_.store(0, std::memory_order_relaxed);
     tokens_.store(0, std::memory_order_relaxed);
     routed_rows_.store(0, std::memory_order_relaxed);
@@ -214,6 +233,7 @@ class SFTProfiler {
   bool enabled_;
   std::array<std::atomic<uint64_t>, static_cast<size_t>(SFTProfileStage::Count)> total_ns_{};
   std::array<std::atomic<uint64_t>, static_cast<size_t>(SFTProfileStage::Count)> calls_{};
+  std::array<std::atomic<uint64_t>, static_cast<size_t>(SFTProfileStage::Count)> bytes_{};
   std::atomic<uint64_t> workloads_{0};
   std::atomic<uint64_t> tokens_{0};
   std::atomic<uint64_t> routed_rows_{0};

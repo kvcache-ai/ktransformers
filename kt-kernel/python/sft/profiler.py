@@ -90,7 +90,7 @@ def _parent_stage(stage: str) -> str | None:
 
 def _aggregate_rows(profile: dict[str, Any]) -> list[dict[str, float | str]]:
     totals: dict[tuple[str, str], dict[str, float]] = defaultdict(
-        lambda: {"total_ns": 0.0, "calls": 0.0, "tokens": 0.0}
+        lambda: {"total_ns": 0.0, "calls": 0.0, "tokens": 0.0, "bytes": 0.0}
     )
     for raw in profile.get("layers", {}).values():
         scope_tokens: dict[str, float] = {"wrapper": raw.get("wrapper.tokens", 0.0)}
@@ -108,6 +108,7 @@ def _aggregate_rows(profile: dict[str, Any]) -> list[dict[str, float | str]]:
             row["total_ns"] += total_ns
             row["calls"] += calls
             row["tokens"] += scope_tokens.get(scope, 0.0)
+            row["bytes"] += raw.get(key[: -len("total_ns")] + "bytes", 0.0)
 
     rows: list[dict[str, float | str]] = []
     for (scope, stage), values in totals.items():
@@ -123,6 +124,7 @@ def _aggregate_rows(profile: dict[str, Any]) -> list[dict[str, float | str]]:
                 "total_ms": values["total_ns"] / 1e6,
                 "avg_ms": values["total_ns"] / calls / 1e6 if calls else 0.0,
                 "us_per_token": values["total_ns"] / tokens / 1e3 if tokens else 0.0,
+                "mib": values["bytes"] / (1024.0 * 1024.0),
                 "parent_pct": values["total_ns"] / parent_ns * 100.0 if parent_ns else 0.0,
             }
         )
@@ -137,13 +139,13 @@ def format_kt_sft_profile(profile: dict[str, Any]) -> str:
     rows = _aggregate_rows(profile)
     header = (
         f"{'scope':<9} {'stage':<34} {'calls':>7} {'total_ms':>11} "
-        f"{'avg_ms':>10} {'us/token':>10} {'parent%':>9}"
+        f"{'avg_ms':>10} {'us/token':>10} {'MiB':>10} {'parent%':>9}"
     )
     lines = [header, "-" * len(header)]
     for row in rows:
         lines.append(
             f"{row['scope']:<9} {row['stage']:<34} {row['calls']:>7.0f} "
             f"{row['total_ms']:>11.3f} {row['avg_ms']:>10.3f} "
-            f"{row['us_per_token']:>10.3f} {row['parent_pct']:>8.1f}%"
+            f"{row['us_per_token']:>10.3f} {row['mib']:>10.2f} {row['parent_pct']:>8.1f}%"
         )
     return "\n".join(lines)

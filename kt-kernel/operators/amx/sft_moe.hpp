@@ -474,10 +474,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   // Last backward expert token distribution (for load balancing analysis)
   std::vector<int> last_backward_expert_tokens_;
-  // Experts that had non-zero contributions in last backward (for selective zeroing)
-  std::vector<int> last_backward_active_experts_;
-  bool grad_outputs_initialized_ = false;
-
   // Cache buffer pools
   void* cache_input_pool_ = nullptr;
   void* cache_gate_output_pool_ = nullptr;
@@ -512,6 +508,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
   // Precomputed offsets for cache operations (avoid repeated heap allocation)
   std::vector<size_t> cache_offsets_;
+  std::vector<ggml_bf16_t*> direct_cache_intermediate_ptrs_;
 
   // =====================================================
   // AMX-optimized LoRA GEMM buffers (performance optimization)
@@ -595,6 +592,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void* backward_bc_pool_ = nullptr;
   void* grad_output_bf16_pool_ = nullptr;
   void* base_grad_output_bf16_pool_ = nullptr;
+  void* dweight_shared_panel_pool_ = nullptr;
   void* backward_pool_ = nullptr;
   size_t backward_pool_bytes_ = 0;
 
@@ -603,6 +601,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   size_t backward_bc_pool_bytes_ = 0;
   size_t grad_output_bf16_pool_bytes_ = 0;
   size_t base_grad_output_bf16_pool_bytes_ = 0;
+  size_t dweight_shared_panel_pool_bytes_ = 0;
 
   // LoRA gradient computation pools (FP32, used in bwd_down_lora_precompute and grad computation)
   float* lora_grad_out_pool_ = nullptr;           // [max_len * num_experts_per_tok * hidden_size]
@@ -845,6 +844,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     required += round_up(backward_bc_pool_bytes_, kAmxAlignment);
     required += round_up(grad_output_bf16_pool_bytes_, kAmxAlignment);
     required += round_up(base_grad_output_bf16_pool_bytes_, kAmxAlignment);
+    required += round_up(dweight_shared_panel_pool_bytes_, kAmxAlignment);
     required += round_up(lora_grad_out_pool_bytes_, kAmxAlignment);
     required += round_up(lora_inter_proj_pool_bytes_, kAmxAlignment);
     required += round_up(lora_grad_times_b_pool_bytes_, kAmxAlignment);
@@ -878,6 +878,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     assign(&backward_bc_pool_, backward_bc_pool_bytes_);
     assign(&grad_output_bf16_pool_, grad_output_bf16_pool_bytes_);
     assign(&base_grad_output_bf16_pool_, base_grad_output_bf16_pool_bytes_);
+    assign(&dweight_shared_panel_pool_, dweight_shared_panel_pool_bytes_);
 
     assign((void**)&lora_grad_out_pool_, lora_grad_out_pool_bytes_);
     assign((void**)&lora_inter_proj_pool_, lora_inter_proj_pool_bytes_);
@@ -932,7 +933,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     lora_scaling_ = rank > 0 ? alpha / rank : 0.0f;
   }
 
-  void set_full_weight_grad(bool enabled) { sft_config_.full_weight_grad = enabled; }
+  void set_full_weight_grad(bool enabled) {
+    sft_config_.full_weight_grad = enabled;
+    if constexpr (std::is_same_v<T, amx::GemmKernel224BF16>) {
+      if (enabled) {
+        const size_t max_routes = static_cast<size_t>(config_.max_len) * config_.num_experts_per_tok;
+        const size_t max_padded_routes =
+            ((max_routes + static_cast<size_t>(config_.expert_num) * (T::K_STEP - 1) + T::K_STEP - 1) / T::K_STEP) *
+            T::K_STEP;
+        dweight_shared_panel_pool_bytes_ =
+            2 * max_padded_routes * config_.hidden_size * sizeof(ggml_bf16_t);
+      } else {
+        dweight_shared_panel_pool_bytes_ = 0;
+      }
+    }
+  }
 
   /**
    * @brief SFT Forward pass with optional caching for backward.
@@ -952,7 +967,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                    bool save_for_backward) {
     SFTProfileScope total_scope(profiler_, SFTProfileStage::FwdTotal);
     SFTProfileScope checkpoint_scope(
-        profiler_, save_for_backward ? SFTProfileStage::FwdRecomputeTotal : SFTProfileStage::FwdInitialTotal);
+        profiler_, save_for_backward && config_.share_cache_pool ? SFTProfileStage::FwdRecomputeTotal
+                                                                : SFTProfileStage::FwdInitialTotal);
     auto stage_start = profiler_.start();
 
     SFT_POOL_LOG("fwd_enter", config_.layer_idx, tp_part_idx, qlen, cache_stack_top_, forward_pool_bytes_,
@@ -1124,6 +1140,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         pool->do_work_stealing_job(count, nullptr, fn, nullptr);
       }
     };
+    constexpr bool kSupportsDirectFullFTCache = std::is_same_v<T, amx::GemmKernel224BF16>;
+    const bool use_direct_fullft_cache =
+        kSupportsDirectFullFTCache && save_for_backward && sft_config_.full_weight_grad && lora_rank_ == 0;
+    ForwardCache* direct_cache = nullptr;
 
     stage_start = profiler_.start();
     direct_or_pool(qlen, [&](int i) {
@@ -1158,6 +1178,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       gate_up_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_input_ptr_[expert_idx], 0, 1);
     });
     profiler_.record(SFTProfileStage::FwdInputPack, stage_start);
+
+    if constexpr (kSupportsDirectFullFTCache) {
+      if (use_direct_fullft_cache) {
+        stage_start = profiler_.start();
+        ForwardCache& cache = (cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1] : push_cache();
+        prepare_cache_metadata(cache, qlen, k, expert_ids, weights, activated_expert);
+        bind_direct_cache_outputs(cache, activated_expert);
+        cache.valid = true;
+        direct_cache = &cache;
+        profiler_.record(SFTProfileStage::FwdCacheMetadata, stage_start);
+
+        stage_start = profiler_.start();
+        copy_input_to_cache(cache, input, qlen);
+        profiler_.record_bytes(SFTProfileStage::FwdCacheInput,
+                               static_cast<uint64_t>(qlen) * config_.hidden_size * sizeof(ggml_bf16_t));
+        profiler_.record(SFTProfileStage::FwdCacheInput, stage_start);
+      }
+    }
 
     // Step 5: Gate + Up GEMM (base projection)
     stage_start = profiler_.start();
@@ -1229,8 +1267,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       // overwrite it instead of pushing a new one.  This keeps the cache
       // consistent with the current forward's buffer state (max_m, routing)
       // and avoids cache stack overflow from duplicate pushes.
-      ForwardCache& cache = (cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1] : push_cache();
-      save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
+      ForwardCache& cache = direct_cache != nullptr
+                                ? *direct_cache
+                                : ((cache_stack_top_ > 0) ? cache_stack_[cache_stack_top_ - 1] : push_cache());
+      if (direct_cache == nullptr) save_to_cache(cache, qlen, k, expert_ids, weights, activated_expert, input);
 
       // NaN Check: Forward Cache - input, gate_output, up_output
       if (is_nan_check_enabled()) {
@@ -1272,7 +1312,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Step 6: Activation (silu(gate) * up)
     stage_start = profiler_.start();
-    { Base::apply_activation(activated_expert, nth, qlen); }
+    if (direct_cache != nullptr) {
+      Base::apply_activation_to(activated_expert, nth, qlen, direct_cache_intermediate_ptrs_);
+      for (int i = 0; i < activated_expert; ++i) {
+        const int expert_idx = m_expert_id_map_[i];
+        m_local_gate_output_ptr_[expert_idx] = direct_cache_intermediate_ptrs_[expert_idx];
+      }
+    } else {
+      Base::apply_activation(activated_expert, nth, qlen);
+    }
     profiler_.record(SFTProfileStage::FwdActivation, stage_start);
 
     // NaN Check: Step 6 - Activation output (silu(gate) * up)
@@ -1293,7 +1341,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     stage_start = profiler_.start();
     if (save_for_backward) {
       ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
-      save_intermediate_to_cache(cache, activated_expert);
+      if (direct_cache == nullptr) save_intermediate_to_cache(cache, activated_expert);
 
       // NaN Check: Forward Cache - intermediate_cache
       if (is_nan_check_enabled()) {
@@ -1394,7 +1442,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     stage_start = profiler_.start();
     if (save_for_backward) {
       ForwardCache& cache = cache_stack_[cache_stack_top_ - 1];  // Get the cache we just pushed
-      save_down_output_to_cache(cache, activated_expert);
+      if (direct_cache == nullptr) save_down_output_to_cache(cache, activated_expert);
     }
     profiler_.record(SFTProfileStage::FwdCacheDown, stage_start);
 
@@ -2028,6 +2076,87 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       auto pool = config_.pool->get_subpool(tp_part_idx);
       const bool profile_inner = profiler_.enabled();
 
+      std::vector<int> expert_padded_k(activated_expert);
+      std::vector<size_t> panel_offsets(activated_expert);
+      size_t panel_elements = 0;
+      for (int expert_task = 0; expert_task < activated_expert; ++expert_task) {
+        const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+        panel_offsets[expert_task] = panel_elements;
+        expert_padded_k[expert_task] = DWeightKernel::padded_k(cache.m_local_num_cache[expert_idx]);
+        panel_elements += static_cast<size_t>(H) * expert_padded_k[expert_task];
+      }
+      const size_t required_panel_bytes = 2 * panel_elements * sizeof(ggml_bf16_t);
+      if (required_panel_bytes > dweight_shared_panel_pool_bytes_) {
+        throw std::runtime_error("BF16 dWeight shared panel pool is too small");
+      }
+      auto* panel_base = static_cast<ggml_bf16_t*>(dweight_shared_panel_pool_);
+      auto* input_panels = panel_base;
+      auto* grad_output_panels = panel_base + panel_elements;
+
+      // X and route-weighted dY are reused by every I tile. Pack each H tile once per expert,
+      // then keep the existing expert x I-tile compute schedule for load balancing.
+      stage_start = profiler_.start();
+      const int panel_tasks_per_expert = h_tiles * 2;
+      const int panel_tasks = activated_expert * panel_tasks_per_expert;
+      if (panel_tasks > 0) {
+        pool->do_work_stealing_job(
+            panel_tasks,
+            [](int _) { amx::bf16_dweight_timings().reset(); },
+            [&, h_tiles, panel_tasks_per_expert](int task_id) {
+              const int expert_task = task_id / panel_tasks_per_expert;
+              const int local_task = task_id % panel_tasks_per_expert;
+              const bool pack_grad_output = local_task >= h_tiles;
+              const int h_tile = local_task % h_tiles;
+              const int h_start = h_tile * TILE_N;
+              const int h_count = std::min(TILE_N, H - h_start);
+              const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+              const int routes = cache.m_local_num_cache[expert_idx];
+              if (routes == 0) return;
+
+              const int padded_k = expert_padded_k[expert_task];
+              const size_t panel_offset = panel_offsets[expert_task];
+              auto& timings = amx::bf16_dweight_timings();
+              const auto profile_operation = [profile_inner](uint64_t& elapsed_ns, uint64_t& calls,
+                                                              auto&& operation) {
+                if (!profile_inner) {
+                  operation();
+                  return;
+                }
+                const auto begin = SFTProfiler::Clock::now();
+                operation();
+                elapsed_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(SFTProfiler::Clock::now() - begin).count());
+                calls++;
+              };
+
+              if (pack_grad_output) {
+                typename DWeightKernel::BufferA panel(H, padded_k, grad_output_panels + panel_offset);
+                profile_operation(timings.panel_grad_output_ns, timings.panel_grad_output_calls, [&] {
+                  DWeightKernel::pack_a_transposed(panel, base_grad_output_bf16_ptr_[expert_idx], H, h_start, h_count,
+                                                   routes, h_start);
+                });
+              } else {
+                typename DWeightKernel::BufferB panel(H, padded_k, input_panels + panel_offset);
+                profile_operation(timings.panel_input_ns, timings.panel_input_calls, [&] {
+                  DWeightKernel::pack_b_transposed(panel, m_local_input_ptr_[expert_idx], H, h_start, h_count, routes,
+                                                   h_start);
+                });
+              }
+            },
+            [this](int _) {
+              auto& timings = amx::bf16_dweight_timings();
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradPanelInput, timings.panel_input_ns,
+                                  timings.panel_input_calls);
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradPanelGradOutput, timings.panel_grad_output_ns,
+                                  timings.panel_grad_output_calls);
+            });
+      }
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradPanelPack, stage_start);
+      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelInput,
+                             panel_elements * sizeof(ggml_bf16_t));
+      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelGradOutput,
+                             panel_elements * sizeof(ggml_bf16_t));
+
       stage_start = profiler_.start();
       if (total_tasks > 0) {
         pool->do_work_stealing_job(
@@ -2050,11 +2179,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               const int padded_k = DWeightKernel::padded_k(routes);
               const int i_start = i_tile * TILE_M;
               const int i_count = std::min(TILE_M, I - i_start);
+              const size_t panel_offset = panel_offsets[expert_task];
               auto& scratch = amx::bf16_dweight_scratch();
               auto& timings = amx::bf16_dweight_timings();
               typename DWeightKernel::BufferA a0(TILE_M, padded_k, scratch.a0());
               typename DWeightKernel::BufferA a1(TILE_M, padded_k, scratch.a1());
               typename DWeightKernel::BufferB b(TILE_N, padded_k, scratch.b());
+              typename DWeightKernel::BufferA shared_grad_output(H, padded_k, grad_output_panels + panel_offset);
+              typename DWeightKernel::BufferB shared_input(H, padded_k, input_panels + panel_offset);
 
               auto profile_operation = [profile_inner](uint64_t& elapsed_ns, uint64_t& calls, auto&& operation) {
                 if (!profile_inner) {
@@ -2069,7 +2201,6 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               };
 
               if (do_down) {
-                const ggml_bf16_t* grad_output = base_grad_output_bf16_ptr_[expert_idx];
                 const ggml_bf16_t* intermediate = cache.intermediate_cache + pos_start * I;
                 profile_operation(timings.pack_b_ns, timings.pack_b_calls, [&] {
                   DWeightKernel::pack_b_transposed(b, intermediate, I, i_start, i_count, routes);
@@ -2079,11 +2210,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 for (int h_tile = 0; h_tile < h_tiles; ++h_tile) {
                   const int h_start = h_tile * TILE_M;
                   const int h_count = std::min(TILE_M, H - h_start);
-                  profile_operation(timings.pack_a_ns, timings.pack_a_calls, [&] {
-                    DWeightKernel::pack_a_transposed(a0, grad_output, H, h_start, h_count, routes);
-                  });
                   profile_operation(timings.kernel_down_ns, timings.kernel_down_calls,
-                                    [&] { DWeightKernel::multiply(padded_k, scratch.c0(), a0, b); });
+                                    [&] {
+                                      DWeightKernel::multiply(padded_k, scratch.c0(), shared_grad_output, b, h_start,
+                                                              0);
+                                    });
                   profile_operation(timings.store_ns, timings.store_calls, [&] {
                     DWeightKernel::store_bf16(scratch.c0(), down_dst + static_cast<size_t>(h_start) * F + i_start, F,
                                               h_count, i_count);
@@ -2099,17 +2230,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 DWeightKernel::pack_a_transposed(a1, up_grad, I, i_start, i_count, routes);
               });
 
-              const ggml_bf16_t* input = m_local_input_ptr_[expert_idx];
               ggml_bf16_t* gate_dst = ggp + static_cast<size_t>(expert_idx) * F * H;
               ggml_bf16_t* up_dst = gup_ptr + static_cast<size_t>(expert_idx) * F * H;
               for (int h_tile = 0; h_tile < h_tiles; ++h_tile) {
                 const int h_start = h_tile * TILE_N;
                 const int h_count = std::min(TILE_N, H - h_start);
-                profile_operation(timings.pack_b_ns, timings.pack_b_calls,
-                                  [&] { DWeightKernel::pack_b_transposed(b, input, H, h_start, h_count, routes); });
                 profile_operation(timings.kernel_gate_up_ns, timings.kernel_gate_up_calls, [&] {
-                  DWeightKernel::multiply(padded_k, scratch.c0(), a0, b);
-                  DWeightKernel::multiply(padded_k, scratch.c1(), a1, b);
+                  DWeightKernel::multiply(padded_k, scratch.c0(), a0, shared_input, 0, h_start);
+                  DWeightKernel::multiply(padded_k, scratch.c1(), a1, shared_input, 0, h_start);
                 });
                 profile_operation(timings.store_ns, timings.store_calls, [&] {
                   DWeightKernel::store_bf16(scratch.c0(), gate_dst + static_cast<size_t>(i_start) * H + h_start, H,
@@ -3159,6 +3287,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     cache_down_output_bytes_ = (size_t)max_cache_depth_ * ml * k_tok * H * sizeof(ggml_bf16_t);
 
     grad_buffer_bytes_ = ml * k_tok * I * sizeof(ggml_bf16_t);
+    if constexpr (std::is_same_v<T, amx::GemmKernel224BF16>) {
+      if (sft_config_.full_weight_grad) {
+        const size_t max_padded_routes =
+            ((ml * k_tok + static_cast<size_t>(config_.expert_num) * (K_STEP - 1) + K_STEP - 1) / K_STEP) * K_STEP;
+        dweight_shared_panel_pool_bytes_ =
+            2 * max_padded_routes * H * sizeof(ggml_bf16_t);  // X^T BufferB + route-weighted dY^T BufferA
+      }
+    }
 
     // =====================================================
     // Calculate LoRA AMX buffer sizes
@@ -3366,6 +3502,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     cache_stack_.resize(max_cache_depth_);
     // Preallocate cache offsets to avoid heap allocation in hot path
     cache_offsets_.resize(config_.expert_num + 1);
+    direct_cache_intermediate_ptrs_.resize(config_.expert_num, nullptr);
     for (int i = 0; i < max_cache_depth_; i++) {
       // Note: cache pointers (input_cache, gate_output_cache, etc.) are set in alloc_forward_buffers()
       cache_stack_[i].input_cache = nullptr;
@@ -4393,10 +4530,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     return cache_stack_[--cache_stack_top_];
   }
 
-  void save_to_cache(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
-                     int activated_expert, const void* input) {
-    auto pool = config_.pool->get_subpool(tp_part_idx);
-
+  void prepare_cache_metadata(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
+                              int activated_expert) {
     cache.qlen_cache = qlen;
     cache.k_cache = k;
     cache.activated_expert_cache = activated_expert;
@@ -4422,6 +4557,39 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       int expert_idx = m_expert_id_map_[i];
       cache_offsets_[i + 1] = cache_offsets_[i] + m_local_num_[expert_idx];
     }
+  }
+
+  void copy_input_to_cache(ForwardCache& cache, const void* input, int qlen) {
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+    const size_t total_bytes = static_cast<size_t>(qlen) * config_.hidden_size * sizeof(ggml_bf16_t);
+    constexpr size_t kChunkBytes = 2 * 1024 * 1024;
+    const int chunks = static_cast<int>((total_bytes + kChunkBytes - 1) / kChunkBytes);
+    pool->do_work_stealing_job(
+        chunks, nullptr,
+        [&, input, total_bytes](int chunk) {
+          const size_t offset = static_cast<size_t>(chunk) * kChunkBytes;
+          const size_t bytes = std::min(kChunkBytes, total_bytes - offset);
+          std::memcpy(reinterpret_cast<uint8_t*>(cache.input_cache) + offset,
+                      reinterpret_cast<const uint8_t*>(input) + offset, bytes);
+        },
+        nullptr);
+  }
+
+  void bind_direct_cache_outputs(ForwardCache& cache, int activated_expert) {
+    for (int i = 0; i < activated_expert; ++i) {
+      const int expert_idx = m_expert_id_map_[i];
+      const size_t offset = cache_offsets_[i];
+      m_local_gate_output_ptr_[expert_idx] = cache.gate_output_cache + offset * config_.intermediate_size;
+      m_local_up_output_ptr_[expert_idx] = cache.up_output_cache + offset * config_.intermediate_size;
+      m_local_down_output_ptr_[expert_idx] = cache.down_output_cache + offset * config_.hidden_size;
+      direct_cache_intermediate_ptrs_[expert_idx] = cache.intermediate_cache + offset * config_.intermediate_size;
+    }
+  }
+
+  void save_to_cache(ForwardCache& cache, int qlen, int k, const int64_t* expert_ids, const float* weights,
+                     int activated_expert, const void* input) {
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+    prepare_cache_metadata(cache, qlen, k, expert_ids, weights, activated_expert);
 
     // Parallel copy: input(1 task) + gate(N tasks) + up(N tasks) = 1 + 2N tasks
     // This parallelizes the ~1.8MB input copy that was previously serial

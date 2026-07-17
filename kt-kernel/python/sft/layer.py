@@ -148,8 +148,20 @@ class KTMoELayerWrapper(nn.Module):
             and (hidden_states.requires_grad or topk_weights.requires_grad or train_lora or full_weight_grad)
         )
         use_autograd_path = save_for_backward
+        checkpoint_mode = _checkpoint_hook_mode()
+        reuse_checkpoint_forward = (
+            not dist_on
+            and self.wrapper is not None
+            and getattr(self.wrapper, "reuse_checkpoint_forward", False)
+        )
+        reuse_cached_forward = (
+            reuse_checkpoint_forward
+            and checkpoint_mode == "recompute"
+            and getattr(self.wrapper, "_kt_has_cached_forward", False)
+        )
+        cache_checkpoint_forward = reuse_checkpoint_forward and checkpoint_mode == "first_forward"
         save_for_backward_submit = use_autograd_path
-        if _checkpoint_hook_mode() == "first_forward":
+        if checkpoint_mode == "first_forward" and not cache_checkpoint_forward:
             save_for_backward_submit = False
 
         if train_lora and self._lora_pointers_dirty:
@@ -168,6 +180,7 @@ class KTMoELayerWrapper(nn.Module):
                 topk_ids,
                 topk_weights,
                 save_for_backward_submit,
+                reuse_cached_forward,
             )
 
         # Use KTMoEFunction whenever backward is needed so KT backward and LoRA
@@ -200,6 +213,8 @@ class KTMoELayerWrapper(nn.Module):
                     save_for_backward,
                     train_lora,
                     all_qlens,
+                    cache_checkpoint_forward,
+                    reuse_cached_forward,
                     # Base weight params for full mode gradient flow
                     self.wrapper.gate_proj_buf if full_weight_grad and self.wrapper is not None else None,
                     self.wrapper.up_proj_buf if full_weight_grad and self.wrapper is not None else None,
@@ -377,6 +392,7 @@ class KTMoELayerWrapper(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
         save_for_backward: bool,
+        reuse_cached_forward: bool = False,
     ) -> tuple[torch.Tensor | None, list[int] | None]:
         import torch.distributed as dist
 
@@ -396,43 +412,37 @@ class KTMoELayerWrapper(nn.Module):
                 raise RuntimeError(f"Rank {rank} qlen mismatch: local={qlen}, all_qlens[{rank}]={all_qlens[rank]}")
             total_qlen = sum(all_qlens)
 
-            hs_flat = hidden_states.view(qlen, self.hidden_size).contiguous()
-            expert_ids = topk_ids.view(qlen, self.moe_config.num_experts_per_tok).contiguous()
-            weights = topk_weights.view(qlen, self.moe_config.num_experts_per_tok).contiguous()
+            if not reuse_cached_forward:
+                hs_flat = hidden_states.view(qlen, self.hidden_size).contiguous()
+                expert_ids = topk_ids.view(qlen, self.moe_config.num_experts_per_tok).contiguous()
+                weights = topk_weights.view(qlen, self.moe_config.num_experts_per_tok).contiguous()
 
-            submit_hs = hs_flat.detach()
-            submit_ids = expert_ids.detach()
-            submit_wts = weights.detach()
-
-            gathered_hs = _dist_gather_varlen_to_rank0(
-                submit_hs,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-            gathered_ids = _dist_gather_varlen_to_rank0(
-                submit_ids,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-            gathered_wts = _dist_gather_varlen_to_rank0(
-                submit_wts,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-            )
-
-            if rank == 0:
-                all_hs = torch.cat(gathered_hs, dim=0)
-                all_ids = torch.cat(gathered_ids, dim=0)
-                all_wts = torch.cat(gathered_wts, dim=0)
-                self.wrapper.submit_forward(
-                    all_hs,
-                    all_ids,
-                    all_wts,
-                    save_for_backward=save_for_backward,
+                gathered_hs = _dist_gather_varlen_to_rank0(
+                    hs_flat.detach(),
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
                 )
+                gathered_ids = _dist_gather_varlen_to_rank0(
+                    expert_ids.detach(),
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                )
+                gathered_wts = _dist_gather_varlen_to_rank0(
+                    weights.detach(),
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                )
+
+                if rank == 0:
+                    self.wrapper.submit_forward(
+                        torch.cat(gathered_hs, dim=0),
+                        torch.cat(gathered_ids, dim=0),
+                        torch.cat(gathered_wts, dim=0),
+                        save_for_backward=save_for_backward,
+                    )
 
             # Keep shared/lora experts local to avoid qlen_max-style amplification.
             gpu_output = None
@@ -456,12 +466,13 @@ class KTMoELayerWrapper(nn.Module):
             submit_hs = input_flat.detach()
             submit_ids = expert_ids.detach()
             submit_wts = weights.detach()
-            self.wrapper.submit_forward(
-                submit_hs,
-                submit_ids,
-                submit_wts,
-                save_for_backward=save_for_backward,
-            )
+            if not reuse_cached_forward:
+                self.wrapper.submit_forward(
+                    submit_hs,
+                    submit_ids,
+                    submit_wts,
+                    save_for_backward=save_for_backward,
+                )
 
             # GPU compute: shared_experts + lora_experts
             gpu_output = None

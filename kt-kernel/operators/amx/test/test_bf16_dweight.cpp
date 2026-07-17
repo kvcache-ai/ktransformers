@@ -94,6 +94,70 @@ bool run_case(int routes, int rows, int columns) {
   return passed;
 }
 
+bool run_shared_panel_case(int routes, int rows, int columns) {
+  const int padded_k = DWeightKernel::padded_k(routes);
+  const int padded_rows = (rows + Kernel::M_STEP - 1) / Kernel::M_STEP * Kernel::M_STEP;
+  const int padded_columns = (columns + Kernel::N_STEP - 1) / Kernel::N_STEP * Kernel::N_STEP;
+  std::vector<ggml_bf16_t> lhs(static_cast<size_t>(routes) * rows);
+  std::vector<ggml_bf16_t> rhs(static_cast<size_t>(routes) * columns);
+  std::vector<ggml_bf16_t> actual(static_cast<size_t>(rows) * columns);
+  fill_random(lhs, static_cast<unsigned>(routes * 41 + rows));
+  fill_random(rhs, static_cast<unsigned>(routes * 43 + columns));
+
+  void* a_memory = alloc_buffer(Kernel::BufferA::required_size(padded_rows, padded_k));
+  void* b_memory = alloc_buffer(Kernel::BufferB::required_size(padded_columns, padded_k));
+  Kernel::BufferA a(padded_rows, padded_k, a_memory);
+  Kernel::BufferB b(padded_columns, padded_k, b_memory);
+  for (int row = 0; row < rows; row += Kernel::M_STEP) {
+    DWeightKernel::pack_a_transposed(a, lhs.data(), rows, row, std::min(Kernel::M_STEP, rows - row), routes, row);
+  }
+  for (int column = 0; column < columns; column += Kernel::N_STEP) {
+    DWeightKernel::pack_b_transposed(b, rhs.data(), columns, column,
+                                     std::min(Kernel::N_STEP, columns - column), routes, column);
+  }
+
+  alignas(64) float accumulator[Kernel::M_STEP * Kernel::N_STEP];
+  for (int row = 0; row < rows; row += Kernel::M_STEP) {
+    const int row_count = std::min(Kernel::M_STEP, rows - row);
+    for (int column = 0; column < columns; column += Kernel::N_STEP) {
+      const int column_count = std::min(Kernel::N_STEP, columns - column);
+      DWeightKernel::multiply(padded_k, accumulator, a, b, row, column);
+      DWeightKernel::store_bf16(accumulator, actual.data() + static_cast<size_t>(row) * columns + column, columns,
+                                row_count, column_count);
+    }
+  }
+
+  double difference_sq = 0.0;
+  double expected_sq = 0.0;
+  double actual_sq = 0.0;
+  double dot = 0.0;
+  for (int row = 0; row < rows; ++row) {
+    for (int column = 0; column < columns; ++column) {
+      float reference = 0.0f;
+      for (int route = 0; route < routes; ++route) {
+        reference += GGML_BF16_TO_FP32(lhs[static_cast<size_t>(route) * rows + row]) *
+                     GGML_BF16_TO_FP32(rhs[static_cast<size_t>(route) * columns + column]);
+      }
+      const float expected = GGML_BF16_TO_FP32(GGML_FP32_TO_BF16(reference));
+      const float value = GGML_BF16_TO_FP32(actual[static_cast<size_t>(row) * columns + column]);
+      const double difference = static_cast<double>(value) - expected;
+      difference_sq += difference * difference;
+      expected_sq += static_cast<double>(expected) * expected;
+      actual_sq += static_cast<double>(value) * value;
+      dot += static_cast<double>(expected) * value;
+    }
+  }
+  const double relative_l2 = std::sqrt(difference_sq / std::max(expected_sq, 1e-30));
+  const double cosine = dot / std::sqrt(std::max(expected_sq * actual_sq, 1e-30));
+  const bool passed = relative_l2 <= 0.01 && cosine >= 0.999;
+  std::printf("BF16 dWeight shared panel routes=%d shape=%dx%d: rel_l2=%.6e cosine=%.9f %s\n", routes, rows,
+              columns, relative_l2, cosine, passed ? "PASS" : "FAIL");
+
+  std::free(a_memory);
+  std::free(b_memory);
+  return passed;
+}
+
 bool run_amx_benchmark() {
   if constexpr (!amx::AMX_AVAILABLE) {
     std::printf("BF16 dWeight AMX benchmark: SKIP (AMX unavailable)\n");
@@ -165,16 +229,85 @@ bool run_amx_benchmark() {
   return passed;
 }
 
+bool run_avx_benchmark() {
+  if constexpr (amx::AMX_AVAILABLE) {
+    std::printf("BF16 dWeight AVX benchmark: SKIP (AMX enabled)\n");
+    return true;
+  }
+
+  constexpr int routes = 64;
+  constexpr int iterations = 50000;
+  constexpr int rounds = 7;
+  const int padded_k = DWeightKernel::padded_k(routes);
+  std::vector<ggml_bf16_t> lhs(static_cast<size_t>(routes) * Kernel::M_STEP);
+  std::vector<ggml_bf16_t> rhs(static_cast<size_t>(routes) * Kernel::N_STEP);
+  fill_random(lhs, 20260717);
+  fill_random(rhs, 20260718);
+
+  void* a_memory = alloc_buffer(Kernel::BufferA::required_size(Kernel::M_STEP, padded_k));
+  void* b_memory = alloc_buffer(Kernel::BufferB::required_size(Kernel::N_STEP, padded_k));
+  Kernel::BufferA a(Kernel::M_STEP, padded_k, a_memory);
+  Kernel::BufferB b(Kernel::N_STEP, padded_k, b_memory);
+  alignas(64) float accumulator[Kernel::M_STEP * Kernel::N_STEP];
+  DWeightKernel::pack_a_transposed(a, lhs.data(), Kernel::M_STEP, 0, Kernel::M_STEP, routes);
+  DWeightKernel::pack_b_transposed(b, rhs.data(), Kernel::N_STEP, 0, Kernel::N_STEP, routes);
+
+  auto generic_driver = [&] {
+    for (int k_block_begin = 0; k_block_begin < padded_k; k_block_begin += Kernel::K_BLOCK) {
+      Kernel::avx_kernel_4(Kernel::M_STEP, Kernel::N_STEP, padded_k, 0, 0, k_block_begin, accumulator, &a, &b);
+    }
+  };
+  auto register_blocked_driver = [&] { DWeightKernel::multiply(padded_k, accumulator, a, b); };
+
+  for (int warmup = 0; warmup < 200; ++warmup) {
+    generic_driver();
+    register_blocked_driver();
+  }
+  auto measure = [&](auto&& operation) {
+    const auto begin = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < iterations; ++iteration) operation();
+    return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - begin).count() / iterations;
+  };
+
+  std::vector<double> generic_ns;
+  std::vector<double> register_blocked_ns;
+  for (int round = 0; round < rounds; ++round) {
+    if (round % 2 == 0) {
+      generic_ns.push_back(measure(generic_driver));
+      register_blocked_ns.push_back(measure(register_blocked_driver));
+    } else {
+      register_blocked_ns.push_back(measure(register_blocked_driver));
+      generic_ns.push_back(measure(generic_driver));
+    }
+  }
+  std::sort(generic_ns.begin(), generic_ns.end());
+  std::sort(register_blocked_ns.begin(), register_blocked_ns.end());
+  const double generic_median = generic_ns[rounds / 2];
+  const double register_blocked_median = register_blocked_ns[rounds / 2];
+  const double ratio = register_blocked_median / generic_median;
+  const bool passed = ratio <= 1.05;
+  std::printf("BF16 dWeight AVX kernel routes=%d: generic=%.1f ns register_blocked=%.1f ns ratio=%.4f %s\n", routes,
+              generic_median, register_blocked_median, ratio, passed ? "PASS" : "FAIL");
+
+  std::free(a_memory);
+  std::free(b_memory);
+  return passed;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   DWeightKernel::configure_worker();
-  if (argc == 2 && std::strcmp(argv[1], "--benchmark") == 0) return run_amx_benchmark() ? 0 : 1;
+  if (argc == 2 && std::strcmp(argv[1], "--benchmark") == 0) {
+    return (run_amx_benchmark() && run_avx_benchmark()) ? 0 : 1;
+  }
   bool passed = true;
   for (int routes : {1, 31, 32, 33, 65, 1792, 1825}) {
     passed = run_case(routes, 32, 32) && passed;
   }
   passed = run_case(33, 17, 29) && passed;
   passed = run_case(65, 31, 7) && passed;
+  passed = run_shared_panel_case(33, 45, 77) && passed;
+  passed = run_shared_panel_case(65, 64, 96) && passed;
   return passed ? 0 : 1;
 }
