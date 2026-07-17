@@ -30,6 +30,7 @@
 #include "../sft_profile.hpp"
 #include "ggml.h"
 #include "la/amx_kernels.hpp"
+#include "la/amx_raw_kernels.hpp"
 #include "la/avx_kernels.hpp"
 #include "moe.hpp"
 
@@ -220,6 +221,8 @@ struct supports_standard_mat_mul : std::false_type {};
 template <>
 struct supports_standard_mat_mul<amx::GemmKernel224BF> : std::true_type {};
 template <>
+struct supports_standard_mat_mul<amx::GemmKernel224BF16> : std::true_type {};
+template <>
 struct supports_standard_mat_mul<amx::GemmKernel224Int8> : std::true_type {};
 template <>
 struct supports_standard_mat_mul<amx::GemmKernel224Int4> : std::true_type {};
@@ -237,6 +240,8 @@ template <typename T>
 struct has_bb_transposed_repack : std::false_type {};
 template <>
 struct has_bb_transposed_repack<amx::GemmKernel224BF> : std::true_type {};
+template <>
+struct has_bb_transposed_repack<amx::GemmKernel224BF16> : std::true_type {};
 template <>
 struct has_bb_transposed_repack<amx::GemmKernel224Int8> : std::true_type {};
 template <typename T>
@@ -2002,10 +2007,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       token_offset += cache.m_local_num_cache[expert_idx];
     }
 
-    if constexpr (std::is_same_v<T, amx::GemmKernel224BF> && amx::AMX_AVAILABLE) {
-      constexpr int TILE_M = amx::GemmKernel224BF::M_STEP;
-      constexpr int TILE_N = amx::GemmKernel224BF::N_STEP;
-      constexpr int TILE_K = amx::GemmKernel224BF::K_STEP;
+    if constexpr ((std::is_same_v<T, amx::GemmKernel224BF> || std::is_same_v<T, amx::GemmKernel224BF16>) &&
+                  amx::AMX_AVAILABLE) {
+      constexpr int TILE_M = T::M_STEP;
+      constexpr int TILE_N = T::N_STEP;
+      constexpr int TILE_K = T::K_STEP;
       static_assert(TILE_M == 32 && TILE_N == 32 && TILE_K == 32,
                     "base-weight gradient tile packing assumes 32x32x32 AMX BF16 tiles");
 
@@ -2068,7 +2074,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   }
                 }
                 amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile));
-                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + amx::GemmKernel224BF::TILE_N * TILE_K));
+                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + T::TILE_N * TILE_K));
               }
 
               ggml_bf16_t* down_dst = gdp + (size_t)expert_idx * H * F;
@@ -2139,7 +2145,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   }
                 }
                 amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile));
-                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + amx::GemmKernel224BF::TILE_N * TILE_K));
+                amx::transpose_16x16_32bit(reinterpret_cast<__m512i*>(b_tile + T::TILE_N * TILE_K));
               }
 
               // Gate and up each consume all four C tiles, so retain C across K in two separate passes.

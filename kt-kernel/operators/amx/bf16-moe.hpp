@@ -30,6 +30,8 @@
 template <class T = amx::GemmKernel224BF16>
 class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   using Base = AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>>;
+
+ protected:
   using Base::config_;
   using Base::down_ba_;
   using Base::down_bb_;

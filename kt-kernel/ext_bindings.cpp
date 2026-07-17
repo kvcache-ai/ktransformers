@@ -819,7 +819,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #endif
 #if defined(__AVX512BF16__)
   // SFT MoE with LoRA support (BF16, INT8, INT4, AWQ, K2)
-  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF>>(moe_module, "AMXBF16_SFT_MOE");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "AMXBF16_SFT_MOE");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_SFT_MOE");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4>>(moe_module, "AMXInt4_SFT_MOE");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_SFT_MOE");
@@ -828,7 +828,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4SmallKGroup, AMX_K2_MOE_TP>>(moe_module,
   //                                                                                       "AMXInt4_KGroup_SFT_MOE");
   // SFT MoE with SkipLoRA=true (skip all LoRA computation in backward, only compute base weight grad_input)
-  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF, AMX_MOE_TP, true>>(moe_module, "AMXBF16_SFT_MOE_SkipLoRA");
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP, true>>(moe_module,
+                                                                                     "AMXBF16_SFT_MOE_SkipLoRA");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int8, AMX_MOE_TP, true>>(moe_module, "AMXInt8_SFT_MOE_SkipLoRA");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4, AMX_MOE_TP, true>>(moe_module, "AMXInt4_SFT_MOE_SkipLoRA");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1, AMX_MOE_TP, true>>(moe_module,

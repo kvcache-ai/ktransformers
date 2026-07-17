@@ -133,16 +133,13 @@ struct BufferBBF16Impl {
   }
   void set_data(void* new_ptr) { b = reinterpret_cast<ggml_bf16_t*>(new_ptr); }
 
-  void from_mat(ggml_bf16_t* src, int ith, int nth) {
-    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
-    int n_block_begin = n_start;
-    int n_block_size = n_end - n_block_begin;
+  void pack_block(ggml_bf16_t* src, int src_stride, int n_block_begin, int n_block_size) {
     for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
       for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
         int k_block_size = std::min(K_BLOCK, k - k_block_begin);
         for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
           for (int i = 0; i < N_STEP; i++) {
-            __m512i* s = (__m512i*)(src + (n_block_begin + n_begin + i) * k + k_block_begin + k_begin);
+            __m512i* s = (__m512i*)(src + (n_begin + i) * src_stride + k_block_begin + k_begin);
             __m512i* d = (__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size +
                                     k_begin * N_STEP + i * K_STEP);
             avx512_copy_32xbf16(s, d);
@@ -151,6 +148,107 @@ struct BufferBBF16Impl {
                                            n_begin * k_block_size + k_begin * N_STEP));
           transpose_16x16_32bit((__m512i*)(b + n_block_begin * k + k_block_begin * n_block_size +
                                            n_begin * k_block_size + k_begin * N_STEP + TILE_N * K_STEP));
+        }
+      }
+    }
+  }
+
+  void from_mat(ggml_bf16_t* src, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    pack_block(src + n_block_begin * k, k, n_block_begin, n_block_size);
+  }
+
+  void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
+    assert(n == src_k && k == src_n);
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+
+    thread_local std::vector<ggml_bf16_t> strip;
+    strip.resize((size_t)n_block_size * k);
+    constexpr int TILE = 32;
+    for (int c_tile = 0; c_tile < k; c_tile += TILE) {
+      int c_end = std::min(c_tile + TILE, k);
+      for (int r_tile = 0; r_tile < n_block_size; r_tile += TILE) {
+        int r_end = std::min(r_tile + TILE, n_block_size);
+        for (int c = c_tile; c < c_end; c++) {
+          for (int r = r_tile; r < r_end; r++) {
+            strip[(size_t)r * k + c] = src[(size_t)c * src_k + n_block_begin + r];
+          }
+        }
+      }
+    }
+    pack_block(strip.data(), k, n_block_begin, n_block_size);
+  }
+
+  void to_mat(ggml_bf16_t* dst, int ith, int nth) const {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+
+    alignas(64) ggml_bf16_t tile_copy[N_STEP * K_STEP];
+    for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
+      for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
+        int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+        for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
+          const ggml_bf16_t* tile_src =
+              b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size + k_begin * N_STEP;
+          memcpy(tile_copy, tile_src, sizeof(tile_copy));
+          transpose_16x16_32bit((__m512i*)tile_copy);
+          transpose_16x16_32bit((__m512i*)(tile_copy + TILE_N * K_STEP));
+          for (int i = 0; i < N_STEP; i++) {
+            __m512i* s = (__m512i*)(tile_copy + i * K_STEP);
+            __m512i* d = (__m512i*)(dst + (size_t)(n_block_begin + n_begin + i) * k + k_block_begin + k_begin);
+            avx512_copy_32xbf16(s, d);
+          }
+        }
+      }
+    }
+  }
+
+  void from_bb_transposed(const BufferBBF16Impl& src, int ith, int nth) {
+    assert(n == src.k && k == src.n);
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int dst_n_block_begin = n_start;
+    int dst_n_block_size = n_end - dst_n_block_begin;
+    if (dst_n_block_size <= 0) return;
+
+    auto tile_ptr = [](ggml_bf16_t* base, int total_n, int total_k, int abs_n, int abs_k) {
+      int n_block_begin = abs_n / N_BLOCK * N_BLOCK;
+      int n_within = abs_n - n_block_begin;
+      int n_block_size = std::min(N_BLOCK, total_n - n_block_begin);
+      int k_block_begin = abs_k / K_BLOCK * K_BLOCK;
+      int k_within = abs_k - k_block_begin;
+      return base + (size_t)n_block_begin * total_k + (size_t)k_block_begin * n_block_size +
+             (size_t)n_within * std::min(K_BLOCK, total_k - k_block_begin) + (size_t)k_within * N_STEP;
+    };
+
+    alignas(64) ggml_bf16_t src_tile[N_STEP * K_STEP];
+    alignas(64) ggml_bf16_t dst_tile[N_STEP * K_STEP];
+    for (int dst_n = 0; dst_n < dst_n_block_size; dst_n += N_STEP) {
+      for (int dst_k_block = 0; dst_k_block < k; dst_k_block += K_BLOCK) {
+        int dst_k_block_size = std::min(K_BLOCK, k - dst_k_block);
+        for (int dst_k = 0; dst_k < dst_k_block_size; dst_k += K_STEP) {
+          int abs_dst_n = dst_n_block_begin + dst_n;
+          int abs_dst_k = dst_k_block + dst_k;
+          ggml_bf16_t* src_ptr = tile_ptr(src.b, src.n, src.k, abs_dst_k, abs_dst_n);
+          memcpy(src_tile, src_ptr, sizeof(src_tile));
+          transpose_16x16_32bit((__m512i*)src_tile);
+          transpose_16x16_32bit((__m512i*)(src_tile + TILE_N * K_STEP));
+
+          for (int i = 0; i < N_STEP; i++) {
+            for (int j = 0; j < K_STEP; j++) {
+              dst_tile[j * K_STEP + i] = src_tile[i * K_STEP + j];
+            }
+          }
+          transpose_16x16_32bit((__m512i*)dst_tile);
+          transpose_16x16_32bit((__m512i*)(dst_tile + TILE_N * K_STEP));
+          ggml_bf16_t* dst_ptr = tile_ptr(b, n, k, abs_dst_n, abs_dst_k);
+          memcpy(dst_ptr, dst_tile, sizeof(dst_tile));
         }
       }
     }
