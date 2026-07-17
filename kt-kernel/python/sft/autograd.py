@@ -78,7 +78,8 @@ class KTMoEFunction(torch.autograd.Function):
 
             # Rank 0: sync CPU result and split by real lengths
             if rank == 0:
-                cpu_output = wrapper.sync_forward(output_device=original_device)
+                with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                    cpu_output = wrapper.sync_forward(output_device=original_device)
                 cpu_output = cpu_output.to(dtype=original_dtype).view(total_qlen, hidden_size)
                 offsets = _qlen_offsets(all_qlens_list)
                 scatter_list = [cpu_output[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
@@ -98,7 +99,8 @@ class KTMoEFunction(torch.autograd.Function):
             del output_flat
         elif wrapper is not None:
             # Single-GPU: sync directly
-            cpu_output = wrapper.sync_forward(output_device=original_device)
+            with torch.profiler.record_function("kt.sft.cpu_forward_sync"):
+                cpu_output = wrapper.sync_forward(output_device=original_device)
             output = cpu_output.view(batch_size, seq_len, hidden_size).to(dtype=original_dtype)
         else:
             # Broadcast-only rank (no wrapper)
@@ -141,12 +143,14 @@ class KTMoEFunction(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         # Wait for any in-flight async repack before recompute forward uses the pool
         if getattr(ctx.wrapper, "share_backward_bb", False):
-            ctx.wrapper.wait_backward_repack()
+            with torch.profiler.record_function("kt.sft.wait_backward_repack"):
+                ctx.wrapper.wait_backward_repack()
 
         # Access saved_tensors FIRST — under non-reentrant checkpoint this
         # triggers the unpack hook which runs a full decoder-layer recompute,
         # populating the C++ cache before we call wrapper.backward().
-        _ = ctx.saved_tensors
+        with torch.profiler.record_function("kt.sft.checkpoint_recompute"):
+            _ = ctx.saved_tensors
 
         qlen = ctx.qlen
         hidden_size = ctx.hidden_size
@@ -191,10 +195,11 @@ class KTMoEFunction(torch.autograd.Function):
                 all_go = torch.cat(gathered_go, dim=0)
                 total_qlen = int(all_go.shape[0])
 
-                backward_out = ctx.wrapper.backward(
-                    all_go,
-                    output_device=ctx.original_device,
-                )
+                with torch.profiler.record_function("kt.sft.cpu_backward"):
+                    backward_out = ctx.wrapper.backward(
+                        all_go,
+                        output_device=ctx.original_device,
+                    )
                 if isinstance(backward_out, tuple) and len(backward_out) == 2:
                     all_grad_input, all_grad_weights = backward_out
                 elif isinstance(backward_out, tuple) and len(backward_out) == 3:
@@ -236,10 +241,11 @@ class KTMoEFunction(torch.autograd.Function):
         elif not ctx.use_broadcast:
             # ---- Single-GPU path ----
             grad_output_flat = grad_output.view(qlen, hidden_size)
-            backward_out = ctx.wrapper.backward(
-                grad_output_flat,
-                output_device=ctx.original_device,
-            )
+            with torch.profiler.record_function("kt.sft.cpu_backward"):
+                backward_out = ctx.wrapper.backward(
+                    grad_output_flat,
+                    output_device=ctx.original_device,
+                )
             ctx.wrapper._kt_has_cached_forward = False
             if isinstance(backward_out, tuple) and len(backward_out) == 2:
                 grad_input, grad_weights = backward_out
@@ -259,7 +265,8 @@ class KTMoEFunction(torch.autograd.Function):
         # Trigger async repack for next MoE layer in backward order
         next_bwd = getattr(ctx.wrapper, "_next_backward_wrapper", None)
         if next_bwd is not None and getattr(next_bwd, "share_backward_bb", False):
-            next_bwd.submit_backward_repack()
+            with torch.profiler.record_function("kt.sft.submit_backward_repack"):
+                next_bwd.submit_backward_repack()
 
         # Base weight gradients: return C++-written grad buffers in full mode, None otherwise
         if ctx.full_weight_grad and ctx.wrapper is not None:

@@ -370,6 +370,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     } else if (config.gate_proj != nullptr) {
       // printf("TP_MOE_SFT: From BF16 with partitioning\n");
+      auto reload_stage_start = profiler_.start();
 
       // Temporary storage for partitioned weights
       std::vector<ggml_bf16_t*> temp_gate(tp_count);
@@ -414,27 +415,34 @@ class TP_MOE_SFT : public TP_MOE<T> {
             },
             nullptr);
       }
+      profiler_.record(SFTProfileStage::BaseWeightReloadPartition, reload_stage_start);
 
       // Step 2: Set weight pointers BEFORE load_weights (Bug #24 fix)
+      reload_stage_start = profiler_.start();
       for (int i = 0; i < tp_count; i++) {
         tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
         tps[i]->set_weight_pointers_for_forward(temp_gate[i], temp_up[i], temp_down[i]);
       }
 
       pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+      profiler_.record(SFTProfileStage::BaseWeightReloadForwardPack, reload_stage_start);
 
       // Step 3: Prepare backward weights (this also clears weight pointers)
+      reload_stage_start = profiler_.start();
       for (int i = 0; i < tp_count; i++) {
         if (!config.share_backward_bb) {
           tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
         }
       }
+      profiler_.record(SFTProfileStage::BaseWeightReloadBackwardPack, reload_stage_start);
 
+      reload_stage_start = profiler_.start();
       for (int i = 0; i < tp_count; i++) {
         delete[] (temp_gate[i]);
         delete[] (temp_up[i]);
         delete[] (temp_down[i]);
       }
+      profiler_.record(SFTProfileStage::BaseWeightReloadCleanup, reload_stage_start);
     } else {
       // Other loading methods (from loader or file)
       for (int i = 0; i < tp_count; i++) {

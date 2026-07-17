@@ -136,7 +136,8 @@ class KTMoELayerWrapper(nn.Module):
         # Check if we need to use distributed broadcast (only rank 0 has KT kernel)
         use_broadcast = dist_on and self.wrapper is None
 
-        topk_ids, topk_weights = self._compute_routing(hidden_states)
+        with torch.profiler.record_function("kt.sft.routing"):
+            topk_ids, topk_weights = self._compute_routing(hidden_states)
 
         train_lora = self._peft_lora_modules is not None and len(self._peft_lora_modules) > 0
         full_weight_grad = self._full_weight_grad
@@ -157,15 +158,17 @@ class KTMoELayerWrapper(nn.Module):
 
         # In full_weight_grad mode, sync base weights after optimizer step
         if full_weight_grad and getattr(self.wrapper, "_base_weights_dirty", False):
-            self.wrapper.update_base_weights()
+            with torch.profiler.record_function("kt.sft.base_weight_reload"):
+                self.wrapper.update_base_weights()
             self.wrapper._base_weights_dirty = False
 
-        gpu_output, all_qlens = self._submit_and_compute_gpu(
-            hidden_states,
-            topk_ids,
-            topk_weights,
-            save_for_backward_submit,
-        )
+        with torch.profiler.record_function("kt.sft.submit_and_gpu_experts"):
+            gpu_output, all_qlens = self._submit_and_compute_gpu(
+                hidden_states,
+                topk_ids,
+                topk_weights,
+                save_for_backward_submit,
+            )
 
         # Use KTMoEFunction whenever backward is needed so KT backward and LoRA
         # gradient paths remain connected.
@@ -184,23 +187,24 @@ class KTMoELayerWrapper(nn.Module):
                 if self.wrapper.gate_proj_buf is not None:
                     lora_ref = self.wrapper.gate_proj_buf
 
-            moe_output = KTMoEFunction.apply(
-                hidden_states,
-                topk_ids,
-                topk_weights,
-                self.wrapper,
-                lora_ref,
-                self.hidden_size,
-                self.moe_config.num_experts_per_tok,
-                self.layer_idx,
-                save_for_backward,
-                train_lora,
-                all_qlens,
-                # Base weight params for full mode gradient flow
-                self.wrapper.gate_proj_buf if full_weight_grad and self.wrapper is not None else None,
-                self.wrapper.up_proj_buf if full_weight_grad and self.wrapper is not None else None,
-                self.wrapper.down_proj_buf if full_weight_grad and self.wrapper is not None else None,
-            )
+            with torch.profiler.record_function("kt.sft.autograd_apply_and_cpu_sync"):
+                moe_output = KTMoEFunction.apply(
+                    hidden_states,
+                    topk_ids,
+                    topk_weights,
+                    self.wrapper,
+                    lora_ref,
+                    self.hidden_size,
+                    self.moe_config.num_experts_per_tok,
+                    self.layer_idx,
+                    save_for_backward,
+                    train_lora,
+                    all_qlens,
+                    # Base weight params for full mode gradient flow
+                    self.wrapper.gate_proj_buf if full_weight_grad and self.wrapper is not None else None,
+                    self.wrapper.up_proj_buf if full_weight_grad and self.wrapper is not None else None,
+                    self.wrapper.down_proj_buf if full_weight_grad and self.wrapper is not None else None,
+                )
         else:
             moe_output = self._sync_forward_output_no_autograd(
                 hidden_states=hidden_states,

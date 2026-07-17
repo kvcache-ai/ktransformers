@@ -16,6 +16,8 @@
 enum class SFTProfileStage : uint8_t {
   // NUMA-local forward stages.
   FwdTotal,
+  FwdInitialTotal,
+  FwdRecomputeTotal,
   FwdSetup,
   FwdRoute,
   FwdBufferSetup,
@@ -48,6 +50,12 @@ enum class SFTProfileStage : uint8_t {
   BwdGateUpLora,
   BwdRouterGrad,
   BwdBaseWeightGrad,
+  BwdBaseWeightGradOffsets,
+  BwdBaseWeightGradAmx,
+  BwdBaseWeightGradZero,
+  BwdBaseWeightGradGateUp,
+  BwdBaseWeightGradDown,
+  BwdBaseWeightGradStore,
 
   // TP wrapper and weight-layout stages.
   TpFwdTotal,
@@ -61,12 +69,18 @@ enum class SFTProfileStage : uint8_t {
   TpBwdRouterGradMerge,
   BackwardRepack,
   BaseWeightReload,
+  BaseWeightReloadPartition,
+  BaseWeightReloadForwardPack,
+  BaseWeightReloadBackwardPack,
+  BaseWeightReloadCleanup,
 
   Count,
 };
 
 inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Count)> kSFTProfileStageNames = {
     "forward.total",
+    "forward.initial_total",
+    "forward.recompute_total",
     "forward.setup",
     "forward.route",
     "forward.buffer_setup",
@@ -97,6 +111,12 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "backward.gate_up.lora",
     "backward.router_grad",
     "backward.base_weight_grad",
+    "backward.base_weight_grad.offsets",
+    "backward.base_weight_grad.amx",
+    "backward.base_weight_grad.zero",
+    "backward.base_weight_grad.gate_up",
+    "backward.base_weight_grad.down",
+    "backward.base_weight_grad.store",
     "tp.forward.total",
     "tp.forward.numa_compute",
     "tp.forward.merge",
@@ -108,6 +128,10 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "tp.backward.router_grad_merge",
     "weights.backward_repack",
     "weights.base_reload",
+    "weights.base_reload.partition",
+    "weights.base_reload.forward_pack",
+    "weights.base_reload.backward_pack",
+    "weights.base_reload.cleanup",
 };
 
 inline bool sft_profile_enabled_from_env() {

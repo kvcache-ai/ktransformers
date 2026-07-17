@@ -949,6 +949,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
     SFTProfileScope total_scope(profiler_, SFTProfileStage::FwdTotal);
+    SFTProfileScope checkpoint_scope(
+        profiler_, save_for_backward ? SFTProfileStage::FwdRecomputeTotal : SFTProfileStage::FwdInitialTotal);
     auto stage_start = profiler_.start();
 
     SFT_POOL_LOG("fwd_enter", config_.layer_idx, tp_part_idx, qlen, cache_stack_top_, forward_pool_bytes_,
@@ -1986,6 +1988,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward_base_weight_grad(const ForwardCache& cache, int full_intermediate_size, void* grad_gate_proj,
                                  void* grad_up_proj, void* grad_down_proj) {
+    auto stage_start = profiler_.start();
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
     const int F = full_intermediate_size;
@@ -2006,6 +2009,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       int expert_idx = cache.m_expert_id_map_cache[task_id];
       token_offset += cache.m_local_num_cache[expert_idx];
     }
+    profiler_.record(SFTProfileStage::BwdBaseWeightGradOffsets, stage_start);
 
     if constexpr ((std::is_same_v<T, amx::GemmKernel224BF> || std::is_same_v<T, amx::GemmKernel224BF16>) &&
                   amx::AMX_AVAILABLE) {
@@ -2022,6 +2026,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       const int total_tasks = activated_expert * tasks_per_expert;
       auto pool = config_.pool->get_subpool(tp_part_idx);
 
+      stage_start = profiler_.start();
       pool->do_work_stealing_job(
           total_tasks, [](int _) { T::config(); },
           [&, i_tiles, h_tiles, tasks_per_expert](int task_id) {
@@ -2174,6 +2179,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             }
           },
           nullptr);
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradAmx, stage_start);
       return;
     }
 
@@ -2189,16 +2195,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       float* acc_up = acc_gate + (size_t)I * H;              // [I, H]
       float* acc_down = acc_up + (size_t)I * H;              // [H, I]
 
+      stage_start = profiler_.start();
       std::memset(acc_gate, 0, (size_t)I * H * sizeof(float));
       std::memset(acc_up, 0, (size_t)I * H * sizeof(float));
       std::memset(acc_down, 0, (size_t)H * I * sizeof(float));
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradZero, stage_start);
 
+      stage_start = profiler_.start();
       for (int t = 0; t < m; t++) {
         const ggml_bf16_t* input_row = m_local_input_ptr_[expert_idx] + (size_t)t * H;
         const ggml_bf16_t* gate_grad_row = grad_gate_output_ + (size_t)(pos_start + t) * I;
         const ggml_bf16_t* up_grad_row = grad_up_output_ + (size_t)(pos_start + t) * I;
-        const ggml_bf16_t* inter_row = cache.intermediate_cache + (size_t)(pos_start + t) * I;
-        const ggml_bf16_t* grad_out_row = base_grad_output_bf16_ptr_[expert_idx] + (size_t)t * H;
 
         // gate_proj grad: [I, H] += grad_gate_out[t]^T @ input[t]
         for (int i = 0; i < I; i++) {
@@ -2210,7 +2217,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             acc_up[i * H + h] += gu * inp;
           }
         }
+      }
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradGateUp, stage_start);
 
+      stage_start = profiler_.start();
+      for (int t = 0; t < m; t++) {
+        const ggml_bf16_t* inter_row = cache.intermediate_cache + (size_t)(pos_start + t) * I;
+        const ggml_bf16_t* grad_out_row = base_grad_output_bf16_ptr_[expert_idx] + (size_t)t * H;
         // down_proj grad: [H, I] += grad_output[t]^T @ intermediate[t]
         for (int h = 0; h < H; h++) {
           float go = GGML_BF16_TO_FP32(grad_out_row[h]);
@@ -2219,8 +2232,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           }
         }
       }
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradDown, stage_start);
 
       // Convert FP32 accumulators to BF16 and store
+      stage_start = profiler_.start();
       for (int i = 0; i < I; i++) {
         for (int h = 0; h < H; h++) {
           ggp[(size_t)expert_idx * F * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_gate[i * H + h]);
@@ -2232,6 +2247,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           gdp[(size_t)expert_idx * H * F + (size_t)h * F + i] = GGML_FP32_TO_BF16(acc_down[h * I + i]);
         }
       }
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradStore, stage_start);
     }
   }
 

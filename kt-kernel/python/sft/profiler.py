@@ -63,6 +63,10 @@ def _split_timer_key(key: str) -> tuple[str, str] | None:
 
 
 def _parent_stage(stage: str) -> str | None:
+    if stage.startswith("backward.base_weight_grad."):
+        return "backward.base_weight_grad"
+    if stage.startswith("weights.base_reload."):
+        return "weights.base_reload"
     if stage == "backward.down.total" or stage == "backward.gate_up.total":
         return "backward.total"
     if stage.startswith("backward.down."):
