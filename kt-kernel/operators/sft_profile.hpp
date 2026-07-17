@@ -127,7 +127,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "backward.base_weight_grad.zero",
     "backward.base_weight_grad.gate_up",
     "backward.base_weight_grad.down",
-    "backward.base_weight_grad.store",
+    "backward.base_weight_grad.worker_cpu.store",
     "tp.forward.total",
     "tp.forward.numa_compute",
     "tp.forward.merge",

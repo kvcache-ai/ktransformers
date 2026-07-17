@@ -29,6 +29,10 @@ class _FakeMoe:
             "tp.0.backward.total.calls": 1,
             "tp.0.backward.down.total.total_ns": 2_000_000,
             "tp.0.backward.down.total.calls": 1,
+            "tp.0.backward.base_weight_grad.total_ns": 1_000_000,
+            "tp.0.backward.base_weight_grad.calls": 1,
+            "tp.0.backward.base_weight_grad.worker_cpu.store.total_ns": 2_000_000,
+            "tp.0.backward.base_weight_grad.worker_cpu.store.calls": 4,
         }
 
     def reset_profile_stats(self):
@@ -55,6 +59,8 @@ def test_collect_and_format_profile():
     assert "75.0%" in output
     assert "10.0%" in output
     assert "40.0%" in output
+    worker_store = next(line for line in output.splitlines() if "worker_cpu.store" in line)
+    assert worker_store.endswith("0.0%")
 
 
 def test_reset_and_disabled_profile():
