@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6a9ea63d.js";
+            window.path_to_searchindex_js = "searchindex-0184dfb7.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c2917af9.js"></script>
+        <script src="toc-16789068.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -2720,6 +2720,189 @@ curl http://localhost:30000/v1/chat/completions \
 <li>降低 <code>--mem-fraction-static</code></li>
 </ul>
 <p>更多问题参见 <a href="#frequently-asked-questions">FAQ</a>。</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="在-intel-igpu-上使用-sycl-gptq-int4-后端"><a class="header" href="#在-intel-igpu-上使用-sycl-gptq-int4-后端">在 Intel iGPU 上使用 SYCL GPTQ INT4 后端</a></h1>
+<p>本教程介绍如何使用 KTransformers 的 <code>SYCL_GPTQ_INT4</code> 后端，将 MoE 模型中的对称 GPTQ INT4 experts 放到 Intel 集成显卡（iGPU）上计算。</p>
+<p>这是一个异构推理方案：Intel iGPU 负责未放在 CUDA GPU 上的 GPTQ INT4 experts；Attention、Embedding、LM Head 以及通过 <code>--kt-num-gpu-experts</code> 保留的 experts 仍由 CUDA GPU 执行。因此，当前实现不能替代 NVIDIA GPU，也不是纯 Intel GPU 推理后端。</p>
+<h2 id="目录-1"><a class="header" href="#目录-1">目录</a></h2>
+<ul>
+<li><a href="#支持范围">支持范围</a></li>
+<li><a href="#硬件和软件要求">硬件和软件要求</a></li>
+<li><a href="#安装-1">安装</a></li>
+<li><a href="#验证安装">验证安装</a></li>
+<li><a href="#下载模型">下载模型</a></li>
+<li><a href="#启动推理服务-1">启动推理服务</a></li>
+<li><a href="#发送请求-1">发送请求</a></li>
+<li><a href="#参数说明">参数说明</a></li>
+<li><a href="#常见问题-1">常见问题</a></li>
+</ul>
+<h2 id="支持范围"><a class="header" href="#支持范围">支持范围</a></h2>
+<p>当前 SYCL 后端支持：</p>
+<ul>
+<li>Linux x86-64 平台。</li>
+<li>通过 Intel Level Zero 驱动访问的 Intel GPU，主要面向共享系统内存的 Intel iGPU。</li>
+<li>MoE expert 的对称 GPTQ INT4 权重。</li>
+<li><code>sym=true</code>、<code>desc_act=false</code>，权重包含 <code>qweight</code> 和 <code>scales</code>，不包含 <code>qzeros</code>。</li>
+<li>已重点验证 <code>group_size=128</code> 的模型。</li>
+<li>单机、<code>tensor_parallel_size=1</code>、以 batch size 1 为主的端侧推理。</li>
+</ul>
+<p>不支持把 BF16、FP8 或非对称 GPTQ 权重交给此后端。启动时必须使用：</p>
+<pre><code class="language-text">--kt-method SYCL_GPTQ_INT4
+</code></pre>
+<h2 id="硬件和软件要求"><a class="header" href="#硬件和软件要求">硬件和软件要求</a></h2>
+<ul>
+<li><strong>Intel GPU</strong>：支持 Level Zero 和 shared USM 的 Intel iGPU。</li>
+<li><strong>CUDA GPU</strong>：一张受当前 PyTorch 和 SGLang 支持的 NVIDIA GPU，用于模型的其余部分。</li>
+<li><strong>CPU</strong>：x86-64，支持 AVX2 和 FMA。</li>
+<li><strong>系统内存</strong>：至少能够容纳模型权重、KV Cache 和 iGPU 运行缓冲区。iGPU 会与 CPU 共享系统内存带宽。</li>
+<li><strong>操作系统</strong>：Linux。</li>
+<li><strong>Intel oneAPI</strong>：需要包含 <code>icpx</code>、SYCL runtime 和 <code>sycl-ls</code> 的 oneAPI Base Toolkit。</li>
+<li><strong>Intel GPU 驱动</strong>：需要安装 Level Zero 用户态驱动。</li>
+<li><strong>CUDA Toolkit</strong>：当前 SYCL 构建仍需要 CUDA runtime 提供 SGLang 与 CPUInfer 之间的 host callback 调度。</li>
+</ul>
+<p>先确认 Intel GPU 能被 SYCL 正常识别：</p>
+<pre><code class="language-bash">source /opt/intel/oneapi/setvars.sh
+sycl-ls
+</code></pre>
+<p>输出中应当能看到类似下面的 Level Zero GPU：</p>
+<pre><code class="language-text">[level_zero:gpu:0] ...
+</code></pre>
+<p>还需要确认当前用户可以读写 GPU render node：</p>
+<pre><code class="language-bash">ls -l /dev/dri/renderD*
+groups
+</code></pre>
+<p>如果当前用户不在 <code>render</code> 用户组中，可以执行：</p>
+<pre><code class="language-bash">sudo usermod -aG render "$USER"
+</code></pre>
+<p>修改用户组后需要注销并重新登录。</p>
+<h2 id="安装-1"><a class="header" href="#安装-1">安装</a></h2>
+<p>从源码构建时，<code>CPUINFER_USE_SYCL</code> 默认关闭，需要显式设置为 <code>1</code>：</p>
+<pre><code class="language-bash">git clone https://github.com/kvcache-ai/ktransformers.git
+cd ktransformers
+git submodule update --init --recursive
+
+source /opt/intel/oneapi/setvars.sh
+CPUINFER_USE_SYCL=1 ./install.sh
+</code></pre>
+<p>安装脚本会使用 <code>icpx</code> 构建 SYCL GPTQ INT4 后端。普通的 CPU/CUDA 构建不需要 oneAPI；只有启用 <code>CPUINFER_USE_SYCL=1</code> 时才需要上述环境。</p>
+<p>SYCL、CUDA、ROCm、MUSA 和 MACA 是互斥的 kt-kernel 编译后端。如果当前 shell 曾经显式设置过其他后端，请先取消对应变量，例如：</p>
+<pre><code class="language-bash">unset CPUINFER_USE_CUDA CPUINFER_USE_ROCM CPUINFER_USE_MUSA CPUINFER_USE_MACA
+</code></pre>
+<p>未显式设置 <code>CPUINFER_USE_CUDA</code> 时不需要手动取消，安装脚本会在启用 SYCL 后端时自动关闭 CUDA kernel 后端。CUDA Toolkit 仍会用于链接 host callback 所需的 <code>cudart</code>。</p>
+<h2 id="验证安装"><a class="header" href="#验证安装">验证安装</a></h2>
+<p>安装完成后，检查 Python 扩展是否包含 SYCL 后端：</p>
+<pre><code class="language-bash">source /opt/intel/oneapi/setvars.sh
+python -c "import kt_kernel_ext.moe as moe; print(hasattr(moe, 'SYCLGPTQInt4_MOE'))"
+</code></pre>
+<p>预期输出：</p>
+<pre><code class="language-text">True
+</code></pre>
+<p>如果机器上存在多个 SYCL GPU，可以在启动服务前指定设备：</p>
+<pre><code class="language-bash">export ONEAPI_DEVICE_SELECTOR=level_zero:0
+</code></pre>
+<p>只有一个可用 Intel GPU 时通常不需要设置该变量，后端会优先选择 Level Zero GPU。</p>
+<h2 id="下载模型"><a class="header" href="#下载模型">下载模型</a></h2>
+<p>下面使用 <code>Qwen3.5-35B-A3B-GPTQ-Int4</code> 作为示例：</p>
+<pre><code class="language-bash">huggingface-cli download Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 \
+  --local-dir /path/to/Qwen3.5-35B-A3B-GPTQ-Int4
+</code></pre>
+<p>使用其他模型时，请先确认它是 MoE 模型，并且 GPTQ 配置为 <code>sym=true</code>、<code>desc_act=false</code>。目前推荐使用已经验证过的 <code>group_size=128</code> 权重。</p>
+<h2 id="启动推理服务-1"><a class="header" href="#启动推理服务-1">启动推理服务</a></h2>
+<p>下面的命令面向单用户、batch size 1 的端侧推理。请将模型路径和显存相关参数改为适合本机的值：</p>
+<pre><code class="language-bash">source /opt/intel/oneapi/setvars.sh
+
+SGLANG_MAMBA_CONV_DTYPE=float16 \
+python -m sglang.launch_server \
+  --host 0.0.0.0 \
+  --port 30000 \
+  --model /path/to/Qwen3.5-35B-A3B-GPTQ-Int4 \
+  --kt-weight-path /path/to/Qwen3.5-35B-A3B-GPTQ-Int4 \
+  --served-model-name qwen3.5 \
+  --tensor-parallel-size 1 \
+  --trust-remote-code \
+  --dtype float16 \
+  --attention-backend triton \
+  --mem-fraction-static 0.90 \
+  --max-running-requests 1 \
+  --max-total-tokens 32000 \
+  --max-prefill-tokens 16000 \
+  --chunked-prefill-size 4096 \
+  --watchdog-timeout 1200 \
+  --kt-method SYCL_GPTQ_INT4 \
+  --kt-cpuinfer 8 \
+  --kt-threadpool-count 1 \
+  --kt-num-gpu-experts 24 \
+  --disable-shared-experts-fusion \
+  --disable-cuda-graph
+</code></pre>
+<p>正常使用时不需要关闭 radix cache。<code>--disable-radix-cache</code> 主要用于确保每次请求都执行完整 prefill 的性能测试，不建议加入日常启动命令。</p>
+<h2 id="发送请求-1"><a class="header" href="#发送请求-1">发送请求</a></h2>
+<p>服务启动后，可以通过 OpenAI 兼容接口发送请求：</p>
+<pre><code class="language-bash">curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.5",
+    "stream": false,
+    "messages": [
+      {"role": "user", "content": "你好，请介绍一下你自己。"}
+    ]
+  }'
+</code></pre>
+<h2 id="参数说明"><a class="header" href="#参数说明">参数说明</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>参数</th><th>说明</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--kt-method SYCL_GPTQ_INT4</code></td><td>让未放在 CUDA GPU 上的 GPTQ INT4 experts 使用 SYCL 后端。</td></tr>
+<tr><td><code>--kt-num-gpu-experts</code></td><td>保留在 CUDA GPU 上的 experts 数量。增大该值会增加 CUDA 显存占用，但减少 iGPU 的计算量。</td></tr>
+<tr><td><code>--kt-cpuinfer</code></td><td>CPUInfer 的 host worker 数量。示例中的 <code>8</code> 是一个保守起点，可根据 CPU 核心数测试调整。</td></tr>
+<tr><td><code>--kt-threadpool-count</code></td><td>CPUInfer thread pool 数量。单 NUMA 节点通常设置为 <code>1</code>。</td></tr>
+<tr><td><code>--chunked-prefill-size</code></td><td>prefill 分块大小。值过大会增加显存和系统内存压力。</td></tr>
+<tr><td><code>--max-running-requests 1</code></td><td>适合端侧单用户场景，也是当前 SYCL 后端的主要优化目标。</td></tr>
+<tr><td><code>--disable-cuda-graph</code></td><td>当前异构路径包含 CUDA host callback 和外部 SYCL queue，使用 CUDA Graph 可能无法正确覆盖这段调度，因此当前推荐关闭。</td></tr>
+</tbody>
+</table>
+</div>
+<p>SYCL kernel 的 tile、subgroup 和 prefill 阈值已经使用当前验证过的默认值，不需要额外设置调试或调优环境变量。</p>
+<h2 id="常见问题-1"><a class="header" href="#常见问题-1">常见问题</a></h2>
+<h3 id="提示-sycl_gptq_int4-backend-not-available"><a class="header" href="#提示-sycl_gptq_int4-backend-not-available">提示 <code>SYCL_GPTQ_INT4 backend not available</code></a></h3>
+<p>当前安装没有包含 SYCL 扩展。重新加载 oneAPI 环境并构建：</p>
+<pre><code class="language-bash">source /opt/intel/oneapi/setvars.sh
+CPUINFER_USE_SYCL=1 ./install.sh
+</code></pre>
+<h3 id="找不到-icpx-或-sycl-ls"><a class="header" href="#找不到-icpx-或-sycl-ls">找不到 <code>icpx</code> 或 <code>sycl-ls</code></a></h3>
+<p>确认已经安装 Intel oneAPI Base Toolkit，并在当前 shell 执行：</p>
+<pre><code class="language-bash">source /opt/intel/oneapi/setvars.sh
+</code></pre>
+<h3 id="无法访问-devdrirenderd"><a class="header" href="#无法访问-devdrirenderd">无法访问 <code>/dev/dri/renderD*</code></a></h3>
+<p>将当前用户加入 <code>render</code> 用户组，注销并重新登录。不要通过长期设置 <code>chmod 666</code> 绕过设备权限。</p>
+<h3 id="提示没有可用的-sycl-gpu"><a class="header" href="#提示没有可用的-sycl-gpu">提示没有可用的 SYCL GPU</a></h3>
+<p>先运行 <code>sycl-ls</code> 检查 Level Zero GPU。如果存在多个设备，可以显式选择：</p>
+<pre><code class="language-bash">export ONEAPI_DEVICE_SELECTOR=level_zero:0
+</code></pre>
+<h3 id="cmake-找不到-cuda-toolkit"><a class="header" href="#cmake-找不到-cuda-toolkit">CMake 找不到 CUDA Toolkit</a></h3>
+<p>当前 SYCL 后端仍需要 <code>cudart</code> 完成 host callback 调度。确认 CUDA Toolkit 已安装；如果不在默认路径，可以设置：</p>
+<pre><code class="language-bash">export CUDA_HOME=/usr/local/cuda
+</code></pre>
+<p>然后重新运行安装命令。</p>
+<h3 id="提示多个-gpu-backend-同时启用"><a class="header" href="#提示多个-gpu-backend-同时启用">提示多个 GPU backend 同时启用</a></h3>
+<p>SYCL 与 kt-kernel 的其他 GPU 编译后端互斥。检查并取消之前显式设置的 <code>CPUINFER_USE_CUDA=1</code>、<code>CPUINFER_USE_ROCM=1</code> 等变量。</p>
+<h3 id="模型提示-qzerossymfalse-或-desc_acttrue-不受支持"><a class="header" href="#模型提示-qzerossymfalse-或-desc_acttrue-不受支持">模型提示 <code>qzeros</code>、<code>sym=false</code> 或 <code>desc_act=true</code> 不受支持</a></h3>
+<p>当前后端只支持对称 GPTQ INT4：<code>sym=true</code>、<code>desc_act=false</code>，且不使用 <code>qzeros</code>。需要更换为兼容的模型权重。</p>
+<h3 id="cuda-显存不足"><a class="header" href="#cuda-显存不足">CUDA 显存不足</a></h3>
+<ul>
+<li>降低 <code>--kt-num-gpu-experts</code>。</li>
+<li>降低 <code>--mem-fraction-static</code>、<code>--max-total-tokens</code> 或 <code>--chunked-prefill-size</code>。</li>
+<li>降低 <code>--kt-num-gpu-experts</code> 会把更多 expert 计算交给 iGPU，可能降低速度并增加系统内存带宽压力。</li>
+</ul>
+<h3 id="igpu-性能不稳定"><a class="header" href="#igpu-性能不稳定">iGPU 性能不稳定</a></h3>
+<ul>
+<li>确认系统处于高性能电源模式，并避免同时运行占用 iGPU 的桌面或视频任务。</li>
+<li>iGPU 与 CPU 共享内存带宽，双通道或更高带宽的内存通常有明显帮助。</li>
+<li>首次请求包含权重准备和运行时预热，性能比较应在 warmup 后进行。</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="frequently-asked-questions"><a class="header" href="#frequently-asked-questions">Frequently Asked Questions</a></h1>
 <h2 id="1-sglang-using-default-moe-kernel-config-warning-at-startup"><a class="header" href="#1-sglang-using-default-moe-kernel-config-warning-at-startup">1. SGLang “Using default MoE kernel config” warning at startup</a></h2>
