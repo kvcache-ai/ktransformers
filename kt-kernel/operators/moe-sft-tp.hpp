@@ -369,80 +369,112 @@ class TP_MOE_SFT : public TP_MOE<T> {
         throw std::runtime_error("K2 pre-quantized mode does not support TP > 1 yet");
       }
     } else if (config.gate_proj != nullptr) {
-      // printf("TP_MOE_SFT: From BF16 with partitioning\n");
-      auto reload_stage_start = profiler_.start();
-
-      // Temporary storage for partitioned weights
-      std::vector<ggml_bf16_t*> temp_gate(tp_count);
-      std::vector<ggml_bf16_t*> temp_up(tp_count);
-      std::vector<ggml_bf16_t*> temp_down(tp_count);
-
-      // Step 1: For each NUMA, allocate and copy partitioned weights
-      for (int i = 0; i < tp_count; i++) {
-        // Use tp_configs[i] instead of tps[i]->config_ (which is protected)
-        auto& tpc = tp_configs[i];
-        size_t gate_up_elcount = (size_t)tpc.intermediate_size * tpc.hidden_size;
-
-        // Allocate partitioned weight space
-        temp_gate[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-        temp_up[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-        temp_down[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
-
-        // Copy partitioned weights
-        pool->get_subpool(i)->do_work_stealing_job(
-            tpc.expert_num, nullptr,
-            [&, i, gate_up_elcount](int expert_id_) {
-              size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
-
-              // gate_proj/up_proj: [intermediate_size, hidden_size] - contiguous block slice
-              memcpy(temp_gate[i] + expert_id * gate_up_elcount,
-                     (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
-                         i * gate_up_elcount,
-                     sizeof(ggml_bf16_t) * gate_up_elcount);
-
-              memcpy(temp_up[i] + expert_id * gate_up_elcount,
-                     (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
-                         i * gate_up_elcount,
-                     sizeof(ggml_bf16_t) * gate_up_elcount);
-
-              // down_proj: [hidden_size, intermediate_size] - row-wise slice
-              for (size_t col = 0; col < config.hidden_size; col++) {
-                memcpy(temp_down[i] + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
-                       (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
-                           col * config.intermediate_size + i * tpc.intermediate_size,
-                       sizeof(ggml_bf16_t) * tpc.intermediate_size);
-              }
-            },
-            nullptr);
-      }
-      profiler_.record(SFTProfileStage::BaseWeightReloadPartition, reload_stage_start);
-
-      // Step 2: Set weight pointers BEFORE load_weights (Bug #24 fix)
-      reload_stage_start = profiler_.start();
-      for (int i = 0; i < tp_count; i++) {
-        tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
-        tps[i]->set_weight_pointers_for_forward(temp_gate[i], temp_up[i], temp_down[i]);
-      }
-
-      pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
-      profiler_.record(SFTProfileStage::BaseWeightReloadForwardPack, reload_stage_start);
-
-      // Step 3: Prepare backward weights (this also clears weight pointers)
-      reload_stage_start = profiler_.start();
-      for (int i = 0; i < tp_count; i++) {
-        if (!config.share_backward_bb) {
-          tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
+      if constexpr (T::kSupportsDirectBf16Reload) {
+        std::vector<int> intermediate_offsets(tp_count);
+        int intermediate_offset = 0;
+        for (int i = 0; i < tp_count; ++i) {
+          const auto& tpc = tp_configs[i];
+          if (tpc.hidden_size != config.hidden_size || tpc.expert_num != config.expert_num) {
+            throw std::runtime_error("incompatible TP config for direct BF16 reload");
+          }
+          intermediate_offsets[i] = intermediate_offset;
+          intermediate_offset += tpc.intermediate_size;
+          tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
         }
-      }
-      profiler_.record(SFTProfileStage::BaseWeightReloadBackwardPack, reload_stage_start);
+        if (intermediate_offset != config.intermediate_size) {
+          throw std::runtime_error("TP intermediate slices do not cover the full BF16 weight");
+        }
 
-      reload_stage_start = profiler_.start();
-      for (int i = 0; i < tp_count; i++) {
-        delete[] (temp_gate[i]);
-        delete[] (temp_up[i]);
-        delete[] (temp_down[i]);
+        auto reload_stage_start = profiler_.start();
+        pool->dispense_backend()->do_numa_job([&, this](int numa_id) {
+          tps[numa_id]->load_forward_weights_from_full_bf16(config.gate_proj, config.up_proj, config.down_proj,
+                                                            config.intermediate_size, intermediate_offsets[numa_id]);
+        });
+        profiler_.record(SFTProfileStage::BaseWeightReloadDirectPack, reload_stage_start);
+
+        if (!config.share_backward_bb) {
+          reload_stage_start = profiler_.start();
+          pool->dispense_backend()->do_numa_job(
+              [this](int numa_id) { tps[numa_id]->prepare_backward_weights_from_forward(); });
+          profiler_.record(SFTProfileStage::BaseWeightReloadBackwardPack, reload_stage_start);
+        }
+      } else {
+        // printf("TP_MOE_SFT: From BF16 with partitioning\n");
+        auto reload_stage_start = profiler_.start();
+
+        // Temporary storage for partitioned weights
+        std::vector<ggml_bf16_t*> temp_gate(tp_count);
+        std::vector<ggml_bf16_t*> temp_up(tp_count);
+        std::vector<ggml_bf16_t*> temp_down(tp_count);
+
+        // Step 1: For each NUMA, allocate and copy partitioned weights
+        for (int i = 0; i < tp_count; i++) {
+          // Use tp_configs[i] instead of tps[i]->config_ (which is protected)
+          auto& tpc = tp_configs[i];
+          size_t gate_up_elcount = (size_t)tpc.intermediate_size * tpc.hidden_size;
+
+          // Allocate partitioned weight space
+          temp_gate[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+          temp_up[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+          temp_down[i] = new ggml_bf16_t[tpc.expert_num * gate_up_elcount];
+
+          // Copy partitioned weights
+          pool->get_subpool(i)->do_work_stealing_job(
+              tpc.expert_num, nullptr,
+              [&, i, gate_up_elcount](int expert_id_) {
+                size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
+
+                // gate_proj/up_proj: [intermediate_size, hidden_size] - contiguous block slice
+                memcpy(temp_gate[i] + expert_id * gate_up_elcount,
+                       (ggml_bf16_t*)config.gate_proj + expert_id * config.intermediate_size * config.hidden_size +
+                           i * gate_up_elcount,
+                       sizeof(ggml_bf16_t) * gate_up_elcount);
+
+                memcpy(temp_up[i] + expert_id * gate_up_elcount,
+                       (ggml_bf16_t*)config.up_proj + expert_id * config.intermediate_size * config.hidden_size +
+                           i * gate_up_elcount,
+                       sizeof(ggml_bf16_t) * gate_up_elcount);
+
+                // down_proj: [hidden_size, intermediate_size] - row-wise slice
+                for (size_t col = 0; col < config.hidden_size; col++) {
+                  memcpy(
+                      temp_down[i] + expert_id * tpc.hidden_size * tpc.intermediate_size + col * tpc.intermediate_size,
+                      (ggml_bf16_t*)config.down_proj + expert_id * config.intermediate_size * config.hidden_size +
+                          col * config.intermediate_size + i * tpc.intermediate_size,
+                      sizeof(ggml_bf16_t) * tpc.intermediate_size);
+                }
+              },
+              nullptr);
+        }
+        profiler_.record(SFTProfileStage::BaseWeightReloadPartition, reload_stage_start);
+
+        // Step 2: Set weight pointers BEFORE load_weights (Bug #24 fix)
+        reload_stage_start = profiler_.start();
+        for (int i = 0; i < tp_count; i++) {
+          tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+          tps[i]->set_weight_pointers_for_forward(temp_gate[i], temp_up[i], temp_down[i]);
+        }
+
+        pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+        profiler_.record(SFTProfileStage::BaseWeightReloadForwardPack, reload_stage_start);
+
+        // Step 3: Prepare backward weights (this also clears weight pointers)
+        reload_stage_start = profiler_.start();
+        for (int i = 0; i < tp_count; i++) {
+          if (!config.share_backward_bb) {
+            tps[i]->prepare_bwd(temp_gate[i], temp_up[i], temp_down[i]);
+          }
+        }
+        profiler_.record(SFTProfileStage::BaseWeightReloadBackwardPack, reload_stage_start);
+
+        reload_stage_start = profiler_.start();
+        for (int i = 0; i < tp_count; i++) {
+          delete[] (temp_gate[i]);
+          delete[] (temp_up[i]);
+          delete[] (temp_down[i]);
+        }
+        profiler_.record(SFTProfileStage::BaseWeightReloadCleanup, reload_stage_start);
       }
-      profiler_.record(SFTProfileStage::BaseWeightReloadCleanup, reload_stage_start);
     } else {
       // Other loading methods (from loader or file)
       for (int i = 0; i < tp_count; i++) {

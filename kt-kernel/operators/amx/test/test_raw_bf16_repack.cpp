@@ -30,6 +30,11 @@ void from_mat(BufferB& buffer, ggml_bf16_t* source) {
   for (int ith = 0; ith < nth; ith++) buffer.from_mat(source, ith, nth);
 }
 
+void from_mat_strided(BufferB& buffer, ggml_bf16_t* source, int source_stride) {
+  int nth = Kernel::recommended_nth(buffer.n);
+  for (int ith = 0; ith < nth; ith++) buffer.from_mat_strided(source, source_stride, ith, nth);
+}
+
 void to_mat(const BufferB& buffer, ggml_bf16_t* destination) {
   int nth = Kernel::recommended_nth(buffer.n);
   for (int ith = 0; ith < nth; ith++) buffer.to_mat(destination, ith, nth);
@@ -87,6 +92,34 @@ bool run_case(int n, int k) {
   return roundtrip_ok && transpose_ok && direct_ok;
 }
 
+bool run_strided_case(int n, int k, int source_stride, size_t source_offset) {
+  const size_t source_count = source_offset + (size_t)(n - 1) * source_stride + k;
+  const size_t output_count = (size_t)n * k;
+  std::vector<ggml_bf16_t> source(source_count);
+  std::vector<ggml_bf16_t> output(output_count);
+  fill_random(source, (unsigned)(n * 17 + k * 13 + source_stride));
+
+  void* memory = alloc_buffer(BufferB::required_size(n, k));
+  BufferB packed(n, k, memory);
+  from_mat_strided(packed, source.data() + source_offset, source_stride);
+  to_mat(packed, output.data());
+
+  bool passed = true;
+  for (int row = 0; row < n && passed; row++) {
+    for (int column = 0; column < k; column++) {
+      if (source[source_offset + (size_t)row * source_stride + column].bits != output[(size_t)row * k + column].bits) {
+        passed = false;
+        break;
+      }
+    }
+  }
+
+  std::free(memory);
+  std::printf("raw BF16 strided repack %dx%d stride=%d offset=%zu: %s\n", n, k, source_stride, source_offset,
+              passed ? "PASS" : "FAIL");
+  return passed;
+}
+
 }  // namespace
 
 int main() {
@@ -94,5 +127,7 @@ int main() {
   passed = run_case(64, 64) && passed;
   passed = run_case(768, 2048) && passed;
   passed = run_case(2048, 768) && passed;
+  passed = run_strided_case(64, 64, 64, 32 * 64) && passed;
+  passed = run_strided_case(64, 64, 96, 17) && passed;
   return passed ? 0 : 1;
 }

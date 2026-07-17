@@ -29,6 +29,7 @@
 #include "../../cpu_backend/worker_pool.h"
 #include "../sft_profile.hpp"
 #include "ggml.h"
+#include "la/bf16_dweight.hpp"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "la/avx_kernels.hpp"
@@ -362,6 +363,7 @@ template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = 
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
+  static constexpr bool kSupportsDirectBf16Reload = std::is_same_v<T, amx::GemmKernel224BF16>;
 
  protected:
   using Base = BaseMOE<T>;
@@ -2004,15 +2006,135 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     std::vector<size_t> expert_offsets(activated_expert);
     size_t token_offset = 0;
+    int max_routes = 0;
     for (int task_id = 0; task_id < activated_expert; task_id++) {
       expert_offsets[task_id] = token_offset;
       int expert_idx = cache.m_expert_id_map_cache[task_id];
-      token_offset += cache.m_local_num_cache[expert_idx];
+      const int routes = cache.m_local_num_cache[expert_idx];
+      token_offset += routes;
+      max_routes = std::max(max_routes, routes);
     }
     profiler_.record(SFTProfileStage::BwdBaseWeightGradOffsets, stage_start);
 
-    if constexpr ((std::is_same_v<T, amx::GemmKernel224BF> || std::is_same_v<T, amx::GemmKernel224BF16>) &&
-                  amx::AMX_AVAILABLE) {
+    if constexpr (std::is_same_v<T, amx::GemmKernel224BF16>) {
+      using DWeightKernel = amx::BF16DWeightKernel;
+      constexpr int TILE_M = DWeightKernel::M_STEP;
+      constexpr int TILE_N = DWeightKernel::N_STEP;
+      const int i_tiles = (I + TILE_M - 1) / TILE_M;
+      const int h_tiles = (H + TILE_N - 1) / TILE_N;
+      const int tasks_per_expert = i_tiles * 2;
+      const int total_tasks = activated_expert * tasks_per_expert;
+      const int max_padded_k = DWeightKernel::padded_k(max_routes);
+      auto pool = config_.pool->get_subpool(tp_part_idx);
+      const bool profile_inner = profiler_.enabled();
+
+      stage_start = profiler_.start();
+      if (total_tasks > 0) {
+        pool->do_work_stealing_job(
+            total_tasks,
+            [max_padded_k](int _) {
+              DWeightKernel::configure_worker();
+              amx::bf16_dweight_scratch().ensure(max_padded_k);
+              amx::bf16_dweight_timings().reset();
+            },
+            [&, i_tiles, h_tiles, tasks_per_expert](int task_id) {
+              const int expert_task = task_id / tasks_per_expert;
+              const int local_task = task_id % tasks_per_expert;
+              const bool do_down = local_task >= i_tiles;
+              const int i_tile = local_task % i_tiles;
+              const int expert_idx = cache.m_expert_id_map_cache[expert_task];
+              const int routes = cache.m_local_num_cache[expert_idx];
+              if (routes == 0) return;
+
+              const size_t pos_start = expert_offsets[expert_task];
+              const int padded_k = DWeightKernel::padded_k(routes);
+              const int i_start = i_tile * TILE_M;
+              const int i_count = std::min(TILE_M, I - i_start);
+              auto& scratch = amx::bf16_dweight_scratch();
+              auto& timings = amx::bf16_dweight_timings();
+              typename DWeightKernel::BufferA a0(TILE_M, padded_k, scratch.a0());
+              typename DWeightKernel::BufferA a1(TILE_M, padded_k, scratch.a1());
+              typename DWeightKernel::BufferB b(TILE_N, padded_k, scratch.b());
+
+              auto profile_operation = [profile_inner](uint64_t& elapsed_ns, uint64_t& calls, auto&& operation) {
+                if (!profile_inner) {
+                  operation();
+                  return;
+                }
+                const auto begin = SFTProfiler::Clock::now();
+                operation();
+                elapsed_ns += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(SFTProfiler::Clock::now() - begin).count());
+                calls++;
+              };
+
+              if (do_down) {
+                const ggml_bf16_t* grad_output = base_grad_output_bf16_ptr_[expert_idx];
+                const ggml_bf16_t* intermediate = cache.intermediate_cache + pos_start * I;
+                profile_operation(timings.pack_b_ns, timings.pack_b_calls, [&] {
+                  DWeightKernel::pack_b_transposed(b, intermediate, I, i_start, i_count, routes);
+                });
+
+                ggml_bf16_t* down_dst = gdp + static_cast<size_t>(expert_idx) * H * F;
+                for (int h_tile = 0; h_tile < h_tiles; ++h_tile) {
+                  const int h_start = h_tile * TILE_M;
+                  const int h_count = std::min(TILE_M, H - h_start);
+                  profile_operation(timings.pack_a_ns, timings.pack_a_calls, [&] {
+                    DWeightKernel::pack_a_transposed(a0, grad_output, H, h_start, h_count, routes);
+                  });
+                  profile_operation(timings.kernel_down_ns, timings.kernel_down_calls,
+                                    [&] { DWeightKernel::multiply(padded_k, scratch.c0(), a0, b); });
+                  profile_operation(timings.store_ns, timings.store_calls, [&] {
+                    DWeightKernel::store_bf16(scratch.c0(), down_dst + static_cast<size_t>(h_start) * F + i_start, F,
+                                              h_count, i_count);
+                  });
+                }
+                return;
+              }
+
+              const ggml_bf16_t* gate_grad = grad_gate_output_ + pos_start * I;
+              const ggml_bf16_t* up_grad = grad_up_output_ + pos_start * I;
+              profile_operation(timings.pack_a_ns, timings.pack_a_calls, [&] {
+                DWeightKernel::pack_a_transposed(a0, gate_grad, I, i_start, i_count, routes);
+                DWeightKernel::pack_a_transposed(a1, up_grad, I, i_start, i_count, routes);
+              });
+
+              const ggml_bf16_t* input = m_local_input_ptr_[expert_idx];
+              ggml_bf16_t* gate_dst = ggp + static_cast<size_t>(expert_idx) * F * H;
+              ggml_bf16_t* up_dst = gup_ptr + static_cast<size_t>(expert_idx) * F * H;
+              for (int h_tile = 0; h_tile < h_tiles; ++h_tile) {
+                const int h_start = h_tile * TILE_N;
+                const int h_count = std::min(TILE_N, H - h_start);
+                profile_operation(timings.pack_b_ns, timings.pack_b_calls,
+                                  [&] { DWeightKernel::pack_b_transposed(b, input, H, h_start, h_count, routes); });
+                profile_operation(timings.kernel_gate_up_ns, timings.kernel_gate_up_calls, [&] {
+                  DWeightKernel::multiply(padded_k, scratch.c0(), a0, b);
+                  DWeightKernel::multiply(padded_k, scratch.c1(), a1, b);
+                });
+                profile_operation(timings.store_ns, timings.store_calls, [&] {
+                  DWeightKernel::store_bf16(scratch.c0(), gate_dst + static_cast<size_t>(i_start) * H + h_start, H,
+                                            i_count, h_count);
+                  DWeightKernel::store_bf16(scratch.c1(), up_dst + static_cast<size_t>(i_start) * H + h_start, H,
+                                            i_count, h_count);
+                });
+              }
+            },
+            [this](int _) {
+              auto& timings = amx::bf16_dweight_timings();
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradPackA, timings.pack_a_ns, timings.pack_a_calls);
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradPackB, timings.pack_b_ns, timings.pack_b_calls);
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradKernelGateUp, timings.kernel_gate_up_ns,
+                                  timings.kernel_gate_up_calls);
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradKernelDown, timings.kernel_down_ns,
+                                  timings.kernel_down_calls);
+              profiler_.record_ns(SFTProfileStage::BwdBaseWeightGradStore, timings.store_ns, timings.store_calls);
+            });
+      }
+      profiler_.record(SFTProfileStage::BwdBaseWeightGradMatMat, stage_start);
+      return;
+    }
+
+    if constexpr (std::is_same_v<T, amx::GemmKernel224BF> && amx::AMX_AVAILABLE) {
       constexpr int TILE_M = T::M_STEP;
       constexpr int TILE_N = T::N_STEP;
       constexpr int TILE_K = T::K_STEP;
@@ -2675,6 +2797,54 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         nullptr);
 
     backward_weights_prepared_ = true;
+  }
+
+  void load_forward_weights_from_full_bf16(void* gate_proj, void* up_proj, void* down_proj, int full_intermediate_size,
+                                           int intermediate_offset) {
+    if constexpr (!kSupportsDirectBf16Reload) {
+      throw std::runtime_error("direct BF16 reload requires GemmKernel224BF16");
+    } else {
+      const int H = config_.hidden_size;
+      const int I = config_.intermediate_size;
+      if (gate_proj == nullptr || up_proj == nullptr || down_proj == nullptr) {
+        throw std::runtime_error("direct BF16 reload requires all three base weights");
+      }
+      if (intermediate_offset < 0 || full_intermediate_size < intermediate_offset + I) {
+        throw std::runtime_error("invalid TP slice for direct BF16 reload");
+      }
+
+      const auto* physical_to_logical_map = static_cast<const uint64_t*>(config_.physical_to_logical_map);
+      auto* gate = static_cast<ggml_bf16_t*>(gate_proj);
+      auto* up = static_cast<ggml_bf16_t*>(up_proj);
+      auto* down = static_cast<ggml_bf16_t*>(down_proj);
+      auto pool = config_.pool->get_subpool(tp_part_idx);
+
+      const int gate_up_nth = T::recommended_nth(I);
+      pool->do_work_stealing_job(
+          gate_up_nth * config_.expert_num, nullptr,
+          [&, gate_up_nth, physical_to_logical_map](int task_id) {
+            const int physical_expert = task_id / gate_up_nth;
+            const int ith = task_id % gate_up_nth;
+            const size_t logical_expert = expert_map(physical_to_logical_map, physical_expert);
+            const size_t source_offset =
+                logical_expert * full_intermediate_size * H + static_cast<size_t>(intermediate_offset) * H;
+            gate_bb_[physical_expert]->from_mat_strided(gate + source_offset, H, ith, gate_up_nth);
+            up_bb_[physical_expert]->from_mat_strided(up + source_offset, H, ith, gate_up_nth);
+          },
+          nullptr);
+
+      const int down_nth = T::recommended_nth(H);
+      pool->do_work_stealing_job(
+          down_nth * config_.expert_num, nullptr,
+          [&, down_nth, physical_to_logical_map](int task_id) {
+            const int physical_expert = task_id / down_nth;
+            const int ith = task_id % down_nth;
+            const size_t logical_expert = expert_map(physical_to_logical_map, physical_expert);
+            const size_t source_offset = logical_expert * H * full_intermediate_size + intermediate_offset;
+            down_bb_[physical_expert]->from_mat_strided(down + source_offset, full_intermediate_size, ith, down_nth);
+          },
+          nullptr);
+    }
   }
 
   /**

@@ -160,6 +160,15 @@ struct BufferBBF16Impl {
     pack_block(src + n_block_begin * k, k, n_block_begin, n_block_size);
   }
 
+  void from_mat_strided(ggml_bf16_t* src, int src_stride, int ith, int nth) {
+    assert(src_stride >= k);
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+    pack_block(src + (size_t)n_block_begin * src_stride, src_stride, n_block_begin, n_block_size);
+  }
+
   void from_mat_transposed(ggml_bf16_t* src, int src_n, int src_k, int ith, int nth) {
     assert(n == src_k && k == src_n);
     auto [n_start, n_end] = K::split_range_n(n, ith, nth);

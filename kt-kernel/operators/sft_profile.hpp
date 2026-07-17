@@ -51,6 +51,11 @@ enum class SFTProfileStage : uint8_t {
   BwdRouterGrad,
   BwdBaseWeightGrad,
   BwdBaseWeightGradOffsets,
+  BwdBaseWeightGradMatMat,
+  BwdBaseWeightGradPackA,
+  BwdBaseWeightGradPackB,
+  BwdBaseWeightGradKernelGateUp,
+  BwdBaseWeightGradKernelDown,
   BwdBaseWeightGradAmx,
   BwdBaseWeightGradZero,
   BwdBaseWeightGradGateUp,
@@ -71,6 +76,7 @@ enum class SFTProfileStage : uint8_t {
   BaseWeightReload,
   BaseWeightReloadPartition,
   BaseWeightReloadForwardPack,
+  BaseWeightReloadDirectPack,
   BaseWeightReloadBackwardPack,
   BaseWeightReloadCleanup,
 
@@ -112,6 +118,11 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "backward.router_grad",
     "backward.base_weight_grad",
     "backward.base_weight_grad.offsets",
+    "backward.base_weight_grad.matmat",
+    "backward.base_weight_grad.worker_cpu.pack_a",
+    "backward.base_weight_grad.worker_cpu.pack_b",
+    "backward.base_weight_grad.worker_cpu.kernel_gate_up",
+    "backward.base_weight_grad.worker_cpu.kernel_down",
     "backward.base_weight_grad.amx",
     "backward.base_weight_grad.zero",
     "backward.base_weight_grad.gate_up",
@@ -130,14 +141,15 @@ inline constexpr std::array<const char*, static_cast<size_t>(SFTProfileStage::Co
     "weights.base_reload",
     "weights.base_reload.partition",
     "weights.base_reload.forward_pack",
+    "weights.base_reload.direct_pack",
     "weights.base_reload.backward_pack",
     "weights.base_reload.cleanup",
 };
 
 inline bool sft_profile_enabled_from_env() {
   const char* value = std::getenv("KT_SFT_PROFILE");
-  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 &&
-         std::strcmp(value, "false") != 0 && std::strcmp(value, "False") != 0;
+  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "False") != 0;
 }
 
 class SFTProfiler {
@@ -145,9 +157,7 @@ class SFTProfiler {
   using Clock = std::chrono::steady_clock;
   using TimePoint = Clock::time_point;
 
-  explicit SFTProfiler(bool enabled = sft_profile_enabled_from_env()) : enabled_(enabled) {
-    reset();
-  }
+  explicit SFTProfiler(bool enabled = sft_profile_enabled_from_env()) : enabled_(enabled) { reset(); }
 
   bool enabled() const { return enabled_; }
 
@@ -156,9 +166,14 @@ class SFTProfiler {
   void record(SFTProfileStage stage, TimePoint start) {
     if (!enabled_) return;
     const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+    record_ns(stage, static_cast<uint64_t>(elapsed));
+  }
+
+  void record_ns(SFTProfileStage stage, uint64_t elapsed_ns, uint64_t calls = 1) {
+    if (!enabled_) return;
     const size_t idx = static_cast<size_t>(stage);
-    total_ns_[idx].fetch_add(static_cast<uint64_t>(elapsed), std::memory_order_relaxed);
-    calls_[idx].fetch_add(1, std::memory_order_relaxed);
+    total_ns_[idx].fetch_add(elapsed_ns, std::memory_order_relaxed);
+    calls_[idx].fetch_add(calls, std::memory_order_relaxed);
   }
 
   void record_workload(uint64_t tokens, uint64_t routed_rows, uint64_t active_experts) {
