@@ -11,6 +11,7 @@
   - [KT-FT 微调推理闭环](zh/Qwen3.5-SGLang-LoRA-Serving_zh.md)
   - [Injection Tutorial](en/SFT/injection_tutorial.md)
   - [kt-sft developer tech notes](en/SFT/KTransformers-Fine-Tuning_Developer-Technical-Notes.md)
+  - [Qwen3-30B-A3B BF16 Full-FT Performance](en/SFT/Qwen3-30B-A3B-Full-FT-BF16-Performance.md)
   - [DPO tutorial](en/SFT/DPO_tutorial.md)
   <!-- - [Multi-GPU Tutorial](en/multi-gpu-tutorial.md) -->
   <!-- - [Use FP8 GPU Kernel](en/fp8_kernel.md) -->
