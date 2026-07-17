@@ -28,7 +28,7 @@ class SchedulerServer:
         self.context = zmq.Context()
         self.frontend = self.context.socket(zmq.ROUTER)
         print(f"sched zmq rpc server on port {main_args.sched_port}")
-        self.frontend.bind(f"tcp://*:{main_args.sched_port}") 
+        self.frontend.bind(f"tcp://127.0.0.1:{main_args.sched_port}") 
 
         self.backend = self.context.socket(zmq.DEALER)
         self.backend.bind("inproc://backend")
