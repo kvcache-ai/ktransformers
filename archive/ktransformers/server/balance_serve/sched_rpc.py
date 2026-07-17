@@ -40,7 +40,14 @@ class SchedulerServer:
         self.context = zmq.Context()
         self.frontend = self.context.socket(zmq.ROUTER)
         print(f"sched zmq rpc server on port {main_args.sched_port}")
-        self.frontend.bind(f"tcp://*:{main_args.sched_port}") 
+        # Security: the scheduler RPC speaks pickle in both directions and has no
+        # authentication, so any peer that can reach this socket can achieve RCE
+        # via a crafted pickle payload. The protocol carries CUDA IPC tensor
+        # handles (mp.reductions.reduce_tensor) that are only valid on the same
+        # host, and SchedulerClient always connects to localhost, so this RPC is
+        # local-only by design. Bind to the loopback interface instead of all
+        # interfaces (tcp://*) so the pickle sink is never exposed to the network.
+        self.frontend.bind(f"tcp://127.0.0.1:{main_args.sched_port}")
 
         # 创建内部的 DEALER 套接字，用于与工作线程通信
         self.backend = self.context.socket(zmq.DEALER)
