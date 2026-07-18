@@ -50,6 +50,14 @@ static inline int hsum_epi32_avx2(__m256i v) {
   return _mm_cvtsi128_si32(sum);
 }
 
+// Horizontal sums of four accumulators at once: lane i of the result holds the sum of vi.
+static inline __m128i hsum4_epi32_avx2(__m256i v0, __m256i v1, __m256i v2, __m256i v3) {
+  __m256i s01 = _mm256_hadd_epi32(v0, v1);
+  __m256i s23 = _mm256_hadd_epi32(v2, v3);
+  __m256i s = _mm256_hadd_epi32(s01, s23);
+  return _mm_add_epi32(_mm256_castsi256_si128(s), _mm256_extracti128_si256(s, 1));
+}
+
 // Quantize one activation group to biased uint8 for dpbusd.
 // Returns the activation scale. A return value of 0 means the group is all zero.
 static inline float quantize_activation_group_u8(const ggml_bf16_t* src, int group_size, uint8_t* dst) {
@@ -214,6 +222,7 @@ static inline void gemm_rawint4_avxvnni256(int m, int n, int k, GemmKernelAVXVNN
   const int num_groups = b.num_groups;
 
   alignas(32) std::array<uint8_t, MAX_SUPPORTED_GROUP_SIZE> a_u8{};
+  alignas(16) int32_t dots[4];
 
   for (int mi = 0; mi < m; ++mi) {
     const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
@@ -227,7 +236,53 @@ static inline void gemm_rawint4_avxvnni256(int m, int n, int k, GemmKernelAVXVNN
         continue;
       }
 
-      for (int ni = n_start; ni < n_end; ++ni) {
+      // Four columns with two dpbusd chains each keep independent accumulators in
+      // flight; one combined reduction replaces four per-column horizontal sums.
+      int ni = n_start;
+      for (; ni + 4 <= n_end; ni += 4) {
+        const int8_t* w_col0 = b.qweight_s8 + (size_t)(ni + 0) * b.k + k_base;
+        const int8_t* w_col1 = b.qweight_s8 + (size_t)(ni + 1) * b.k + k_base;
+        const int8_t* w_col2 = b.qweight_s8 + (size_t)(ni + 2) * b.k + k_base;
+        const int8_t* w_col3 = b.qweight_s8 + (size_t)(ni + 3) * b.k + k_base;
+
+        __m256i acc0a = _mm256_setzero_si256(), acc0b = _mm256_setzero_si256();
+        __m256i acc1a = _mm256_setzero_si256(), acc1b = _mm256_setzero_si256();
+        __m256i acc2a = _mm256_setzero_si256(), acc2b = _mm256_setzero_si256();
+        __m256i acc3a = _mm256_setzero_si256(), acc3b = _mm256_setzero_si256();
+
+        int kk = 0;
+        for (; kk + 64 <= group_size; kk += 64) {
+          const __m256i a_vec0 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk));
+          const __m256i a_vec1 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk + 32));
+          acc0a = _mm256_dpbusd_avx_epi32(acc0a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col0 + kk)));
+          acc0b = _mm256_dpbusd_avx_epi32(acc0b, a_vec1, _mm256_loadu_si256((const __m256i*)(w_col0 + kk + 32)));
+          acc1a = _mm256_dpbusd_avx_epi32(acc1a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col1 + kk)));
+          acc1b = _mm256_dpbusd_avx_epi32(acc1b, a_vec1, _mm256_loadu_si256((const __m256i*)(w_col1 + kk + 32)));
+          acc2a = _mm256_dpbusd_avx_epi32(acc2a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col2 + kk)));
+          acc2b = _mm256_dpbusd_avx_epi32(acc2b, a_vec1, _mm256_loadu_si256((const __m256i*)(w_col2 + kk + 32)));
+          acc3a = _mm256_dpbusd_avx_epi32(acc3a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col3 + kk)));
+          acc3b = _mm256_dpbusd_avx_epi32(acc3b, a_vec1, _mm256_loadu_si256((const __m256i*)(w_col3 + kk + 32)));
+        }
+        if (kk < group_size) {  // group_size % 64 == 32 tail
+          const __m256i a_vec0 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk));
+          acc0a = _mm256_dpbusd_avx_epi32(acc0a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col0 + kk)));
+          acc1a = _mm256_dpbusd_avx_epi32(acc1a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col1 + kk)));
+          acc2a = _mm256_dpbusd_avx_epi32(acc2a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col2 + kk)));
+          acc3a = _mm256_dpbusd_avx_epi32(acc3a, a_vec0, _mm256_loadu_si256((const __m256i*)(w_col3 + kk)));
+        }
+
+        const __m128i sums = hsum4_epi32_avx2(_mm256_add_epi32(acc0a, acc0b), _mm256_add_epi32(acc1a, acc1b),
+                                              _mm256_add_epi32(acc2a, acc2b), _mm256_add_epi32(acc3a, acc3b));
+        _mm_store_si128((__m128i*)dots, sums);
+
+        for (int col = 0; col < 4; ++col) {
+          const int nc = ni + col;
+          const int dot = dots[col] - 128 * (int)b.weight_sums[(size_t)nc * num_groups + g];
+          c_row[nc] += (float)dot * a_scale * b.scales[(size_t)nc * num_groups + g];
+        }
+      }
+
+      for (; ni < n_end; ++ni) {
         __m256i acc = _mm256_setzero_si256();
         const int8_t* w_col = b.qweight_s8 + (size_t)ni * b.k + k_base;
         for (int kk = 0; kk < group_size; kk += 32) {
