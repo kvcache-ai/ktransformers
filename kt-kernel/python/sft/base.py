@@ -420,10 +420,10 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self.up_proj_buf = nn.Parameter(up_proj.to(dtype=dtype, device="cpu").contiguous(), requires_grad=True)
         self.down_proj_buf = nn.Parameter(down_proj.to(dtype=dtype, device="cpu").contiguous(), requires_grad=True)
 
-        # Create gradient buffers (C++ writes directly to these)
-        self.grad_gate_proj_buf = torch.zeros(E, I, H, dtype=dtype, device="cpu")
-        self.grad_up_proj_buf = torch.zeros(E, I, H, dtype=dtype, device="cpu")
-        self.grad_down_proj_buf = torch.zeros(E, H, I, dtype=dtype, device="cpu")
+        # C++ clears these authoritative gradient buffers before first use.
+        self.grad_gate_proj_buf = torch.empty(E, I, H, dtype=dtype, device="cpu")
+        self.grad_up_proj_buf = torch.empty(E, I, H, dtype=dtype, device="cpu")
+        self.grad_down_proj_buf = torch.empty(E, H, I, dtype=dtype, device="cpu")
 
         if self._uses_authoritative_optimizer_grads:
             self.register_authoritative_optimizer_grad("base.gate_proj", self.gate_proj_buf, self.grad_gate_proj_buf)
