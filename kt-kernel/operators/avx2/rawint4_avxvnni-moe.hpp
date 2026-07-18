@@ -13,6 +13,14 @@
  * weights are unpacked into signed int8 [N, K] once at load time. dpbusd then
  * does the group-wise inner product, followed by compensation (128 * weight_sum)
  * and rescale by (a_scale * w_scale).
+ *
+ * KT_RAWINT4_PACKED_WEIGHTS=1 keeps the weights resident as packed nibbles
+ * [N, K/2] instead and unpacks 32 values per 16 loaded bytes in-register
+ * inside the GEMM. That halves resident weight memory and produces the same
+ * int32 dots, hence bitwise-identical outputs. It is opt-in because halving
+ * the weight bytes wins bandwidth-bound decode (up to ~1.4x at large dims)
+ * but the unpack costs ~10% at qlen 16, where weight streaming amortizes;
+ * batch-heavy deployments keep the default.
  **/
 #ifndef CPUINFER_OPERATOR_AVX2_RAW_INT4_AVXVNNI_MOE_H
 #define CPUINFER_OPERATOR_AVX2_RAW_INT4_AVXVNNI_MOE_H
@@ -23,6 +31,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -40,6 +49,14 @@
 namespace avxvnni_rawint4 {
 
 static constexpr int MAX_SUPPORTED_GROUP_SIZE = 256;
+
+// Opt-in packed weight storage (see the header comment). Sampled when a
+// backend instance allocates its weight buffers, so instances built under
+// different settings coexist; each BufferB carries its own layout flag.
+static inline bool packed_weights_enabled() {
+  const char* env = getenv("KT_RAWINT4_PACKED_WEIGHTS");
+  return env && env[0] != '0';
+}
 
 static inline int hsum_epi32_avx2(__m256i v) {
   __m128i lo = _mm256_castsi256_si128(v);
@@ -121,16 +138,19 @@ struct GemmKernelAVXVNNI256RawInt4 {
   };
 
   struct BufferB {
-    int8_t* qweight_s8 = nullptr;    // [N, K] unpacked signed int8 weights
+    int8_t* qweight_s8 = nullptr;    // [N, K] unpacked signed int8 weights (packed mode: unused)
+    uint8_t* qweight_i4 = nullptr;   // [N, K/2] packed nibbles, low nibble = even k (packed mode only)
     float* scales = nullptr;         // [N, num_groups] float32 (converted from bf16)
-    int16_t* weight_sums = nullptr;  // [N, num_groups] per-group sum of unpacked int8 weights
+    int16_t* weight_sums = nullptr;  // [N, num_groups] per-group sum of the signed int4 weights
     int n = 0;
     int k = 0;
     int group_size = 128;
     int num_groups = 0;
+    bool packed = false;
 
     BufferB() = default;
-    BufferB(size_t n_, size_t k_, int gs, void* ptr) : n((int)n_), k((int)k_), group_size(gs) {
+    BufferB(size_t n_, size_t k_, int gs, bool packed_, void* ptr)
+        : n((int)n_), k((int)k_), group_size(gs), packed(packed_) {
       if (group_size <= 0 || (group_size % 32) != 0) {
         throw std::runtime_error("AVX-VNNI RAWINT4 requires group_size to be a positive multiple of 32");
       }
@@ -141,37 +161,60 @@ struct GemmKernelAVXVNNI256RawInt4 {
         throw std::runtime_error("AVX-VNNI RAWINT4 requires k to be divisible by both 8 and group_size");
       }
       num_groups = k / group_size;
-      qweight_s8 = (int8_t*)ptr;
-      scales = (float*)((uint8_t*)ptr + (size_t)k * n * sizeof(int8_t));
+      if (packed) {
+        qweight_i4 = (uint8_t*)ptr;
+        scales = (float*)((uint8_t*)ptr + (size_t)k / 2 * n);
+      } else {
+        qweight_s8 = (int8_t*)ptr;
+        scales = (float*)((uint8_t*)ptr + (size_t)k * n * sizeof(int8_t));
+      }
       weight_sums = (int16_t*)((uint8_t*)scales + (size_t)num_groups * n * sizeof(float));
     }
 
-    static size_t required_size(size_t n, size_t k, int gs) {
+    static size_t required_size(size_t n, size_t k, int gs, bool packed) {
       const size_t num_groups = k / gs;
-      return k * n * sizeof(int8_t) + num_groups * n * sizeof(float) + num_groups * n * sizeof(int16_t);
+      const size_t weight_bytes = packed ? k / 2 * n : k * n * sizeof(int8_t);
+      return weight_bytes + num_groups * n * sizeof(float) + num_groups * n * sizeof(int16_t);
     }
 
     // Unpack packed RAWINT4 weights [n_len, k/2] (row-major, low nibble = even k) into
     // signed int8 [n_len, k], convert bf16 scales [n_len, num_groups] to float32,
-    // and compute int16 weight_sums [n_len, num_groups].
+    // and compute int16 weight_sums [n_len, num_groups]. In packed mode the nibble
+    // rows are copied as-is and the weight_sums come from the same nibble arithmetic,
+    // so both layouts hold identical scales and weight_sums for identical sources.
     void from_raw_mat(const uint8_t* src_packed, const ggml_bf16_t* src_scales, int ith, int nth) {
       auto [n_start, n_end] = avx2::split_range(n, ith, nth);
       const size_t row_bytes = (size_t)k / 2;
 
       for (int ni = n_start; ni < n_end; ++ni) {
         const uint8_t* src_row = src_packed + (size_t)ni * row_bytes;
-        int8_t* dst_col = qweight_s8 + (size_t)ni * k;
         const ggml_bf16_t* src_sc_row = src_scales + (size_t)ni * num_groups;
         float* dst_sc_row = scales + (size_t)ni * num_groups;
         int16_t* dst_ws_row = weight_sums + (size_t)ni * num_groups;
 
+        if (packed) {
+          std::memcpy(qweight_i4 + (size_t)ni * row_bytes, src_row, row_bytes);
+          for (int g = 0; g < num_groups; ++g) {
+            const int k_base = g * group_size;
+            int sum = 0;
+            for (int kk = 0; kk < group_size; kk += 2) {
+              const uint8_t packed_byte = src_row[(k_base + kk) / 2];
+              sum += (int8_t)((packed_byte & 0x0F) - 8) + (int8_t)(((packed_byte >> 4) & 0x0F) - 8);
+            }
+            dst_ws_row[g] = (int16_t)sum;
+            dst_sc_row[g] = GGML_BF16_TO_FP32(src_sc_row[g]);
+          }
+          continue;
+        }
+
+        int8_t* dst_col = qweight_s8 + (size_t)ni * k;
         for (int g = 0; g < num_groups; ++g) {
           const int k_base = g * group_size;
           int sum = 0;
           for (int kk = 0; kk < group_size; kk += 2) {
-            const uint8_t packed = src_row[(k_base + kk) / 2];
-            const int8_t v0 = (int8_t)((packed & 0x0F) - 8);         // even k
-            const int8_t v1 = (int8_t)(((packed >> 4) & 0x0F) - 8);  // odd k
+            const uint8_t packed_byte = src_row[(k_base + kk) / 2];
+            const int8_t v0 = (int8_t)((packed_byte & 0x0F) - 8);         // even k
+            const int8_t v1 = (int8_t)(((packed_byte >> 4) & 0x0F) - 8);  // odd k
             dst_col[k_base + kk] = v0;
             dst_col[k_base + kk + 1] = v1;
             sum += v0 + v1;
@@ -212,10 +255,117 @@ struct GemmKernelAVXVNNI256RawInt4 {
   };
 };
 
+// Unpack 16 packed bytes (32 int4 values, low nibble = even k) into 32 signed
+// int8 in k order. Matches from_raw_mat: value = nibble - 8.
+KT_AVXVNNI256_RAWINT4_TARGET
+static inline __m256i unpack32_rawint4(const uint8_t* p) {
+  const __m128i raw = _mm_loadu_si128((const __m128i*)p);
+  const __m128i m4 = _mm_set1_epi8(0x0F);
+  const __m128i lo = _mm_and_si128(raw, m4);                     // even k nibbles
+  const __m128i hi = _mm_and_si128(_mm_srli_epi16(raw, 4), m4);  // odd k nibbles
+  const __m128i il0 = _mm_unpacklo_epi8(lo, hi);                 // k 0..15
+  const __m128i il1 = _mm_unpackhi_epi8(lo, hi);                 // k 16..31
+  return _mm256_sub_epi8(_mm256_set_m128i(il1, il0), _mm256_set1_epi8(8));
+}
+
+// Packed-mode GEMM: same blocking and the same integer/float composition as
+// gemm_rawint4_avxvnni256 below, but streams the packed nibble rows and
+// unpacks in-register. Equal int32 dots imply bit-equal float output.
+KT_AVXVNNI256_RAWINT4_TARGET
+static inline void gemm_rawint4_avxvnni256_packed(int m, int n, int k, GemmKernelAVXVNNI256RawInt4::BufferA& a,
+                                                  GemmKernelAVXVNNI256RawInt4::BufferB& b,
+                                                  GemmKernelAVXVNNI256RawInt4::BufferC& c, int ith, int nth) {
+  (void)k;
+  auto [n_start, n_end] = avx2::split_range(n, ith, nth);
+  const int group_size = b.group_size;
+  const int num_groups = b.num_groups;
+  const size_t row_bytes = (size_t)b.k / 2;
+
+  alignas(32) std::array<uint8_t, MAX_SUPPORTED_GROUP_SIZE> a_u8{};
+  alignas(16) int32_t dots[4];
+
+  for (int mi = 0; mi < m; ++mi) {
+    const ggml_bf16_t* a_row = a.data + (size_t)mi * a.k;
+    float* c_row = c.data + (size_t)mi * n;
+    std::fill(c_row + n_start, c_row + n_end, 0.0f);
+
+    for (int g = 0; g < num_groups; ++g) {
+      const int k_base = g * group_size;
+      const int p_base = k_base >> 1;  // group_size is a multiple of 32, so exact
+      const float a_scale = quantize_activation_group_u8(a_row + k_base, group_size, a_u8.data());
+      if (a_scale == 0.0f) {
+        continue;
+      }
+
+      int ni = n_start;
+      for (; ni + 4 <= n_end; ni += 4) {
+        const uint8_t* w_col0 = b.qweight_i4 + (size_t)(ni + 0) * row_bytes + p_base;
+        const uint8_t* w_col1 = b.qweight_i4 + (size_t)(ni + 1) * row_bytes + p_base;
+        const uint8_t* w_col2 = b.qweight_i4 + (size_t)(ni + 2) * row_bytes + p_base;
+        const uint8_t* w_col3 = b.qweight_i4 + (size_t)(ni + 3) * row_bytes + p_base;
+
+        __m256i acc0a = _mm256_setzero_si256(), acc0b = _mm256_setzero_si256();
+        __m256i acc1a = _mm256_setzero_si256(), acc1b = _mm256_setzero_si256();
+        __m256i acc2a = _mm256_setzero_si256(), acc2b = _mm256_setzero_si256();
+        __m256i acc3a = _mm256_setzero_si256(), acc3b = _mm256_setzero_si256();
+
+        int kk = 0;
+        for (; kk + 64 <= group_size; kk += 64) {
+          const __m256i a_vec0 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk));
+          const __m256i a_vec1 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk + 32));
+          const int pb = kk >> 1;
+          acc0a = _mm256_dpbusd_avx_epi32(acc0a, a_vec0, unpack32_rawint4(w_col0 + pb));
+          acc0b = _mm256_dpbusd_avx_epi32(acc0b, a_vec1, unpack32_rawint4(w_col0 + pb + 16));
+          acc1a = _mm256_dpbusd_avx_epi32(acc1a, a_vec0, unpack32_rawint4(w_col1 + pb));
+          acc1b = _mm256_dpbusd_avx_epi32(acc1b, a_vec1, unpack32_rawint4(w_col1 + pb + 16));
+          acc2a = _mm256_dpbusd_avx_epi32(acc2a, a_vec0, unpack32_rawint4(w_col2 + pb));
+          acc2b = _mm256_dpbusd_avx_epi32(acc2b, a_vec1, unpack32_rawint4(w_col2 + pb + 16));
+          acc3a = _mm256_dpbusd_avx_epi32(acc3a, a_vec0, unpack32_rawint4(w_col3 + pb));
+          acc3b = _mm256_dpbusd_avx_epi32(acc3b, a_vec1, unpack32_rawint4(w_col3 + pb + 16));
+        }
+        if (kk < group_size) {  // group_size % 64 == 32 tail
+          const __m256i a_vec0 = _mm256_load_si256((const __m256i*)(a_u8.data() + kk));
+          const int pb = kk >> 1;
+          acc0a = _mm256_dpbusd_avx_epi32(acc0a, a_vec0, unpack32_rawint4(w_col0 + pb));
+          acc1a = _mm256_dpbusd_avx_epi32(acc1a, a_vec0, unpack32_rawint4(w_col1 + pb));
+          acc2a = _mm256_dpbusd_avx_epi32(acc2a, a_vec0, unpack32_rawint4(w_col2 + pb));
+          acc3a = _mm256_dpbusd_avx_epi32(acc3a, a_vec0, unpack32_rawint4(w_col3 + pb));
+        }
+
+        const __m128i sums = hsum4_epi32_avx2(_mm256_add_epi32(acc0a, acc0b), _mm256_add_epi32(acc1a, acc1b),
+                                              _mm256_add_epi32(acc2a, acc2b), _mm256_add_epi32(acc3a, acc3b));
+        _mm_store_si128((__m128i*)dots, sums);
+
+        for (int col = 0; col < 4; ++col) {
+          const int nc = ni + col;
+          const int dot = dots[col] - 128 * (int)b.weight_sums[(size_t)nc * num_groups + g];
+          c_row[nc] += (float)dot * a_scale * b.scales[(size_t)nc * num_groups + g];
+        }
+      }
+
+      for (; ni < n_end; ++ni) {
+        __m256i acc = _mm256_setzero_si256();
+        const uint8_t* w_col = b.qweight_i4 + (size_t)ni * row_bytes + p_base;
+        for (int kk = 0; kk < group_size; kk += 32) {
+          const __m256i a_vec = _mm256_load_si256((const __m256i*)(a_u8.data() + kk));
+          acc = _mm256_dpbusd_avx_epi32(acc, a_vec, unpack32_rawint4(w_col + (kk >> 1)));
+        }
+
+        const int dot = hsum_epi32_avx2(acc) - 128 * (int)b.weight_sums[(size_t)ni * num_groups + g];
+        c_row[ni] += (float)dot * a_scale * b.scales[(size_t)ni * num_groups + g];
+      }
+    }
+  }
+}
+
 KT_AVXVNNI256_RAWINT4_TARGET
 static inline void gemm_rawint4_avxvnni256(int m, int n, int k, GemmKernelAVXVNNI256RawInt4::BufferA& a,
                                            GemmKernelAVXVNNI256RawInt4::BufferB& b,
                                            GemmKernelAVXVNNI256RawInt4::BufferC& c, int ith, int nth) {
+  if (b.packed) {
+    gemm_rawint4_avxvnni256_packed(m, n, k, a, b, c, ith, nth);
+    return;
+  }
   (void)k;
   auto [n_start, n_end] = avx2::split_range(n, ith, nth);
   const int group_size = b.group_size;
@@ -338,15 +488,16 @@ class AVXVNNI256_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVXVNNI256_RAW_INT4_M
     if (qc.zero_point) {
       throw std::runtime_error("AVX-VNNI-256 RAWINT4 only supports signed INT4 without zero point");
     }
-    printf("Created AVXVNNI256_RAW_INT4_MOE_TP %d at numa %d (group_size=%d)\n", tp_part_idx,
-           numa_node_of_cpu(sched_getcpu()), qc.group_size);
+    printf("Created AVXVNNI256_RAW_INT4_MOE_TP %d at numa %d (group_size=%d%s)\n", tp_part_idx,
+           numa_node_of_cpu(sched_getcpu()), qc.group_size,
+           avxvnni_rawint4::packed_weights_enabled() ? ", packed weights" : "");
   }
 
   ~AVXVNNI256_RAW_INT4_MOE_TP() = default;
 
   size_t buffer_a_required_size_impl(size_t m, size_t k) const { return T::BufferA::required_size(m, k); }
   size_t buffer_b_required_size_impl(size_t n, size_t k) const {
-    return T::BufferB::required_size(n, k, config_.quant_config.group_size);
+    return T::BufferB::required_size(n, k, config_.quant_config.group_size, avxvnni_rawint4::packed_weights_enabled());
   }
   size_t buffer_c_required_size_impl(size_t m, size_t n) const { return T::BufferC::required_size(m, n); }
 
@@ -354,7 +505,8 @@ class AVXVNNI256_RAW_INT4_MOE_TP : public AVX2_MOE_BASE<T, AVXVNNI256_RAW_INT4_M
     return std::make_shared<typename T::BufferA>(m, k, data);
   }
   std::shared_ptr<typename T::BufferB> make_buffer_b_impl(size_t n, size_t k, void* data) const {
-    return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size, data);
+    return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size,
+                                                 avxvnni_rawint4::packed_weights_enabled(), data);
   }
   std::shared_ptr<typename T::BufferC> make_buffer_c_impl(size_t m, size_t n, void* data) const {
     return std::make_shared<typename T::BufferC>(m, n, data);
