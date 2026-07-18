@@ -1511,7 +1511,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                 float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr,
-                void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr, void* grad_down_proj = nullptr) {
+                void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr, void* grad_down_proj = nullptr,
+                bool accumulate_optimizer_grads = false, float optimizer_grad_scale = 1.0f) {
     SFTProfileScope total_scope(profiler_, SFTProfileStage::BwdTotal);
     auto stage_start = profiler_.start();
     // If full_intermediate_size not provided, use local (non-TP mode)
@@ -1672,7 +1673,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     stage_start = profiler_.start();
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_down_amx(cache, grad_output, grad_down_lora_a, grad_down_lora_b, full_intermediate_size,
-                        fp32_grad_down_lora_b);
+                        fp32_grad_down_lora_b, optimizer_grad_scale);
     } else {
       // backward_down(cache, grad_output, grad_down_lora_a, grad_down_lora_b);
     }
@@ -1797,7 +1798,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     stage_start = profiler_.start();
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_gate_up_amx(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
-                           full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a);
+                           full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a,
+                           optimizer_grad_scale);
     } else {
       // backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
     }
@@ -2013,7 +2015,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // =====================================================================
     stage_start = profiler_.start();
     if (sft_config_.full_weight_grad && grad_gate_proj && grad_up_proj && grad_down_proj) {
-      backward_base_weight_grad(cache, full_intermediate_size, grad_gate_proj, grad_up_proj, grad_down_proj);
+      backward_base_weight_grad(cache, full_intermediate_size, grad_gate_proj, grad_up_proj, grad_down_proj,
+                                accumulate_optimizer_grads, optimizer_grad_scale);
     }
     profiler_.record(SFTProfileStage::BwdBaseWeightGrad, stage_start);
 
@@ -2037,7 +2040,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Uses FP32 accumulator for precision, writes BF16 output.
    */
   void backward_base_weight_grad(const ForwardCache& cache, int full_intermediate_size, void* grad_gate_proj,
-                                 void* grad_up_proj, void* grad_down_proj) {
+                                 void* grad_up_proj, void* grad_down_proj,
+                                 bool accumulate_optimizer_grads = false, float optimizer_grad_scale = 1.0f) {
     auto stage_start = profiler_.start();
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
@@ -2051,6 +2055,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     auto* ggp = static_cast<ggml_bf16_t*>(grad_gate_proj);    // TP slice of [E, F, H]
     auto* gup_ptr = static_cast<ggml_bf16_t*>(grad_up_proj);  // TP slice of [E, F, H]
     auto* gdp = static_cast<ggml_bf16_t*>(grad_down_proj);    // TP slice of [E, H, F]
+    auto store_optimizer_grad = [accumulate_optimizer_grads, optimizer_grad_scale](ggml_bf16_t& destination,
+                                                                                   float current) {
+      float value = current * optimizer_grad_scale;
+      if (accumulate_optimizer_grads) value += GGML_BF16_TO_FP32(destination);
+      destination = GGML_FP32_TO_BF16(value);
+    };
 
     std::vector<size_t> expert_offsets(activated_expert);
     size_t token_offset = 0;
@@ -2217,7 +2227,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                     });
                   profile_operation(timings.store_ns, timings.store_calls, [&] {
                     DWeightKernel::store_bf16(scratch.c0(), down_dst + static_cast<size_t>(h_start) * F + i_start, F,
-                                              h_count, i_count);
+                                              h_count, i_count, accumulate_optimizer_grads, optimizer_grad_scale);
                   });
                 }
                 return;
@@ -2241,9 +2251,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 });
                 profile_operation(timings.store_ns, timings.store_calls, [&] {
                   DWeightKernel::store_bf16(scratch.c0(), gate_dst + static_cast<size_t>(i_start) * H + h_start, H,
-                                            i_count, h_count);
+                                            i_count, h_count, accumulate_optimizer_grads, optimizer_grad_scale);
                   DWeightKernel::store_bf16(scratch.c1(), up_dst + static_cast<size_t>(i_start) * H + h_start, H,
-                                            i_count, h_count);
+                                            i_count, h_count, accumulate_optimizer_grads, optimizer_grad_scale);
                 });
               }
             },
@@ -2359,7 +2369,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
                 for (int row = 0; row < h_count; row++) {
                   for (int col = 0; col < i_count; col++) {
-                    down_dst[(size_t)(h_start + row) * F + i_start + col] = GGML_FP32_TO_BF16(c0[row * TILE_N + col]);
+                    store_optimizer_grad(down_dst[(size_t)(h_start + row) * F + i_start + col],
+                                         c0[row * TILE_N + col]);
                   }
                 }
               }
@@ -2422,8 +2433,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
               for (int row = 0; row < i_count; row++) {
                 for (int col = 0; col < h_count; col++) {
-                  gate_dst[(size_t)(i_start + row) * H + h_start + col] = GGML_FP32_TO_BF16(c0[row * TILE_N + col]);
-                  up_dst[(size_t)(i_start + row) * H + h_start + col] = GGML_FP32_TO_BF16(c1[row * TILE_N + col]);
+                  store_optimizer_grad(gate_dst[(size_t)(i_start + row) * H + h_start + col],
+                                       c0[row * TILE_N + col]);
+                  store_optimizer_grad(up_dst[(size_t)(i_start + row) * H + h_start + col],
+                                       c1[row * TILE_N + col]);
                 }
               }
             }
@@ -2488,13 +2501,13 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       stage_start = profiler_.start();
       for (int i = 0; i < I; i++) {
         for (int h = 0; h < H; h++) {
-          ggp[(size_t)expert_idx * F * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_gate[i * H + h]);
-          gup_ptr[(size_t)expert_idx * F * H + (size_t)i * H + h] = GGML_FP32_TO_BF16(acc_up[i * H + h]);
+          store_optimizer_grad(ggp[(size_t)expert_idx * F * H + (size_t)i * H + h], acc_gate[i * H + h]);
+          store_optimizer_grad(gup_ptr[(size_t)expert_idx * F * H + (size_t)i * H + h], acc_up[i * H + h]);
         }
       }
       for (int h = 0; h < H; h++) {
         for (int i = 0; i < I; i++) {
-          gdp[(size_t)expert_idx * H * F + (size_t)h * F + i] = GGML_FP32_TO_BF16(acc_down[h * I + i]);
+          store_optimizer_grad(gdp[(size_t)expert_idx * H * F + (size_t)h * F + i], acc_down[h * I + i]);
         }
       }
       profiler_.record(SFTProfileStage::BwdBaseWeightGradStore, stage_start);
@@ -4868,7 +4881,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward_down_amx(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
                          void* grad_down_lora_b, int full_intermediate_size = 0,
-                         float* fp32_grad_down_lora_b = nullptr) {
+                         float* fp32_grad_down_lora_b = nullptr,
+                         float optimizer_grad_scale = 1.0f) {
     auto stage_start = profiler_.start();
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
@@ -5161,7 +5175,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         max_down_lora_tokens = std::max(max_down_lora_tokens, num_tokens);
       }
 
-      const float scale = lora_scaling_;
+      const float scale = lora_scaling_ * optimizer_grad_scale;
       constexpr int kDownGradABBlockedThreshold = 4096;
 
       if (max_down_lora_tokens >= kDownGradABBlockedThreshold) {
@@ -5636,7 +5650,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void backward_gate_up_amx(const ForwardCache& cache, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                             void* grad_up_lora_a, void* grad_up_lora_b, int full_intermediate_size = 0,
-                            float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr) {
+                            float* fp32_grad_gate_lora_a = nullptr, float* fp32_grad_up_lora_a = nullptr,
+                            float optimizer_grad_scale = 1.0f) {
     auto stage_start = profiler_.start();
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
@@ -6020,7 +6035,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       constexpr int kGuGradBBlock = 256;
       int gradb_blocks = (inter_size + kGuGradBBlock - 1) / kGuGradBBlock;
-      const float scale = lora_scaling_;
+      const float scale = lora_scaling_ * optimizer_grad_scale;
       pool->do_work_stealing_job(
           activated_expert * 2 * gradb_blocks, nullptr,
           [&, grad_gate_b, grad_up_b, activated_expert, gradb_blocks, inter_size, rank, gradb_elems,
@@ -6124,7 +6139,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       int grad_a_blocks = (config_.hidden_size + kGuGradATile - 1) / kGuGradATile;
       pool->do_work_stealing_job(
           activated_expert * grad_a_blocks, nullptr,
-          [this, do_up, grad_lora_a, fp32_grad_lora_a, use_fp32_lora_a, grad_a_blocks, &fused_bufs](int task_id) {
+          [this, do_up, grad_lora_a, fp32_grad_lora_a, use_fp32_lora_a, grad_a_blocks, &fused_bufs,
+           optimizer_grad_scale](int task_id) {
             int expert_task = task_id / grad_a_blocks;
             int block_idx = task_id % grad_a_blocks;
             int expert_idx = m_expert_id_map_[expert_task];
@@ -6143,7 +6159,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             int tile_len = h_end - h_start;
             if (tile_len <= 0) return;
             int tile_vec_end = tile_len & ~(kVecWidth - 1);
-            __m512 scale_vec = _mm512_set1_ps(lora_scaling_);
+            const float parameter_scale = lora_scaling_ * optimizer_grad_scale;
+            __m512 scale_vec = _mm512_set1_ps(parameter_scale);
             const int lora_r = lora_rank_;
 
             // Split one expert into hidden-dimension tiles so LoRA grad_A can use all CPU threads.
@@ -6189,7 +6206,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   _mm512_storeu_ps(fp32_row + h, cur);
                 }
                 for (; h < tile_len; h++) {
-                  fp32_row[h] += acc_row[h] * lora_scaling_;
+                  fp32_row[h] += acc_row[h] * parameter_scale;
                 }
               }
             } else {
@@ -6209,7 +6226,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 }
                 for (; h < tile_len; h++) {
                   float cur = GGML_BF16_TO_FP32(grad_row[h]);
-                  cur += acc_row[h] * lora_scaling_;
+                  cur += acc_row[h] * parameter_scale;
                   grad_row[h] = GGML_FP32_TO_BF16(cur);
                 }
               }

@@ -201,17 +201,29 @@ class BF16DWeightKernel {
   }
 
   static void store_bf16(const float* source, ggml_bf16_t* destination, int destination_stride, int row_count,
-                         int column_count) {
+                         int column_count, bool accumulate = false, float scale = 1.0f) {
+    const __m512 scale_vector = _mm512_set1_ps(scale);
     for (int row = 0; row < row_count; ++row) {
       const float* src_row = source + row * N_STEP;
       ggml_bf16_t* dst_row = destination + static_cast<size_t>(row) * destination_stride;
       if (column_count == N_STEP) {
         __m512 lo = _mm512_loadu_ps(src_row);
         __m512 hi = _mm512_loadu_ps(src_row + 16);
+        lo = _mm512_mul_ps(lo, scale_vector);
+        hi = _mm512_mul_ps(hi, scale_vector);
+        if (accumulate) {
+          __m512 old_lo;
+          __m512 old_hi;
+          avx512_32xbf16_to_32xfp32(reinterpret_cast<__m512i*>(dst_row), &old_lo, &old_hi);
+          lo = _mm512_add_ps(lo, old_lo);
+          hi = _mm512_add_ps(hi, old_hi);
+        }
         avx512_32xfp32_to_32xbf16(&lo, &hi, reinterpret_cast<__m512i*>(dst_row));
       } else {
         for (int column = 0; column < column_count; ++column) {
-          dst_row[column] = GGML_FP32_TO_BF16(src_row[column]);
+          float value = src_row[column] * scale;
+          if (accumulate) value += GGML_BF16_TO_FP32(dst_row[column]);
+          dst_row[column] = GGML_FP32_TO_BF16(value);
         }
       }
     }

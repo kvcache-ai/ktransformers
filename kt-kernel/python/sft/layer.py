@@ -46,6 +46,8 @@ class KTMoELayerWrapper(nn.Module):
         hidden_size: int,
         layer_idx: int,
         lora_experts: "LoRAExperts | None" = None,
+        full_weight_grad: bool | None = None,
+        uses_authoritative_optimizer_grads: bool | None = None,
     ):
         super().__init__()
         self._is_kt_moe_wrapper = True
@@ -106,9 +108,18 @@ class KTMoELayerWrapper(nn.Module):
         # _peft_lora_modules: {expert_idx: {proj_name: (lora_A, lora_B)}}
         self._peft_lora_modules: dict[int, dict[str, tuple[nn.Module, nn.Module]]] | None = None
         self._lora_pointers_dirty = False
+        self._kt_managed_lora_enabled = False
 
-        # Full weight grad mode (set during wrapping or kt_adapt_peft_lora)
-        self._full_weight_grad = getattr(wrapper, "_full_weight_grad", False) if wrapper is not None else False
+        # Training-mode flags must be identical on every distributed rank even
+        # though only rank 0 owns the backend object.
+        if full_weight_grad is None:
+            full_weight_grad = getattr(wrapper, "_full_weight_grad", False) if wrapper is not None else False
+        if uses_authoritative_optimizer_grads is None:
+            uses_authoritative_optimizer_grads = bool(
+                wrapper is not None and getattr(wrapper, "_uses_authoritative_optimizer_grads", False)
+            )
+        self._full_weight_grad = bool(full_weight_grad)
+        self._uses_authoritative_optimizer_grads = bool(uses_authoritative_optimizer_grads)
 
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
@@ -139,7 +150,11 @@ class KTMoELayerWrapper(nn.Module):
         with torch.profiler.record_function("kt.sft.routing"):
             topk_ids, topk_weights = self._compute_routing(hidden_states)
 
-        train_lora = self._peft_lora_modules is not None and len(self._peft_lora_modules) > 0
+        train_lora = bool(
+            self._kt_managed_lora_enabled
+            or (self._peft_lora_modules is not None and len(self._peft_lora_modules) > 0)
+            or getattr(self, "_fused_expert_lora_params", None)
+        )
         full_weight_grad = self._full_weight_grad
 
         save_for_backward = (
@@ -186,15 +201,21 @@ class KTMoELayerWrapper(nn.Module):
         # Use KTMoEFunction whenever backward is needed so KT backward and LoRA
         # gradient paths remain connected.
         if use_autograd_path:
-            lora_ref = hidden_states.new_empty(())
+            # A requires-grad sentinel keeps the custom autograd node alive on
+            # non-rank-0 fused/full ranks that intentionally own no KT params.
+            lora_ref = hidden_states.new_empty((), requires_grad=(train_lora or full_weight_grad))
             if train_lora and self._peft_lora_modules:
+                found_lora_ref = False
                 for expert_loras in self._peft_lora_modules.values():
                     for lora_A, lora_B in expert_loras.values():
                         if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
                             lora_ref = lora_A.weight
+                            found_lora_ref = True
                             break
-                    if lora_ref.numel() > 0:
+                    if found_lora_ref:
                         break
+            elif train_lora and getattr(self, "_fused_expert_lora_params", None):
+                lora_ref = self._fused_expert_lora_params[0]
             elif full_weight_grad and self.wrapper is not None:
                 # In full mode, use base weight param as autograd sentinel
                 if self.wrapper.gate_proj_buf is not None:
@@ -403,6 +424,20 @@ class KTMoELayerWrapper(nn.Module):
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist_on else 1
+
+        if dist_on and self._uses_authoritative_optimizer_grads:
+            wrapped_world_size = int(getattr(self, "_kt_world_size_at_wrap", world_size))
+            if wrapped_world_size != world_size:
+                raise RuntimeError(
+                    f"Layer {self.layer_idx}: KT wrapper was created for world_size={wrapped_world_size}, "
+                    f"but the active process group has world_size={world_size}"
+                )
+            if rank == 0 and self.wrapper is None:
+                raise RuntimeError(f"Layer {self.layer_idx}: rank 0 does not own the authoritative KT backend")
+            if rank != 0 and self.wrapper is not None:
+                raise RuntimeError(
+                    f"Layer {self.layer_idx}: rank {rank} unexpectedly owns an authoritative KT backend"
+                )
 
         qlen = batch_size * seq_len
 

@@ -11,11 +11,42 @@ Provides:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 import torch
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
+
+
+def _supports_authoritative_optimizer_grads(method: str, num_gpu_experts: int) -> bool:
+    """Whether this backend can use C++-authoritative optimizer gradients."""
+    return method == "AMXBF16_SFT" and int(num_gpu_experts) == 0
+
+
+@dataclass(frozen=True)
+class _AuthoritativeOptimizerGrad:
+    """Stable Parameter-to-C++-gradient binding for one optimizer tensor."""
+
+    name: str
+    parameter: torch.nn.Parameter
+    grad_view: torch.Tensor
+    metadata: tuple
+
+
+def _authoritative_grad_metadata(tensor: torch.Tensor) -> tuple:
+    device_index = tensor.device.index if tensor.device.index is not None else -1
+    return (
+        tensor.dtype,
+        tensor.layout,
+        tensor.device.type,
+        device_index,
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        int(tensor.storage_offset()),
+        int(tensor.data_ptr()),
+    )
 
 
 class KExpertsSFTBuffer:
@@ -194,12 +225,162 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._cache_depth: int = 0
         self._is_skip_lora: bool = False
         self._base_weights_dirty: bool = False
+        # AMXSFTMoEWrapper enables this capability only for AMXBF16_SFT.
+        # Keeping it false here preserves legacy INT8/INT4/SkipLoRA behavior.
+        self._uses_authoritative_optimizer_grads: bool = False
+        self._init_authoritative_optimizer_grads()
         self.reuse_checkpoint_forward: bool = False
         self._kt_has_cached_forward: bool = False
         self._checkpoint_output_cpu: Optional[torch.Tensor] = None
         self._checkpoint_output_qlen: int = 0
 
         self.moe = None
+
+    # ========== Authoritative optimizer-gradient lifecycle ==========
+
+    def _init_authoritative_optimizer_grads(self) -> None:
+        self._authoritative_optimizer_grads: list[_AuthoritativeOptimizerGrad] = []
+        self._authoritative_grad_submission_pending: bool = False
+        self._authoritative_grad_pending_accumulate: bool = False
+
+    @property
+    def authoritative_optimizer_grads(self) -> tuple[_AuthoritativeOptimizerGrad, ...]:
+        """Read-only view of the persistent C++ optimizer-gradient bindings."""
+        return tuple(self._authoritative_optimizer_grads)
+
+    def register_authoritative_optimizer_grad(
+        self,
+        name: str,
+        parameter: torch.nn.Parameter,
+        grad_view: torch.Tensor,
+    ) -> None:
+        """Register a C++-written gradient as the Parameter's sole grad copy."""
+        if not self._uses_authoritative_optimizer_grads:
+            return
+        if not isinstance(parameter, torch.nn.Parameter):
+            raise TypeError(f"{name}: expected nn.Parameter, got {type(parameter)!r}")
+        if not isinstance(grad_view, torch.Tensor):
+            raise TypeError(f"{name}: expected Tensor grad view, got {type(grad_view)!r}")
+        if parameter.shape != grad_view.shape:
+            raise ValueError(
+                f"{name}: Parameter/grad shape mismatch: {tuple(parameter.shape)} != {tuple(grad_view.shape)}"
+            )
+        if parameter.dtype != grad_view.dtype or parameter.device != grad_view.device:
+            raise ValueError(
+                f"{name}: Parameter/grad dtype or device mismatch: "
+                f"{parameter.dtype}/{parameter.device} != {grad_view.dtype}/{grad_view.device}"
+            )
+        for entry in self._authoritative_optimizer_grads:
+            if entry.parameter is parameter:
+                raise RuntimeError(f"{name}: Parameter is already registered as {entry.name}")
+            if entry.grad_view is grad_view:
+                raise RuntimeError(f"{name}: grad view is already registered as {entry.name}")
+
+        # Initial state is always a closed optimizer window.  The view remains
+        # alive in this registry while Parameter.grad is None.
+        parameter.grad = None
+        self._authoritative_optimizer_grads.append(
+            _AuthoritativeOptimizerGrad(
+                name=name,
+                parameter=parameter,
+                grad_view=grad_view,
+                metadata=_authoritative_grad_metadata(grad_view),
+            )
+        )
+
+    def _validate_authoritative_grad_metadata(self) -> None:
+        for entry in self._authoritative_optimizer_grads:
+            current = _authoritative_grad_metadata(entry.grad_view)
+            if current != entry.metadata:
+                raise RuntimeError(
+                    f"{entry.name}: authoritative grad view metadata changed; "
+                    "replacing or resizing a C++ gradient buffer is unsupported"
+                )
+            parameter = entry.parameter
+            grad_view = entry.grad_view
+            if parameter.shape != grad_view.shape or parameter.dtype != grad_view.dtype:
+                raise RuntimeError(f"{entry.name}: Parameter metadata no longer matches its authoritative grad view")
+            if parameter.device != grad_view.device:
+                raise RuntimeError(f"{entry.name}: Parameter device no longer matches its authoritative grad view")
+
+    def validate_authoritative_optimizer_grad_state(self) -> str:
+        """Validate aliases and return ``empty``, ``closed``, or ``open``."""
+        if not self._uses_authoritative_optimizer_grads or not self._authoritative_optimizer_grads:
+            return "empty"
+        self._validate_authoritative_grad_metadata()
+
+        none_count = 0
+        alias_count = 0
+        for entry in self._authoritative_optimizer_grads:
+            grad = entry.parameter.grad
+            if grad is None:
+                none_count += 1
+            elif grad is entry.grad_view:
+                alias_count += 1
+            else:
+                raise RuntimeError(
+                    f"{entry.name}: Parameter.grad was externally replaced; "
+                    "expected None or the registered authoritative grad view"
+                )
+
+        total = len(self._authoritative_optimizer_grads)
+        if none_count == total:
+            return "closed"
+        if alias_count == total:
+            return "open"
+        raise RuntimeError(
+            "Mixed authoritative optimizer-gradient state: some KT Parameter.grad values are None "
+            "while others still alias their C++ buffers"
+        )
+
+    def _prepare_authoritative_optimizer_grad_write(self, optimizer_grad_scale: float) -> bool:
+        if self._authoritative_grad_submission_pending:
+            raise RuntimeError("An authoritative optimizer-gradient backward submission is already pending")
+        scale = float(optimizer_grad_scale)
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError(f"optimizer_grad_scale must be finite and positive, got {optimizer_grad_scale}")
+        state = self.validate_authoritative_optimizer_grad_state()
+        accumulate = state == "open"
+        self._authoritative_grad_submission_pending = True
+        self._authoritative_grad_pending_accumulate = accumulate
+        return accumulate
+
+    def _publish_authoritative_optimizer_grads(self) -> None:
+        if not self._authoritative_grad_submission_pending:
+            raise RuntimeError("No authoritative optimizer-gradient backward submission is pending")
+        expected_state = "open" if self._authoritative_grad_pending_accumulate else "closed"
+        try:
+            state = self.validate_authoritative_optimizer_grad_state()
+            if state not in ("empty", expected_state):
+                raise RuntimeError(
+                    f"Authoritative optimizer-gradient state changed during C++ backward: "
+                    f"expected {expected_state}, got {state}"
+                )
+            for entry in self._authoritative_optimizer_grads:
+                entry.parameter.grad = entry.grad_view
+        except Exception:
+            self._abort_authoritative_optimizer_grad_write()
+            raise
+        self._authoritative_grad_submission_pending = False
+        self._authoritative_grad_pending_accumulate = False
+
+    def _abort_authoritative_optimizer_grad_write(self) -> None:
+        # A failed C++ task may have partially modified its outputs.  Closing
+        # the Python window forces the next task down the overwrite/full-init path.
+        for entry in self._authoritative_optimizer_grads:
+            entry.parameter.grad = None
+        self._authoritative_grad_submission_pending = False
+        self._authoritative_grad_pending_accumulate = False
+
+    def release_authoritative_optimizer_grads(self) -> None:
+        """Close the optimizer window after step without touching C++ buffers."""
+        if not self._uses_authoritative_optimizer_grads:
+            return
+        if self._authoritative_grad_submission_pending:
+            raise RuntimeError("Cannot release authoritative gradients while C++ backward is pending")
+        self.validate_authoritative_optimizer_grad_state()
+        for entry in self._authoritative_optimizer_grads:
+            entry.parameter.grad = None
 
     @staticmethod
     def _validate_sft_config(
@@ -244,10 +425,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self.grad_up_proj_buf = torch.zeros(E, I, H, dtype=dtype, device="cpu")
         self.grad_down_proj_buf = torch.zeros(E, H, I, dtype=dtype, device="cpu")
 
-        # Note: .grad is NOT pre-assigned here. PyTorch autograd will set it
-        # when KTMoEFunction.backward() returns the gradient buffers.
-        # The C++ kernel writes directly to grad_gate_proj_buf etc.,
-        # and backward returns them so PyTorch can propagate correctly.
+        if self._uses_authoritative_optimizer_grads:
+            self.register_authoritative_optimizer_grad("base.gate_proj", self.gate_proj_buf, self.grad_gate_proj_buf)
+            self.register_authoritative_optimizer_grad("base.up_proj", self.up_proj_buf, self.grad_up_proj_buf)
+            self.register_authoritative_optimizer_grad("base.down_proj", self.down_proj_buf, self.grad_down_proj_buf)
+        # Legacy backends leave .grad unset here and return these buffers from
+        # KTMoEFunction.backward(), preserving their existing AccumulateGrad path.
 
     @abstractmethod
     def update_base_weights(self) -> None:
@@ -262,7 +445,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         ...
 
     @abstractmethod
-    def _make_backward_task(self, buffer: KExpertsSFTBuffer):
+    def _make_backward_task(
+        self,
+        buffer: KExpertsSFTBuffer,
+        accumulate_optimizer_grads: bool = False,
+        optimizer_grad_scale: float = 1.0,
+    ):
         """Construct the C++ backward task object. Backend-specific."""
         ...
 
@@ -305,7 +493,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
     def _validate_forward_inputs(self, hidden_states: torch.Tensor, expert_ids: torch.Tensor, weights: torch.Tensor):
         if not self._weights_loaded:
             raise RuntimeError("Weights not loaded. Call load_weights() or load_weights_from_tensors() first.")
-        if not self._lora_initialized and not self._is_skip_lora and not self._full_weight_grad:
+        # Hybrid mode still requires LoRA buffers even though base gradients are
+        # enabled.  Only pure Full (lora_rank == 0) may legitimately skip them.
+        if self.lora_rank > 0 and not self._lora_initialized and not self._is_skip_lora:
             raise RuntimeError("LoRA weights not initialized. Call init_lora_weights() first.")
         qlen = hidden_states.shape[0]
         if qlen > self.chunked_prefill_size:
@@ -412,20 +602,47 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self,
         grad_output: torch.Tensor,
         output_device: Optional[torch.device] = None,
+        optimizer_grad_scale: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Backward pass computing grad_input and grad_weights."""
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward(save_for_backward=True) first.")
+        if self._uses_authoritative_optimizer_grads and self._authoritative_grad_submission_pending:
+            raise RuntimeError("An authoritative optimizer-gradient backward submission is already pending")
 
         qlen = grad_output.shape[0]
         buffer = self._get_buffer(qlen)
         self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
-        self.cpu_infer.submit(self._make_backward_task(buffer))
-        self.cpu_infer.sync()
+        use_authoritative = self._uses_authoritative_optimizer_grads
+        accumulate_optimizer_grads = False
+        if use_authoritative:
+            accumulate_optimizer_grads = self._prepare_authoritative_optimizer_grad_write(optimizer_grad_scale)
+        try:
+            if use_authoritative:
+                backward_task = self._make_backward_task(
+                    buffer,
+                    accumulate_optimizer_grads=accumulate_optimizer_grads,
+                    optimizer_grad_scale=optimizer_grad_scale,
+                )
+            else:
+                backward_task = self._make_backward_task(buffer)
+            self.cpu_infer.submit(backward_task)
+            self.cpu_infer.sync()
+            result = self._return_grads(buffer, qlen, output_device)
+            if use_authoritative:
+                self._publish_authoritative_optimizer_grads()
+        except Exception:
+            if use_authoritative:
+                self._abort_authoritative_optimizer_grad_write()
+                # The C++ forward cache may already have been consumed by a
+                # partially executed backward. Require a fresh forward before
+                # retrying instead of reusing an indeterminate cache entry.
+                self._cache_depth = max(0, self._cache_depth - 1)
+            raise
 
         self._cache_depth -= 1
-        return self._return_grads(buffer, qlen, output_device)
+        return result
 
     # ========== Async forward ==========
 
@@ -572,29 +789,78 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self,
         grad_output: torch.Tensor,
         output_device: Optional[torch.device] = None,
+        optimizer_grad_scale: float = 1.0,
     ) -> None:
         """Submit backward task without waiting. Call sync_backward() for results."""
         if self._cache_depth <= 0:
             raise RuntimeError("No forward cache available. Call forward(save_for_backward=True) first.")
+        if self._uses_authoritative_optimizer_grads and self._authoritative_grad_submission_pending:
+            raise RuntimeError("An authoritative optimizer-gradient backward submission is already pending")
 
         qlen = grad_output.shape[0]
         buffer = self._get_buffer(qlen)
         self._copy_grad_output_to_cpu(buffer, grad_output, qlen)
 
-        self.cpu_infer.submit(self._make_backward_task(buffer))
+        use_authoritative = self._uses_authoritative_optimizer_grads
+        accumulate_optimizer_grads = False
+        if use_authoritative:
+            accumulate_optimizer_grads = self._prepare_authoritative_optimizer_grad_write(optimizer_grad_scale)
+        try:
+            if use_authoritative:
+                backward_task = self._make_backward_task(
+                    buffer,
+                    accumulate_optimizer_grads=accumulate_optimizer_grads,
+                    optimizer_grad_scale=optimizer_grad_scale,
+                )
+            else:
+                backward_task = self._make_backward_task(buffer)
+            self.cpu_infer.submit(backward_task)
+        except Exception:
+            if use_authoritative:
+                # submit() is expected to be atomic, but drain defensively in
+                # case a backend queued work before reporting an error.
+                try:
+                    self.cpu_infer.sync()
+                except Exception:
+                    pass
+                self._abort_authoritative_optimizer_grad_write()
+                self._cache_depth = max(0, self._cache_depth - 1)
+            self._async_bwd_qlen = None
+            self._async_bwd_output_device = None
+            self._async_bwd_uses_authoritative = False
+            raise
         self._async_bwd_qlen = qlen
         self._async_bwd_output_device = output_device
+        self._async_bwd_uses_authoritative = use_authoritative
 
     def sync_backward(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Wait for async backward and return results."""
-        self.cpu_infer.sync()
+        if not hasattr(self, "_async_bwd_qlen") or self._async_bwd_qlen is None:
+            raise RuntimeError("No pending backward. Call submit_backward_async() first.")
 
-        qlen = self._async_bwd_qlen
-        output_device = self._async_bwd_output_device
-        buffer = self._get_buffer(qlen)
+        use_authoritative = getattr(self, "_async_bwd_uses_authoritative", False)
+        try:
+            self.cpu_infer.sync()
+            qlen = self._async_bwd_qlen
+            output_device = self._async_bwd_output_device
+            buffer = self._get_buffer(qlen)
+            result = self._return_grads(buffer, qlen, output_device)
+            if use_authoritative:
+                self._publish_authoritative_optimizer_grads()
+        except Exception:
+            if use_authoritative:
+                self._abort_authoritative_optimizer_grad_write()
+                self._cache_depth = max(0, self._cache_depth - 1)
+            self._async_bwd_qlen = None
+            self._async_bwd_output_device = None
+            self._async_bwd_uses_authoritative = False
+            raise
 
         self._cache_depth -= 1
-        return self._return_grads(buffer, qlen, output_device)
+        self._async_bwd_qlen = None
+        self._async_bwd_output_device = None
+        self._async_bwd_uses_authoritative = False
+        return result
 
     # ========== Backward repack (optional, subclasses may override) ==========
 

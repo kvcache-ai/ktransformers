@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from .arch import MOEArchConfig
+from .dist_utils import _distributed_rank_world_size
 
 logger = logging.getLogger(__name__)
 
@@ -98,25 +99,30 @@ def _find_kt_wrappers(model: nn.Module):
     return wrappers
 
 
+def _collect_wrapper_managed_lora_params(wrapper) -> list[nn.Parameter]:
+    """Collect only C++-managed PEFT/fused LoRA params for one wrapper."""
+    params: list[nn.Parameter] = []
+    peft_lora_modules = getattr(wrapper, "_peft_lora_modules", None)
+    if peft_lora_modules is not None:
+        for expert_loras in peft_lora_modules.values():
+            for lora_A, lora_B in expert_loras.values():
+                if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
+                    params.append(lora_A.weight)
+                if hasattr(lora_B, "weight") and lora_B.weight.requires_grad:
+                    params.append(lora_B.weight)
+    fused_params = getattr(wrapper, "_fused_expert_lora_params", None)
+    if fused_params is not None:
+        params.extend(fused_params)
+    return params
+
+
 def _collect_kt_lora_params(wrappers) -> list[nn.Parameter]:
     """Collect LoRA-only trainable parameters from KT wrappers."""
     params: list[nn.Parameter] = []
 
     if wrappers:
         for wrapper in wrappers:
-            # PEFT LoRA parameters (from _peft_lora_modules)
-            peft_lora_modules = getattr(wrapper, "_peft_lora_modules", None)
-            if peft_lora_modules is not None:
-                for expert_loras in peft_lora_modules.values():
-                    for lora_A, lora_B in expert_loras.values():
-                        if hasattr(lora_A, "weight") and lora_A.weight.requires_grad:
-                            params.append(lora_A.weight)
-                        if hasattr(lora_B, "weight") and lora_B.weight.requires_grad:
-                            params.append(lora_B.weight)
-            # Fused expert LoRA parameters (KT-managed, not PEFT)
-            fused_params = getattr(wrapper, "_fused_expert_lora_params", None)
-            if fused_params is not None:
-                params.extend(fused_params)
+            params.extend(_collect_wrapper_managed_lora_params(wrapper))
             # lora_experts parameters (separate feature)
             if getattr(wrapper, "lora_experts", None) is not None:
                 params.extend(wrapper.lora_experts.parameters())
@@ -198,17 +204,14 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
 
     Should be called after PEFT LoRA injection and before create_optimizer.
     """
-    import torch.distributed as dist
-
     wrappers = _find_kt_wrappers(model)
 
     if not wrappers:
         logger.info("[kt_adapt_peft_lora] No _kt_wrappers found, skipping")
         return
 
-    is_rank_0 = True
-    if dist.is_initialized():
-        is_rank_0 = dist.get_rank() == 0
+    distributed_rank, _ = _distributed_rank_world_size()
+    is_rank_0 = distributed_rank == 0
 
     adapted_count = 0
     for wrapper in wrappers:
@@ -221,10 +224,11 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             continue
 
         # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
-        # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init,
-        # wrap as nn.Parameter for optimizer, and pre-assign .grad for C++ backward.
+        # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init
+        # and wrap them as nn.Parameter objects for optimizer injection.
         if getattr(wrapper, "_fused_experts", False):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
+            authoritative_mode = bool(getattr(wrapper, "_uses_authoritative_optimizer_grads", False))
 
             # In full mode (lora_rank=0), skip LoRA buffer creation entirely.
             # C++ kernel will not compute LoRA contributions when lora_rank=0.
@@ -238,11 +242,23 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 adapted_count += 1
                 continue
 
+            wrapper._kt_managed_lora_enabled = True
+
+            # In rank-0-authoritative BF16 mode, non-rank-0 processes need the
+            # mode flag for collective/autograd symmetry but own no optimizer
+            # Parameter or gradient buffer.
+            if authoritative_mode and not is_rank_0:
+                wrapper._fused_expert_lora_params = []
+                wrapper._peft_lora_modules = None
+                adapted_count += 1
+                continue
+
             lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
                 wrapper,
                 moe_config,
                 lora_rank,
                 torch.bfloat16,
+                preassign_grads=not authoritative_mode,
             )
 
             if is_rank_0 and wrapper.wrapper is not None:
@@ -254,6 +270,16 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                     f"[kt_adapt_peft_lora] Layer {layer_idx}: fused expert LoRA "
                     f"(r={lora_rank}, E={moe_config.expert_num})"
                 )
+                if authoritative_mode:
+                    for key, param in zip(
+                        ("gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"),
+                        lora_params,
+                    ):
+                        wrapper.wrapper.register_authoritative_optimizer_grad(
+                            f"lora.{key}", param, lora_grad_buffers[f"grad_{key}"]
+                        )
+            elif authoritative_mode:
+                raise RuntimeError(f"Layer {layer_idx}: rank 0 authoritative LoRA requires a KT backend")
 
             wrapper._fused_expert_lora_params = lora_params
             wrapper._peft_lora_modules = None
@@ -306,13 +332,14 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         # Store PEFT LoRA references on wrapper
         wrapper._peft_lora_modules = peft_lora_modules
 
-        # In full_weight_grad mode, PEFT LoRA is not injected by LlamaFactory,
-        # so no PEFT LoRA found is expected — skip the error.
+        # Missing PEFT LoRA is valid only for pure Full. Hybrid has lora_rank
+        # greater than zero and must fail instead of silently training base
+        # weights alone.
         if not peft_lora_modules:
-            if getattr(wrapper, "_full_weight_grad", False):
+            if getattr(wrapper, "_full_weight_grad", False) and getattr(wrapper, "_lora_rank", 0) == 0:
                 logger.info(
                     f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found "
-                    f"(full_weight_grad mode — expected, skipping)"
+                    f"(pure Full mode — expected, skipping)"
                 )
                 adapted_count += 1
                 continue
@@ -320,6 +347,9 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found on any expert. "
                 f"Check that PEFT lora_target includes expert modules."
             )
+
+        wrapper._kt_managed_lora_enabled = True
+        authoritative_mode = bool(getattr(wrapper, "_uses_authoritative_optimizer_grads", False))
 
         # Allocate contiguous bf16 buffers and populate with initial PEFT values (all ranks)
         lora_buffers = _create_lora_view_buffers(peft_lora_modules, moe_config, torch.bfloat16)
@@ -333,7 +363,14 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             logger.info(f"[kt_adapt_peft_lora] Layer {layer_idx}: synced PEFT LoRA to C++ kernel")
 
         # All ranks: replace PEFT weights with views into the contiguous buffers
-        _replace_peft_weights_with_views(peft_lora_modules, lora_buffers, lora_grad_buffers, moe_config)
+        _replace_peft_weights_with_views(
+            peft_lora_modules,
+            lora_buffers,
+            lora_grad_buffers,
+            moe_config,
+            authoritative_mode=authoritative_mode,
+            authoritative_backend=wrapper.wrapper if authoritative_mode and is_rank_0 else None,
+        )
 
         adapted_count += 1
 
@@ -487,6 +524,7 @@ def _create_fused_expert_lora_buffers(
     moe_config: MOEArchConfig,
     lora_rank: int,
     dtype: torch.dtype = torch.bfloat16,
+    preassign_grads: bool = True,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], list[nn.Parameter]]:
     """
     Create KT-managed LoRA buffers for fused expert modules.
@@ -532,7 +570,8 @@ def _create_fused_expert_lora_buffers(
     lora_params = []
     for key in ("gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"):
         param = nn.Parameter(lora_buffers[key], requires_grad=True)
-        param.grad = lora_grad_buffers[f"grad_{key}"]
+        if preassign_grads:
+            param.grad = lora_grad_buffers[f"grad_{key}"]
         lora_params.append(param)
 
     return lora_buffers, lora_grad_buffers, lora_params
@@ -548,6 +587,9 @@ def _replace_peft_weights_with_views(
     buffers: dict[str, torch.Tensor],
     grad_buffers: dict[str, torch.Tensor],
     moe_config: MOEArchConfig,
+    *,
+    authoritative_mode: bool = False,
+    authoritative_backend=None,
 ) -> None:
     """
     Replace each PEFT LoRA module's .weight with a view into the contiguous buffer.
@@ -585,8 +627,21 @@ def _replace_peft_weights_with_views(
             lora_B.weight.data = buffers[key_b][expert_idx]
             lora_A.weight.requires_grad_(True)
             lora_B.weight.requires_grad_(True)
-            lora_A.weight.grad = grad_buffers["grad_" + key_a][expert_idx]
-            lora_B.weight.grad = grad_buffers["grad_" + key_b][expert_idx]
+            grad_view_a = grad_buffers["grad_" + key_a][expert_idx]
+            grad_view_b = grad_buffers["grad_" + key_b][expert_idx]
+            if authoritative_mode:
+                lora_A.weight.grad = None
+                lora_B.weight.grad = None
+                if authoritative_backend is not None:
+                    authoritative_backend.register_authoritative_optimizer_grad(
+                        f"lora.{key_a}.expert_{expert_idx}", lora_A.weight, grad_view_a
+                    )
+                    authoritative_backend.register_authoritative_optimizer_grad(
+                        f"lora.{key_b}.expert_{expert_idx}", lora_B.weight, grad_view_b
+                    )
+            else:
+                lora_A.weight.grad = grad_view_a
+                lora_B.weight.grad = grad_view_b
 
             if not _first_logged:
                 _new_id_a = id(lora_A.weight)
@@ -625,10 +680,14 @@ def update_kt_lora_pointers(model: nn.Module):
 
     if wrappers:
         for wrapper in wrappers:
-            wrapper._lora_pointers_dirty = True
+            if getattr(wrapper, "_kt_managed_lora_enabled", False):
+                wrapper._lora_pointers_dirty = True
             # In full mode, base weights also need re-sync after optimizer step
             if getattr(wrapper, "_full_weight_grad", False) and wrapper.wrapper is not None:
                 wrapper.wrapper._base_weights_dirty = True
+            backend = getattr(wrapper, "wrapper", None)
+            if backend is not None and getattr(backend, "_uses_authoritative_optimizer_grads", False):
+                backend.release_authoritative_optimizer_grads()
 
 
 # =============================================================================
@@ -649,11 +708,48 @@ def sync_kt_lora_gradients(model: nn.Module) -> None:
         return
 
     world_size = dist.get_world_size()
+    rank = dist.get_rank()
     if world_size <= 1:
         return
 
-    # Sync base weight gradients in full mode
     wrappers = _find_kt_wrappers(model)
+    if not wrappers:
+        return
+
+    # AMXBF16_SFT gathers every rank's routed rows and writes a world-size
+    # normalized optimizer gradient on rank 0.  No gradient collective is
+    # needed here; validate ownership/aliases only.  Ordinary GPU
+    # lora_experts are deliberately excluded and remain DDP/FSDP-managed.
+    authoritative_wrappers = [w for w in wrappers if getattr(w, "_uses_authoritative_optimizer_grads", False)]
+    if authoritative_wrappers:
+        if len(authoritative_wrappers) != len(wrappers):
+            raise RuntimeError("Mixed authoritative and legacy KT SFT backends are unsupported in one model")
+        for wrapper in authoritative_wrappers:
+            backend = getattr(wrapper, "wrapper", None)
+            wrapped_world_size = int(getattr(wrapper, "_kt_world_size_at_wrap", world_size))
+            if wrapped_world_size != world_size:
+                raise RuntimeError(
+                    f"Layer {wrapper.layer_idx}: KT wrapper was created for world_size={wrapped_world_size}, "
+                    f"but the active process group has world_size={world_size}"
+                )
+            if rank == 0:
+                if backend is None:
+                    raise RuntimeError(f"Layer {wrapper.layer_idx}: rank 0 does not own the authoritative KT backend")
+                backend.validate_authoritative_optimizer_grad_state()
+            else:
+                if backend is not None:
+                    raise RuntimeError(
+                        f"Layer {wrapper.layer_idx}: rank {rank} unexpectedly owns an authoritative KT backend"
+                    )
+                for param in _collect_wrapper_managed_lora_params(wrapper):
+                    if param.grad is not None:
+                        raise RuntimeError(
+                            f"Layer {wrapper.layer_idx}: non-rank-0 KT LoRA Parameter unexpectedly has a gradient"
+                        )
+        return
+
+    # Legacy backends retain their existing cross-rank synchronization.
+    # Sync base weight gradients in full mode.
     if wrappers:
         for wrapper in wrappers:
             if not getattr(wrapper, "_full_weight_grad", False):

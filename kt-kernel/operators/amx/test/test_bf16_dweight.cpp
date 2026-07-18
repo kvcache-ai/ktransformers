@@ -158,6 +158,60 @@ bool run_shared_panel_case(int routes, int rows, int columns) {
   return passed;
 }
 
+bool run_store_mode_case(int rows, int columns, int destination_stride, bool accumulate, float scale) {
+  constexpr int prefix_guard_elements = 5;
+  constexpr int suffix_guard_elements = 11;
+  const ggml_bf16_t guard = GGML_FP32_TO_BF16(-123.0f);
+
+  alignas(64) float source[Kernel::M_STEP * Kernel::N_STEP];
+  for (int row = 0; row < Kernel::M_STEP; ++row) {
+    for (int column = 0; column < Kernel::N_STEP; ++column) {
+      source[row * Kernel::N_STEP + column] =
+          static_cast<float>((row * Kernel::N_STEP + column) % 41 - 20) * 0.03125f;
+    }
+  }
+
+  std::vector<ggml_bf16_t> storage(
+      prefix_guard_elements + static_cast<size_t>(rows) * destination_stride + suffix_guard_elements, guard);
+  std::vector<ggml_bf16_t> expected(static_cast<size_t>(rows) * columns);
+  ggml_bf16_t* destination = storage.data() + prefix_guard_elements;
+
+  for (int row = 0; row < rows; ++row) {
+    for (int column = 0; column < columns; ++column) {
+      const float initial = static_cast<float>((row * columns + column) % 17 - 8) * 0.125f;
+      destination[static_cast<size_t>(row) * destination_stride + column] = GGML_FP32_TO_BF16(initial);
+      const float old = GGML_BF16_TO_FP32(destination[static_cast<size_t>(row) * destination_stride + column]);
+      const float value = source[row * Kernel::N_STEP + column] * scale + (accumulate ? old : 0.0f);
+      expected[static_cast<size_t>(row) * columns + column] = GGML_FP32_TO_BF16(value);
+    }
+  }
+
+  DWeightKernel::store_bf16(source, destination, destination_stride, rows, columns, accumulate, scale);
+
+  bool passed = true;
+  for (int row = 0; row < rows; ++row) {
+    for (int column = 0; column < columns; ++column) {
+      const ggml_bf16_t actual = destination[static_cast<size_t>(row) * destination_stride + column];
+      if (actual.bits != expected[static_cast<size_t>(row) * columns + column].bits) passed = false;
+    }
+    for (int column = columns; column < destination_stride; ++column) {
+      if (destination[static_cast<size_t>(row) * destination_stride + column].bits != guard.bits) passed = false;
+    }
+  }
+  for (int i = 0; i < prefix_guard_elements; ++i) {
+    if (storage[i].bits != guard.bits) passed = false;
+  }
+  const size_t suffix_begin = prefix_guard_elements + static_cast<size_t>(rows) * destination_stride;
+  for (int i = 0; i < suffix_guard_elements; ++i) {
+    if (storage[suffix_begin + i].bits != guard.bits) passed = false;
+  }
+
+  std::printf("BF16 dWeight store mode=%s scale=%.4f shape=%dx%d stride=%d guards=%s %s\n",
+              accumulate ? "accumulate" : "overwrite", scale, rows, columns, destination_stride,
+              passed ? "intact" : "CORRUPTED", passed ? "PASS" : "FAIL");
+  return passed;
+}
+
 bool run_amx_benchmark() {
   if constexpr (!amx::AMX_AVAILABLE) {
     std::printf("BF16 dWeight AMX benchmark: SKIP (AMX unavailable)\n");
@@ -309,5 +363,9 @@ int main(int argc, char** argv) {
   passed = run_case(65, 31, 7) && passed;
   passed = run_shared_panel_case(33, 45, 77) && passed;
   passed = run_shared_panel_case(65, 64, 96) && passed;
+  passed = run_store_mode_case(32, 32, 41, false, 1.0f) && passed;
+  passed = run_store_mode_case(32, 32, 39, true, 0.5f) && passed;
+  passed = run_store_mode_case(17, 29, 37, false, -0.25f) && passed;
+  passed = run_store_mode_case(31, 7, 19, true, 0.125f) && passed;
   return passed ? 0 : 1;
 }

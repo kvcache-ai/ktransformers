@@ -41,7 +41,7 @@ except (ImportError, AttributeError):
     AMXInt8_SFT_MOE_SkipLoRA = None
     AMXInt4_SFT_MOE_SkipLoRA = None
 
-from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
+from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer, _supports_authoritative_optimizer_grads
 
 _AMX_M_STEP = 32
 
@@ -111,6 +111,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         self.method = method
         self._is_skip_lora = "SkipLoRA" in method
+        # Authoritative optimizer gradients currently rely on the BF16 SFT
+        # kernel's overwrite/accumulate/lazy-clear implementation.  Quantized
+        # and SkipLoRA backends intentionally retain their legacy lifecycle.
+        self._uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
+            method, self.num_gpu_experts
+        )
         self.group_size = group_size
         self.zero_point = zero_point
 
@@ -140,7 +146,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             save_for_backward,
         )
 
-    def _make_backward_task(self, buffer: KExpertsSFTBuffer):
+    def _make_backward_task(
+        self,
+        buffer: KExpertsSFTBuffer,
+        accumulate_optimizer_grads: bool = False,
+        optimizer_grad_scale: float = 1.0,
+    ):
         if self._is_skip_lora:
             return self.moe.backward_task(
                 buffer.grad_output_cpu.data_ptr(),
@@ -168,7 +179,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             self.grad_down_proj_buf.data_ptr() if self._full_weight_grad and self.grad_down_proj_buf is not None else 0
         )
 
-        return self.moe.backward_task(
+        backward_args = (
             buffer.grad_output_cpu.data_ptr(),
             buffer.grad_input_cpu.data_ptr(),
             self.grad_gate_lora_a.data_ptr() if self.lora_rank > 0 else 0,
@@ -182,6 +193,13 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_up_proj_ptr,
             grad_down_proj_ptr,
         )
+        if self._uses_authoritative_optimizer_grads:
+            return self.moe.backward_task(
+                *backward_args,
+                bool(accumulate_optimizer_grads),
+                float(optimizer_grad_scale),
+            )
+        return self.moe.backward_task(*backward_args)
 
     # ========== Weight loading ==========
 
@@ -216,6 +234,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.share_backward_bb = getattr(self, "share_backward_bb", False)
         config.share_cache_pool = getattr(self, "share_cache_pool", False)
         config.full_weight_grad = self._full_weight_grad
+        config.authoritative_optimizer_grads = self._uses_authoritative_optimizer_grads
         config.physical_to_logical_map = self._physical_to_logical_map_cpu.data_ptr()
 
         if getattr(self, "_use_kt_direct_load", False):

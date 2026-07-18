@@ -146,6 +146,9 @@ class KTMoEFunction(torch.autograd.Function):
         ctx.full_weight_grad = (
             wrapper is not None and getattr(wrapper, "_full_weight_grad", False) and gate_proj_param is not None
         )
+        ctx.authoritative_optimizer_grads = bool(
+            wrapper is not None and getattr(wrapper, "_uses_authoritative_optimizer_grads", False)
+        )
 
         # Save a sentinel tensor so non-reentrant checkpoint's saved_tensors
         # hooks can intercept it.  When backward accesses ctx.saved_tensors,
@@ -211,72 +214,123 @@ class KTMoEFunction(torch.autograd.Function):
                 rank=rank,
                 world_size=world_size,
             )
+            authoritative_grad_published = False
+
+            def close_published_authoritative_window() -> None:
+                if not (rank == 0 and authoritative_grad_published and ctx.wrapper is not None):
+                    return
+                try:
+                    ctx.wrapper.release_authoritative_optimizer_grads()
+                except Exception:
+                    logger.exception(
+                        "Failed to close authoritative optimizer-gradient window after distributed backward error"
+                    )
+
             if rank == 0:
                 all_go = torch.cat(gathered_go, dim=0)
                 total_qlen = int(all_go.shape[0])
 
                 with torch.profiler.record_function("kt.sft.cpu_backward"):
-                    backward_out = ctx.wrapper.backward(
-                        all_go,
-                        output_device=ctx.original_device,
+                    if ctx.authoritative_optimizer_grads:
+                        backward_out = ctx.wrapper.backward(
+                            all_go,
+                            output_device=ctx.original_device,
+                            optimizer_grad_scale=1.0 / world_size,
+                        )
+                    else:
+                        backward_out = ctx.wrapper.backward(
+                            all_go,
+                            output_device=ctx.original_device,
+                        )
+                authoritative_grad_published = ctx.authoritative_optimizer_grads
+                try:
+                    if isinstance(backward_out, tuple) and len(backward_out) == 2:
+                        all_grad_input, all_grad_weights = backward_out
+                    elif isinstance(backward_out, tuple) and len(backward_out) == 3:
+                        all_grad_input, _, all_grad_weights = backward_out
+                    else:
+                        raise ValueError("KTMoEWrapper.backward returned unexpected format.")
+
+                    all_grad_input = all_grad_input.to(dtype=ctx.original_dtype).view(total_qlen, hidden_size)
+                    all_grad_weights = all_grad_weights.to(dtype=torch.bfloat16).view(
+                        total_qlen, num_experts_per_tok
                     )
-                if isinstance(backward_out, tuple) and len(backward_out) == 2:
-                    all_grad_input, all_grad_weights = backward_out
-                elif isinstance(backward_out, tuple) and len(backward_out) == 3:
-                    all_grad_input, _, all_grad_weights = backward_out
-                else:
-                    raise ValueError("KTMoEWrapper.backward returned unexpected format.")
 
-                all_grad_input = all_grad_input.to(dtype=ctx.original_dtype).view(total_qlen, hidden_size)
-                all_grad_weights = all_grad_weights.to(dtype=torch.bfloat16).view(total_qlen, num_experts_per_tok)
-
-                offsets = _qlen_offsets(all_qlens)
-                scatter_gi = [all_grad_input[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
-                scatter_gw = [all_grad_weights[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)]
+                    offsets = _qlen_offsets(all_qlens)
+                    scatter_gi = [
+                        all_grad_input[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)
+                    ]
+                    scatter_gw = [
+                        all_grad_weights[offsets[i] : offsets[i + 1]].contiguous() for i in range(world_size)
+                    ]
+                except Exception:
+                    close_published_authoritative_window()
+                    raise
             else:
                 scatter_gi = None
                 scatter_gw = None
 
-            grad_input_flat = _dist_scatter_varlen_from_rank0(
-                rank0_chunks=scatter_gi,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-                feature_shape=(hidden_size,),
-                device=ctx.original_device,
-                dtype=ctx.original_dtype,
-            )
-            grad_weights_flat = _dist_scatter_varlen_from_rank0(
-                rank0_chunks=scatter_gw,
-                all_qlens=all_qlens,
-                rank=rank,
-                world_size=world_size,
-                feature_shape=(num_experts_per_tok,),
-                device=ctx.weights_device,
-                dtype=torch.bfloat16,
-            )
-            grad_input = grad_input_flat.view(batch_size, seq_len, hidden_size)
-            grad_weights = grad_weights_flat.view(ctx.weights_shape).to(dtype=ctx.weights_dtype)
+            try:
+                grad_input_flat = _dist_scatter_varlen_from_rank0(
+                    rank0_chunks=scatter_gi,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                    feature_shape=(hidden_size,),
+                    device=ctx.original_device,
+                    dtype=ctx.original_dtype,
+                )
+                grad_weights_flat = _dist_scatter_varlen_from_rank0(
+                    rank0_chunks=scatter_gw,
+                    all_qlens=all_qlens,
+                    rank=rank,
+                    world_size=world_size,
+                    feature_shape=(num_experts_per_tok,),
+                    device=ctx.weights_device,
+                    dtype=torch.bfloat16,
+                )
+                grad_input = grad_input_flat.view(batch_size, seq_len, hidden_size)
+                grad_weights = grad_weights_flat.view(ctx.weights_shape).to(dtype=ctx.weights_dtype)
+            except Exception:
+                close_published_authoritative_window()
+                raise
 
         elif not ctx.use_broadcast:
             # ---- Single-GPU path ----
             grad_output_flat = grad_output.view(qlen, hidden_size)
             try:
-                with torch.profiler.record_function("kt.sft.cpu_backward"):
-                    backward_out = ctx.wrapper.backward(
-                        grad_output_flat,
-                        output_device=ctx.original_device,
-                    )
-            finally:
-                ctx.wrapper.clear_checkpoint_output()
-            if isinstance(backward_out, tuple) and len(backward_out) == 2:
-                grad_input, grad_weights = backward_out
-            elif isinstance(backward_out, tuple) and len(backward_out) == 3:
-                grad_input, _, grad_weights = backward_out
-            else:
-                raise ValueError("KTMoEWrapper.backward returned unexpected format.")
-            grad_input = grad_input.view(batch_size, seq_len, hidden_size).to(dtype=ctx.original_dtype)
-            grad_weights = grad_weights.to(dtype=torch.bfloat16)
+                try:
+                    with torch.profiler.record_function("kt.sft.cpu_backward"):
+                        if ctx.authoritative_optimizer_grads:
+                            backward_out = ctx.wrapper.backward(
+                                grad_output_flat,
+                                output_device=ctx.original_device,
+                                optimizer_grad_scale=1.0,
+                            )
+                        else:
+                            backward_out = ctx.wrapper.backward(
+                                grad_output_flat,
+                                output_device=ctx.original_device,
+                            )
+                finally:
+                    ctx.wrapper.clear_checkpoint_output()
+                if isinstance(backward_out, tuple) and len(backward_out) == 2:
+                    grad_input, grad_weights = backward_out
+                elif isinstance(backward_out, tuple) and len(backward_out) == 3:
+                    grad_input, _, grad_weights = backward_out
+                else:
+                    raise ValueError("KTMoEWrapper.backward returned unexpected format.")
+                grad_input = grad_input.view(batch_size, seq_len, hidden_size).to(dtype=ctx.original_dtype)
+                grad_weights = grad_weights.to(dtype=torch.bfloat16)
+            except Exception:
+                if ctx.authoritative_optimizer_grads and ctx.wrapper is not None:
+                    try:
+                        ctx.wrapper.release_authoritative_optimizer_grads()
+                    except Exception:
+                        logger.exception(
+                            "Failed to close authoritative optimizer-gradient window after local backward error"
+                        )
+                raise
         else:
             # No wrapper, no dist — shouldn't happen in normal flow
             grad_input = torch.zeros(
@@ -287,11 +341,23 @@ class KTMoEFunction(torch.autograd.Function):
         # Trigger async repack for next MoE layer in backward order
         next_bwd = getattr(ctx.wrapper, "_next_backward_wrapper", None)
         if next_bwd is not None and getattr(next_bwd, "share_backward_bb", False):
-            with torch.profiler.record_function("kt.sft.submit_backward_repack"):
-                next_bwd.submit_backward_repack()
+            try:
+                with torch.profiler.record_function("kt.sft.submit_backward_repack"):
+                    next_bwd.submit_backward_repack()
+            except Exception:
+                if ctx.authoritative_optimizer_grads and ctx.wrapper is not None:
+                    try:
+                        ctx.wrapper.release_authoritative_optimizer_grads()
+                    except Exception:
+                        logger.exception(
+                            "Failed to close authoritative optimizer-gradient window after repack submission error"
+                        )
+                raise
 
-        # Base weight gradients: return C++-written grad buffers in full mode, None otherwise
-        if ctx.full_weight_grad and ctx.wrapper is not None:
+        # Legacy backends still use PyTorch AccumulateGrad.  AMXBF16_SFT
+        # publishes the C++ buffers directly as Parameter.grad, so returning
+        # them here would create a second giant copy and an aten::add_.
+        if ctx.full_weight_grad and ctx.wrapper is not None and not ctx.authoritative_optimizer_grads:
             grad_gate_proj = ctx.wrapper.grad_gate_proj_buf
             grad_up_proj = ctx.wrapper.grad_up_proj_buf
             grad_down_proj = ctx.wrapper.grad_down_proj_buf

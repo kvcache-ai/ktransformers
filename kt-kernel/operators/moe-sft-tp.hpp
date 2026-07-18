@@ -11,6 +11,7 @@
 #include <immintrin.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cmath>
@@ -217,13 +218,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> part_grad_input_;
   std::vector<float*> part_grad_weights_;
 
-  // Full-FT dWeight outputs persist across calls. Active experts are overwritten in full;
-  // only experts that became inactive need to be cleared after the first invocation.
-  std::vector<int> last_base_grad_active_experts_;
-  bool base_grad_outputs_initialized_ = false;
-  void* last_grad_gate_proj_ = nullptr;
-  void* last_grad_up_proj_ = nullptr;
-  void* last_grad_down_proj_ = nullptr;
+  // The nine optimizer-gradient outputs are owned by C++ across an optimizer
+  // window.  Python only attaches/detaches aliases to these buffers; it never
+  // zeros them.  Keep the active-expert union from the previous completed
+  // window so a new window can lazily retire stale expert slices.
+  std::vector<int> optimizer_grad_window_active_experts_;
+  std::array<void*, 9> optimizer_grad_output_ptrs_{};
+  bool optimizer_grad_outputs_initialized_ = false;
 
  public:
   TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
@@ -627,7 +628,8 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void backward(const void* grad_output, void* grad_input, void* grad_gate_lora_a, void* grad_gate_lora_b,
                 void* grad_up_lora_a, void* grad_up_lora_b, void* grad_down_lora_a, void* grad_down_lora_b,
                 void* grad_weights, void* grad_gate_proj = nullptr, void* grad_up_proj = nullptr,
-                void* grad_down_proj = nullptr) {
+                void* grad_down_proj = nullptr, bool accumulate_optimizer_grads = false,
+                float optimizer_grad_scale = 1.0f) {
     SFTProfileScope total_scope(profiler_, SFTProfileStage::TpBwdTotal);
     auto stage_start = profiler_.start();
     auto pool = config.pool;
@@ -643,6 +645,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
     const bool need_grad_weights = (grad_weights != nullptr);
     const bool need_base_weight_grad = sft_config.full_weight_grad && grad_gate_proj != nullptr &&
                                        grad_up_proj != nullptr && grad_down_proj != nullptr;
+    const bool need_lora_weight_grad = !kSkipLoRA && lora_rank > 0 && grad_gate_lora_a != nullptr &&
+                                       grad_gate_lora_b != nullptr && grad_up_lora_a != nullptr &&
+                                       grad_up_lora_b != nullptr && grad_down_lora_a != nullptr &&
+                                       grad_down_lora_b != nullptr;
 
     // SkipLoRA: zero out lora_rank to skip all LoRA buffer allocations
     if constexpr (kSkipLoRA) lora_rank = 0;
@@ -711,7 +717,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       clear_bytes[i] = offset;
     }
 
-    // Parallel memset for per-TP partials and final base-weight gradients.
+    // Parallel memset for per-TP partials and persistent optimizer gradients.
     struct ClearSeg {
       uint8_t* ptr;
       size_t len;
@@ -732,40 +738,105 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
-    size_t base_grad_clear_bytes = 0;
-    const bool can_selectively_clear_base_grad =
-        need_base_weight_grad && T::kSupportsDirectBf16Reload && sft_config.lora_rank == 0 &&
-        config.num_gpu_experts == 0;
-    if (need_base_weight_grad) {
-      const size_t base_grad_bytes = (size_t)expert_num * full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
-      const size_t expert_grad_bytes = (size_t)full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
-      auto append_clear_segments = [&](void* ptr, size_t offset, size_t bytes) {
-        auto* base = static_cast<uint8_t*>(ptr) + offset;
-        for (size_t off = 0; off < bytes; off += kChunkBytes) {
-          size_t len = std::min(kChunkBytes, bytes - off);
-          clear_segs.push_back(ClearSeg{base + off, len});
-        }
-      };
+    size_t optimizer_grad_clear_bytes = 0;
+    const bool supports_authoritative_optimizer_grads =
+        sft_config.authoritative_optimizer_grads && T::kSupportsDirectBf16Reload && config.num_gpu_experts == 0;
+    const bool has_authoritative_optimizer_grads =
+        supports_authoritative_optimizer_grads && (need_base_weight_grad || need_lora_weight_grad);
+    const std::array<void*, 9> current_optimizer_grad_ptrs = {
+        need_base_weight_grad ? grad_gate_proj : nullptr,
+        need_base_weight_grad ? grad_up_proj : nullptr,
+        need_base_weight_grad ? grad_down_proj : nullptr,
+        need_lora_weight_grad ? grad_gate_lora_a : nullptr,
+        need_lora_weight_grad ? grad_gate_lora_b : nullptr,
+        need_lora_weight_grad ? grad_up_lora_a : nullptr,
+        need_lora_weight_grad ? grad_up_lora_b : nullptr,
+        need_lora_weight_grad ? grad_down_lora_a : nullptr,
+        need_lora_weight_grad ? grad_down_lora_b : nullptr,
+    };
+    const bool optimizer_grad_pointers_unchanged =
+        current_optimizer_grad_ptrs == optimizer_grad_output_ptrs_;
+    const bool force_optimizer_grad_initialization =
+        has_authoritative_optimizer_grads &&
+        (!optimizer_grad_outputs_initialized_ || !optimizer_grad_pointers_unchanged);
+    // If C++ state was invalidated by a failed invocation, clearing and
+    // overwriting is the only safe recovery; never accumulate into unknown data.
+    const bool effective_accumulate_optimizer_grads =
+        has_authoritative_optimizer_grads && accumulate_optimizer_grads &&
+        !force_optimizer_grad_initialization;
 
-      const bool pointers_unchanged = last_grad_gate_proj_ == grad_gate_proj && last_grad_up_proj_ == grad_up_proj &&
-                                      last_grad_down_proj_ == grad_down_proj;
-      if (!can_selectively_clear_base_grad || !base_grad_outputs_initialized_ || !pointers_unchanged) {
+    if (has_authoritative_optimizer_grads) {
+      profiler_.record_ns(effective_accumulate_optimizer_grads
+                              ? SFTProfileStage::TpBwdOptimizerGradAccumulate
+                              : SFTProfileStage::TpBwdOptimizerGradOverwrite,
+                          0);
+      // Mark invalid before dispatch. State is committed only after all NUMA
+      // work and TP merges complete successfully.
+      optimizer_grad_outputs_initialized_ = false;
+    }
+
+    auto append_clear_segments = [&](void* ptr, size_t offset, size_t bytes) {
+      if (ptr == nullptr || bytes == 0) return;
+      auto* base = static_cast<uint8_t*>(ptr) + offset;
+      for (size_t off = 0; off < bytes; off += kChunkBytes) {
+        size_t len = std::min(kChunkBytes, bytes - off);
+        clear_segs.push_back(ClearSeg{base + off, len});
+      }
+      optimizer_grad_clear_bytes += bytes;
+    };
+
+    std::vector<uint8_t> current_active_mask(expert_num, 0);
+    for (int expert_idx : active_expert_map) {
+      if (expert_idx >= 0 && expert_idx < expert_num) current_active_mask[expert_idx] = 1;
+    }
+
+    const size_t base_expert_bytes =
+        (size_t)full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
+    const size_t base_grad_bytes = (size_t)expert_num * base_expert_bytes;
+    if (need_base_weight_grad) {
+      if (!supports_authoritative_optimizer_grads || force_optimizer_grad_initialization) {
         append_clear_segments(grad_gate_proj, 0, base_grad_bytes);
         append_clear_segments(grad_up_proj, 0, base_grad_bytes);
         append_clear_segments(grad_down_proj, 0, base_grad_bytes);
-        base_grad_clear_bytes = 3 * base_grad_bytes;
-      } else {
-        std::vector<uint8_t> active_mask(expert_num, 0);
-        for (int expert_idx : active_expert_map) {
-          if (expert_idx >= 0 && expert_idx < expert_num) active_mask[expert_idx] = 1;
+      } else if (!effective_accumulate_optimizer_grads) {
+        // Active experts are overwritten by dWeight. Only experts that were
+        // active in the previous optimizer window and are absent now are stale.
+        for (int expert_idx : optimizer_grad_window_active_experts_) {
+          if (expert_idx < 0 || expert_idx >= expert_num || current_active_mask[expert_idx]) continue;
+          const size_t offset = static_cast<size_t>(expert_idx) * base_expert_bytes;
+          append_clear_segments(grad_gate_proj, offset, base_expert_bytes);
+          append_clear_segments(grad_up_proj, offset, base_expert_bytes);
+          append_clear_segments(grad_down_proj, offset, base_expert_bytes);
         }
-        for (int expert_idx : last_base_grad_active_experts_) {
-          if (expert_idx < 0 || expert_idx >= expert_num || active_mask[expert_idx]) continue;
-          const size_t expert_offset = static_cast<size_t>(expert_idx) * expert_grad_bytes;
-          append_clear_segments(grad_gate_proj, expert_offset, expert_grad_bytes);
-          append_clear_segments(grad_up_proj, expert_offset, expert_grad_bytes);
-          append_clear_segments(grad_down_proj, expert_offset, expert_grad_bytes);
-          base_grad_clear_bytes += 3 * expert_grad_bytes;
+      }
+    }
+
+    if (need_lora_weight_grad && supports_authoritative_optimizer_grads) {
+      const std::array<void*, 6> lora_ptrs = {grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a,
+                                              grad_up_lora_b, grad_down_lora_a, grad_down_lora_b};
+      const std::array<size_t, 6> lora_expert_bytes = {
+          (size_t)lora_rank * hidden_size * sizeof(ggml_bf16_t),
+          (size_t)full_intermediate_size * lora_rank * sizeof(ggml_bf16_t),
+          (size_t)lora_rank * hidden_size * sizeof(ggml_bf16_t),
+          (size_t)full_intermediate_size * lora_rank * sizeof(ggml_bf16_t),
+          (size_t)lora_rank * full_intermediate_size * sizeof(ggml_bf16_t),
+          (size_t)hidden_size * lora_rank * sizeof(ggml_bf16_t),
+      };
+      if (force_optimizer_grad_initialization) {
+        for (size_t output_idx = 0; output_idx < lora_ptrs.size(); ++output_idx) {
+          append_clear_segments(lora_ptrs[output_idx], 0,
+                                (size_t)expert_num * lora_expert_bytes[output_idx]);
+        }
+      } else if (!effective_accumulate_optimizer_grads) {
+        // LoRA kernels use BF16 read-modify-write, so retire every expert from
+        // the previous window before the first microbatch of the new window.
+        for (int expert_idx : optimizer_grad_window_active_experts_) {
+          if (expert_idx < 0 || expert_idx >= expert_num) continue;
+          for (size_t output_idx = 0; output_idx < lora_ptrs.size(); ++output_idx) {
+            append_clear_segments(lora_ptrs[output_idx],
+                                  (size_t)expert_idx * lora_expert_bytes[output_idx],
+                                  lora_expert_bytes[output_idx]);
+          }
         }
       }
     }
@@ -778,35 +849,38 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                nullptr);
     size_t partial_clear_bytes = 0;
     for (size_t bytes : clear_bytes) partial_clear_bytes += bytes;
-    profiler_.record_bytes(SFTProfileStage::TpBwdBufferClear, partial_clear_bytes + base_grad_clear_bytes);
+    profiler_.record_bytes(SFTProfileStage::TpBwdBufferClear, partial_clear_bytes + optimizer_grad_clear_bytes);
+    profiler_.record_bytes(SFTProfileStage::TpBwdOptimizerGradLazyClear, optimizer_grad_clear_bytes);
     profiler_.record(SFTProfileStage::TpBwdBufferClear, stage_start);
 
     // Compute TP-slice pointers for copy-type direct writes
     // Each TP writes to its own I-slice of the final output tensor
-    std::vector<ggml_bf16_t*> tp_gate_b_ptr(tp_count);
-    std::vector<ggml_bf16_t*> tp_up_b_ptr(tp_count);
-    std::vector<ggml_bf16_t*> tp_down_a_ptr(tp_count);
-    std::vector<float*> tp_fp32_down_b(tp_count);
-    std::vector<float*> tp_fp32_gate_a(tp_count);
-    std::vector<float*> tp_fp32_up_a(tp_count);
+    std::vector<ggml_bf16_t*> tp_gate_b_ptr(tp_count, nullptr);
+    std::vector<ggml_bf16_t*> tp_up_b_ptr(tp_count, nullptr);
+    std::vector<ggml_bf16_t*> tp_down_a_ptr(tp_count, nullptr);
+    std::vector<float*> tp_fp32_down_b(tp_count, nullptr);
+    std::vector<float*> tp_fp32_gate_a(tp_count, nullptr);
+    std::vector<float*> tp_fp32_up_a(tp_count, nullptr);
     std::vector<ggml_bf16_t*> tp_grad_gate_proj(tp_count, nullptr);
     std::vector<ggml_bf16_t*> tp_grad_up_proj(tp_count, nullptr);
     std::vector<ggml_bf16_t*> tp_grad_down_proj(tp_count, nullptr);
 
     if constexpr (!kSkipLoRA) {
-      int tp_offset = 0;
-      for (int i = 0; i < tp_count; i++) {
-        // Copy-type: pointer into final tensor at this TP's I-slice
-        tp_gate_b_ptr[i] = (ggml_bf16_t*)grad_gate_lora_b + (size_t)tp_offset * lora_rank;
-        tp_up_b_ptr[i] = (ggml_bf16_t*)grad_up_lora_b + (size_t)tp_offset * lora_rank;
-        tp_down_a_ptr[i] = (ggml_bf16_t*)grad_down_lora_a + tp_offset;  // row-wise, offset added per-row
+      if (need_lora_weight_grad) {
+        int tp_offset = 0;
+        for (int i = 0; i < tp_count; i++) {
+          // Copy-type: pointer into final tensor at this TP's I-slice
+          tp_gate_b_ptr[i] = (ggml_bf16_t*)grad_gate_lora_b + (size_t)tp_offset * lora_rank;
+          tp_up_b_ptr[i] = (ggml_bf16_t*)grad_up_lora_b + (size_t)tp_offset * lora_rank;
+          tp_down_a_ptr[i] = (ggml_bf16_t*)grad_down_lora_a + tp_offset;  // row-wise, offset added per-row
 
-        // Reduce-type: sparse FP32 partials (reinterpret from part_grad pointers)
-        tp_fp32_down_b[i] = (float*)part_grad_down_lora_a_[i];  // reused slot for down_lora_b FP32
-        tp_fp32_gate_a[i] = (float*)part_grad_gate_lora_a_[i];
-        tp_fp32_up_a[i] = (float*)part_grad_up_lora_a_[i];
+          // Reduce-type: sparse FP32 partials (reinterpret from part_grad pointers)
+          tp_fp32_down_b[i] = (float*)part_grad_down_lora_a_[i];  // reused slot for down_lora_b FP32
+          tp_fp32_gate_a[i] = (float*)part_grad_gate_lora_a_[i];
+          tp_fp32_up_a[i] = (float*)part_grad_up_lora_a_[i];
 
-        tp_offset += tp_configs[i].intermediate_size;
+          tp_offset += tp_configs[i].intermediate_size;
+        }
       }
     }
 
@@ -823,9 +897,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
       throw std::runtime_error("TP intermediate_size slices do not cover the full intermediate_size");
     }
 
-    // A failed dWeight computation must force a full clear on the next invocation.
-    if (can_selectively_clear_base_grad) base_grad_outputs_initialized_ = false;
-
     // Run backward on each NUMA node
     stage_start = profiler_.start();
     pool->dispense_backend()->do_numa_job([&](int numa_id) {
@@ -839,16 +910,10 @@ class TP_MOE_SFT : public TP_MOE<T> {
                              nullptr,                /* grad_down_lora_b — unused, FP32 path below */
                              part_grad_weights_[numa_id], full_intermediate_size, tp_fp32_down_b[numa_id],
                              tp_fp32_gate_a[numa_id], tp_fp32_up_a[numa_id], tp_grad_gate_proj[numa_id],
-                             tp_grad_up_proj[numa_id], tp_grad_down_proj[numa_id]);
+                             tp_grad_up_proj[numa_id], tp_grad_down_proj[numa_id],
+                             effective_accumulate_optimizer_grads, optimizer_grad_scale);
     });
     profiler_.record(SFTProfileStage::TpBwdNumaCompute, stage_start);
-    if (can_selectively_clear_base_grad) {
-      last_base_grad_active_experts_ = active_expert_map;
-      last_grad_gate_proj_ = grad_gate_proj;
-      last_grad_up_proj_ = grad_up_proj;
-      last_grad_down_proj_ = grad_down_proj;
-      base_grad_outputs_initialized_ = true;
-    }
 
     // // Collect per-thread timing from all NUMA subpools
     // for (int i = 0; i < tp_count; i++) {
@@ -927,76 +992,96 @@ class TP_MOE_SFT : public TP_MOE<T> {
     // Copy-type grads (gate/up_lora_b, down_lora_a) were written directly — no merge needed.
     stage_start = profiler_.start();
     if constexpr (!kSkipLoRA) {
-      // Sparse merge for gate_lora_a, up_lora_a: [active_count, r, H] FP32 → [E, r, H] BF16
-      {
-        const int sparse_rows = active_count * lora_rank;  // e.g. 10*8=80 vs 4096
-        auto* out_gate_a = (ggml_bf16_t*)grad_gate_lora_a;
-        auto* out_up_a = (ggml_bf16_t*)grad_up_lora_a;
-        pool->do_work_stealing_job(
-            sparse_rows, nullptr,
-            [&](int sparse_row_id) {
-              int task = sparse_row_id / lora_rank;
-              int r = sparse_row_id % lora_rank;
-              int expert_idx = active_expert_map[task];
-              size_t src_base = ((size_t)task * lora_rank + r) * hidden_size;
-              size_t dst_base = ((size_t)expert_idx * lora_rank + r) * hidden_size;
+      if (need_lora_weight_grad) {
+        // Sparse merge for gate_lora_a, up_lora_a: [active_count, r, H] FP32 → [E, r, H] BF16
+        {
+          const int sparse_rows = active_count * lora_rank;  // e.g. 10*8=80 vs 4096
+          auto* out_gate_a = (ggml_bf16_t*)grad_gate_lora_a;
+          auto* out_up_a = (ggml_bf16_t*)grad_up_lora_a;
+          pool->do_work_stealing_job(
+              sparse_rows, nullptr,
+              [&](int sparse_row_id) {
+                int task = sparse_row_id / lora_rank;
+                int r = sparse_row_id % lora_rank;
+                int expert_idx = active_expert_map[task];
+                size_t src_base = ((size_t)task * lora_rank + r) * hidden_size;
+                size_t dst_base = ((size_t)expert_idx * lora_rank + r) * hidden_size;
 
-              ggml_bf16_t* gd = out_gate_a + dst_base;
-              ggml_bf16_t* ud = out_up_a + dst_base;
+                ggml_bf16_t* gd = out_gate_a + dst_base;
+                ggml_bf16_t* ud = out_up_a + dst_base;
 
-              int h = 0;
-              for (; h + 32 <= hidden_size; h += 32) {
-                __m512 gs0 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h);
-                __m512 gs1 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h + 16);
-                __m512 us0 = _mm512_loadu_ps((const float*)tp_fp32_up_a[0] + src_base + h);
-                __m512 us1 = _mm512_loadu_ps((const float*)tp_fp32_up_a[0] + src_base + h + 16);
-                for (int tp = 1; tp < tp_count; tp++) {
-                  gs0 = _mm512_add_ps(gs0, _mm512_loadu_ps((const float*)tp_fp32_gate_a[tp] + src_base + h));
-                  gs1 = _mm512_add_ps(gs1, _mm512_loadu_ps((const float*)tp_fp32_gate_a[tp] + src_base + h + 16));
-                  us0 = _mm512_add_ps(us0, _mm512_loadu_ps((const float*)tp_fp32_up_a[tp] + src_base + h));
-                  us1 = _mm512_add_ps(us1, _mm512_loadu_ps((const float*)tp_fp32_up_a[tp] + src_base + h + 16));
-                }
-                avx512_32xfp32_to_32xbf16(&gs0, &gs1, (__m512i*)(gd + h));
-                avx512_32xfp32_to_32xbf16(&us0, &us1, (__m512i*)(ud + h));
-              }
-              for (; h < hidden_size; h++) {
-                float gs = ((const float*)tp_fp32_gate_a[0])[src_base + h];
-                float us = ((const float*)tp_fp32_up_a[0])[src_base + h];
-                for (int tp = 1; tp < tp_count; tp++) {
-                  gs += ((const float*)tp_fp32_gate_a[tp])[src_base + h];
-                  us += ((const float*)tp_fp32_up_a[tp])[src_base + h];
-                }
-                gd[h] = GGML_FP32_TO_BF16(gs);
-                ud[h] = GGML_FP32_TO_BF16(us);
-              }
-            },
-            nullptr);
-      }
-
-      // Sparse merge for down_lora_b: [active_count, H, r] FP32 → [E, H, r] BF16
-      {
-        const int sparse_rows = active_count;  // one task per active expert
-        auto* out_down_b = (ggml_bf16_t*)grad_down_lora_b;
-        pool->do_work_stealing_job(
-            sparse_rows, nullptr,
-            [&](int task) {
-              int expert_idx = active_expert_map[task];
-              size_t src_expert_base = (size_t)task * hidden_size * lora_rank;
-              size_t dst_expert_base = (size_t)expert_idx * hidden_size * lora_rank;
-
-              for (int hh = 0; hh < hidden_size; hh++) {
-                size_t src_row = src_expert_base + (size_t)hh * lora_rank;
-                size_t dst_row = dst_expert_base + (size_t)hh * lora_rank;
-                for (int r = 0; r < lora_rank; r++) {
-                  float sum = ((const float*)tp_fp32_down_b[0])[src_row + r];
+                int h = 0;
+                for (; h + 32 <= hidden_size; h += 32) {
+                  __m512 gs0 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h);
+                  __m512 gs1 = _mm512_loadu_ps((const float*)tp_fp32_gate_a[0] + src_base + h + 16);
+                  __m512 us0 = _mm512_loadu_ps((const float*)tp_fp32_up_a[0] + src_base + h);
+                  __m512 us1 = _mm512_loadu_ps((const float*)tp_fp32_up_a[0] + src_base + h + 16);
                   for (int tp = 1; tp < tp_count; tp++) {
-                    sum += ((const float*)tp_fp32_down_b[tp])[src_row + r];
+                    gs0 = _mm512_add_ps(gs0, _mm512_loadu_ps((const float*)tp_fp32_gate_a[tp] + src_base + h));
+                    gs1 = _mm512_add_ps(gs1, _mm512_loadu_ps((const float*)tp_fp32_gate_a[tp] + src_base + h + 16));
+                    us0 = _mm512_add_ps(us0, _mm512_loadu_ps((const float*)tp_fp32_up_a[tp] + src_base + h));
+                    us1 = _mm512_add_ps(us1, _mm512_loadu_ps((const float*)tp_fp32_up_a[tp] + src_base + h + 16));
                   }
-                  out_down_b[dst_row + r] = GGML_FP32_TO_BF16(sum);
+                  // Authoritative BF16 buffers persist across microbatches. Legacy
+                  // backends keep their original reduce-merge overwrite semantics.
+                  if (supports_authoritative_optimizer_grads) {
+                    __m512 old_gs0, old_gs1, old_us0, old_us1;
+                    avx512_32xbf16_to_32xfp32((__m512i*)(gd + h), &old_gs0, &old_gs1);
+                    avx512_32xbf16_to_32xfp32((__m512i*)(ud + h), &old_us0, &old_us1);
+                    gs0 = _mm512_add_ps(gs0, old_gs0);
+                    gs1 = _mm512_add_ps(gs1, old_gs1);
+                    us0 = _mm512_add_ps(us0, old_us0);
+                    us1 = _mm512_add_ps(us1, old_us1);
+                  }
+                  avx512_32xfp32_to_32xbf16(&gs0, &gs1, (__m512i*)(gd + h));
+                  avx512_32xfp32_to_32xbf16(&us0, &us1, (__m512i*)(ud + h));
                 }
-              }
-            },
-            nullptr);
+                for (; h < hidden_size; h++) {
+                  float gs = ((const float*)tp_fp32_gate_a[0])[src_base + h];
+                  float us = ((const float*)tp_fp32_up_a[0])[src_base + h];
+                  for (int tp = 1; tp < tp_count; tp++) {
+                    gs += ((const float*)tp_fp32_gate_a[tp])[src_base + h];
+                    us += ((const float*)tp_fp32_up_a[tp])[src_base + h];
+                  }
+                  if (supports_authoritative_optimizer_grads) {
+                    gs += GGML_BF16_TO_FP32(gd[h]);
+                    us += GGML_BF16_TO_FP32(ud[h]);
+                  }
+                  gd[h] = GGML_FP32_TO_BF16(gs);
+                  ud[h] = GGML_FP32_TO_BF16(us);
+                }
+              },
+              nullptr);
+        }
+
+        // Sparse merge for down_lora_b: [active_count, H, r] FP32 → [E, H, r] BF16
+        {
+          const int sparse_rows = active_count;  // one task per active expert
+          auto* out_down_b = (ggml_bf16_t*)grad_down_lora_b;
+          pool->do_work_stealing_job(
+              sparse_rows, nullptr,
+              [&](int task) {
+                int expert_idx = active_expert_map[task];
+                size_t src_expert_base = (size_t)task * hidden_size * lora_rank;
+                size_t dst_expert_base = (size_t)expert_idx * hidden_size * lora_rank;
+
+                for (int hh = 0; hh < hidden_size; hh++) {
+                  size_t src_row = src_expert_base + (size_t)hh * lora_rank;
+                  size_t dst_row = dst_expert_base + (size_t)hh * lora_rank;
+                  for (int r = 0; r < lora_rank; r++) {
+                    float sum = ((const float*)tp_fp32_down_b[0])[src_row + r];
+                    for (int tp = 1; tp < tp_count; tp++) {
+                      sum += ((const float*)tp_fp32_down_b[tp])[src_row + r];
+                    }
+                    if (supports_authoritative_optimizer_grads) {
+                      sum += GGML_BF16_TO_FP32(out_down_b[dst_row + r]);
+                    }
+                    out_down_b[dst_row + r] = GGML_FP32_TO_BF16(sum);
+                  }
+                }
+              },
+              nullptr);
+        }
       }
     }  // if constexpr (!kSkipLoRA)
     profiler_.record(SFTProfileStage::TpBwdLoraMerge, stage_start);
@@ -1042,6 +1127,31 @@ class TP_MOE_SFT : public TP_MOE<T> {
     profiler_.record(SFTProfileStage::TpBwdRouterGradMerge, stage_start);
 
     pool->dispense_backend()->do_numa_job([&](int numa_id) {});
+
+    if (has_authoritative_optimizer_grads) {
+      if (effective_accumulate_optimizer_grads) {
+        std::vector<uint8_t> window_mask(expert_num, 0);
+        for (int expert_idx : optimizer_grad_window_active_experts_) {
+          if (expert_idx >= 0 && expert_idx < expert_num) window_mask[expert_idx] = 1;
+        }
+        for (int expert_idx : active_expert_map) {
+          if (expert_idx >= 0 && expert_idx < expert_num) window_mask[expert_idx] = 1;
+        }
+        optimizer_grad_window_active_experts_.clear();
+        for (int expert_idx = 0; expert_idx < expert_num; ++expert_idx) {
+          if (window_mask[expert_idx]) optimizer_grad_window_active_experts_.push_back(expert_idx);
+        }
+      } else {
+        optimizer_grad_window_active_experts_ = active_expert_map;
+        std::sort(optimizer_grad_window_active_experts_.begin(), optimizer_grad_window_active_experts_.end());
+        optimizer_grad_window_active_experts_.erase(
+            std::unique(optimizer_grad_window_active_experts_.begin(),
+                        optimizer_grad_window_active_experts_.end()),
+            optimizer_grad_window_active_experts_.end());
+      }
+      optimizer_grad_output_ptrs_ = current_optimizer_grad_ptrs;
+      optimizer_grad_outputs_initialized_ = true;
+    }
   }
 
   /**
@@ -1050,10 +1160,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void backward_binding(intptr_t grad_output, intptr_t grad_input, intptr_t grad_gate_lora_a, intptr_t grad_gate_lora_b,
                         intptr_t grad_up_lora_a, intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
                         intptr_t grad_down_lora_b, intptr_t grad_weights, intptr_t grad_gate_proj,
-                        intptr_t grad_up_proj, intptr_t grad_down_proj) {
+                        intptr_t grad_up_proj, intptr_t grad_down_proj,
+                        bool accumulate_optimizer_grads = false, float optimizer_grad_scale = 1.0f) {
     backward((const void*)grad_output, (void*)grad_input, (void*)grad_gate_lora_a, (void*)grad_gate_lora_b,
              (void*)grad_up_lora_a, (void*)grad_up_lora_b, (void*)grad_down_lora_a, (void*)grad_down_lora_b,
-             (void*)grad_weights, (void*)grad_gate_proj, (void*)grad_up_proj, (void*)grad_down_proj);
+             (void*)grad_weights, (void*)grad_gate_proj, (void*)grad_up_proj, (void*)grad_down_proj,
+             accumulate_optimizer_grads, optimizer_grad_scale);
   }
 
   /**

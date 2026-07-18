@@ -10,9 +10,41 @@ This is a leaf module — no imports from other sft/ submodules.
 from __future__ import annotations
 
 from contextlib import nullcontext
+import os
 from typing import Any
 
 import torch
+
+
+def _distributed_rank_world_size() -> tuple[int, int]:
+    """Return rank/world size during both model construction and runtime.
+
+    Accelerate/torchrun may construct the model before the process group is
+    initialized.  In that phase the standard launcher environment is the only
+    reliable way to keep rank-0 KT ownership and rank-0 buffer capacity
+    consistent across processes.
+    """
+    import torch.distributed as dist
+
+    if dist.is_initialized():
+        return int(dist.get_rank()), int(dist.get_world_size())
+
+    rank_text = os.environ.get("RANK")
+    world_text = os.environ.get("WORLD_SIZE")
+    if rank_text is None or world_text is None:
+        return 0, 1
+    try:
+        rank = int(rank_text)
+        world_size = int(world_text)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid distributed launcher environment: RANK={rank_text!r}, WORLD_SIZE={world_text!r}"
+        ) from exc
+    if world_size <= 0 or rank < 0 or rank >= world_size:
+        raise RuntimeError(
+            f"Invalid distributed launcher environment: rank={rank}, world_size={world_size}"
+        )
+    return rank, world_size
 
 
 def _all_gather_qlens(local_qlen: int, device: torch.device, world_size: int) -> list[int]:
