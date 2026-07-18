@@ -78,18 +78,18 @@ def build_coactivation_matrix(
     if traces.dim() == 1:
         traces = traces.unsqueeze(0)
 
+    # Build a per-token binary indicator over experts, then C = I^T @ I. Row
+    # i, col j of the product counts tokens where both i and j were present;
+    # the diagonal holds marginal counts. Out-of-range ids (e.g. -1 padding)
+    # are steered into a scratch column that is dropped before the matmul. The
+    # binary indicator dedups repeated ids within a token, matching the earlier
+    # per-token unique() semantics. Fully vectorized (no Python token loop).
     num_tokens, top_k = traces.shape
-    for token_idx in range(num_tokens):
-        ids = traces[token_idx]
-        valid = ids[(ids >= 0) & (ids < num_experts)]
-        unique_ids = torch.unique(valid)
-        if unique_ids.numel() == 0:
-            continue
-        # Outer product over the present experts increments every ordered pair,
-        # including the (i, i) diagonal, giving marginal counts for free.
-        rows = unique_ids.unsqueeze(1).expand(-1, unique_ids.numel()).reshape(-1)
-        cols = unique_ids.unsqueeze(0).expand(unique_ids.numel(), -1).reshape(-1)
-        coactivation[rows, cols] += 1.0
+    clamped = torch.where((traces >= 0) & (traces < num_experts), traces, num_experts)
+    indicator = torch.zeros(num_tokens, num_experts + 1, dtype=torch.float32, device="cpu")
+    indicator.scatter_(1, clamped, 1.0)
+    indicator = indicator[:, :num_experts]
+    coactivation = indicator.t().mm(indicator)
 
     return coactivation
 
@@ -292,6 +292,11 @@ def _coverage_select(
             selected[e] = True
             selected_set.add(e)
 
+        # Drop tokens that are now fully covered so later iterations scan fewer
+        # of them. Coverage is monotone (selected_set only grows), so a covered
+        # token stays covered and can be removed permanently.
+        token_sets = [s for s in token_sets if not s.issubset(selected_set)]
+
     # If budget remains and every token is covered, fill by marginal frequency.
     if int(selected.sum().item()) < budget:
         remaining = budget - int(selected.sum().item())
@@ -473,11 +478,27 @@ class EmaHotnessTracker:
                           Tokens are consumed in row order so recency is respected.
         """
         for layer_idx, traces in token_traces.items():
+            if layer_idx < 0 or layer_idx >= self.num_layers:
+                continue
             ids = traces.to(device="cpu", dtype=torch.long)
             if ids.dim() == 1:
                 ids = ids.unsqueeze(0)
-            for token_ids in ids:
-                self.observe(layer_idx, token_ids)
+            num_tokens, top_k = ids.shape
+            if num_tokens == 0:
+                continue
+            # Vectorized equivalent of applying observe() to each row in order:
+            # the prior row decays by decay**num_tokens, and token t (0-indexed)
+            # contributes (1 - decay) * decay**(num_tokens - 1 - t), so later
+            # tokens weigh more. A single index_add_ replaces the per-token loop.
+            row = self._hotness[layer_idx]
+            row.mul_(self.decay**num_tokens)
+            exponent = torch.arange(num_tokens, dtype=torch.float32, device="cpu")
+            weights = (1.0 - self.decay) * torch.pow(self.decay, num_tokens - 1 - exponent)
+            flat_weights = weights.unsqueeze(1).expand(-1, top_k).flatten()
+            flat_ids = ids.flatten()
+            valid_mask = (flat_ids >= 0) & (flat_ids < self.num_experts)
+            if valid_mask.any():
+                row.index_add_(0, flat_ids[valid_mask], flat_weights[valid_mask])
 
     def scores(self) -> torch.Tensor:
         """Return a copy of the current ``(num_layers, num_experts)`` EMA scores."""
@@ -577,13 +598,17 @@ def token_resident_rate(
         if ids.dim() == 1:
             ids = ids.unsqueeze(0)
         layer_mask = mask[layer_idx]
-        for token_ids in ids:
-            valid = token_ids[(token_ids >= 0) & (token_ids < num_experts)]
-            if valid.numel() == 0:
-                continue
-            total_tokens += 1
-            if bool(layer_mask[valid].all()):
-                fully_resident += 1
+        # A token counts only if it has >=1 valid routed id, and is fully
+        # resident when every valid id maps to a True mask entry. Vectorized:
+        # padding positions are forced True so they don't fail the all() test,
+        # and tokens with no valid id are excluded from both counts.
+        valid = (ids >= 0) & (ids < num_experts)
+        has_valid = valid.any(dim=1)
+        total_tokens += int(has_valid.sum().item())
+        clamped_ids = ids.clamp(min=0, max=num_experts - 1)
+        resident = layer_mask[clamped_ids]
+        token_ok = (resident | ~valid).all(dim=1)
+        fully_resident += int((token_ok & has_valid).sum().item())
 
     if total_tokens == 0:
         return 0.0

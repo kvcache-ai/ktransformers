@@ -77,6 +77,13 @@ class TestCoactivationMatrix(unittest.TestCase):
         self.assertEqual(coact.shape, (4, 4))
         self.assertEqual(coact.sum().item(), 0.0)
 
+    def test_repeated_id_within_token_counts_once(self):
+        """A duplicated id in one token contributes a single presence, not two."""
+        traces = torch.tensor([[0, 0], [0, 1]])  # token 0 lists expert 0 twice
+        coact = build_coactivation_matrix(traces, num_experts=2)
+        self.assertEqual(coact[0, 0].item(), 2.0)  # present in 2 tokens, not 3
+        self.assertEqual(coact[0, 1].item(), 1.0)
+
 
 class TestCoactivationBeatsFrequency(unittest.TestCase):
     def test_coactivation_beats_frequency(self):
@@ -411,6 +418,22 @@ class TestEmaHotnessTracker(unittest.TestCase):
         t = EmaHotnessTracker(1, 4, 0)
         t.observe(0, torch.tensor([0, 1]))
         self.assertEqual(int(t.mask().sum()), 0)
+
+    def test_observe_batch_matches_scalar_multitoken(self):
+        """Vectorized observe_batch equals repeated scalar observe on a longer,
+        varied trace including padding -- guards the batched EMA math."""
+        traces = {0: torch.tensor([[0, 1], [2, -1], [1, 3], [0, 0], [3, 2]])}
+        batch = EmaHotnessTracker(1, 4, 2, decay=0.85)
+        batch.observe_batch(traces)
+        seq = EmaHotnessTracker(1, 4, 2, decay=0.85)
+        for row in traces[0]:
+            seq.observe(0, row)
+        self.assertTrue(bool(torch.allclose(batch.scores(), seq.scores(), atol=1e-6)))
+
+    def test_observe_batch_empty_layer(self):
+        t = EmaHotnessTracker(1, 4, 2, decay=0.9)
+        t.observe_batch({0: torch.empty(0, 2, dtype=torch.long)})
+        self.assertEqual(float(t.scores().sum()), 0.0)
 
 
 if __name__ == "__main__":
