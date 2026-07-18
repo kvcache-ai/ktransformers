@@ -408,8 +408,9 @@ class TP_MOE<AVXVNNI256_RAW_INT4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
-    if (config.gate_proj == nullptr || config.gate_scale == nullptr) {
-      throw std::runtime_error("AVX-VNNI RAWINT4 MoE only supports flat packed INT4 with KGroup bf16 scales");
+    const bool use_per_expert_ptrs = !config.gate_projs.empty();
+    if (!use_per_expert_ptrs && (config.gate_proj == nullptr || config.gate_scale == nullptr)) {
+      throw std::runtime_error("AVX-VNNI RAWINT4 MoE requires flat packed INT4 or per-expert weight pointers");
     }
 
     const int group_size = config.quant_config.group_size;
@@ -433,21 +434,35 @@ class TP_MOE<AVXVNNI256_RAW_INT4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AVX
           tpc.expert_num, nullptr,
           [&, i](int expert_id_) {
             size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
-            uint8_t* src_gate =
-                (uint8_t*)config.gate_proj + ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
-            uint8_t* src_up =
-                (uint8_t*)config.up_proj + ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
-            uint8_t* src_down =
-                (uint8_t*)config.down_proj + ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
-            ggml_bf16_t* src_gate_scale =
-                (ggml_bf16_t*)config.gate_scale +
-                expert_id * ((size_t)config.hidden_size / group_size) * config.intermediate_size;
-            ggml_bf16_t* src_up_scale = (ggml_bf16_t*)config.up_scale + expert_id *
-                                                                            ((size_t)config.hidden_size / group_size) *
-                                                                            config.intermediate_size;
-            ggml_bf16_t* src_down_scale =
-                (ggml_bf16_t*)config.down_scale +
-                expert_id * ((size_t)config.intermediate_size / group_size) * config.hidden_size;
+            uint8_t* src_gate;
+            uint8_t* src_up;
+            uint8_t* src_down;
+            ggml_bf16_t* src_gate_scale;
+            ggml_bf16_t* src_up_scale;
+            ggml_bf16_t* src_down_scale;
+            if (use_per_expert_ptrs) {
+              // Per-expert mode: each pointer is one expert's full [N, K/2] weight /
+              // [N, K/gs] scale tensor, so the TP slice offsets below apply unchanged.
+              src_gate = (uint8_t*)config.gate_projs[0][expert_id];
+              src_up = (uint8_t*)config.up_projs[0][expert_id];
+              src_down = (uint8_t*)config.down_projs[0][expert_id];
+              src_gate_scale = (ggml_bf16_t*)config.gate_scales[0][expert_id];
+              src_up_scale = (ggml_bf16_t*)config.up_scales[0][expert_id];
+              src_down_scale = (ggml_bf16_t*)config.down_scales[0][expert_id];
+            } else {
+              src_gate = (uint8_t*)config.gate_proj +
+                         ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
+              src_up =
+                  (uint8_t*)config.up_proj + ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
+              src_down = (uint8_t*)config.down_proj +
+                         ((expert_id * (size_t)config.intermediate_size * config.hidden_size) >> 1);
+              src_gate_scale = (ggml_bf16_t*)config.gate_scale +
+                               expert_id * ((size_t)config.hidden_size / group_size) * config.intermediate_size;
+              src_up_scale = (ggml_bf16_t*)config.up_scale +
+                             expert_id * ((size_t)config.hidden_size / group_size) * config.intermediate_size;
+              src_down_scale = (ggml_bf16_t*)config.down_scale +
+                               expert_id * ((size_t)config.intermediate_size / group_size) * config.hidden_size;
+            }
 
             // Gate/Up: contiguous slice along N (intermediate).
             std::memcpy((uint8_t*)tpc.gate_proj + ((expert_id * weight_elem_count) >> 1),
