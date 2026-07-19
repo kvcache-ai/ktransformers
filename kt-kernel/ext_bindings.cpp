@@ -712,6 +712,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
           "gpu_experts_mask",
           [](const GeneralMOEConfig& self) { return reinterpret_cast<uintptr_t>(self.gpu_experts_mask); },
           [](GeneralMOEConfig& self, uintptr_t val) { self.gpu_experts_mask = reinterpret_cast<uint8_t*>(val); })
+      .def_readwrite("skip_gpu_expert_cpu_copy", &GeneralMOEConfig::skip_gpu_expert_cpu_copy)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, physical_to_logical_map)
 
       .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_proj)

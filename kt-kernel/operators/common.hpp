@@ -241,6 +241,7 @@ struct GeneralMOEConfig {
   int num_gpu_experts = 0;              // Computed from gpu_experts_mask
   uint8_t* gpu_experts_mask = nullptr;  // Bool mask: true = expert on GPU
   void* physical_to_logical_map = nullptr;
+  bool skip_gpu_expert_cpu_copy = false;
 
   // Compute num_gpu_experts from gpu_experts_mask
   void compute_num_gpu_experts() {

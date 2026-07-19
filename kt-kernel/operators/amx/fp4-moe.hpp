@@ -442,6 +442,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
         nth * config_.expert_num, nullptr,
         [this, nth, physical_to_logical_map](int task_id) {
           uint64_t expert_idx = task_id / nth;
+          if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
           gate_bb_[expert_idx]->from_raw_mat(
@@ -459,6 +460,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
         nth * config_.expert_num, nullptr,
         [this, nth, physical_to_logical_map](int task_id) {
           uint64_t expert_idx = task_id / nth;
+          if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           int ith = task_id % nth;
           down_bb_[expert_idx]->from_raw_mat(
@@ -472,6 +474,7 @@ class AMX_FP4_MOE_TP : public AMX_MOE_BASE<T, AMX_FP4_MOE_TP<T>> {
         config_.expert_num, nullptr,
         [this, physical_to_logical_map](int task_id) {
           uint64_t expert_idx = task_id;
+          if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_idx)) return;
           uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
           size_t scale_elem_count = (config_.hidden_size * config_.intermediate_size) / config_.quant_config.group_size;
           convert_or_copy(gate_bb_[expert_idx]->d,

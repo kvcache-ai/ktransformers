@@ -132,6 +132,7 @@ class KTMoEWrapper:
         # Inference-specific parameters
         cpu_save: bool = False,
         max_deferred_experts_per_token: Optional[int] = None,
+        skip_gpu_expert_cpu_copy: bool = False,
         # Mode and method selection
         method: str = "AMXINT4",
         numa_nodes: Optional[List[int]] = None,
@@ -221,6 +222,7 @@ class KTMoEWrapper:
                 chunked_prefill_size=chunked_prefill_size,
                 cpu_save=cpu_save,
                 max_deferred_experts_per_token=max_deferred_experts_per_token,
+                skip_gpu_expert_cpu_copy=skip_gpu_expert_cpu_copy,
                 method=method,
                 numa_nodes=numa_nodes,
                 swiglu_limit=swiglu_limit,
@@ -234,6 +236,15 @@ class KTMoEWrapper:
                     f"swiglu_limit={swiglu_limit} is not supported in "
                     f"mode='sft' (method={method!r}); SFT backends do not "
                     f"implement the V4-2604B clamp."
+                )
+            # SFT trains every expert on CPU and needs full host copies of all
+            # expert weights, including GPU-resident ones; the inference-only
+            # CPU-copy skip must never reach a training run.
+            if skip_gpu_expert_cpu_copy:
+                raise ValueError(
+                    "skip_gpu_expert_cpu_copy=True is not supported in "
+                    "mode='sft'; SFT requires full CPU copies of all expert "
+                    "weights (GPU-resident experts included)."
                 )
             return _create_sft_wrapper(
                 layer_idx=layer_idx,
@@ -319,6 +330,7 @@ def _create_inference_wrapper(
     chunked_prefill_size: int,
     cpu_save: bool,
     max_deferred_experts_per_token: Optional[int],
+    skip_gpu_expert_cpu_copy: bool,
     method: str,
     numa_nodes: Optional[List[int]] = None,
     swiglu_limit: float = 0.0,
@@ -374,6 +386,8 @@ def _create_inference_wrapper(
             f"environment while the current launch does not actually use "
             f"MXFP4/MXFP8 weights — either unset the env or pass --kt-method MXFP4/MXFP8."
         )
+    if backend_cls is NativeMoEWrapper:
+        extra_kwargs["skip_gpu_expert_cpu_copy"] = skip_gpu_expert_cpu_copy
     return backend_cls(
         layer_idx=layer_idx,
         num_experts=num_experts,

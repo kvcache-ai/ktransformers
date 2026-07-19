@@ -211,6 +211,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
           config_.expert_num, nullptr,
           [this, physical_to_logical_map](int expert_id) {
             // printf("Load layer %d [%d/%d]\n", config_.layer_idx, expert_id, config_.expert_num);
+            if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)expert_id)) return;
             uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_id);
             {
               size_t scale_size = config_.intermediate_size * sizeof(float);
@@ -254,6 +255,9 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             config_.expert_num * mat_type_all * mat_split,
             [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
               int64_t expert_idx = task_id / (mat_type_all * mat_split);
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert(expert_idx)) {
+                return;
+              }
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
               uint8_t mat_split_idex = task_id % mat_split;
@@ -291,6 +295,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)logical_expert_id)) return;
               int ith = task_id % nth;
               // gate part
               gate_bb_[logical_expert_id]->from_mat(
@@ -309,6 +314,7 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
             [this, nth, physical_to_logical_map](int task_id) {
               int64_t expert_idx = task_id / nth;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              if (config_.skip_gpu_expert_cpu_copy && config_.should_skip_expert((int64_t)logical_expert_id)) return;
               int ith = task_id % nth;
               // down part
               down_bb_[logical_expert_id]->from_mat(

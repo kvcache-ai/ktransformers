@@ -215,9 +215,27 @@ class TP_MOE_SFT : public TP_MOE<T> {
   std::vector<ggml_bf16_t*> part_grad_input_;
   std::vector<float*> part_grad_weights_;
 
+  // SFT trains every expert on CPU, so full host copies of all expert weights
+  // are mandatory (GPU-resident experts included). MOESFTConfig inherits
+  // skip_gpu_expert_cpu_copy from GeneralMOEConfig, so a mis-set flag would
+  // otherwise ride the sliced config into the TP_MOE base; strip it here so no
+  // current or future base-class loader can act on it in a training run.
+  static GeneralMOEConfig reject_skip_gpu_expert_cpu_copy(GeneralMOEConfig cfg) {
+    if (cfg.skip_gpu_expert_cpu_copy) {
+      printf(
+          "[TP_MOE_SFT] skip_gpu_expert_cpu_copy is not supported in SFT mode; "
+          "ignoring it and keeping full CPU copies of all expert weights (layer %d)\n",
+          cfg.layer_idx);
+      cfg.skip_gpu_expert_cpu_copy = false;
+    }
+    return cfg;
+  }
+
  public:
-  TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
+  TP_MOE_SFT(const MOESFTConfig& config)
+      : Base(reject_skip_gpu_expert_cpu_copy(static_cast<const GeneralMOEConfig&>(config))), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
+    sft_config.skip_gpu_expert_cpu_copy = false;
 
     backward_temp_pools_.assign(tp_count, nullptr);
     backward_temp_pool_bytes_.assign(tp_count, 0);
