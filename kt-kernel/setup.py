@@ -451,6 +451,9 @@ class CMakeBuild(build_ext):
             build_temp: Temporary build directory for CMake
             cfg: Build type (Release/Debug/etc.)
         """
+        # Ensure Path early (pip/setuptools may pass str; #1874) so later `/` and rglob are safe
+        build_temp = Path(build_temp)
+        build_temp.mkdir(parents=True, exist_ok=True)
 
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
@@ -661,10 +664,6 @@ class CMakeBuild(build_ext):
         for a in cmake_args:
             print("   ", a)
 
-        # Ensure build_temp is a Path before cmake (pip/setuptools may pass str; #1874)
-        build_temp = Path(build_temp)
-        build_temp.mkdir(parents=True, exist_ok=True)
-
         # Configure
         subprocess.run(["cmake", ext.sourcedir, *cmake_args], cwd=build_temp, check=True)
 
@@ -677,8 +676,7 @@ class CMakeBuild(build_ext):
         subprocess.run(["cmake", *build_args], cwd=build_temp, check=True)
 
         # On some systems LTO + CMake + pybind may place the built .so inside build tree; move if needed
-        # Path(...) guards against str build_temp (#1874 AttributeError: 'str' has no attribute 'rglob')
-        built_candidates = list(Path(build_temp).rglob(f"{ext.name}*.so"))
+        built_candidates = list(build_temp.rglob(f"{ext.name}*.so"))
         for cand in built_candidates:
             if cand.parent != extdir:
                 target = extdir / cand.name
