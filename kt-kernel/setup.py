@@ -451,6 +451,9 @@ class CMakeBuild(build_ext):
             build_temp: Temporary build directory for CMake
             cfg: Build type (Release/Debug/etc.)
         """
+        # Ensure Path early (pip/setuptools may pass str; #1874) so later `/` and rglob are safe
+        build_temp = Path(build_temp)
+        build_temp.mkdir(parents=True, exist_ok=True)
 
         # Auto-detect CUDA toolkit if user did not explicitly set CPUINFER_USE_CUDA
         def detect_cuda_toolkit() -> bool:
