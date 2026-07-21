@@ -233,6 +233,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._kt_has_cached_forward: bool = False
         self._checkpoint_output_cpu: Optional[torch.Tensor] = None
         self._checkpoint_output_qlen: int = 0
+        self._backward_repack_pending: bool = False
 
         self.moe = None
 
@@ -576,6 +577,10 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     # ========== Concrete forward/backward ==========
 
+    def _wait_for_pending_backward_repack(self) -> None:
+        if getattr(self, "_backward_repack_pending", False):
+            self.wait_backward_repack()
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -590,6 +595,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         buffer = self._get_buffer(qlen)
         self._copy_inputs_to_buffer(buffer, hidden_states, expert_ids, weights, qlen)
 
+        self._wait_for_pending_backward_repack()
         self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
         self.cpu_infer.sync()
 
@@ -627,6 +633,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 )
             else:
                 backward_task = self._make_backward_task(buffer)
+            self._wait_for_pending_backward_repack()
             self.cpu_infer.submit(backward_task)
             self.cpu_infer.sync()
             result = self._return_grads(buffer, qlen, output_device)
@@ -663,6 +670,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._pending_save_for_backward = save_for_backward
         self._pending_qlen = qlen
 
+        self._wait_for_pending_backward_repack()
         self.cpu_infer.submit(self._make_forward_task(buffer, save_for_backward))
 
     def sync_forward(self, output_device: Optional[torch.device] = None) -> torch.Tensor:
@@ -747,6 +755,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._pending_inference_output_cpu = output_cpu[current_slot]
         self._pending_inference_output_gpu = output_gpu[current_slot]
 
+        self._wait_for_pending_backward_repack()
         self.cpu_infer.submit_with_cuda_stream(
             cuda_stream,
             self._make_forward_task(buffer_view, save_for_backward=False),
@@ -814,6 +823,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 )
             else:
                 backward_task = self._make_backward_task(buffer)
+            self._wait_for_pending_backward_repack()
             self.cpu_infer.submit(backward_task)
         except Exception:
             if use_authoritative:
@@ -869,9 +879,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             return
         if hasattr(self.moe, "submit_backward_repack"):
             self.moe.submit_backward_repack()
+            self._backward_repack_pending = True
 
     def wait_backward_repack(self):
         if not self._weights_loaded or self.moe is None:
+            self._backward_repack_pending = False
             return
         if hasattr(self.moe, "wait_backward_repack"):
             self.moe.wait_backward_repack()
+        self._backward_repack_pending = False

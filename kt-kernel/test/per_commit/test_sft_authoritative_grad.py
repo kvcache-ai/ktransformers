@@ -36,6 +36,16 @@ class _TaskRunner:
             task()
 
 
+class _EventTaskRunner(_TaskRunner):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def submit(self, task):
+        self.events.append("pool_submit")
+        super().submit(task)
+
+
 def test_capability_is_limited_to_cpu_only_amxbf16_sft():
     assert _supports_authoritative_optimizer_grads("AMXBF16_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT", 1)
@@ -125,6 +135,32 @@ class _FakeAuthoritativeWrapper(BaseSFTMoEWrapper):
 
     def update_base_weights(self):
         raise NotImplementedError
+
+
+def test_forward_waits_for_pending_backward_repack_before_pool_submit():
+    backend = _FakeAuthoritativeWrapper()
+    events = []
+    backend.cpu_infer = _EventTaskRunner(events)
+    backend._weights_loaded = True
+    backend.moe = SimpleNamespace(
+        submit_backward_repack=lambda: events.append("repack_submit"),
+        wait_backward_repack=lambda: events.append("repack_wait"),
+    )
+    backend._validate_forward_inputs = lambda *_args: None
+    backend._get_buffer = lambda _qlen: SimpleNamespace()
+    backend._copy_inputs_to_buffer = lambda *_args: None
+    backend._make_forward_task = lambda *_args: (lambda: None)
+
+    backend.submit_backward_repack()
+    backend.submit_forward(
+        torch.ones(1, 1),
+        torch.zeros(1, 1, dtype=torch.int64),
+        torch.ones(1, 1),
+        save_for_backward=True,
+    )
+
+    assert events == ["repack_submit", "repack_wait", "pool_submit"]
+    assert not backend._backward_repack_pending
 
 
 def test_sync_backward_overwrite_accumulate_publish_and_step_release():
