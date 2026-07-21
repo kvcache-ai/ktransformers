@@ -45,6 +45,10 @@ else:
     KTMoEWrapper = None
 
 
+def _supports_checkpoint_forward_reuse(full_weight_grad: bool, lora_rank: int) -> bool:
+    return (full_weight_grad and lora_rank == 0) or (not full_weight_grad and lora_rank > 0)
+
+
 # =============================================================================
 # Device-map builders
 # =============================================================================
@@ -368,8 +372,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             single_process = distributed_world_size == 1
             reuse_checkpoint_forward = (
                 single_process
-                and full_weight_grad
-                and lora_rank == 0
+                and _supports_checkpoint_forward_reuse(full_weight_grad, lora_rank)
                 and kt_method == "AMXBF16_SFT"
                 and os.environ.get("KT_REUSE_CHECKPOINT_FORWARD", "1") != "0"
             )

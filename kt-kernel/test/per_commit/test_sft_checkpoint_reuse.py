@@ -5,6 +5,14 @@ from torch.utils.checkpoint import checkpoint
 
 from kt_kernel.sft.autograd import KTMoEFunction
 from kt_kernel.sft.dist_utils import _checkpoint_hook_mode
+from kt_kernel.sft.wrapper import _supports_checkpoint_forward_reuse
+
+
+def test_checkpoint_forward_reuse_supports_pure_full_and_lora_modes():
+    assert _supports_checkpoint_forward_reuse(full_weight_grad=True, lora_rank=0)
+    assert _supports_checkpoint_forward_reuse(full_weight_grad=False, lora_rank=8)
+    assert not _supports_checkpoint_forward_reuse(full_weight_grad=True, lora_rank=8)
+    assert not _supports_checkpoint_forward_reuse(full_weight_grad=False, lora_rank=0)
 
 
 class _FakeWrapper:
