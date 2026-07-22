@@ -810,8 +810,8 @@ struct GemmKernel224BF {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
           for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
-            ggml_bf16_t* tile_src = b + n_block_begin * k + k_block_begin * n_block_size +
-                                    n_begin * k_block_size + k_begin * N_STEP;
+            ggml_bf16_t* tile_src =
+                b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size + k_begin * N_STEP;
 
             // Copy tile and reverse VNNI transpose (self-inverse)
             memcpy(tile_copy, tile_src, N_STEP * K_STEP * sizeof(ggml_bf16_t));
@@ -845,15 +845,14 @@ struct GemmKernel224BF {
       if (dst_nb_size <= 0) return;
 
       // Helper: compute tile pointer in a packed BF16 BB
-      auto tile_ptr = [](ggml_bf16_t* base, int total_n, int total_k,
-                         int abs_n, int abs_k) -> ggml_bf16_t* {
+      auto tile_ptr = [](ggml_bf16_t* base, int total_n, int total_k, int abs_n, int abs_k) -> ggml_bf16_t* {
         int nb_begin = abs_n / N_BLOCK * N_BLOCK;
         int n_within = abs_n - nb_begin;
         int nb_size = std::min(N_BLOCK, total_n - nb_begin);
         int kb_begin = abs_k / K_BLOCK * K_BLOCK;
         int k_within = abs_k - kb_begin;
-        return base + nb_begin * total_k + kb_begin * nb_size +
-               n_within * std::min(K_BLOCK, total_k - kb_begin) + k_within * N_STEP;
+        return base + nb_begin * total_k + kb_begin * nb_size + n_within * std::min(K_BLOCK, total_k - kb_begin) +
+               k_within * N_STEP;
       };
 
       alignas(64) ggml_bf16_t src_tile[N_STEP * K_STEP];
@@ -1198,8 +1197,8 @@ struct GemmKernel224Int8 {
         for (int k_block_begin = 0; k_block_begin < k; k_block_begin += K_BLOCK) {
           int k_block_size = std::min(K_BLOCK, k - k_block_begin);
           for (int k_begin = 0; k_begin < k_block_size; k_begin += K_STEP) {
-            int8_t* tile_src = b + n_block_begin * k + k_block_begin * n_block_size +
-                               n_begin * k_block_size + k_begin * N_STEP;
+            int8_t* tile_src =
+                b + n_block_begin * k + k_block_begin * n_block_size + n_begin * k_block_size + k_begin * N_STEP;
 
             // Copy tile and reverse VNNI transpose (transpose_16x16_32bit is self-inverse)
             memcpy(tile_copy, tile_src, N_STEP * K_STEP);
@@ -1245,15 +1244,14 @@ struct GemmKernel224Int8 {
       int dst_nb_size = n_end - dst_nb_begin;
       if (dst_nb_size <= 0) return;
 
-      auto tile_ptr = [](int8_t* base, int total_n, int total_k,
-                         int abs_n, int abs_k) -> int8_t* {
+      auto tile_ptr = [](int8_t* base, int total_n, int total_k, int abs_n, int abs_k) -> int8_t* {
         int nb_begin = abs_n / N_BLOCK * N_BLOCK;
         int n_within = abs_n - nb_begin;
         int nb_size = std::min(N_BLOCK, total_n - nb_begin);
         int kb_begin = abs_k / K_BLOCK * K_BLOCK;
         int k_within = abs_k - kb_begin;
-        return base + nb_begin * total_k + kb_begin * nb_size +
-               n_within * std::min(K_BLOCK, total_k - kb_begin) + k_within * N_STEP;
+        return base + nb_begin * total_k + kb_begin * nb_size + n_within * std::min(K_BLOCK, total_k - kb_begin) +
+               k_within * N_STEP;
       };
 
       alignas(64) int8_t tile_copy[N_STEP * K_STEP];  // 2KB un-VNNI workspace
@@ -1273,8 +1271,7 @@ struct GemmKernel224Int8 {
         int nchunks = ncols / 16;
 
         __m512 amax[4];
-        for (int c = 0; c < nchunks; c++)
-          amax[c] = _mm512_setzero_ps();
+        for (int c = 0; c < nchunks; c++) amax[c] = _mm512_setzero_ps();
 
         for (int src_r = 0; src_r < src.n; src_r += N_STEP) {
           int8_t* sp = tile_ptr(src.b, src.n, src.k, src_r, src_c);
@@ -1291,18 +1288,15 @@ struct GemmKernel224Int8 {
             for (int c = 0; c < nchunks; c++) {
               __m128i i8_16 = _mm_load_si128((__m128i*)(row + c * 16));
               __m512i abs_i32 = _mm512_abs_epi32(_mm512_cvtepi8_epi32(i8_16));
-              amax[c] = _mm512_max_ps(amax[c],
-                _mm512_mul_ps(_mm512_cvtepi32_ps(abs_i32), vs));
+              amax[c] = _mm512_max_ps(amax[c], _mm512_mul_ps(_mm512_cvtepi32_ps(abs_i32), vs));
             }
           }
         }
 
-        for (int c = 0; c < nchunks; c++)
-          _mm512_store_ps(absmax_arr + buf_offset + c * 16, amax[c]);
+        for (int c = 0; c < nchunks; c++) _mm512_store_ps(absmax_arr + buf_offset + c * 16, amax[c]);
       }
 
-      for (int j = 0; j < dst_nb_size; j++)
-        d[dst_nb_begin + j] = absmax_arr[j] / 127.0f;
+      for (int j = 0; j < dst_nb_size; j++) d[dst_nb_begin + j] = absmax_arr[j] / 127.0f;
 
       // === Pass 2: register-based 16×16 sub-block transpose ===
       alignas(64) int8_t quant_tile[N_STEP * K_STEP];  // 2KB
@@ -1331,8 +1325,7 @@ struct GemmKernel224Int8 {
                     int8_t* addr = tile_copy + (src_rb + i) * K_STEP + c_offset + src_cb;
                     float scale = src.d[src_r + src_rb + i];
                     __m512i i32 = _mm512_cvtepi8_epi32(_mm_load_si128((__m128i*)addr));
-                    regs[i] = _mm512_castps_si512(
-                      _mm512_mul_ps(_mm512_cvtepi32_ps(i32), _mm512_set1_ps(scale)));
+                    regs[i] = _mm512_castps_si512(_mm512_mul_ps(_mm512_cvtepi32_ps(i32), _mm512_set1_ps(scale)));
                   }
 
                   // Transpose 16×16 in registers (32-bit element shuffle)
@@ -1344,11 +1337,9 @@ struct GemmKernel224Int8 {
                   for (int i = 0; i < 16; i++) {
                     float sv = d[abs_dn + dest_rb + i];
                     float id = sv ? 1.0f / sv : 0.0f;
-                    __m512i q = _mm512_cvtps_epi32(
-                      _mm512_mul_ps(_mm512_castsi512_ps(regs[i]), _mm512_set1_ps(id)));
-                    _mm_store_si128(
-                      (__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb),
-                      _mm512_cvtsepi32_epi8(q));
+                    __m512i q = _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_castsi512_ps(regs[i]), _mm512_set1_ps(id)));
+                    _mm_store_si128((__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb),
+                                    _mm512_cvtsepi32_epi8(q));
                   }
                 }
               }
@@ -1359,8 +1350,7 @@ struct GemmKernel224Int8 {
             transpose_16x16_32bit((__m512i*)(quant_tile + TILE_N * K_STEP));
 
             // Write to dest BB
-            int8_t* dp = b + dst_nb_begin * k + dk_block * dst_nb_size +
-                         dn * dk_block_size + dk * N_STEP;
+            int8_t* dp = b + dst_nb_begin * k + dk_block * dst_nb_size + dn * dk_block_size + dk * N_STEP;
             memcpy(dp, quant_tile, N_STEP * K_STEP);
           }
         }
@@ -3233,6 +3223,7 @@ struct GemmKernel224Int4SmallKGroup {
   using output_t = int32_t;
   static constexpr double ELEMENT_SIZE = 0.5;
   static constexpr int VNNI_BLK = 4;
+  static constexpr bool BLOCKED_B_LAYOUT = false;
 
   static constexpr int M_STEP = 1;
   static constexpr int N_STEP = 32;
@@ -3282,38 +3273,402 @@ struct GemmKernel224Int4SmallKGroup {
     const __m512i lane_shuffle = _mm512_set_epi64(7, 6, 3, 2, 5, 4, 1, 0);
     return _mm512_permutexvar_epi64(lane_shuffle, result);
   }
+  static inline __m512 make_scale_pair(float scale0, float scale1) {
+    __m256 abscale0 = _mm256_set1_ps(scale0);
+    __m256 abscale1 = _mm256_set1_ps(scale1);
+    return _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
+  }
+
+  static inline __m512 dot_scaled_decoded_kblock(__m512i a512, __m512i w512, __m512 abscale) {
+    __m512i mul = _mm512_setzero_si512();
+    mul = _mm512_dpbssd_epi32(mul, a512, w512);
+    return _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul));
+  }
+
+  static inline __m512 dot_scaled_kblock(__m512i a512, __m256i b256, float scale0, float scale1) {
+    return dot_scaled_decoded_kblock(a512, compressed_int4_to_int8_avx512(b256), make_scale_pair(scale0, scale1));
+  }
+
+  static inline void store4_reduce_div16(__m512 s0, __m512 s1, __m512 s2, __m512 s3, float* dst) {
+    dst[0] = _mm512_reduce_add_ps(s0) / 16;
+    dst[1] = _mm512_reduce_add_ps(s1) / 16;
+    dst[2] = _mm512_reduce_add_ps(s2) / 16;
+    dst[3] = _mm512_reduce_add_ps(s3) / 16;
+  }
+
+  static inline void accumulate_row4(__m512* acc, __m512i a512, __m512i w0, __m512i w1, __m512i w2, __m512i w3,
+                                     __m512 abscale0, __m512 abscale1, __m512 abscale2, __m512 abscale3) {
+    acc[0] = _mm512_add_ps(acc[0], dot_scaled_decoded_kblock(a512, w0, abscale0));
+    acc[1] = _mm512_add_ps(acc[1], dot_scaled_decoded_kblock(a512, w1, abscale1));
+    acc[2] = _mm512_add_ps(acc[2], dot_scaled_decoded_kblock(a512, w2, abscale2));
+    acc[3] = _mm512_add_ps(acc[3], dot_scaled_decoded_kblock(a512, w3, abscale3));
+  }
+
   static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
                                             BufferC* bc, int ith, int nth) {
     auto [n_start, n_end] = split_range_n(n, ith, nth);
     for (int m_begin = 0; m_begin < m; m_begin++) {
       float* c = bc->get_submat(m, n, m_begin, n_start);
       __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
+      float* as = (float*)ba->get_scale(m, m_begin, k, 0);
 
       for (int n_block_begin = n_start; n_block_begin < n_end; n_block_begin++) {
         __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_block_begin, 0);
-        float* as = (float*)ba->get_scale(m, m_begin, k, 0);
         float* bs = (float*)bb->get_scale(n, n_block_begin, k, 0);
 
         __m512 sum = _mm512_setzero_ps();
-#define WORK_K_BLOCK(k_block)                                                                     \
-  {                                                                                               \
-    __m256 abscale0 = _mm256_set1_ps(as[(k_block) * 2] * bs[(k_block) * 2]);                      \
-    __m256 abscale1 = _mm256_set1_ps(as[(k_block) * 2 + 1] * bs[(k_block) * 2 + 1]);              \
-    __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);           \
-    __m512i mul = _mm512_setzero_si512();                                                         \
-    mul = _mm512_dpbssd_epi32(mul, a512[k_block], compressed_int4_to_int8_avx512(b256[k_block])); \
-    sum = _mm512_add_ps(sum, _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));                    \
-  }
-
-        for (int k_block = 0; k_block < k / 64; k_block += 2) {
-          WORK_K_BLOCK(k_block);
-          WORK_K_BLOCK(k_block + 1);
+        for (int k_block = 0; k_block < k / 64; k_block++) {
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block], as[k_block * 2] * bs[k_block * 2],
+                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
         }
 
         c[n_block_begin - n_start] = _mm512_reduce_add_ps(sum) / 16;
       }
     }
   }
+
+  static inline void integer_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
+                                            BufferC* bc, int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+
+    constexpr int MB = 4;
+    constexpr int NB = 4;
+    const int k_blocks = k / 64;
+
+    int m_pos = 0;
+    for (; m_pos + MB <= m; m_pos += MB) {
+      __m512i* a_rows[MB] = {
+          (__m512i*)ba->get_submat(m, k, m_pos + 0, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 1, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 2, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 3, 0),
+      };
+      float* as[MB] = {
+          (float*)ba->get_scale(m, m_pos + 0, k, 0),
+          (float*)ba->get_scale(m, m_pos + 1, k, 0),
+          (float*)ba->get_scale(m, m_pos + 2, k, 0),
+          (float*)ba->get_scale(m, m_pos + 3, k, 0),
+      };
+
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        __m256i* b_rows[NB] = {
+            (__m256i*)bb->get_submat(n, k, n_pos + 0, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 1, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 2, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 3, 0),
+        };
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+
+        __m512 acc[MB][NB];
+        for (int i = 0; i < MB; i++) {
+          for (int j = 0; j < NB; j++) acc[i][j] = _mm512_setzero_ps();
+        }
+
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(b_rows[0][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[1][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[2][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[3][k_block]),
+          };
+
+#define K2_INT4_ACCUM_ROW4(M_I)                                                                          \
+  do {                                                                                                    \
+    const __m512 ab0 = make_scale_pair(as[M_I][k_block * 2] * bs[0][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[0][k_block * 2 + 1]);                 \
+    const __m512 ab1 = make_scale_pair(as[M_I][k_block * 2] * bs[1][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[1][k_block * 2 + 1]);                 \
+    const __m512 ab2 = make_scale_pair(as[M_I][k_block * 2] * bs[2][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[2][k_block * 2 + 1]);                 \
+    const __m512 ab3 = make_scale_pair(as[M_I][k_block * 2] * bs[3][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[3][k_block * 2 + 1]);                 \
+    accumulate_row4(acc[M_I], a_rows[M_I][k_block], w[0], w[1], w[2], w[3], ab0, ab1, ab2, ab3);           \
+  } while (0)
+          K2_INT4_ACCUM_ROW4(0);
+          K2_INT4_ACCUM_ROW4(1);
+          K2_INT4_ACCUM_ROW4(2);
+          K2_INT4_ACCUM_ROW4(3);
+#undef K2_INT4_ACCUM_ROW4
+        }
+
+        for (int i = 0; i < MB; i++) {
+          float* c = bc->get_submat(m, n, m_pos + i, n_start);
+          store4_reduce_div16(acc[i][0], acc[i][1], acc[i][2], acc[i][3], c + (n_pos - n_start));
+        }
+      }
+
+      for (; n_pos < n_end; n_pos++) {
+        __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_pos, 0);
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
+        for (int i = 0; i < MB; i++) {
+          float* c = bc->get_submat(m, n, m_pos + i, n_start);
+          __m512 sum = _mm512_setzero_ps();
+          for (int k_block = 0; k_block < k_blocks; k_block++) {
+            sum = _mm512_add_ps(
+                sum, dot_scaled_kblock(a_rows[i][k_block], b256[k_block], as[i][k_block * 2] * bs[k_block * 2],
+                                       as[i][k_block * 2 + 1] * bs[k_block * 2 + 1]));
+          }
+          c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
+        }
+      }
+    }
+
+    for (int mi = m_pos; mi < m; mi++) {
+      float* c = bc->get_submat(m, n, mi, n_start);
+      __m512i* a512 = (__m512i*)ba->get_submat(m, k, mi, 0);
+      float* as = (float*)ba->get_scale(m, mi, k, 0);
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        __m256i* b_rows[NB] = {
+            (__m256i*)bb->get_submat(n, k, n_pos + 0, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 1, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 2, 0),
+            (__m256i*)bb->get_submat(n, k, n_pos + 3, 0),
+        };
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+        __m512 acc[NB] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(b_rows[0][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[1][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[2][k_block]),
+              compressed_int4_to_int8_avx512(b_rows[3][k_block]),
+          };
+          for (int j = 0; j < NB; j++) {
+            __m256 abscale0 = _mm256_set1_ps(as[k_block * 2] * bs[j][k_block * 2]);
+            __m256 abscale1 = _mm256_set1_ps(as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
+            __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
+            __m512i mul = _mm512_setzero_si512();
+            mul = _mm512_dpbssd_epi32(mul, a512[k_block], w[j]);
+            acc[j] = _mm512_add_ps(acc[j], _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));
+          }
+        }
+        store4_reduce_div16(acc[0], acc[1], acc[2], acc[3], c + (n_pos - n_start));
+      }
+      for (; n_pos < n_end; n_pos++) {
+        __m256i* b256 = (__m256i*)bb->get_submat(n, k, n_pos, 0);
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
+        __m512 sum = _mm512_setzero_ps();
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block], as[k_block * 2] * bs[k_block * 2],
+                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
+        }
+        c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
+      }
+    }
+  }
+};
+
+struct GemmKernel224Int4SmallKGroupBlocked : public GemmKernel224Int4SmallKGroup {
+  static constexpr bool BLOCKED_B_LAYOUT = true;
+  static std::string name() { return "K2_INT4_KGROUP_BLOCKED"; }
+
+  using BufferA = BufferASmallKGroupImpl<GemmKernel224Int4SmallKGroupBlocked>;
+  using BufferB = BufferBInt4KGroupBlockedImpl<GemmKernel224Int4SmallKGroupBlocked>;
+  using BufferC = BufferCReduceImpl<GemmKernel224Int4SmallKGroupBlocked>;
+
+  static inline __m256i load_packed_kblock(BufferB* bb, int n_begin, int k_begin) {
+    return _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bb->get_kblock(n_begin, k_begin)));
+  }
+
+  static inline void integer_mat_vec_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
+                                            BufferC* bc, int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+
+    constexpr int NB = 4;
+    const int k_blocks = k / 64;
+    for (int m_begin = 0; m_begin < m; m_begin++) {
+      float* c = bc->get_submat(m, n, m_begin, n_start);
+      __m512i* a512 = (__m512i*)ba->get_submat(m, k, m_begin, 0);
+      float* as = (float*)ba->get_scale(m, m_begin, k, 0);
+
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+        __m512 acc[NB] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
+
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          const int k_begin = k_block * 64;
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 0, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 1, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 2, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 3, k_begin)),
+          };
+
+          for (int j = 0; j < NB; j++) {
+            __m512 abscale = make_scale_pair(as[k_block * 2] * bs[j][k_block * 2],
+                                             as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
+            acc[j] = _mm512_add_ps(acc[j], dot_scaled_decoded_kblock(a512[k_block], w[j], abscale));
+          }
+        }
+
+        store4_reduce_div16(acc[0], acc[1], acc[2], acc[3], c + (n_pos - n_start));
+      }
+
+      for (; n_pos < n_end; n_pos++) {
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
+
+        __m512 sum = _mm512_setzero_ps();
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          __m256i b256 = load_packed_kblock(bb, n_pos, k_block * 64);
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256, as[k_block * 2] * bs[k_block * 2],
+                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
+        }
+
+        c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
+      }
+    }
+  }
+
+  static inline void integer_mat_mat_kgroup(int m, int n, int k, int k_group_size, BufferA* ba, BufferB* bb,
+                                            BufferC* bc, int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+
+    constexpr int MB = 4;
+    constexpr int NB = 4;
+    const int k_blocks = k / 64;
+
+    int m_pos = 0;
+    for (; m_pos + MB <= m; m_pos += MB) {
+      __m512i* a_rows[MB] = {
+          (__m512i*)ba->get_submat(m, k, m_pos + 0, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 1, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 2, 0),
+          (__m512i*)ba->get_submat(m, k, m_pos + 3, 0),
+      };
+      float* as[MB] = {
+          (float*)ba->get_scale(m, m_pos + 0, k, 0),
+          (float*)ba->get_scale(m, m_pos + 1, k, 0),
+          (float*)ba->get_scale(m, m_pos + 2, k, 0),
+          (float*)ba->get_scale(m, m_pos + 3, k, 0),
+      };
+
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+
+        __m512 acc[MB][NB];
+        for (int i = 0; i < MB; i++) {
+          for (int j = 0; j < NB; j++) acc[i][j] = _mm512_setzero_ps();
+        }
+
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          const int k_begin = k_block * 64;
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 0, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 1, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 2, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 3, k_begin)),
+          };
+
+#define K2_INT4_BLOCKED_ACCUM_ROW4(M_I)                                                                  \
+  do {                                                                                                    \
+    const __m512 ab0 = make_scale_pair(as[M_I][k_block * 2] * bs[0][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[0][k_block * 2 + 1]);                 \
+    const __m512 ab1 = make_scale_pair(as[M_I][k_block * 2] * bs[1][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[1][k_block * 2 + 1]);                 \
+    const __m512 ab2 = make_scale_pair(as[M_I][k_block * 2] * bs[2][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[2][k_block * 2 + 1]);                 \
+    const __m512 ab3 = make_scale_pair(as[M_I][k_block * 2] * bs[3][k_block * 2],                         \
+                                       as[M_I][k_block * 2 + 1] * bs[3][k_block * 2 + 1]);                 \
+    accumulate_row4(acc[M_I], a_rows[M_I][k_block], w[0], w[1], w[2], w[3], ab0, ab1, ab2, ab3);           \
+  } while (0)
+          K2_INT4_BLOCKED_ACCUM_ROW4(0);
+          K2_INT4_BLOCKED_ACCUM_ROW4(1);
+          K2_INT4_BLOCKED_ACCUM_ROW4(2);
+          K2_INT4_BLOCKED_ACCUM_ROW4(3);
+#undef K2_INT4_BLOCKED_ACCUM_ROW4
+        }
+
+        for (int i = 0; i < MB; i++) {
+          float* c = bc->get_submat(m, n, m_pos + i, n_start);
+          store4_reduce_div16(acc[i][0], acc[i][1], acc[i][2], acc[i][3], c + (n_pos - n_start));
+        }
+      }
+
+      for (; n_pos < n_end; n_pos++) {
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
+        for (int i = 0; i < MB; i++) {
+          float* c = bc->get_submat(m, n, m_pos + i, n_start);
+          __m512 sum = _mm512_setzero_ps();
+          for (int k_block = 0; k_block < k_blocks; k_block++) {
+            __m256i b256 = load_packed_kblock(bb, n_pos, k_block * 64);
+            sum = _mm512_add_ps(
+                sum, dot_scaled_kblock(a_rows[i][k_block], b256, as[i][k_block * 2] * bs[k_block * 2],
+                                       as[i][k_block * 2 + 1] * bs[k_block * 2 + 1]));
+          }
+          c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
+        }
+      }
+    }
+
+    for (int mi = m_pos; mi < m; mi++) {
+      float* c = bc->get_submat(m, n, mi, n_start);
+      __m512i* a512 = (__m512i*)ba->get_submat(m, k, mi, 0);
+      float* as = (float*)ba->get_scale(m, mi, k, 0);
+      int n_pos = n_start;
+      for (; n_pos + NB <= n_end; n_pos += NB) {
+        float* bs[NB] = {
+            (float*)bb->get_scale(n, n_pos + 0, k, 0),
+            (float*)bb->get_scale(n, n_pos + 1, k, 0),
+            (float*)bb->get_scale(n, n_pos + 2, k, 0),
+            (float*)bb->get_scale(n, n_pos + 3, k, 0),
+        };
+        __m512 acc[NB] = {_mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps(), _mm512_setzero_ps()};
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          const int k_begin = k_block * 64;
+          __m512i w[NB] = {
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 0, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 1, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 2, k_begin)),
+              compressed_int4_to_int8_avx512(load_packed_kblock(bb, n_pos + 3, k_begin)),
+          };
+          for (int j = 0; j < NB; j++) {
+            __m512 abscale = make_scale_pair(as[k_block * 2] * bs[j][k_block * 2],
+                                             as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
+            acc[j] = _mm512_add_ps(acc[j], dot_scaled_decoded_kblock(a512[k_block], w[j], abscale));
+          }
+        }
+        store4_reduce_div16(acc[0], acc[1], acc[2], acc[3], c + (n_pos - n_start));
+      }
+      for (; n_pos < n_end; n_pos++) {
+        float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
+        __m512 sum = _mm512_setzero_ps();
+        for (int k_block = 0; k_block < k_blocks; k_block++) {
+          __m256i b256 = load_packed_kblock(bb, n_pos, k_block * 64);
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256, as[k_block * 2] * bs[k_block * 2],
+                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
+        }
+        c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
+      }
+    }
+  }
+
 };
 
 inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
@@ -3327,7 +3682,24 @@ inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferA> ba,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferB> bb,
                            std::shared_ptr<GemmKernel224Int4SmallKGroup::BufferC> bc, int ith, int nth) {
-  GemmKernel224Int4SmallKGroup::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+  GemmKernel224Int4SmallKGroup::integer_mat_mat_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith, nth);
+}
+
+
+inline void vec_mul_kgroup(int m, int n, int k, int k_group_size,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferA> ba,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferB> bb,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferC> bc, int ith, int nth) {
+  GemmKernel224Int4SmallKGroupBlocked::integer_mat_vec_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith,
+                                                              nth);
+}
+
+inline void mat_mul_kgroup(int m, int n, int k, int k_group_size,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferA> ba,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferB> bb,
+                           std::shared_ptr<GemmKernel224Int4SmallKGroupBlocked::BufferC> bc, int ith, int nth) {
+  GemmKernel224Int4SmallKGroupBlocked::integer_mat_mat_kgroup(m, n, k, k_group_size, ba.get(), bb.get(), bc.get(), ith,
+                                                              nth);
 }
 
 // New k-group aware matrix multiplication function

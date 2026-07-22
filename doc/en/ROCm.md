@@ -42,6 +42,44 @@ pip3 install packaging ninja cpufeature numpy
 
 > **Tip:** For other ROCm versions, visit [PyTorch Previous Versions](https://pytorch.org/get-started/previous-versions/)
 
+### Hygon DCU / DTK Notes
+
+Hygon DCU uses a ROCm-compatible DTK stack. For DCU systems, use the Hygon DCU
+PyTorch environment that matches your DTK release instead of installing the
+generic PyPI `torch` package or the official AMD ROCm wheel.
+
+For example, a reported working `gfx936` setup uses a Hygon DCU PyTorch image
+from the SourceFind/Hygon developer image portal:
+
+https://sourcefind.cn/#/image/dcu/pytorch
+
+The reported environment provides:
+
+- DTK 26.04, typically under `/opt/dtk`
+- PyTorch `2.5.1+das.opt1.dtk2604`
+- Python 3.10
+
+Before building, verify that the DCU PyTorch package is active:
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.version.hip); print(torch.__file__)"
+```
+
+Then build `kt-kernel` without letting pip replace the vendor PyTorch package:
+
+```bash
+export CPUINFER_USE_ROCM=1
+export PYTORCH_ROCM_ARCH=gfx936
+export ROCM_PATH=/opt/dtk  # change this if DTK is installed elsewhere
+
+cd kt-kernel
+pip install . --no-build-isolation --no-deps
+```
+
+> **Tip:** Keep `--no-deps` when building in a vendor PyTorch environment. A
+> plain `pip install .` may resolve `kt-kernel`'s normal `torch` dependency and
+> shadow or replace the installed DCU PyTorch package with a generic torch wheel.
+
 ### 4. Build ktransformers
 
 ```bash

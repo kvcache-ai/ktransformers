@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # coding=utf-8
-"""GPTQ INT4 MoE accuracy tests for KT-Kernel x86 backends."""
+"""GPTQ INT4 MoE accuracy tests for KT-Kernel backends."""
 
 import importlib.util
 import os
@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from ci.ci_register import register_cpu_ci
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
+if os.environ.get("KT_KERNEL_EXT_DIR"):
+    sys.path.insert(0, os.environ["KT_KERNEL_EXT_DIR"])
 
 register_cpu_ci(est_time=120, suite="default")
 
@@ -160,10 +162,13 @@ def available_backends():
             has_avx_vnni = False
         if has_avx_vnni:
             backends.append(("AVXVNNI256GPTQInt4_MOE", kt_kernel_ext.moe.AVXVNNI256GPTQInt4_MOE, 0.20))
+    if os.environ.get("KT_TEST_SYCL_GPTQ_INT4") == "1" and hasattr(kt_kernel_ext.moe, "SYCLGPTQInt4_MOE"):
+        backends.append(("SYCLGPTQInt4_MOE", kt_kernel_ext.moe.SYCLGPTQInt4_MOE, 0.05))
     return backends
 
 
-def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
+def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen_cases):
+    torch.manual_seed(20260716)
     physical_to_logical_map = torch.tensor(range(expert_num), dtype=torch.int64).contiguous()
     cpu_infer = kt_kernel_ext.CPUInfer(CPUINFER_PARAM)
 
@@ -238,48 +243,94 @@ def run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen):
         cpu_infer.submit(moe.load_weights_task(physical_to_logical_map.data_ptr()))
         cpu_infer.sync()
 
-        print(f"\n--- {backend_name} (qlen={qlen}) ---")
-        for i in range(validation_iter):
-            expert_ids = torch.stack(
-                [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
-            ).contiguous()
-            weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
-            input_data = (torch.randn((qlen, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16).contiguous()
-            output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
-
-            bsz_tensor = torch.tensor([qlen], dtype=torch.int32)
-            cpu_infer.submit(
-                moe.forward_task(
-                    bsz_tensor.data_ptr(),
-                    num_experts_per_tok,
-                    expert_ids.data_ptr(),
-                    weights.data_ptr(),
-                    input_data.data_ptr(),
-                    output.data_ptr(),
-                    False,
+        for qlen, fixed_experts in qlen_cases:
+            print(f"\n--- {backend_name} (qlen={qlen}) ---")
+            for i in range(validation_iter):
+                if fixed_experts:
+                    expert_ids = torch.tensor([[0, 1]] * qlen, dtype=torch.int64).contiguous()
+                else:
+                    expert_ids = torch.stack(
+                        [torch.randperm(expert_num)[:num_experts_per_tok] for _ in range(qlen)]
+                    ).contiguous()
+                weights = torch.rand((qlen, num_experts_per_tok), dtype=torch.float32).contiguous()
+                input_data = (
+                    (torch.randn((qlen, hidden_size), dtype=torch.float32) / 100.0).to(torch.bfloat16).contiguous()
                 )
-            )
-            cpu_infer.sync()
+                output = torch.empty((qlen, hidden_size), dtype=torch.bfloat16).contiguous()
 
-            ref_output = moe_torch(input_data.float(), expert_ids, weights, gate_deq, up_deq, down_deq).to(
-                torch.bfloat16
-            )
-            diff = torch.mean(torch.abs(output.float() - ref_output.float())) / (
-                torch.mean(torch.abs(ref_output.float())) + 1e-8
-            )
-            print(f"  Iteration {i}: diff = {diff.item():.6f}")
-            assert diff < threshold, f"{backend_name} accuracy test failed: diff={diff.item():.6f} >= {threshold}"
+                bsz_tensor = torch.tensor([qlen], dtype=torch.int32)
+                cpu_infer.submit(
+                    moe.forward_task(
+                        bsz_tensor.data_ptr(),
+                        num_experts_per_tok,
+                        expert_ids.data_ptr(),
+                        weights.data_ptr(),
+                        input_data.data_ptr(),
+                        output.data_ptr(),
+                        False,
+                    )
+                )
+                cpu_infer.sync()
+
+                ref_output = moe_torch(input_data.float(), expert_ids, weights, gate_deq, up_deq, down_deq).to(
+                    torch.bfloat16
+                )
+                diff = torch.mean(torch.abs(output.float() - ref_output.float())) / (
+                    torch.mean(torch.abs(ref_output.float())) + 1e-8
+                )
+                print(f"  Iteration {i}: diff = {diff.item():.6f}")
+                assert diff < threshold, f"{backend_name} accuracy test failed: diff={diff.item():.6f} >= {threshold}"
 
 
 def test_gptq_int4_accuracy():
     backends = available_backends()
     if not backends:
-        print("Skipping GPTQ INT4 accuracy tests: no x86 GPTQ backend available")
+        print("Skipping GPTQ INT4 accuracy tests: no GPTQ backend available")
         return
 
     for backend_name, backend_cls, threshold in backends:
-        run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=1)
-        run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen=16)
+        qlen_cases = [(1, False), (16, False)]
+        if backend_name == "SYCLGPTQInt4_MOE":
+            # Reuse one instance across decode, sparse/dense threshold edges,
+            # dense prefill, and decode again to exercise scratch state changes.
+            qlen_cases.extend([(32, True), (33, True), (40, True), (1, False)])
+        run_backend_accuracy_test(backend_name, backend_cls, threshold, qlen_cases)
+
+
+def test_sycl_preflight_honors_oneapi_device_selector(monkeypatch):
+    amx_utils = load_amx_utils()
+    monkeypatch.setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:0")
+    monkeypatch.setattr(amx_utils.glob, "glob", lambda _: ["/dev/dri/renderD128"])
+    monkeypatch.setattr(amx_utils.os, "access", lambda *_: False)
+
+    amx_utils._preflight_sycl_device()
+
+
+def test_sycl_preflight_rejects_inaccessible_render_nodes(monkeypatch):
+    amx_utils = load_amx_utils()
+    monkeypatch.delenv("ONEAPI_DEVICE_SELECTOR", raising=False)
+    monkeypatch.setattr(amx_utils.glob, "glob", lambda _: ["/dev/dri/renderD128"])
+    monkeypatch.setattr(amx_utils.os, "access", lambda *_: False)
+
+    with pytest.raises(RuntimeError, match="ONEAPI_DEVICE_SELECTOR"):
+        amx_utils._preflight_sycl_device()
+
+
+def test_sycl_preflight_accepts_accessible_render_node(monkeypatch):
+    amx_utils = load_amx_utils()
+    monkeypatch.delenv("ONEAPI_DEVICE_SELECTOR", raising=False)
+    monkeypatch.setattr(amx_utils.glob, "glob", lambda _: ["/dev/dri/renderD128"])
+    monkeypatch.setattr(amx_utils.os, "access", lambda *_: True)
+
+    amx_utils._preflight_sycl_device()
+
+
+def test_sycl_preflight_accepts_missing_render_nodes(monkeypatch):
+    amx_utils = load_amx_utils()
+    monkeypatch.delenv("ONEAPI_DEVICE_SELECTOR", raising=False)
+    monkeypatch.setattr(amx_utils.glob, "glob", lambda _: [])
+
+    amx_utils._preflight_sycl_device()
 
 
 def test_gptq_int4_backend_selection_falls_back_to_avx2_for_large_group_size(monkeypatch):

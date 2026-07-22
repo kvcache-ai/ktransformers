@@ -439,7 +439,7 @@ class TP_MOE<AVXVNNI256_GPTQ_INT4_MOE_TP<K>> : public TP_MOE<AVX2_MOE_BASE<K, AV
 
       pool->get_subpool(i)->do_work_stealing_job(
           tpc.expert_num, nullptr,
-          [&, &tpc](int expert_id_) {
+          [&](int expert_id_) {
             const size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
             const uint32_t* gate_qw_src;

@@ -1141,6 +1141,121 @@ struct BufferBInt4KGroupImpl {
   }
 };
 
+// Block-major BufferB for signed RAWINT4 with KGroup scale. The external
+// format remains row-major packed int4; internally weights are stored by
+// N_BLOCK and 64-K-element tiles for prefill-friendly access.
+template <typename K>
+struct BufferBInt4KGroupBlockedImpl {
+  using dt = typename K::dt;
+  dt* b;
+  float* d;
+  int n, k, k_group_size, k_group_count;
+
+  static constexpr int N_STEP = K::N_STEP;
+  static constexpr int K_STEP = K::K_STEP;
+  static constexpr int N_BLOCK = K::N_BLOCK;
+  static constexpr int K_TILE = 64;
+  static constexpr int K_TILE_BYTES = K_TILE / 2;
+  static constexpr bool SCALE = true;
+
+  static size_t required_size(int n, int k, int k_group_size) {
+    return sizeof(int8_t) * n * k / 2 + sizeof(float) * n * (k / k_group_size);
+  }
+
+  BufferBInt4KGroupBlockedImpl(int n, int k, int k_group_size, void* ptr) : n(n), k(k), k_group_size(k_group_size) {
+    assert(reinterpret_cast<intptr_t>(ptr) % 64 == 0);
+    if (n % N_STEP || k % K_TILE || k % k_group_size) {
+      printf("BufferBInt4KGroupBlockedImpl: n: %d, k: %d, N_STEP: %d, K_TILE: %d, k_group_size: %d\n", n, k,
+             N_STEP, K_TILE, k_group_size);
+      throw std::runtime_error("n or k is not aligned to blocked RAWINT4 layout");
+    }
+    k_group_count = k / k_group_size;
+    b = reinterpret_cast<dt*>(ptr);
+    d = reinterpret_cast<float*>(offset_pointer(b, n * k / 2));
+  }
+
+  size_t block_offset_bytes(int n_begin, int k_begin) const {
+    const int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
+    const int n_in_block = n_begin - n_block_begin;
+    const int n_block_size = std::min(N_BLOCK, n - n_block_begin);
+    const int k_tile = k_begin / K_TILE;
+    return static_cast<size_t>(n_block_begin) * k / 2 + static_cast<size_t>(k_tile) * n_block_size * K_TILE_BYTES +
+           static_cast<size_t>(n_in_block) * K_TILE_BYTES;
+  }
+
+  void from_raw_mat(uint8_t* proj, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+    const size_t src_row_bytes = static_cast<size_t>(k) / 2;
+    for (int row = n_start; row < n_end; row++) {
+      const uint8_t* src_row = proj + static_cast<size_t>(row) * src_row_bytes;
+      for (int k_begin = 0; k_begin < k; k_begin += K_TILE) {
+        uint8_t* dst = reinterpret_cast<uint8_t*>(b) + block_offset_bytes(row, k_begin);
+        std::memcpy(dst, src_row + k_begin / 2, K_TILE_BYTES);
+      }
+    }
+  }
+
+  dt* get_submat(int n_, int k_, int n_begin, int k_begin) {
+    (void)n_;
+    (void)k_;
+    return reinterpret_cast<dt*>(reinterpret_cast<uint8_t*>(b) + block_offset_bytes(n_begin, k_begin));
+  }
+
+  const uint8_t* get_kblock(int n_begin, int k_begin) const {
+    return reinterpret_cast<const uint8_t*>(b) + block_offset_bytes(n_begin, k_begin);
+  }
+
+  uint8_t* get_kblock(int n_begin, int k_begin) {
+    return reinterpret_cast<uint8_t*>(b) + block_offset_bytes(n_begin, k_begin);
+  }
+
+  float* get_scale(int n_, int n_begin, int k_, int k_begin) {
+    (void)n_;
+    int k_group_idx = k_begin / k_group_size;
+    return d + n_begin * (k_ / k_group_size) + k_group_idx;
+  }
+
+  const float* get_scale(int n_, int n_begin, int k_, int k_begin) const {
+    (void)n_;
+    int k_group_idx = k_begin / k_group_size;
+    return d + n_begin * (k_ / k_group_size) + k_group_idx;
+  }
+
+  void copy_weight_rows_to(uint8_t* dst, int row_start, int row_count, int k_start, int k_count,
+                           size_t dst_row_stride_bytes) const {
+    assert(k_start % K_TILE == 0);
+    assert(k_count % K_TILE == 0);
+    for (int r = 0; r < row_count; r++) {
+      uint8_t* dst_row = dst + static_cast<size_t>(r) * dst_row_stride_bytes;
+      const int src_row = row_start + r;
+      for (int kk = 0; kk < k_count; kk += K_TILE) {
+        std::memcpy(dst_row + kk / 2, get_kblock(src_row, k_start + kk), K_TILE_BYTES);
+      }
+    }
+  }
+
+  void copy_scale_rows_to(ggml_bf16_t* dst, int row_start, int row_count, int kg_start, int kg_count,
+                          size_t dst_row_stride_elems) const {
+    for (int r = 0; r < row_count; r++) {
+      const float* src = d + static_cast<size_t>(row_start + r) * k_group_count + kg_start;
+      ggml_bf16_t* dst_row = dst + static_cast<size_t>(r) * dst_row_stride_elems;
+      for (int kg = 0; kg < kg_count; kg++) {
+        dst_row[kg] = ggml_fp32_to_bf16(src[kg]);
+      }
+    }
+  }
+
+  static std::pair<int, int> split_range_n(int n, int ith, int nth) {
+    int n_per_thread = (n + nth - 1) / nth;
+    n_per_thread = (n_per_thread + N_STEP - 1) / N_STEP * N_STEP;
+    int n_start = std::min(ith * n_per_thread, n);
+    int n_end = std::min(n_start + n_per_thread, n);
+    return {n_start, n_end};
+  }
+
+};
+
 template <typename K>
 struct BufferBInt4WithZeroKGroupImpl {
   using dt = typename K::dt;

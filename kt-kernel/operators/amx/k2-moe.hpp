@@ -241,6 +241,91 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     }
   }
 
+
+  void write_weights_to_buffer_blocked(int gpu_tp_count, [[maybe_unused]] int cpu_tp_count, int expert_id,
+                                       const GeneralMOEConfig& full_config,
+                                       const std::vector<uintptr_t>& w13_weight_ptrs,
+                                       const std::vector<uintptr_t>& w13_scale_ptrs,
+                                       const std::vector<uintptr_t>& w2_weight_ptrs,
+                                       const std::vector<uintptr_t>& w2_scale_ptrs) const {
+    const int group_size = config_.quant_config.group_size;
+    auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    constexpr int NUM_W13_TASKS = 32;
+    constexpr int NUM_W2_TASKS = 32;
+    const int total_tasks = NUM_W13_TASKS + NUM_W2_TASKS;
+
+    const int cpu_n_w13 = config_.intermediate_size;
+    const int cpu_k_w13 = config_.hidden_size;
+    const int gpu_n_w13 = full_config.intermediate_size / gpu_tp_count;
+    const int gpu_k_w13 = full_config.hidden_size;
+    const int global_n_offset_w13 = tp_part_idx * cpu_n_w13;
+    const size_t gpu_w13_weight_per_mat = static_cast<size_t>(gpu_n_w13) * gpu_k_w13 / 2;
+    const size_t gpu_w13_scale_per_mat = static_cast<size_t>(gpu_n_w13) * (gpu_k_w13 / group_size);
+
+    const int cpu_n_w2 = config_.hidden_size;
+    const int cpu_k_w2 = config_.intermediate_size;
+    const int gpu_k_w2 = full_config.intermediate_size / gpu_tp_count;
+    const int global_k_offset_w2 = tp_part_idx * cpu_k_w2;
+
+    pool->do_work_stealing_job(
+        total_tasks, nullptr,
+        [=, &w13_weight_ptrs, &w13_scale_ptrs, &w2_weight_ptrs, &w2_scale_ptrs, this](int task_id) {
+          if (task_id < NUM_W13_TASKS) {
+            const int rows_per_task = (cpu_n_w13 + NUM_W13_TASKS - 1) / NUM_W13_TASKS;
+            const int row_start = task_id * rows_per_task;
+            const int row_end = std::min(row_start + rows_per_task, cpu_n_w13);
+            for (int local_n = row_start; local_n < row_end; local_n++) {
+              const int global_n = global_n_offset_w13 + local_n;
+              const int target_gpu = global_n / gpu_n_w13;
+              const int n_in_gpu = global_n % gpu_n_w13;
+
+              uint8_t* w13_weight_base = reinterpret_cast<uint8_t*>(w13_weight_ptrs[target_gpu]);
+              ggml_bf16_t* w13_scale_base = reinterpret_cast<ggml_bf16_t*>(w13_scale_ptrs[target_gpu]);
+              const size_t weight_row_offset = static_cast<size_t>(n_in_gpu) * gpu_k_w13 / 2;
+              const size_t scale_row_offset = static_cast<size_t>(n_in_gpu) * (gpu_k_w13 / group_size);
+
+              gate_bb_[expert_id]->copy_weight_rows_to(w13_weight_base + weight_row_offset, local_n, 1, 0, cpu_k_w13,
+                                                        gpu_k_w13 / 2);
+              up_bb_[expert_id]->copy_weight_rows_to(w13_weight_base + gpu_w13_weight_per_mat + weight_row_offset,
+                                                      local_n, 1, 0, cpu_k_w13, gpu_k_w13 / 2);
+
+              gate_bb_[expert_id]->copy_scale_rows_to(w13_scale_base + scale_row_offset, local_n, 1, 0,
+                                                       cpu_k_w13 / group_size, gpu_k_w13 / group_size);
+              up_bb_[expert_id]->copy_scale_rows_to(w13_scale_base + gpu_w13_scale_per_mat + scale_row_offset, local_n,
+                                                     1, 0, cpu_k_w13 / group_size, gpu_k_w13 / group_size);
+            }
+            return;
+          }
+
+          const int w2_task_id = task_id - NUM_W13_TASKS;
+          const int rows_per_task = (cpu_n_w2 + NUM_W2_TASKS - 1) / NUM_W2_TASKS;
+          const int row_start = w2_task_id * rows_per_task;
+          const int row_end = std::min(row_start + rows_per_task, cpu_n_w2);
+          for (int row = row_start; row < row_end; row++) {
+            int k_local = 0;
+            while (k_local < cpu_k_w2) {
+              const int global_k = global_k_offset_w2 + k_local;
+              const int target_gpu = global_k / gpu_k_w2;
+              const int k_in_gpu = global_k % gpu_k_w2;
+              const int k_count = std::min(cpu_k_w2 - k_local, gpu_k_w2 - k_in_gpu);
+
+              uint8_t* w2_weight_base = reinterpret_cast<uint8_t*>(w2_weight_ptrs[target_gpu]);
+              ggml_bf16_t* w2_scale_base = reinterpret_cast<ggml_bf16_t*>(w2_scale_ptrs[target_gpu]);
+              uint8_t* weight_dst = w2_weight_base + static_cast<size_t>(row) * gpu_k_w2 / 2 + k_in_gpu / 2;
+              ggml_bf16_t* scale_dst =
+                  w2_scale_base + static_cast<size_t>(row) * (gpu_k_w2 / group_size) + k_in_gpu / group_size;
+
+              down_bb_[expert_id]->copy_weight_rows_to(weight_dst, row, 1, k_local, k_count, gpu_k_w2 / 2);
+              down_bb_[expert_id]->copy_scale_rows_to(scale_dst, row, 1, k_local / group_size, k_count / group_size,
+                                                       gpu_k_w2 / group_size);
+              k_local += k_count;
+            }
+          }
+        },
+        nullptr);
+  }
+
   // Write a single expert's weights to the output buffers
   // The caller provides pointers that already point to the target expert's location (no offset needed)
   // expert_id: the index of the expert to write
@@ -250,6 +335,12 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
                                const std::vector<uintptr_t>& w13_scale_ptrs,
                                const std::vector<uintptr_t>& w2_weight_ptrs,
                                const std::vector<uintptr_t>& w2_scale_ptrs) const {
+    if constexpr (T::BLOCKED_B_LAYOUT) {
+      write_weights_to_buffer_blocked(gpu_tp_count, cpu_tp_count, expert_id, full_config, w13_weight_ptrs,
+                                      w13_scale_ptrs, w2_weight_ptrs, w2_scale_ptrs);
+      return;
+    }
+
     const int group_size = config_.quant_config.group_size;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 

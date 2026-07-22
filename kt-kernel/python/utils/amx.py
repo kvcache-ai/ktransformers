@@ -1,4 +1,5 @@
 import gc
+import glob
 import logging
 import os
 import torch
@@ -24,6 +25,7 @@ import kt_kernel_ext.moe as _moe_mod
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
 AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
 AMXInt4_KGroup_MOE = getattr(_moe_mod, "AMXInt4_KGroup_MOE", None)
+AMXInt4_KGroupBlocked_MOE = getattr(_moe_mod, "AMXInt4_KGroupBlocked_MOE", None)
 AMXFP4_KGroup_MOE = getattr(_moe_mod, "AMXFP4_KGroup_MOE", None)
 AMXMXFP8_KGroup_MOE = getattr(_moe_mod, "AMXMXFP8_KGroup_MOE", None)
 AMXFP8_MOE = getattr(_moe_mod, "AMXFP8_MOE", None)
@@ -37,10 +39,12 @@ AVX2MXFP4_MOE = getattr(_moe_mod, "AVX2MXFP4_MOE", None)
 AVX2MXFP8_MOE = getattr(_moe_mod, "AVX2MXFP8_MOE", None)
 AVXVNNI256GPTQInt4_MOE = getattr(_moe_mod, "AVXVNNI256GPTQInt4_MOE", None)
 AVXVNNI256RawInt4_MOE = getattr(_moe_mod, "AVXVNNI256RawInt4_MOE", None)
+SYCLGPTQInt4_MOE = getattr(_moe_mod, "SYCLGPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
 _HAS_RAWINT4_SUPPORT = AMXInt4_KGroup_MOE is not None
+_HAS_RAWINT4_BLOCKED_SUPPORT = AMXInt4_KGroupBlocked_MOE is not None
 _HAS_MXFP4_SUPPORT = AMXFP4_KGroup_MOE is not None
 _HAS_MXFP8_SUPPORT = AMXMXFP8_KGroup_MOE is not None
 _HAS_FP8_SUPPORT = AMXFP8_MOE is not None
@@ -54,6 +58,7 @@ _HAS_AVX2_MXFP4_SUPPORT = AVX2MXFP4_MOE is not None
 _HAS_AVX2_MXFP8_SUPPORT = AVX2MXFP8_MOE is not None
 _HAS_AVXVNNI256_GPTQ_INT4_SUPPORT = AVXVNNI256GPTQInt4_MOE is not None
 _HAS_AVXVNNI256_RAW_INT4_SUPPORT = AVXVNNI256RawInt4_MOE is not None
+_HAS_SYCL_GPTQ_INT4_SUPPORT = SYCLGPTQInt4_MOE is not None
 _AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE = 256
 _AVXVNNI256_RAW_INT4_MAX_GROUP_SIZE = 256
 
@@ -71,6 +76,20 @@ def _host_has_cpu_flag(*flag_names: str) -> bool:
 
 
 _HOST_HAS_AVX_VNNI = _host_has_cpu_flag("avx_vnni", "avxvnni")
+
+
+def _preflight_sycl_device() -> None:
+    """Report the common Linux render-node permission error before C++ initialization."""
+    if os.getenv("ONEAPI_DEVICE_SELECTOR", "").strip():
+        return
+
+    render_nodes = sorted(glob.glob("/dev/dri/renderD*"))
+    if render_nodes and not any(os.access(path, os.R_OK | os.W_OK) for path in render_nodes):
+        raise RuntimeError(
+            "SYCL_GPTQ_INT4 selects a GPU by default, but the current user cannot access "
+            "/dev/dri/renderD*. Add the user to the render group and re-login, or set "
+            "ONEAPI_DEVICE_SELECTOR to an accessible SYCL GPU."
+        )
 
 
 def _supports_avxvnni256_gptq_int4_group_size(group_size: Optional[int]) -> bool:
@@ -122,6 +141,13 @@ def _select_rawint4_backend(group_size: Optional[int] = None):
         if not _HAS_RAWINT4_SUPPORT:
             raise RuntimeError("KT_RAWINT4_BACKEND=amx requested, but AMXInt4_KGroup_MOE is not compiled in.")
         return AMXInt4_KGroup_MOE
+
+    if forced in {"amx_blocked", "blocked"}:
+        if not _HAS_RAWINT4_BLOCKED_SUPPORT:
+            raise RuntimeError(
+                "KT_RAWINT4_BACKEND=amx_blocked requested, but AMXInt4_KGroupBlocked_MOE is not compiled in."
+            )
+        return AMXInt4_KGroupBlocked_MOE
 
     if forced in {"avxvnni", "avxvnni256"}:
         if not _HAS_AVXVNNI256_RAW_INT4_SUPPORT:
@@ -521,7 +547,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
 
 class NativeMoEWrapper(BaseMoEWrapper):
-    """Wrapper for RAWINT4/FP8/FP8_PERCHANNEL/BF16 experts stored in compressed SafeTensor format."""
+    """Wrapper for native CPU/SYCL experts stored in compressed SafeTensor format."""
 
     _native_loader_instance = None
 
@@ -590,6 +616,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
                 "Please recompile kt_kernel_ext with GPTQ INT4 support enabled.\n"
                 "AVX-VNNI-256 will be selected automatically when available on the current CPU."
             )
+        if method == "SYCL_GPTQ_INT4" and not _HAS_SYCL_GPTQ_INT4_SUPPORT:
+            raise RuntimeError(
+                "SYCL_GPTQ_INT4 backend not available. Rebuild kt_kernel_ext with "
+                "CPUINFER_USE_SYCL=1 using a SYCL compiler such as icpx."
+            )
         if method == "MXFP4" and not (_HAS_MXFP4_SUPPORT or _HAS_AVX2_MXFP4_SUPPORT):
             raise RuntimeError(
                 "MXFP4 backend not available. Required ISA (any one of):\n"
@@ -644,7 +675,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             return FP8SafeTensorLoader(weight_path, scale_suffix="weight_scale")
         elif method == "BF16":
             return BF16SafeTensorLoader(weight_path)
-        elif method == "GPTQ_INT4":
+        elif method in ("GPTQ_INT4", "SYCL_GPTQ_INT4"):
             return GPTQSafeTensorLoader(weight_path)
         elif method == "MXFP4":
             return MXFP4SafeTensorLoader(weight_path)
@@ -660,13 +691,11 @@ class NativeMoEWrapper(BaseMoEWrapper):
             NativeMoEWrapper._native_loader_instance = None
             if layer_idx >= 0:
                 logger.info(
-                    "[KT] Released NativeMoEWrapper loader after layer %d: "
-                    "safetensors mmap handles freed.", layer_idx,
+                    "[KT] Released NativeMoEWrapper loader after layer %d: " "safetensors mmap handles freed.",
+                    layer_idx,
                 )
             else:
-                logger.info(
-                    "[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed."
-                )
+                logger.info("[KT] Released NativeMoEWrapper loader: safetensors mmap handles freed.")
 
     @staticmethod
     def force_release_loader():
@@ -686,14 +715,13 @@ class NativeMoEWrapper(BaseMoEWrapper):
 
         if NativeMoEWrapper._native_loader_instance is None:
             t_recreate_start = time.time()
-            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(
-                self.method, self.weight_path
-            )
+            NativeMoEWrapper._native_loader_instance = NativeMoEWrapper._create_loader(self.method, self.weight_path)
             self.loader = NativeMoEWrapper._native_loader_instance
             t_recreate_elapsed = (time.time() - t_recreate_start) * 1000
             logger.info(
                 "[KT] Recreated NativeMoEWrapper loader for layer %d (took %.1fms)",
-                self.layer_idx, t_recreate_elapsed,
+                self.layer_idx,
+                t_recreate_elapsed,
             )
         else:
             self.loader = NativeMoEWrapper._native_loader_instance
@@ -712,9 +740,7 @@ class NativeMoEWrapper(BaseMoEWrapper):
             except (ValueError, KeyError):
                 continue
         if weights is None:
-            raise ValueError(
-                f"No experts found for layer {self.layer_idx} under any prefix: {_candidates}"
-            )
+            raise ValueError(f"No experts found for layer {self.layer_idx} under any prefix: {_candidates}")
         t1 = time.time()
 
         # Keep individual tensors instead of stacking - avoid expensive memory copy
@@ -887,6 +913,16 @@ class NativeMoEWrapper(BaseMoEWrapper):
                     f"{_AVXVNNI256_GPTQ_INT4_MAX_GROUP_SIZE}; AVX2 is used as the fallback when available."
                 )
             self.moe = backend_cls(moe_config)
+        elif self.method == "SYCL_GPTQ_INT4":
+            # Same symmetric GPTQ tensor layout as GPTQ_INT4; execution is on
+            # the selected SYCL device.
+            num_groups = self.gate_scales[0].shape[0]
+            actual_gs = self.hidden_size // num_groups
+            moe_config.quant_config.bits = 4
+            moe_config.quant_config.group_size = actual_gs
+            moe_config.quant_config.zero_point = False
+            _preflight_sycl_device()
+            self.moe = SYCLGPTQInt4_MOE(moe_config)
         elif self.method == "BF16":
             # BF16 has no quantization config needed
             # Prefer AMX backend, fall back to AVX2

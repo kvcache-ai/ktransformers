@@ -40,7 +40,7 @@ class SchedulerServer:
         self.context = zmq.Context()
         self.frontend = self.context.socket(zmq.ROUTER)
         print(f"sched zmq rpc server on port {main_args.sched_port}")
-        self.frontend.bind(f"tcp://*:{main_args.sched_port}") 
+        self.frontend.bind(f"tcp://127.0.0.1:{main_args.sched_port}") 
 
         # 创建内部的 DEALER 套接字，用于与工作线程通信
         self.backend = self.context.socket(zmq.DEALER)

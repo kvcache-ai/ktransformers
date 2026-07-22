@@ -65,6 +65,9 @@ static const bool _is_plain_ = false;
 #include "operators/avx2/rawint4-moe.hpp"
 #include "operators/avx2/rawint4_avxvnni-moe.hpp"
 #endif
+#if defined(USE_SYCL)
+#include "operators/sycl/gptq_int4_sycl-moe.hpp"
+#endif
 
 #include <pybind11/stl.h>  // std::vector/std::pair/std::string conversions
 
@@ -827,6 +830,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_MOE");
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
+  bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroupBlocked>>(moe_module, "AMXInt4_KGroupBlocked_MOE");
 #if defined(__AVX512F__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
@@ -869,6 +873,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
                                                                                       "AVXVNNI256GPTQInt4_MOE");
   bind_moe_module<AVXVNNI256_RAW_INT4_MOE_TP<avxvnni_rawint4::GemmKernelAVXVNNI256RawInt4>>(moe_module,
                                                                                             "AVXVNNI256RawInt4_MOE");
+#endif
+#if defined(USE_SYCL)
+  bind_moe_module<SYCL_GPTQ_INT4_MOE_TP<sycl_int4::GemmKernelSYCLGPTQInt4>>(moe_module, "SYCLGPTQInt4_MOE");
 #endif
 
 #if defined(USE_MOE_KERNEL)

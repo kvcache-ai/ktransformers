@@ -679,7 +679,7 @@ class TP_MOE<AMX_FP8_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_FP8_MOE_TP<K
 
       pool->get_subpool(i)->do_work_stealing_job(
           tpc.expert_num, nullptr,
-          [&, &tpc](int expert_id_) {
+          [&](int expert_id_) {
             const size_t expert_id = expert_map(physical_to_logical_map, expert_id_);
 
             uint8_t* gate_dst = (uint8_t*)tpc.gate_proj + expert_id * tp_weight_elems;

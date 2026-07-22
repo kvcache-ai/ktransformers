@@ -16,6 +16,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
   - [Step 4: Send Inference Requests](#step-4-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
+  - [Notes for Skylake / older Xeons & single-stream tuning caveats](#notes-for-skylake--older-xeons--single-stream-tuning-caveats)
 
 ## Hardware Requirements
 
@@ -120,7 +121,7 @@ export TORCH_CUDA_ARCH_LIST="12.0+PTX"
 export SGLANG_DSV4_MODE=2604
 export SGLANG_DSV4_2604_SUBMODE=2604B
 
-numactl --interleave=all python -m sglang.launch_server \
+python -m sglang.launch_server \
   --host 0.0.0.0 --port 30000 \
   --model /path/to/models/DeepSeek-V4-Flash \
   --kt-weight-path /path/to/models/DeepSeek-V4-Flash \
@@ -187,4 +188,22 @@ The `kt` CLI ships with an OpenAI-compatible chat client that talks to the SGLan
 kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 ```
 
+## Notes for Skylake / older Xeons & single-stream tuning caveats
 
+The following notes are from a community-validated single-workstation deployment on **1× RTX 5090 + 2× Intel Xeon Gold 6138 (Skylake-SP, 40 physical cores total, AVX-512, no AMX tile, no VNNI)**, 256 GB DDR4-2400. All numbers below are single-request decode with `--kt-method AMXINT4`, top-4 routing, coding quality verified against the unquantized reference.
+
+**AMXINT4 does not require an AMX Xeon.** Despite the name, the INT4 expert kernel runs on `AVX512F + AVX512BW` and works on **Skylake-SP / Cascade Lake** (no AMX tile, no VNNI required) — not only Sapphire-Rapids-class CPUs. Measured **~28 tok/s** single-stream on the box above. This is useful for the large installed base of older, inexpensive dual-socket Xeons.
+
+**Dual-socket tuning:**
+- Set `--kt-cpuinfer` to the **physical** core count (here `40`) — one thread per physical core — with `--kt-threadpool-count 2` (one pool per NUMA node) and NUMA-sharded weights.
+- Prefer **node-local allocation** over `numactl --interleave=all` when the weights are per-socket sharded: node-local reads avoid cross-socket traffic, which on this bandwidth-bound decode was worth roughly +14% (25 → ~28 tok/s).
+
+**Single-stream configs that REDUCED throughput on this bandwidth-bound box (measure before assuming):**
+
+| Config | Effect (here) | Mechanism |
+|--------|---------------|-----------|
+| EAGLE / MTP speculative decode | ~28 → 27.2 tok/s (net-negative) | The validated `26.5 → 32.74` above is on **8× RTX 5090**. On a **single-GPU, CPU-expert-bandwidth-bound** box, verifying a batch of draft tokens that route to *different* experts multiplies the CPU expert reads that are the bottleneck, so the benefit can **invert**. Worth measuring against your actual bottleneck. |
+| `--kt-cpuinfer` = 2× physical cores (hyperthreads) | ~28 → ~2.7 tok/s (≈10× slower) | HT oversubscription thrashes the bandwidth-bound AVX-512 kernel. Keep one thread per physical core. |
+| Extra GPU experts under AMXINT4 (`--kt-num-gpu-experts`) | small net loss on a single 5090 | The MXFP4-GPU path required alongside AMXINT4 costs more than offloading a few of 256 experts saves on this GPU. |
+
+**Bottom line for this hardware class:** single-stream decode is **DDR4-bandwidth-saturated** at ~28 tok/s (4-bit). Speculative decode and GPU-expert offload help when the bottleneck is elsewhere (multi-GPU, higher-bandwidth CPU), but not on a single-GPU, bandwidth-bound CPU-offload box — so measure on your own hardware rather than assuming the multi-GPU numbers transfer.
