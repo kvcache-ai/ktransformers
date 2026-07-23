@@ -385,12 +385,25 @@ class KTMoELayerWrapper(nn.Module):
         return torch.empty(batch_size, seq_len, self.hidden_size, device=original_device, dtype=original_dtype)
 
     def _compute_routing(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # In full_weight_grad mode, Router gradients should flow (no torch.no_grad).
-        # In LoRA mode, Router is frozen — wrap in no_grad to avoid orphan autograd nodes.
-        no_grad_ctx = torch.no_grad() if not self._full_weight_grad else nullcontext()
+        router = getattr(self, self._router_attr)
+        router_grad_enabled = self.training and torch.is_grad_enabled() and any(
+            parameter.requires_grad for parameter in router.parameters()
+        )
+        routing_context = nullcontext() if router_grad_enabled else torch.no_grad()
 
-        with no_grad_ctx:
-            router = getattr(self, self._router_attr)
+        def finish(
+            topk_ids: torch.Tensor,
+            topk_weights: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if topk_weights.is_floating_point():
+                topk_weights = topk_weights.to(torch.bfloat16)
+            if router_grad_enabled and not topk_weights.requires_grad:
+                raise RuntimeError(
+                    f"Layer {self.layer_idx}: trainable router produced detached routing weights"
+                )
+            return topk_ids, topk_weights
+
+        with routing_context:
             if self.router_type == "deepseek_gate":
                 # DeepSeek V3's MoEGate has `assert not self.training` in its noaux_tc
                 # routing path because the HF model is an inference-only port.
@@ -405,9 +418,7 @@ class KTMoELayerWrapper(nn.Module):
                     topk_ids, topk_weights = router_output
                 else:
                     topk_ids, topk_weights = router_output[0], router_output[1]
-                if topk_weights.is_floating_point():
-                    topk_weights = topk_weights.to(torch.bfloat16)
-                return topk_ids, topk_weights
+                return finish(topk_ids, topk_weights)
 
             # When _original_router is set, self.gate is an nn.Linear wrapper
             # around the TopKRouter's weight.  Use it (with PEFT LoRA if
@@ -448,9 +459,7 @@ class KTMoELayerWrapper(nn.Module):
                     if getattr(orig_router, "norm_topk_prob", True):
                         topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
                     topk_weights = topk_weights * getattr(orig_router, "routed_scaling_factor", 1.0)
-                    if topk_weights.is_floating_point():
-                        topk_weights = topk_weights.to(torch.bfloat16)
-                    return topk_ids, topk_weights
+                    return finish(topk_ids, topk_weights)
 
                 router_probs = F.softmax(router_logits, dtype=torch.float, dim=-1)
                 top_k = getattr(orig_router, "top_k", self.moe_config.num_experts_per_tok)
@@ -459,9 +468,7 @@ class KTMoELayerWrapper(nn.Module):
                 if norm_topk_prob:
                     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
                 topk_weights = topk_weights.to(router_logits.dtype)
-                if topk_weights.is_floating_point():
-                    topk_weights = topk_weights.to(torch.bfloat16)
-                return topk_ids, topk_weights
+                return finish(topk_ids, topk_weights)
 
             router_output = router(hidden_states.view(-1, self.hidden_size))
             # transformers v5 TopKRouter returns (router_logits, router_scores, router_indices)
@@ -469,17 +476,14 @@ class KTMoELayerWrapper(nn.Module):
             if isinstance(router_output, tuple):
                 if len(router_output) >= 3:
                     _logits, topk_weights, topk_ids = router_output[0], router_output[1], router_output[2]
-                    if topk_weights.is_floating_point():
-                        topk_weights = topk_weights.to(torch.bfloat16)
-                    return topk_ids, topk_weights
+                    return finish(topk_ids, topk_weights)
                 router_output = router_output[0]
 
             router_logits = router_output
             routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
             topk_weights, topk_ids = torch.topk(routing_weights, self.moe_config.num_experts_per_tok, dim=-1)
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-            topk_weights = topk_weights.to(torch.bfloat16)
-            return topk_ids, topk_weights
+            return finish(topk_ids, topk_weights)
 
     def _submit_and_compute_gpu(
         self,
