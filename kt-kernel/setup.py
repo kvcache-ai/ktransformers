@@ -680,8 +680,44 @@ class CMakeBuild(build_ext):
                 hostcxx = os.environ["CUDAHOSTCXX"]
                 cmake_args.append(f"-DCMAKE_CUDA_HOST_COMPILER={hostcxx}")
                 print(f"-- Using CUDA host compiler from CUDAHOSTCXX: {hostcxx}")
-            # Set CUDA architectures (default: Ampere/Ada/Hopper)
-            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "80;86;89;90").strip()
+            # Set CUDA architectures. The default targets Ampere/Ada/Hopper, but
+            # nvcc rejects architectures it does not know about (CUDA < 11.8 has no
+            # sm_89, CUDA < 12.0 has no sm_90), which makes the build fail outright
+            # on older toolkits. So when the user has not pinned CPUINFER_CUDA_ARCHS,
+            # derive a default that the detected nvcc actually supports.
+            def _default_cuda_archs() -> str:
+                full = "80;86;89;90"
+                nvcc = find_nvcc_path()
+                if not nvcc:
+                    return full
+                try:
+                    ver_out = subprocess.check_output(
+                        [nvcc, "--version"], text=True, stderr=subprocess.STDOUT
+                    )
+                except Exception:
+                    return full
+                m = re.search(r"release\s+(\d+)\.(\d+)", ver_out)
+                if not m:
+                    return full
+                ver = (int(m.group(1)), int(m.group(2)))
+                archs = []
+                if ver >= (11, 0):
+                    archs.append("80")
+                if ver >= (11, 1):
+                    archs.append("86")
+                if ver >= (11, 8):
+                    archs.append("89")
+                if ver >= (12, 0):
+                    archs.append("90")
+                selected = ";".join(archs) if archs else full
+                if selected != full:
+                    print(
+                        f"-- Detected CUDA {ver[0]}.{ver[1]}; defaulting CUDA "
+                        f"architectures to {selected} (set CPUINFER_CUDA_ARCHS to override)"
+                    )
+                return selected
+
+            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "").strip() or _default_cuda_archs()
             if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
                 cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
                 print(f"-- Set CUDA architectures: {archs_env}")
