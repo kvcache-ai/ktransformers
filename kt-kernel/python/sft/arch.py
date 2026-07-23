@@ -259,8 +259,18 @@ def move_non_experts_to_gpu(
         if router is not None:
             router.to(device)
 
-        if hasattr(moe_module, "shared_experts") and moe_module.shared_experts is not None:
-            moe_module.shared_experts.to(device)
+        # DeepSeek/GLM use ``shared_experts``. Qwen2-MoE/Qwen3.5 use
+        # ``shared_expert`` and a separate sigmoid gate. These are ordinary
+        # GPU/FSDP modules rather than routed CPU experts.
+        for shared_attr in (
+            "shared_experts",
+            "shared_expert",
+            "shared_experts_gate",
+            "shared_expert_gate",
+        ):
+            shared_module = getattr(moe_module, shared_attr, None)
+            if shared_module is not None:
+                shared_module.to(device)
 
     logger.info(f"Moved non-expert parameters to {device}")
 

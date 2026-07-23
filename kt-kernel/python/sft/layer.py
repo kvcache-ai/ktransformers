@@ -120,11 +120,42 @@ class KTMoELayerWrapper(nn.Module):
         setattr(self, experts_attr, getattr(original_moe, experts_attr, None))
         self._experts_attr = experts_attr
 
-        # 3. shared_experts (if any)
-        if moe_config.has_shared_experts and hasattr(original_moe, "shared_experts"):
-            self.shared_experts = original_moe.shared_experts
-        else:
-            self.shared_experts = None
+        # 3. Shared expert (if any). DeepSeek/GLM use ``shared_experts`` while
+        # Qwen2-MoE/Qwen3.5 use ``shared_expert`` plus a sigmoid gate. Preserve
+        # the original attribute names so state_dict/checkpoint keys stay
+        # compatible with the Hugging Face model.
+        self._shared_expert_attr: str | None = None
+        self._shared_expert_gate_attr: str | None = None
+        if moe_config.has_shared_experts:
+            for shared_expert_attr in ("shared_experts", "shared_expert"):
+                shared_expert = getattr(original_moe, shared_expert_attr, None)
+                if shared_expert is not None:
+                    setattr(self, shared_expert_attr, shared_expert)
+                    self._shared_expert_attr = shared_expert_attr
+                    break
+
+            if self._shared_expert_attr is None:
+                raise ValueError(
+                    f"Layer {layer_idx}: architecture declares shared experts, "
+                    "but the MoE module has neither 'shared_experts' nor 'shared_expert'"
+                )
+
+            gate_candidates = (
+                ("shared_expert_gate", "shared_experts_gate")
+                if self._shared_expert_attr == "shared_expert"
+                else ("shared_experts_gate", "shared_expert_gate")
+            )
+            for shared_expert_gate_attr in gate_candidates:
+                shared_expert_gate = getattr(original_moe, shared_expert_gate_attr, None)
+                if shared_expert_gate is not None:
+                    setattr(self, shared_expert_gate_attr, shared_expert_gate)
+                    self._shared_expert_gate_attr = shared_expert_gate_attr
+                    break
+            if self._shared_expert_attr == "shared_expert" and self._shared_expert_gate_attr is None:
+                raise ValueError(
+                    f"Layer {layer_idx}: singular 'shared_expert' requires "
+                    "'shared_expert_gate' for Qwen-style gated output"
+                )
 
         # 4. lora_experts (separate LoRA expert MLPs, different from PEFT LoRA on experts)
         self.lora_experts = lora_experts
@@ -147,6 +178,17 @@ class KTMoELayerWrapper(nn.Module):
         self._uses_authoritative_optimizer_grads = bool(uses_authoritative_optimizer_grads)
         self.register_state_dict_post_hook(_strip_kt_zero_storage_from_state_dict)
         self.register_load_state_dict_pre_hook(_supply_kt_zero_storage_for_state_dict_load)
+
+    def _compute_shared_expert(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        if self._shared_expert_attr is None:
+            return None
+
+        shared_expert = getattr(self, self._shared_expert_attr)
+        shared_output = shared_expert(hidden_states)
+        if self._shared_expert_gate_attr is not None:
+            shared_expert_gate = getattr(self, self._shared_expert_gate_attr)
+            shared_output = torch.sigmoid(shared_expert_gate(hidden_states)) * shared_output
+        return shared_output
 
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
@@ -512,9 +554,8 @@ class KTMoELayerWrapper(nn.Module):
                     )
 
             # Keep shared/lora experts local to avoid qlen_max-style amplification.
-            gpu_output = None
-            if self.shared_experts is not None:
-                gpu_output = self.shared_experts(hidden_states)
+            gpu_output = self._compute_shared_expert(hidden_states)
+            if gpu_output is not None:
                 gpu_output = gpu_output.to(dtype=original_dtype)
 
             if self.lora_experts is not None:
@@ -542,9 +583,7 @@ class KTMoELayerWrapper(nn.Module):
                 )
 
             # GPU compute: shared_experts + lora_experts
-            gpu_output = None
-            if self.shared_experts is not None:
-                gpu_output = self.shared_experts(hidden_states)
+            gpu_output = self._compute_shared_expert(hidden_states)
             if self.lora_experts is not None:
                 lora_out = self.lora_experts(hidden_states)
                 gpu_output = lora_out if gpu_output is None else gpu_output + lora_out
