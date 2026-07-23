@@ -8,8 +8,13 @@ import hashlib
 import requests
 import os
 from pathlib import Path
-from typing import Dict, Any, Literal, Tuple
+from typing import Dict, Any, List, Literal, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# File suffixes whose SHA256 the remote repository publishes and we therefore
+# verify locally. Must stay in sync with fetch_model_sha256, which fetches
+# hashes for *.safetensors (weights), *.json (configs) and *.py (model code).
+VERIFIABLE_SUFFIXES = (".safetensors", ".json", ".py")
 
 
 def _compute_file_sha256(file_path: Path) -> Tuple[str, str, float]:
@@ -31,6 +36,47 @@ def _compute_file_sha256(file_path: Path) -> Tuple[str, str, float]:
             sha256_hash.update(byte_block)
 
     return file_path.name, sha256_hash.hexdigest(), file_size_mb
+
+
+def list_local_model_files(local_dir: Path) -> List[Path]:
+    """List every verifiable model file under local_dir, searching recursively.
+
+    The remote hash set (fetch_model_sha256) spans *.safetensors, *.json and *.py
+    at any depth, e.g. ``inference/config.json`` or ``encoding/tests/x.json``, so
+    the local scan must recurse and cover the same suffixes. A top-level,
+    weights-only glob reports healthy config/code files as missing (issue #2100).
+    """
+    if not local_dir.exists():
+        return []
+    return sorted(f for f in local_dir.rglob("*") if f.is_file() and f.suffix in VERIFIABLE_SUFFIXES)
+
+
+def compare_local_to_official(
+    official_hashes: Dict[str, str], local_hashes: Dict[str, str]
+) -> Tuple[int, List[str], List[str]]:
+    """Compare locally computed hashes against the official remote hashes.
+
+    Both dicts are keyed by repo-relative POSIX path (see calculate_local_sha256
+    and fetch_model_sha256), so each file is matched by its full relative path.
+    This distinguishes files that share a basename across subdirectories, e.g.
+    ``config.json`` and ``inference/config.json`` (issue #2100); matching on the
+    basename alone collides them and mislabels one as missing or mismatched.
+
+    Returns (files_passed, files_missing, files_mismatched), where files_missing
+    and files_mismatched are lists of the offending remote relative paths.
+    """
+    files_passed = 0
+    files_missing: List[str] = []
+    files_mismatched: List[str] = []
+    for filename, official_hash in official_hashes.items():
+        local_hash = local_hashes.get(filename)
+        if local_hash is None:
+            files_missing.append(filename)
+        elif local_hash.lower() != official_hash.lower():
+            files_mismatched.append(filename)
+        else:
+            files_passed += 1
+    return files_passed, files_missing, files_mismatched
 
 
 def check_huggingface_connectivity(timeout: int = 5) -> Tuple[bool, str]:
@@ -268,15 +314,23 @@ def calculate_local_sha256(
         # Process results as they complete
         for future in as_completed(future_to_file):
             completed_count += 1
+            file_path = future_to_file[future]
             try:
                 filename, sha256_hash, file_size_mb = future.result()
-                result[filename] = sha256_hash
+                # Key by path relative to local_dir (POSIX) so files that share a
+                # basename across subdirectories (e.g. config.json vs
+                # inference/config.json) stay distinct and line up with the remote
+                # keys, which are repo-relative paths. See issue #2100.
+                try:
+                    key = file_path.relative_to(local_dir).as_posix()
+                except ValueError:
+                    key = filename
+                result[key] = sha256_hash
 
                 if progress_callback:
                     progress_callback(f"  [{completed_count}/{total_files}] ✓ {filename} ({file_size_mb:.1f} MB)")
 
             except Exception as e:
-                file_path = future_to_file[future]
                 if progress_callback:
                     progress_callback(f"  [{completed_count}/{total_files}] ✗ {file_path.name} - Error: {str(e)}")
 
@@ -808,7 +862,7 @@ def pre_operation_verification(user_model, user_registry, operation_name: str = 
 
     # Calculate local hashes and compare
     local_dir = Path(user_model.path)
-    files_to_hash = [f for f in local_dir.glob("*.safetensors") if f.is_file()]
+    files_to_hash = list_local_model_files(local_dir)
 
     with Progress(
         SpinnerColumn(),
@@ -825,7 +879,7 @@ def pre_operation_verification(user_model, user_registry, operation_name: str = 
             if "[" in msg and "/" in msg and "]" in msg and "✓" in msg:
                 progress.advance(task)
 
-        local_hashes = calculate_local_sha256(local_dir, "*.safetensors", progress_callback=hash_callback)
+        local_hashes = calculate_local_sha256(local_dir, progress_callback=hash_callback, files_list=files_to_hash)
         progress.remove_task(task)
 
         console.print(f"  [green]✓ Calculated {len(local_hashes)} local hashes[/green]")
@@ -833,29 +887,9 @@ def pre_operation_verification(user_model, user_registry, operation_name: str = 
 
         # Compare hashes
         task = progress.add_task("[blue]Comparing hashes...", total=len(official_hashes))
-
-        files_failed = []
-        files_missing = []
-        files_passed = 0
-
-        for filename, official_hash in official_hashes.items():
-            file_basename = Path(filename).name
-            local_hash = None
-
-            for local_file, local_hash_value in local_hashes.items():
-                if Path(local_file).name == file_basename:
-                    local_hash = local_hash_value
-                    break
-
-            if local_hash is None:
-                files_missing.append(filename)
-            elif local_hash.lower() != official_hash.lower():
-                files_failed.append(f"{filename} (hash mismatch)")
-            else:
-                files_passed += 1
-
-            progress.advance(task)
-
+        files_passed, files_missing, files_mismatched = compare_local_to_official(official_hashes, local_hashes)
+        files_failed = [f"{f} (hash mismatch)" for f in files_mismatched]
+        progress.update(task, completed=len(official_hashes))
         progress.remove_task(task)
 
     console.print()

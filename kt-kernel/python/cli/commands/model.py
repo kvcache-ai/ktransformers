@@ -2401,7 +2401,11 @@ def verify_model(
         console.print()
 
         # Step 2 & 3: Calculate local SHA256 and compare (with Progress bar)
-        from kt_kernel.cli.utils.model_verifier import calculate_local_sha256
+        from kt_kernel.cli.utils.model_verifier import (
+            calculate_local_sha256,
+            compare_local_to_official,
+            list_local_model_files,
+        )
 
         with Progress(
             SpinnerColumn(),
@@ -2414,24 +2418,20 @@ def verify_model(
             # Step 2: Calculate local SHA256 hashes (no timeout)
             local_dir_path = Path(selected_model.path)
 
-            # Determine which files to hash
+            # Determine which files to hash. The remote hash set spans
+            # *.safetensors, *.json and *.py at any depth, keyed by repo-relative
+            # path, so the local scan recurses and keeps subdirectory files (#2100).
+            all_local_files = list_local_model_files(local_dir_path)
             if files_to_verify:
-                # Only hash files that need re-verification
-                clean_filenames = {
-                    Path(f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()).name
-                    for f in files_to_verify
+                # Only hash files that need re-verification, matched by relative path.
+                clean_relpaths = {
+                    f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip() for f in files_to_verify
                 }
-                # Collect files matching *.safetensors, *.json, *.py
-                files_to_hash = []
-                for pattern in ["*.safetensors", "*.json", "*.py"]:
-                    files_to_hash.extend(
-                        [f for f in local_dir_path.glob(pattern) if f.is_file() and f.name in clean_filenames]
-                    )
+                files_to_hash = [
+                    f for f in all_local_files if f.relative_to(local_dir_path).as_posix() in clean_relpaths
+                ]
             else:
-                # Collect all important files: *.safetensors, *.json, *.py
-                files_to_hash = []
-                for pattern in ["*.safetensors", "*.json", "*.py"]:
-                    files_to_hash.extend([f for f in local_dir_path.glob(pattern) if f.is_file()])
+                files_to_hash = all_local_files
 
             total_files = len(files_to_hash)
 
@@ -2452,27 +2452,21 @@ def verify_model(
 
             local_hashes = calculate_local_sha256(
                 local_dir_path,
-                "*.safetensors",
                 progress_callback=local_hash_callback,
-                files_list=files_to_hash if files_to_verify else None,
+                files_list=files_to_hash,
             )
 
             progress.remove_task(hash_task_id)
             console.print(f"  [green]✓ Calculated {len(local_hashes)} local file hashes[/green]")
 
             # Step 3: Compare hashes
-            # If re-verifying specific files, only compare those files
+            # If re-verifying specific files, only compare those files (matched by
+            # relative path so subdirectory files are handled correctly, #2100).
             if files_to_verify:
-                # Build set of clean filenames to verify
-                clean_verify_filenames = {
-                    Path(f.replace(" (missing)", "").replace(" (hash mismatch)", "").strip()).name
-                    for f in files_to_verify
-                }
-                # Filter official_hashes to only include files we're re-verifying
                 hashes_to_compare = {
                     filename: hash_value
                     for filename, hash_value in official_hashes.items()
-                    if Path(filename).name in clean_verify_filenames
+                    if filename in clean_relpaths
                 }
             else:
                 # First-time verification: compare all files
@@ -2480,35 +2474,16 @@ def verify_model(
 
             compare_task_id = progress.add_task("[blue]Comparing hashes...", total=len(hashes_to_compare))
 
-            files_failed = []
-            files_missing = []
-            files_passed = 0
+            files_passed, files_missing, files_mismatched = compare_local_to_official(hashes_to_compare, local_hashes)
+            files_failed = [f"{f} (hash mismatch)" for f in files_mismatched]
 
-            for filename, official_hash in hashes_to_compare.items():
-                file_basename = Path(filename).name
+            if verbose:
+                for f in files_missing:
+                    console.print(f"  [red]✗ {f} (missing)[/red]")
+                for f in files_mismatched:
+                    console.print(f"  [red]✗ {f} (hash mismatch)[/red]")
 
-                # Find matching local file
-                local_hash = None
-                for local_file, local_hash_value in local_hashes.items():
-                    if Path(local_file).name == file_basename:
-                        local_hash = local_hash_value
-                        break
-
-                if local_hash is None:
-                    files_missing.append(filename)
-                    if verbose:
-                        console.print(f"  [red]✗ {file_basename} (missing)[/red]")
-                elif local_hash.lower() != official_hash.lower():
-                    files_failed.append(f"{filename} (hash mismatch)")
-                    if verbose:
-                        console.print(f"  [red]✗ {file_basename} (hash mismatch)[/red]")
-                else:
-                    files_passed += 1
-                    if verbose:
-                        console.print(f"  [green]✓ {file_basename}[/green]")
-
-                progress.update(compare_task_id, advance=1)
-
+            progress.update(compare_task_id, completed=len(hashes_to_compare))
             progress.remove_task(compare_task_id)
 
             # Build result
