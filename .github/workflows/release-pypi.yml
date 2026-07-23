@@ -214,8 +214,8 @@ jobs:
         run: |
           # Extract version from first wheel filename
           wheel_name=$(ls dist/*.whl | head -1 | xargs basename)
-          # Extract version (format: kt_kernel-X.Y.Z-...)
-          version=$(echo "$wheel_name" | sed 's/kt_kernel-\([0-9.]*\)-.*/\1/')
+          # Extract version (format: kt_kernel-X.Y.Z[.postN]-...)
+          version=$(echo "$wheel_name" | sed 's/^kt_kernel-\([^-]*\)-.*/\1/')
           echo "VERSION=$version" >> $GITHUB_OUTPUT
           echo "Publishing version: $version"
 
@@ -281,3 +281,74 @@ jobs:
           echo "- For CUDA features: NVIDIA driver with CUDA 11.8+ or 12.x support" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "PyPI link: https://pypi.org/project/kt-kernel/${{ steps.get_version.outputs.VERSION }}/" >> $GITHUB_STEP_SUMMARY
+
+  # ── ktransformers shell package ──
+  build-and-publish-ktransformers:
+    name: Build & publish ktransformers shell sdist
+    needs: [build-and-publish-sglang-kt, publish-pypi]
+    runs-on: [self-hosted, linux, x64]
+    if: github.repository == 'kvcache-ai/ktransformers' && github.ref == 'refs/heads/main'
+    environment: prod
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build ktransformers sdist
+        run: |
+          rm -rf dist build *.egg-info
+          python -m build --sdist
+          echo "Generated sdist:"
+          ls -lh dist/
+
+      - name: Verify ktransformers sdist
+        run: |
+          artifact_count=$(find dist -maxdepth 1 -name 'ktransformers-*.tar.gz' | wc -l)
+          if [ "$artifact_count" -ne 1 ]; then
+            echo "ERROR: expected exactly one ktransformers sdist, found $artifact_count"
+            find dist -maxdepth 1 -type f -print
+            exit 1
+          fi
+
+          artifact=$(find dist -maxdepth 1 -name 'ktransformers-*.tar.gz' | head -1)
+          tar tzf "$artifact" | grep -q '/version.py$' || {
+            echo "ERROR: version.py is missing from $artifact"
+            exit 1
+          }
+          echo "Verified $artifact contains version.py"
+
+      - name: Publish ktransformers to TestPyPI (if requested)
+        if: github.event.inputs.test_pypi == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --repository testpypi \
+            --skip-existing \
+            --verbose \
+            dist/ktransformers-*.tar.gz
+
+      - name: Publish ktransformers to PyPI
+        if: github.event.inputs.test_pypi != 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m twine upload \
+            --skip-existing \
+            --verbose \
+            dist/ktransformers-*.tar.gz
