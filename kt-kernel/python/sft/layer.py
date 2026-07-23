@@ -56,7 +56,7 @@ def _supply_kt_zero_storage_for_state_dict_load(
     del local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     for name, param in module.named_parameters():
         if getattr(param, "_kt_zero_storage", False):
-            state_dict[f"{prefix}{name}"] = param.detach()
+            state_dict[f"{prefix}{name}"] = param
 
 
 class KTMoELayerWrapper(nn.Module):

@@ -402,6 +402,7 @@ def test_state_dict_hook_removes_only_marked_expert_placeholders(tmp_path):
     )
     placeholder = nn.Parameter(fake_tensor, requires_grad=False)
     placeholder._kt_zero_storage = True
+    placeholder_storage_nbytes = placeholder.untyped_storage().nbytes()
     layer.experts[0].gate_proj._parameters["weight"] = placeholder
 
     state_dict = layer.state_dict()
@@ -410,5 +411,15 @@ def test_state_dict_hook_removes_only_marked_expert_placeholders(tmp_path):
     assert "gate.weight" in state_dict
 
     save_file(state_dict, str(tmp_path / "model.safetensors"))
-    load_result = layer.load_state_dict(state_dict, strict=False)
-    assert "experts.0.gate_proj.weight" not in load_result.missing_keys
+    load_result = layer.load_state_dict(state_dict, strict=True, assign=True)
+    assert load_result.missing_keys == []
+    assert load_result.unexpected_keys == []
+
+    loaded_placeholder = layer.experts[0].gate_proj.weight
+    assert loaded_placeholder is placeholder
+    assert loaded_placeholder._kt_zero_storage is True
+    assert loaded_placeholder.requires_grad is False
+    assert loaded_placeholder.stride() == (0, 0)
+    assert loaded_placeholder.untyped_storage().nbytes() == placeholder_storage_nbytes
+    assert placeholder_storage_nbytes == placeholder.element_size()
+    assert "experts.0.gate_proj.weight" not in layer.state_dict()
