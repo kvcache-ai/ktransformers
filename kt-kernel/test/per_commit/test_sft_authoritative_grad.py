@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 
-from kt_kernel.sft.base import BaseSFTMoEWrapper, _supports_authoritative_optimizer_grads
+from kt_kernel.sft.amx import AMXSFTMoEWrapper
 from kt_kernel.sft.autograd import KTMoEFunction
+from kt_kernel.sft.base import BaseSFTMoEWrapper, _supports_authoritative_optimizer_grads
 from kt_kernel.sft.dist_utils import _distributed_rank_world_size
-from kt_kernel.sft.lora import kt_adapt_peft_lora, update_kt_lora_pointers
+from kt_kernel.sft.lora import kt_adapt_peft_lora, sync_kt_lora_gradients, update_kt_lora_pointers
 
 
 class _TaskRunner:
@@ -135,6 +138,121 @@ class _FakeAuthoritativeWrapper(BaseSFTMoEWrapper):
 
     def update_base_weights(self):
         raise NotImplementedError
+
+
+class _FakeLegacyWrapper(_FakeAuthoritativeWrapper):
+    """Legacy lifecycle with observable task-construction arguments."""
+
+    def __init__(self):
+        super().__init__()
+        self._uses_authoritative_optimizer_grads = False
+        self.task_kwargs = []
+
+    def _make_backward_task(self, _buffer, **kwargs):
+        self.task_kwargs.append(dict(kwargs))
+        accumulate_optimizer_grads = bool(kwargs.get("accumulate_optimizer_grads", False))
+        optimizer_grad_scale = float(kwargs.get("optimizer_grad_scale", 1.0))
+        self.task_modes.append((accumulate_optimizer_grads, optimizer_grad_scale))
+
+        def task():
+            value = self.write_value * optimizer_grad_scale
+            for grad_view in self.grad_views:
+                if accumulate_optimizer_grads:
+                    grad_view.add_(value)
+                else:
+                    grad_view.fill_(value)
+
+        return task
+
+
+def test_legacy_backward_forwards_nonunit_optimizer_scale_sync_and_async():
+    backend = _FakeLegacyWrapper()
+
+    backend.backward(torch.ones(1, 1), optimizer_grad_scale=0.5)
+    assert backend.task_kwargs == [{"accumulate_optimizer_grads": False, "optimizer_grad_scale": 0.5}]
+    assert backend.task_modes == [(False, 0.5)]
+
+    backend.reset_cache()
+    backend.submit_backward_async(torch.ones(1, 1), optimizer_grad_scale=0.25)
+    assert backend.task_kwargs[-1] == {
+        "accumulate_optimizer_grads": False,
+        "optimizer_grad_scale": 0.25,
+    }
+    backend.sync_backward()
+
+    backend.reset_cache()
+    backend.backward(torch.ones(1, 1))
+    assert backend.task_kwargs[-1] == {}
+    assert backend.task_modes[-1] == (False, 1.0)
+
+
+def test_legacy_backward_rejects_invalid_optimizer_scale_before_staging_copy():
+    backend = _FakeLegacyWrapper()
+
+    for scale in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and positive"):
+            backend.backward(torch.ones(1, 1), optimizer_grad_scale=scale)
+    assert backend.staging_copy_count == 0
+
+
+class _RecordingMoe:
+    def __init__(self):
+        self.calls = []
+
+    def backward_task(self, *args):
+        self.calls.append(args)
+        return args
+
+
+def _fake_amx_backend(method: str, *, skip_lora: bool = False):
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = method
+    backend._is_skip_lora = skip_lora
+    backend._uses_authoritative_optimizer_grads = False
+    backend._full_weight_grad = True
+    backend.lora_rank = 0
+    backend.grad_gate_proj_buf = torch.empty(1)
+    backend.grad_up_proj_buf = torch.empty(1)
+    backend.grad_down_proj_buf = torch.empty(1)
+    backend.moe = _RecordingMoe()
+    return backend
+
+
+def _fake_amx_backward_buffer():
+    return SimpleNamespace(
+        grad_output_cpu=torch.empty(1),
+        grad_input_cpu=torch.empty(1),
+        grad_weights=torch.empty(1),
+    )
+
+
+@pytest.mark.parametrize("method", ["AMXBF16_SFT", "AMXINT8_SFT", "AMXINT4_SFT"])
+def test_legacy_amx_task_uses_scaled_tail_only_when_required(method):
+    backend = _fake_amx_backend(method)
+    buffer = _fake_amx_backward_buffer()
+
+    backend._make_backward_task(buffer)
+    assert len(backend.moe.calls[-1]) == 12
+
+    backend._make_backward_task(buffer, accumulate_optimizer_grads=False, optimizer_grad_scale=0.5)
+    scaled_call = backend.moe.calls[-1]
+    assert len(scaled_call) == 14
+    assert scaled_call[-2:] == (False, 0.5)
+
+
+def test_skip_lora_task_keeps_legacy_signature_when_scale_is_supplied():
+    backend = _fake_amx_backend("AMXBF16_SFT_SkipLoRA", skip_lora=True)
+
+    backend._make_backward_task(
+        _fake_amx_backward_buffer(),
+        accumulate_optimizer_grads=False,
+        optimizer_grad_scale=0.5,
+    )
+
+    call = backend.moe.calls[-1]
+    assert len(call) == 12
+    assert call[2:8] == (0, 0, 0, 0, 0, 0)
+    assert call[9:12] == (0, 0, 0)
 
 
 def test_forward_waits_for_pending_backward_repack_before_pool_submit():
@@ -395,3 +513,210 @@ def test_autograd_returns_no_base_gradient_and_preserves_published_alias():
     # the alias published by the backend must therefore remain the sole grad.
     assert parameter.grad is grad_view
     torch.testing.assert_close(grad_view, torch.full_like(grad_view, 2.0))
+
+
+class _DistributedLegacyBackend:
+    """Rank-0 fake that models an overwrite-only C++ dWeight producer."""
+
+    def __init__(self, total_qlen):
+        self.total_qlen = total_qlen
+        self._full_weight_grad = True
+        self._uses_authoritative_optimizer_grads = False
+        self.share_backward_bb = False
+        self.grad_gate_proj_buf = torch.empty(1)
+        self.grad_up_proj_buf = None
+        self.grad_down_proj_buf = None
+        self.optimizer_grad_scales = []
+
+    def sync_forward(self, output_device=None):
+        output = torch.zeros(self.total_qlen, 1)
+        return output if output_device is None else output.to(output_device)
+
+    def backward(self, grad_output, output_device=None, optimizer_grad_scale=1.0):
+        scale = float(optimizer_grad_scale)
+        self.optimizer_grad_scales.append(scale)
+        self.grad_gate_proj_buf.fill_(float(grad_output.float().sum()) * scale)
+        grad_input = grad_output.clone()
+        grad_weights = torch.zeros(grad_output.shape[0], 1)
+        if output_device is not None:
+            grad_input = grad_input.to(output_device)
+            grad_weights = grad_weights.to(output_device)
+        return grad_input, grad_weights
+
+
+def _distributed_legacy_grad_worker(rank, init_file, gas_steps, result_queue):
+    import torch.distributed as dist
+
+    try:
+        dist.init_process_group(
+            "gloo",
+            init_method=f"file://{init_file}",
+            rank=rank,
+            world_size=2,
+            timeout=timedelta(seconds=10),
+        )
+        all_qlens = [1, 2]
+        local_qlen = all_qlens[rank]
+        parameter = torch.nn.Parameter(torch.tensor([10.0])) if rank == 0 else None
+        backend = _DistributedLegacyBackend(sum(all_qlens)) if rank == 0 else None
+
+        for microbatch_idx in range(gas_steps):
+            hidden_states = torch.ones(1, local_qlen, 1, requires_grad=True)
+            expert_ids = torch.zeros(1, local_qlen, 1, dtype=torch.int64)
+            route_weights = torch.ones(1, local_qlen, 1, requires_grad=True)
+            lora_ref = parameter if parameter is not None else torch.empty((), requires_grad=True)
+            output = KTMoEFunction.apply(
+                hidden_states,
+                expert_ids,
+                route_weights,
+                backend,
+                lora_ref,
+                1,
+                1,
+                0,
+                True,
+                False,
+                all_qlens,
+                False,
+                False,
+                parameter,
+                None,
+                None,
+            )
+            output.mul(float(microbatch_idx + 1)).sum().backward()
+
+        if rank == 0:
+            grad_before_step = float(parameter.grad.item())
+            optimizer = torch.optim.SGD([parameter], lr=0.1)
+            optimizer.step()
+            payload = (
+                grad_before_step,
+                float(parameter.item()),
+                tuple(backend.optimizer_grad_scales),
+            )
+        else:
+            payload = None
+        dist.barrier()
+        result_queue.put((rank, "ok", payload))
+    except Exception as exc:
+        result_queue.put((rank, "error", str(exc)))
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _distributed_sync_helper_worker(rank, init_file, result_queue):
+    import torch.distributed as dist
+
+    original_all_reduce = None
+    original_cuda = None
+    try:
+        dist.init_process_group(
+            "gloo",
+            init_method=f"file://{init_file}",
+            rank=rank,
+            world_size=2,
+            timeout=timedelta(seconds=10),
+        )
+        ordinary_module = torch.nn.Linear(1, 1, bias=False)
+        ordinary_parameter = next(ordinary_module.parameters())
+        ordinary_parameter.grad = torch.full_like(ordinary_parameter, float(rank + 1))
+        backend = (
+            SimpleNamespace(
+                grad_gate_proj_buf=torch.ones(1),
+                grad_up_proj_buf=torch.ones(1),
+                grad_down_proj_buf=torch.ones(1),
+            )
+            if rank == 0
+            else None
+        )
+        wrapper = SimpleNamespace(
+            layer_idx=0,
+            wrapper=backend,
+            _uses_authoritative_optimizer_grads=False,
+            _full_weight_grad=True,
+            _kt_world_size_at_wrap=2,
+            lora_experts=ordinary_module,
+        )
+        model = SimpleNamespace(_kt_wrappers=[wrapper])
+
+        original_all_reduce = dist.all_reduce
+        original_cuda = torch.Tensor.cuda
+
+        def forbidden_all_reduce(*_args, **_kwargs):
+            raise AssertionError("sync_kt_lora_gradients must not issue all_reduce")
+
+        dist.all_reduce = forbidden_all_reduce
+        torch.Tensor.cuda = lambda self, *_args, **_kwargs: self
+        sync_kt_lora_gradients(model)
+        dist.all_reduce = original_all_reduce
+        torch.Tensor.cuda = original_cuda
+
+        dist.barrier()
+        result_queue.put((rank, "ok", float(ordinary_parameter.grad.item())))
+    except Exception as exc:
+        result_queue.put((rank, "error", str(exc)))
+    finally:
+        if original_all_reduce is not None:
+            dist.all_reduce = original_all_reduce
+        if original_cuda is not None:
+            torch.Tensor.cuda = original_cuda
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def _run_forked_workers(target, init_file, *worker_args):
+    context = mp.get_context("fork")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=target,
+            args=(rank, str(init_file), *worker_args, result_queue),
+        )
+        for rank in range(2)
+    ]
+    for process in processes:
+        process.start()
+
+    try:
+        results = [result_queue.get(timeout=20) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(timeout=20)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    for process in processes:
+        assert process.exitcode == 0
+    assert all(status == "ok" for _, status, _ in results), results
+    return sorted(results)
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+@pytest.mark.parametrize("gas_steps", [1, 2])
+def test_distributed_legacy_full_grad_is_averaged_before_optimizer_step(tmp_path, gas_steps):
+    results = _run_forked_workers(
+        _distributed_legacy_grad_worker,
+        tmp_path / f"legacy-grad-gas-{gas_steps}",
+        gas_steps,
+    )
+    _, _, rank0_payload = results[0]
+    grad_before_step, parameter_after_step, scales = rank0_payload
+    expected_grad = (sum((1, 2)) / 2) * sum(range(1, gas_steps + 1))
+
+    assert grad_before_step == pytest.approx(expected_grad)
+    assert parameter_after_step == pytest.approx(10.0 - 0.1 * expected_grad)
+    assert scales == (0.5,) * gas_steps
+    assert results[1][2] is None
+
+
+@pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
+def test_sync_helper_is_collective_free_and_leaves_ordinary_module_grads_unchanged(tmp_path):
+    results = _run_forked_workers(
+        _distributed_sync_helper_worker,
+        tmp_path / "sync-helper-no-collective",
+    )
+
+    assert results[0][2] == 1.0
+    assert results[1][2] == 2.0

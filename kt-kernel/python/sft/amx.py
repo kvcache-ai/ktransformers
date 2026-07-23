@@ -193,7 +193,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             grad_up_proj_ptr,
             grad_down_proj_ptr,
         )
-        if self._uses_authoritative_optimizer_grads:
+        if (
+            self._uses_authoritative_optimizer_grads
+            or bool(accumulate_optimizer_grads)
+            or float(optimizer_grad_scale) != 1.0
+        ):
             return self.moe.backward_task(
                 *backward_args,
                 bool(accumulate_optimizer_grads),

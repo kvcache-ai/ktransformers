@@ -231,17 +231,14 @@ class KTMoEFunction(torch.autograd.Function):
                 total_qlen = int(all_go.shape[0])
 
                 with torch.profiler.record_function("kt.sft.cpu_backward"):
-                    if ctx.authoritative_optimizer_grads:
-                        backward_out = ctx.wrapper.backward(
-                            all_go,
-                            output_device=ctx.original_device,
-                            optimizer_grad_scale=1.0 / world_size,
-                        )
-                    else:
-                        backward_out = ctx.wrapper.backward(
-                            all_go,
-                            output_device=ctx.original_device,
-                        )
+                    # Rank 0 computes one dWeight over every rank's gathered
+                    # rows. Match DDP averaging at the C++ gradient producer
+                    # so grad clipping and GAS both observe normalized values.
+                    backward_out = ctx.wrapper.backward(
+                        all_go,
+                        output_device=ctx.original_device,
+                        optimizer_grad_scale=1.0 / world_size,
+                    )
                 authoritative_grad_published = ctx.authoritative_optimizer_grads
                 try:
                     if isinstance(backward_out, tuple) and len(backward_out) == 2:

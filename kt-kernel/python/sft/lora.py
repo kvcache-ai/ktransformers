@@ -698,11 +698,13 @@ def update_kt_lora_pointers(model: nn.Module):
 
 
 def sync_kt_lora_gradients(model: nn.Module) -> None:
-    """
-    Synchronize KT-managed gradients across ranks.
+    """Validate distributed KT gradient ownership without issuing collectives.
 
-    In LoRA mode: synchronizes LoRA gradients only.
-    In full mode: synchronizes both base weight and LoRA gradients.
+    KT gathers every rank's routed rows before the rank-0 C++ backward, which
+    applies world-size normalization while producing optimizer gradients.
+    This compatibility entry point therefore must not all-reduce those
+    rank-0-owned gradients again. Ordinary registered GPU modules remain under
+    DDP/FSDP ownership and are deliberately untouched here.
     """
     import torch.distributed as dist
 
@@ -718,75 +720,39 @@ def sync_kt_lora_gradients(model: nn.Module) -> None:
     if not wrappers:
         return
 
-    # AMXBF16_SFT gathers every rank's routed rows and writes a world-size
-    # normalized optimizer gradient on rank 0.  No gradient collective is
-    # needed here; validate ownership/aliases only.  Ordinary GPU
-    # lora_experts are deliberately excluded and remain DDP/FSDP-managed.
+    # Distributed KT SFT gathers every rank's routed rows and writes a
+    # world-size-normalized optimizer gradient on rank 0.  No gradient
+    # collective is needed here; validate ownership/aliases only.  Ordinary
+    # GPU lora_experts are deliberately excluded and remain DDP/FSDP-managed.
     authoritative_wrappers = [w for w in wrappers if getattr(w, "_uses_authoritative_optimizer_grads", False)]
     if authoritative_wrappers:
         if len(authoritative_wrappers) != len(wrappers):
             raise RuntimeError("Mixed authoritative and legacy KT SFT backends are unsupported in one model")
-        for wrapper in authoritative_wrappers:
-            backend = getattr(wrapper, "wrapper", None)
-            wrapped_world_size = int(getattr(wrapper, "_kt_world_size_at_wrap", world_size))
-            if wrapped_world_size != world_size:
-                raise RuntimeError(
-                    f"Layer {wrapper.layer_idx}: KT wrapper was created for world_size={wrapped_world_size}, "
-                    f"but the active process group has world_size={world_size}"
-                )
-            if rank == 0:
-                if backend is None:
-                    raise RuntimeError(f"Layer {wrapper.layer_idx}: rank 0 does not own the authoritative KT backend")
+
+    for wrapper in wrappers:
+        backend = getattr(wrapper, "wrapper", None)
+        wrapped_world_size = int(getattr(wrapper, "_kt_world_size_at_wrap", world_size))
+        if wrapped_world_size != world_size:
+            raise RuntimeError(
+                f"Layer {wrapper.layer_idx}: KT wrapper was created for world_size={wrapped_world_size}, "
+                f"but the active process group has world_size={world_size}"
+            )
+        authoritative = bool(getattr(wrapper, "_uses_authoritative_optimizer_grads", False))
+        backend_description = "an authoritative KT backend" if authoritative else "a KT backend"
+        if rank == 0:
+            if backend is None:
+                raise RuntimeError(f"Layer {wrapper.layer_idx}: rank 0 does not own {backend_description}")
+            if authoritative:
                 backend.validate_authoritative_optimizer_grad_state()
-            else:
-                if backend is not None:
-                    raise RuntimeError(
-                        f"Layer {wrapper.layer_idx}: rank {rank} unexpectedly owns an authoritative KT backend"
-                    )
+        else:
+            if backend is not None:
+                raise RuntimeError(f"Layer {wrapper.layer_idx}: rank {rank} unexpectedly owns {backend_description}")
+            if authoritative:
                 for param in _collect_wrapper_managed_lora_params(wrapper):
                     if param.grad is not None:
                         raise RuntimeError(
                             f"Layer {wrapper.layer_idx}: non-rank-0 KT LoRA Parameter unexpectedly has a gradient"
                         )
-        return
-
-    # Legacy backends retain their existing cross-rank synchronization.
-    # Sync base weight gradients in full mode.
-    if wrappers:
-        for wrapper in wrappers:
-            if not getattr(wrapper, "_full_weight_grad", False):
-                continue
-            if wrapper.wrapper is None:
-                continue
-            for grad_buf in (
-                wrapper.wrapper.grad_gate_proj_buf,
-                wrapper.wrapper.grad_up_proj_buf,
-                wrapper.wrapper.grad_down_proj_buf,
-            ):
-                if grad_buf is not None:
-                    grad_gpu = grad_buf.cuda()
-                    dist.all_reduce(grad_gpu, op=dist.ReduceOp.SUM)
-                    grad_gpu.div_(world_size)
-                    grad_buf.copy_(grad_gpu.cpu())
-
-    # Sync LoRA gradients. Use the LoRA-only helper here because base gradients
-    # were synchronized above and get_kt_lora_params() is full-aware for legacy
-    # optimizer injection compatibility.
-    params = _collect_kt_lora_params(wrappers)
-    if not params:
-        return
-
-    for param in params:
-        if param.grad is not None:
-            original_device = param.grad.device
-            if original_device.type == "cpu":
-                grad_gpu = param.grad.cuda()
-                dist.all_reduce(grad_gpu, op=dist.ReduceOp.SUM)
-                grad_gpu.div_(world_size)
-                param.grad.copy_(grad_gpu.cpu())
-            else:
-                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-                param.grad.div_(world_size)
 
 
 # =============================================================================

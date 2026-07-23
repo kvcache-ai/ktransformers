@@ -615,6 +615,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             raise RuntimeError("No forward cache available. Call forward(save_for_backward=True) first.")
         if self._uses_authoritative_optimizer_grads and self._authoritative_grad_submission_pending:
             raise RuntimeError("An authoritative optimizer-gradient backward submission is already pending")
+        optimizer_grad_scale = float(optimizer_grad_scale)
+        if not math.isfinite(optimizer_grad_scale) or optimizer_grad_scale <= 0.0:
+            raise ValueError(f"optimizer_grad_scale must be finite and positive, got {optimizer_grad_scale}")
 
         qlen = grad_output.shape[0]
         buffer = self._get_buffer(qlen)
@@ -631,7 +634,18 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                     accumulate_optimizer_grads=accumulate_optimizer_grads,
                     optimizer_grad_scale=optimizer_grad_scale,
                 )
+            elif optimizer_grad_scale != 1.0:
+                # Legacy backends still let PyTorch AccumulateGrad own GAS
+                # accumulation, but their C++ dWeight producer must apply
+                # distributed world-size normalization before grad clipping.
+                backward_task = self._make_backward_task(
+                    buffer,
+                    accumulate_optimizer_grads=False,
+                    optimizer_grad_scale=optimizer_grad_scale,
+                )
             else:
+                # Preserve the historical task signature for single-rank
+                # legacy backends and older compatible extension builds.
                 backward_task = self._make_backward_task(buffer)
             self._wait_for_pending_backward_repack()
             self.cpu_infer.submit(backward_task)
@@ -805,6 +819,9 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             raise RuntimeError("No forward cache available. Call forward(save_for_backward=True) first.")
         if self._uses_authoritative_optimizer_grads and self._authoritative_grad_submission_pending:
             raise RuntimeError("An authoritative optimizer-gradient backward submission is already pending")
+        optimizer_grad_scale = float(optimizer_grad_scale)
+        if not math.isfinite(optimizer_grad_scale) or optimizer_grad_scale <= 0.0:
+            raise ValueError(f"optimizer_grad_scale must be finite and positive, got {optimizer_grad_scale}")
 
         qlen = grad_output.shape[0]
         buffer = self._get_buffer(qlen)
@@ -819,6 +836,12 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
                 backward_task = self._make_backward_task(
                     buffer,
                     accumulate_optimizer_grads=accumulate_optimizer_grads,
+                    optimizer_grad_scale=optimizer_grad_scale,
+                )
+            elif optimizer_grad_scale != 1.0:
+                backward_task = self._make_backward_task(
+                    buffer,
+                    accumulate_optimizer_grads=False,
                     optimizer_grad_scale=optimizer_grad_scale,
                 )
             else:
