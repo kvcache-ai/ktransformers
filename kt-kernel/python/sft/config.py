@@ -145,7 +145,7 @@ class KTConfig:
 
     # Weight loading
     kt_weight_path: str | None = None
-    kt_expert_checkpoint_path: str | None = None
+    kt_expert_checkpoint_path: str | None = None  # HF expert checkpoint or KT Full checkpoint directory
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
     kt_share_backward_bb: bool | None = None  # default True — always saves memory

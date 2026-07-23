@@ -34,6 +34,31 @@ logger = logging.getLogger(__name__)
 _KT_SFT_DEBUG = os.environ.get("KT_SFT_DEBUG", "0") == "1"
 
 
+def _strip_kt_zero_storage_from_state_dict(module, state_dict, prefix, local_metadata) -> None:
+    """Never serialize expert placeholders that do not contain real weights."""
+    del local_metadata
+    for name, param in module.named_parameters():
+        if getattr(param, "_kt_zero_storage", False):
+            state_dict.pop(f"{prefix}{name}", None)
+
+
+def _supply_kt_zero_storage_for_state_dict_load(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+) -> None:
+    """Keep placeholder keys out of checkpoints without reporting them missing."""
+    del local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    for name, param in module.named_parameters():
+        if getattr(param, "_kt_zero_storage", False):
+            state_dict[f"{prefix}{name}"] = param.detach()
+
+
 class KTMoELayerWrapper(nn.Module):
     """Wrapper for MoE layer using KTMoEWrapper."""
 
@@ -120,6 +145,8 @@ class KTMoELayerWrapper(nn.Module):
             )
         self._full_weight_grad = bool(full_weight_grad)
         self._uses_authoritative_optimizer_grads = bool(uses_authoritative_optimizer_grads)
+        self.register_state_dict_post_hook(_strip_kt_zero_storage_from_state_dict)
+        self.register_load_state_dict_pre_hook(_supply_kt_zero_storage_for_state_dict_load)
 
     def _apply(self, fn, recurse=True):
         # Protect experts from device transfer (PEFT LoRA should stay on CPU for KT)
@@ -184,6 +211,11 @@ class KTMoELayerWrapper(nn.Module):
             self._lora_pointers_dirty = False
 
         # In full_weight_grad mode, sync base weights after optimizer step
+        if full_weight_grad and getattr(self.wrapper, "_kt_full_checkpoint_load_failed", False):
+            raise RuntimeError(
+                f"Layer {self.layer_idx}: a previous KT Full checkpoint load failed; "
+                "reload a valid checkpoint before running forward"
+            )
         if full_weight_grad and getattr(self.wrapper, "_base_weights_dirty", False):
             with torch.profiler.record_function("kt.sft.base_weight_reload"):
                 self.wrapper.update_base_weights()

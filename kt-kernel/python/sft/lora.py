@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from .arch import MOEArchConfig
+from .checkpoint import load_full_weight_checkpoint, save_full_weight_checkpoint
 from .dist_utils import _distributed_rank_world_size
 
 logger = logging.getLogger(__name__)
@@ -415,6 +416,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                         torch.empty(1, dtype=param.dtype, device="cpu"),
                         requires_grad=False,
                     )
+                    scalar_param._kt_zero_storage = True
                     container_params[local_name] = scalar_param
                     shrunk_count += 1
                     shrunk_saved_bytes += (original_numel - 1) * param.element_size()
@@ -845,9 +847,11 @@ def save_lora_experts_to_adapter(model: nn.Module, output_dir: str) -> None:
 
 def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
     """
-    Unified function to save KT MoE weights to adapter file.
-    Note: Per-expert PEFT LoRA is saved by PEFT directly, not here.
-    This function only handles lora_experts (a separate feature).
+    Unified function to save KT-managed MoE training weights.
+
+    Full/Hybrid expert base Parameters are written to the dedicated sharded KT
+    Full checkpoint. Per-expert PEFT LoRA remains owned and saved by PEFT.
+    LoRA Experts and fused expert LoRA keep their existing formats.
     """
     wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
@@ -856,6 +860,10 @@ def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
     has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
+
+    if has_full_weights:
+        save_full_weight_checkpoint(wrappers, output_dir)
 
     if has_lora_experts:
         save_lora_experts_to_adapter(model, output_dir)
@@ -863,8 +871,8 @@ def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
     if has_fused_lora:
         _save_fused_expert_lora(wrappers, output_dir)
 
-    if not has_lora_experts and not has_fused_lora:
-        logger.info("[save_kt_moe] No lora_experts or fused expert LoRA in KT wrappers")
+    if not has_full_weights and not has_lora_experts and not has_fused_lora:
+        logger.info("[save_kt_moe] No Full weights, lora_experts, or fused expert LoRA in KT wrappers")
 
 
 def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
@@ -991,9 +999,10 @@ def load_lora_experts_from_adapter(model: nn.Module, adapter_path: str) -> None:
 
 def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
     """
-    Unified function to load KT MoE weights from adapter file.
-    Note: Per-expert PEFT LoRA is loaded by PEFT directly, not here.
-    This function only handles lora_experts (a separate feature).
+    Restore KT-managed MoE training weights without replacing Parameters.
+
+    Per-expert PEFT LoRA remains owned and loaded by PEFT. Full/Hybrid base
+    weights, LoRA Experts, and fused expert LoRA are restored here.
     """
     wrappers = _find_kt_wrappers(model) or []
     if not wrappers:
@@ -1002,6 +1011,10 @@ def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
     has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
+
+    if has_full_weights:
+        load_full_weight_checkpoint(wrappers, adapter_path)
 
     if has_lora_experts:
         load_lora_experts_from_adapter(model, adapter_path)
@@ -1009,5 +1022,5 @@ def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
     if has_fused_lora:
         _load_fused_expert_lora(wrappers, adapter_path)
 
-    if not has_lora_experts and not has_fused_lora:
-        logger.info("No lora_experts or fused expert LoRA in KT wrappers")
+    if not has_full_weights and not has_lora_experts and not has_fused_lora:
+        logger.info("No Full weights, lora_experts, or fused expert LoRA in KT wrappers")

@@ -24,6 +24,7 @@ from .arch import (
 from .layer import KTMoELayerWrapper
 from .lora import LoRAExperts
 from .base import _supports_authoritative_optimizer_grads
+from .checkpoint import load_full_weight_layer, resolve_full_weight_checkpoint
 from .dist_utils import _distributed_rank_world_size
 from .weights import (
     _clear_original_expert_weights,
@@ -242,7 +243,16 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     # When kt_expert_checkpoint_path is set, always resolve from it (overrides any existing
     # checkpoint_files which may come from AttnOnlyBf16 and lack expert weights).
     kt_expert_checkpoint_path = getattr(cfg, "kt_expert_checkpoint_path", None)
-    if kt_expert_checkpoint_path:
+    full_weight_checkpoint = resolve_full_weight_checkpoint(kt_expert_checkpoint_path)
+    use_full_weight_checkpoint = full_weight_checkpoint is not None
+    if use_full_weight_checkpoint and use_kt_weight_path:
+        raise KTAMXConfigError(
+            "A KT Full checkpoint and kt_weight_path were both selected. "
+            "Choose exactly one authoritative expert weight source."
+        )
+    if use_full_weight_checkpoint:
+        logger.info(f"Loading expert weights from KT Full checkpoint: {full_weight_checkpoint}")
+    elif kt_expert_checkpoint_path:
         logger.info(f"Resolving expert checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}")
         resolved_files, resolved_meta = _resolve_checkpoint_files(model_name_or_path=kt_expert_checkpoint_path)
         if resolved_files and all(f.endswith(".safetensors") for f in resolved_files):
@@ -256,20 +266,28 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                 f"Failed to resolve checkpoint files from kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}"
             )
 
-    use_checkpoint_files = bool(checkpoint_files) and not use_kt_weight_path
+    use_checkpoint_files = bool(checkpoint_files) and not use_kt_weight_path and not use_full_weight_checkpoint
 
     logger.debug(
         f"Weight source: kt_weight_path={kt_weight_path!r}, "
         f"kt_expert_checkpoint_path={kt_expert_checkpoint_path!r}, "
+        f"full_weight_checkpoint={full_weight_checkpoint!r}, "
         f"checkpoint_files count={len(checkpoint_files) if checkpoint_files else 0}, "
-        f"use_kt_weight_path={use_kt_weight_path}, use_checkpoint_files={use_checkpoint_files}"
+        f"use_kt_weight_path={use_kt_weight_path}, use_full_weight_checkpoint={use_full_weight_checkpoint}, "
+        f"use_checkpoint_files={use_checkpoint_files}"
     )
 
-    if use_checkpoint_files:
+    if use_full_weight_checkpoint:
+        logger.info("Loading expert weights from a KT Full checkpoint.")
+    elif use_checkpoint_files:
         logger.info("Loading expert weights from checkpoint files (online conversion).")
     elif use_kt_weight_path and bool(checkpoint_files):
         logger.info("BF16 checkpoint files available for backward gradient computation.")
-    elif (not use_kt_weight_path) and bool(getattr(cfg, "kt_skip_expert_loading", False)):
+    elif (
+        not use_kt_weight_path
+        and not use_full_weight_checkpoint
+        and bool(getattr(cfg, "kt_skip_expert_loading", False))
+    ):
         # If HF expert weights were skipped during `from_pretrained`, we must source expert weights externally.
         model_name_or_path = getattr(getattr(model, "config", None), "name_or_path", None)
         if model_name_or_path:
@@ -314,7 +332,30 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             if _quant_cfg is not None:
                 _block_size = getattr(_quant_cfg, "weight_block_size", None)
 
-            if use_kt_weight_path:
+            if use_full_weight_checkpoint:
+                expected_shapes = {
+                    "gate_proj": (
+                        int(moe_config.expert_num),
+                        int(moe_config.intermediate_size),
+                        int(hidden_size),
+                    ),
+                    "up_proj": (
+                        int(moe_config.expert_num),
+                        int(moe_config.intermediate_size),
+                        int(hidden_size),
+                    ),
+                    "down_proj": (
+                        int(moe_config.expert_num),
+                        int(hidden_size),
+                        int(moe_config.intermediate_size),
+                    ),
+                }
+                gate_proj, up_proj, down_proj = load_full_weight_layer(
+                    full_weight_checkpoint,
+                    layer_idx=layer_idx,
+                    expected_shapes=expected_shapes,
+                )
+            elif use_kt_weight_path:
                 logger.debug(f"Layer {layer_idx}: forward + backward from kt_weight_path (.kt files)")
             elif use_checkpoint_files:
                 layers_prefix = _get_layers_prefix(model.config)
@@ -635,6 +676,17 @@ def load_kt_model(
     loading_kwargs.update(kwargs)
 
     cfg = _get_kt_config(kt_plugin)
+    auto_full_weight_checkpoint = resolve_full_weight_checkpoint(model_name_or_path)
+    if auto_full_weight_checkpoint is not None and getattr(cfg, "kt_expert_checkpoint_path", None) is None:
+        cfg.kt_expert_checkpoint_path = auto_full_weight_checkpoint
+        plugin_config = getattr(kt_plugin, "kt_config", None)
+        if isinstance(plugin_config, dict):
+            plugin_config["kt_expert_checkpoint_path"] = auto_full_weight_checkpoint
+        elif plugin_config is not None:
+            setattr(plugin_config, "kt_expert_checkpoint_path", auto_full_weight_checkpoint)
+        else:
+            setattr(kt_plugin, "kt_expert_checkpoint_path", auto_full_weight_checkpoint)
+        logger.info("Detected KT Full checkpoint in model directory: %s", auto_full_weight_checkpoint)
 
     if getattr(cfg, "kt_skip_expert_loading", None) is None:
         checkpoint_files, sharded_metadata = _resolve_checkpoint_files(
