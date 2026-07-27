@@ -10,7 +10,8 @@ distributed) on top of the inference-only kt_kernel base package.
 Additional dependencies beyond base kt_kernel: torch.nn, torch.distributed, peft (optional).
 """
 
-from .config import KTConfig
+from .config import KTActivationPolicy, KTConfig
+from .dist_utils import get_activation_checkpoint_context_fn
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 from .amx import AMXSFTMoEWrapper
 from .arch import (
@@ -56,6 +57,8 @@ from .profiler import collect_kt_sft_profile, format_kt_sft_profile, reset_kt_sf
 
 __all__ = [
     "KTConfig",
+    "KTActivationPolicy",
+    "get_activation_checkpoint_context_fn",
     "BaseSFTMoEWrapper",
     "KExpertsSFTBuffer",
     "AMXSFTMoEWrapper",

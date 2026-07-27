@@ -14,14 +14,89 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from dataclasses import dataclass, field
+import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 
 logger = logging.getLogger(__name__)
 
 _CPU_TOPOLOGY_ROOT = Path("/sys/devices/system/cpu")
+_LEGACY_REUSE_ENV = "KT_REUSE_CHECKPOINT_FORWARD"
+
+ActivationRetention = Literal["retain", "recompute"]
+
+
+@dataclass(frozen=True)
+class KTActivationPolicy:
+    """Activation lifetime policy shared by every KT distributed rank."""
+
+    cpu: ActivationRetention = "recompute"
+    gpu: ActivationRetention = "recompute"
+
+    def __post_init__(self) -> None:
+        valid = {"retain", "recompute"}
+        if self.cpu not in valid:
+            raise ValueError(
+                f"activation_policy.cpu must be one of {sorted(valid)}, got {self.cpu!r}"
+            )
+        if self.gpu not in valid:
+            raise ValueError(
+                f"activation_policy.gpu must be one of {sorted(valid)}, got {self.gpu!r}"
+            )
+        if self.cpu == "recompute" and self.gpu == "retain":
+            raise NotImplementedError(
+                "activation_policy cpu=recompute, gpu=retain is not implemented"
+            )
+
+    @classmethod
+    def from_value(
+        cls,
+        value: "KTActivationPolicy | Mapping[str, str]",
+    ) -> "KTActivationPolicy":
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise TypeError(
+                "kt_activation_policy must be a KTActivationPolicy or a mapping "
+                "with exactly the keys 'cpu' and 'gpu'"
+            )
+        expected = {"cpu", "gpu"}
+        actual = set(value)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unexpected = sorted(actual - expected)
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if unexpected:
+                details.append(f"unexpected={unexpected}")
+            raise ValueError(
+                "kt_activation_policy must contain exactly 'cpu' and 'gpu'"
+                + (f" ({', '.join(details)})" if details else "")
+            )
+        return cls(cpu=value["cpu"], gpu=value["gpu"])
+
+
+def _legacy_activation_policy_from_env(value: str) -> KTActivationPolicy:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        cpu = "retain"
+    elif normalized in {"0", "false", "no", "off"}:
+        cpu = "recompute"
+    else:
+        raise ValueError(
+            f"{_LEGACY_REUSE_ENV} must be a boolean value, got {value!r}"
+        )
+    warnings.warn(
+        f"{_LEGACY_REUSE_ENV} is deprecated; configure kt_activation_policy "
+        "through the training frontend instead",
+        FutureWarning,
+        stacklevel=3,
+    )
+    return KTActivationPolicy(cpu=cpu, gpu="recompute")
 
 
 def _env_int(key: str, default: int | None) -> int | None:
@@ -154,6 +229,7 @@ class KTConfig:
     # Cache
     kt_max_cache_depth: int | None = None
     kt_model_max_length: int | None = None
+    kt_activation_policy: KTActivationPolicy | Mapping[str, str] | None = None
 
     # LoRA
     kt_lora_rank: int | None = None
@@ -189,6 +265,22 @@ class KTConfig:
 
     def __post_init__(self):
         configure_omp_threads()
+        legacy_reuse = os.environ.get(_LEGACY_REUSE_ENV)
+        legacy_reuse_is_explicit = legacy_reuse is not None and legacy_reuse.strip() != ""
+        if self.kt_activation_policy is not None and legacy_reuse_is_explicit:
+            raise ValueError(
+                f"kt_activation_policy conflicts with legacy {_LEGACY_REUSE_ENV}; "
+                f"unset {_LEGACY_REUSE_ENV}"
+            )
+        if self.kt_activation_policy is None:
+            if legacy_reuse_is_explicit:
+                self.kt_activation_policy = _legacy_activation_policy_from_env(legacy_reuse)
+            else:
+                self.kt_activation_policy = KTActivationPolicy()
+        else:
+            self.kt_activation_policy = KTActivationPolicy.from_value(
+                self.kt_activation_policy
+            )
         if self.kt_backend is None:
             self.kt_backend = os.environ.get("ACCELERATE_KT_BACKEND", "AMXBF16")
         if self.kt_num_threads is None:

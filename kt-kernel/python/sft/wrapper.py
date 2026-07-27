@@ -6,7 +6,6 @@ from __future__ import annotations
 import gc
 import importlib.util as _u
 import logging
-import os
 from typing import Any
 
 import torch
@@ -164,6 +163,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     hidden_size = _text_cfg.hidden_size
 
     cfg = _get_kt_config(kt_plugin)
+    activation_policy = cfg.kt_activation_policy
 
     # Read lora_rank/lora_alpha for C++ wrapper initialization (buffer allocation only)
     # Use explicit None checks: lora_rank=0 is a valid value (full mode, no LoRA),
@@ -226,6 +226,26 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
     requested_num_gpu_experts = int(getattr(cfg, "kt_num_gpu_experts", 0) or 0)
+    cpu_activation_retain = activation_policy.cpu == "retain"
+    reuse_checkpoint_forward = cpu_activation_retain and activation_policy.gpu == "recompute"
+    if cpu_activation_retain and (
+        not _supports_checkpoint_forward_reuse(full_weight_grad, lora_rank)
+        or kt_method != "AMXBF16_SFT"
+        or requested_num_gpu_experts != 0
+        or use_lora_experts
+    ):
+        raise KTAMXConfigError(
+            "activation_policy.cpu=retain currently requires AMXBF16 pure LoRA "
+            "or pure Full training; Hybrid, quantized, GPU-expert, and SkipLoRA "
+            "paths are not supported"
+        )
+    if is_rank_0:
+        logger.info(
+            "KT activation policy: cpu=%s, gpu=%s, world_size=%d",
+            activation_policy.cpu,
+            activation_policy.gpu,
+            distributed_world_size,
+        )
     uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
         kt_method, requested_num_gpu_experts
     )
@@ -410,17 +430,11 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
             # Set share_backward_bb and share_cache_pool BEFORE load_weights (config is built during load)
             wrapper.share_backward_bb = cfg.kt_share_backward_bb
-            single_process = distributed_world_size == 1
-            reuse_checkpoint_forward = (
-                single_process
-                and _supports_checkpoint_forward_reuse(full_weight_grad, lora_rank)
-                and kt_method == "AMXBF16_SFT"
-                and os.environ.get("KT_REUSE_CHECKPOINT_FORWARD", "1") != "0"
-            )
             wrapper.reuse_checkpoint_forward = reuse_checkpoint_forward
-            # Reusing the first checkpoint forward requires each layer's C++
-            # activations to remain valid until its backward invocation.
-            wrapper.share_cache_pool = False if reuse_checkpoint_forward else cfg.kt_share_cache_pool
+            wrapper.activation_policy = activation_policy
+            # CPU recompute only needs a live cache for the layer currently
+            # recomputed in backward, so all layers may share the pool.
+            wrapper.share_cache_pool = not cpu_activation_retain
 
             physical_to_logical_map = torch.arange(moe_config.expert_num, dtype=torch.int64, device="cpu")
 
@@ -473,6 +487,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             lora_experts=lora_experts,
             full_weight_grad=full_weight_grad,
             uses_authoritative_optimizer_grads=uses_authoritative_optimizer_grads,
+            activation_policy=activation_policy,
         )
         layer_wrapper._fused_experts = _layer_is_fused
         layer_wrapper._lora_rank = lora_rank
@@ -555,6 +570,7 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_lora_alpha=configured_lora_alpha,
         kt_model_max_length=getattr(model_args, "model_max_length", None),
         kt_train_mode=kt_train_mode,
+        kt_activation_policy=getattr(model_args, "activation_policy", None),
     )
     return KTransformersPlugin(enabled=True, kt_config=kt_config)
 

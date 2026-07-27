@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import math
 import torch
 from typing import Optional, Tuple
@@ -33,6 +34,12 @@ class _AuthoritativeOptimizerGrad:
     parameter: torch.nn.Parameter
     grad_view: torch.Tensor
     metadata: tuple
+
+
+class _CheckpointCacheState(str, Enum):
+    EMPTY = "EMPTY"
+    READY = "READY"
+    POISONED = "POISONED"
 
 
 def _authoritative_grad_metadata(tensor: torch.Tensor) -> tuple:
@@ -230,7 +237,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._uses_authoritative_optimizer_grads: bool = False
         self._init_authoritative_optimizer_grads()
         self.reuse_checkpoint_forward: bool = False
-        self._kt_has_cached_forward: bool = False
+        self._checkpoint_cache_state = _CheckpointCacheState.EMPTY
+        self._checkpoint_cache_error: Optional[str] = None
         self._checkpoint_output_cpu: Optional[torch.Tensor] = None
         self._checkpoint_output_qlen: int = 0
         self._backward_repack_pending: bool = False
@@ -542,29 +550,84 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         else:
             return buffer.output_cpu[:qlen].clone()
 
+    @property
+    def checkpoint_cache_state(self) -> _CheckpointCacheState:
+        return self._checkpoint_cache_state
+
+    @property
+    def _kt_has_cached_forward(self) -> bool:
+        """Compatibility view; cache state is authoritative."""
+        return self._checkpoint_cache_state is _CheckpointCacheState.READY
+
+    def poison_checkpoint_output(self, error: BaseException | str) -> None:
+        self._checkpoint_output_cpu = None
+        self._checkpoint_output_qlen = 0
+        self._checkpoint_cache_state = _CheckpointCacheState.POISONED
+        self._checkpoint_cache_error = str(error)
+
+    def validate_checkpoint_output(self, qlen: int) -> None:
+        state = self._checkpoint_cache_state
+        if state is _CheckpointCacheState.POISONED:
+            detail = f": {self._checkpoint_cache_error}" if self._checkpoint_cache_error else ""
+            raise RuntimeError(f"Checkpoint forward cache is poisoned{detail}")
+        if state is not _CheckpointCacheState.READY or self._checkpoint_output_cpu is None:
+            raise RuntimeError("No cached checkpoint forward output is available.")
+        if int(qlen) != self._checkpoint_output_qlen:
+            error = RuntimeError(
+                f"Cached checkpoint qlen mismatch: cached={self._checkpoint_output_qlen}, requested={qlen}"
+            )
+            self.poison_checkpoint_output(error)
+            raise error
+
+    def validate_checkpoint_cache_empty(self) -> None:
+        state = self._checkpoint_cache_state
+        if state is _CheckpointCacheState.POISONED:
+            detail = f": {self._checkpoint_cache_error}" if self._checkpoint_cache_error else ""
+            raise RuntimeError(f"Checkpoint forward cache is poisoned{detail}")
+        if state is not _CheckpointCacheState.EMPTY or self._checkpoint_output_cpu is not None:
+            error = RuntimeError("Checkpoint forward cache is still live before a new first forward")
+            self.poison_checkpoint_output(error)
+            raise error
+
     def cache_checkpoint_output(self, output_cpu: torch.Tensor, qlen: int) -> None:
-        if output_cpu.device.type != "cpu":
-            raise ValueError("checkpoint CPU expert output must reside on CPU")
-        if output_cpu.shape[0] < qlen:
-            raise ValueError(f"checkpoint output is shorter than qlen: {output_cpu.shape[0]} < {qlen}")
-        self._checkpoint_output_cpu = output_cpu[:qlen].contiguous()
-        self._checkpoint_output_qlen = qlen
-        self._kt_has_cached_forward = True
+        try:
+            if self._checkpoint_cache_state is _CheckpointCacheState.POISONED:
+                self.validate_checkpoint_output(qlen)
+            if self._checkpoint_cache_state is not _CheckpointCacheState.EMPTY:
+                raise RuntimeError(
+                    "Cannot replace a live checkpoint forward cache before backward consumes it"
+                )
+            if output_cpu.device.type != "cpu":
+                raise ValueError("checkpoint CPU expert output must reside on CPU")
+            if output_cpu.shape[0] < qlen:
+                raise ValueError(f"checkpoint output is shorter than qlen: {output_cpu.shape[0]} < {qlen}")
+            cached_output = output_cpu[:qlen].contiguous()
+        except Exception as exc:
+            self.poison_checkpoint_output(exc)
+            raise
+        self._checkpoint_output_cpu = cached_output
+        self._checkpoint_output_qlen = int(qlen)
+        self._checkpoint_cache_error = None
+        self._checkpoint_cache_state = _CheckpointCacheState.READY
 
     def get_checkpoint_output(self, qlen: int, output_device: Optional[torch.device] = None) -> torch.Tensor:
-        if not self._kt_has_cached_forward or self._checkpoint_output_cpu is None:
-            raise RuntimeError("No cached checkpoint forward output is available.")
-        if qlen != self._checkpoint_output_qlen:
-            raise RuntimeError(f"Cached checkpoint qlen mismatch: cached={self._checkpoint_output_qlen}, requested={qlen}")
+        self.validate_checkpoint_output(qlen)
         output = self._checkpoint_output_cpu
-        if output_device is not None:
-            return output.to(device=output_device, non_blocking=True)
-        return output
+        assert output is not None
+        try:
+            if output_device is not None:
+                return output.to(device=output_device, non_blocking=True)
+            return output
+        except Exception as exc:
+            self.poison_checkpoint_output(exc)
+            raise
 
     def clear_checkpoint_output(self) -> None:
         self._checkpoint_output_cpu = None
         self._checkpoint_output_qlen = 0
-        self._kt_has_cached_forward = False
+        if self._checkpoint_cache_state is not _CheckpointCacheState.POISONED:
+            self._checkpoint_cache_state = _CheckpointCacheState.EMPTY
+            self._checkpoint_cache_error = None
 
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:
