@@ -49,10 +49,21 @@ class _EventTaskRunner(_TaskRunner):
         super().submit(task)
 
 
-def test_capability_is_limited_to_cpu_only_amxbf16_sft():
+def test_capability_supports_cpu_only_bf16_and_frozen_int8_lora():
     assert _supports_authoritative_optimizer_grads("AMXBF16_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT", 1)
-    assert not _supports_authoritative_optimizer_grads("AMXINT8_SFT", 0)
+    assert _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=False, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=True, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=False, lora_rank=0
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 1, full_weight_grad=False, lora_rank=8
+    )
     assert not _supports_authoritative_optimizer_grads("AMXINT4_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT_SkipLoRA", 0)
 
@@ -224,6 +235,77 @@ def _fake_amx_backward_buffer():
         grad_input_cpu=torch.empty(1),
         grad_weights=torch.empty(1),
     )
+
+
+def _fake_lora_tensors():
+    shapes = (
+        (2, 2, 4),
+        (2, 6, 2),
+        (2, 2, 4),
+        (2, 6, 2),
+        (2, 2, 6),
+        (2, 4, 2),
+    )
+    weights = [torch.empty(shape, dtype=torch.bfloat16) for shape in shapes]
+    grads = [torch.empty(shape, dtype=torch.bfloat16) for shape in shapes]
+    return weights, grads
+
+
+def _fake_lora_init_backend():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.num_experts = 2
+    backend.lora_rank = 2
+    backend.hidden_size = 4
+    backend.moe_intermediate_size = 6
+    backend.method = "AMXINT8_SFT"
+    backend._weights_loaded = False
+    backend.moe = None
+    return backend
+
+
+def test_int8_lora_init_preserves_exact_weight_and_grad_storage():
+    backend = _fake_lora_init_backend()
+    weights, grads = _fake_lora_tensors()
+    backend.init_lora_weights(*weights, *grads)
+    names = (
+        "gate_lora_a",
+        "gate_lora_b",
+        "up_lora_a",
+        "up_lora_b",
+        "down_lora_a",
+        "down_lora_b",
+    )
+    for name, tensor in zip(names, weights):
+        assert getattr(backend, name) is tensor
+    for name, tensor in zip(names, grads):
+        assert getattr(backend, f"grad_{name}") is tensor
+
+
+def test_int8_lora_init_rejects_noncontiguous_pointer_inputs():
+    backend = _fake_lora_init_backend()
+    weights, grads = _fake_lora_tensors()
+    weights[0] = torch.empty((2, 4, 2), dtype=torch.bfloat16).transpose(1, 2)
+    assert weights[0].shape == (2, 2, 4)
+    assert not weights[0].is_contiguous()
+    with pytest.raises(ValueError, match="must be contiguous"):
+        backend.init_lora_weights(*weights, *grads)
+
+
+def test_int8_sft_rejects_online_tensor_weight_loading():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT8_SFT"
+    tensor = torch.empty(1, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="pre-quantized"):
+        backend.load_weights_from_tensors(tensor, tensor, tensor, torch.arange(1))
+
+
+def test_int8_sft_rejects_merged_or_unconverted_weight_path(tmp_path):
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT8_SFT"
+    backend.weight_path = str(tmp_path)
+    backend.layer_idx = 3
+    with pytest.raises(RuntimeError, match=r"pre-quantized \.kt files"):
+        backend._load_base_weights_from_file()
 
 
 @pytest.mark.parametrize("method", ["AMXBF16_SFT", "AMXINT8_SFT", "AMXINT4_SFT"])

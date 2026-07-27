@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <mutex>
 #include <numeric>
@@ -173,6 +174,30 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
+  template <typename Function>
+  void run_numa_job_checked(const char* context, Function&& function) {
+    std::vector<std::exception_ptr> errors(tp_count);
+    config.pool->dispense_backend()->do_numa_job([&](int numa_id) {
+      try {
+        function(numa_id);
+      } catch (...) {
+        errors[numa_id] = std::current_exception();
+      }
+    });
+    for (int numa_id = 0; numa_id < tp_count; ++numa_id) {
+      if (!errors[numa_id]) continue;
+      try {
+        std::rethrow_exception(errors[numa_id]);
+      } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(context) + " failed on TP/NUMA " +
+                                 std::to_string(numa_id) + ": " + error.what());
+      } catch (...) {
+        throw std::runtime_error(std::string(context) + " failed on TP/NUMA " +
+                                 std::to_string(numa_id) + " with an unknown error");
+      }
+    }
+  }
+
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
     required_bytes = round_up(required_bytes, kAmxAlignment);
     if (required_bytes == 0) {
@@ -203,6 +228,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
   // Async backward repack state (Phase 2: overlap repack with GPU attention backward)
   std::thread repack_thread_;
   std::atomic<bool> repack_in_flight_{false};
+  std::exception_ptr repack_exception_;
   SFTProfiler profiler_;
 
   // Per-instance references to shared per-TP backward temporary pools.
@@ -229,6 +255,11 @@ class TP_MOE_SFT : public TP_MOE<T> {
  public:
   TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
+
+    if (config.full_weight_grad && T::kIsInt8Backend) {
+      throw std::runtime_error(
+          "INT8 SFT does not support base weight gradients; use frozen-base LoRA");
+    }
 
     backward_temp_pools_.assign(tp_count, nullptr);
     backward_temp_pool_bytes_.assign(tp_count, 0);
@@ -489,12 +520,13 @@ class TP_MOE_SFT : public TP_MOE<T> {
       for (int i = 0; i < tp_count; i++) {
         tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
       }
-      pool->dispense_backend()->do_numa_job([this](int numa_id) { tps[numa_id]->load_weights(); });
+      run_numa_job_checked("pre-quantized .kt forward weight load",
+                           [this](int numa_id) { tps[numa_id]->load_weights(); });
 
       // Try loading backward weights from disk (.kt files) — parallel across NUMA nodes.
       if (!config.share_backward_bb) {
-        pool->dispense_backend()->do_numa_job(
-            [this](int numa_id) { tps[numa_id]->prepare_bwd(nullptr, nullptr, nullptr); });
+        run_numa_job_checked("pre-quantized .kt backward weight load",
+                             [this](int numa_id) { tps[numa_id]->prepare_bwd(nullptr, nullptr, nullptr); });
       } else {
         printf("  [MEM] share_backward_bb: skipping .kt backward weight load (dynamic repack)\n");
       }
@@ -739,20 +771,28 @@ class TP_MOE_SFT : public TP_MOE<T> {
     }
 
     size_t optimizer_grad_clear_bytes = 0;
-    const bool supports_authoritative_optimizer_grads =
-        sft_config.authoritative_optimizer_grads && T::kSupportsDirectBf16Reload && config.num_gpu_experts == 0;
+    const bool supports_authoritative_base_grads =
+        sft_config.authoritative_optimizer_grads && T::kSupportsAuthoritativeBaseGrads &&
+        config.num_gpu_experts == 0;
+    const bool supports_authoritative_lora_grads =
+        sft_config.authoritative_optimizer_grads && T::kSupportsAuthoritativeLoraGrads &&
+        config.num_gpu_experts == 0;
+    const bool has_authoritative_base_grads =
+        supports_authoritative_base_grads && need_base_weight_grad;
+    const bool has_authoritative_lora_grads =
+        supports_authoritative_lora_grads && need_lora_weight_grad;
     const bool has_authoritative_optimizer_grads =
-        supports_authoritative_optimizer_grads && (need_base_weight_grad || need_lora_weight_grad);
+        has_authoritative_base_grads || has_authoritative_lora_grads;
     const std::array<void*, 9> current_optimizer_grad_ptrs = {
-        need_base_weight_grad ? grad_gate_proj : nullptr,
-        need_base_weight_grad ? grad_up_proj : nullptr,
-        need_base_weight_grad ? grad_down_proj : nullptr,
-        need_lora_weight_grad ? grad_gate_lora_a : nullptr,
-        need_lora_weight_grad ? grad_gate_lora_b : nullptr,
-        need_lora_weight_grad ? grad_up_lora_a : nullptr,
-        need_lora_weight_grad ? grad_up_lora_b : nullptr,
-        need_lora_weight_grad ? grad_down_lora_a : nullptr,
-        need_lora_weight_grad ? grad_down_lora_b : nullptr,
+        has_authoritative_base_grads ? grad_gate_proj : nullptr,
+        has_authoritative_base_grads ? grad_up_proj : nullptr,
+        has_authoritative_base_grads ? grad_down_proj : nullptr,
+        has_authoritative_lora_grads ? grad_gate_lora_a : nullptr,
+        has_authoritative_lora_grads ? grad_gate_lora_b : nullptr,
+        has_authoritative_lora_grads ? grad_up_lora_a : nullptr,
+        has_authoritative_lora_grads ? grad_up_lora_b : nullptr,
+        has_authoritative_lora_grads ? grad_down_lora_a : nullptr,
+        has_authoritative_lora_grads ? grad_down_lora_b : nullptr,
     };
     const bool optimizer_grad_pointers_unchanged =
         current_optimizer_grad_ptrs == optimizer_grad_output_ptrs_;
@@ -794,7 +834,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
         (size_t)full_intermediate_size * hidden_size * sizeof(ggml_bf16_t);
     const size_t base_grad_bytes = (size_t)expert_num * base_expert_bytes;
     if (need_base_weight_grad) {
-      if (!supports_authoritative_optimizer_grads || force_optimizer_grad_initialization) {
+      if (!supports_authoritative_base_grads || force_optimizer_grad_initialization) {
         append_clear_segments(grad_gate_proj, 0, base_grad_bytes);
         append_clear_segments(grad_up_proj, 0, base_grad_bytes);
         append_clear_segments(grad_down_proj, 0, base_grad_bytes);
@@ -811,7 +851,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
       }
     }
 
-    if (need_lora_weight_grad && supports_authoritative_optimizer_grads) {
+    if (has_authoritative_lora_grads) {
       const std::array<void*, 6> lora_ptrs = {grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a,
                                               grad_up_lora_b, grad_down_lora_a, grad_down_lora_b};
       const std::array<size_t, 6> lora_expert_bytes = {
@@ -899,7 +939,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
 
     // Run backward on each NUMA node
     stage_start = profiler_.start();
-    pool->dispense_backend()->do_numa_job([&](int numa_id) {
+    run_numa_job_checked("SFT backward", [&](int numa_id) {
       tps[numa_id]->backward(grad_output, part_grad_input_[numa_id],
                              // reduce-type: BF16 pointer unused (FP32 sparse used instead)
                              nullptr,                /* grad_gate_lora_a — unused, FP32 path below */
@@ -1024,7 +1064,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                   }
                   // Authoritative BF16 buffers persist across microbatches. Legacy
                   // backends keep their original reduce-merge overwrite semantics.
-                  if (supports_authoritative_optimizer_grads) {
+                  if (supports_authoritative_lora_grads) {
                     __m512 old_gs0, old_gs1, old_us0, old_us1;
                     avx512_32xbf16_to_32xfp32((__m512i*)(gd + h), &old_gs0, &old_gs1);
                     avx512_32xbf16_to_32xfp32((__m512i*)(ud + h), &old_us0, &old_us1);
@@ -1043,7 +1083,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                     gs += ((const float*)tp_fp32_gate_a[tp])[src_base + h];
                     us += ((const float*)tp_fp32_up_a[tp])[src_base + h];
                   }
-                  if (supports_authoritative_optimizer_grads) {
+                  if (supports_authoritative_lora_grads) {
                     gs += GGML_BF16_TO_FP32(gd[h]);
                     us += GGML_BF16_TO_FP32(ud[h]);
                   }
@@ -1073,7 +1113,7 @@ class TP_MOE_SFT : public TP_MOE<T> {
                     for (int tp = 1; tp < tp_count; tp++) {
                       sum += ((const float*)tp_fp32_down_b[tp])[src_row + r];
                     }
-                    if (supports_authoritative_optimizer_grads) {
+                    if (supports_authoritative_lora_grads) {
                       sum += GGML_BF16_TO_FP32(out_down_b[dst_row + r]);
                     }
                     out_down_b[dst_row + r] = GGML_FP32_TO_BF16(sum);
@@ -1336,14 +1376,19 @@ class TP_MOE_SFT : public TP_MOE<T> {
   void submit_backward_repack() {
     if (!config.share_backward_bb) return;
 
-    // Join any previous repack first
-    if (repack_thread_.joinable()) repack_thread_.join();
+    wait_backward_repack();
 
+    repack_exception_ = nullptr;
     repack_in_flight_.store(true, std::memory_order_release);
     repack_thread_ = std::thread([this]() {
-      SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
-      config.pool->dispense_backend()->do_numa_job(
-          [this](int numa_id) { tps[numa_id]->prepare_backward_bb_for_async(); });
+      try {
+        SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
+        run_numa_job_checked(
+            "async backward repack",
+            [this](int numa_id) { tps[numa_id]->prepare_backward_bb_for_async(); });
+      } catch (...) {
+        repack_exception_ = std::current_exception();
+      }
       repack_in_flight_.store(false, std::memory_order_release);
     });
   }
@@ -1357,13 +1402,18 @@ class TP_MOE_SFT : public TP_MOE<T> {
       SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepackWait);
       repack_thread_.join();
     }
+    if (repack_exception_) {
+      std::exception_ptr error = repack_exception_;
+      repack_exception_ = nullptr;
+      std::rethrow_exception(error);
+    }
   }
 
   /**
    * @brief Destructor - free partitioned weights.
    */
   ~TP_MOE_SFT() {
-    wait_backward_repack();
+    if (repack_thread_.joinable()) repack_thread_.join();
     free_backward_temp_pools();
     free_partitioned_lora_weights();
     free_partitioned_base_weights();

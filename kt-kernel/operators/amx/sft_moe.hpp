@@ -363,7 +363,12 @@ template <class T, template <class> class BaseMOE = AMX_MOE_TP, bool SkipLoRA = 
 class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
+  static constexpr bool kIsInt8Backend = std::is_same_v<T, amx::GemmKernel224Int8>;
   static constexpr bool kSupportsDirectBf16Reload = std::is_same_v<T, amx::GemmKernel224BF16>;
+  static constexpr bool kSupportsAuthoritativeBaseGrads = std::is_same_v<T, amx::GemmKernel224BF16>;
+  static constexpr bool kSupportsAuthoritativeLoraGrads =
+      !SkipLoRA &&
+      (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend);
 
  protected:
   using Base = BaseMOE<T>;
@@ -3145,52 +3150,56 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // mat_class: 0=gate_bwd, 1=up_bwd, 2=down_bwd
     static constexpr int mat_type_all = 3;
-    std::atomic<bool> ok{true};
+    std::mutex load_error_mutex;
+    std::string load_error;
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
     auto read_one = [&](int expert_idx, const char* proj_name, char* dst_b, size_t size, size_t scale_size,
-                        auto* bb_ptr /* only used when SCALE */) {
-      std::ifstream f(prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
-                                std::to_string(size - scale_size) + "Byte_quant_.kt"));
-      if (!f.is_open()) {
-        ok.store(false, std::memory_order_relaxed);
-        return;
-      }
-      f.read(dst_b, size - scale_size);
-      f.close();
+                        auto* bb_ptr /* only used when SCALE */) -> std::string {
+      const size_t quant_size = size - scale_size;
+      const auto quant_path =
+          prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
+                    std::to_string(quant_size) + "Byte_quant_.kt");
+      std::string error =
+          kt::detail::read_exact_weight_file_slice(quant_path, dst_b, quant_size, 1, 0);
+      if (!error.empty()) return error;
 
       if constexpr (T::BufferB::SCALE) {
-        f.open(prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" + std::to_string(scale_size) +
-                         "Byte_scale_.kt"));
-        if (!f.is_open()) {
-          ok.store(false, std::memory_order_relaxed);
-          return;
-        }
-        f.read((char*)bb_ptr->d, scale_size);
+        const auto scale_path =
+            prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
+                      std::to_string(scale_size) + "Byte_scale_.kt");
+        error = kt::detail::read_exact_weight_file_slice(scale_path, (char*)bb_ptr->d, scale_size, 1, 0);
       }
+      return error;
     };
 
     pool->do_work_stealing_job(
         config_.expert_num * mat_type_all, nullptr,
         [&](int task_id) {
-          if (!ok.load(std::memory_order_relaxed)) return;
           int expert_idx = task_id / mat_type_all;
           int mat_class = task_id % mat_type_all;
+          std::string error;
 
           if (mat_class == 0) {
-            read_one(expert_idx, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, gu_size, gu_scale,
-                     gate_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, gu_size,
+                             gu_scale, gate_backward_bb_[expert_idx].get());
           } else if (mat_class == 1) {
-            read_one(expert_idx, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, gu_size, gu_scale,
-                     up_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, gu_size,
+                             gu_scale, up_backward_bb_[expert_idx].get());
           } else {
-            read_one(expert_idx, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, d_size, d_scale,
-                     down_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, d_size,
+                             d_scale, down_backward_bb_[expert_idx].get());
+          }
+          if (!error.empty()) {
+            std::lock_guard<std::mutex> lock(load_error_mutex);
+            if (load_error.empty()) load_error = std::move(error);
           }
         },
         nullptr);
 
-    if (!ok.load()) return false;
+    if (!load_error.empty()) {
+      throw std::runtime_error("failed to load pre-quantized backward weights: " + load_error);
+    }
     backward_weights_prepared_ = true;
     return true;
   }

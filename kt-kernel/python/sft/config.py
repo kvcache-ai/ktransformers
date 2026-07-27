@@ -25,8 +25,18 @@ logger = logging.getLogger(__name__)
 
 _CPU_TOPOLOGY_ROOT = Path("/sys/devices/system/cpu")
 _LEGACY_REUSE_ENV = "KT_REUSE_CHECKPOINT_FORWARD"
+_KNOWN_SFT_BACKENDS = {
+    "amxbf16",
+    "amxint8",
+    "amxint4",
+    "amxbf16_skiplora",
+    "amxint8_skiplora",
+    "amxint4_skiplora",
+}
 
 ActivationRetention = Literal["retain", "recompute"]
+ExpertWeightFormat = Literal["bf16", "int8"]
+WeightLifecycle = Literal["persistent", "ephemeral"]
 
 
 @dataclass(frozen=True)
@@ -220,6 +230,8 @@ class KTConfig:
 
     # Weight loading
     kt_weight_path: str | None = None
+    kt_expert_weight_format: ExpertWeightFormat | str | None = None
+    kt_weight_lifecycle: WeightLifecycle | str | None = None
     kt_expert_checkpoint_path: str | None = None  # HF expert checkpoint or KT Full checkpoint directory
     kt_num_gpu_experts: int | None = None
     kt_skip_expert_loading: bool | None = None
@@ -265,6 +277,30 @@ class KTConfig:
 
     def __post_init__(self):
         configure_omp_threads()
+        explicit_backend = self.kt_backend is not None
+        env_backend = os.environ.get("ACCELERATE_KT_BACKEND")
+        if self.kt_expert_weight_format is None:
+            self.kt_expert_weight_format = os.environ.get(
+                "ACCELERATE_KT_EXPERT_WEIGHT_FORMAT"
+            )
+        if self.kt_expert_weight_format is not None:
+            self.kt_expert_weight_format = str(self.kt_expert_weight_format).strip().lower()
+            if self.kt_expert_weight_format not in {"bf16", "int8"}:
+                raise ValueError(
+                    "kt_expert_weight_format must be one of ['bf16', 'int8'], "
+                    f"got {self.kt_expert_weight_format!r}"
+                )
+        if self.kt_weight_lifecycle is None:
+            self.kt_weight_lifecycle = os.environ.get(
+                "ACCELERATE_KT_WEIGHT_LIFECYCLE", "persistent"
+            )
+        self.kt_weight_lifecycle = str(self.kt_weight_lifecycle).strip().lower()
+        if self.kt_weight_lifecycle not in {"persistent", "ephemeral"}:
+            raise ValueError(
+                "kt_weight_lifecycle must be one of ['ephemeral', 'persistent'], "
+                f"got {self.kt_weight_lifecycle!r}"
+            )
+
         legacy_reuse = os.environ.get(_LEGACY_REUSE_ENV)
         legacy_reuse_is_explicit = legacy_reuse is not None and legacy_reuse.strip() != ""
         if self.kt_activation_policy is not None and legacy_reuse_is_explicit:
@@ -282,7 +318,34 @@ class KTConfig:
                 self.kt_activation_policy
             )
         if self.kt_backend is None:
-            self.kt_backend = os.environ.get("ACCELERATE_KT_BACKEND", "AMXBF16")
+            if env_backend:
+                self.kt_backend = env_backend
+            elif self.kt_expert_weight_format == "int8":
+                self.kt_backend = "AMXINT8"
+            else:
+                self.kt_backend = "AMXBF16"
+        backend_lower = str(self.kt_backend).lower()
+        if backend_lower not in _KNOWN_SFT_BACKENDS:
+            raise ValueError(
+                f"unknown kt_backend {self.kt_backend!r}; expected one of "
+                f"{sorted(_KNOWN_SFT_BACKENDS)}"
+            )
+        if self.kt_expert_weight_format is None:
+            if backend_lower == "amxint8":
+                # Backward compatibility for the legacy environment-only entry.
+                self.kt_expert_weight_format = "int8"
+            elif backend_lower == "amxbf16":
+                self.kt_expert_weight_format = "bf16"
+        expected_backend = {
+            "bf16": "amxbf16",
+            "int8": "amxint8",
+        }.get(self.kt_expert_weight_format)
+        if expected_backend is not None and backend_lower != expected_backend:
+            source = "kt_backend" if explicit_backend else "ACCELERATE_KT_BACKEND"
+            raise ValueError(
+                f"kt_expert_weight_format={self.kt_expert_weight_format!r} conflicts "
+                f"with {source}={self.kt_backend!r}"
+            )
         if self.kt_num_threads is None:
             self.kt_num_threads = _env_int("ACCELERATE_KT_NUM_THREADS", 1)
         if self.kt_tp_enabled is None:
@@ -322,3 +385,33 @@ class KTConfig:
         if self.kt_skip_expert_loading is None:
             if "ACCELERATE_KT_SKIP_EXPERT_LOADING" in os.environ:
                 self.kt_skip_expert_loading = _env_bool("ACCELERATE_KT_SKIP_EXPERT_LOADING", True)
+
+        if self.kt_expert_weight_format == "int8":
+            if str(self.kt_backend).lower() != "amxint8":
+                raise ValueError("INT8 SFT requires kt_backend='AMXINT8'")
+            if self.kt_train_mode != "lora" or bool(self.kt_full_weight_grad):
+                raise ValueError(
+                    "INT8 SFT supports frozen-base LoRA only; Full and Hybrid are not supported"
+                )
+            if int(self.kt_num_gpu_experts or 0) != 0:
+                raise ValueError("INT8 SFT requires kt_num_gpu_experts=0")
+            if bool(self.kt_use_lora_experts):
+                raise ValueError(
+                    "INT8 SFT does not support GPU LoRA experts; use pure expert LoRA"
+                )
+            if not bool(self.kt_share_backward_bb):
+                raise ValueError("INT8 SFT requires kt_share_backward_bb=true")
+            if self.kt_expert_checkpoint_path:
+                raise ValueError(
+                    "INT8 SFT requires pre-quantized .kt weights; "
+                    "kt_expert_checkpoint_path is not supported"
+                )
+            if not self.kt_weight_path:
+                raise ValueError(
+                    "INT8 SFT requires kt_weight_path pointing to pre-quantized .kt weights"
+                )
+        if self.kt_weight_lifecycle == "ephemeral":
+            if self.kt_expert_weight_format != "int8":
+                raise ValueError(
+                    "kt_weight_lifecycle='ephemeral' is supported only for INT8 .kt weights"
+                )

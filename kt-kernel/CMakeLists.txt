@@ -413,6 +413,16 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     # BLIS paths and apply them after the module target is created.
 endif()
 
+if(KTRANSFORMERS_CPU_DEBUG)
+    find_package(Threads REQUIRED)
+    add_executable(
+        test_task_queue
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/test/test_task_queue.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/task_queue.cpp
+    )
+    target_link_libraries(test_task_queue PRIVATE Threads::Threads)
+endif()
+
 
 if(HOST_IS_X86)
     if(KTRANSFORMERS_CPU_USE_AMX_AVX512)

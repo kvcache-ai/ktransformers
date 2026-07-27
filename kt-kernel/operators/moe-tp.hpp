@@ -5,7 +5,11 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <exception>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <vector>
 
 #include "../cpu_backend/shared_mem_buffer.h"
 #include "common.hpp"
@@ -122,8 +126,26 @@ class TP_MOE_Common : public MoE_Interface {
       }
     }
 
-    config.pool->dispense_backend()->do_numa_job(
-        [this, config](int i) { tps[i] = std::unique_ptr<T>(new Concrete(tp_configs[i], i)); });
+    std::vector<std::exception_ptr> construction_errors(tp_count);
+    config.pool->dispense_backend()->do_numa_job([this, &construction_errors](int i) {
+      try {
+        tps[i] = std::unique_ptr<T>(new Concrete(tp_configs[i], i));
+      } catch (...) {
+        construction_errors[i] = std::current_exception();
+      }
+    });
+    for (int i = 0; i < tp_count; ++i) {
+      if (!construction_errors[i]) continue;
+      try {
+        std::rethrow_exception(construction_errors[i]);
+      } catch (const std::exception& error) {
+        throw std::runtime_error("TP/NUMA " + std::to_string(i) +
+                                 " construction failed: " + error.what());
+      } catch (...) {
+        throw std::runtime_error("TP/NUMA " + std::to_string(i) +
+                                 " construction failed with an unknown error");
+      }
+    }
 
     local_output_numa.resize(tp_count, nullptr);
     MemoryRequest mem_requests;

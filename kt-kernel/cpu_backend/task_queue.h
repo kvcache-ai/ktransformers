@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <queue>
@@ -42,6 +43,7 @@ class TaskQueue {
   std::thread workerThread;
   std::mutex mtx;
   std::condition_variable cv;
+  std::exception_ptr first_exception;
 
   void worker();
 };

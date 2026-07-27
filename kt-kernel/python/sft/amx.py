@@ -111,11 +111,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
 
         self.method = method
         self._is_skip_lora = "SkipLoRA" in method
-        # Authoritative optimizer gradients currently rely on the BF16 SFT
-        # kernel's overwrite/accumulate/lazy-clear implementation.  Quantized
-        # and SkipLoRA backends intentionally retain their legacy lifecycle.
         self._uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
-            method, self.num_gpu_experts
+            method,
+            self.num_gpu_experts,
+            full_weight_grad=self._full_weight_grad,
+            lora_rank=self.lora_rank,
         )
         self.group_size = group_size
         self.zero_point = zero_point
@@ -351,6 +351,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         down_proj: torch.Tensor,
         physical_to_logical_map_cpu: torch.Tensor,
     ) -> None:
+        if self.method == "AMXINT8_SFT":
+            raise ValueError(
+                "AMXINT8_SFT accepts pre-quantized .kt weights only; "
+                "online tensor conversion is not supported"
+            )
         self.gate_proj = gate_proj.contiguous()
         self.up_proj = up_proj.contiguous()
         self.down_proj = down_proj.contiguous()
@@ -370,6 +375,12 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             if kt_files:
                 self._use_kt_direct_load = True
                 return
+        if self.method == "AMXINT8_SFT":
+            raise RuntimeError(
+                f"AMXINT8_SFT requires pre-quantized .kt files under "
+                f"{kt_layer_dir}/_numa_*/; merged safetensors and online "
+                "conversion are not supported"
+            )
 
         if "BF16" in self.method:
             loader = BF16SafeTensorLoader(self.weight_path)
@@ -531,20 +542,52 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
                 raise ValueError(
                     f"{name} must be a CPU tensor for {self.method} SFT, got {tensor.device}."
                 )
+            if tensor.dtype != torch.bfloat16:
+                raise ValueError(
+                    f"{name} must use torch.bfloat16 for {self.method} SFT, got {tensor.dtype}."
+                )
+            if not tensor.is_contiguous():
+                raise ValueError(
+                    f"{name} must be contiguous for stable {self.method} pointer registration."
+                )
 
-        self.gate_lora_a = gate_lora_a.contiguous()
-        self.gate_lora_b = gate_lora_b.contiguous()
-        self.up_lora_a = up_lora_a.contiguous()
-        self.up_lora_b = up_lora_b.contiguous()
-        self.down_lora_a = down_lora_a.contiguous()
-        self.down_lora_b = down_lora_b.contiguous()
+        grad_provided = {
+            "grad_gate_lora_a": grad_gate_lora_a,
+            "grad_gate_lora_b": grad_gate_lora_b,
+            "grad_up_lora_a": grad_up_lora_a,
+            "grad_up_lora_b": grad_up_lora_b,
+            "grad_down_lora_a": grad_down_lora_a,
+            "grad_down_lora_b": grad_down_lora_b,
+        }
+        for name, tensor in grad_provided.items():
+            expected = expected_shapes[name.removeprefix("grad_")]
+            if tensor.shape != expected:
+                raise ValueError(
+                    f"{name} shape mismatch: expected {expected}, got {tuple(tensor.shape)}"
+                )
+            if tensor.device.type != "cpu" or tensor.dtype != torch.bfloat16:
+                raise ValueError(
+                    f"{name} must be a CPU torch.bfloat16 tensor for {self.method} SFT, "
+                    f"got {tensor.dtype} on {tensor.device}."
+                )
+            if not tensor.is_contiguous():
+                raise ValueError(
+                    f"{name} must be contiguous for stable {self.method} pointer registration."
+                )
 
-        self.grad_gate_lora_a = grad_gate_lora_a.contiguous()
-        self.grad_gate_lora_b = grad_gate_lora_b.contiguous()
-        self.grad_up_lora_a = grad_up_lora_a.contiguous()
-        self.grad_up_lora_b = grad_up_lora_b.contiguous()
-        self.grad_down_lora_a = grad_down_lora_a.contiguous()
-        self.grad_down_lora_b = grad_down_lora_b.contiguous()
+        self.gate_lora_a = gate_lora_a
+        self.gate_lora_b = gate_lora_b
+        self.up_lora_a = up_lora_a
+        self.up_lora_b = up_lora_b
+        self.down_lora_a = down_lora_a
+        self.down_lora_b = down_lora_b
+
+        self.grad_gate_lora_a = grad_gate_lora_a
+        self.grad_gate_lora_b = grad_gate_lora_b
+        self.grad_up_lora_a = grad_up_lora_a
+        self.grad_up_lora_b = grad_up_lora_b
+        self.grad_down_lora_a = grad_down_lora_a
+        self.grad_down_lora_b = grad_down_lora_b
 
         self._lora_initialized = True
 

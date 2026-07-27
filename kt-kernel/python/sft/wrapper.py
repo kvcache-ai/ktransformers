@@ -49,6 +49,39 @@ def _supports_checkpoint_forward_reuse(full_weight_grad: bool, lora_rank: int) -
     return (full_weight_grad and lora_rank == 0) or (not full_weight_grad and lora_rank > 0)
 
 
+def _sync_rank0_wrap_error(
+    error: BaseException | None,
+    *,
+    context: str,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Make rank-0-only ephemeral loading fail coherently on every rank."""
+    if world_size <= 1:
+        if error is not None:
+            raise error
+        return
+
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        if error is not None:
+            raise error
+        return
+
+    payload = [
+        None
+        if error is None
+        else f"{type(error).__name__}: {error}"
+    ]
+    dist.broadcast_object_list(payload, src=0)
+    if payload[0] is None:
+        return
+    if rank == 0 and error is not None:
+        raise error
+    raise RuntimeError(f"{context}: rank 0 failed: {payload[0]}")
+
+
 # =============================================================================
 # Device-map builders
 # =============================================================================
@@ -213,11 +246,16 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         "AMXINT8_SkipLoRA": "AMXINT8_SFT_SkipLoRA",
         "AMXINT4_SkipLoRA": "AMXINT4_SFT_SkipLoRA",
     }
-    # Build case-insensitive lookup to handle common typos like "SkipLora" vs "SkipLoRA"
+    # Case-insensitive matching remains for compatibility, but an unknown
+    # backend must never silently turn a requested quantized run into BF16.
     _kt_backend_map_lower = {k.lower(): v for k, v in kt_backend_map.items()}
-    kt_backend = getattr(cfg, "kt_backend", "AMXBF16")
-    kt_method = kt_backend_map.get(kt_backend) or _kt_backend_map_lower.get(kt_backend.lower(), "AMXBF16_SFT")
-    if kt_method != kt_backend_map.get(kt_backend):
+    kt_backend = str(getattr(cfg, "kt_backend", "AMXBF16"))
+    kt_method = kt_backend_map.get(kt_backend) or _kt_backend_map_lower.get(kt_backend.lower())
+    if kt_method is None:
+        raise KTAMXConfigError(
+            f"Unknown kt_backend {kt_backend!r}; expected one of {sorted(kt_backend_map)}"
+        )
+    if kt_backend not in kt_backend_map:
         logger.warning(
             f"kt_backend '{kt_backend}' matched via case-insensitive lookup -> '{kt_method}'. "
             f"Please use the exact name from: {list(kt_backend_map.keys())}"
@@ -226,18 +264,34 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
     requested_num_gpu_experts = int(getattr(cfg, "kt_num_gpu_experts", 0) or 0)
+    expert_weight_format = getattr(cfg, "kt_expert_weight_format", None)
+    if expert_weight_format == "int8":
+        if kt_method != "AMXINT8_SFT":
+            raise KTAMXConfigError(
+                "kt_expert_weight_format='int8' requires kt_backend='AMXINT8'"
+            )
+        if full_weight_grad or train_mode != "lora" or lora_rank <= 0:
+            raise KTAMXConfigError(
+                "INT8 SFT supports frozen-base LoRA only; Full and Hybrid are not supported"
+            )
+        if requested_num_gpu_experts != 0 or use_lora_experts:
+            raise KTAMXConfigError(
+                "INT8 SFT requires all base experts and LoRA execution on CPU"
+            )
+        if not bool(getattr(cfg, "kt_share_backward_bb", False)):
+            raise KTAMXConfigError("INT8 SFT requires kt_share_backward_bb=true")
     cpu_activation_retain = activation_policy.cpu == "retain"
     reuse_checkpoint_forward = cpu_activation_retain and activation_policy.gpu == "recompute"
     if cpu_activation_retain and (
         not _supports_checkpoint_forward_reuse(full_weight_grad, lora_rank)
-        or kt_method != "AMXBF16_SFT"
+        or kt_method not in {"AMXBF16_SFT", "AMXINT8_SFT"}
         or requested_num_gpu_experts != 0
         or use_lora_experts
     ):
         raise KTAMXConfigError(
-            "activation_policy.cpu=retain currently requires AMXBF16 pure LoRA "
-            "or pure Full training; Hybrid, quantized, GPU-expert, and SkipLoRA "
-            "paths are not supported"
+            "activation_policy.cpu=retain requires CPU-only AMXBF16 Full/LoRA "
+            "or frozen-base AMXINT8 LoRA; Hybrid, GPU-expert, LoRA-expert, "
+            "INT4, and SkipLoRA paths are not supported"
         )
     if is_rank_0:
         logger.info(
@@ -247,7 +301,10 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             distributed_world_size,
         )
     uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
-        kt_method, requested_num_gpu_experts
+        kt_method,
+        requested_num_gpu_experts,
+        full_weight_grad=full_weight_grad,
+        lora_rank=lora_rank,
     )
 
     threadpool_count = getattr(cfg, "kt_threadpool_count", 1) if getattr(cfg, "kt_tp_enabled", False) else 1
@@ -255,7 +312,11 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     kt_weight_path = getattr(cfg, "kt_weight_path", None)
     use_kt_weight_path = kt_weight_path is not None
     if use_kt_weight_path:
-        logger.info(f"Loading INT8 weights from kt_weight_path: {kt_weight_path}")
+        logger.info(
+            "Loading %s weights from kt_weight_path: %s",
+            expert_weight_format or "pre-quantized",
+            kt_weight_path,
+        )
 
     checkpoint_files = getattr(cfg, "kt_checkpoint_files", None)
     sharded_metadata = getattr(cfg, "kt_sharded_metadata", None)
@@ -287,6 +348,15 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             )
 
     use_checkpoint_files = bool(checkpoint_files) and not use_kt_weight_path and not use_full_weight_checkpoint
+    if expert_weight_format == "int8":
+        if not use_kt_weight_path:
+            raise KTAMXConfigError(
+                "INT8 SFT requires kt_weight_path with pre-quantized .kt weights"
+            )
+        if use_full_weight_checkpoint or kt_expert_checkpoint_path:
+            raise KTAMXConfigError(
+                "INT8 SFT does not support Full checkpoints or online expert conversion"
+            )
 
     logger.debug(
         f"Weight source: kt_weight_path={kt_weight_path!r}, "
@@ -331,6 +401,38 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
     from .arch import detect_fused_experts as _detect_fused
 
+    ephemeral_store = None
+    ephemeral_requested = (
+        getattr(cfg, "kt_weight_lifecycle", "persistent") == "ephemeral"
+    )
+    ephemeral_open_error = None
+    if is_rank_0 and ephemeral_requested:
+        try:
+            from .ephemeral import EphemeralKTWeightStore
+
+            expert_layer_indices = [
+                layer_idx
+                for layer_idx, layer in enumerate(layers)
+                if get_moe_module(layer, moe_config) is not None
+            ]
+            ephemeral_store = EphemeralKTWeightStore.open(
+                kt_weight_path,
+                layer_indices=expert_layer_indices,
+                numa_count=threadpool_count,
+                expert_num=moe_config.expert_num,
+                hidden_size=hidden_size,
+                intermediate_size=moe_config.intermediate_size,
+            )
+        except BaseException as exc:
+            ephemeral_open_error = exc
+    if ephemeral_requested:
+        _sync_rank0_wrap_error(
+            ephemeral_open_error,
+            context="opening ephemeral INT8 weights",
+            rank=distributed_rank,
+            world_size=distributed_world_size,
+        )
+
     for layer_idx, layer in enumerate(layers):
         moe_module = get_moe_module(layer, moe_config)
         if moe_module is None:
@@ -344,6 +446,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
         wrapper = None
+        ephemeral_layer_error = None
 
         if is_rank_0:
             # Get block_size from quantization_config if available (for FP8 dequant)
@@ -403,68 +506,115 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         # Only rank 0 creates KTMoEWrapper and loads weights
         if is_rank_0:
-            wrapper = KTMoEWrapper(
-                layer_idx=layer_idx,
-                num_experts=moe_config.expert_num,
-                num_experts_per_tok=moe_config.num_experts_per_tok,
-                hidden_size=hidden_size,
-                moe_intermediate_size=moe_config.intermediate_size,
-                gpu_experts_mask=None,
-                num_gpu_experts=0,
-                cpuinfer_threads=getattr(cfg, "kt_num_threads", 1),
-                threadpool_count=threadpool_count,
-                weight_path=kt_weight_path or "",
-                chunked_prefill_size=rank0_chunked_prefill_size,
-                method=kt_method,
-                mode="sft",
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
-                full_weight_grad=full_weight_grad,
+            try:
+                wrapper = KTMoEWrapper(
+                    layer_idx=layer_idx,
+                    num_experts=moe_config.expert_num,
+                    num_experts_per_tok=moe_config.num_experts_per_tok,
+                    hidden_size=hidden_size,
+                    moe_intermediate_size=moe_config.intermediate_size,
+                    gpu_experts_mask=None,
+                    num_gpu_experts=0,
+                    cpuinfer_threads=getattr(cfg, "kt_num_threads", 1),
+                    threadpool_count=threadpool_count,
+                    weight_path=kt_weight_path or "",
+                    chunked_prefill_size=rank0_chunked_prefill_size,
+                    method=kt_method,
+                    mode="sft",
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
+                    full_weight_grad=full_weight_grad,
+                )
+            except BaseException as exc:
+                if not ephemeral_requested:
+                    raise
+                try:
+                    if ephemeral_store is not None:
+                        ephemeral_store.cleanup()
+                except BaseException:
+                    logger.exception(
+                        "Cleanup failed after constructing ephemeral INT8 layer %s",
+                        layer_idx,
+                    )
+                _sync_rank0_wrap_error(
+                    exc,
+                    context=f"constructing ephemeral INT8 layer {layer_idx}",
+                    rank=distributed_rank,
+                    world_size=distributed_world_size,
+                )
+                raise AssertionError("unreachable")
+            try:
+                # The current SFT wrapping path routes all experts through KT even
+                # when the loading config requested GPU experts. Preserve that
+                # configuration's legacy gradient lifecycle until the hybrid
+                # routed-expert path supports authoritative buffers end to end.
+                wrapper._uses_authoritative_optimizer_grads = uses_authoritative_optimizer_grads
+
+                # These flags are consumed while the C++ config is built.
+                wrapper.share_backward_bb = cfg.kt_share_backward_bb
+                wrapper.reuse_checkpoint_forward = reuse_checkpoint_forward
+                wrapper.activation_policy = activation_policy
+                wrapper.share_cache_pool = not cpu_activation_retain
+
+                physical_to_logical_map = torch.arange(
+                    moe_config.expert_num,
+                    dtype=torch.int64,
+                    device="cpu",
+                )
+
+                if use_kt_weight_path:
+                    logger.debug(
+                        f"Layer {layer_idx}: calling wrapper.load_weights() "
+                        "(C++ direct .kt load)"
+                    )
+                    wrapper.load_weights(physical_to_logical_map)
+                    if ephemeral_store is not None:
+                        # load_weights() returns only after C++ copied every file
+                        # into its owned BufferB storage.
+                        ephemeral_store.consume_layer(layer_idx)
+                else:
+                    logger.debug(
+                        f"Layer {layer_idx}: calling wrapper.load_weights_from_tensors() "
+                        f"(BF16 tensor path, gate_proj shape={gate_proj.shape if gate_proj is not None else None})"
+                    )
+                    wrapper.load_weights_from_tensors(
+                        gate_proj=gate_proj,
+                        up_proj=up_proj,
+                        down_proj=down_proj,
+                        physical_to_logical_map_cpu=physical_to_logical_map,
+                    )
+
+                if full_weight_grad:
+                    wrapper.init_full_weight_grad_buffers(
+                        gate_proj=wrapper.gate_proj if wrapper.gate_proj is not None else gate_proj,
+                        up_proj=wrapper.up_proj if wrapper.up_proj is not None else up_proj,
+                        down_proj=wrapper.down_proj if wrapper.down_proj is not None else down_proj,
+                    )
+                else:
+                    wrapper.gate_proj = None
+                    wrapper.up_proj = None
+                    wrapper.down_proj = None
+            except BaseException as exc:
+                if ephemeral_store is not None:
+                    try:
+                        ephemeral_store.cleanup()
+                    except BaseException:
+                        logger.exception(
+                            "Cleanup failed after loading ephemeral INT8 layer %s",
+                            layer_idx,
+                        )
+                if not ephemeral_requested:
+                    raise
+                ephemeral_layer_error = exc
+
+        if ephemeral_requested:
+            _sync_rank0_wrap_error(
+                ephemeral_layer_error,
+                context=f"loading ephemeral INT8 layer {layer_idx}",
+                rank=distributed_rank,
+                world_size=distributed_world_size,
             )
-            # The current SFT wrapping path routes all experts through KT even
-            # when the loading config requested GPU experts. Preserve that
-            # configuration's legacy gradient lifecycle until the hybrid
-            # routed-expert path supports authoritative buffers end to end.
-            wrapper._uses_authoritative_optimizer_grads = uses_authoritative_optimizer_grads
-
-            # Set share_backward_bb and share_cache_pool BEFORE load_weights (config is built during load)
-            wrapper.share_backward_bb = cfg.kt_share_backward_bb
-            wrapper.reuse_checkpoint_forward = reuse_checkpoint_forward
-            wrapper.activation_policy = activation_policy
-            # CPU recompute only needs a live cache for the layer currently
-            # recomputed in backward, so all layers may share the pool.
-            wrapper.share_cache_pool = not cpu_activation_retain
-
-            physical_to_logical_map = torch.arange(moe_config.expert_num, dtype=torch.int64, device="cpu")
-
-            if use_kt_weight_path:
-                logger.debug(f"Layer {layer_idx}: calling wrapper.load_weights() (C++ direct .kt load)")
-                wrapper.load_weights(physical_to_logical_map)
-            else:
-                logger.debug(
-                    f"Layer {layer_idx}: calling wrapper.load_weights_from_tensors() "
-                    f"(BF16 tensor path, gate_proj shape={gate_proj.shape if gate_proj is not None else None})"
-                )
-                wrapper.load_weights_from_tensors(
-                    gate_proj=gate_proj,
-                    up_proj=up_proj,
-                    down_proj=down_proj,
-                    physical_to_logical_map_cpu=physical_to_logical_map,
-                )
-
-            # In full_weight_grad mode, keep weight references for nn.Parameter initialization
-            # and initialize the base weight buffers
-            if full_weight_grad:
-                wrapper.init_full_weight_grad_buffers(
-                    gate_proj=wrapper.gate_proj if wrapper.gate_proj is not None else gate_proj,
-                    up_proj=wrapper.up_proj if wrapper.up_proj is not None else up_proj,
-                    down_proj=wrapper.down_proj if wrapper.down_proj is not None else down_proj,
-                )
-            else:
-                wrapper.gate_proj = None
-                wrapper.up_proj = None
-                wrapper.down_proj = None
 
         # Create LoRA Experts if enabled
         lora_experts = None
@@ -508,6 +658,24 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         # Rank 0 already copied weights to C++ kernel via load_weights_from_tensors.
         # gate_proj_buf serves as the authoritative copy in full_weight_grad mode.
         _clear_original_expert_weights(moe_module, moe_config, full_weight_grad=full_weight_grad)
+
+    ephemeral_finish_error = None
+    if ephemeral_store is not None:
+        try:
+            ephemeral_store.finish()
+        except BaseException as exc:
+            try:
+                ephemeral_store.cleanup()
+            except BaseException:
+                logger.exception("Cleanup failed while finishing ephemeral INT8 weights")
+            ephemeral_finish_error = exc
+    if ephemeral_requested:
+        _sync_rank0_wrap_error(
+            ephemeral_finish_error,
+            context="finishing ephemeral INT8 weights",
+            rank=distributed_rank,
+            world_size=distributed_world_size,
+        )
 
     logger.info(f"Wrapped {moe_layer_count} MoE layers with KTMoEWrapper")
 
@@ -562,6 +730,8 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_max_cache_depth=getattr(model_args, "kt_max_cache_depth", None),
         kt_num_gpu_experts=getattr(model_args, "kt_num_gpu_experts", None),
         kt_weight_path=getattr(model_args, "kt_weight_path", None),
+        kt_expert_weight_format=getattr(model_args, "kt_expert_weight_format", None),
+        kt_weight_lifecycle=getattr(model_args, "kt_weight_lifecycle", None),
         kt_expert_checkpoint_path=getattr(model_args, "kt_expert_checkpoint_path", None),
         kt_use_lora_experts=getattr(model_args, "kt_use_lora_experts", None),
         kt_lora_expert_num=getattr(model_args, "kt_lora_expert_num", None),

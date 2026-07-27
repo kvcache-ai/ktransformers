@@ -21,9 +21,27 @@ from abc import ABC, abstractmethod
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
 
 
-def _supports_authoritative_optimizer_grads(method: str, num_gpu_experts: int) -> bool:
-    """Whether this backend can use C++-authoritative optimizer gradients."""
-    return method == "AMXBF16_SFT" and int(num_gpu_experts) == 0
+def _supports_authoritative_optimizer_grads(
+    method: str,
+    num_gpu_experts: int,
+    *,
+    full_weight_grad: bool = False,
+    lora_rank: int = 1,
+) -> bool:
+    """Whether this SFT configuration can use C++-authoritative gradients.
+
+    BF16 supports both base and LoRA authoritative gradients. Quantized base
+    weights are frozen, so INT8 supports the same lifecycle only for pure LoRA.
+    """
+    if int(num_gpu_experts) != 0:
+        return False
+    if method == "AMXBF16_SFT":
+        return True
+    return (
+        method == "AMXINT8_SFT"
+        and not bool(full_weight_grad)
+        and int(lora_rank) > 0
+    )
 
 
 @dataclass(frozen=True)
@@ -232,8 +250,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._cache_depth: int = 0
         self._is_skip_lora: bool = False
         self._base_weights_dirty: bool = False
-        # AMXSFTMoEWrapper enables this capability only for AMXBF16_SFT.
-        # Keeping it false here preserves legacy INT8/INT4/SkipLoRA behavior.
+        # AMXSFTMoEWrapper enables this for supported CPU-only SFT methods.
+        # Keeping it false here preserves legacy INT4/SkipLoRA behavior.
         self._uses_authoritative_optimizer_grads: bool = False
         self._init_authoritative_optimizer_grads()
         self.reuse_checkpoint_forward: bool = False

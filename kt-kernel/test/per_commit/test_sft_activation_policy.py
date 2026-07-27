@@ -122,6 +122,92 @@ def test_explicit_policy_conflicts_with_legacy_reuse_env():
         )
 
 
+def _make_int8_config(**overrides):
+    kwargs = {
+        "kt_expert_weight_format": "int8",
+        "kt_weight_path": "/dev/shm/kt-int8-test-run",
+        "kt_train_mode": "lora",
+        "kt_lora_rank": 8,
+        "kt_num_gpu_experts": 0,
+        "kt_share_backward_bb": True,
+    }
+    kwargs.update(overrides)
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        return config.KTConfig(**kwargs)
+
+
+def test_int8_format_selects_backend_and_accepts_cpu_activation_retain():
+    cfg = _make_int8_config(
+        kt_activation_policy={"cpu": "retain", "gpu": "recompute"}
+    )
+    assert cfg.kt_backend == "AMXINT8"
+    assert cfg.kt_expert_weight_format == "int8"
+    assert cfg.kt_weight_lifecycle == "persistent"
+    assert (cfg.kt_activation_policy.cpu, cfg.kt_activation_policy.gpu) == (
+        "retain",
+        "recompute",
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"kt_backend": "AMXBF16"}, "conflicts"),
+        ({"kt_train_mode": "full"}, "frozen-base LoRA"),
+        ({"kt_train_mode": "hybrid"}, "frozen-base LoRA"),
+        ({"kt_num_gpu_experts": 1}, "kt_num_gpu_experts=0"),
+        ({"kt_use_lora_experts": True}, "GPU LoRA experts"),
+        ({"kt_share_backward_bb": False}, "kt_share_backward_bb=true"),
+        ({"kt_expert_checkpoint_path": "/checkpoint"}, "pre-quantized"),
+        ({"kt_weight_path": None}, "kt_weight_path"),
+    ],
+)
+def test_int8_rejects_unsupported_training_or_weight_sources(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _make_int8_config(**overrides)
+
+
+def test_legacy_int8_backend_env_infers_format_when_nonconflicting():
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ACCELERATE_KT_BACKEND": "AMXINT8",
+                "ACCELERATE_KT_WEIGHT_PATH": "/dev/shm/kt-int8-legacy-run",
+            },
+            clear=True,
+        ),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        cfg = config.KTConfig()
+    assert cfg.kt_expert_weight_format == "int8"
+    assert cfg.kt_backend == "AMXINT8"
+
+
+def test_ephemeral_lifecycle_is_int8_only():
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(ValueError, match="supported only for INT8"),
+    ):
+        config.KTConfig(
+            kt_expert_weight_format="bf16",
+            kt_weight_lifecycle="ephemeral",
+        )
+
+
+def test_unknown_backend_fails_instead_of_falling_back_to_bf16():
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(ValueError, match="unknown kt_backend"),
+    ):
+        config.KTConfig(kt_backend="AMXINT8_typo")
+
+
 def test_explicit_checkpoint_context_takes_precedence_over_hook_probe():
     context_fn = dist_utils.get_activation_checkpoint_context_fn()
     first_forward, recompute = context_fn()
