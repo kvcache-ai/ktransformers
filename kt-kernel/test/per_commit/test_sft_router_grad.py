@@ -13,8 +13,9 @@ class _LoRARouter(torch.nn.Module):
     def __init__(self, base=None, detach_output: bool = False):
         super().__init__()
         self.base = base if base is not None else torch.nn.Linear(4, 3, bias=False)
+        out_features = self.base.out_features
         self.lora_a = torch.nn.Linear(4, 2, bias=False)
-        self.lora_b = torch.nn.Linear(2, 3, bias=False)
+        self.lora_b = torch.nn.Linear(2, out_features, bias=False)
         self.base.requires_grad_(False)
         torch.nn.init.zeros_(self.lora_b.weight)
         self.detach_output = detach_output
@@ -30,6 +31,39 @@ class _TopKRouter(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.randn(3, 4))
         self.top_k = 2
         self.norm_topk_prob = True
+
+
+class _DeepseekTopKRouter(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(8, 4))
+        self.e_score_correction_bias = torch.nn.Parameter(torch.randn(8))
+        self.top_k = 2
+        self.n_group = 2
+        self.topk_group = 1
+        self.norm_topk_prob = True
+        self.routed_scaling_factor = 2.5
+
+    def forward(self, hidden_states):
+        scores = torch.nn.functional.linear(
+            hidden_states.view(-1, hidden_states.shape[-1]).float(),
+            self.weight.float(),
+        ).sigmoid()
+        scores_for_choice = scores + self.e_score_correction_bias.unsqueeze(0)
+        group_scores = scores_for_choice.view(-1, self.n_group, 4).topk(2, dim=-1)[0].sum(dim=-1)
+        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+        group_mask.scatter_(1, group_idx, True)
+        score_mask = group_mask.unsqueeze(-1).expand(-1, self.n_group, 4).reshape(-1, 8)
+        topk_ids = torch.topk(
+            scores_for_choice.masked_fill(~score_mask, float("-inf")),
+            k=self.top_k,
+            dim=-1,
+            sorted=False,
+        )[1]
+        topk_weights = scores.gather(1, topk_ids)
+        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
+        return topk_ids, topk_weights * self.routed_scaling_factor
 
 
 class _OriginalMoE(torch.nn.Module):
@@ -118,6 +152,30 @@ def _make_topk_layer(*, wrapper=None):
     return layer
 
 
+def _make_deepseek_topk_layer():
+    original_router = _DeepseekTopKRouter()
+    config = SimpleNamespace(
+        router_attr="gate",
+        experts_attr="experts",
+        has_shared_experts=False,
+        router_type="deepseek_gate",
+        expert_num=8,
+        num_experts_per_tok=2,
+    )
+    layer = KTMoELayerWrapper(
+        original_moe=_OriginalMoE(original_router),
+        wrapper=None,
+        lora_params=None,
+        moe_config=config,
+        hidden_size=4,
+        layer_idx=7,
+        full_weight_grad=False,
+    )
+    layer.gate = _LoRARouter(base=layer.gate)
+    layer.train()
+    return layer, original_router
+
+
 def test_trainable_router_preserves_routing_graph_in_lora_mode():
     router = _LoRARouter()
     layer = _make_layer(router)
@@ -139,6 +197,25 @@ def test_transformers_v5_topk_router_lora_preserves_routing_graph():
     topk_weights.float().square().sum().backward()
 
     assert layer._original_router is not None
+    assert layer.gate.base.weight.grad is None
+    assert layer.gate.lora_b.weight.grad is not None
+    assert torch.count_nonzero(layer.gate.lora_b.weight.grad) > 0
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_deepseek_topk_router_lora_matches_gate_and_preserves_graph(batch_size):
+    torch.manual_seed(0)
+    layer, original_router = _make_deepseek_topk_layer()
+    hidden_states = torch.randn(batch_size, 3, 4)
+
+    original_router.eval()
+    expected_ids, expected_weights = original_router(hidden_states)
+    actual_ids, actual_weights = layer._compute_routing(hidden_states)
+
+    torch.testing.assert_close(actual_ids, expected_ids)
+    torch.testing.assert_close(actual_weights.float(), expected_weights, atol=4e-3, rtol=4e-3)
+
+    actual_weights.float().square().sum().backward()
     assert layer.gate.base.weight.grad is None
     assert layer.gate.lora_b.weight.grad is not None
     assert torch.count_nonzero(layer.gate.lora_b.weight.grad) > 0

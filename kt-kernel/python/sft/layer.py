@@ -44,6 +44,15 @@ logger = logging.getLogger(__name__)
 _KT_SFT_DEBUG = os.environ.get("KT_SFT_DEBUG", "0") == "1"
 
 
+class _DeepseekRouterLinear(nn.Linear):
+    """PEFT-compatible proxy preserving DeepSeek's FP32 gate projection."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.float()
+        bias = self.bias.float() if self.bias is not None else None
+        return F.linear(input.float(), weight, bias)
+
+
 def _activation_checkpoint_action(policy: KTActivationPolicy, phase: str) -> str:
     """Map public activation policy and checkpoint phase to collective control."""
     if policy.gpu == "recompute" and policy.cpu == "retain":
@@ -144,7 +153,8 @@ class KTMoELayerWrapper(nn.Module):
             # The nn.Linear shares the same weight tensor - LoRA applied to it
             # is equivalent to LoRA on the original gate.
             router_weight = original_router.weight
-            router_linear = nn.Linear(
+            router_linear_cls = _DeepseekRouterLinear if self.router_type == "deepseek_gate" else nn.Linear
+            router_linear = router_linear_cls(
                 router_weight.shape[1], router_weight.shape[0], bias=False,
             )
             router_linear.weight = router_weight  # share the same parameter
@@ -464,20 +474,20 @@ class KTMoELayerWrapper(nn.Module):
             return topk_ids, topk_weights
 
         with routing_context:
-            if self.router_type == "deepseek_gate":
-                # DeepSeek V3's MoEGate has `assert not self.training` in its noaux_tc
-                # routing path because the HF model is an inference-only port.
-                # For LoRA fine-tuning the router is frozen, so eval() is safe.
+            if self.router_type == "deepseek_gate" and self._original_router is None:
+                # Native fallback; weighted gates use the proxy below so router LoRA stays active.
                 was_training = router.training
                 if was_training:
                     router.eval()
                 router_output = router(hidden_states)
                 if was_training:
                     router.train()
-                if len(router_output) == 2:
-                    topk_ids, topk_weights = router_output
-                else:
-                    topk_ids, topk_weights = router_output[0], router_output[1]
+                if not isinstance(router_output, (tuple, list)) or len(router_output) != 2:
+                    raise RuntimeError(
+                        f"Layer {self.layer_idx}: DeepSeek gate must return "
+                        "(topk_ids, topk_weights)"
+                    )
+                topk_ids, topk_weights = router_output
                 return finish(topk_ids, topk_weights)
 
             # When _original_router is set, self.gate is an nn.Linear wrapper
@@ -486,6 +496,44 @@ class KTMoELayerWrapper(nn.Module):
             if self._original_router is not None:
                 orig_router = self._original_router
                 router_logits = router(hidden_states.view(-1, self.hidden_size))
+                if self.router_type == "deepseek_gate":
+                    router_probs = torch.sigmoid(router_logits.float())
+                    correction_bias = getattr(orig_router, "e_score_correction_bias", None)
+                    if correction_bias is None:
+                        raise RuntimeError(
+                            f"Layer {self.layer_idx}: DeepSeek noaux_tc gate is missing "
+                            "e_score_correction_bias"
+                        )
+
+                    scores_for_choice = router_probs + correction_bias.to(
+                        device=router_probs.device,
+                        dtype=router_probs.dtype,
+                    )
+                    n_group = getattr(orig_router, "n_group", 1)
+                    topk_group = getattr(orig_router, "topk_group", n_group)
+                    expert_num = self.moe_config.expert_num
+                    group_scores = (
+                        scores_for_choice.view(-1, n_group, expert_num // n_group)
+                        .topk(2, dim=-1)[0]
+                        .sum(dim=-1)
+                    )
+                    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
+                    group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+                    group_mask.scatter_(1, group_idx, True)
+                    score_mask = (
+                        group_mask.unsqueeze(-1)
+                        .expand(-1, n_group, expert_num // n_group)
+                        .reshape(-1, expert_num)
+                    )
+                    scores_for_choice = scores_for_choice.masked_fill(~score_mask, float("-inf"))
+                    top_k = getattr(orig_router, "top_k", self.moe_config.num_experts_per_tok)
+                    topk_ids = torch.topk(scores_for_choice, k=top_k, dim=-1, sorted=False)[1]
+                    topk_weights = router_probs.gather(1, topk_ids)
+                    if getattr(orig_router, "norm_topk_prob", True):
+                        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
+                    topk_weights = topk_weights * getattr(orig_router, "routed_scaling_factor", 1.0)
+                    return finish(topk_ids, topk_weights)
+
                 if self.router_type == "glm4_moe_gate":
                     router_probs = torch.sigmoid(router_logits.float())
                     correction_bias = getattr(orig_router, "e_score_correction_bias", None)
