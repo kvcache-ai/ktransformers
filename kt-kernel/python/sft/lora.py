@@ -376,13 +376,9 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
 
         adapted_count += 1
 
-    # After collecting all LoRA references, shrink expert base weight parameters
-    # from their original shape (e.g. [768, 2048]) to scalar (1,).
-    # These base weights were already replaced with tiny-storage stride=[0] placeholders
-    # by _clear_original_expert_weights(). They have correct shape but serve no purpose
-    # after PEFT injection. FSDP2 broadcasts ALL non-DTensor params, and uses
-    # torch.empty(param.size()) on non-rank-0 — with the original shape this wastes
-    # ~28GB+. Shrinking to (1,) reduces broadcast cost to ~30KB total.
+    # Expert base weights are owned by the KT backend after PEFT injection. Keep
+    # zero-element placeholders in the module tree so FSDP cannot allocate or
+    # broadcast tensors with the original expert shapes.
     shrunk_count = 0
     shrunk_saved_bytes = 0
     for wrapper in wrappers:
@@ -403,8 +399,12 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 if storage_bytes > 2:
                     continue  # Skip non-placeholder params
 
-                # This is a tiny-storage placeholder (base weight) — replace with
-                # a scalar (1,) parameter so FSDP broadcasts only 1 element.
+                # This is a tiny-storage placeholder (base weight). Preserve its
+                # logical shape as metadata while removing its final storage.
+                original_shape = getattr(param, "_kt_original_shape", tuple(param.shape))
+                if param.numel() == 0:
+                    param._kt_original_shape = tuple(original_shape)
+                    continue
                 original_numel = param.nelement()
                 parts = param_name.split(".")
                 container = expert
@@ -413,19 +413,20 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 local_name = parts[-1]
                 container_params = getattr(container, "_parameters", {})
                 if isinstance(container_params, dict) and local_name in container_params:
-                    scalar_param = nn.Parameter(
-                        torch.empty(1, dtype=param.dtype, device="cpu"),
+                    empty_param = nn.Parameter(
+                        torch.empty(0, dtype=param.dtype, device="cpu"),
                         requires_grad=False,
                     )
-                    scalar_param._kt_zero_storage = True
-                    container_params[local_name] = scalar_param
+                    empty_param._kt_zero_storage = True
+                    empty_param._kt_original_shape = tuple(original_shape)
+                    container_params[local_name] = empty_param
                     shrunk_count += 1
-                    shrunk_saved_bytes += (original_numel - 1) * param.element_size()
+                    shrunk_saved_bytes += original_numel * param.element_size()
 
     if shrunk_count > 0:
         logger.info(
-            f"[kt_adapt_peft_lora] Shrunk {shrunk_count} expert base weight params "
-            f"to shape (1,), FSDP broadcast savings={shrunk_saved_bytes / 1024 / 1024:.1f} MB"
+            f"[kt_adapt_peft_lora] Removed storage from {shrunk_count} expert base "
+            f"weight params, FSDP broadcast savings={shrunk_saved_bytes / 1024 / 1024:.1f} MB"
         )
 
     logger.info(f"[kt_adapt_peft_lora] Adapted {adapted_count} layers (PEFT LoRA mode)")

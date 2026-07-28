@@ -11,6 +11,8 @@ Additional dependencies beyond base kt_kernel: torch.nn, torch.distributed, peft
 """
 
 from .config import KTActivationPolicy, KTConfig
+from .backend import INT8_BACKEND, INT8_SFT_METHOD, get_int8_runtime
+from .weight_manifest import validate_persistent_int8_weights
 from .dist_utils import get_activation_checkpoint_context_fn
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 from .amx import AMXSFTMoEWrapper
@@ -58,6 +60,10 @@ from .profiler import collect_kt_sft_profile, format_kt_sft_profile, reset_kt_sf
 __all__ = [
     "KTConfig",
     "KTActivationPolicy",
+    "INT8_BACKEND",
+    "INT8_SFT_METHOD",
+    "get_int8_runtime",
+    "validate_persistent_int8_weights",
     "get_activation_checkpoint_context_fn",
     "BaseSFTMoEWrapper",
     "KExpertsSFTBuffer",

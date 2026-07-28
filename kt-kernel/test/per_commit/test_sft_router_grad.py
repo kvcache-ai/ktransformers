@@ -38,6 +38,7 @@ class _DeepseekTopKRouter(torch.nn.Module):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.randn(8, 4))
         self.e_score_correction_bias = torch.nn.Parameter(torch.randn(8))
+        self.n_routed_experts = 8
         self.top_k = 2
         self.n_group = 2
         self.topk_group = 1
@@ -56,7 +57,7 @@ class _DeepseekTopKRouter(torch.nn.Module):
         group_mask.scatter_(1, group_idx, True)
         score_mask = group_mask.unsqueeze(-1).expand(-1, self.n_group, 4).reshape(-1, 8)
         topk_ids = torch.topk(
-            scores_for_choice.masked_fill(~score_mask, float("-inf")),
+            scores_for_choice.masked_fill(~score_mask, 0.0),
             k=self.top_k,
             dim=-1,
             sorted=False,
@@ -67,10 +68,81 @@ class _DeepseekTopKRouter(torch.nn.Module):
 
 
 class _OriginalMoE(torch.nn.Module):
-    def __init__(self, router):
+    def __init__(self, router, **routing_metadata):
         super().__init__()
         self.gate = router
         self.experts = torch.nn.ModuleList()
+        for name, value in routing_metadata.items():
+            setattr(self, name, value)
+
+
+class _NativeDeepseekTopKRouter(torch.nn.Module):
+    """Transformers v5 shape: routing policy lives on MoE/config, not router."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            hidden_size=4,
+            n_routed_experts=8,
+            n_group=2,
+            topk_group=1,
+            num_experts_per_tok=2,
+            norm_topk_prob=True,
+            routed_scaling_factor=2.5,
+        )
+        self.weight = torch.nn.Parameter(torch.randn(8, 4))
+        self.register_buffer("e_score_correction_bias", torch.randn(8))
+
+    def forward(self, hidden_states):
+        return torch.nn.functional.linear(
+            hidden_states.view(-1, hidden_states.shape[-1]).float(),
+            self.weight.float(),
+        )
+
+
+class _NativeDeepseekMoE(_OriginalMoE):
+    def __init__(self, router):
+        super().__init__(
+            router,
+            n_routed_experts=8,
+            n_group=2,
+            topk_group=1,
+            top_k=2,
+            norm_topk_prob=True,
+            routed_scaling_factor=2.5,
+        )
+        self.config = router.config
+
+    def route_tokens_to_experts(self, router_logits):
+        router_probs = router_logits.sigmoid()
+        scores_for_choice = router_probs + self.gate.e_score_correction_bias
+        group_scores = (
+            scores_for_choice.view(-1, self.n_group, 4)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )
+        group_idx = torch.topk(
+            group_scores,
+            k=self.topk_group,
+            dim=-1,
+            sorted=False,
+        )[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(-1, self.n_group, 4)
+            .reshape(-1, 8)
+        )
+        topk_ids = torch.topk(
+            scores_for_choice.masked_fill(~score_mask.bool(), 0.0),
+            k=self.top_k,
+            dim=-1,
+            sorted=False,
+        )[1]
+        topk_weights = router_probs.gather(1, topk_ids)
+        topk_weights /= topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+        return topk_ids, topk_weights * self.routed_scaling_factor
 
 
 class _FakeWrapper:
@@ -152,8 +224,15 @@ def _make_topk_layer(*, wrapper=None):
     return layer
 
 
-def _make_deepseek_topk_layer():
-    original_router = _DeepseekTopKRouter()
+def _make_deepseek_topk_layer(*, native=False):
+    original_router = (
+        _NativeDeepseekTopKRouter() if native else _DeepseekTopKRouter()
+    )
+    original_moe = (
+        _NativeDeepseekMoE(original_router)
+        if native
+        else _OriginalMoE(original_router)
+    )
     config = SimpleNamespace(
         router_attr="gate",
         experts_attr="experts",
@@ -163,7 +242,7 @@ def _make_deepseek_topk_layer():
         num_experts_per_tok=2,
     )
     layer = KTMoELayerWrapper(
-        original_moe=_OriginalMoE(original_router),
+        original_moe=original_moe,
         wrapper=None,
         lora_params=None,
         moe_config=config,
@@ -173,7 +252,7 @@ def _make_deepseek_topk_layer():
     )
     layer.gate = _LoRARouter(base=layer.gate)
     layer.train()
-    return layer, original_router
+    return layer, original_router, original_moe
 
 
 def test_trainable_router_preserves_routing_graph_in_lora_mode():
@@ -205,7 +284,7 @@ def test_transformers_v5_topk_router_lora_preserves_routing_graph():
 @pytest.mark.parametrize("batch_size", [1, 2])
 def test_deepseek_topk_router_lora_matches_gate_and_preserves_graph(batch_size):
     torch.manual_seed(0)
-    layer, original_router = _make_deepseek_topk_layer()
+    layer, original_router, _ = _make_deepseek_topk_layer()
     hidden_states = torch.randn(batch_size, 3, 4)
 
     original_router.eval()
@@ -219,6 +298,85 @@ def test_deepseek_topk_router_lora_matches_gate_and_preserves_graph(batch_size):
     assert layer.gate.base.weight.grad is None
     assert layer.gate.lora_b.weight.grad is not None
     assert torch.count_nonzero(layer.gate.lora_b.weight.grad) > 0
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_native_deepseek_router_reads_policy_from_moe_and_config(batch_size):
+    torch.manual_seed(0)
+    layer, original_router, original_moe = _make_deepseek_topk_layer(native=True)
+    hidden_states = torch.randn(batch_size, 3, 4)
+
+    router_logits = original_router(hidden_states)
+    expected_ids, expected_weights = original_moe.route_tokens_to_experts(
+        router_logits
+    )
+    actual_ids, actual_weights = layer._compute_routing(hidden_states)
+
+    torch.testing.assert_close(actual_ids, expected_ids)
+    torch.testing.assert_close(
+        actual_weights.float(),
+        expected_weights,
+        atol=4e-3,
+        rtol=4e-3,
+    )
+    assert layer._deepseek_routing_spec.n_group == 2
+    assert layer._deepseek_routing_spec.topk_group == 1
+    assert layer._deepseek_routing_spec.top_k == 2
+    assert layer._deepseek_routing_spec.routed_scaling_factor == 2.5
+
+    actual_weights.float().square().sum().backward()
+    assert layer.gate.lora_b.weight.grad is not None
+    assert torch.count_nonzero(layer.gate.lora_b.weight.grad) > 0
+
+
+def test_native_deepseek_router_missing_metadata_fails_closed():
+    router = _NativeDeepseekTopKRouter()
+    del router.config.n_group
+    moe = _OriginalMoE(router)
+    config = SimpleNamespace(
+        router_attr="gate",
+        experts_attr="experts",
+        has_shared_experts=False,
+        router_type="deepseek_gate",
+        expert_num=8,
+        num_experts_per_tok=2,
+    )
+
+    with pytest.raises(ValueError, match="metadata 'n_group' is missing"):
+        KTMoELayerWrapper(
+            original_moe=moe,
+            wrapper=None,
+            lora_params=None,
+            moe_config=config,
+            hidden_size=4,
+            layer_idx=7,
+            full_weight_grad=False,
+        )
+
+
+def test_native_deepseek_router_conflicting_metadata_fails_closed():
+    router = _NativeDeepseekTopKRouter()
+    moe = _NativeDeepseekMoE(router)
+    moe.n_group = 4
+    config = SimpleNamespace(
+        router_attr="gate",
+        experts_attr="experts",
+        has_shared_experts=False,
+        router_type="deepseek_gate",
+        expert_num=8,
+        num_experts_per_tok=2,
+    )
+
+    with pytest.raises(ValueError, match="Conflicting DeepSeek routing metadata"):
+        KTMoELayerWrapper(
+            original_moe=moe,
+            wrapper=None,
+            lora_params=None,
+            moe_config=config,
+            hidden_size=4,
+            layer_idx=7,
+            full_weight_grad=False,
+        )
 
 
 def test_frozen_router_keeps_routing_outside_autograd():

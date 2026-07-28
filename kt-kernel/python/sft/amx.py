@@ -42,6 +42,7 @@ except (ImportError, AttributeError):
     AMXInt4_SFT_MOE_SkipLoRA = None
 
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer, _supports_authoritative_optimizer_grads
+from .backend import is_int8_sft_method
 
 _AMX_M_STEP = 32
 
@@ -49,6 +50,7 @@ _AMX_M_STEP = 32
 # Mapping from method string to C++ SFT MOE class
 _SFT_METHOD_TO_CLASS = {
     "AMXBF16_SFT": AMXBF16_SFT_MOE,
+    "INT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
     "AMXBF16_SFT_SkipLoRA": AMXBF16_SFT_MOE_SkipLoRA,
@@ -351,9 +353,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         down_proj: torch.Tensor,
         physical_to_logical_map_cpu: torch.Tensor,
     ) -> None:
-        if self.method == "AMXINT8_SFT":
+        if is_int8_sft_method(self.method):
             raise ValueError(
-                "AMXINT8_SFT accepts pre-quantized .kt weights only; "
+                "INT8_SFT accepts pre-quantized .kt weights only; "
                 "online tensor conversion is not supported"
             )
         self.gate_proj = gate_proj.contiguous()
@@ -375,9 +377,9 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             if kt_files:
                 self._use_kt_direct_load = True
                 return
-        if self.method == "AMXINT8_SFT":
+        if is_int8_sft_method(self.method):
             raise RuntimeError(
-                f"AMXINT8_SFT requires pre-quantized .kt files under "
+                f"INT8_SFT requires pre-quantized .kt files under "
                 f"{kt_layer_dir}/_numa_*/; merged safetensors and online "
                 "conversion are not supported"
             )

@@ -101,10 +101,48 @@ def _int8_config(*, force_fused=True):
 
 def _wrap(model, config, monkeypatch):
     import kt_kernel.sft.wrapper as wrapper_module
+    import kt_kernel.sft.weight_manifest as manifest_module
 
     monkeypatch.setattr(wrapper_module, "KT_KERNEL_AVAILABLE", True)
     monkeypatch.setattr(wrapper_module, "KTMoEWrapper", _Backend)
+    monkeypatch.setattr(
+        wrapper_module,
+        "get_int8_runtime",
+        lambda: SimpleNamespace(
+            cpu_variant="avx512_bf16",
+            kernel="avx512-vnni",
+            weight_layout="kt-int8-n32-k64-vnni-v1",
+        ),
+    )
+    monkeypatch.setattr(
+        manifest_module,
+        "validate_persistent_int8_weights",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            path="/persistent/kt-int8/kt-weight-manifest.json",
+            schema_version=2,
+            is_legacy=False,
+            layout="kt-int8-n32-k64-vnni-v1",
+            layer_indices=(0,),
+            file_count=12,
+            size_bytes=12,
+        ),
+    )
     return wrap_moe_layers_with_kt_wrapper(model, config)[0]
+
+
+def _assert_int8_expert_placeholders_are_empty(experts):
+    expected_shapes = {
+        "gate_proj": (3, 4),
+        "up_proj": (3, 4),
+        "down_proj": (4, 3),
+    }
+    for expert in experts:
+        for name, expected_shape in expected_shapes.items():
+            parameter = getattr(expert, name).weight
+            assert parameter.numel() == 0
+            assert parameter.device.type == "cpu"
+            assert parameter._kt_zero_storage is True
+            assert parameter._kt_original_shape == expected_shape
 
 
 def test_force_fused_expert_lora_reads_environment(monkeypatch):
@@ -125,6 +163,7 @@ def test_force_fused_lora_preserves_nonfused_base_and_is_rank0_owned(monkeypatch
     assert wrapper._fused_experts is False
     assert wrapper._use_fused_expert_lora is True
     assert wrapper._force_fused_expert_lora is True
+    _assert_int8_expert_placeholders_are_empty(wrapper.experts)
 
     model._kt_wrappers = [wrapper]
     kt_adapt_peft_lora(model)
@@ -139,11 +178,34 @@ def test_force_fused_lora_preserves_nonfused_base_and_is_rank0_owned(monkeypatch
 
 
 def test_int8_nonfused_experts_require_forced_fused_lora(monkeypatch):
+    import kt_kernel.sft.weight_manifest as manifest_module
+
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setenv("WORLD_SIZE", "1")
     with (
         patch("kt_kernel.sft.wrapper.KT_KERNEL_AVAILABLE", True),
         patch("kt_kernel.sft.wrapper.KTMoEWrapper", _Backend),
+        patch(
+            "kt_kernel.sft.wrapper.get_int8_runtime",
+            return_value=SimpleNamespace(
+                cpu_variant="avx512_bf16",
+                kernel="avx512-vnni",
+                weight_layout="kt-int8-n32-k64-vnni-v1",
+            ),
+        ),
+        patch.object(
+            manifest_module,
+            "validate_persistent_int8_weights",
+            return_value=SimpleNamespace(
+                path="/persistent/kt-int8/kt-weight-manifest.json",
+                schema_version=2,
+                is_legacy=False,
+                layout="kt-int8-n32-k64-vnni-v1",
+                layer_indices=(0,),
+                file_count=12,
+                size_bytes=12,
+            ),
+        ),
         pytest.raises(KTAMXConfigError, match="kt_force_fused_expert_lora=true"),
     ):
         wrap_moe_layers_with_kt_wrapper(
@@ -164,6 +226,7 @@ def test_force_fused_lora_creates_no_rank1_params_or_backend(monkeypatch):
     assert wrapper.wrapper is None
     assert wrapper._fused_expert_lora_params == []
     assert get_kt_lora_params(model) == []
+    _assert_int8_expert_placeholders_are_empty(wrapper.experts)
 
 
 def test_force_fused_lora_reload_skips_rank1_without_owned_params(tmp_path):

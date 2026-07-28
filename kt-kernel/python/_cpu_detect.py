@@ -19,8 +19,30 @@ Example:
 """
 
 import os
-import sys
-from pathlib import Path
+
+_VARIANT_LEVEL = {
+    "avx2": 0,
+    "avx512_base": 1,
+    "avx512_vnni": 2,
+    "avx512_vbmi": 3,
+    "avx512_bf16": 4,
+    "amx": 5,
+}
+
+
+def _validate_loaded_variant(detected_variant: str, loaded_variant: str) -> None:
+    detected_level = _VARIANT_LEVEL.get(detected_variant)
+    loaded_level = _VARIANT_LEVEL.get(loaded_variant)
+    if detected_level is None or loaded_level is None:
+        raise RuntimeError(
+            f"Unknown kt-kernel CPU variant metadata: detected={detected_variant!r}, loaded={loaded_variant!r}."
+        )
+    if loaded_level > detected_level:
+        raise RuntimeError(
+            "The installed kt-kernel extension requires a newer CPU ISA than this host: "
+            f"detected={detected_variant}, loaded={loaded_variant}. "
+            "Install a multi-variant wheel or rebuild for this machine."
+        )
 
 
 def detect_cpu_features():
@@ -280,15 +302,17 @@ def initialize():
         >>> wrapper = ext.AMXMoEWrapper(...)
     """
     # Detect CPU features
-    variant = detect_cpu_features()
+    detected_variant = detect_cpu_features()
 
     if os.environ.get("KT_KERNEL_DEBUG") == "1":
-        print(f"[kt-kernel] Selected CPU variant: {variant}")
+        print(f"[kt-kernel] Selected CPU variant: {detected_variant}")
 
     # Load the appropriate extension
-    ext = load_extension(variant)
+    ext = load_extension(detected_variant)
+    loaded_variant = str(getattr(ext, "__cpu_variant__", detected_variant))
+    _validate_loaded_variant(detected_variant, loaded_variant)
 
     if os.environ.get("KT_KERNEL_DEBUG") == "1":
         print(f"[kt-kernel] Extension module loaded: {ext.__name__}")
 
-    return ext, variant
+    return ext, loaded_variant

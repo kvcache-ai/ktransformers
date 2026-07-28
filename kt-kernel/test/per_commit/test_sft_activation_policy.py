@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -13,9 +14,14 @@ from torch.utils.checkpoint import checkpoint
 
 
 SFT_PATH = Path(__file__).resolve().parents[2] / "python" / "sft"
+PACKAGE_NAME = "kt_sft_activation_under_test"
+package = ModuleType(PACKAGE_NAME)
+package.__path__ = [str(SFT_PATH)]
+sys.modules[PACKAGE_NAME] = package
 
 
-def _load_module(name: str, filename: str):
+def _load_module(filename: str):
+    name = f"{PACKAGE_NAME}.{Path(filename).stem}"
     spec = importlib.util.spec_from_file_location(name, SFT_PATH / filename)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -24,8 +30,8 @@ def _load_module(name: str, filename: str):
     return module
 
 
-config = _load_module("kt_sft_activation_config_under_test", "config.py")
-dist_utils = _load_module("kt_sft_activation_dist_utils_under_test", "dist_utils.py")
+config = _load_module("config.py")
+dist_utils = _load_module("dist_utils.py")
 
 
 def _make_config(policy=None):
@@ -143,7 +149,7 @@ def test_int8_format_selects_backend_and_accepts_cpu_activation_retain():
     cfg = _make_int8_config(
         kt_activation_policy={"cpu": "retain", "gpu": "recompute"}
     )
-    assert cfg.kt_backend == "AMXINT8"
+    assert cfg.kt_backend == "INT8"
     assert cfg.kt_expert_weight_format == "int8"
     assert cfg.kt_weight_lifecycle == "persistent"
     assert (cfg.kt_activation_policy.cpu, cfg.kt_activation_policy.gpu) == (
@@ -171,20 +177,27 @@ def test_int8_rejects_unsupported_training_or_weight_sources(overrides, message)
 
 
 def test_legacy_int8_backend_env_infers_format_when_nonconflicting():
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "ACCELERATE_KT_BACKEND": "AMXINT8",
-                "ACCELERATE_KT_WEIGHT_PATH": "/dev/shm/kt-int8-legacy-run",
-            },
-            clear=True,
-        ),
-        patch.object(config, "configure_omp_threads", return_value=1),
-    ):
-        cfg = config.KTConfig()
+    with pytest.warns(FutureWarning, match="deprecated"):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ACCELERATE_KT_BACKEND": "AMXINT8",
+                    "ACCELERATE_KT_WEIGHT_PATH": "/dev/shm/kt-int8-legacy-run",
+                },
+                clear=True,
+            ),
+            patch.object(config, "configure_omp_threads", return_value=1),
+        ):
+            cfg = config.KTConfig()
     assert cfg.kt_expert_weight_format == "int8"
-    assert cfg.kt_backend == "AMXINT8"
+    assert cfg.kt_backend == "INT8"
+
+
+@pytest.mark.parametrize("backend", ["auto", "AUTO", "INT8", "int8"])
+def test_int8_accepts_hardware_neutral_backend_names(backend):
+    cfg = _make_int8_config(kt_backend=backend)
+    assert cfg.kt_backend == "INT8"
 
 
 def test_ephemeral_lifecycle_is_int8_only():

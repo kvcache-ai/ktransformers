@@ -55,6 +55,9 @@ def test_capability_supports_cpu_only_bf16_and_frozen_int8_lora():
     assert _supports_authoritative_optimizer_grads(
         "AMXINT8_SFT", 0, full_weight_grad=False, lora_rank=8
     )
+    assert _supports_authoritative_optimizer_grads(
+        "INT8_SFT", 0, full_weight_grad=False, lora_rank=8
+    )
     assert not _supports_authoritative_optimizer_grads(
         "AMXINT8_SFT", 0, full_weight_grad=True, lora_rank=8
     )
@@ -308,7 +311,10 @@ def test_int8_sft_rejects_merged_or_unconverted_weight_path(tmp_path):
         backend._load_base_weights_from_file()
 
 
-@pytest.mark.parametrize("method", ["AMXBF16_SFT", "AMXINT8_SFT", "AMXINT4_SFT"])
+@pytest.mark.parametrize(
+    "method",
+    ["AMXBF16_SFT", "INT8_SFT", "AMXINT8_SFT", "AMXINT4_SFT"],
+)
 def test_legacy_amx_task_uses_scaled_tail_only_when_required(method):
     backend = _fake_amx_backend(method)
     buffer = _fake_amx_backward_buffer()

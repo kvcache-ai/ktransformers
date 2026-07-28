@@ -3,11 +3,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -109,7 +107,11 @@ def extract_moe_weights(
 
 
 def _clear_original_expert_weights(
-    moe_module: nn.Module, moe_config: MOEArchConfig, full_weight_grad: bool = False
+    moe_module: nn.Module,
+    moe_config: MOEArchConfig,
+    full_weight_grad: bool = False,
+    *,
+    empty_placeholders: bool = False,
 ) -> None:
     """
     Clear original expert weights to free memory after KT weights are loaded.
@@ -125,23 +127,29 @@ def _clear_original_expert_weights(
     if experts is None:
         return
 
+    def make_placeholder(parameter: torch.nn.Parameter) -> nn.Parameter:
+        if empty_placeholders:
+            fake_tensor = torch.empty(0, dtype=parameter.dtype, device="cpu")
+        else:
+            tiny_storage = torch.UntypedStorage(1, device="cpu")
+            fake_tensor = torch.tensor([], dtype=parameter.dtype, device="cpu").set_(
+                tiny_storage,
+                storage_offset=0,
+                size=parameter.shape,
+                stride=[0] * len(parameter.shape),
+            )
+        placeholder = nn.Parameter(fake_tensor, requires_grad=False)
+        placeholder._kt_zero_storage = True
+        placeholder._kt_original_shape = tuple(parameter.shape)
+        return placeholder
+
     # Fused format: replace gate_up_proj/down_proj tensors with zero-storage placeholders
     if detect_fused_experts(experts):
         for name in ("gate_up_proj", "down_proj"):
             param = getattr(experts, name, None)
             if not isinstance(param, torch.nn.Parameter):
                 continue
-            original_dtype = param.dtype
-            tiny_storage = torch.UntypedStorage(1, device="cpu")
-            fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage,
-                storage_offset=0,
-                size=param.shape,
-                stride=[0] * len(param.shape),
-            )
-            placeholder = nn.Parameter(fake_tensor, requires_grad=False)
-            placeholder._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
-            experts._parameters[name] = placeholder
+            experts._parameters[name] = make_placeholder(param)
         return
 
     def _iter_weight_params():
@@ -179,25 +187,7 @@ def _clear_original_expert_weights(
 
     with _maybe_zero3_gathered_parameters(gather_params):
         for proj, container, param_name, weight_param in _iter_weight_params():
-            original_dtype = weight_param.dtype
-
-            # Create a CPU tensor with the correct shape but NO physical memory.
-            # torch.empty(shape, device="cpu") unfortunately touches pages via the
-            # allocator, consuming real RSS.  Instead, allocate a 1-byte storage and
-            # use set_ to give it the original shape with zero strides.  The tensor
-            # is "valid" (correct dtype, device, shape) so PEFT can discover
-            # in/out features, but its storage is essentially zero-cost.
-            # NOTE: reading element values from this tensor is undefined -- it is
-            # only used for shape/dtype discovery by PEFT.
-            tiny_storage = torch.UntypedStorage(1, device="cpu")
-            fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage,
-                storage_offset=0,
-                size=weight_param.shape,
-                stride=[0] * len(weight_param.shape),
-            )
-            new_param = nn.Parameter(fake_tensor, requires_grad=False)
-            new_param._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
+            new_param = make_placeholder(weight_param)
             replaced_count += 1
 
             # Avoid `KeyError: attribute 'weight' already exists` for parametrized modules

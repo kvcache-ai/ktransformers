@@ -19,10 +19,10 @@ Usage:
 from __future__ import annotations
 
 import torch
-from typing import List, Optional, Union
+from typing import List, Optional
 
 # Import base infrastructure for inference
-from .experts_base import BaseMoEWrapper, KExpertsCPUBuffer
+from .experts_base import BaseMoEWrapper
 
 # Import inference backend implementations
 from .utils.amx import AMXMoEWrapper, NativeMoEWrapper
@@ -51,6 +51,7 @@ INFERENCE_METHODS = frozenset(
 SFT_METHODS = frozenset(
     [
         "AMXBF16_SFT",  # AMX BF16 training
+        "INT8_SFT",  # Hardware-neutral INT8 training (AMX or AVX512-VNNI)
         "AMXINT8_SFT",  # AMX INT8 training
         "AMXINT4_SFT",  # AMX INT4 training
         "AMXINT4_1_SFT",  # AMX INT4_1 training

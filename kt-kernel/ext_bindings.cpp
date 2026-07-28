@@ -514,6 +514,27 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
 }
 
 PYBIND11_MODULE(kt_kernel_ext, m) {
+#if defined(HAVE_AMX)
+  m.attr("__cpu_variant__") = "amx";
+  m.attr("__int8_kernel__") = "amx-int8";
+#elif defined(__AVX512BF16__) && defined(__AVX512VNNI__)
+  m.attr("__cpu_variant__") = "avx512_bf16";
+  m.attr("__int8_kernel__") = "avx512-vnni";
+#elif defined(__AVX512VBMI__)
+  m.attr("__cpu_variant__") = "avx512_vbmi";
+  m.attr("__int8_kernel__") = "unsupported";
+#elif defined(__AVX512VNNI__)
+  m.attr("__cpu_variant__") = "avx512_vnni";
+  m.attr("__int8_kernel__") = "unsupported";
+#elif defined(__AVX512F__)
+  m.attr("__cpu_variant__") = "avx512_base";
+  m.attr("__int8_kernel__") = "unsupported";
+#else
+  m.attr("__cpu_variant__") = "avx2";
+  m.attr("__int8_kernel__") = "unsupported";
+#endif
+  m.attr("__int8_weight_layout__") = "kt-int8-n32-k64-vnni-v1";
+
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())

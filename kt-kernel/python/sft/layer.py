@@ -12,8 +12,10 @@ small MLPs on GPU), shared experts, and multi-GPU rank-0-only execution.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -51,6 +53,126 @@ class _DeepseekRouterLinear(nn.Linear):
         weight = self.weight.float()
         bias = self.bias.float() if self.bias is not None else None
         return F.linear(input.float(), weight, bias)
+
+
+@dataclass(frozen=True)
+class DeepSeekRoutingSpec:
+    """Validated routing semantics shared by remote and native DeepSeek MoE."""
+
+    expert_num: int
+    n_group: int
+    topk_group: int
+    top_k: int
+    norm_topk_prob: bool
+    routed_scaling_factor: float
+
+    @classmethod
+    def from_modules(
+        cls,
+        *,
+        moe: nn.Module,
+        router: nn.Module,
+        expert_num: int,
+    ) -> "DeepSeekRoutingSpec":
+        sources = [
+            ("moe", moe),
+            ("router", router),
+            ("moe.config", getattr(moe, "config", None)),
+            ("router.config", getattr(router, "config", None)),
+        ]
+
+        def resolve(name: str, aliases: tuple[str, ...]) -> Any:
+            observed: list[tuple[str, Any]] = []
+            for source_name, source in sources:
+                if source is None:
+                    continue
+                for alias in aliases:
+                    if hasattr(source, alias):
+                        value = getattr(source, alias)
+                        if value is not None:
+                            observed.append((f"{source_name}.{alias}", value))
+                            break
+            if not observed:
+                raise ValueError(
+                    f"DeepSeek routing metadata {name!r} is missing; checked "
+                    + ", ".join(source_name for source_name, _ in sources)
+                )
+            first_source, first_value = observed[0]
+            for source_name, value in observed[1:]:
+                if value != first_value:
+                    raise ValueError(
+                        f"Conflicting DeepSeek routing metadata for {name}: "
+                        f"{first_source}={first_value!r}, {source_name}={value!r}"
+                    )
+            return first_value
+
+        def positive_int(name: str, aliases: tuple[str, ...]) -> int:
+            value = resolve(name, aliases)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"DeepSeek routing metadata {name} must be a positive integer, "
+                    f"got {value!r}"
+                )
+            return int(value)
+
+        n_group = positive_int("n_group", ("n_group",))
+        topk_group = positive_int("topk_group", ("topk_group",))
+        routed_expert_num = positive_int(
+            "n_routed_experts",
+            ("n_routed_experts", "num_local_experts"),
+        )
+        top_k = positive_int(
+            "top_k",
+            ("top_k", "num_experts_per_tok"),
+        )
+        norm_topk_prob = resolve("norm_topk_prob", ("norm_topk_prob",))
+        if not isinstance(norm_topk_prob, bool):
+            raise ValueError(
+                "DeepSeek routing metadata norm_topk_prob must be bool, "
+                f"got {norm_topk_prob!r}"
+            )
+        routed_scaling_factor = float(
+            resolve("routed_scaling_factor", ("routed_scaling_factor",))
+        )
+        if not math.isfinite(routed_scaling_factor) or routed_scaling_factor <= 0:
+            raise ValueError(
+                "DeepSeek routed_scaling_factor must be finite and positive, "
+                f"got {routed_scaling_factor!r}"
+            )
+
+        expert_num = int(expert_num)
+        if routed_expert_num != expert_num:
+            raise ValueError(
+                "DeepSeek routed expert count does not match the KT architecture: "
+                f"routing={routed_expert_num}, kt={expert_num}"
+            )
+        if expert_num <= 0 or expert_num % n_group:
+            raise ValueError(
+                "DeepSeek expert_num must be positive and divisible by n_group, "
+                f"got expert_num={expert_num}, n_group={n_group}"
+            )
+        experts_per_group = expert_num // n_group
+        if experts_per_group < 2:
+            raise ValueError(
+                "DeepSeek group-top2 routing requires at least two experts per group"
+            )
+        if topk_group > n_group:
+            raise ValueError(
+                f"DeepSeek topk_group={topk_group} exceeds n_group={n_group}"
+            )
+        if top_k > topk_group * experts_per_group:
+            raise ValueError(
+                f"DeepSeek top_k={top_k} exceeds the {topk_group * experts_per_group} "
+                "experts available in selected groups"
+            )
+        return cls(
+            expert_num=expert_num,
+            n_group=n_group,
+            topk_group=topk_group,
+            top_k=top_k,
+            norm_topk_prob=norm_topk_prob,
+            routed_scaling_factor=routed_scaling_factor,
+        )
 
 
 def _activation_checkpoint_action(policy: KTActivationPolicy, phase: str) -> str:
@@ -164,6 +286,26 @@ class KTMoELayerWrapper(nn.Module):
         else:
             setattr(self, router_attr, original_router)
         self._router_attr = router_attr
+        self._deepseek_routing_spec: DeepSeekRoutingSpec | None = None
+        if self.router_type == "deepseek_gate" and self._original_router is not None:
+            self._deepseek_routing_spec = DeepSeekRoutingSpec.from_modules(
+                moe=original_moe,
+                router=self._original_router,
+                expert_num=moe_config.expert_num,
+            )
+            correction_bias = getattr(
+                self._original_router,
+                "e_score_correction_bias",
+                None,
+            )
+            if not isinstance(correction_bias, torch.Tensor) or tuple(
+                correction_bias.shape
+            ) != (int(moe_config.expert_num),):
+                raise ValueError(
+                    f"Layer {layer_idx}: DeepSeek correction bias must have shape "
+                    f"({moe_config.expert_num},), got "
+                    f"{getattr(correction_bias, 'shape', None)}"
+                )
 
         # 2. experts SECOND (this is what PEFT targets for LoRA)
         experts_attr = moe_config.experts_attr  # typically "experts"
@@ -285,11 +427,6 @@ class KTMoELayerWrapper(nn.Module):
         import torch.distributed as dist
 
         dist_on = dist.is_initialized() and dist.get_world_size() > 1
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
-        # Check if we need to use distributed broadcast (only rank 0 has KT kernel)
-        use_broadcast = dist_on and self.wrapper is None
-
         with torch.profiler.record_function("kt.sft.routing"):
             topk_ids, topk_weights = self._compute_routing(hidden_states)
 
@@ -497,6 +634,11 @@ class KTMoELayerWrapper(nn.Module):
                 orig_router = self._original_router
                 router_logits = router(hidden_states.view(-1, self.hidden_size))
                 if self.router_type == "deepseek_gate":
+                    spec = self._deepseek_routing_spec
+                    if spec is None:
+                        raise RuntimeError(
+                            f"Layer {self.layer_idx}: DeepSeek routing spec was not initialized"
+                        )
                     router_probs = torch.sigmoid(router_logits.float())
                     correction_bias = getattr(orig_router, "e_score_correction_bias", None)
                     if correction_bias is None:
@@ -509,29 +651,46 @@ class KTMoELayerWrapper(nn.Module):
                         device=router_probs.device,
                         dtype=router_probs.dtype,
                     )
-                    n_group = getattr(orig_router, "n_group", 1)
-                    topk_group = getattr(orig_router, "topk_group", n_group)
-                    expert_num = self.moe_config.expert_num
                     group_scores = (
-                        scores_for_choice.view(-1, n_group, expert_num // n_group)
+                        scores_for_choice.view(
+                            -1,
+                            spec.n_group,
+                            spec.expert_num // spec.n_group,
+                        )
                         .topk(2, dim=-1)[0]
                         .sum(dim=-1)
                     )
-                    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]
+                    group_idx = torch.topk(
+                        group_scores,
+                        k=spec.topk_group,
+                        dim=-1,
+                        sorted=False,
+                    )[1]
                     group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
                     group_mask.scatter_(1, group_idx, True)
                     score_mask = (
                         group_mask.unsqueeze(-1)
-                        .expand(-1, n_group, expert_num // n_group)
-                        .reshape(-1, expert_num)
+                        .expand(
+                            -1,
+                            spec.n_group,
+                            spec.expert_num // spec.n_group,
+                        )
+                        .reshape(-1, spec.expert_num)
                     )
-                    scores_for_choice = scores_for_choice.masked_fill(~score_mask, float("-inf"))
-                    top_k = getattr(orig_router, "top_k", self.moe_config.num_experts_per_tok)
-                    topk_ids = torch.topk(scores_for_choice, k=top_k, dim=-1, sorted=False)[1]
+                    scores_for_choice = scores_for_choice.masked_fill(
+                        ~score_mask,
+                        0.0,
+                    )
+                    topk_ids = torch.topk(
+                        scores_for_choice,
+                        k=spec.top_k,
+                        dim=-1,
+                        sorted=False,
+                    )[1]
                     topk_weights = router_probs.gather(1, topk_ids)
-                    if getattr(orig_router, "norm_topk_prob", True):
+                    if spec.norm_topk_prob:
                         topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
-                    topk_weights = topk_weights * getattr(orig_router, "routed_scaling_factor", 1.0)
+                    topk_weights = topk_weights * spec.routed_scaling_factor
                     return finish(topk_ids, topk_weights)
 
                 if self.router_type == "glm4_moe_gate":
