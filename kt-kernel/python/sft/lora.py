@@ -224,10 +224,11 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         if experts is None:
             continue
 
-        # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
-        # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init
-        # and wrap them as nn.Parameter objects for optimizer injection.
-        if getattr(wrapper, "_fused_experts", False):
+        # Packed experts, or an explicitly forced offloaded expert path, use
+        # KT-managed contiguous LoRA buffers.
+        if getattr(wrapper, "_use_fused_expert_lora", False) or getattr(
+            wrapper, "_fused_experts", False
+        ):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
             authoritative_mode = bool(getattr(wrapper, "_uses_authoritative_optimizer_grads", False))
 
@@ -825,7 +826,9 @@ def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
-    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_fused_lora = any(
+        bool(getattr(w, "_fused_expert_lora_params", None)) for w in wrappers
+    )
     has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
 
     if has_full_weights:
@@ -849,7 +852,7 @@ def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
     tensors = {}
     for w in wrappers:
         fused = getattr(w, "_fused_expert_lora_params", None)
-        if fused is None:
+        if not fused:
             continue
         for param, name in zip(fused, names):
             key = f"layers.{w.layer_idx}.experts.{name}"
@@ -861,42 +864,73 @@ def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
         logger.info(f"[save_kt_moe] Saved {len(tensors)} fused expert LoRA tensors to {path}")
 
 
-def _load_fused_expert_lora(wrappers: list, adapter_path: str) -> None:
-    """Load fused expert LoRA params from a safetensors file into existing wrapper buffers."""
+def _load_fused_expert_lora(wrappers: list, adapter_path: str) -> int:
+    """Strictly load fused expert LoRA tensors into rank-owned buffers."""
+    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
+    owned_wrappers = {}
+    expected = {}
+    for wrapper in wrappers:
+        fused = getattr(wrapper, "_fused_expert_lora_params", None)
+        if not fused:
+            continue
+        if len(fused) != len(names):
+            raise RuntimeError(
+                f"Layer {wrapper.layer_idx}: expected {len(names)} fused expert LoRA "
+                f"parameters, found {len(fused)}"
+            )
+        if wrapper.layer_idx in owned_wrappers:
+            raise RuntimeError(
+                f"Duplicate owned fused expert LoRA layer {wrapper.layer_idx}"
+            )
+        owned_wrappers[wrapper.layer_idx] = wrapper
+        for param, name in zip(fused, names):
+            expected[f"layers.{wrapper.layer_idx}.experts.{name}"] = (wrapper, param)
+
+    if not expected:
+        return 0
+
     path = os.path.join(adapter_path, "fused_expert_lora.safetensors")
     if not os.path.isfile(path):
-        logger.warning(f"No fused_expert_lora.safetensors found at {adapter_path}")
-        return
+        raise FileNotFoundError(
+            f"Missing fused_expert_lora.safetensors in adapter {adapter_path}"
+        )
 
     from safetensors.torch import load_file
 
     saved = load_file(path)
-    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
-    wrapper_map = {w.layer_idx: w for w in wrappers}
-    loaded_count = 0
+    actual_keys = set(saved)
+    expected_keys = set(expected)
+    missing_keys = sorted(expected_keys - actual_keys)
+    unexpected_keys = sorted(actual_keys - expected_keys)
+    if missing_keys or unexpected_keys:
+        details = []
+        if missing_keys:
+            details.append(f"missing={missing_keys}")
+        if unexpected_keys:
+            details.append(f"unexpected={unexpected_keys}")
+        raise RuntimeError(
+            "Invalid fused_expert_lora.safetensors key set: " + ", ".join(details)
+        )
 
-    for key, tensor in saved.items():
-        parts = key.split(".")
-        if len(parts) != 4 or parts[0] != "layers" or parts[2] != "experts":
-            logger.warning(f"Unexpected key in fused_expert_lora.safetensors: {key}")
-            continue
-        layer_idx = int(parts[1])
-        name = parts[3]
-        if name not in names:
-            continue
+    for key, (_, param) in expected.items():
+        tensor = saved[key]
+        if tensor.shape != param.shape:
+            raise RuntimeError(
+                f"{key} shape mismatch: expected {tuple(param.shape)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != param.dtype:
+            raise RuntimeError(
+                f"{key} dtype mismatch: expected {param.dtype}, got {tensor.dtype}"
+            )
 
-        wrapper = wrapper_map.get(layer_idx)
-        if wrapper is None:
-            continue
-        fused = getattr(wrapper, "_fused_expert_lora_params", None)
-        if fused is None:
-            continue
+    for key, (wrapper, param) in expected.items():
+        param.data.copy_(saved[key])
+        wrapper._lora_pointers_dirty = True
 
-        param_idx = names.index(name)
-        fused[param_idx].data.copy_(tensor)
-        loaded_count += 1
-
+    loaded_count = len(expected)
     logger.info(f"[_load_fused_expert_lora] Loaded {loaded_count} tensors from {path}")
+    return loaded_count
 
 
 def load_lora_experts_from_adapter(model: nn.Module, adapter_path: str) -> None:
@@ -976,7 +1010,9 @@ def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
-    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_fused_lora = any(
+        bool(getattr(w, "_fused_expert_lora_params", None)) for w in wrappers
+    )
     has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
 
     if has_full_weights:

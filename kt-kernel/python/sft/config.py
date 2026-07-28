@@ -237,6 +237,7 @@ class KTConfig:
     kt_skip_expert_loading: bool | None = None
     kt_share_backward_bb: bool | None = None  # default True — always saves memory
     kt_share_cache_pool: bool | None = None  # auto-set by trainer_config_process, not user-facing
+    kt_force_fused_expert_lora: bool | None = None
 
     # Cache
     kt_max_cache_depth: int | None = None
@@ -364,6 +365,10 @@ class KTConfig:
             self.kt_share_backward_bb = _env_bool("ACCELERATE_KT_SHARE_BACKWARD_BB", True)
         if self.kt_share_cache_pool is None:
             self.kt_share_cache_pool = False
+        if self.kt_force_fused_expert_lora is None:
+            self.kt_force_fused_expert_lora = _env_bool(
+                "ACCELERATE_KT_FORCE_FUSED_EXPERT_LORA", False
+            )
         if self.kt_use_lora_experts is None:
             self.kt_use_lora_experts = _env_bool("ACCELERATE_KT_USE_LORA_EXPERTS", False)
         if self.kt_lora_expert_num is None:

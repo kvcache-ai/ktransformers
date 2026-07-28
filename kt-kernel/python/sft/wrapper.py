@@ -263,6 +263,13 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
+    force_fused_expert_lora = bool(
+        getattr(cfg, "kt_force_fused_expert_lora", False)
+    )
+    if force_fused_expert_lora and "SkipLoRA" in kt_method:
+        raise KTAMXConfigError(
+            "kt_force_fused_expert_lora is incompatible with SkipLoRA backends"
+        )
     requested_num_gpu_experts = int(getattr(cfg, "kt_num_gpu_experts", 0) or 0)
     expert_weight_format = getattr(cfg, "kt_expert_weight_format", None)
     if expert_weight_format == "int8":
@@ -440,8 +447,24 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
 
         _layer_experts = getattr(moe_module, moe_config.experts_attr, None)
         _layer_is_fused = _detect_fused(_layer_experts)
+        if (
+            expert_weight_format == "int8"
+            and not _layer_is_fused
+            and not force_fused_expert_lora
+        ):
+            raise KTAMXConfigError(
+                "INT8 LoRA with non-fused experts requires "
+                "kt_force_fused_expert_lora=true"
+            )
+        _use_fused_expert_lora = _layer_is_fused or force_fused_expert_lora
 
-        logger.debug(f"Wrapping MoE layer {layer_idx} (method={kt_method}, fused={_layer_is_fused})")
+        logger.debug(
+            "Wrapping MoE layer %s (method=%s, fused=%s, force_fused_lora=%s)",
+            layer_idx,
+            kt_method,
+            _layer_is_fused,
+            force_fused_expert_lora,
+        )
 
         # Only rank 0 loads weights and initializes KT kernel
         gate_proj, up_proj, down_proj = None, None, None
@@ -640,6 +663,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             activation_policy=activation_policy,
         )
         layer_wrapper._fused_experts = _layer_is_fused
+        layer_wrapper._use_fused_expert_lora = _use_fused_expert_lora
+        layer_wrapper._force_fused_expert_lora = force_fused_expert_lora
         layer_wrapper._lora_rank = lora_rank
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
@@ -733,6 +758,7 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_expert_weight_format=getattr(model_args, "kt_expert_weight_format", None),
         kt_weight_lifecycle=getattr(model_args, "kt_weight_lifecycle", None),
         kt_expert_checkpoint_path=getattr(model_args, "kt_expert_checkpoint_path", None),
+        kt_force_fused_expert_lora=getattr(model_args, "kt_force_fused_expert_lora", None),
         kt_use_lora_experts=getattr(model_args, "kt_use_lora_experts", None),
         kt_lora_expert_num=getattr(model_args, "kt_lora_expert_num", None),
         kt_lora_expert_intermediate_size=getattr(model_args, "kt_lora_expert_intermediate_size", None),
