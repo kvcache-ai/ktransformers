@@ -519,7 +519,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__int8_kernel__") = "amx-int8";
 #elif defined(__AVX512BF16__) && defined(__AVX512VNNI__)
   m.attr("__cpu_variant__") = "avx512_bf16";
-  m.attr("__int8_kernel__") = "avx512-vnni";
+  m.attr("__int8_kernel__") = amx::int8_vnni_backend_name();
 #elif defined(__AVX512VBMI__)
   m.attr("__cpu_variant__") = "avx512_vbmi";
   m.attr("__int8_kernel__") = "unsupported";

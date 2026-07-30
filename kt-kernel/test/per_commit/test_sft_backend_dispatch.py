@@ -37,6 +37,7 @@ def _install_fake_runtime(
     [
         ("amx", "amx-int8"),
         ("avx512_bf16", "avx512-vnni"),
+        ("avx512_bf16", "onednn-vnni"),
     ],
 )
 def test_int8_runtime_reports_effective_kernel(monkeypatch, variant, kernel):

@@ -31,6 +31,7 @@ Example usage:
 Environment Variables:
     KT_KERNEL_CPU_VARIANT: Override automatic detection ('amx', 'avx512', 'avx2')
     KT_KERNEL_DEBUG: Enable debug output ('1' to enable)
+    KT_INT8_VNNI_BACKEND: Select the AVX512 INT8 backend ('auto', 'onednn', or 'native')
 """
 
 from __future__ import annotations

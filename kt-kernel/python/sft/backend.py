@@ -74,9 +74,10 @@ def get_int8_runtime() -> INT8Runtime:
     cpu_variant = str(extension.__cpu_variant__).lower()
     kernel = str(extension.__int8_kernel__).lower()
 
-    if kernel not in {"amx-int8", "avx512-vnni"}:
+    if kernel not in {"amx-int8", "avx512-vnni", "onednn-vnni"}:
         raise RuntimeError(
-            "INT8 SFT requires an AMX-INT8 or AVX512-VNNI+BF16 extension; "
+            "INT8 SFT requires an AMX-INT8 or AVX512-VNNI+BF16 extension "
+            "(native or oneDNN); "
             f"loaded cpu_variant={cpu_variant!r}, effective_kernel={kernel!r}"
         )
 
