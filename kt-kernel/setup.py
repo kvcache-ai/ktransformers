@@ -717,7 +717,13 @@ class CMakeBuild(build_ext):
                     )
                 return selected
 
-            archs_env = os.environ.get("CPUINFER_CUDA_ARCHS", "").strip() or _default_cuda_archs()
+            # Only derive a default when the variable is absent: an explicitly
+            # empty CPUINFER_CUDA_ARCHS is the documented way to suppress
+            # -DCMAKE_CUDA_ARCHITECTURES entirely, so keep honoring it.
+            if "CPUINFER_CUDA_ARCHS" in os.environ:
+                archs_env = os.environ["CPUINFER_CUDA_ARCHS"].strip()
+            else:
+                archs_env = _default_cuda_archs()
             if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
                 cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
                 print(f"-- Set CUDA architectures: {archs_env}")
