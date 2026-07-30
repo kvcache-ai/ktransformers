@@ -2906,8 +2906,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           auto& dst_bb = (proj == 0) ? gate_backward_bb_[expert_idx] : up_backward_bb_[expert_idx];
 
           if constexpr (has_bb_transposed_repack_v<T>) {
-            int nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+            if constexpr (kIsInt8Backend) {
+              dst_bb->repack_from_bb_transposed(*src_bb);
+            } else {
+              int nth = T::recommended_nth(dst_bb->n);
+              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+            }
           } else {
             thread_local std::vector<ggml_bf16_t> workspace;
             workspace.resize((size_t)src_bb->n * src_bb->k);
@@ -2928,8 +2932,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           auto& dst_bb = down_backward_bb_[task_id];
 
           if constexpr (has_bb_transposed_repack_v<T>) {
-            int nth = T::recommended_nth(dst_bb->n);
-            for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+            if constexpr (kIsInt8Backend) {
+              dst_bb->repack_from_bb_transposed(*src_bb);
+            } else {
+              int nth = T::recommended_nth(dst_bb->n);
+              for (int p = 0; p < nth; p++) dst_bb->from_bb_transposed(*src_bb, p, nth);
+            }
           } else {
             thread_local std::vector<ggml_bf16_t> workspace;
             workspace.resize((size_t)src_bb->n * src_bb->k);
@@ -3017,6 +3025,20 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     backward_weights_prepared_ = false;
     prepare_backward_weights_from_forward();
     // backward_weights_prepared_ = true is set inside prepare_backward_weights_from_forward()
+
+#if defined(KTRANSFORMERS_USE_ONEDNN_VNNI)
+    if constexpr (kIsInt8Backend) {
+      if (amx::int8_vnni_backend() == amx::Int8VnniBackend::OneDnn) {
+        for (int expert_idx = 0; expert_idx < config_.expert_num; ++expert_idx) {
+          if (!gate_backward_bb_[expert_idx]->has_ready_compensation() ||
+              !up_backward_bb_[expert_idx]->has_ready_compensation() ||
+              !down_backward_bb_[expert_idx]->has_ready_compensation()) {
+            throw std::runtime_error("backward BufferB owner cannot be published before oneDNN compensation");
+          }
+        }
+      }
+    }
+#endif
 
     auto& shared = SFTSharedPools::instance();
     shared.ensure_numa_count(tp_part_idx + 1);

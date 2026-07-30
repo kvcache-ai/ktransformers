@@ -1081,6 +1081,7 @@ struct GemmKernel224Int8 {
     float* d;
     int n, k;
     std::atomic<bool> compensation_ready{false};
+    std::atomic<bool> compensation_repack_in_progress{false};
     std::mutex compensation_mutex;
     std::vector<int32_t> compensation;
     static constexpr bool SCALE = true;
@@ -1253,7 +1254,8 @@ struct GemmKernel224Int8 {
      *   Pass 2: 8 sub-blocks of 16×16: dequant → register transpose → quantize → VNNI-pack
      */
     void from_bb_transposed(const BufferB& src, int ith, int nth) {
-      compensation_ready.store(false, std::memory_order_relaxed);
+      const bool fuse_compensation = compensation_repack_in_progress.load(std::memory_order_acquire);
+      if (!fuse_compensation) compensation_ready.store(false, std::memory_order_relaxed);
       assert(n == src.k && k == src.n);
 
       auto [n_start, n_end] = split_range_n(n, ith, nth);
@@ -1317,6 +1319,8 @@ struct GemmKernel224Int8 {
 
       // === Pass 2: register-based 16×16 sub-block transpose ===
       alignas(64) int8_t quant_tile[N_STEP * K_STEP];  // 2KB
+      alignas(64) int32_t block_compensation[N_BLOCK];
+      if (fuse_compensation) memset(block_compensation, 0, dst_nb_size * sizeof(int32_t));
 
       for (int dn = 0; dn < dst_nb_size; dn += N_STEP) {
         for (int dk_block = 0; dk_block < k; dk_block += K_BLOCK) {
@@ -1355,8 +1359,12 @@ struct GemmKernel224Int8 {
                     float sv = d[abs_dn + dest_rb + i];
                     float id = sv ? 1.0f / sv : 0.0f;
                     __m512i q = _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_castsi512_ps(regs[i]), _mm512_set1_ps(id)));
-                    _mm_store_si128((__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb),
-                                    _mm512_cvtsepi32_epi8(q));
+                    __m128i q8 = _mm512_cvtsepi32_epi8(q);
+                    _mm_store_si128((__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb), q8);
+                    if (fuse_compensation) {
+                      const int32_t sum = _mm512_reduce_add_epi32(_mm512_cvtepi8_epi32(q8));
+                      block_compensation[dn + dest_rb + i] -= 128 * sum;
+                    }
                   }
                 }
               }
@@ -1372,6 +1380,44 @@ struct GemmKernel224Int8 {
           }
         }
       }
+
+      if (fuse_compensation) {
+        std::copy_n(block_compensation, dst_nb_size, compensation.data() + dst_nb_begin);
+      }
+    }
+
+    void repack_from_bb_transposed(const BufferB& src) {
+      bool build_compensation = false;
+#if defined(KTRANSFORMERS_USE_ONEDNN_VNNI)
+      build_compensation = int8_vnni_backend() == Int8VnniBackend::OneDnn;
+#endif
+
+      if (build_compensation) {
+        std::lock_guard<std::mutex> guard(compensation_mutex);
+        if (compensation_repack_in_progress.load(std::memory_order_relaxed)) {
+          throw std::runtime_error("INT8 BufferB compensation repack is already in progress");
+        }
+        compensation_ready.store(false, std::memory_order_relaxed);
+        compensation.assign(n, 0);
+        compensation_repack_in_progress.store(true, std::memory_order_release);
+      } else {
+        compensation_ready.store(false, std::memory_order_relaxed);
+      }
+
+      try {
+        const int nth = recommended_nth(n);
+        for (int ith = 0; ith < nth; ++ith) from_bb_transposed(src, ith, nth);
+      } catch (...) {
+        compensation_repack_in_progress.store(false, std::memory_order_release);
+        compensation_ready.store(false, std::memory_order_release);
+        throw;
+      }
+
+      if (build_compensation) {
+        std::lock_guard<std::mutex> guard(compensation_mutex);
+        compensation_repack_in_progress.store(false, std::memory_order_release);
+        compensation_ready.store(true, std::memory_order_release);
+      }
     }
 
     int8_t* get_submat(int n, int k, int n_begin, int k_begin) {
@@ -1386,10 +1432,15 @@ struct GemmKernel224Int8 {
 
     float* get_scale(int n, int n_begin) { return d + n_begin; }
 
+    bool has_ready_compensation() const { return compensation_ready.load(std::memory_order_acquire); }
+
     const int32_t* get_onednn_compensation(int n_begin) {
       if (!compensation_ready.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> guard(compensation_mutex);
         if (!compensation_ready.load(std::memory_order_relaxed)) {
+          if (compensation_repack_in_progress.load(std::memory_order_acquire)) {
+            throw std::runtime_error("oneDNN compensation requested while INT8 BufferB repack is in progress");
+          }
           compensation.assign(n, 0);
           for (int tile_n = 0; tile_n < n; tile_n += N_STEP) {
             for (int block_k = 0; block_k < k; block_k += K_BLOCK) {

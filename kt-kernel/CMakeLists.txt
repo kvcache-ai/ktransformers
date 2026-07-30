@@ -448,7 +448,7 @@ if(HOST_IS_X86)
                 get_filename_component(test_name ${test_src} NAME_WE)
                 add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
                 target_compile_options(${test_name} PRIVATE ${ARCH_FLAGS})
-                target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
+                target_link_libraries(${test_name} PRIVATE llama OpenMP::OpenMP_CXX numa)
             endforeach()
         endif()
 
