@@ -169,6 +169,54 @@ BUILTIN_MODELS: list[ModelInfo] = [
         description_zh="MiniMax M2.1 MoE 模型（增强多语言编程能力）",
         max_tensor_parallel_size=4,  # M2.1 only supports up to 4-way tensor parallelism
     ),
+    ModelInfo(
+        name="MiniMax-M3",
+        hf_repo="MiniMaxAI/MiniMax-M3-MXFP8",
+        aliases=["minimax-m3", "m3"],
+        type="moe",
+        default_params={
+            "kt-method": "MXFP8",
+            "kt-gpu-prefill-token-threshold": 500,
+            "attention-backend": "flashinfer",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 8192,
+            "mem-fraction-static": 0.55,
+            "watchdog-timeout": 3000,
+            "served-model-name": "MiniMax-M3",
+            "disable-shared-experts-fusion": True,
+            "tool-call-parser": "minimax-m3",
+            "reasoning-parser": "minimax-m3",
+            "quantization": "mxfp8",
+            "moe-runner-backend": "triton",
+        },
+        description="MiniMax M3 MoE model (native MXFP8 experts, 128 routed experts)",
+        description_zh="MiniMax M3 MoE 模型（原生 MXFP8 专家，128 路由专家）",
+        max_tensor_parallel_size=8,  # M3 supports up to 8-way tensor parallelism
+    ),
+    ModelInfo(
+        name="MiniMax-M2.7",
+        hf_repo="MiniMaxAI/MiniMax-M2.7",
+        aliases=["minimax-m2.7", "m2.7"],
+        type="moe",
+        default_params={
+            "kt-method": "FP8",
+            "kt-gpu-prefill-token-threshold": 4096,
+            "attention-backend": "flashinfer",
+            "max-total-tokens": 100000,
+            "max-running-requests": 16,
+            "chunked-prefill-size": 32768,
+            "mem-fraction-static": 0.80,
+            "watchdog-timeout": 3000,
+            "served-model-name": "MiniMax-M2.7",
+            "disable-shared-experts-fusion": True,
+            "tool-call-parser": "minimax-m2",
+            "reasoning-parser": "minimax-append-think",
+        },
+        description="MiniMax M2.7 MoE model",
+        description_zh="MiniMax M2.7 MoE 模型",
+        max_tensor_parallel_size=4,  # M2.7 follows the M2 family 4-way tensor parallelism limit
+    ),
 ]
 
 
@@ -412,7 +460,7 @@ def compute_kimi_k2_thinking_gpu_experts(tensor_parallel_size: int, vram_per_gpu
 
 
 def compute_minimax_m2_gpu_experts(tensor_parallel_size: int, vram_per_gpu_gb: float) -> int:
-    """Compute kt-num-gpu-experts for MiniMax M2/M2.1."""
+    """Compute kt-num-gpu-experts for MiniMax M2/M2.1/M2.7 and M3 (FP8/MXFP8, ~1 byte/param)."""
     per_gpu_gb = 16
     if vram_per_gpu_gb < per_gpu_gb:
         return int(0)
@@ -430,4 +478,6 @@ MODEL_COMPUTE_FUNCTIONS: dict[str, Callable[[int, float], int]] = {
     "Kimi-K2-Thinking": compute_kimi_k2_thinking_gpu_experts,
     "MiniMax-M2": compute_minimax_m2_gpu_experts,
     "MiniMax-M2.1": compute_minimax_m2_gpu_experts,  # Same as M2
+    "MiniMax-M3": compute_minimax_m2_gpu_experts,  # MXFP8 ~1 byte/param, same budget as FP8 M2
+    "MiniMax-M2.7": compute_minimax_m2_gpu_experts,  # Same as M2
 }
