@@ -6,6 +6,7 @@ from __future__ import annotations
 import gc
 import importlib.util as _u
 import logging
+import os
 from typing import Any
 
 import torch
@@ -205,6 +206,8 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     lora_rank = _raw_rank if _raw_rank is not None else 1
     _raw_alpha = getattr(cfg, "kt_lora_alpha", None)
     lora_alpha = _raw_alpha if _raw_alpha is not None else 1.0
+    _raw_dropout = getattr(cfg, "kt_lora_dropout", None)
+    lora_dropout = _raw_dropout if _raw_dropout is not None else 0.0
 
     # Read full_weight_grad mode
     _raw_fwg = getattr(cfg, "kt_full_weight_grad", None)
@@ -620,6 +623,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
                     mode="sft",
                     lora_rank=lora_rank,
                     lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
                     max_cache_depth=getattr(cfg, "kt_max_cache_depth", 2),
                     full_weight_grad=full_weight_grad,
                 )
@@ -821,9 +825,11 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
 
     configured_lora_rank = getattr(finetuning_args, "lora_rank", None) if finetuning_args else None
     configured_lora_alpha = getattr(finetuning_args, "lora_alpha", None) if finetuning_args else None
+    configured_lora_dropout = getattr(finetuning_args, "lora_dropout", None) if finetuning_args else None
     if kt_train_mode == "full":
         configured_lora_rank = None
         configured_lora_alpha = None
+        configured_lora_dropout = None
 
     kt_config = KTConfig(
         kt_backend=getattr(model_args, "kt_backend", None),
@@ -842,6 +848,7 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_lora_expert_intermediate_size=getattr(model_args, "kt_lora_expert_intermediate_size", None),
         kt_lora_rank=configured_lora_rank,
         kt_lora_alpha=configured_lora_alpha,
+        kt_lora_dropout=configured_lora_dropout,
         kt_model_max_length=getattr(model_args, "model_max_length", None),
         kt_train_mode=kt_train_mode,
         kt_activation_policy=getattr(model_args, "activation_policy", None),
@@ -879,29 +886,45 @@ def _resolve_checkpoint_files(
 ) -> tuple[list[str] | None, dict | None]:
     """Resolve HF checkpoint files. Depends on transformers internals."""
     try:
+        import inspect
+
         from transformers.modeling_utils import _get_resolved_checkpoint_files
     except Exception:
         return None, None
     try:
-        checkpoint_files, sharded_metadata = _get_resolved_checkpoint_files(
-            pretrained_model_name_or_path=model_name_or_path,
-            subfolder="",
-            variant=None,
-            gguf_file=None,
-            from_tf=False,
-            from_flax=False,
-            use_safetensors=None,
-            cache_dir=cache_dir,
-            force_download=False,
-            proxies=None,
-            local_files_only=False,
-            token=token,
-            user_agent={"file_type": "model", "framework": "pytorch"},
-            revision=revision or "main",
-            commit_hash=None,
-            is_remote_code=bool(trust_remote_code),
-            transformers_explicit_filename=None,
-        )
+        common = {
+            "pretrained_model_name_or_path": model_name_or_path,
+            "variant": None,
+            "gguf_file": None,
+            "use_safetensors": None,
+            "user_agent": {"file_type": "model", "framework": "pytorch"},
+            "is_remote_code": bool(trust_remote_code),
+            "transformers_explicit_filename": None,
+        }
+        if "download_kwargs" in inspect.signature(_get_resolved_checkpoint_files).parameters:
+            common["download_kwargs"] = {
+                "cache_dir": cache_dir,
+                "force_download": False,
+                "local_files_only": False,
+                "token": token,
+                "revision": revision or "main",
+                "subfolder": "",
+            }
+            checkpoint_files, sharded_metadata = _get_resolved_checkpoint_files(**common)
+        else:
+            checkpoint_files, sharded_metadata = _get_resolved_checkpoint_files(
+                **common,
+                subfolder="",
+                from_tf=False,
+                from_flax=False,
+                cache_dir=cache_dir,
+                force_download=False,
+                proxies=None,
+                local_files_only=False,
+                token=token,
+                revision=revision or "main",
+                commit_hash=None,
+            )
     except Exception:
         return None, None
     return checkpoint_files, sharded_metadata
@@ -976,7 +999,16 @@ def load_kt_model(
             setattr(kt_plugin, "kt_expert_checkpoint_path", auto_full_weight_checkpoint)
         logger.info("Detected KT Full checkpoint in model directory: %s", auto_full_weight_checkpoint)
 
-    if getattr(cfg, "kt_skip_expert_loading", None) is None:
+    skip_expert_loading = getattr(cfg, "kt_skip_expert_loading", None)
+    needs_checkpoint_resolution = (
+        skip_expert_loading is None
+        or (
+            bool(skip_expert_loading)
+            and not getattr(cfg, "kt_checkpoint_files", None)
+            and not getattr(cfg, "kt_weight_path", None)
+        )
+    )
+    if needs_checkpoint_resolution:
         checkpoint_files, sharded_metadata = _resolve_checkpoint_files(
             model_name_or_path=model_name_or_path,
             cache_dir=cache_dir,
@@ -1001,7 +1033,8 @@ def load_kt_model(
         unset_kt_config()
 
     moe_config = get_moe_arch_config(config)
-    move_non_experts_to_gpu(model, moe_config, device="cuda:0")
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    move_non_experts_to_gpu(model, moe_config, device=f"cuda:{local_rank}")
 
     existing_wrappers = getattr(model, "_kt_wrappers", None)
     if existing_wrappers:

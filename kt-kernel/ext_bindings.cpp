@@ -45,12 +45,12 @@ static const bool _is_plain_ = false;
 #include "operators/amx/awq-moe.hpp"
 #include "operators/amx/bf16-moe.hpp"            // Native BF16 MoE using CRTP pattern, with fallback for AVX512F
 #include "operators/amx/fp4-moe.hpp"             // MXFP4 MoE: FP4 E2M1 weights × BF16 activations
-#include "operators/amx/mxfp8-moe.hpp"           // MXFP8 MoE: FP8 E4M3fn weights × BF16 activations (MiniMax M3)
 #include "operators/amx/fp8-moe.hpp"             // FP8 MoE requires AVX512 BF16 support, with fallback for AVX512F+BW
 #include "operators/amx/fp8-perchannel-moe.hpp"  // FP8 Per-Channel MoE for GLM-4.7-FP8
 #include "operators/amx/k2-moe.hpp"
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
+#include "operators/amx/mxfp8-moe.hpp"  // MXFP8 MoE: FP8 E4M3fn weights × BF16 activations (MiniMax M3)
 #include "operators/amx/sft_moe.hpp"
 #include "operators/moe-sft-tp.hpp"
 #endif
@@ -339,24 +339,30 @@ class MOESFTBindings {
       args_->cpuinfer->enqueue(&TP_MOE_SFT<T>::backward_binding, args_->moe, args_->grad_output, args_->grad_input,
                                args_->grad_gate_lora_a, args_->grad_gate_lora_b, args_->grad_up_lora_a,
                                args_->grad_up_lora_b, args_->grad_down_lora_a, args_->grad_down_lora_b,
-                               args_->grad_weights, args_->grad_gate_proj, args_->grad_up_proj,
-                               args_->grad_down_proj, args_->accumulate_optimizer_grads,
-                               args_->optimizer_grad_scale);
+                               args_->grad_weights, args_->grad_gate_proj, args_->grad_up_proj, args_->grad_down_proj,
+                               args_->accumulate_optimizer_grads, args_->optimizer_grad_scale);
     }
-    static std::pair<intptr_t, intptr_t> cpuinfer_interface(std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t grad_output,
-                                                            intptr_t grad_input, intptr_t grad_gate_lora_a,
-                                                            intptr_t grad_gate_lora_b, intptr_t grad_up_lora_a,
-                                                            intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
-                                                            intptr_t grad_down_lora_b, intptr_t grad_weights,
-                                                            intptr_t grad_gate_proj, intptr_t grad_up_proj,
-                                                            intptr_t grad_down_proj,
-                                                            bool accumulate_optimizer_grads = false,
-                                                            float optimizer_grad_scale = 1.0f) {
-      Args* args = new Args{nullptr,          moe.get(),        grad_output,    grad_input,
-                            grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
-                            grad_down_lora_a, grad_down_lora_b, grad_weights,
-                            grad_gate_proj,   grad_up_proj,     grad_down_proj,
-                            accumulate_optimizer_grads, optimizer_grad_scale};
+    static std::pair<intptr_t, intptr_t> cpuinfer_interface(
+        std::shared_ptr<TP_MOE_SFT<T>> moe, intptr_t grad_output, intptr_t grad_input, intptr_t grad_gate_lora_a,
+        intptr_t grad_gate_lora_b, intptr_t grad_up_lora_a, intptr_t grad_up_lora_b, intptr_t grad_down_lora_a,
+        intptr_t grad_down_lora_b, intptr_t grad_weights, intptr_t grad_gate_proj, intptr_t grad_up_proj,
+        intptr_t grad_down_proj, bool accumulate_optimizer_grads = false, float optimizer_grad_scale = 1.0f) {
+      Args* args = new Args{nullptr,
+                            moe.get(),
+                            grad_output,
+                            grad_input,
+                            grad_gate_lora_a,
+                            grad_gate_lora_b,
+                            grad_up_lora_a,
+                            grad_up_lora_b,
+                            grad_down_lora_a,
+                            grad_down_lora_b,
+                            grad_weights,
+                            grad_gate_proj,
+                            grad_up_proj,
+                            grad_down_proj,
+                            accumulate_optimizer_grads,
+                            optimizer_grad_scale};
       return std::make_pair((intptr_t)&inner, (intptr_t)args);
     }
   };
@@ -407,20 +413,18 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
       .def("warm_up_task", &MoeBindings::WarmUpBindings::cpuinfer_interface)
       .def("load_weights_task", &MoeBindings::LoadWeightsBindings::cpuinfer_interface)
       .def("forward_sft_task", &MoeBindings::ForwardSFTBindings::cpuinfer_interface)
-      .def("backward_task", &MoeBindings::BackwardBindings::cpuinfer_interface,
-           py::arg("grad_output"), py::arg("grad_input"), py::arg("grad_gate_lora_a"),
-           py::arg("grad_gate_lora_b"), py::arg("grad_up_lora_a"), py::arg("grad_up_lora_b"),
-           py::arg("grad_down_lora_a"), py::arg("grad_down_lora_b"), py::arg("grad_weights"),
+      .def("backward_task", &MoeBindings::BackwardBindings::cpuinfer_interface, py::arg("grad_output"),
+           py::arg("grad_input"), py::arg("grad_gate_lora_a"), py::arg("grad_gate_lora_b"), py::arg("grad_up_lora_a"),
+           py::arg("grad_up_lora_b"), py::arg("grad_down_lora_a"), py::arg("grad_down_lora_b"), py::arg("grad_weights"),
            py::arg("grad_gate_proj"), py::arg("grad_up_proj"), py::arg("grad_down_proj"),
            py::arg("accumulate_optimizer_grads") = false, py::arg("optimizer_grad_scale") = 1.0f)
       .def("update_lora_weights_task", &MoeBindings::UpdateLoRAWeightsBindings::cpuinfer_interface)
       .def("warm_up", &MoeClass::warm_up)
       .def("load_weights", &MoeClass::load_weights)
       .def("forward_sft", &MoeClass::forward_sft_binding)
-      .def("backward", &MoeClass::backward_binding,
-           py::arg("grad_output"), py::arg("grad_input"), py::arg("grad_gate_lora_a"),
-           py::arg("grad_gate_lora_b"), py::arg("grad_up_lora_a"), py::arg("grad_up_lora_b"),
-           py::arg("grad_down_lora_a"), py::arg("grad_down_lora_b"), py::arg("grad_weights"),
+      .def("backward", &MoeClass::backward_binding, py::arg("grad_output"), py::arg("grad_input"),
+           py::arg("grad_gate_lora_a"), py::arg("grad_gate_lora_b"), py::arg("grad_up_lora_a"),
+           py::arg("grad_up_lora_b"), py::arg("grad_down_lora_a"), py::arg("grad_down_lora_b"), py::arg("grad_weights"),
            py::arg("grad_gate_proj"), py::arg("grad_up_proj"), py::arg("grad_down_proj"),
            py::arg("accumulate_optimizer_grads") = false, py::arg("optimizer_grad_scale") = 1.0f)
       .def("update_lora_weights", &MoeClass::update_lora_weights_binding)
@@ -434,10 +438,9 @@ void bind_moe_sft_module(py::module_& moe_module, const char* name) {
       .def("reset_profile_stats", &MoeClass::reset_profile_stats)
       // Update base weight BF16 pointers for reload_base_weights (full mode training)
       // After calling this, call load_weights_task() to re-quantize BF16->AMX
-      .def("set_base_weight_pointers",
-           [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down) {
-             self.set_base_weight_pointers((void*)gate, (void*)up, (void*)down);
-           });
+      .def("set_base_weight_pointers", [](MoeClass& self, intptr_t gate, intptr_t up, intptr_t down) {
+        self.set_base_weight_pointers((void*)gate, (void*)up, (void*)down);
+      });
 }
 #endif  // defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
 
@@ -829,6 +832,7 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       }))
       .def_readwrite("lora_rank", &MOESFTConfig::lora_rank)
       .def_readwrite("lora_alpha", &MOESFTConfig::lora_alpha)
+      .def_readwrite("lora_dropout", &MOESFTConfig::lora_dropout)
       .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_a)
       .DEF_PTR_PROPERTY(MOESFTConfig, gate_lora_b)
       .DEF_PTR_PROPERTY(MOESFTConfig, up_lora_a)

@@ -251,6 +251,7 @@ class KTConfig:
     # LoRA
     kt_lora_rank: int | None = None
     kt_lora_alpha: float | None = None
+    kt_lora_dropout: float | None = None
 
     # Training mode
     kt_train_mode: str | None = None  # "lora" | "full" | "hybrid"
@@ -390,6 +391,12 @@ class KTConfig:
             self.kt_lora_alpha = _env_float("ACCELERATE_KT_LORA_ALPHA", None)
         if self.kt_lora_alpha is None and self.kt_lora_rank is not None:
             self.kt_lora_alpha = float(self.kt_lora_rank * 2)
+        if self.kt_lora_dropout is None:
+            self.kt_lora_dropout = _env_float("ACCELERATE_KT_LORA_DROPOUT", 0.0)
+        if not 0.0 <= self.kt_lora_dropout < 1.0:
+            raise ValueError(
+                f"kt_lora_dropout must be in [0, 1), got {self.kt_lora_dropout}"
+            )
         if self.kt_train_mode is None:
             self.kt_train_mode = os.environ.get("ACCELERATE_KT_TRAIN_MODE", "lora")
         if self.kt_full_weight_grad is None:

@@ -82,6 +82,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         chunked_prefill_size: int,
         lora_rank: int = 16,
         lora_alpha: float = 32.0,
+        lora_dropout: float = 0.0,
         max_cache_depth: int = 1,
         method: str = "AMXBF16_SFT",
         group_size: int = 128,
@@ -107,6 +108,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             chunked_prefill_size=chunked_prefill_size,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
             max_cache_depth=max_cache_depth,
             full_weight_grad=full_weight_grad,
         )
@@ -234,6 +236,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         config.intermediate_size = self.moe_intermediate_size
         config.lora_rank = self.lora_rank
         config.lora_alpha = self.lora_alpha
+        config.lora_dropout = self.lora_dropout
         config.max_cache_depth = self.max_cache_depth
         config.max_len = self._aligned_max_len()
         config.layer_idx = self.layer_idx

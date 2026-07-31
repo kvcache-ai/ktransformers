@@ -201,6 +201,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         chunked_prefill_size: int,
         lora_rank: int = 16,
         lora_alpha: float = 32.0,
+        lora_dropout: float = 0.0,
         max_cache_depth: int = 1,
         full_weight_grad: bool = False,
     ):
@@ -212,7 +213,13 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             moe_intermediate_size=moe_intermediate_size,
             num_experts_per_tok=num_experts_per_tok,
         )
-        self._validate_sft_config(lora_rank, lora_alpha, max_cache_depth, full_weight_grad=full_weight_grad)
+        self._validate_sft_config(
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            max_cache_depth,
+            full_weight_grad=full_weight_grad,
+        )
 
         self.layer_idx = layer_idx
         self.num_experts = num_experts
@@ -226,6 +233,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
         self.lora_scaling = lora_alpha / lora_rank if lora_rank > 0 else 0.0
         self.max_cache_depth = max_cache_depth
 
@@ -412,7 +420,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     @staticmethod
     def _validate_sft_config(
-        lora_rank: int, lora_alpha: float, max_cache_depth: int, full_weight_grad: bool = False
+        lora_rank: int,
+        lora_alpha: float,
+        lora_dropout: float,
+        max_cache_depth: int,
+        full_weight_grad: bool = False,
     ) -> None:
         if not full_weight_grad and lora_rank <= 0:
             raise ValueError(
@@ -421,6 +433,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             )
         if lora_rank > 0 and lora_alpha <= 0:
             raise ValueError(f"lora_alpha must be positive, got {lora_alpha}")
+        if not 0.0 <= lora_dropout < 1.0:
+            raise ValueError(f"lora_dropout must be in [0, 1), got {lora_dropout}")
         if max_cache_depth <= 0:
             raise ValueError(f"max_cache_depth must be positive, got {max_cache_depth}")
 

@@ -29,10 +29,10 @@
 #include "../../cpu_backend/worker_pool.h"
 #include "../sft_profile.hpp"
 #include "ggml.h"
-#include "la/bf16_dweight.hpp"
 #include "la/amx_kernels.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "la/avx_kernels.hpp"
+#include "la/bf16_dweight.hpp"
 #include "moe.hpp"
 
 // =====================================================
@@ -272,6 +272,7 @@ struct ForwardCache {
   int qlen_cache = 0;
   int k_cache = 0;
   int activated_expert_cache = 0;
+  uint64_t lora_dropout_seed = 0;
 
   bool valid = false;
 };
@@ -367,8 +368,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   static constexpr bool kSupportsDirectBf16Reload = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeBaseGrads = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeLoraGrads =
-      !SkipLoRA &&
-      (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend);
+      !SkipLoRA && (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend);
 
  protected:
   using Base = BaseMOE<T>;
@@ -453,6 +453,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   // LoRA configuration (from MOESFTConfig)
   int lora_rank_;
   float lora_scaling_;
+  float lora_dropout_;
+  uint64_t lora_dropout_sequence_ = 0;
+  uint64_t active_lora_dropout_seed_ = 0;
 
   // LoRA weight pointers (directly pointing to Python tensors)
   ggml_bf16_t* gate_lora_a_;  // [expert_num, lora_rank, hidden_size]
@@ -681,6 +684,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Initialize LoRA configuration
     lora_rank_ = config.lora_rank;
     lora_scaling_ = config.lora_scaling();
+    lora_dropout_ = config.lora_dropout;
     max_cache_depth_ = config.max_cache_depth;
 
     // Get LoRA weight pointers
@@ -716,8 +720,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     free_transposed_lora_weights();
   }
 
-  void append_profile_stats(std::map<std::string, double>& out, const std::string& prefix,
-                            bool reset_after = false) {
+  void append_profile_stats(std::map<std::string, double>& out, const std::string& prefix, bool reset_after = false) {
     profiler_.append(out, prefix, reset_after);
   }
 
@@ -933,9 +936,42 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * @param rank LoRA rank (typically 8 or 16)
    * @param alpha LoRA alpha for scaling (lora_scaling = alpha / rank)
    */
-  void set_lora_params(int rank, float alpha) {
+  void set_lora_params(int rank, float alpha, float dropout = 0.0f) {
     lora_rank_ = rank;
     lora_scaling_ = rank > 0 ? alpha / rank : 0.0f;
+    lora_dropout_ = dropout;
+  }
+
+  static uint64_t lora_dropout_mix(uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+  }
+
+  float lora_dropout_channel_scale(uint64_t seed, int expert_idx, int projection, int feature) const {
+    if (lora_dropout_ <= 0.0f) return 1.0f;
+    uint64_t key = seed;
+    key ^= static_cast<uint64_t>(config_.layer_idx + 1) * 0x9e3779b97f4a7c15ULL;
+    key ^= static_cast<uint64_t>(expert_idx + 1) * 0xbf58476d1ce4e5b9ULL;
+    key ^= static_cast<uint64_t>(projection + 1) * 0x94d049bb133111ebULL;
+    key ^= static_cast<uint64_t>(feature + 1) * 0xd6e8feb86659fd93ULL;
+    const double uniform = static_cast<double>(lora_dropout_mix(key) >> 11) * (1.0 / 9007199254740992.0);
+    return uniform < static_cast<double>(lora_dropout_) ? 0.0f : 1.0f / (1.0f - lora_dropout_);
+  }
+
+  const ggml_bf16_t* make_dropout_lora_a(const ggml_bf16_t* source, int rank, int input_dim, uint64_t seed,
+                                         int expert_idx, int projection, std::vector<ggml_bf16_t>& storage) const {
+    if (lora_dropout_ <= 0.0f) return source;
+    storage.resize(static_cast<size_t>(rank) * input_dim);
+    for (int feature = 0; feature < input_dim; ++feature) {
+      const float channel_scale = lora_dropout_channel_scale(seed, expert_idx, projection, feature);
+      for (int r = 0; r < rank; ++r) {
+        const size_t offset = static_cast<size_t>(r) * input_dim + feature;
+        storage[offset] = GGML_FP32_TO_BF16(GGML_BF16_TO_FP32(source[offset]) * channel_scale);
+      }
+    }
+    return storage.data();
   }
 
   void set_full_weight_grad(bool enabled) {
@@ -946,8 +982,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         const size_t max_padded_routes =
             ((max_routes + static_cast<size_t>(config_.expert_num) * (T::K_STEP - 1) + T::K_STEP - 1) / T::K_STEP) *
             T::K_STEP;
-        dweight_shared_panel_pool_bytes_ =
-            2 * max_padded_routes * config_.hidden_size * sizeof(ggml_bf16_t);
+        dweight_shared_panel_pool_bytes_ = 2 * max_padded_routes * config_.hidden_size * sizeof(ggml_bf16_t);
       } else {
         dweight_shared_panel_pool_bytes_ = 0;
       }
@@ -971,10 +1006,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
   void forward_sft(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output,
                    bool save_for_backward) {
     SFTProfileScope total_scope(profiler_, SFTProfileStage::FwdTotal);
-    SFTProfileScope checkpoint_scope(
-        profiler_, save_for_backward && config_.share_cache_pool ? SFTProfileStage::FwdRecomputeTotal
-                                                                : SFTProfileStage::FwdInitialTotal);
+    SFTProfileScope checkpoint_scope(profiler_, save_for_backward && config_.share_cache_pool
+                                                    ? SFTProfileStage::FwdRecomputeTotal
+                                                    : SFTProfileStage::FwdInitialTotal);
     auto stage_start = profiler_.start();
+    active_lora_dropout_seed_ = ++lora_dropout_sequence_;
 
     SFT_POOL_LOG("fwd_enter", config_.layer_idx, tp_part_idx, qlen, cache_stack_top_, forward_pool_bytes_,
                  cache_pool_bytes_, backward_pool_bytes_, 0, "save_bwd=%d", (int)save_for_backward);
@@ -1803,8 +1839,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     stage_start = profiler_.start();
     if constexpr (supports_standard_mat_mul_v<T>) {
       backward_gate_up_amx(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
-                           full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a,
-                           optimizer_grad_scale);
+                           full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a, optimizer_grad_scale);
     } else {
       // backward_gate_up(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b);
     }
@@ -2045,8 +2080,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Uses FP32 accumulator for precision, writes BF16 output.
    */
   void backward_base_weight_grad(const ForwardCache& cache, int full_intermediate_size, void* grad_gate_proj,
-                                 void* grad_up_proj, void* grad_down_proj,
-                                 bool accumulate_optimizer_grads = false, float optimizer_grad_scale = 1.0f) {
+                                 void* grad_up_proj, void* grad_down_proj, bool accumulate_optimizer_grads = false,
+                                 float optimizer_grad_scale = 1.0f) {
     auto stage_start = profiler_.start();
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
@@ -2115,8 +2150,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       const int panel_tasks = activated_expert * panel_tasks_per_expert;
       if (panel_tasks > 0) {
         pool->do_work_stealing_job(
-            panel_tasks,
-            [](int _) { amx::bf16_dweight_timings().reset(); },
+            panel_tasks, [](int _) { amx::bf16_dweight_timings().reset(); },
             [&, h_tiles, panel_tasks_per_expert](int task_id) {
               const int expert_task = task_id / panel_tasks_per_expert;
               const int local_task = task_id % panel_tasks_per_expert;
@@ -2131,8 +2165,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               const int padded_k = expert_padded_k[expert_task];
               const size_t panel_offset = panel_offsets[expert_task];
               auto& timings = amx::bf16_dweight_timings();
-              const auto profile_operation = [profile_inner](uint64_t& elapsed_ns, uint64_t& calls,
-                                                              auto&& operation) {
+              const auto profile_operation = [profile_inner](uint64_t& elapsed_ns, uint64_t& calls, auto&& operation) {
                 if (!profile_inner) {
                   operation();
                   return;
@@ -2167,10 +2200,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             });
       }
       profiler_.record(SFTProfileStage::BwdBaseWeightGradPanelPack, stage_start);
-      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelInput,
-                             panel_elements * sizeof(ggml_bf16_t));
-      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelGradOutput,
-                             panel_elements * sizeof(ggml_bf16_t));
+      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelInput, panel_elements * sizeof(ggml_bf16_t));
+      profiler_.record_bytes(SFTProfileStage::BwdBaseWeightGradPanelGradOutput, panel_elements * sizeof(ggml_bf16_t));
 
       stage_start = profiler_.start();
       if (total_tasks > 0) {
@@ -2225,11 +2256,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                 for (int h_tile = 0; h_tile < h_tiles; ++h_tile) {
                   const int h_start = h_tile * TILE_M;
                   const int h_count = std::min(TILE_M, H - h_start);
-                  profile_operation(timings.kernel_down_ns, timings.kernel_down_calls,
-                                    [&] {
-                                      DWeightKernel::multiply(padded_k, scratch.c0(), shared_grad_output, b, h_start,
-                                                              0);
-                                    });
+                  profile_operation(timings.kernel_down_ns, timings.kernel_down_calls, [&] {
+                    DWeightKernel::multiply(padded_k, scratch.c0(), shared_grad_output, b, h_start, 0);
+                  });
                   profile_operation(timings.store_ns, timings.store_calls, [&] {
                     DWeightKernel::store_bf16(scratch.c0(), down_dst + static_cast<size_t>(h_start) * F + i_start, F,
                                               h_count, i_count, accumulate_optimizer_grads, optimizer_grad_scale);
@@ -2374,8 +2403,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
                 for (int row = 0; row < h_count; row++) {
                   for (int col = 0; col < i_count; col++) {
-                    store_optimizer_grad(down_dst[(size_t)(h_start + row) * F + i_start + col],
-                                         c0[row * TILE_N + col]);
+                    store_optimizer_grad(down_dst[(size_t)(h_start + row) * F + i_start + col], c0[row * TILE_N + col]);
                   }
                 }
               }
@@ -2438,10 +2466,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
               for (int row = 0; row < i_count; row++) {
                 for (int col = 0; col < h_count; col++) {
-                  store_optimizer_grad(gate_dst[(size_t)(i_start + row) * H + h_start + col],
-                                       c0[row * TILE_N + col]);
-                  store_optimizer_grad(up_dst[(size_t)(i_start + row) * H + h_start + col],
-                                       c1[row * TILE_N + col]);
+                  store_optimizer_grad(gate_dst[(size_t)(i_start + row) * H + h_start + col], c0[row * TILE_N + col]);
+                  store_optimizer_grad(up_dst[(size_t)(i_start + row) * H + h_start + col], c1[row * TILE_N + col]);
                 }
               }
             }
@@ -3179,17 +3205,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     auto read_one = [&](int expert_idx, const char* proj_name, char* dst_b, size_t size, size_t scale_size,
                         auto* bb_ptr /* only used when SCALE */) -> std::string {
       const size_t quant_size = size - scale_size;
-      const auto quant_path =
-          prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
-                    std::to_string(quant_size) + "Byte_quant_.kt");
-      std::string error =
-          kt::detail::read_exact_weight_file_slice(quant_path, dst_b, quant_size, 1, 0);
+      const auto quant_path = prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
+                                        std::to_string(quant_size) + "Byte_quant_.kt");
+      std::string error = kt::detail::read_exact_weight_file_slice(quant_path, dst_b, quant_size, 1, 0);
       if (!error.empty()) return error;
 
       if constexpr (T::BufferB::SCALE) {
-        const auto scale_path =
-            prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
-                      std::to_string(scale_size) + "Byte_scale_.kt");
+        const auto scale_path = prefix / (T::name() + proj_name + std::to_string(expert_idx) + "_" +
+                                          std::to_string(scale_size) + "Byte_scale_.kt");
         error = kt::detail::read_exact_weight_file_slice(scale_path, (char*)bb_ptr->d, scale_size, 1, 0);
       }
       return error;
@@ -3203,14 +3226,14 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           std::string error;
 
           if (mat_class == 0) {
-            error = read_one(expert_idx, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, gu_size,
-                             gu_scale, gate_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, gu_size, gu_scale,
+                             gate_backward_bb_[expert_idx].get());
           } else if (mat_class == 1) {
-            error = read_one(expert_idx, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, gu_size,
-                             gu_scale, up_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, gu_size, gu_scale,
+                             up_backward_bb_[expert_idx].get());
           } else {
-            error = read_one(expert_idx, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, d_size,
-                             d_scale, down_backward_bb_[expert_idx].get());
+            error = read_one(expert_idx, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, d_size, d_scale,
+                             down_backward_bb_[expert_idx].get());
           }
           if (!error.empty()) {
             std::lock_guard<std::mutex> lock(load_error_mutex);
@@ -4464,13 +4487,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           size_t lora_b_t_offset = expert_idx * lora_rank_ * config_.intermediate_size;
           ggml_bf16_t* expert_lora_a = lora_a + lora_a_offset;
           ggml_bf16_t* expert_lora_b_t = lora_b_t + lora_b_t_offset;
+          std::vector<ggml_bf16_t> dropout_lora_a;
+          const ggml_bf16_t* effective_lora_a = make_dropout_lora_a(
+              expert_lora_a, rank, hidden, active_lora_dropout_seed_, expert_idx, do_up ? 1 : 0, dropout_lora_a);
 
           int local_num_tokens = t_end - t_start;
           float* local_intermediate = get_lora_fp32_buffer(local_num_tokens * rank);
 
           // Step 1: intermediate = input @ lora_A^T (optimized with T_BLOCK=4, R_BLOCK=4)
           avx::lora_bf16_matmul_t4r4(input + t_start * hidden,  // input for this thread's tokens
-                                     expert_lora_a,             // lora_A weight [rank, hidden]
+                                     effective_lora_a,          // dropout-adjusted lora_A [rank, hidden]
                                      local_intermediate,        // output [local_num_tokens, rank]
                                      local_num_tokens, hidden, rank);
 
@@ -4525,13 +4551,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           size_t lora_b_t_offset = expert_idx * lora_rank_ * config_.hidden_size;
           ggml_bf16_t* expert_lora_a = down_lora_a_ + lora_a_offset;
           ggml_bf16_t* expert_lora_b_t = down_lora_b_transposed_ + lora_b_t_offset;
+          std::vector<ggml_bf16_t> dropout_lora_a;
+          const ggml_bf16_t* effective_lora_a = make_dropout_lora_a(
+              expert_lora_a, rank, inter_size, active_lora_dropout_seed_, expert_idx, 2, dropout_lora_a);
 
           int local_num_tokens = t_end - t_start;
           float* local_intermediate = get_lora_fp32_buffer(local_num_tokens * rank);
 
           // Step 1: intermediate = input @ lora_A^T (optimized with T_BLOCK=4, R_BLOCK=4)
           avx::lora_bf16_matmul_t4r4(input + t_start * inter_size,  // input for this thread's tokens
-                                     expert_lora_a,                 // lora_A weight [rank, inter_size]
+                                     effective_lora_a,              // dropout-adjusted lora_A [rank, inter_size]
                                      local_intermediate,            // output [local_num_tokens, rank]
                                      local_num_tokens, inter_size, rank);
 
@@ -4579,6 +4608,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     cache.qlen_cache = qlen;
     cache.k_cache = k;
     cache.activated_expert_cache = activated_expert;
+    cache.lora_dropout_seed = active_lora_dropout_seed_;
 
     // Copy routing information (small data, keep serial)
     cache.expert_ids_cache.resize(qlen * k);
@@ -4911,8 +4941,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * and small matrix sizes involved.
    */
   void backward_down_amx(const ForwardCache& cache, const void* grad_output, void* grad_down_lora_a,
-                         void* grad_down_lora_b, int full_intermediate_size = 0,
-                         float* fp32_grad_down_lora_b = nullptr,
+                         void* grad_down_lora_b, int full_intermediate_size = 0, float* fp32_grad_down_lora_b = nullptr,
                          float optimizer_grad_scale = 1.0f) {
     auto stage_start = profiler_.start();
     if (full_intermediate_size == 0) full_intermediate_size = config_.intermediate_size;
@@ -5117,8 +5146,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       const float scale = lora_scaling_;
       const int nth = 4;
 
-      direct_or_pool(nth * activated_expert, [this, &expert_offsets, &expert_token_offsets, hidden, inter_size, rank,
-                                              scale, nth](int task_id) {
+      direct_or_pool(nth * activated_expert, [this, &cache, &expert_offsets, &expert_token_offsets, hidden, inter_size,
+                                              rank, scale, nth](int task_id) {
         int expert_idx = m_expert_id_map_[task_id / nth];
         int ith = task_id % nth;
         int num_tokens = m_local_num_[expert_idx];
@@ -5135,6 +5164,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         size_t lora_b_t_offset = (size_t)expert_idx * rank * hidden;  // Transposed: [rank, hidden]
         const ggml_bf16_t* expert_lora_a = down_lora_a_ + lora_a_offset;
         const ggml_bf16_t* expert_lora_b_t = down_lora_b_transposed_ + lora_b_t_offset;
+        std::vector<ggml_bf16_t> dropout_lora_a;
+        const ggml_bf16_t* effective_lora_a = make_dropout_lora_a(
+            expert_lora_a, rank, inter_size, cache.lora_dropout_seed, expert_idx, 2, dropout_lora_a);
         const ggml_bf16_t* expert_grad = grad_output_bf16_ptr_[expert_idx];
         ggml_bf16_t* grad_inter = grad_intermediate_ + expert_offsets[task_id / nth];
         float* grad_times_b = lora_grad_times_b_pool_ + (expert_token_offsets[task_id / nth] + t_start) * rank;
@@ -5151,7 +5183,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         // Step 2: grad_times_b @ down_lora_A -> [local_num_tokens, inter_size] (AVX512)
         // Using optimized kernel with weight layout [rank, inter_size]
         avx::lora_fp32_bf16_fused_add_wt(grad_times_b,                       // [local_num_tokens, rank] FP32
-                                         expert_lora_a,                      // [rank, inter_size] BF16
+                                         effective_lora_a,                   // dropout-adjusted A [rank, inter_size]
                                          grad_inter + t_start * inter_size,  // [local_num_tokens, inter_size] BF16
                                          local_num_tokens, rank, inter_size, scale);
       });
@@ -5303,7 +5335,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   if (rank == 8) {
                     __m256 grad_times_b_vec = _mm256_loadu_ps(grad_times_b);
                     for (int ii = 0; ii < block_len; ii++) {
-                      float x = GGML_BF16_TO_FP32(inter_row_bf16[ii]);
+                      float x = GGML_BF16_TO_FP32(inter_row_bf16[ii]) *
+                                lora_dropout_channel_scale(cache.lora_dropout_seed, buf.expert_idx, 2, task.start + ii);
                       if (x == 0.0f) continue;
                       float* out = accum + static_cast<size_t>(ii) * rank;
                       __m256 acc = _mm256_loadu_ps(out);
@@ -5312,7 +5345,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                     }
                   } else {
                     for (int ii = 0; ii < block_len; ii++) {
-                      float x = GGML_BF16_TO_FP32(inter_row_bf16[ii]);
+                      float x = GGML_BF16_TO_FP32(inter_row_bf16[ii]) *
+                                lora_dropout_channel_scale(cache.lora_dropout_seed, buf.expert_idx, 2, task.start + ii);
                       if (x == 0.0f) continue;
                       float* out = accum + static_cast<size_t>(ii) * rank;
                       for (int r = 0; r < rank; r++) {
@@ -5401,11 +5435,17 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
               for (; i < inter_vec_end; i += 32) {
                 __m512 x0, x1;
                 avx512_32xbf16_to_32xfp32((__m512i*)(inter_row_bf16 + i), &x0, &x1);
-                _mm512_storeu_ps(inter_row_fp32 + i, x0);
-                _mm512_storeu_ps(inter_row_fp32 + i + 16, x1);
+                alignas(64) float x_values[32];
+                _mm512_store_ps(x_values, x0);
+                _mm512_store_ps(x_values + 16, x1);
+                for (int lane = 0; lane < 32; ++lane) {
+                  inter_row_fp32[i + lane] =
+                      x_values[lane] * lora_dropout_channel_scale(cache.lora_dropout_seed, buf.expert_idx, 2, i + lane);
+                }
               }
               for (; i < inter_size; i++) {
-                inter_row_fp32[i] = GGML_BF16_TO_FP32(inter_row_bf16[i]);
+                inter_row_fp32[i] = GGML_BF16_TO_FP32(inter_row_bf16[i]) *
+                                    lora_dropout_channel_scale(cache.lora_dropout_seed, buf.expert_idx, 2, i);
               }
 
               const float* inter_proj = buf.cached_down_lora_u + static_cast<size_t>(t) * rank;
@@ -5983,9 +6023,16 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         float* up_gradb_local = gate_gradb_local + gradb_elems;
         memset(gate_gradb_local, 0, gradb_elems * 2 * sizeof(float));
 
-        avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, buf.gate_lora_a, gate_u,
-                                   local_tokens, hidden, rank);
-        avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, buf.up_lora_a, up_u,
+        std::vector<ggml_bf16_t> gate_dropout_lora_a;
+        std::vector<ggml_bf16_t> up_dropout_lora_a;
+        const ggml_bf16_t* effective_gate_lora_a = make_dropout_lora_a(
+            buf.gate_lora_a, rank, hidden, cache.lora_dropout_seed, buf.expert_idx, 0, gate_dropout_lora_a);
+        const ggml_bf16_t* effective_up_lora_a = make_dropout_lora_a(
+            buf.up_lora_a, rank, hidden, cache.lora_dropout_seed, buf.expert_idx, 1, up_dropout_lora_a);
+
+        avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, effective_gate_lora_a,
+                                   gate_u, local_tokens, hidden, rank);
+        avx::lora_bf16_matmul_t4r4(buf.input + static_cast<size_t>(task.t_start) * hidden, effective_up_lora_a, up_u,
                                    local_tokens, hidden, rank);
 
         for (int t = 0; t < local_tokens; t++) {
@@ -6143,6 +6190,9 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                                         static_cast<size_t>(expert_idx) * lora_rank_ * inter_size;
           const ggml_bf16_t* lora_a =
               (do_up ? up_lora_a_ : gate_lora_a_) + static_cast<size_t>(expert_idx) * lora_rank_ * hidden;
+          std::vector<ggml_bf16_t> dropout_lora_a;
+          const ggml_bf16_t* effective_lora_a = make_dropout_lora_a(lora_a, lora_rank_, hidden, cache.lora_dropout_seed,
+                                                                    expert_idx, do_up ? 1 : 0, dropout_lora_a);
 
           float* gb = get_lora_fp32_buffer(static_cast<size_t>(local_tokens) * lora_rank_);
           avx::lora_backward_matmul_transposed(grad, lora_b_t, gb, local_tokens, inter_size, lora_rank_);
@@ -6157,7 +6207,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           }
 
           memset(grad_out, 0, static_cast<size_t>(local_tokens) * hidden * sizeof(ggml_bf16_t));
-          avx::lora_fp32_bf16_fused_add_transposed(gb, lora_a, grad_out, local_tokens, lora_rank_, hidden, 1.0f);
+          avx::lora_fp32_bf16_fused_add_transposed(gb, effective_lora_a, grad_out, local_tokens, lora_rank_, hidden,
+                                                   1.0f);
         });
       }
 
@@ -6170,7 +6221,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       int grad_a_blocks = (config_.hidden_size + kGuGradATile - 1) / kGuGradATile;
       pool->do_work_stealing_job(
           activated_expert * grad_a_blocks, nullptr,
-          [this, do_up, grad_lora_a, fp32_grad_lora_a, use_fp32_lora_a, grad_a_blocks, &fused_bufs,
+          [this, &cache, do_up, grad_lora_a, fp32_grad_lora_a, use_fp32_lora_a, grad_a_blocks, &fused_bufs,
            optimizer_grad_scale](int task_id) {
             int expert_task = task_id / grad_a_blocks;
             int block_idx = task_id % grad_a_blocks;
@@ -6196,6 +6247,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
             // Split one expert into hidden-dimension tiles so LoRA grad_A can use all CPU threads.
             std::vector<float> accum(lora_r * tile_len, 0.0f);
+            std::vector<float> dropout_scales(tile_len);
+            for (int h = 0; h < tile_len; ++h) {
+              dropout_scales[h] =
+                  lora_dropout_channel_scale(cache.lora_dropout_seed, expert_idx, do_up ? 1 : 0, h_start + h);
+            }
 
             for (int t = 0; t < num_tokens; t++) {
               const ggml_bf16_t* g_row = g_ptr + t * padded_lora_rank_;
@@ -6211,13 +6267,15 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                   __m512 acc1 = _mm512_loadu_ps(acc_row + h + 16);
                   __m512 x0, x1;
                   avx512_32xbf16_to_32xfp32((__m512i*)(input_row + h), &x0, &x1);
+                  x0 = _mm512_mul_ps(x0, _mm512_loadu_ps(dropout_scales.data() + h));
+                  x1 = _mm512_mul_ps(x1, _mm512_loadu_ps(dropout_scales.data() + h + 16));
                   acc0 = _mm512_fmadd_ps(x0, gb_vec, acc0);
                   acc1 = _mm512_fmadd_ps(x1, gb_vec, acc1);
                   _mm512_storeu_ps(acc_row + h, acc0);
                   _mm512_storeu_ps(acc_row + h + 16, acc1);
                 }
                 for (; h < tile_len; h++) {
-                  float inp = GGML_BF16_TO_FP32(input_row[h]);
+                  float inp = GGML_BF16_TO_FP32(input_row[h]) * dropout_scales[h];
                   acc_row[h] += inp * gb;
                 }
               }
