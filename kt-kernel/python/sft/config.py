@@ -12,6 +12,7 @@ KTransformersPlugin.kt_config (similar to DeepSpeedPlugin.hf_ds_config).
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 import warnings
@@ -26,6 +27,7 @@ from .backend import INT8_BACKEND, normalize_sft_backend
 logger = logging.getLogger(__name__)
 
 _CPU_TOPOLOGY_ROOT = Path("/sys/devices/system/cpu")
+_ACTIVATION_POLICY_ENV = "ACCELERATE_KT_ACTIVATION_POLICY"
 _LEGACY_REUSE_ENV = "KT_REUSE_CHECKPOINT_FORWARD"
 _KNOWN_SFT_BACKENDS = {
     "auto",
@@ -111,6 +113,17 @@ def _legacy_activation_policy_from_env(value: str) -> KTActivationPolicy:
         stacklevel=3,
     )
     return KTActivationPolicy(cpu=cpu, gpu="recompute")
+
+
+def _activation_policy_from_env(value: str) -> KTActivationPolicy:
+    try:
+        policy = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{_ACTIVATION_POLICY_ENV} must be a JSON object with exactly "
+            "the keys 'cpu' and 'gpu'"
+        ) from exc
+    return KTActivationPolicy.from_value(policy)
 
 
 def _env_int(key: str, default: int | None) -> int | None:
@@ -307,15 +320,33 @@ class KTConfig:
                 f"got {self.kt_weight_lifecycle!r}"
             )
 
+        forwarded_policy = os.environ.get(_ACTIVATION_POLICY_ENV)
+        forwarded_policy_is_explicit = (
+            forwarded_policy is not None and forwarded_policy.strip() != ""
+        )
         legacy_reuse = os.environ.get(_LEGACY_REUSE_ENV)
         legacy_reuse_is_explicit = legacy_reuse is not None and legacy_reuse.strip() != ""
+        if self.kt_activation_policy is not None and forwarded_policy_is_explicit:
+            raise ValueError(
+                f"kt_activation_policy conflicts with {_ACTIVATION_POLICY_ENV}; "
+                f"unset {_ACTIVATION_POLICY_ENV}"
+            )
         if self.kt_activation_policy is not None and legacy_reuse_is_explicit:
             raise ValueError(
                 f"kt_activation_policy conflicts with legacy {_LEGACY_REUSE_ENV}; "
                 f"unset {_LEGACY_REUSE_ENV}"
             )
+        if forwarded_policy_is_explicit and legacy_reuse_is_explicit:
+            raise ValueError(
+                f"{_ACTIVATION_POLICY_ENV} conflicts with legacy "
+                f"{_LEGACY_REUSE_ENV}; unset {_LEGACY_REUSE_ENV}"
+            )
         if self.kt_activation_policy is None:
-            if legacy_reuse_is_explicit:
+            if forwarded_policy_is_explicit:
+                self.kt_activation_policy = _activation_policy_from_env(
+                    forwarded_policy
+                )
+            elif legacy_reuse_is_explicit:
                 self.kt_activation_policy = _legacy_activation_policy_from_env(legacy_reuse)
             else:
                 self.kt_activation_policy = KTActivationPolicy()

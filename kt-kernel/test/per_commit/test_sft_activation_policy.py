@@ -38,7 +38,11 @@ def _make_config(policy=None):
     clean_env = {
         key: value
         for key, value in os.environ.items()
-        if key != "KT_REUSE_CHECKPOINT_FORWARD"
+        if key
+        not in {
+            "ACCELERATE_KT_ACTIVATION_POLICY",
+            "KT_REUSE_CHECKPOINT_FORWARD",
+        }
     }
     kwargs = {} if policy is None else {"kt_activation_policy": policy}
     with (
@@ -126,6 +130,73 @@ def test_explicit_policy_conflicts_with_legacy_reuse_env():
         config.KTConfig(
             kt_activation_policy={"cpu": "retain", "gpu": "recompute"}
         )
+
+
+def test_forwarded_activation_policy_env_is_applied():
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ACCELERATE_KT_ACTIVATION_POLICY": (
+                    '{"cpu":"retain","gpu":"recompute"}'
+                )
+            },
+            clear=True,
+        ),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        policy = config.KTConfig().kt_activation_policy
+    assert policy == config.KTActivationPolicy(cpu="retain", gpu="recompute")
+
+
+def test_forwarded_activation_policy_env_rejects_invalid_json():
+    with (
+        patch.dict(
+            os.environ,
+            {"ACCELERATE_KT_ACTIVATION_POLICY": "retain/recompute"},
+            clear=True,
+        ),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(ValueError, match="must be a JSON object"),
+    ):
+        config.KTConfig()
+
+
+def test_explicit_policy_conflicts_with_forwarded_policy_env():
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ACCELERATE_KT_ACTIVATION_POLICY": (
+                    '{"cpu":"retain","gpu":"recompute"}'
+                )
+            },
+            clear=True,
+        ),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(ValueError, match="conflicts"),
+    ):
+        config.KTConfig(
+            kt_activation_policy={"cpu": "retain", "gpu": "recompute"}
+        )
+
+
+def test_forwarded_policy_env_conflicts_with_legacy_reuse_env():
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "ACCELERATE_KT_ACTIVATION_POLICY": (
+                    '{"cpu":"retain","gpu":"recompute"}'
+                ),
+                "KT_REUSE_CHECKPOINT_FORWARD": "1",
+            },
+            clear=True,
+        ),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(ValueError, match="conflicts with legacy"),
+    ):
+        config.KTConfig()
 
 
 def _make_int8_config(**overrides):

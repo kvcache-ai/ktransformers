@@ -305,10 +305,13 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             "INT4, and SkipLoRA paths are not supported"
         )
     if is_rank_0:
-        logger.info(
-            "KT activation policy: cpu=%s, gpu=%s, world_size=%d",
+        logger.warning(
+            "KT activation policy: cpu=%s, gpu=%s, "
+            "checkpoint_forward_reuse=%s, share_cache_pool=%s, world_size=%d",
             activation_policy.cpu,
             activation_policy.gpu,
+            reuse_checkpoint_forward,
+            not cpu_activation_retain,
             distributed_world_size,
         )
     uses_authoritative_optimizer_grads = _supports_authoritative_optimizer_grads(
