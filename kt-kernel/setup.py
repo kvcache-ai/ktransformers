@@ -664,6 +664,7 @@ class CMakeBuild(build_ext):
             print("-- Enabling CUDA backend (-DKTRANSFORMERS_USE_CUDA=ON)")
             # Inject nvcc compiler path automatically unless user already specified one.
             user_specified_compiler = any("CMAKE_CUDA_COMPILER" in a for a in cmake_args)
+            nvcc_path = None
             if not user_specified_compiler:
                 extra_env = os.environ.get("CMAKE_ARGS", "")
                 if "CMAKE_CUDA_COMPILER" in extra_env:
@@ -685,9 +686,13 @@ class CMakeBuild(build_ext):
             # sm_89, CUDA < 12.0 has no sm_90), which makes the build fail outright
             # on older toolkits. So when the user has not pinned CPUINFER_CUDA_ARCHS,
             # derive a default that the detected nvcc actually supports.
-            def _default_cuda_archs() -> str:
+            def _default_cuda_archs(nvcc: str | None) -> str:
                 full = "80;86;89;90"
-                nvcc = find_nvcc_path()
+                # Reuse the nvcc already resolved for -DCMAKE_CUDA_COMPILER above; only
+                # fall back to a fresh lookup when the compiler was user-specified and
+                # we never resolved a path ourselves. This avoids a second set of
+                # filesystem probes and guarantees both uses pick the same binary.
+                nvcc = nvcc or find_nvcc_path()
                 if not nvcc:
                     return full
                 try:
@@ -723,7 +728,7 @@ class CMakeBuild(build_ext):
             if "CPUINFER_CUDA_ARCHS" in os.environ:
                 archs_env = os.environ["CPUINFER_CUDA_ARCHS"].strip()
             else:
-                archs_env = _default_cuda_archs()
+                archs_env = _default_cuda_archs(nvcc_path)
             if archs_env and not any("CMAKE_CUDA_ARCHITECTURES" in a for a in cmake_args):
                 cmake_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={archs_env}")
                 print(f"-- Set CUDA architectures: {archs_env}")
