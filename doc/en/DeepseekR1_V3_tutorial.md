@@ -197,6 +197,14 @@ To use this feature, [install flashinfer](https://github.com/flashinfer-ai/flash
 
 Note: The latest MLA kernel in FlashInfer still has a few minor issues. They are continuously fixing them on the main branch. If you are using FlashInfer, please install it from the main source code.
 
+> [!WARNING]
+> The FlashInfer instruction above applies to the legacy `ktransformers` backend in this
+> longer-context section. If you are running the v0.2.4+ `balance_serve` backend, use the
+> `custom_flashinfer` installed by the balance-serve build instead. Do not reinstall upstream
+> FlashInfer packages (`flashinfer` / `flashinfer-python`) after building `balance_serve`, because
+> replacing the patched package can break the scheduler/attention wrapper ABI. See
+> [Balance Serve backend](./balance-serve.md#installation-guide) for the matching setup.
+
 If you want to use long context(longer than 20K) for prefill, enable the matrix absorption MLA during the prefill phase, which will significantly reduce the size of the kv cache. Modify yaml file like this:
 
 ```
