@@ -32,6 +32,10 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 - ✅ **Universal CPU (llamafile backend)**: Supported (using GGUF-format weights)
 - ✅ **AMD CPUs with BLIS**: Supported (for int8 prefill & decode) - [Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/amd_blis.md)
 
+KT-Kernel is **not AMX-only**. AMX provides the fastest INT4/INT8 path on recent Intel Xeon
+CPUs, but AVX512 CPUs and AMD EPYC systems can use the native-precision / BLIS paths where
+supported, and AVX2-only CPUs can use the `LLAMAFILE` backend with GGUF weights.
+
 **KT-CLI**
 
 We are developing a simpler way to use KTransformers. Check out the [KT-CLI Guide](https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/kt-kernel/kt-cli.md) for more details.
