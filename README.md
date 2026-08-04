@@ -85,7 +85,7 @@ pip install kt-kernel sglang-kt
 # CPU-only / portable CPU build from source (AVX2 baseline, no CUDA kernels)
 git clone --recursive https://github.com/kvcache-ai/ktransformers.git
 cd ktransformers/kt-kernel
-CPUINFER_USE_CUDA=0 CPUINFER_CPU_INSTRUCT=AVX2 CPUINFER_ENABLE_AMX=OFF ./install.sh build --manual
+CPUINFER_USE_CUDA=0 CPUINFER_CPU_INSTRUCT=AVX2 CPUINFER_ENABLE_AMX=OFF ./install.sh all --manual
 
 # CUDA source build for CPU-GPU heterogeneous serving
 cd /path/to/ktransformers
