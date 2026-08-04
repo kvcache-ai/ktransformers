@@ -7,37 +7,92 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 - [Running DeepSeek-V4-Flash with SGLang and KT-Kernel](#running-deepseek-v4-flash-with-sglang-and-kt-kernel)
   - [Table of Contents](#table-of-contents)
   - [Hardware Requirements](#hardware-requirements)
+  - [Docker Quick Start](#docker-quick-start)
+    - [Docker Runtime Configuration](#docker-runtime-configuration)
   - [Prerequisites](#prerequisites)
   - [Step 1: Download Model Weights](#step-1-download-model-weights)
-  - [Step 2: Quantize CPU Weights (Optional, for AMXINT4 mode)](#step-2-quantize-cpu-weights-optional-for-amxint4-mode)
-  - [Step 3: Launch SGLang Server](#step-3-launch-sglang-server)
+  - [Step 2: Launch SGLang Server](#step-2-launch-sglang-server)
     - [Launch Command (Single RTX 5090 Example)](#launch-command-single-rtx-5090-example)
     - [Optional: Enable MTP (Multi-Token Prediction) Speculative Decoding](#optional-enable-mtp-multi-token-prediction-speculative-decoding)
-  - [Step 4: Send Inference Requests](#step-4-send-inference-requests)
+  - [Step 3: Send Inference Requests](#step-3-send-inference-requests)
     - [Decode](#decode)
     - [Interactive Chat (kt chat)](#interactive-chat-kt-chat)
-  - [Notes for Skylake / older Xeons & single-stream tuning caveats](#notes-for-skylake--older-xeons--single-stream-tuning-caveats)
 
 ## Hardware Requirements
 
 **Validated Configuration (this tutorial):**
 - **GPU**: 1× NVIDIA RTX 5090 (32GB VRAM, SM_120)
-- **CPU**: x86 CPU with AVX512 support
-- **RAM**: ≥256GB system memory
+- **CPU**: x86 CPU with AVX-512 support
+- **RAM**: ≥200GB system memory
 - **Storage**: ~340GB for model weights
 
-**architectures** (auto-detected at startup; non-validated configurations should work but have not been benchmarked end-to-end):
+**Supported consumer GPU architectures:**
 
 | Arch | Compute Cap | MXFP4 MoE | NSA sparse MLA | Validated |
 |------|------------|-----------|----------------|-----------|
-| Hopper (H100 / H200) | SM_90 | triton_kernels | flash_mla wheel | — |
-| Datacenter Blackwell (B100 / B200) | SM_100 | trtllm-fp4 | Triton fallback | — |
 | Consumer Blackwell (RTX 5090) | SM_120 | triton_kernels | Triton fallback | ✓ |
-| Ada Lovelace (RTX 4090 / L20 / L40) | SM_89 | triton_kernels | Triton fallback | ✓ |
-| Ampere (A100 / A6000) | SM_80 / SM_86 | triton_kernels | Triton fallback | Now supported |
+| Ada Lovelace (RTX 4090) | SM_89 | triton_kernels | Triton fallback | ✓ |
+| Ampere (RTX 3090) | SM_86 | triton_kernels | Triton fallback | ✓ |
+
+## Docker Quick Start
+
+Use Docker when you want to run the prebuilt environment without cloning the repository or compiling from source. Install the NVIDIA driver, Docker, and NVIDIA Container Toolkit on the host first.
+
+Pull the image from Docker Hub:
+
+```bash
+sudo docker pull approachingai/ktransformers:DSV4-specific
+```
+
+After downloading the model, enter the model directory and start the service:
+
+```bash
+cd /path/to/DeepSeek-V4-Flash-0731
+
+sudo docker run --gpus all \
+  --ipc host \
+  --cap-add SYS_NICE \
+  -p 30000:30000 \
+  -v "$PWD":/model:ro \
+  approachingai/ktransformers:DSV4-specific
+```
+
+The server listens on `http://localhost:30000` and exposes an OpenAI-compatible API. After the startup logs report readiness, verify it with:
+
+```bash
+curl http://localhost:30000/v1/models
+```
+
+### Docker Runtime Configuration
+
+The image exposes the following environment variables. The launch command above uses these defaults:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEM_FRACTION` | `0.85` | Fraction of GPU memory reserved by the server. |
+| `CHUNKED_PREFILL_SIZE` | `2048` | Maximum token count in a prefill chunk. |
+| `CONTEXT_LENGTH` | `16384` | Maximum model context length. |
+| `MAX_RUNNING_REQUESTS` | `2` | Maximum concurrent running requests. |
+| `KT_GPU_PREFILL_TOKEN_THRESHOLD` | `0` | Layerwise GPU-prefill threshold. `0` keeps layerwise prefill disabled. |
+
+Override a value by passing `-e NAME=value` before the image name. For example, on a system with sufficient GPU memory, enable layerwise prefill for prompts of 2,048 tokens or longer:
+
+```bash
+sudo docker run --gpus all \
+  --ipc host \
+  --cap-add SYS_NICE \
+  -p 30000:30000 \
+  -e KT_GPU_PREFILL_TOKEN_THRESHOLD=2048 \
+  -v "$PWD":/model:ro \
+  approachingai/ktransformers:DSV4-specific
+```
+
+Enabling layerwise prefill allocates an additional buffer when the server starts. Adjust the other variables only after measuring the available GPU memory and workload behavior. The image does not set `--max-total-tokens` by default; leave it unset unless you intentionally need to override the runtime's token budget.
 
 
 ## Prerequisites
+
+The remaining sections describe the native source installation path. Docker users can skip them.
 
 1. **KT-Kernel installed**:
    ```bash
@@ -75,56 +130,26 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 
 ## Step 1: Download Model Weights
 
+Download the model from [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731):
+
 ```bash
 mkdir -p /path/to/models
-huggingface-cli download deepseek-ai/DeepSeek-V4-Flash \
-  --local-dir /path/to/models/DeepSeek-V4-Flash
+huggingface-cli download deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --local-dir /path/to/models/DeepSeek-V4-Flash-0731
 ```
 
-## Step 2: Quantize CPU Weights (Optional, for AMXINT4 mode)
-
-This step is only needed if you want to run the CPU experts in **AMXINT4** mode instead (e.g., on Intel Xeon with AMX where INT4 is preferred over MXFP4).
-
-### Conversion Command
-
-For a 4-NUMA system with 64 physical cores assigned to CPU inference:
-
-```bash
-cd /path/to/ktransformers/kt-kernel
-
-python scripts/convert_cpu_weights_ds4.py \
-  --input-path /path/to/models/DeepSeek-V4-Flash \
-  --input-type fp4 \
-  --output /path/to/models/DeepSeek-V4-Flash-AMXINT4 \
-  --quant-method int4 \
-  --cpuinfer-threads 64 \
-  --threadpool-count 4 \
-  --no-merge-safetensor
-```
-
-The script auto-detects `model_type=deepseek_v4` and `expert_dtype=fp4` from `config.json`, dequantizes the MXFP4 routed experts (group size 32) on GPU, and re-quantizes them to AMX-INT4 layout on CPU. Both HF (`model.layers.{L}.mlp.experts.{E}.{proj}.weight`) and V4 inference (`layers.{L}.ffn.experts.{E}.{w1,w2,w3}.weight`) key formats are supported.
-
-To use the converted weights, replace the relevant flags in Step 3's launch command:
-
-```bash
-  --kt-weight-path /path/to/models/DeepSeek-V4-Flash-AMXINT4 \
-  --kt-method AMXINT4 \
-```
-
-## Step 3: Launch SGLang Server
+## Step 2: Launch SGLang Server
 
 ### Launch Command (Single RTX 5090 Example)
 
 ```bash
 export FLASHINFER_CUDA_ARCH_LIST=12.0a
 export TORCH_CUDA_ARCH_LIST="12.0+PTX"
-export SGLANG_DSV4_MODE=2604
-export SGLANG_DSV4_2604_SUBMODE=2604B
 
 python -m sglang.launch_server \
   --host 0.0.0.0 --port 30000 \
-  --model /path/to/models/DeepSeek-V4-Flash \
-  --kt-weight-path /path/to/models/DeepSeek-V4-Flash \
+  --model /path/to/models/DeepSeek-V4-Flash-0731 \
+  --kt-weight-path /path/to/models/DeepSeek-V4-Flash-0731 \
   --kt-method MXFP4 \
   --kt-num-gpu-experts 10 \
   --kt-cpuinfer 60 \
@@ -167,7 +192,7 @@ Append the following flags to the launch command above:
   --speculative-moe-runner-backend auto \
 ```
 
-## Step 4: Send Inference Requests
+## Step 3: Send Inference Requests
 
 ### Decode
 
@@ -188,22 +213,4 @@ The `kt` CLI ships with an OpenAI-compatible chat client that talks to the SGLan
 kt chat --host 127.0.0.1 --port 30000 --temperature 0.7 --max-tokens 2048
 ```
 
-## Notes for Skylake / older Xeons & single-stream tuning caveats
-
-The following notes are from a community-validated single-workstation deployment on **1× RTX 5090 + 2× Intel Xeon Gold 6138 (Skylake-SP, 40 physical cores total, AVX-512, no AMX tile, no VNNI)**, 256 GB DDR4-2400. All numbers below are single-request decode with `--kt-method AMXINT4`, top-4 routing, coding quality verified against the unquantized reference.
-
-**AMXINT4 does not require an AMX Xeon.** Despite the name, the INT4 expert kernel runs on `AVX512F + AVX512BW` and works on **Skylake-SP / Cascade Lake** (no AMX tile, no VNNI required) — not only Sapphire-Rapids-class CPUs. Measured **~28 tok/s** single-stream on the box above. This is useful for the large installed base of older, inexpensive dual-socket Xeons.
-
-**Dual-socket tuning:**
-- Set `--kt-cpuinfer` to the **physical** core count (here `40`) — one thread per physical core — with `--kt-threadpool-count 2` (one pool per NUMA node) and NUMA-sharded weights.
-- Prefer **node-local allocation** over `numactl --interleave=all` when the weights are per-socket sharded: node-local reads avoid cross-socket traffic, which on this bandwidth-bound decode was worth roughly +14% (25 → ~28 tok/s).
-
-**Single-stream configs that REDUCED throughput on this bandwidth-bound box (measure before assuming):**
-
-| Config | Effect (here) | Mechanism |
-|--------|---------------|-----------|
-| EAGLE / MTP speculative decode | ~28 → 27.2 tok/s (net-negative) | The validated `26.5 → 32.74` above is on **8× RTX 5090**. On a **single-GPU, CPU-expert-bandwidth-bound** box, verifying a batch of draft tokens that route to *different* experts multiplies the CPU expert reads that are the bottleneck, so the benefit can **invert**. Worth measuring against your actual bottleneck. |
-| `--kt-cpuinfer` = 2× physical cores (hyperthreads) | ~28 → ~2.7 tok/s (≈10× slower) | HT oversubscription thrashes the bandwidth-bound AVX-512 kernel. Keep one thread per physical core. |
-| Extra GPU experts under AMXINT4 (`--kt-num-gpu-experts`) | small net loss on a single 5090 | The MXFP4-GPU path required alongside AMXINT4 costs more than offloading a few of 256 experts saves on this GPU. |
-
-**Bottom line for this hardware class:** single-stream decode is **DDR4-bandwidth-saturated** at ~28 tok/s (4-bit). Speculative decode and GPU-expert offload help when the bottleneck is elsewhere (multi-GPU, higher-bandwidth CPU), but not on a single-GPU, bandwidth-bound CPU-offload box — so measure on your own hardware rather than assuming the multi-GPU numbers transfer.
+See [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters) for the complete parameter reference.
