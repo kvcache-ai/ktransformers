@@ -682,6 +682,16 @@ If you prefer manual installation without the `install.sh` script:
 | `CPUINFER_PARALLEL` | Number | Parallel build jobs (default: auto-detect) |
 | `CPUINFER_VERBOSE` | `0`, `1` | Verbose build output (default: `0`) |
 
+If the build fails at a `cmake --build ... --parallel=<N>` step on memory-constrained machines,
+retry with fewer parallel build jobs:
+
+```bash
+CPUINFER_PARALLEL=6 ./install.sh build
+```
+
+Use the largest value your machine can compile reliably; lower values reduce peak memory usage
+at the cost of longer build time.
+
 **Instruction Set Details:**
 
 | Option | Target CPUs | Use Case |
