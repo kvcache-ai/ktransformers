@@ -43,7 +43,16 @@ pip install kt-kernel sglang-kt
 > Note: You may need to reinstall cudnn: `pip install nvidia-cudnn-cu12==9.16.0.29`
 
 3. **CUDA toolkit** - Compatible with your GPU (CUDA 12.8+ recommended)
-4. **Hugging Face CLI** - For downloading models:
+4. **transformers==4.57.1** - Avoid the `DeepSeekV4Config` dataclass import error:
+
+   ```bash
+   pip install "transformers==4.57.1"
+   ```
+
+   `transformers` 5.x can raise `TypeError: non-default argument 'quantization_config'
+   follows default argument` while importing SGLang config classes. Pin `transformers`
+   to 4.57.1, or use a newer `sglang-kt` release once it declares a compatible version.
+5. **Hugging Face CLI** - For downloading models:
 
    ```bash
    pip install huggingface-hub
