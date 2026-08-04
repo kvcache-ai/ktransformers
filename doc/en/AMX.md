@@ -29,6 +29,12 @@ python ktransformers/server/main.py --architectures Qwen3MoeForCausalLM --model_
 
 **Note: At present, Qwen3MoE running with AMX can only read BF16 GGUF; support for loading from safetensor will be added later.**
 
+`<model_dir>` must point to a local copy of the original Qwen3 model repository metadata,
+including files such as `config.json`, `tokenizer.json`, `tokenizer_config.json`, and the
+chat template. The large `.safetensors` weight files are not required there when serving from
+GGUF weights, but the tokenizer/config files are still needed so chat requests can resolve
+`tokenizer.chat_template` correctly.
+
 To make it easier for everyone to understand the AMX optimizations we’ve open-sourced, we’ve prepared a brief document. We also extend our gratitude to Intel for their assistance.
 
 # Introduction to AMX Instruction Set
