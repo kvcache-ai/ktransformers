@@ -63,6 +63,18 @@ Some preparation:
   ```
 - At the same time, you should download and install the corresponding version of flash-attention from https://github.com/Dao-AILab/flash-attention/releases.
 
+  If runtime fails with `NameError: name 'flash_attn_func' is not defined`, verify that
+  `flash-attn` is installed for the active Python / PyTorch / CUDA environment:
+
+  ```bash
+  python -c "from flash_attn import flash_attn_func; print('flash-attn OK')"
+  ```
+
+  Install PyTorch first, then choose a `flash-attn` wheel that matches your Python version,
+  CUDA version, PyTorch version, and C++ ABI. For the newer `balance_serve` backend, follow
+  [the balance-serve FlashInfer note](./balance-serve.md#installation-guide) instead of
+  replacing its patched FlashInfer package.
+
 ## Installation
 
 ### Attention
