@@ -34,7 +34,7 @@ High-performance kernel operations for KTransformers, featuring CPU-optimized Mo
 
 KT-Kernel is **not AMX-only**. AMX provides the fastest INT4/INT8 path on recent Intel Xeon
 CPUs, but AVX512 CPUs and AMD EPYC systems can use the native-precision / BLIS paths where
-supported, and AVX2-only CPUs can use the `LLAMAFILE` backend with GGUF weights.
+supported, and AVX2-only CPUs can use the llamafile backend with GGUF weights.
 
 **KT-CLI**
 
