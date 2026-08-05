@@ -73,7 +73,6 @@ The image exposes the following environment variables. The launch command above 
 | `TP` | `1` | SGLang tensor-parallel degree; it must not exceed the visible GPU count. |
 | `MEM_FRACTION` | `0.90` | Fraction of GPU memory reserved by the server. |
 | `CHUNKED_PREFILL_SIZE` | `4096` | Maximum token count in a prefill chunk. |
-| `MAX_PREFILL_TOKENS` | `4096` | Maximum number of prefill tokens admitted by the scheduler. |
 | `CONTEXT_LENGTH` | `16384` | Maximum model context length. |
 | `MAX_RUNNING_REQUESTS` | `2` | Maximum concurrent running requests. |
 | `KT_GPU_PREFILL_TOKEN_THRESHOLD` | `2048` | Layerwise GPU-prefill threshold. Set `0` to disable it. |
@@ -81,10 +80,7 @@ The image exposes the following environment variables. The launch command above 
 
 Layerwise prefill is enabled by default for prompts of 2,048 tokens or longer.
 Its slots are allocated lazily by the first qualifying request, so that request
-can have a one-time setup cost. `KT_GPU_EXPERTS=0` does not disable this path;
-it only keeps routed experts off the GPU between requests. Set
-`KT_GPU_PREFILL_TOKEN_THRESHOLD=0` only when you intentionally want to disable
-layerwise prefill to reduce peak VRAM use.
+can have a one-time setup cost. Set `KT_GPU_PREFILL_TOKEN_THRESHOLD=0` only when you intentionally want to disable layerwise prefill to reduce peak VRAM use.
 
 For tensor parallelism, select the CUDA ordinals and set a matching degree. For
 example, this starts two ranks on GPUs 0 and 1:
@@ -99,12 +95,6 @@ sudo docker run --gpus all \
   -v "$PWD":/model:ro \
   approachingai/ktransformers:DSV4-specific
 ```
-
-The entrypoint checks that PyTorch can see at least `TP` GPUs before launching.
-Adjust the other variables only after measuring available GPU memory and
-workload behavior. The image does not set `--max-total-tokens` by default;
-leave it unset unless you intentionally need to override the runtime's token
-budget.
 
 
 ## Prerequisites
