@@ -22,7 +22,7 @@ This tutorial demonstrates how to run **DeepSeek-V4-Flash** model inference usin
 
 **Validated Configuration (this tutorial):**
 - **GPU**: 1× NVIDIA RTX 5090 (32GB VRAM, SM_120)
-- **CPU**: x86 CPU with AVX-512 support
+- **CPU**: x86 CPU with AVX2 and FMA; AVX512/AMX improves throughput but is not required
 - **RAM**: ≥200GB system memory
 - **Storage**: ~340GB for model weights
 
@@ -69,25 +69,32 @@ The image exposes the following environment variables. The launch command above 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MEM_FRACTION` | `0.85` | Fraction of GPU memory reserved by the server. |
-| `CHUNKED_PREFILL_SIZE` | `2048` | Maximum token count in a prefill chunk. |
+| `CUDA_VISIBLE_DEVICES` | all GPUs exposed by Docker | CUDA ordinals visible to the container; use with `TP`. |
+| `TP` | `1` | SGLang tensor-parallel degree; it must not exceed the visible GPU count. |
+| `MEM_FRACTION` | `0.90` | Fraction of GPU memory reserved by the server. |
+| `CHUNKED_PREFILL_SIZE` | `4096` | Maximum token count in a prefill chunk. |
 | `CONTEXT_LENGTH` | `16384` | Maximum model context length. |
 | `MAX_RUNNING_REQUESTS` | `2` | Maximum concurrent running requests. |
-| `KT_GPU_PREFILL_TOKEN_THRESHOLD` | `0` | Layerwise GPU-prefill threshold. `0` keeps layerwise prefill disabled. |
+| `KT_GPU_PREFILL_TOKEN_THRESHOLD` | `2048` | Layerwise GPU-prefill threshold. Set `0` to disable it. |
+| `SWA_FULL_TOKENS_RATIO` | `0.4` | SWA KV-cache ratio sized for the default 4,096-token prefill chunk. |
 
-Override a value by passing `-e NAME=value` before the image name. For example, on a system with sufficient GPU memory, enable layerwise prefill for prompts of 2,048 tokens or longer:
+Layerwise prefill is enabled by default for prompts of 2,048 tokens or longer.
+Its slots are allocated lazily by the first qualifying request, so that request
+can have a one-time setup cost. Set `KT_GPU_PREFILL_TOKEN_THRESHOLD=0` only when you intentionally want to disable layerwise prefill to reduce peak VRAM use.
+
+For tensor parallelism, select the CUDA ordinals and set a matching degree. For
+example, this starts two ranks on GPUs 0 and 1:
 
 ```bash
 sudo docker run --gpus all \
   --ipc host \
   --cap-add SYS_NICE \
   -p 30000:30000 \
-  -e KT_GPU_PREFILL_TOKEN_THRESHOLD=2048 \
+  -e CUDA_VISIBLE_DEVICES=0,1 \
+  -e TP=2 \
   -v "$PWD":/model:ro \
   approachingai/ktransformers:DSV4-specific
 ```
-
-Enabling layerwise prefill allocates an additional buffer when the server starts. Adjust the other variables only after measuring the available GPU memory and workload behavior. The image does not set `--max-total-tokens` by default; leave it unset unless you intentionally need to override the runtime's token budget.
 
 
 ## Prerequisites
