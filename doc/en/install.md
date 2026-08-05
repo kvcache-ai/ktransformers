@@ -70,8 +70,8 @@ Some preparation:
   python -c "from flash_attn import flash_attn_func; print('flash-attn OK')"
   ```
 
-  Install PyTorch first, then choose a `flash-attn` wheel that matches your Python version,
-  CUDA version, PyTorch version, and C++ ABI. For the newer `balance_serve` backend, follow
+  Choose a `flash-attn` wheel that matches your Python version, CUDA version, PyTorch
+  version, and C++ ABI. For the newer `balance_serve` backend, follow
   [the balance-serve FlashInfer note](./balance-serve.md#installation-guide) instead of
   replacing its patched FlashInfer package.
 
