@@ -22,6 +22,7 @@ curl -s http://127.0.0.1:10002/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"DeepSeek-R1","messages":[{"role":"user","content":"hello"}],"stream":false}'
 
+# Install EvalScope if needed: pip install evalscope
 # Then run a small benchmark and scale parallelism gradually.
 evalscope perf \
   --url "http://127.0.0.1:10002/v1/chat/completions" \
@@ -30,9 +31,10 @@ evalscope perf \
   --number 4 \
   --api openai \
   --dataset openqa \
-  --stream \
-  --tokenizer-path /path/to/tokenizer-or-model
+  --stream
 ```
+
+Add `--tokenizer-path /path/to/tokenizer-or-model` only when you need local token-count metrics or use a dataset that requires a tokenizer path.
 
 Start with a small `--number` and `--parallel 1`, then increase concurrency only after repeated direct API requests are stable. If the server process crashes during the benchmark, reproduce the same prompt with plain `curl` first; benchmark tools can amplify model-format, quantization, or server-side sampling issues that are easier to debug with one request at a time.
 
