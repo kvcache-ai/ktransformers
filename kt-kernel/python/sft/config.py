@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from .backend import INT8_BACKEND, normalize_sft_backend
+from .backend import FP8_BACKEND, INT8_BACKEND, normalize_sft_backend
 
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,10 @@ _LEGACY_REUSE_ENV = "KT_REUSE_CHECKPOINT_FORWARD"
 _KNOWN_SFT_BACKENDS = {
     "auto",
     "int8",
+    "fp8",
     "amxbf16",
     "amxint8",
+    "amxfp8",
     "amxint4",
     "amxbf16_skiplora",
     "amxint8_skiplora",
@@ -41,7 +43,7 @@ _KNOWN_SFT_BACKENDS = {
 }
 
 ActivationRetention = Literal["retain", "recompute"]
-ExpertWeightFormat = Literal["bf16", "int8"]
+ExpertWeightFormat = Literal["bf16", "int8", "fp8"]
 WeightLifecycle = Literal["persistent", "ephemeral"]
 
 
@@ -304,9 +306,9 @@ class KTConfig:
             )
         if self.kt_expert_weight_format is not None:
             self.kt_expert_weight_format = str(self.kt_expert_weight_format).strip().lower()
-            if self.kt_expert_weight_format not in {"bf16", "int8"}:
+            if self.kt_expert_weight_format not in {"bf16", "int8", "fp8"}:
                 raise ValueError(
-                    "kt_expert_weight_format must be one of ['bf16', 'int8'], "
+                    "kt_expert_weight_format must be one of ['bf16', 'fp8', 'int8'], "
                     f"got {self.kt_expert_weight_format!r}"
                 )
         if self.kt_weight_lifecycle is None:
@@ -357,7 +359,7 @@ class KTConfig:
         if self.kt_backend is None:
             if env_backend:
                 self.kt_backend = env_backend
-            elif self.kt_expert_weight_format == "int8":
+            elif self.kt_expert_weight_format in {"int8", "fp8"}:
                 self.kt_backend = "auto"
             else:
                 self.kt_backend = "AMXBF16"
@@ -376,11 +378,14 @@ class KTConfig:
             if backend_lower == INT8_BACKEND.lower():
                 # Backward compatibility for the legacy environment-only entry.
                 self.kt_expert_weight_format = "int8"
+            elif backend_lower == FP8_BACKEND.lower():
+                self.kt_expert_weight_format = "fp8"
             elif backend_lower == "amxbf16":
                 self.kt_expert_weight_format = "bf16"
         expected_backend = {
             "bf16": "amxbf16",
             "int8": INT8_BACKEND.lower(),
+            "fp8": FP8_BACKEND.lower(),
         }.get(self.kt_expert_weight_format)
         if expected_backend is not None and backend_lower != expected_backend:
             source = "kt_backend" if explicit_backend else "ACCELERATE_KT_BACKEND"
@@ -464,6 +469,27 @@ class KTConfig:
                 raise ValueError(
                     "INT8 SFT requires kt_weight_path pointing to pre-quantized .kt weights"
                 )
+        if self.kt_expert_weight_format == "fp8":
+            if str(self.kt_backend).lower() != FP8_BACKEND.lower():
+                raise ValueError(
+                    "FP8 SFT requires kt_backend='auto' or kt_backend='FP8'"
+                )
+            if self.kt_train_mode != "lora" or bool(self.kt_full_weight_grad):
+                raise ValueError(
+                    "FP8 SFT supports frozen-base LoRA only; Full and Hybrid are not supported"
+                )
+            if not self.kt_lora_rank or int(self.kt_lora_rank) <= 0:
+                raise ValueError("FP8 SFT requires kt_lora_rank > 0")
+            if int(self.kt_num_gpu_experts or 0) != 0:
+                raise ValueError("FP8 SFT requires kt_num_gpu_experts=0")
+            if bool(self.kt_use_lora_experts):
+                raise ValueError(
+                    "FP8 SFT does not support GPU LoRA experts; use pure expert LoRA"
+                )
+            if not bool(self.kt_share_backward_bb):
+                raise ValueError("FP8 SFT requires kt_share_backward_bb=true")
+            if self.kt_weight_lifecycle != "persistent":
+                raise ValueError("FP8 SFT requires kt_weight_lifecycle='persistent'")
         if self.kt_weight_lifecycle == "ephemeral":
             if self.kt_expert_weight_format != "int8":
                 raise ValueError(

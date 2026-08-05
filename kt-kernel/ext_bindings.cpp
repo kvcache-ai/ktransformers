@@ -537,6 +537,12 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__int8_kernel__") = "unsupported";
 #endif
   m.attr("__int8_weight_layout__") = "kt-int8-n32-k64-vnni-v1";
+#if defined(__AVX512BF16__) && defined(__AVX512VBMI__)
+  m.attr("__fp8_kernel__") = "avx512-fp8-decode-bf16";
+#else
+  m.attr("__fp8_kernel__") = "unsupported";
+#endif
+  m.attr("__fp8_weight_layout__") = "block-e4m3-128x128";
 
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
@@ -866,6 +872,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #if defined(__AVX512BF16__)
   // SFT MoE with LoRA support (BF16, INT8, INT4, AWQ, K2)
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224BF16, AMX_BF16_MOE_TP>>(moe_module, "AMXBF16_SFT_MOE");
+#if defined(__AVX512VBMI__)
+  bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224FP8, AMX_FP8_MOE_TP>>(moe_module, "AMXFP8_SFT_MOE");
+#endif
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_SFT_MOE");
   bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4>>(moe_module, "AMXInt4_SFT_MOE");
   // bind_moe_sft_module<AMX_SFT_MOE_TP<amx::GemmKernel224Int4_1>>(moe_module, "AMXInt4_1_SFT_MOE");

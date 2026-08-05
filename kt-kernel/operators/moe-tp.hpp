@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <functional>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -49,7 +51,11 @@ class TP_MOE_Common : public MoE_Interface {
  public:
   GeneralMOEConfig config;
   using input_t = typename T::input_t;
-  TP_MOE_Common(const GeneralMOEConfig& config) : config(config) {
+  using PartFactory = std::function<std::unique_ptr<T>(const GeneralMOEConfig&, int)>;
+
+  TP_MOE_Common(const GeneralMOEConfig& config) : TP_MOE_Common(config, PartFactory{}) {}
+
+  TP_MOE_Common(const GeneralMOEConfig& config, PartFactory part_factory) : config(config) {
     printf("TP MOE layer %d, pool: 0x%lx, expert num: %d, num_experts_per_tok: %d\n", config.layer_idx,
            (intptr_t)config.pool, config.expert_num, config.num_experts_per_tok);
     if (config.pool == nullptr) {
@@ -127,9 +133,9 @@ class TP_MOE_Common : public MoE_Interface {
     }
 
     std::vector<std::exception_ptr> construction_errors(tp_count);
-    config.pool->dispense_backend()->do_numa_job([this, &construction_errors](int i) {
+    config.pool->dispense_backend()->do_numa_job([this, &construction_errors, &part_factory](int i) {
       try {
-        tps[i] = std::unique_ptr<T>(new Concrete(tp_configs[i], i));
+        tps[i] = part_factory ? part_factory(tp_configs[i], i) : std::unique_ptr<T>(new Concrete(tp_configs[i], i));
       } catch (...) {
         construction_errors[i] = std::current_exception();
       }

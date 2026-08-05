@@ -233,6 +233,20 @@ struct supports_standard_mat_mul<amx::GemmKernel224Int4_1> : std::true_type {};
 template <typename T>
 inline constexpr bool supports_standard_mat_mul_v = supports_standard_mat_mul<T>::value;
 
+// Block-FP8 uses the same BF16 activation/FP32 output buffers as the standard
+// kernels, but its base weight requires group-aware construction and GEMM.
+// Keep this capability separate from supports_standard_mat_mul so BF16 LoRA
+// weights are never routed through an FP8 BufferB.
+template <typename T>
+struct supports_block_fp8_base_backward : std::false_type {};
+template <>
+struct supports_block_fp8_base_backward<amx::GemmKernel224FP8> : std::true_type {};
+template <typename T>
+inline constexpr bool supports_block_fp8_base_backward_v = supports_block_fp8_base_backward<T>::value;
+template <typename T>
+inline constexpr bool supports_base_backward_v =
+    supports_standard_mat_mul_v<T> || supports_block_fp8_base_backward_v<T>;
+
 // =====================================================
 // Type trait: kernel has direct BB→BB transposed repack (from_bb_transposed)
 // INT4 lacks this, so it falls back to to_mat + from_mat_transposed.
@@ -245,6 +259,8 @@ template <>
 struct has_bb_transposed_repack<amx::GemmKernel224BF16> : std::true_type {};
 template <>
 struct has_bb_transposed_repack<amx::GemmKernel224Int8> : std::true_type {};
+template <>
+struct has_bb_transposed_repack<amx::GemmKernel224FP8> : std::true_type {};
 template <typename T>
 inline constexpr bool has_bb_transposed_repack_v = has_bb_transposed_repack<T>::value;
 
@@ -298,6 +314,7 @@ struct SFTSharedPools {
   };
   std::vector<PerNuma> pools;
   std::mutex mu;
+  std::mutex bwd_bb_mu;
 
   static SFTSharedPools& instance() {
     static SFTSharedPools inst;
@@ -365,10 +382,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
  public:
   static constexpr bool kSkipLoRA = SkipLoRA;
   static constexpr bool kIsInt8Backend = std::is_same_v<T, amx::GemmKernel224Int8>;
+  static constexpr bool kIsFP8Backend = std::is_same_v<T, amx::GemmKernel224FP8>;
   static constexpr bool kSupportsDirectBf16Reload = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeBaseGrads = std::is_same_v<T, amx::GemmKernel224BF16>;
   static constexpr bool kSupportsAuthoritativeLoraGrads =
-      !SkipLoRA && (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend);
+      !SkipLoRA && (std::is_same_v<T, amx::GemmKernel224BF16> || kIsInt8Backend || kIsFP8Backend);
 
  protected:
   using Base = BaseMOE<T>;
@@ -673,6 +691,32 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     backward_bb_pool_bytes_ = p.bwd_bb_bytes;
   }
 
+  size_t base_backward_bb_required_size(int n, int k) const {
+    if constexpr (kIsFP8Backend) {
+      return T::BufferB::required_size(n, k, config_.quant_config.group_size);
+    } else {
+      return T::BufferB::required_size(n, k);
+    }
+  }
+
+  std::shared_ptr<typename T::BufferB> make_base_backward_bb(int n, int k, void* data) const {
+    if constexpr (kIsFP8Backend) {
+      return std::make_shared<typename T::BufferB>(n, k, config_.quant_config.group_size, data);
+    } else {
+      return std::make_shared<typename T::BufferB>(n, k, data);
+    }
+  }
+
+  void base_backward_mat_mul(int m, int n, int k, const std::shared_ptr<typename T::BufferA>& ba,
+                             const std::shared_ptr<typename T::BufferB>& bb,
+                             const std::shared_ptr<typename T::BufferC>& bc, int ith, int nth) {
+    if constexpr (kIsFP8Backend) {
+      amx::mat_mul_kgroup(m, n, k, config_.quant_config.group_size, ba, bb, bc, ith, nth);
+    } else {
+      amx::mat_mul(m, n, k, ba, bb, bc, ith, nth);
+    }
+  }
+
  public:
   AMX_SFT_MOE_TP(MOESFTConfig config, int tp_part_idx = 0)
       : Base(static_cast<GeneralMOEConfig>(config), tp_part_idx), sft_config_(config) {
@@ -680,6 +724,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         "Creating AMX_SFT_MOE_TP layer=%d tp_part=%d at numa %d skiplora %s share_backward_bb %s share_cache_pool %s\n",
         config.layer_idx, tp_part_idx, numa_node_of_cpu(sched_getcpu()), SkipLoRA ? "true" : "false",
         config.share_backward_bb ? "true" : "false", config.share_cache_pool ? "true" : "false");
+
+    if constexpr (kIsFP8Backend) {
+      if (config.quant_config.group_size != 128 || config.quant_config.zero_point) {
+        throw std::invalid_argument("FP8 SFT requires zero-point-free 128x128 block quantization");
+      }
+      if (config.hidden_size % 128 != 0 || config.intermediate_size % 128 != 0) {
+        throw std::invalid_argument("FP8 SFT requires 128-aligned TP-local hidden and intermediate dimensions");
+      }
+      if (!config.share_backward_bb) {
+        throw std::invalid_argument("FP8 SFT phase one requires the single-layer shared backward BufferB pool");
+      }
+      if (config.full_weight_grad) {
+        throw std::invalid_argument("FP8 SFT phase one supports frozen-base LoRA only");
+      }
+    }
 
     // Initialize LoRA configuration
     lora_rank_ = config.lora_rank;
@@ -926,18 +985,11 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     cache_down_output_pool_ = nullptr;
   }
 
-  /**
-   * @brief Set LoRA parameters after construction (Bug #007 fix).
-   *
-   * This is needed because TP_MOE base class uses GeneralMOEConfig which
-   * doesn't have lora_rank/lora_alpha fields, causing object slicing.
-   * The TP_MOE_SFT wrapper calls this method to propagate correct values.
-   *
-   * @param rank LoRA rank (typically 8 or 16)
-   * @param alpha LoRA alpha for scaling (lora_scaling = alpha / rank)
-   */
+  /** Update LoRA scaling/dropout without changing the allocation shape. */
   void set_lora_params(int rank, float alpha, float dropout = 0.0f) {
-    lora_rank_ = rank;
+    if (rank != lora_rank_) {
+      throw std::invalid_argument("LoRA rank is fixed when the SFT TP instance is constructed");
+    }
     lora_scaling_ = rank > 0 ? alpha / rank : 0.0f;
     lora_dropout_ = dropout;
   }
@@ -1636,9 +1688,18 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (config_.share_backward_bb) {
       auto& shared = SFTSharedPools::instance();
       shared.ensure_numa_count(tp_part_idx + 1);
-      if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
-        // Pool was overwritten by another layer or not yet repacked — sync fallback
-        prepare_backward_bb_for_async();
+      if constexpr (kIsFP8Backend) {
+        // FP8 phase one never publishes the shared pool from an async producer.
+        // Serialize the owner check, packed transpose and publication.
+        std::lock_guard<std::mutex> owner_guard(shared.bwd_bb_mu);
+        if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
+          prepare_backward_bb_for_async();
+        }
+      } else {
+        if (shared.pools[tp_part_idx].bwd_bb_owner_layer != config_.layer_idx) {
+          // Pool was overwritten by another layer or not yet repacked — sync fallback
+          prepare_backward_bb_for_async();
+        }
       }
     }
 
@@ -1712,7 +1773,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     // Step 1: Down projection backward
     stage_start = profiler_.start();
-    if constexpr (supports_standard_mat_mul_v<T>) {
+    if constexpr (supports_base_backward_v<T>) {
       backward_down_amx(cache, grad_output, grad_down_lora_a, grad_down_lora_b, full_intermediate_size,
                         fp32_grad_down_lora_b, optimizer_grad_scale);
     } else {
@@ -1837,7 +1898,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // }
 
     stage_start = profiler_.start();
-    if constexpr (supports_standard_mat_mul_v<T>) {
+    if constexpr (supports_base_backward_v<T>) {
       backward_gate_up_amx(cache, grad_input, grad_gate_lora_a, grad_gate_lora_b, grad_up_lora_a, grad_up_lora_b,
                            full_intermediate_size, fp32_grad_gate_lora_a, fp32_grad_up_lora_a, optimizer_grad_scale);
     } else {
@@ -2862,12 +2923,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     // Only prepare weights for kernels that support standard mat_mul
     if constexpr (!supports_standard_mat_mul_v<T>) {
       return;  // KGroup kernels use for-loop implementation
-    }
+    } else {
 
-    if (backward_weights_prepared_) return;
-    if (config_.gate_proj == nullptr) return;  // No base weights to prepare
+      if (backward_weights_prepared_) return;
+      if (config_.gate_proj == nullptr) return;  // No base weights to prepare
 
-    auto pool = config_.pool->get_subpool(tp_part_idx);
+      auto pool = config_.pool->get_subpool(tp_part_idx);
 
     // Fine-grained parallelism: nth_gate_up * expert_num * 2 + nth_down * expert_num tasks
     int nth_gate_up = T::recommended_nth(config_.hidden_size);
@@ -2910,7 +2971,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
         },
         nullptr);
 
-    backward_weights_prepared_ = true;
+      backward_weights_prepared_ = true;
+    }
   }
 
   /**
@@ -2918,7 +2980,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Used in share_backward_bb mode (Mode 1) to avoid persistent backward_bb_pool_ per instance.
    */
   void prepare_backward_weights_from_forward() {
-    if constexpr (!supports_standard_mat_mul_v<T>) return;
+    if constexpr (!supports_base_backward_v<T>) return;
 
     auto pool = config_.pool->get_subpool(tp_part_idx);
 
@@ -3035,7 +3097,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    */
   void prepare_backward_bb_for_async() {
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BackwardRepack);
-    if constexpr (!supports_standard_mat_mul_v<T>) return;
+    if constexpr (!supports_base_backward_v<T>) return;
     if (backward_bb_pool_bytes_ == 0) return;
 
     // Free any locally-allocated pool before switching to shared
@@ -3096,6 +3158,10 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Used by TP_MOE_SFT::load_weights() to set partitioned weights and prepare backward weights.
    */
   void prepare_bwd(void* gate_proj, void* up_proj, void* down_proj) {
+    if constexpr (kIsFP8Backend) {
+      throw std::runtime_error("FP8 SFT backward weights are built only from the shared forward BufferB pool");
+    }
+
     // If pool not yet allocated (Mode 1 init), allocate per-instance for save/load path
     if (backward_bb_pool_ == nullptr && backward_bb_pool_bytes_ > 0) {
       backward_bb_pool_ = aligned_alloc(64, backward_bb_pool_bytes_);
@@ -3168,12 +3234,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     for (int expert_idx = 0; expert_idx < config_.expert_num; expert_idx++) {
       // gate_bwd: [hidden_size, intermediate_size]
-      size_t gu_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+      size_t gu_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
       size_t gu_scale = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
       write_bwd_weights(prefix, "_gate_bwd_", (char*)gate_backward_bb_[expert_idx]->b, expert_idx, gu_size, gu_scale);
       write_bwd_weights(prefix, "_up_bwd_", (char*)up_backward_bb_[expert_idx]->b, expert_idx, gu_size, gu_scale);
       // down_bwd: [intermediate_size, hidden_size]
-      size_t d_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+      size_t d_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
       size_t d_scale = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
       write_bwd_weights(prefix, "_down_bwd_", (char*)down_backward_bb_[expert_idx]->b, expert_idx, d_size, d_scale);
     }
@@ -3188,12 +3254,12 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
     if (backward_weights_prepared_) return true;
 
     // Check if files exist for the first expert
-    size_t gu_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
+    size_t gu_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
     size_t gu_scale = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
     std::string test_file = T::name() + "_gate_bwd_0_" + std::to_string(gu_size - gu_scale) + "Byte_quant_.kt";
     if (!std::filesystem::exists(prefix / test_file)) return false;
 
-    size_t d_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+    size_t d_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
     size_t d_scale = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
 
     // mat_class: 0=gate_bwd, 1=up_bwd, 2=down_bwd
@@ -3268,7 +3334,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // gate_bwd: [hidden_size, intermediate_size]
           {
             size_t scale_size = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
-            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
+            size_t size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
             memcpy(gate_backward_bb_[expert_idx]->b, config_.gate_bwd_projs[tp_part_idx][logical_expert_id], size);
             if constexpr (T::BufferB::SCALE) {
               memcpy(gate_backward_bb_[expert_idx]->d, config_.gate_bwd_scales[tp_part_idx][logical_expert_id],
@@ -3278,7 +3344,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // up_bwd
           {
             size_t scale_size = T::BufferB::SCALE ? config_.hidden_size * sizeof(float) : 0;
-            size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
+            size_t size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size) - scale_size;
             memcpy(up_backward_bb_[expert_idx]->b, config_.up_bwd_projs[tp_part_idx][logical_expert_id], size);
             if constexpr (T::BufferB::SCALE) {
               memcpy(up_backward_bb_[expert_idx]->d, config_.up_bwd_scales[tp_part_idx][logical_expert_id], scale_size);
@@ -3287,7 +3353,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           // down_bwd: [intermediate_size, hidden_size]
           {
             size_t scale_size = T::BufferB::SCALE ? config_.intermediate_size * sizeof(float) : 0;
-            size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size) - scale_size;
+            size_t size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size) - scale_size;
             memcpy(down_backward_bb_[expert_idx]->b, config_.down_bwd_projs[tp_part_idx][logical_expert_id], size);
             if constexpr (T::BufferB::SCALE) {
               memcpy(down_backward_bb_[expert_idx]->d, config_.down_bwd_scales[tp_part_idx][logical_expert_id],
@@ -3492,6 +3558,43 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
       gate_up_backward_bb_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
       down_backward_bb_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
       backward_bb_pool_bytes_ = config_.expert_num * (gate_up_backward_bb_size * 2 + down_backward_bb_size);
+    } else if constexpr (kIsFP8Backend) {
+      // Base weights stay block-FP8. LoRA uses the direct BF16 AVX512 path,
+      // so only allocate its BF16 scratch and the common base-backward A/C buffers.
+      lora_bb_pool_bytes_ = 0;
+      lora_ba_pool_bytes_ = 0;
+      lora_bc_inter_pool_bytes_ = 0;
+      lora_bc_out_pool_bytes_ = 0;
+
+      size_t raw_total_tokens = (size_t)config_.max_len * config_.num_experts_per_tok;
+      size_t safe_alloc_tokens = raw_total_tokens + (config_.expert_num * M_STEP);
+      safe_alloc_tokens = ((safe_alloc_tokens + M_STEP - 1) / M_STEP) * M_STEP;
+      size_t align_overhead = config_.expert_num * 64;
+
+      lora_intermediate_bf16_pool_bytes_ =
+          safe_alloc_tokens * padded_lora_rank_ * sizeof(ggml_bf16_t) * 2 + align_overhead * 2;
+
+      grad_output_ba_size = T::BufferA::required_size(max_m, config_.hidden_size);
+      backward_ba_pool_bytes_ = T::BufferA::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead;
+      grad_intermediate_bc_size = T::BufferC::required_size(max_m, config_.intermediate_size);
+      grad_gate_up_bc_size = T::BufferC::required_size(max_m, config_.hidden_size);
+      backward_bc_pool_bytes_ = T::BufferC::required_size(safe_alloc_tokens, config_.intermediate_size) +
+                                T::BufferC::required_size(safe_alloc_tokens, config_.hidden_size) + align_overhead * 2;
+
+      grad_output_bf16_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(ggml_bf16_t) + align_overhead;
+      base_grad_output_bf16_pool_bytes_ = grad_output_bf16_pool_bytes_;
+      lora_grad_out_pool_bytes_ = safe_alloc_tokens * config_.hidden_size * sizeof(float) + align_overhead;
+      lora_inter_proj_pool_bytes_ = safe_alloc_tokens * lora_rank_ * sizeof(float) + align_overhead;
+      lora_grad_times_b_pool_bytes_ = safe_alloc_tokens * lora_rank_ * sizeof(float) + align_overhead;
+      down_lora_grad_b_accum_pool_bytes_ =
+          static_cast<size_t>(config_.expert_num) * config_.hidden_size * lora_rank_ * sizeof(float) + align_overhead;
+      down_lora_grad_a_accum_pool_bytes_ =
+          static_cast<size_t>(config_.expert_num) * config_.intermediate_size * lora_rank_ * sizeof(float) +
+          align_overhead;
+
+      gate_up_backward_bb_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
+      down_backward_bb_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
+      backward_bb_pool_bytes_ = config_.expert_num * (gate_up_backward_bb_size * 2 + down_backward_bb_size);
     } else {
       // For unsupported kernels (KGroup kernels), set all AMX buffer sizes to 0
       // These kernels will use the original for-loop implementation
@@ -3595,6 +3698,8 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                             lora_gate_up_out_bc_size, lora_down_out_bc_size, grad_output_ba_size,
                             grad_intermediate_bc_size, grad_gate_up_bc_size, gate_up_backward_bb_size,
                             down_backward_bb_size);
+    } else if constexpr (kIsFP8Backend) {
+      init_fp8_sft_buffers(max_m);
     }
 
     // Pool logger: static allocation summary (printed once per instance at init)
@@ -3603,6 +3708,36 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
                  "static_alloc: expert_num=%d hidden=%d inter=%d lora_bb=%.2fGB bwd_bb=%.2fGB", config_.expert_num,
                  config_.hidden_size, config_.intermediate_size, lora_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0,
                  backward_bb_pool_bytes_ / 1024.0 / 1024.0 / 1024.0);
+  }
+
+  /**
+   * @brief Initialize only the BF16 activation/LoRA scratch metadata and
+   * block-FP8 base backward buffers needed by FP8 SFT.
+   */
+  void init_fp8_sft_buffers(size_t max_m) {
+    lora_gate_intermediate_ptr_.assign(config_.expert_num, nullptr);
+    lora_up_intermediate_ptr_.assign(config_.expert_num, nullptr);
+
+    grad_output_ba_.resize(config_.expert_num);
+    grad_intermediate_bc_.resize(config_.expert_num);
+    grad_gate_up_bc_.resize(config_.expert_num);
+    grad_output_bf16_ptr_.assign(config_.expert_num, nullptr);
+    base_grad_output_bf16_ptr_.assign(config_.expert_num, nullptr);
+    gate_backward_bb_.resize(config_.expert_num);
+    up_backward_bb_.resize(config_.expert_num);
+    down_backward_bb_.resize(config_.expert_num);
+
+    for (int i = 0; i < config_.expert_num; ++i) {
+      grad_output_ba_[i] = std::make_shared<typename T::BufferA>(max_m, config_.hidden_size, nullptr);
+      grad_intermediate_bc_[i] =
+          std::make_shared<typename T::BufferC>(max_m, config_.intermediate_size, nullptr);
+      grad_gate_up_bc_[i] = std::make_shared<typename T::BufferC>(max_m, config_.hidden_size, nullptr);
+    }
+
+    if (backward_bb_pool_ != nullptr) init_backward_bb_pointers();
+    lora_weights_prepared_ = false;
+    lora_backward_weights_prepared_ = false;
+    backward_weights_prepared_ = false;
   }
 
   /**
@@ -3757,21 +3892,21 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
    * Requires backward_bb_pool_ != nullptr and backward_bb_pool_bytes_ > 0.
    */
   void init_backward_bb_pointers() {
-    size_t gate_up_backward_bb_size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
-    size_t down_backward_bb_size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
+    size_t gate_up_backward_bb_size = base_backward_bb_required_size(config_.hidden_size, config_.intermediate_size);
+    size_t down_backward_bb_size = base_backward_bb_required_size(config_.intermediate_size, config_.hidden_size);
 
     char* backward_bb_ptr = (char*)backward_bb_pool_;
     for (int i = 0; i < config_.expert_num; i++) {
       gate_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
+          make_base_backward_bb(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
       backward_bb_ptr += gate_up_backward_bb_size;
 
-      up_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.hidden_size, config_.intermediate_size, (void*)backward_bb_ptr);
+      up_backward_bb_[i] = make_base_backward_bb(config_.hidden_size, config_.intermediate_size,
+                                                 (void*)backward_bb_ptr);
       backward_bb_ptr += gate_up_backward_bb_size;
 
-      down_backward_bb_[i] =
-          std::make_shared<typename T::BufferB>(config_.intermediate_size, config_.hidden_size, (void*)backward_bb_ptr);
+      down_backward_bb_[i] = make_base_backward_bb(config_.intermediate_size, config_.hidden_size,
+                                                   (void*)backward_bb_ptr);
       backward_bb_ptr += down_backward_bb_size;
     }
   }
@@ -5125,7 +5260,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
           auto& bc = grad_intermediate_bc_[expert_idx];
 
           // mat_mul: [m, hidden_size] @ [intermediate_size, hidden_size]^T = [m, intermediate_size]
-          amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+          base_backward_mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
 
           // to_mat: Convert BufferC to BF16 - use same ith, nth as mat_mul!
           bc->to_mat(m, grad_intermediate_ + expert_offsets[task_idx], ith, nth);
@@ -5748,7 +5883,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
     assert(backward_weights_prepared_);
     if (lora_rank_ > 0 && gate_lora_a_ != nullptr && gate_lora_b_ != nullptr) {
-      prepare_lora_backward_weights();
+      if constexpr (supports_standard_mat_mul_v<T>) prepare_lora_backward_weights();
     }
 
     // =====================================================
@@ -5794,25 +5929,24 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
 
       size_t local_max_m = ((m + M_STEP - 1) / M_STEP) * M_STEP;
 
-      // BufferA for LoRA intermediate (gate)
-      lora_gate_intermediate_ba_[expert_idx]->max_m = local_max_m;
-      lora_gate_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
-      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+      if constexpr (supports_standard_mat_mul_v<T>) {
+        // Legacy AMX LoRA BufferA/BufferC objects are not instantiated for FP8.
+        lora_gate_intermediate_ba_[expert_idx]->max_m = local_max_m;
+        lora_gate_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+        lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
 
-      // BufferA for LoRA intermediate (up)
-      lora_up_intermediate_ba_[expert_idx]->max_m = local_max_m;
-      lora_up_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
-      lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
+        lora_up_intermediate_ba_[expert_idx]->max_m = local_max_m;
+        lora_up_intermediate_ba_[expert_idx]->set_data(lora_ba_ptr);
+        lora_ba_ptr += align64(T::BufferA::required_size(local_max_m, padded_lora_rank_));
 
-      // BufferC for LoRA step 1 output (gate)
-      lora_gate_intermediate_bc_[expert_idx]->max_m = local_max_m;
-      lora_gate_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
-      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+        lora_gate_intermediate_bc_[expert_idx]->max_m = local_max_m;
+        lora_gate_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+        lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
 
-      // BufferC for LoRA step 1 output (up)
-      lora_up_intermediate_bc_[expert_idx]->max_m = local_max_m;
-      lora_up_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
-      lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+        lora_up_intermediate_bc_[expert_idx]->max_m = local_max_m;
+        lora_up_intermediate_bc_[expert_idx]->set_data(lora_bc_inter_ptr);
+        lora_bc_inter_ptr += align64(T::BufferC::required_size(local_max_m, padded_lora_rank_));
+      }
 
       // BF16 intermediate pointers (gate)
       lora_gate_intermediate_ptr_[expert_idx] = (ggml_bf16_t*)bf16_inter_ptr;
@@ -5897,7 +6031,7 @@ class AMX_SFT_MOE_TP : public BaseMOE<T> {
             auto& bb = do_up ? up_backward_bb_[expert_idx] : gate_backward_bb_[expert_idx];
             auto& bc = grad_gate_up_bc_[expert_idx];
 
-            amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+            base_backward_mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
             bc->to_mat(m, grad_output_bf16_ptr_[expert_idx], ith, nth);
           },
           nullptr);

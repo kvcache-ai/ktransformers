@@ -229,6 +229,194 @@ class INT8ExpertWeights:
     down_scale: torch.Tensor
 
 
+@dataclass
+class BlockFP8ExpertWeights:
+    """Raw per-expert E4M3 weights and normalized block scales.
+
+    The lists intentionally remain unstacked: native FP8 packing consumes one
+    expert pointer at a time and releases these checkpoint tensors after the
+    synchronous C++ load completes.
+    """
+
+    gate_proj: list[torch.Tensor]
+    gate_scale: list[torch.Tensor]
+    up_proj: list[torch.Tensor]
+    up_scale: list[torch.Tensor]
+    down_proj: list[torch.Tensor]
+    down_scale: list[torch.Tensor]
+    block_size: tuple[int, int] = (128, 128)
+
+
+def _checkpoint_tensor_files(
+    checkpoint_files: list[str],
+    sharded_metadata: dict | None,
+) -> dict[str, str]:
+    """Return tensor key -> absolute checkpoint file without loading tensors."""
+
+    base_dir = os.path.dirname(checkpoint_files[0])
+    weight_map = (
+        sharded_metadata.get("weight_map")
+        if isinstance(sharded_metadata, dict)
+        else None
+    )
+    if weight_map:
+        return {
+            key: os.path.join(base_dir, filename)
+            for key, filename in weight_map.items()
+        }
+
+    result: dict[str, str] = {}
+    for file_path in checkpoint_files:
+        with safe_open(file_path, framework="pt") as handle:
+            for key in handle.keys():
+                result[key] = file_path
+    return result
+
+
+def load_block_fp8_experts_from_checkpoint_files(
+    checkpoint_files: list[str],
+    sharded_metadata: dict | None,
+    layers_prefix: str,
+    moe_config: MOEArchConfig,
+    layer_idx: int,
+    hidden_size: int,
+    block_size: tuple[int, int] = (128, 128),
+) -> BlockFP8ExpertWeights:
+    """Load raw block-FP8 routed experts without stacking or dequantizing.
+
+    Native FP8 SFT currently accepts only non-fused, CPU-resident E4M3FN
+    matrices with one inverse scale per 128x128 block. Scale tensors from
+    checkpoints may be BF16 or FP32; the returned scale lists are always FP32.
+    """
+
+    if not SAFETENSORS_AVAILABLE:
+        raise ImportError("safetensors is required for native FP8 expert loading")
+    if not checkpoint_files:
+        raise FileNotFoundError("checkpoint_files is empty")
+    if tuple(block_size) != (128, 128):
+        raise ValueError(
+            "native FP8 SFT requires weight_block_size=[128, 128], "
+            f"got {tuple(block_size)}"
+        )
+
+    hidden_size = int(hidden_size)
+    intermediate_size = int(moe_config.intermediate_size)
+    if hidden_size % 128 or intermediate_size % 128:
+        raise ValueError(
+            "native FP8 SFT requires hidden and routed intermediate dimensions "
+            f"divisible by 128, got hidden_size={hidden_size}, "
+            f"intermediate_size={intermediate_size}"
+        )
+
+    gate_name, up_name, down_name = moe_config.weight_names
+    experts_prefix = (
+        f"{layers_prefix}.{layer_idx}.{moe_config.moe_layer_attr}."
+        f"{moe_config.experts_attr}"
+    )
+    tensor_files = _checkpoint_tensor_files(checkpoint_files, sharded_metadata)
+    fused_keys = (
+        f"{experts_prefix}.gate_up_proj",
+        f"{experts_prefix}.gate_up_proj.weight",
+        f"{experts_prefix}.down_proj",
+        f"{experts_prefix}.down_proj.weight",
+    )
+    if any(key in tensor_files for key in fused_keys):
+        raise ValueError(
+            "native FP8 SFT requires non-fused per-expert checkpoint weights; "
+            f"layer {layer_idx} contains fused gate_up/down tensors"
+        )
+
+    projection_specs = {
+        "gate": (gate_name, (intermediate_size, hidden_size)),
+        "up": (up_name, (intermediate_size, hidden_size)),
+        "down": (down_name, (hidden_size, intermediate_size)),
+    }
+    keys: list[str] = []
+    for expert_idx in range(int(moe_config.expert_num)):
+        base = f"{experts_prefix}.{expert_idx}"
+        for projection_name, _ in projection_specs.values():
+            keys.extend(
+                (
+                    f"{base}.{projection_name}.weight",
+                    f"{base}.{projection_name}.weight_scale_inv",
+                )
+            )
+
+    missing = [key for key in keys if key not in tensor_files]
+    if missing:
+        preview = ", ".join(missing[:3])
+        suffix = " ..." if len(missing) > 3 else ""
+        raise FileNotFoundError(
+            f"layer {layer_idx} is missing {len(missing)} native FP8 tensors: "
+            f"{preview}{suffix}"
+        )
+
+    tensors: dict[str, torch.Tensor] = {}
+    keys_by_file: dict[str, list[str]] = {}
+    for key in keys:
+        keys_by_file.setdefault(tensor_files[key], []).append(key)
+    for file_path, file_keys in keys_by_file.items():
+        with safe_open(file_path, framework="pt") as handle:
+            for key in file_keys:
+                tensors[key] = handle.get_tensor(key)
+
+    output: dict[str, list[torch.Tensor]] = {
+        "gate_proj": [],
+        "gate_scale": [],
+        "up_proj": [],
+        "up_scale": [],
+        "down_proj": [],
+        "down_scale": [],
+    }
+    fp8_dtype = torch.float8_e4m3fn
+    for expert_idx in range(int(moe_config.expert_num)):
+        base = f"{experts_prefix}.{expert_idx}"
+        for label, (projection_name, expected_shape) in projection_specs.items():
+            weight_key = f"{base}.{projection_name}.weight"
+            scale_key = f"{base}.{projection_name}.weight_scale_inv"
+            weight = tensors[weight_key]
+            scale = tensors[scale_key]
+            expected_scale_shape = (
+                expected_shape[0] // 128,
+                expected_shape[1] // 128,
+            )
+            if weight.device.type != "cpu" or weight.dtype != fp8_dtype:
+                raise ValueError(
+                    f"{weight_key} must be CPU torch.float8_e4m3fn, got "
+                    f"{weight.dtype} on {weight.device}"
+                )
+            if tuple(weight.shape) != expected_shape:
+                raise ValueError(
+                    f"{weight_key} shape mismatch: expected {expected_shape}, "
+                    f"got {tuple(weight.shape)}"
+                )
+            if scale.device.type != "cpu" or scale.dtype not in {
+                torch.bfloat16,
+                torch.float32,
+            }:
+                raise ValueError(
+                    f"{scale_key} must be a BF16 or FP32 CPU tensor, got "
+                    f"{scale.dtype} on {scale.device}"
+                )
+            if tuple(scale.shape) != expected_scale_shape:
+                raise ValueError(
+                    f"{scale_key} shape mismatch for 128x128 blocks: expected "
+                    f"{expected_scale_shape}, got {tuple(scale.shape)}"
+                )
+            output[f"{label}_proj"].append(weight.contiguous())
+            output[f"{label}_scale"].append(
+                scale.to(dtype=torch.float32, device="cpu").contiguous()
+            )
+
+    logger.info(
+        "Loaded layer %d native FP8 routed experts: experts=%d, block_size=%s",
+        layer_idx,
+        moe_config.expert_num,
+        block_size,
+    )
+    return BlockFP8ExpertWeights(**output, block_size=(128, 128))
+
+
 def _find_safetensor_files(kt_weight_path: str) -> list[str]:
     if not os.path.isdir(kt_weight_path):
         raise FileNotFoundError(f"kt_weight_path directory not found: {kt_weight_path}")

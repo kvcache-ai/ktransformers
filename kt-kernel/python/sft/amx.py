@@ -41,8 +41,14 @@ except (ImportError, AttributeError):
     AMXInt8_SFT_MOE_SkipLoRA = None
     AMXInt4_SFT_MOE_SkipLoRA = None
 
+try:
+    from kt_kernel_ext.moe import AMXFP8_SFT_MOE
+except (ImportError, AttributeError):
+    AMXFP8_SFT_MOE = None
+
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer, _supports_authoritative_optimizer_grads
-from .backend import is_int8_sft_method
+from .backend import is_fp8_sft_method, is_int8_sft_method
+from .weights import BlockFP8ExpertWeights
 
 _AMX_M_STEP = 32
 
@@ -50,6 +56,7 @@ _AMX_M_STEP = 32
 # Mapping from method string to C++ SFT MOE class
 _SFT_METHOD_TO_CLASS = {
     "AMXBF16_SFT": AMXBF16_SFT_MOE,
+    "AMXFP8_SFT": AMXFP8_SFT_MOE,
     "INT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT8_SFT": AMXInt8_SFT_MOE,
     "AMXINT4_SFT": AMXInt4_SFT_MOE,
@@ -63,7 +70,7 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
     """
     AMX-based SFT MoE wrapper.
 
-    Supports BF16, INT8, INT4, and SkipLoRA variants.
+    Supports BF16, native block-FP8, INT8, INT4, and SkipLoRA variants.
     Forward/backward buffer management is in BaseSFTMoEWrapper;
     this class implements weight loading and C++ task construction.
     """
@@ -123,6 +130,28 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         )
         self.group_size = group_size
         self.zero_point = zero_point
+
+        if is_fp8_sft_method(method):
+            if self._full_weight_grad or self.lora_rank <= 0:
+                raise ValueError("AMXFP8_SFT supports frozen-base LoRA only")
+            if self.num_gpu_experts != 0:
+                raise ValueError("AMXFP8_SFT requires all routed experts on CPU")
+            if self.hidden_size % 128 or self.moe_intermediate_size % 128:
+                raise ValueError(
+                    "AMXFP8_SFT requires hidden_size and moe_intermediate_size "
+                    "divisible by 128"
+                )
+            if self.threadpool_count < 1 or self.moe_intermediate_size % self.threadpool_count:
+                raise ValueError(
+                    "AMXFP8_SFT requires moe_intermediate_size divisible by "
+                    "threadpool_count"
+                )
+            if (self.moe_intermediate_size // self.threadpool_count) % 128:
+                raise ValueError(
+                    "AMXFP8_SFT requires every TP intermediate slice divisible by 128"
+                )
+            self.group_size = 128
+            self.zero_point = False
 
         if method not in _SFT_METHOD_TO_CLASS:
             raise ValueError(f"Unknown SFT method: {method}. Supported: {list(_SFT_METHOD_TO_CLASS.keys())}")
@@ -285,6 +314,10 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         if self.method in ("AMXINT4_KGroup_SFT", "AMXINT4_1KGroup_SFT"):
             config.quant_config.group_size = self.group_size
             config.quant_config.zero_point = self.zero_point
+        elif is_fp8_sft_method(self.method):
+            config.quant_config.bits = 8
+            config.quant_config.group_size = 128
+            config.quant_config.zero_point = False
 
         # Release old C++ MOE object before creating a new one to avoid memory leak
         old_moe = getattr(self, "moe", None)
@@ -356,6 +389,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         down_proj: torch.Tensor,
         physical_to_logical_map_cpu: torch.Tensor,
     ) -> None:
+        if is_fp8_sft_method(self.method):
+            raise ValueError(
+                "AMXFP8_SFT accepts raw per-expert E4M3 weights only; "
+                "use load_block_fp8_weights()"
+            )
         if is_int8_sft_method(self.method):
             raise ValueError(
                 "INT8_SFT accepts pre-quantized .kt weights only; "
@@ -366,6 +404,76 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
         self.down_proj = down_proj.contiguous()
         self.load_weights(physical_to_logical_map_cpu)
         del gate_proj, up_proj, down_proj
+
+    def load_block_fp8_weights(
+        self,
+        weights: BlockFP8ExpertWeights,
+        physical_to_logical_map_cpu: torch.Tensor,
+    ) -> None:
+        """Synchronously pack raw per-expert FP8 checkpoint tensors in C++."""
+
+        if not is_fp8_sft_method(self.method):
+            raise ValueError(
+                f"load_block_fp8_weights() requires AMXFP8_SFT, got {self.method!r}"
+            )
+        if tuple(weights.block_size) != (128, 128):
+            raise ValueError(
+                "AMXFP8_SFT requires block_size=(128, 128), "
+                f"got {weights.block_size}"
+            )
+
+        projections = {
+            "gate": (weights.gate_proj, weights.gate_scale, (self.moe_intermediate_size, self.hidden_size)),
+            "up": (weights.up_proj, weights.up_scale, (self.moe_intermediate_size, self.hidden_size)),
+            "down": (weights.down_proj, weights.down_scale, (self.hidden_size, self.moe_intermediate_size)),
+        }
+        for name, (expert_weights, expert_scales, expected_shape) in projections.items():
+            if len(expert_weights) != self.num_experts or len(expert_scales) != self.num_experts:
+                raise ValueError(
+                    f"{name} FP8 tensors must contain {self.num_experts} experts, got "
+                    f"weights={len(expert_weights)}, scales={len(expert_scales)}"
+                )
+            expected_scale_shape = (expected_shape[0] // 128, expected_shape[1] // 128)
+            for expert_idx, (weight, scale) in enumerate(zip(expert_weights, expert_scales)):
+                if (
+                    weight.device.type != "cpu"
+                    or weight.dtype != torch.float8_e4m3fn
+                    or not weight.is_contiguous()
+                    or tuple(weight.shape) != expected_shape
+                ):
+                    raise ValueError(
+                        f"{name} expert {expert_idx} must be contiguous CPU E4M3FN "
+                        f"with shape {expected_shape}"
+                    )
+                if (
+                    scale.device.type != "cpu"
+                    or scale.dtype != torch.float32
+                    or not scale.is_contiguous()
+                    or tuple(scale.shape) != expected_scale_shape
+                ):
+                    raise ValueError(
+                        f"{name} scale {expert_idx} must be contiguous CPU FP32 "
+                        f"with shape {expected_scale_shape}"
+                    )
+
+        self._gate_weights_per_numa = [weights.gate_proj]
+        self._up_weights_per_numa = [weights.up_proj]
+        self._down_weights_per_numa = [weights.down_proj]
+        self._gate_scales_per_numa = [weights.gate_scale]
+        self._up_scales_per_numa = [weights.up_scale]
+        self._down_scales_per_numa = [weights.down_scale]
+        self._gate_projs_ptrs = [[tensor.data_ptr() for tensor in weights.gate_proj]]
+        self._up_projs_ptrs = [[tensor.data_ptr() for tensor in weights.up_proj]]
+        self._down_projs_ptrs = [[tensor.data_ptr() for tensor in weights.down_proj]]
+        self._gate_scale_ptrs = [[tensor.data_ptr() for tensor in weights.gate_scale]]
+        self._up_scale_ptrs = [[tensor.data_ptr() for tensor in weights.up_scale]]
+        self._down_scale_ptrs = [[tensor.data_ptr() for tensor in weights.down_scale]]
+        self._has_bwd_projs = False
+        self._use_projs_path = True
+        self.gate_proj = None
+        self.up_proj = None
+        self.down_proj = None
+        self.load_weights(physical_to_logical_map_cpu)
 
     def _load_base_weights_from_file(self) -> None:
         if not hasattr(self, "weight_path") or self.weight_path is None:
@@ -380,6 +488,11 @@ class AMXSFTMoEWrapper(BaseSFTMoEWrapper):
             if kt_files:
                 self._use_kt_direct_load = True
                 return
+        if is_fp8_sft_method(self.method):
+            raise RuntimeError(
+                "AMXFP8_SFT requires raw per-expert HF checkpoint tensors; "
+                "legacy merged weight files are not supported"
+            )
         if is_int8_sft_method(self.method):
             raise RuntimeError(
                 f"INT8_SFT requires pre-quantized .kt files under "

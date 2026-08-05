@@ -283,6 +283,51 @@ def test_ephemeral_lifecycle_is_int8_only():
         )
 
 
+def _make_fp8_config(**overrides):
+    kwargs = {
+        "kt_expert_weight_format": "fp8",
+        "kt_weight_path": "/models/native-fp8",
+        "kt_train_mode": "lora",
+        "kt_lora_rank": 8,
+        "kt_num_gpu_experts": 0,
+        "kt_share_backward_bb": True,
+    }
+    kwargs.update(overrides)
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        return config.KTConfig(**kwargs)
+
+
+def test_fp8_format_selects_backend_and_accepts_checkpoint_provenance():
+    cfg = _make_fp8_config(
+        kt_activation_policy={"cpu": "retain", "gpu": "recompute"}
+    )
+    assert cfg.kt_backend == "FP8"
+    assert cfg.kt_expert_weight_format == "fp8"
+    assert cfg.kt_weight_path == "/models/native-fp8"
+    assert cfg.kt_weight_lifecycle == "persistent"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"kt_backend": "AMXBF16"}, "conflicts"),
+        ({"kt_train_mode": "full"}, "frozen-base LoRA"),
+        ({"kt_train_mode": "hybrid"}, "frozen-base LoRA"),
+        ({"kt_lora_rank": 0}, "kt_lora_rank > 0"),
+        ({"kt_num_gpu_experts": 1}, "kt_num_gpu_experts=0"),
+        ({"kt_use_lora_experts": True}, "GPU LoRA experts"),
+        ({"kt_share_backward_bb": False}, "kt_share_backward_bb=true"),
+        ({"kt_weight_lifecycle": "ephemeral"}, "persistent"),
+    ],
+)
+def test_fp8_rejects_unsupported_training_modes(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        _make_fp8_config(**overrides)
+
+
 def test_unknown_backend_fails_instead_of_falling_back_to_bf16():
     with (
         patch.dict(os.environ, {}, clear=True),

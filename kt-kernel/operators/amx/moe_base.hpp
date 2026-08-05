@@ -84,6 +84,20 @@ class AMX_MOE_BASE {
     derived()->derived_init();
   }
 
+  void set_staged_weight_pointers(void* gate, void* up, void* down, void* gate_scale, void* up_scale,
+                                  void* down_scale) {
+    config_.gate_proj = gate;
+    config_.up_proj = up;
+    config_.down_proj = down;
+    config_.gate_scale = gate_scale;
+    config_.up_scale = up_scale;
+    config_.down_scale = down_scale;
+  }
+
+  void clear_staged_weight_pointers() {
+    set_staged_weight_pointers(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+  }
+
   void init() {
     if (config_.load && config_.path == "") {
       config_.load = false;

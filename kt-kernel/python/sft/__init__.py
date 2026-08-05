@@ -11,7 +11,14 @@ Additional dependencies beyond base kt_kernel: torch.nn, torch.distributed, peft
 """
 
 from .config import KTActivationPolicy, KTConfig
-from .backend import INT8_BACKEND, INT8_SFT_METHOD, get_int8_runtime
+from .backend import (
+    FP8_BACKEND,
+    FP8_SFT_METHOD,
+    INT8_BACKEND,
+    INT8_SFT_METHOD,
+    get_fp8_runtime,
+    get_int8_runtime,
+)
 from .weight_manifest import validate_persistent_int8_weights
 from .dist_utils import get_activation_checkpoint_context_fn
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
@@ -31,9 +38,11 @@ from .autograd import KTMoEFunction
 from .layer import KTMoELayerWrapper
 from .weights import (
     extract_moe_weights,
+    load_block_fp8_experts_from_checkpoint_files,
     load_experts_from_checkpoint_files,
     load_experts_from_kt_weight_path,
     INT8ExpertWeights,
+    BlockFP8ExpertWeights,
 )
 from .lora import (
     kt_adapt_peft_lora,
@@ -63,6 +72,9 @@ __all__ = [
     "INT8_BACKEND",
     "INT8_SFT_METHOD",
     "get_int8_runtime",
+    "FP8_BACKEND",
+    "FP8_SFT_METHOD",
+    "get_fp8_runtime",
     "validate_persistent_int8_weights",
     "get_activation_checkpoint_context_fn",
     "BaseSFTMoEWrapper",
@@ -80,9 +92,11 @@ __all__ = [
     "KTMoEFunction",
     "KTMoELayerWrapper",
     "extract_moe_weights",
+    "load_block_fp8_experts_from_checkpoint_files",
     "load_experts_from_checkpoint_files",
     "load_experts_from_kt_weight_path",
     "INT8ExpertWeights",
+    "BlockFP8ExpertWeights",
     "kt_adapt_peft_lora",
     "get_kt_lora_params",
     "get_kt_trainable_params",

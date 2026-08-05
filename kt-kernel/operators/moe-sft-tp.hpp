@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 
+#include "amx/fp8_tp_staging.hpp"
 #include "amx/la/amx.hpp"
 #include "moe-tp.hpp"
 #include "sft_profile.hpp"
@@ -73,6 +74,12 @@ static inline void print_tp_bf16_stats(int layer_idx, const char* name, const gg
 // Forward declaration
 template <class T, template <class> class BaseMOE, bool SkipLoRA>
 class AMX_SFT_MOE_TP;
+
+inline MOESFTConfig make_tp_sft_config(const MOESFTConfig& full_config, const GeneralMOEConfig& tp_config) {
+  MOESFTConfig local_config = full_config;
+  static_cast<GeneralMOEConfig&>(local_config) = tp_config;
+  return local_config;
+}
 
 /**
  * @brief Shared TP backward temporary pools (one buffer per TP index).
@@ -174,6 +181,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
   static constexpr size_t kAmxAlignment = 64;
   static inline size_t round_up(size_t x, size_t align) { return (x + align - 1) / align * align; }
 
+  static typename Base::PartFactory make_sft_part_factory(const MOESFTConfig& full_config) {
+    return [full_config](const GeneralMOEConfig& tp_config, int tp_index) -> std::unique_ptr<T> {
+      return std::make_unique<T>(make_tp_sft_config(full_config, tp_config), tp_index);
+    };
+  }
+
   template <typename Function>
   void run_numa_job_checked(const char* context, Function&& function) {
     std::vector<std::exception_ptr> errors(tp_count);
@@ -196,6 +209,55 @@ class TP_MOE_SFT : public TP_MOE<T> {
                                  " with an unknown error");
       }
     }
+  }
+
+  void load_fp8_weights_with_tp_staging() {
+    amx::validate_block_fp8_tp_source(config);
+    const int group_size = config.quant_config.group_size;
+    const auto* physical_to_logical_map = static_cast<const uint64_t*>(config.physical_to_logical_map);
+
+    std::vector<int> intermediate_offsets(tp_count);
+    int intermediate_offset = 0;
+    for (int i = 0; i < tp_count; ++i) {
+      const auto& tp_config = tp_configs[i];
+      if (tp_config.hidden_size != config.hidden_size || tp_config.expert_num != config.expert_num ||
+          tp_config.intermediate_size % group_size != 0 || intermediate_offset % group_size != 0) {
+        throw std::runtime_error("FP8 SFT TP config is incompatible with block-aligned staging");
+      }
+      intermediate_offsets[i] = intermediate_offset;
+      intermediate_offset += tp_config.intermediate_size;
+      tps[i]->set_physical_to_logical_map(config.physical_to_logical_map);
+    }
+    if (intermediate_offset != config.intermediate_size) {
+      throw std::runtime_error("FP8 SFT TP slices do not cover the full intermediate size");
+    }
+
+    std::vector<amx::BlockFP8TPStaging> staging(tp_count);
+    try {
+      run_numa_job_checked("native FP8 TP staging", [&](int numa_id) {
+        const auto& tp_config = tp_configs[numa_id];
+        auto& tp_staging = staging[numa_id];
+        tp_staging.allocate(tp_config.expert_num, tp_config.hidden_size, tp_config.intermediate_size, group_size);
+        config.pool->get_subpool(numa_id)->do_work_stealing_job(
+            tp_config.expert_num, nullptr,
+            [&](int physical_expert) {
+              const int logical_expert =
+                  static_cast<int>(expert_map(physical_to_logical_map, physical_expert));
+              amx::stage_block_fp8_tp_expert(config, tp_config.intermediate_size, intermediate_offsets[numa_id],
+                                             logical_expert, tp_staging);
+            },
+            nullptr);
+        tps[numa_id]->set_staged_weight_pointers(
+            tp_staging.gate.get(), tp_staging.up.get(), tp_staging.down.get(), tp_staging.gate_scale.get(),
+            tp_staging.up_scale.get(), tp_staging.down_scale.get());
+      });
+      run_numa_job_checked("native FP8 TP forward weight load",
+                           [this](int numa_id) { tps[numa_id]->load_weights(); });
+    } catch (...) {
+      for (auto& tp : tps) tp->clear_staged_weight_pointers();
+      throw;
+    }
+    for (auto& tp : tps) tp->clear_staged_weight_pointers();
   }
 
   void alloc_or_resize_backward_pool(int tp_idx, size_t required_bytes) {
@@ -253,11 +315,15 @@ class TP_MOE_SFT : public TP_MOE<T> {
   bool optimizer_grad_outputs_initialized_ = false;
 
  public:
-  TP_MOE_SFT(const MOESFTConfig& config) : Base(static_cast<const GeneralMOEConfig&>(config)), sft_config(config) {
+  TP_MOE_SFT(const MOESFTConfig& config)
+      : Base(static_cast<const GeneralMOEConfig&>(config), make_sft_part_factory(config)), sft_config(config) {
     printf("Creating TP_MOE_SFT layer %d\n", config.layer_idx);
 
     if (config.full_weight_grad && T::kIsInt8Backend) {
       throw std::runtime_error("INT8 SFT does not support base weight gradients; use frozen-base LoRA");
+    }
+    if (config.full_weight_grad && T::kIsFP8Backend) {
+      throw std::runtime_error("FP8 SFT phase one supports frozen-base LoRA only");
     }
 
     backward_temp_pools_.assign(tp_count, nullptr);
@@ -270,11 +336,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
     part_grad_input_.assign(tp_count, nullptr);
     part_grad_weights_.assign(tp_count, nullptr);
 
-    // TP_MOE stores GeneralMOEConfig and slices off SFT-only fields.
-    for (int i = 0; i < tp_count; i++) {
-      tps[i]->set_full_weight_grad(config.full_weight_grad);
-    }
-
     if constexpr (!kSkipLoRA) {
       // Bug #16 fix: TP_MOE base class uses GeneralMOEConfig (object slicing) which loses
       // LoRA pointers. We need to propagate LoRA pointers to all NUMA node instances.
@@ -283,11 +344,6 @@ class TP_MOE_SFT : public TP_MOE<T> {
                             config.down_lora_a, config.down_lora_b);
       }
 
-      // Bug #007 fix: TP_MOE base class uses GeneralMOEConfig which doesn't have
-      // LoRA hyperparameters. Propagate them to all NUMA node instances.
-      for (int i = 0; i < tp_count; i++) {
-        tps[i]->set_lora_params(config.lora_rank, config.lora_alpha, config.lora_dropout);
-      }
     }
   }
 
@@ -319,6 +375,12 @@ class TP_MOE_SFT : public TP_MOE<T> {
     SFTProfileScope profile_scope(profiler_, SFTProfileStage::BaseWeightReload);
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+
+    if constexpr (T::kIsFP8Backend) {
+      load_fp8_weights_with_tp_staging();
+      weights_loaded = true;
+      return;
+    }
 
     // Bug #27 fix: K2 pre-quantized mode detection
     // K2 uses gate_scale != nullptr and zero_point = false
@@ -1362,6 +1424,14 @@ class TP_MOE_SFT : public TP_MOE<T> {
    */
   void submit_backward_repack() {
     if (!config.share_backward_bb) return;
+
+    // Block-FP8 publishes a single-layer shared backward pool synchronously
+    // inside backward(). This avoids an async producer overwriting packed FP8
+    // weights or their scale grid while a consumer is running.
+    if constexpr (T::kIsFP8Backend) {
+      wait_backward_repack();
+      return;
+    }
 
     wait_backward_repack();
 

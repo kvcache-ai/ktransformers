@@ -51,6 +51,7 @@ INFERENCE_METHODS = frozenset(
 SFT_METHODS = frozenset(
     [
         "AMXBF16_SFT",  # AMX BF16 training
+        "AMXFP8_SFT",  # Block-wise E4M3 routed-expert LoRA training
         "INT8_SFT",  # Hardware-neutral INT8 training (AMX or AVX512-VNNI)
         "AMXINT8_SFT",  # AMX INT8 training
         "AMXINT4_SFT",  # AMX INT4 training
