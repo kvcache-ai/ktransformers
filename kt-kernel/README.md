@@ -107,18 +107,6 @@ pip install kt-kernel
 - CUDA 11.8, 11.9, 12.0-12.6+: Full support
 - CUDA 11.0-11.7: Not supported (upgrade driver or use CPU-only)
 
-**Source build CUDA architectures:**
-When building from source with CUDA enabled, `CPUINFER_CUDA_ARCHS` controls
-`CMAKE_CUDA_ARCHITECTURES`. The default includes Ampere, Ada, and Hopper
-(`80;86;89;90`). For an Ada Lovelace / SM89-only build, set:
-
-```bash
-CPUINFER_USE_CUDA=1 CPUINFER_CUDA_ARCHS=89 ./install.sh build
-```
-
-Use a semicolon-separated list such as `80;86;89;90` when one build needs to cover
-multiple GPU generations.
-
 **CPU Variants Included:**
 
 The wheel includes 6 optimized variants that are **automatically selected at runtime** based on your CPU:
@@ -193,6 +181,18 @@ Simply run the install script - it will auto-detect your CPU and optimize for be
 ./install.sh deps   # Install dependencies only
 ./install.sh build  # Build and install kt-kernel
 ```
+
+**Source build CUDA architectures:**
+When building from source with CUDA enabled, `CPUINFER_CUDA_ARCHS` controls
+`CMAKE_CUDA_ARCHITECTURES`. The default includes Ampere, Ada, and Hopper
+(`80;86;89;90`). For an Ada Lovelace / SM89-only build, set:
+
+```bash
+CPUINFER_USE_CUDA=1 CPUINFER_CUDA_ARCHS=89 ./install.sh build
+```
+
+Use a semicolon-separated list such as `80;86;89;90` when one build needs to cover
+multiple GPU generations.
 
 **CPU Requirements by Backend:**
 
