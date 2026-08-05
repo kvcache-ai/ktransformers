@@ -19,10 +19,11 @@ In this document, we will show you how to install and run KTransformers on your 
 
 Some preparation:
 
-- The legacy `local_chat` / `ktransformers.server` examples in this document target
-  CPU-GPU heterogeneous inference and require at least one CUDA-capable GPU at runtime.
-  For CPU-only experiments, use the newer KT-Kernel CPU backends directly (for example
-  `LLAMAFILE` with GGUF weights) instead of these legacy server commands.
+- The `local_chat` / `ktransformers.server` examples in this document target CPU-GPU
+  heterogeneous inference and require at least one CUDA-capable GPU at runtime. For
+  CPU-only experiments, use the KT-Kernel CPU backends directly (for example `LLAMAFILE`
+  with GGUF weights; see the [llamafile operator guide](./operators/llamafile.md))
+  instead of these server commands.
 - CUDA 12.1 and above, if you didn't have it yet, you may install from [here](https://developer.nvidia.com/cuda-downloads).
 
   ```sh
