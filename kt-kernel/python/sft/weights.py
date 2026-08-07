@@ -212,6 +212,37 @@ def _clear_original_expert_weights(
     logger.info(f"Replaced {replaced_count} expert weight params")
 
 
+def get_kt_expert_placeholders(model: nn.Module) -> dict[str, nn.Parameter]:
+    """Return KT expert placeholders as current parameter FQNs mapped to their identities."""
+    placeholder_ids: set[int] = set()
+    for module in model.modules():
+        if not getattr(module, "_is_kt_moe_wrapper", False):
+            continue
+
+        experts_attr = getattr(module, "_experts_attr", None)
+        experts = getattr(module, experts_attr, None) if isinstance(experts_attr, str) else None
+        if not isinstance(experts, nn.Module):
+            raise RuntimeError("KT MoE wrapper does not expose a valid expert subtree")
+
+        placeholder_ids.update(
+            id(parameter)
+            for parameter in experts.parameters(recurse=True)
+            if getattr(parameter, "_kt_zero_storage", False)
+        )
+
+    placeholders: dict[str, nn.Parameter] = {}
+    for fqn, parameter in model.named_parameters(remove_duplicate=False):
+        if id(parameter) not in placeholder_ids:
+            continue
+        if fqn in placeholders and placeholders[fqn] is not parameter:
+            raise RuntimeError(f"KT expert placeholder FQN {fqn!r} resolves to conflicting Parameter identities")
+        placeholders[fqn] = parameter
+    found_ids = {id(parameter) for parameter in placeholders.values()}
+    if found_ids != placeholder_ids:
+        raise RuntimeError("KT expert placeholder is not registered in the model parameter tree")
+    return placeholders
+
+
 # =============================================================================
 # kt_weight_path Loading Functions
 # =============================================================================

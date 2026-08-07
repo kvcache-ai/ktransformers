@@ -38,6 +38,7 @@ from .autograd import KTMoEFunction
 from .layer import KTMoELayerWrapper
 from .weights import (
     extract_moe_weights,
+    get_kt_expert_placeholders,
     load_block_fp8_experts_from_checkpoint_files,
     load_experts_from_checkpoint_files,
     load_experts_from_kt_weight_path,
@@ -92,6 +93,7 @@ __all__ = [
     "KTMoEFunction",
     "KTMoELayerWrapper",
     "extract_moe_weights",
+    "get_kt_expert_placeholders",
     "load_block_fp8_experts_from_checkpoint_files",
     "load_experts_from_checkpoint_files",
     "load_experts_from_kt_weight_path",
