@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from kt_kernel.sft.arch import KTAMXConfigError
 from kt_kernel.sft.config import KTConfig
 from kt_kernel.sft.lora import (
     _load_fused_expert_lora,
+    _save_fused_expert_lora,
     get_kt_lora_params,
     kt_adapt_peft_lora,
     load_kt_moe_from_adapter,
@@ -267,6 +269,51 @@ def _saved_fused_tensors(layer_idx=0):
         )
         for index, name in enumerate(_FUSED_LORA_NAMES)
     }
+
+
+def test_force_fused_lora_save_publishes_atomically(tmp_path, monkeypatch):
+    from safetensors.torch import load_file
+
+    wrapper = _owned_reload_wrapper()
+    replacements = []
+    real_replace = os.replace
+
+    def record_replace(source, destination):
+        replacements.append((source, destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr("kt_kernel.sft.lora.os.replace", record_replace)
+    _save_fused_expert_lora([wrapper], str(tmp_path))
+
+    output_path = tmp_path / "fused_expert_lora.safetensors"
+    assert len(replacements) == 1
+    temporary_path, published_path = replacements[0]
+    assert os.path.dirname(temporary_path) == str(tmp_path)
+    assert published_path == str(output_path)
+    assert not os.path.exists(temporary_path)
+    saved = load_file(str(output_path))
+    assert set(saved) == set(_saved_fused_tensors())
+
+
+def test_force_fused_lora_save_failure_keeps_published_file(tmp_path, monkeypatch):
+    from safetensors.torch import save_file
+
+    output_path = tmp_path / "fused_expert_lora.safetensors"
+    original = {"existing": torch.ones(1)}
+    save_file(original, str(output_path))
+    original_bytes = output_path.read_bytes()
+
+    def fail_save(_tensors, path):
+        with open(path, "wb") as handle:
+            handle.write(b"partial")
+        raise RuntimeError("injected save failure")
+
+    monkeypatch.setattr("safetensors.torch.save_file", fail_save)
+    with pytest.raises(RuntimeError, match="injected save failure"):
+        _save_fused_expert_lora([_owned_reload_wrapper()], str(tmp_path))
+
+    assert output_path.read_bytes() == original_bytes
+    assert list(tmp_path.glob(".fused_expert_lora.*.safetensors.tmp")) == []
 
 
 def test_force_fused_lora_reload_requires_and_consumes_exact_key_set(tmp_path):

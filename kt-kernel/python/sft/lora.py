@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 
 import torch
 import torch.nn as nn
@@ -861,7 +862,21 @@ def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
 
     if tensors:
         path = os.path.join(output_dir, "fused_expert_lora.safetensors")
-        save_file(tensors, path)
+        with tempfile.NamedTemporaryFile(
+            dir=output_dir,
+            prefix=".fused_expert_lora.",
+            suffix=".safetensors.tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+        try:
+            save_file(tensors, temporary_path)
+            os.replace(temporary_path, path)
+        finally:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
         logger.info(f"[save_kt_moe] Saved {len(tensors)} fused expert LoRA tensors to {path}")
 
 
