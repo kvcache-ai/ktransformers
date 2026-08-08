@@ -1345,11 +1345,18 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
 def load_kt_adapter_artifacts(
     model: Any, adapter_path: str | os.PathLike[str]
 ) -> KTAdapterManifest | None:
-    """Validate all KT adapter artifacts before mutating any runtime buffer."""
+    """Restore KT-owned adapter state after the standard PEFT adapter is loaded.
 
-    from .lora import load_kt_moe_from_adapter
+    The rank that owns the KT backend also owns fused buffers and may safely
+    run the idempotent PEFT adaptation here. Non-owner ranks validate the same
+    artifact contract without allocating optimizer-visible KT parameters.
+    """
+
+    from .lora import kt_adapt_peft_lora, load_kt_moe_from_adapter
 
     root = _safe_root(adapter_path, "KT adapter")
+    if any(getattr(wrapper, "wrapper", None) is not None for wrapper in _find_wrappers(model)):
+        kt_adapt_peft_lora(model)
     contract = _fused_lora_contract(model)
     manifest_path = root / KT_ADAPTER_MANIFEST_NAME
     manifest = None

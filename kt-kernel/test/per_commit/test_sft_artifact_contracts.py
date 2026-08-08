@@ -465,6 +465,33 @@ def test_adapter_overwrite_invalidates_old_ready_manifest_before_replacement(tmp
     assert not manifest_path.exists()
 
 
+def test_adapter_load_auto_adapts_owner_and_remains_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    source_model, source_wrapper = _fused_model()
+    kt_adapt_peft_lora(source_model)
+    output = tmp_path / "adapter"
+    output.mkdir()
+    _write_json(output / "adapter_config.json", {"r": 1})
+    save_file({"router.lora_A.weight": torch.ones(1, 2)}, output / "adapter_model.safetensors")
+    saved_manifest = save_kt_adapter_artifacts(source_model, output)
+    expected = [parameter.detach().clone() for parameter in source_wrapper._fused_expert_lora_params]
+
+    restored_model, restored_wrapper = _fused_model()
+    loaded_manifest = load_kt_adapter_artifacts(restored_model, output)
+
+    assert loaded_manifest.payload == saved_manifest.payload
+    assert restored_wrapper._kt_peft_lora_adapted is True
+    assert restored_wrapper.wrapper.initialized is not None
+    assert len(restored_wrapper._fused_expert_lora_params) == 6
+    for parameter, tensor in zip(restored_wrapper._fused_expert_lora_params, expected):
+        assert torch.equal(parameter, tensor)
+
+    parameter_ids = tuple(id(parameter) for parameter in restored_wrapper._fused_expert_lora_params)
+    load_kt_adapter_artifacts(restored_model, output)
+
+    assert parameter_ids == tuple(id(parameter) for parameter in restored_wrapper._fused_expert_lora_params)
+
+
 def test_legacy_int8_adapter_manifest_without_explicit_format_remains_loadable(tmp_path, monkeypatch):
     source, _, _, config = _make_pretrained_artifacts(tmp_path)
     config.kt_lora_rank = 1
