@@ -8,7 +8,6 @@ import importlib.util as _u
 import json
 import logging
 import os
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -172,17 +171,6 @@ def _get_kt_config(kt_plugin: Any):
 
     if isinstance(kt_plugin, KTConfig):
         return kt_plugin
-    if isinstance(kt_plugin, Mapping):
-        return KTConfig(**dict(kt_plugin))
-
-    kt_config = getattr(kt_plugin, "kt_config", None)
-    if kt_config is not None and kt_config is not kt_plugin:
-        return _get_kt_config(kt_config)
-
-    wrapped_config = getattr(kt_plugin, "config", None)
-    if wrapped_config is not None and wrapped_config is not kt_plugin:
-        return _get_kt_config(wrapped_config)
-
     return KTConfig.from_object(kt_plugin)
 
 

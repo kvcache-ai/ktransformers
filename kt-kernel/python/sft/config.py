@@ -288,14 +288,26 @@ class KTConfig:
 
     @classmethod
     def from_object(cls, obj: Any) -> "KTConfig":
-        """Create KTConfig from an attribute-based object (HfTrainerKTConfig, etc.)."""
-        _field_names = {f.name for f in dataclasses.fields(cls)}
+        """Create KTConfig from a mapping or compatible public container."""
+        if isinstance(obj, cls):
+            return obj
+        if isinstance(obj, Mapping):
+            return cls(**dict(obj))
+
+        field_names = {field.name for field in dataclasses.fields(cls)}
         kwargs: dict[str, Any] = {}
-        for name in _field_names:
+        for name in field_names:
             val = getattr(obj, name, None)
             if val is not None:
                 kwargs[name] = val
-        return cls(**kwargs)
+        if kwargs:
+            return cls(**kwargs)
+
+        for container_name in ("kt_config", "config"):
+            nested = getattr(obj, container_name, None)
+            if nested is not None and nested is not obj:
+                return cls.from_object(nested)
+        return cls()
 
     def __post_init__(self):
         configure_omp_threads()

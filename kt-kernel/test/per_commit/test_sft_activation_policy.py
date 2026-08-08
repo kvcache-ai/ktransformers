@@ -57,6 +57,49 @@ def test_activation_policy_defaults_to_recompute_recompute():
     assert policy == config.KTActivationPolicy(cpu="recompute", gpu="recompute")
 
 
+def test_config_from_hf_wrapper_preserves_outer_runtime_metadata():
+    public_config = {
+        "kt_backend": "AMXBF16",
+        "kt_num_threads": 7,
+        "kt_skip_expert_loading": False,
+    }
+    checkpoint_files = ["/models/qwen/model-00001-of-00002.safetensors"]
+    sharded_metadata = {"weight_map": {"expert.weight": checkpoint_files[0]}}
+
+    class HfTrainerKTConfig:
+        config = public_config
+        _runtime_metadata = {
+            "kt_checkpoint_files": checkpoint_files,
+            "kt_sharded_metadata": sharded_metadata,
+            "kt_skip_expert_loading": True,
+        }
+
+        def __getattr__(self, name):
+            if name in self._runtime_metadata:
+                return self._runtime_metadata[name]
+            try:
+                return self.config[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        cfg = config.KTConfig.from_object(HfTrainerKTConfig())
+
+    assert public_config == {
+        "kt_backend": "AMXBF16",
+        "kt_num_threads": 7,
+        "kt_skip_expert_loading": False,
+    }
+    assert cfg.kt_backend == "AMXBF16"
+    assert cfg.kt_num_threads == 7
+    assert cfg.kt_checkpoint_files is checkpoint_files
+    assert cfg.kt_sharded_metadata is sharded_metadata
+    assert cfg.kt_skip_expert_loading is True
+
+
 @pytest.mark.parametrize(
     ("cpu", "gpu"),
     [

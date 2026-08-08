@@ -21,7 +21,7 @@ from kt_kernel.sft.config import KTConfig
 from kt_kernel.sft.layer import KTMoELayerWrapper
 from kt_kernel.sft.lora import load_kt_moe_from_adapter, save_kt_moe_to_adapter
 from kt_kernel.sft.wrapper import wrap_moe_layers_with_kt_wrapper
-from kt_kernel.sft.weights import _clear_original_expert_weights
+from kt_kernel.sft.weights import _clear_original_expert_weights, extract_moe_weights
 
 
 class _FakeFullBackend:
@@ -374,6 +374,36 @@ class _OriginalMoE(nn.Module):
         super().__init__()
         self.gate = nn.Linear(4, 2, bias=False)
         self.experts = nn.ModuleList([_Expert(), _Expert()])
+
+
+def test_extract_fused_experts_rejects_unmarked_tiny_storage_placeholder():
+    fused_experts = nn.Module()
+    tiny_storage = torch.empty(1, dtype=torch.bfloat16).untyped_storage()
+    gate_up = torch.empty(0, dtype=torch.bfloat16).set_(
+        tiny_storage,
+        storage_offset=0,
+        size=(2, 6, 4),
+        stride=(0, 0, 0),
+    )
+    fused_experts.gate_up_proj = nn.Parameter(gate_up, requires_grad=False)
+    fused_experts.down_proj = nn.Parameter(
+        torch.empty((2, 4, 3), dtype=torch.bfloat16),
+        requires_grad=False,
+    )
+    moe_module = nn.Module()
+    moe_module.experts = fused_experts
+    moe_config = MOEArchConfig(
+        moe_layer_attr="mlp",
+        router_attr="gate",
+        experts_attr="experts",
+        weight_names=("gate_proj", "up_proj", "down_proj"),
+        expert_num=2,
+        intermediate_size=3,
+        num_experts_per_tok=1,
+    )
+
+    with pytest.raises(RuntimeError, match="zero-storage placeholder"):
+        extract_moe_weights(moe_module, moe_config)
 
 
 def _layer_with_expert_placeholders():

@@ -30,6 +30,22 @@ except ImportError:
 # =============================================================================
 
 
+def _require_materialized_expert_weight(name: str, weight: torch.Tensor) -> None:
+    if weight.device.type == "meta" or getattr(weight, "_kt_zero_storage", False):
+        raise RuntimeError(
+            f"Cannot extract {name}: routed expert weight is an unmaterialized placeholder"
+        )
+    try:
+        storage_bytes = weight.untyped_storage().nbytes()
+    except (NotImplementedError, RuntimeError):
+        return
+    required_bytes = weight.numel() * weight.element_size()
+    if required_bytes and storage_bytes < required_bytes:
+        raise RuntimeError(
+            f"Cannot extract {name}: routed expert weight is a zero-storage placeholder"
+        )
+
+
 def extract_moe_weights(
     moe_module: nn.Module, moe_config: MOEArchConfig
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -50,8 +66,12 @@ def extract_moe_weights(
 
     # Fused format (transformers v5): a single nn.Module with gate_up_proj/down_proj tensors
     if detect_fused_experts(experts):
-        gate_up = getattr(experts, "gate_up_proj").data
-        down_fused = getattr(experts, "down_proj").data
+        gate_up_parameter = getattr(experts, "gate_up_proj")
+        down_parameter = getattr(experts, "down_proj")
+        _require_materialized_expert_weight("gate_up_proj", gate_up_parameter)
+        _require_materialized_expert_weight("down_proj", down_parameter)
+        gate_up = gate_up_parameter.data
+        down_fused = down_parameter.data
         # gate_up_proj is [E, 2*I, H], split into gate [E, I, H] and up [E, I, H]
         intermediate = gate_up.shape[1] // 2
         gate_proj = gate_up[:, :intermediate, :].contiguous()
@@ -79,25 +99,31 @@ def extract_moe_weights(
         up_weights = []
         down_weights = []
 
-        for expert in experts:
+        for expert_idx, expert in enumerate(experts):
             # Handle PEFT LoRA wrapped modules - get weight tensor properly
             gate_proj = getattr(expert, gate_name)
             up_proj_mod = getattr(expert, up_name)
             down_proj_mod = getattr(expert, down_name)
 
             # Get weight tensors, handling both regular Linear and PEFT LoRA wrapped
-            def get_weight_tensor(mod):
+            def get_weight_tensor(mod, projection_name):
                 weight = mod.weight
                 if isinstance(weight, torch.Tensor):
-                    return weight.data
+                    tensor = weight
                 elif hasattr(weight, "data"):
-                    return weight.data
+                    tensor = weight.data
                 else:
-                    raise ValueError(f"Cannot extract weight from {type(mod)}, weight type={type(weight)}")
+                    raise ValueError(
+                        f"Cannot extract weight from {type(mod)}, weight type={type(weight)}"
+                    )
+                _require_materialized_expert_weight(
+                    f"expert {expert_idx} {projection_name}", tensor
+                )
+                return tensor.data
 
-            gate_weights.append(get_weight_tensor(gate_proj))
-            up_weights.append(get_weight_tensor(up_proj_mod))
-            down_weights.append(get_weight_tensor(down_proj_mod))
+            gate_weights.append(get_weight_tensor(gate_proj, gate_name))
+            up_weights.append(get_weight_tensor(up_proj_mod, up_name))
+            down_weights.append(get_weight_tensor(down_proj_mod, down_name))
 
     gate_proj = torch.stack(gate_weights, dim=0)
     up_proj = torch.stack(up_weights, dim=0)
@@ -631,9 +657,9 @@ def load_experts_from_checkpoint_files(
         if gate_up is None or down is None:
             raise FileNotFoundError(f"Missing fused expert weights for layer {layer_idx}")
         gate_up = gate_up.cpu().to(torch.bfloat16).contiguous()
-        I = gate_up.shape[1] // 2
-        gate_proj = gate_up[:, :I, :].contiguous()
-        up_proj = gate_up[:, I:, :].contiguous()
+        intermediate = gate_up.shape[1] // 2
+        gate_proj = gate_up[:, :intermediate, :].contiguous()
+        up_proj = gate_up[:, intermediate:, :].contiguous()
         down_proj = down.cpu().to(torch.bfloat16).contiguous()
         del gate_up
         print(
