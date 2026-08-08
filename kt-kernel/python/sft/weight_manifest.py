@@ -282,9 +282,15 @@ def validate_persistent_int8_weights(
     expert_num: int,
     hidden_size: int,
     intermediate_size: int,
-    verify_hashes: bool = False,
+    verify_hashes: bool | None = False,
 ) -> ValidatedKTWeightManifest:
-    """Validate the complete persistent INT8 tree before any C++ load."""
+    """Validate the complete persistent INT8 tree before any C++ load.
+
+    ``verify_hashes=None`` selects the strongest verification supported by the
+    manifest: schema-v2 files are hashed, while legacy schema-v1 files retain
+    strict size, filename, inventory, and directory checks without requiring
+    hashes that their producer never recorded.
+    """
 
     expected_numa_count = _positive_int(
         int(numa_count),
@@ -307,6 +313,7 @@ def validate_persistent_int8_weights(
 
     resolved = _resolve_root(root)
     manifest_path, manifest, schema_version = _load_manifest(resolved)
+    effective_verify_hashes = schema_version >= 2 if verify_hashes is None else bool(verify_hashes)
     expected_metadata = {
         "state": "ready",
         "expert_weight_format": "int8",
@@ -367,7 +374,7 @@ def validate_persistent_int8_weights(
             expected_expert_num=expected_expert_num,
             expected_hidden_size=expected_hidden_size,
             expected_intermediate_size=expected_intermediate_size,
-            verify_hashes=verify_hashes,
+            verify_hashes=effective_verify_hashes,
         )
         file_count += layer_files
         size_bytes += layer_bytes

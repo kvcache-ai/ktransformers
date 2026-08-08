@@ -223,6 +223,17 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
         raise
 
 
+def _invalidate_ready_manifest(path: Path) -> None:
+    """Remove an earlier ready marker before replacing any bundle member."""
+
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise KTArtifactError(f"existing KT adapter manifest must be a regular file: {path}")
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
 def _safe_root(path: str | os.PathLike[str], description: str) -> Path:
     root = Path(path)
     if not root.is_absolute():
@@ -230,6 +241,42 @@ def _safe_root(path: str | os.PathLike[str], description: str) -> Path:
     if root.is_symlink() or not root.is_dir():
         raise KTArtifactError(f"{description} must be a real directory: {root}")
     return root.resolve()
+
+
+def _distributed_validation_context() -> tuple[Any | None, int, int]:
+    """Return an initialized process group, never launcher-env guesses."""
+
+    try:
+        import torch.distributed as dist
+    except ImportError:
+        return None, 0, 1
+    if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() <= 1:
+        return None, 0, 1
+    return dist, int(dist.get_rank()), int(dist.get_world_size())
+
+
+def _synchronize_artifact_validation(
+    dist: Any | None,
+    rank: int,
+    world_size: int,
+    error: Exception | None,
+    signature: tuple[Any, ...] | None,
+) -> None:
+    """Make validation failure and artifact disagreement symmetric across ranks."""
+
+    if dist is None or world_size <= 1:
+        if error is not None:
+            raise error
+        return
+    local_error = None if error is None else f"rank {rank}: {type(error).__name__}: {error}"
+    gathered: list[tuple[str | None, tuple[Any, ...] | None] | None] = [None] * world_size
+    dist.all_gather_object(gathered, (local_error, signature))
+    failures = [entry[0] for entry in gathered if entry is not None and entry[0] is not None]
+    if failures:
+        raise KTArtifactError("distributed KT artifact validation failed: " + "; ".join(failures))
+    signatures = {entry[1] for entry in gathered if entry is not None}
+    if len(signatures) != 1:
+        raise KTArtifactError("distributed KT ranks resolved different artifact provenance")
 
 
 def _inspect_cache_tensors(
@@ -392,6 +439,8 @@ def write_kt_non_expert_cache_manifest(
 def _validate_non_expert_cache(
     cache_path: str | os.PathLike[str],
     source_model_name_or_path: str | os.PathLike[str],
+    *,
+    verify_hashes: bool = True,
 ) -> KTNonExpertCache:
     root = _safe_root(cache_path, "KT non-expert cache")
     source = _safe_root(source_model_name_or_path, "source model")
@@ -472,7 +521,7 @@ def _validate_non_expert_cache(
         root,
         cache_index,
         source_config=source_config,
-        verify_hashes=True,
+        verify_hashes=verify_hashes,
         file_records=records,
     )
     tensors = manifest.get("tensors")
@@ -621,14 +670,29 @@ def resolve_kt_pretrained_artifacts(
     weight_path = _config_value(kt_config, "kt_weight_path")
     if not isinstance(weight_path, str) or not weight_path:
         raise KTArtifactError("routed INT8 loading requires kt_weight_path")
-    cache = _validate_non_expert_cache(cache_path, pretrained_model_name_or_path)
-    source_config = cache.source_config
-    layer_count = _positive_int(source_config.get("num_hidden_layers"), "num_hidden_layers", Path(cache.manifest_path))
-    first_moe_layer = source_config.get("first_k_dense_replace", 0)
-    if isinstance(first_moe_layer, bool) or not isinstance(first_moe_layer, int) or first_moe_layer < 0:
-        raise KTArtifactError("source first_k_dense_replace must be a non-negative integer")
-    layer_indices = tuple(range(first_moe_layer, layer_count))
+
+    dist, distributed_rank, world_size = _distributed_validation_context()
+    cache = None
+    validated_routed = None
+    routed_manifest = None
+    local_error = None
+    signature = None
     try:
+        # All ranks retain structural, size, dtype, and inventory checks. Only
+        # rank 0 streams the large payloads for SHA256 verification.
+        cache = _validate_non_expert_cache(
+            cache_path,
+            pretrained_model_name_or_path,
+            verify_hashes=distributed_rank == 0,
+        )
+        source_config = cache.source_config
+        layer_count = _positive_int(
+            source_config.get("num_hidden_layers"), "num_hidden_layers", Path(cache.manifest_path)
+        )
+        first_moe_layer = source_config.get("first_k_dense_replace", 0)
+        if isinstance(first_moe_layer, bool) or not isinstance(first_moe_layer, int) or first_moe_layer < 0:
+            raise KTArtifactError("source first_k_dense_replace must be a non-negative integer")
+        layer_indices = tuple(range(first_moe_layer, layer_count))
         validated_routed = validate_persistent_int8_weights(
             weight_path,
             layer_indices=layer_indices,
@@ -636,11 +700,28 @@ def resolve_kt_pretrained_artifacts(
             expert_num=int(source_config["n_routed_experts"]),
             hidden_size=int(source_config["hidden_size"]),
             intermediate_size=int(source_config["moe_intermediate_size"]),
-            verify_hashes=True,
+            # None hashes schema-v2 but keeps legacy v1 on its strict
+            # structure/size contract; non-owner ranks never repeat hashes.
+            verify_hashes=None if distributed_rank == 0 else False,
         )
-    except (KeyError, TypeError, ValueError, PermissionError, OSError) as exc:
-        raise KTArtifactError(f"routed INT8 artifact validation failed: {exc}") from exc
-    routed_manifest = _read_json(validated_routed.path, "routed INT8 manifest")
+        routed_manifest = _read_json(validated_routed.path, "routed INT8 manifest")
+        signature = (
+            cache.fingerprint,
+            cache.path,
+            str(validated_routed.root),
+            hashlib.sha256(
+                json.dumps(routed_manifest, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        )
+    except Exception as exc:
+        local_error = (
+            exc
+            if isinstance(exc, KTArtifactError)
+            else KTArtifactError(f"routed INT8 artifact validation failed: {exc}")
+        )
+    _synchronize_artifact_validation(dist, distributed_rank, world_size, local_error, signature)
+    if cache is None or validated_routed is None or routed_manifest is None:
+        raise KTArtifactError("KT artifact validation completed without a load plan")
     rank = _config_value(kt_config, "kt_lora_rank")
     alpha = _config_value(kt_config, "kt_lora_alpha")
     return KTPretrainedLoadPlan(
@@ -1153,6 +1234,11 @@ def save_kt_adapter_artifacts(
     if output.is_symlink():
         raise KTArtifactError(f"adapter output must not be a symlink: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    manifest_path = output / KT_ADAPTER_MANIFEST_NAME
+    # PEFT writes the standard adapter before this function is called. An old
+    # ready manifest is already stale on an in-place overwrite and must not
+    # remain observable while KT publishes the rest of the bundle.
+    _invalidate_ready_manifest(manifest_path)
     if not contract:
         save_kt_moe_to_adapter(model, str(output))
         return None
@@ -1200,7 +1286,6 @@ def save_kt_adapter_artifacts(
             **_adapter_provenance(model, plan),
             "artifacts": artifacts,
         }
-        manifest_path = output / KT_ADAPTER_MANIFEST_NAME
         _write_json_atomic(manifest_path, payload)
         return KTAdapterManifest(
             path=str(manifest_path),

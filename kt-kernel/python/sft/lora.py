@@ -274,6 +274,19 @@ def get_kt_lora_named_params(model: nn.Module) -> list[tuple[str, nn.Parameter]]
     return get_kt_named_trainable_params(model)
 
 
+def get_kt_rank_local_parameter_names(model: nn.Module) -> tuple[str, ...]:
+    """Return registered expert-placeholder FQNs owned outside FSDP2.
+
+    Wrapping creates and caches these names during ``from_pretrained``, so this
+    API is valid before PEFT adaptation. Fused optimizer buffers use virtual
+    names and are deliberately excluded because they are not model FQNs.
+    """
+
+    from .weights import get_kt_expert_placeholders
+
+    return tuple(sorted(get_kt_expert_placeholders(model)))
+
+
 def _adaptation_result(
     model: nn.Module,
     *,
@@ -283,13 +296,14 @@ def _adaptation_result(
     from .weights import get_kt_expert_placeholders
 
     placeholders = get_kt_expert_placeholders(model)
-    named_placeholders = tuple(sorted(placeholders.items()))
+    placeholder_names = get_kt_rank_local_parameter_names(model)
+    named_placeholders = tuple((name, placeholders[name]) for name in placeholder_names)
     return KTAdaptationResult(
         adapted_layers=adapted_layers,
         already_adapted_layers=already_adapted_layers,
         named_optimizer_parameters=tuple(get_kt_named_trainable_params(model)),
         placeholders=named_placeholders,
-        placeholder_names=tuple(name for name, _ in named_placeholders),
+        placeholder_names=placeholder_names,
     )
 
 

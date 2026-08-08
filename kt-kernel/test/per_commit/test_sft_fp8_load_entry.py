@@ -71,6 +71,35 @@ sys.modules[spec.name] = wrapper
 spec.loader.exec_module(wrapper)
 
 
+def test_get_kt_config_resolves_raw_nested_and_transformers_mappings(monkeypatch):
+    class FakeKTConfig:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+
+        @classmethod
+        def from_object(cls, value):
+            return cls(
+                **{
+                    name: field_value
+                    for name, field_value in vars(value).items()
+                    if name.startswith("kt_") and field_value is not None
+                }
+            )
+
+    config_module = ModuleType(f"{PACKAGE_NAME}.config")
+    config_module.KTConfig = FakeKTConfig
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    payload = {"kt_backend": "AMXBF16", "kt_num_threads": 7}
+
+    raw = wrapper._get_kt_config(payload)
+    nested = wrapper._get_kt_config(SimpleNamespace(kt_config=payload))
+    transformers_wrapper = wrapper._get_kt_config(SimpleNamespace(config=payload))
+
+    assert payload == {"kt_backend": "AMXBF16", "kt_num_threads": 7}
+    assert all(isinstance(item, FakeKTConfig) for item in (raw, nested, transformers_wrapper))
+    assert [item.kt_num_threads for item in (raw, nested, transformers_wrapper)] == [7, 7, 7]
+
+
 def test_load_kt_model_keeps_fp8_path_as_provenance_and_skips_hf_experts(monkeypatch):
     cfg = SimpleNamespace(
         kt_expert_weight_format="fp8",
@@ -136,6 +165,7 @@ def test_load_kt_model_keeps_fp8_path_as_provenance_and_skips_hf_experts(monkeyp
     assert cfg.kt_checkpoint_files == checkpoint_files
     assert cfg.kt_sharded_metadata == metadata
     assert cfg.kt_skip_expert_loading is True
+    assert captured["plugin"] is cfg
 
 
 @pytest.mark.parametrize(

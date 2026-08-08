@@ -101,7 +101,7 @@ def _validate(root: Path, **kwargs):
 
 def test_schema1_shared_persistent_tree_is_accepted_without_owner_check(tmp_path):
     root = _make_tree(tmp_path, schema_version=1)
-    result = _validate(root)
+    result = _validate(root, verify_hashes=None)
 
     assert result.is_legacy
     assert result.layout == weight_manifest.INT8_WEIGHT_LAYOUT
@@ -206,4 +206,4 @@ def test_schema2_hash_verification_detects_same_size_corruption(tmp_path):
     target.write_bytes(payload)
 
     with pytest.raises(ValueError, match="SHA256 mismatch"):
-        _validate(root, verify_hashes=True)
+        _validate(root, verify_hashes=None)

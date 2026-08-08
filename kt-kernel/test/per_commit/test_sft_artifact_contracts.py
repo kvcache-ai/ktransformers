@@ -2,13 +2,17 @@
 
 import hashlib
 import json
+import os
 from dataclasses import fields
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import save_file
 
+import kt_kernel.sft.artifacts as artifacts_module
+import kt_kernel.sft.weight_manifest as weight_manifest_module
 from kt_kernel.sft.artifacts import (
     KT_ADAPTER_MANIFEST_NAME,
     KT_NON_EXPERT_MANIFEST_NAME,
@@ -25,7 +29,12 @@ from kt_kernel.sft.artifacts import (
 )
 from kt_kernel.sft.backend import INT8_WEIGHT_LAYOUT
 from kt_kernel.sft.config import KTConfig
-from kt_kernel.sft.lora import get_kt_lora_named_params, kt_adapt_peft_lora
+from kt_kernel.sft.lora import (
+    get_kt_lora_named_params,
+    get_kt_rank_local_parameter_names,
+    kt_adapt_peft_lora,
+)
+from kt_kernel.sft.weights import get_kt_expert_placeholders
 
 
 def _sha256(path):
@@ -36,7 +45,7 @@ def _write_json(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _make_routed_weights(root):
+def _make_routed_weights(root, *, schema_version=2):
     root.mkdir()
     files = []
     numa = root / "_layer_0" / "_numa_0"
@@ -54,18 +63,17 @@ def _make_routed_weights(root):
             size = sizes[(projection, kind)]
             path = numa / f"INT8_{projection}_0_{size}Byte_{kind}_.kt"
             path.write_bytes(bytes([size]) * size)
-            files.append(
-                {
-                    "path": path.relative_to(root).as_posix(),
-                    "size_bytes": size,
-                    "sha256": _sha256(path),
-                }
-            )
+            record = {
+                "path": path.relative_to(root).as_posix(),
+                "size_bytes": size,
+            }
+            if schema_version == 2:
+                record["sha256"] = _sha256(path)
+            files.append(record)
     manifest = {
-        "schema_version": 2,
+        "schema_version": schema_version,
         "state": "ready",
         "expert_weight_format": "int8",
-        "layout": INT8_WEIGHT_LAYOUT,
         "threadpool_count": 1,
         "expert_num": 1,
         "hidden_size": 2,
@@ -81,11 +89,17 @@ def _make_routed_weights(root):
         ],
         "bytes": sum(item["size_bytes"] for item in files),
     }
-    _write_json(root / "kt-weight-manifest.json", manifest)
+    if schema_version == 1:
+        manifest["backend"] = "AMXINT8"
+        manifest_name = "kt-ephemeral-manifest.json"
+    else:
+        manifest["layout"] = INT8_WEIGHT_LAYOUT
+        manifest_name = "kt-weight-manifest.json"
+    _write_json(root / manifest_name, manifest)
     return root
 
 
-def _make_pretrained_artifacts(tmp_path):
+def _make_pretrained_artifacts(tmp_path, *, routed_schema_version=2):
     source = tmp_path / "source"
     source.mkdir()
     _write_json(
@@ -114,7 +128,7 @@ def _make_pretrained_artifacts(tmp_path):
         },
     )
     write_kt_non_expert_cache_manifest(cache, source)
-    routed = _make_routed_weights(tmp_path / "routed")
+    routed = _make_routed_weights(tmp_path / "routed", schema_version=routed_schema_version)
     config = SimpleNamespace(
         kt_expert_weight_format="int8",
         kt_non_expert_weight_path=str(cache),
@@ -143,7 +157,7 @@ def test_non_expert_weight_path_is_an_authoritative_kt_config_field():
 
 
 def test_legacy_llamafactory_v1_cache_is_read_only_compatible(tmp_path):
-    source, cache, _, config = _make_pretrained_artifacts(tmp_path)
+    source, cache, routed, config = _make_pretrained_artifacts(tmp_path, routed_schema_version=1)
     path = cache / KT_NON_EXPERT_MANIFEST_NAME
     manifest = json.loads(path.read_text(encoding="utf-8"))
     manifest["version"] = 1
@@ -163,8 +177,63 @@ def test_legacy_llamafactory_v1_cache_is_read_only_compatible(tmp_path):
     plan = resolve_kt_pretrained_artifacts(config, source)
 
     assert plan.manifest["version"] == 1
+    assert plan.routed_manifest["schema_version"] == 1
+    assert plan.routed_manifest_path == str(routed / "kt-ephemeral-manifest.json")
     with pytest.raises(KTArtifactError, match="already exists"):
         write_kt_non_expert_cache_manifest(cache, source)
+
+
+def test_non_owner_rank_keeps_structural_checks_without_large_hash_scan(tmp_path, monkeypatch):
+    source, cache, routed, config = _make_pretrained_artifacts(tmp_path)
+
+    class FakeDist:
+        @staticmethod
+        def all_gather_object(gathered, value):
+            for index in range(len(gathered)):
+                gathered[index] = value
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_distributed_validation_context",
+        lambda: (FakeDist(), 1, 2),
+    )
+    original_cache_sha256 = artifacts_module._sha256_file
+    original_routed_sha256 = weight_manifest_module._sha256
+
+    def reject_large_hash(path):
+        path = Path(path)
+        if path.suffix in {".safetensors", ".kt"} and (
+            cache in path.parents or routed in path.parents
+        ):
+            raise AssertionError(f"non-owner rank hashed a large KT artifact: {path}")
+        if path.suffix == ".kt":
+            return original_routed_sha256(path)
+        return original_cache_sha256(path)
+
+    monkeypatch.setattr(artifacts_module, "_sha256_file", reject_large_hash)
+    monkeypatch.setattr(weight_manifest_module, "_sha256", reject_large_hash)
+
+    plan = resolve_kt_pretrained_artifacts(config, source)
+
+    assert plan.weight_path == str(cache)
+    assert plan.routed_weight_path == str(routed)
+
+
+def test_distributed_validation_propagates_another_ranks_local_error():
+    class FakeDist:
+        @staticmethod
+        def all_gather_object(gathered, value):
+            gathered[0] = value
+            gathered[1] = ("rank 1: KTArtifactError: corrupt routed weights", None)
+
+    with pytest.raises(KTArtifactError, match="rank 1.*corrupt routed weights"):
+        artifacts_module._synchronize_artifact_validation(
+            FakeDist(),
+            rank=0,
+            world_size=2,
+            error=None,
+            signature=("same",),
+        )
 
 
 def test_validate_pretrained_load_attaches_provenance(tmp_path):
@@ -290,6 +359,28 @@ def test_adaptation_is_idempotent_and_publishes_stable_parameter_names(monkeypat
     assert wrapper.wrapper.initialized is not None
 
 
+def test_rank_local_names_survive_meta_and_parameter_replacement():
+    model = torch.nn.Module()
+    model.block = torch.nn.Module()
+    model.block.moe = torch.nn.Module()
+    model.block.moe._is_kt_moe_wrapper = True
+    model.block.moe._experts_attr = "experts"
+    model.block.moe.experts = torch.nn.Linear(2, 2, bias=False)
+    model.block.moe.experts.weight._kt_zero_storage = True
+    expected = ("block.moe.experts.weight",)
+
+    assert get_kt_rank_local_parameter_names(model) == expected
+    model.to("meta")
+    assert get_kt_rank_local_parameter_names(model) == expected
+
+    replacement = torch.nn.Parameter(torch.empty((2, 2), device="meta"), requires_grad=False)
+    model.block.moe.experts.weight = replacement
+
+    assert not getattr(replacement, "_kt_zero_storage", False)
+    assert get_kt_rank_local_parameter_names(model) == expected
+    assert get_kt_expert_placeholders(model) == {expected[0]: replacement}
+
+
 def test_combined_adapter_save_load_is_manifest_last_and_fail_closed(tmp_path, monkeypatch):
     model, wrapper = _fused_model()
     monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
@@ -341,6 +432,37 @@ def test_combined_adapter_save_load_is_manifest_last_and_fail_closed(tmp_path, m
         load_kt_adapter_artifacts(model, output)
     for parameter, tensor in zip(wrapper._fused_expert_lora_params, before):
         assert torch.equal(parameter, tensor)
+
+
+def test_adapter_overwrite_invalidates_old_ready_manifest_before_replacement(tmp_path, monkeypatch):
+    model, _ = _fused_model()
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    kt_adapt_peft_lora(model)
+    output = tmp_path / "adapter"
+    output.mkdir()
+    _write_json(output / "adapter_config.json", {"r": 1})
+    save_file({"router.lora_A.weight": torch.ones(1, 2)}, output / "adapter_model.safetensors")
+    save_kt_adapter_artifacts(model, output)
+    manifest_path = output / KT_ADAPTER_MANIFEST_NAME
+    assert manifest_path.is_file()
+
+    original_replace = os.replace
+    observed = {}
+
+    def fail_first_bundle_replacement(source, destination):
+        destination = Path(destination)
+        if destination.parent == output and destination.name != KT_ADAPTER_MANIFEST_NAME:
+            observed["ready_visible"] = manifest_path.exists()
+            raise OSError("injected replacement failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(artifacts_module.os, "replace", fail_first_bundle_replacement)
+
+    with pytest.raises(OSError, match="injected replacement failure"):
+        save_kt_adapter_artifacts(model, output)
+
+    assert observed == {"ready_visible": False}
+    assert not manifest_path.exists()
 
 
 def test_legacy_int8_adapter_manifest_without_explicit_format_remains_loadable(tmp_path, monkeypatch):
