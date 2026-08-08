@@ -753,8 +753,8 @@ def _distributed_sync_helper_worker(rank, init_file, result_queue):
             dist.destroy_process_group()
 
 
-def _run_forked_workers(target, init_file, *worker_args):
-    context = mp.get_context("fork")
+def _run_spawned_workers(target, init_file, *worker_args):
+    context = mp.get_context("spawn")
     result_queue = context.Queue()
     processes = [
         context.Process(
@@ -784,7 +784,7 @@ def _run_forked_workers(target, init_file, *worker_args):
 @pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
 @pytest.mark.parametrize("gas_steps", [1, 2])
 def test_distributed_legacy_full_grad_is_averaged_before_optimizer_step(tmp_path, gas_steps):
-    results = _run_forked_workers(
+    results = _run_spawned_workers(
         _distributed_legacy_grad_worker,
         tmp_path / f"legacy-grad-gas-{gas_steps}",
         gas_steps,
@@ -801,7 +801,7 @@ def test_distributed_legacy_full_grad_is_averaged_before_optimizer_step(tmp_path
 
 @pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
 def test_sync_helper_is_collective_free_and_leaves_ordinary_module_grads_unchanged(tmp_path):
-    results = _run_forked_workers(
+    results = _run_spawned_workers(
         _distributed_sync_helper_worker,
         tmp_path / "sync-helper-no-collective",
     )

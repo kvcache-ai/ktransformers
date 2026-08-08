@@ -317,7 +317,7 @@ def test_distributed_full_checkpoint_load_is_rank0_owned_and_error_synchronized(
     save_kt_moe_to_adapter(SimpleNamespace(_kt_wrappers=[wrapper]), str(tmp_path))
     expected_sum = float(wrapper.wrapper.gate_proj_buf.detach().float().sum())
 
-    context = mp.get_context("fork")
+    context = mp.get_context("spawn")
     result_queue = context.Queue()
     init_file = tmp_path / "dist-success"
     processes = [

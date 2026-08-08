@@ -339,7 +339,7 @@ def _make_distributed_layer(
 
 
 def _run_two_rank_workers(target, init_file, *worker_args):
-    context = mp.get_context("fork")
+    context = mp.get_context("spawn")
     result_queue = context.Queue()
     processes = [
         context.Process(
