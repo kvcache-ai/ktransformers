@@ -216,13 +216,7 @@ _KT_RANK_LOCAL_PARAMETER_NAMES = "_kt_rank_local_parameter_names"
 
 
 def get_kt_expert_placeholders(model: nn.Module) -> dict[str, nn.Parameter]:
-    """Return stable placeholder FQNs mapped to their current Parameter identities.
-
-    FSDP2/meta initialization may replace Parameters and discard Python marker
-    attributes. The first pre-prepare discovery therefore caches validated FQNs
-    on the model; later calls resolve those names against the current parameter
-    tree and allow identities to change without losing KT ownership.
-    """
+    """Resolve current placeholder identities from stable, cached FQNs."""
     placeholder_ids: set[int] = set()
     for module in model.modules():
         if not getattr(module, "_is_kt_moe_wrapper", False):

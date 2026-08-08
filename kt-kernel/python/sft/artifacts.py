@@ -1235,9 +1235,7 @@ def save_kt_adapter_artifacts(
         raise KTArtifactError(f"adapter output must not be a symlink: {output}")
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / KT_ADAPTER_MANIFEST_NAME
-    # PEFT writes the standard adapter before this function is called. An old
-    # ready manifest is already stale on an in-place overwrite and must not
-    # remain observable while KT publishes the rest of the bundle.
+    # Invalidate an earlier ready marker before replacing bundle members.
     _invalidate_ready_manifest(manifest_path)
     if not contract:
         save_kt_moe_to_adapter(model, str(output))
@@ -1345,12 +1343,7 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
 def load_kt_adapter_artifacts(
     model: Any, adapter_path: str | os.PathLike[str]
 ) -> KTAdapterManifest | None:
-    """Restore KT-owned adapter state after the standard PEFT adapter is loaded.
-
-    The rank that owns the KT backend also owns fused buffers and may safely
-    run the idempotent PEFT adaptation here. Non-owner ranks validate the same
-    artifact contract without allocating optimizer-visible KT parameters.
-    """
+    """Restore KT state after PEFT load without allocating on non-owner ranks."""
 
     from .lora import kt_adapt_peft_lora, load_kt_moe_from_adapter
 

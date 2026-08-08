@@ -167,11 +167,7 @@ def _sync_rank0_wrap_error(
 
 
 def _get_kt_config(kt_plugin: Any):
-    """Extract KTConfig from a KTransformersPlugin or compatible object.
-
-    KTConfig field names use kt_ prefix, matching the dict keys in
-    HfTrainerKTConfig exactly — no name-mapping needed.
-    """
+    """Resolve a private KTConfig from a compatible public container."""
     from .config import KTConfig
 
     if isinstance(kt_plugin, KTConfig):
@@ -183,9 +179,6 @@ def _get_kt_config(kt_plugin: Any):
     if kt_config is not None and kt_config is not kt_plugin:
         return _get_kt_config(kt_config)
 
-    # Transformers' public HfTrainerKTConfig exposes the caller configuration
-    # via `.config`; keep Accelerate's opaque container and caller mappings
-    # untouched while resolving a private KTConfig copy for execution.
     wrapped_config = getattr(kt_plugin, "config", None)
     if wrapped_config is not None and wrapped_config is not kt_plugin:
         return _get_kt_config(wrapped_config)
