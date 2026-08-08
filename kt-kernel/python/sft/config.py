@@ -11,7 +11,9 @@ KTransformersPlugin.kt_config (similar to DeepSpeedPlugin.hf_ds_config).
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -289,25 +291,95 @@ class KTConfig:
     @classmethod
     def from_object(cls, obj: Any) -> "KTConfig":
         """Create KTConfig from a mapping or compatible public container."""
+        return cls._from_object(obj, seen=set())
+
+    @classmethod
+    def _from_object(cls, obj: Any, *, seen: set[int]) -> "KTConfig":
         if isinstance(obj, cls):
             return obj
         if isinstance(obj, Mapping):
-            return cls(**dict(obj))
+            return cls(**cls._validated_mapping(obj))
+
+        object_id = id(obj)
+        if object_id in seen:
+            raise ValueError("Cyclic KT configuration container")
+        seen.add(object_id)
 
         field_names = {field.name for field in dataclasses.fields(cls)}
-        kwargs: dict[str, Any] = {}
-        for name in field_names:
-            val = getattr(obj, name, None)
-            if val is not None:
-                kwargs[name] = val
-        if kwargs:
-            return cls(**kwargs)
+        attributes = vars(obj) if hasattr(obj, "__dict__") else {}
+        unknown = sorted(
+            name
+            for name in attributes
+            if name.startswith("kt_")
+            and name not in field_names
+            and name != "kt_config"
+        )
+        if unknown:
+            raise TypeError(f"Unknown KTConfig fields: {unknown}")
 
+        missing = object()
+        has_public_container = False
         for container_name in ("kt_config", "config"):
+            if inspect.getattr_static(obj, container_name, missing) is missing:
+                continue
+            has_public_container = True
             nested = getattr(obj, container_name, None)
-            if nested is not None and nested is not obj:
-                return cls.from_object(nested)
-        return cls()
+            if nested is None:
+                continue
+            if nested is obj:
+                raise ValueError(f"Cyclic KT configuration container: {container_name}")
+
+            if isinstance(nested, Mapping):
+                kwargs = cls._validated_mapping(nested)
+                for name in (
+                    "kt_checkpoint_files",
+                    "kt_sharded_metadata",
+                    "kt_skip_expert_loading",
+                ):
+                    value = getattr(obj, name, None)
+                    if value is not None:
+                        kwargs[name] = value
+                return cls(**kwargs)
+
+            resolved = cls._from_object(nested, seen=seen)
+            overrides: dict[str, Any] = {}
+            for name in (
+                "kt_checkpoint_files",
+                "kt_sharded_metadata",
+                "kt_skip_expert_loading",
+            ):
+                value = getattr(obj, name, None)
+                if value is not None and value is not getattr(resolved, name, None):
+                    overrides[name] = value
+            if not overrides:
+                return resolved
+            result = copy.copy(resolved)
+            for name, value in overrides.items():
+                setattr(result, name, value)
+            return result
+
+        if has_public_container:
+            return cls()
+        raise TypeError(
+            "KT configuration must be a KTConfig, mapping, or public container "
+            "with a static 'kt_config' or 'config' attribute"
+        )
+
+    @classmethod
+    def _validated_mapping(cls, obj: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(obj)
+        invalid_keys = sorted(repr(name) for name in payload if not isinstance(name, str))
+        if invalid_keys:
+            raise TypeError(f"KTConfig field names must be strings: {invalid_keys}")
+        if "enabled" in payload:
+            enabled = payload.pop("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                raise TypeError("KT framework field 'enabled' must be a bool or None")
+        field_names = {field.name for field in dataclasses.fields(cls)}
+        unknown = sorted(set(payload).difference(field_names))
+        if unknown:
+            raise TypeError(f"Unknown KTConfig fields: {unknown}")
+        return payload
 
     def __post_init__(self):
         configure_omp_threads()

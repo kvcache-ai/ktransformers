@@ -5,7 +5,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -98,6 +98,155 @@ def test_config_from_hf_wrapper_preserves_outer_runtime_metadata():
     assert cfg.kt_checkpoint_files is checkpoint_files
     assert cfg.kt_sharded_metadata is sharded_metadata
     assert cfg.kt_skip_expert_loading is True
+
+
+@pytest.mark.parametrize("unknown", ["kt_backned", "totally_unknown"])
+def test_config_from_hf_wrapper_rejects_unknown_public_fields(unknown):
+    class HfTrainerKTConfig:
+        config = {unknown: "FP8"}
+        kt_checkpoint_files = ["/models/qwen/model.safetensors"]
+        kt_skip_expert_loading = True
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+        pytest.raises(TypeError, match=unknown),
+    ):
+        config.KTConfig.from_object(HfTrainerKTConfig())
+
+
+def test_hf_public_mapping_cannot_impersonate_container_attributes():
+    class HfTrainerKTConfig:
+        config = {
+            "kt_config": {"kt_backend": "FP8"},
+            "kt_backned": "AMXBF16",
+        }
+
+        def __getattr__(self, name):
+            try:
+                return self.config[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+    with pytest.raises(TypeError, match="kt_backned"):
+        config.KTConfig.from_object(HfTrainerKTConfig())
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_config_mapping_accepts_framework_enabled_without_mutation(enabled):
+    payload = {"enabled": enabled, "kt_backend": "AMXBF16"}
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        cfg = config.KTConfig.from_object(payload)
+    assert payload == {"enabled": enabled, "kt_backend": "AMXBF16"}
+    assert cfg.kt_backend == "AMXBF16"
+
+
+def test_config_mapping_rejects_invalid_enabled_and_unknown_fields():
+    with pytest.raises(TypeError, match="enabled"):
+        config.KTConfig.from_object({"enabled": "yes"})
+    with pytest.raises(TypeError, match="kt_backned"):
+        config.KTConfig.from_object({"kt_backned": "FP8"})
+    with pytest.raises(TypeError, match="field names must be strings"):
+        config.KTConfig.from_object({1: "AMXBF16"})
+
+
+def test_nested_typed_config_runtime_overlay_is_copy_only():
+    base = _make_config()
+    assert config.KTConfig.from_object(base) is base
+    assert config.KTConfig.from_object(SimpleNamespace(config=base)) is base
+
+    checkpoint_files = []
+    sharded_metadata = {}
+    outer = SimpleNamespace(
+        config=base,
+        kt_checkpoint_files=checkpoint_files,
+        kt_sharded_metadata=sharded_metadata,
+        kt_skip_expert_loading=False,
+    )
+    with patch.object(
+        config,
+        "configure_omp_threads",
+        side_effect=AssertionError("typed KTConfig must not be reinitialized"),
+    ):
+        resolved = config.KTConfig.from_object(outer)
+
+    assert resolved is not base
+    assert base.kt_checkpoint_files is None
+    assert base.kt_sharded_metadata is None
+    assert base.kt_skip_expert_loading is None
+    assert resolved.kt_checkpoint_files is checkpoint_files
+    assert resolved.kt_sharded_metadata is sharded_metadata
+    assert resolved.kt_skip_expert_loading is False
+
+
+def test_nested_config_prefers_kt_config_and_rejects_cycles():
+    outer = SimpleNamespace(
+        kt_config={"kt_num_threads": 3},
+        config={"kt_num_threads": 4},
+    )
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        assert config.KTConfig.from_object(outer).kt_num_threads == 3
+
+    cyclic = SimpleNamespace()
+    cyclic.kt_config = cyclic
+    with pytest.raises(ValueError, match="Cyclic"):
+        config.KTConfig.from_object(cyclic)
+
+    empty_plugin = SimpleNamespace(enabled=True, kt_config=None)
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        assert isinstance(config.KTConfig.from_object(empty_plugin), config.KTConfig)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [object(), SimpleNamespace(), SimpleNamespace(kt_backend="AMXBF16")],
+)
+def test_config_rejects_objects_without_an_explicit_public_container(value):
+    with pytest.raises(TypeError, match="public container"):
+        config.KTConfig.from_object(value)
+
+
+def test_nested_mapping_only_accepts_outer_runtime_overrides():
+    checkpoint_files = []
+    outer = SimpleNamespace(
+        kt_config={
+            "kt_backend": "AMXBF16",
+            "kt_num_threads": 0,
+            "kt_skip_expert_loading": True,
+        },
+        kt_backend="FP8",
+        kt_num_threads=12,
+        kt_checkpoint_files=checkpoint_files,
+        kt_skip_expert_loading=False,
+    )
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "configure_omp_threads", return_value=1),
+    ):
+        resolved = config.KTConfig.from_object(outer)
+
+    assert resolved.kt_backend == "AMXBF16"
+    assert resolved.kt_num_threads == 0
+    assert resolved.kt_checkpoint_files is checkpoint_files
+    assert resolved.kt_skip_expert_loading is False
+
+    outer.kt_config = {"kt_backned": "FP8"}
+    with pytest.raises(TypeError, match="kt_backned"):
+        config.KTConfig.from_object(outer)
+
+    outer.kt_config = {"kt_backend": "AMXBF16"}
+    outer.kt_backned = "FP8"
+    with pytest.raises(TypeError, match="kt_backned"):
+        config.KTConfig.from_object(outer)
 
 
 @pytest.mark.parametrize(
