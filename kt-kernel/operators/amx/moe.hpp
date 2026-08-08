@@ -15,6 +15,9 @@
 // #define FORWARD_TIME_REPORT
 
 #include "moe_base.hpp"
+#include "../mesh/mesh_hook.hpp"
+
+#include <type_traits>
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
@@ -178,32 +181,126 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
   // CRTP virtual points - GEMM dispatch
   // ============================================================================
 
+  // MESH GEMM 辅助：根据 kernel 类型选择栈对象或 make_shared 路径
+  // GemmKernel224BF 不支持 integer_mat_mul，需走 make_shared + mat_mul/vec_mul
+  // Int4/Int8 路径用栈对象，避免热路径堆分配/释放导致的堆损坏
+  // （make_shared 的堆 chunk 易被相邻 bc pool 溢出覆盖，触发 free(): unaligned chunk）
+  void run_mesh_gemm(int m, int n, int k,
+                     std::shared_ptr<typename T::BufferA>& ba,
+                     std::shared_ptr<typename T::BufferC>& bc,
+                     void* slot_ptr, int ith, int nth, int qlen) {
+    if constexpr (std::is_same_v<T, amx::GemmKernel224BF>) {
+      auto bb = std::make_shared<typename T::BufferB>(n, k, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, n, k, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, n, k, ba, bb, bc, ith, nth);
+      }
+    } else {
+      typename T::BufferB bb(n, k, slot_ptr);
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::integer_mat_mul<T, true>(m, n, k, ba.get(), &bb, bc.get(), ith, nth);
+      } else {
+        amx::integer_mat_mul<T, false>(m, n, k, ba.get(), &bb, bc.get(), ith, nth);
+      }
+    }
+  }
+
   void do_gate_up_gemm(bool do_up, int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = gate_up_ba_[expert_idx];
-    auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
     auto& bc = do_up ? up_bc_[expert_idx] : gate_bc_[expert_idx];
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+    // A1-call: MESH hook — 如果 mesh_residency 已设置，尝试从 slot 池获取权重指针
+    // get_*_bb / load_*_bb 返回非 nullptr 时 reader 已自动持有
+    void* slot_ptr = nullptr;
+    auto _t_acq = std::chrono::steady_clock::now();
+    if (config_.mesh_residency) {
+      slot_ptr = do_up
+          ? mesh::hook::get_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::get_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+    auto _t_acq_end = std::chrono::steady_clock::now();
+    long acq_us = std::chrono::duration_cast<std::chrono::microseconds>(_t_acq_end - _t_acq).count();
+
+    if (slot_ptr) {
+      // MESH 路径：slot 命中，reader 已持有
+      run_mesh_gemm(m, config_.intermediate_size, config_.hidden_size, ba, bc, slot_ptr, ith, nth, qlen);
+      auto _t_gem_end = std::chrono::steady_clock::now();
+      mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      auto _t_rel_end = std::chrono::steady_clock::now();
+      long gem_us = std::chrono::duration_cast<std::chrono::microseconds>(_t_gem_end - _t_acq_end).count();
+      long rel_us = std::chrono::duration_cast<std::chrono::microseconds>(_t_rel_end - _t_gem_end).count();
+      if (ith == 0 && (acq_us > 100 || gem_us > 100 || rel_us > 100)) {
+        fprintf(stderr, "[GEMM_SLOW] L%d tp%d ex%d up=%d acq=%ldus gem=%ldus rel=%ldus\n",
+                config_.layer_idx, tp_part_idx, expert_idx, do_up, acq_us, gem_us, rel_us);
+      }
+    } else if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式 slot 未命中：同步从 SSD 加载到 slot（gate_bb_ 为空，不能回退）
+      fprintf(stderr, "[GEMM_LOAD] L%d tp%d ex%d up=%d SLOT MISS → sync load\n",
+              config_.layer_idx, tp_part_idx, expert_idx, do_up);
+      slot_ptr = do_up
+          ? mesh::hook::load_up_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx)
+          : mesh::hook::load_gate_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      if (slot_ptr) {
+        // 加载成功，reader 已持有
+        run_mesh_gemm(m, config_.intermediate_size, config_.hidden_size, ba, bc, slot_ptr, ith, nth, qlen);
+        mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      } else {
+        fprintf(stderr, "[MESH DEBUG] do_gate_up_gemm: load FAILED layer=%d tp=%d expert=%d do_up=%d\n",
+                config_.layer_idx, tp_part_idx, expert_idx, do_up);
+      }
     } else {
-      amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      // 原版路径
+      auto& bb = do_up ? up_bb_[expert_idx] : gate_bb_[expert_idx];
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.intermediate_size, config_.hidden_size, ba, bb, bc, ith, nth);
+      }
     }
   }
 
   void do_down_gemm(int expert_idx, int ith, int nth, int qlen) {
     int m = m_local_num_[expert_idx];
     auto& ba = down_ba_[expert_idx];
-    auto& bb = down_bb_[expert_idx];
     auto& bc = down_bc_[expert_idx];
 
-    if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
-      amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+    // A1-call: MESH hook — 返回非 nullptr 时 reader 已持有
+    void* slot_ptr = nullptr;
+    if (config_.mesh_residency) {
+      slot_ptr = mesh::hook::get_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    }
+
+    if (slot_ptr) {
+      // MESH 路径：slot 命中，reader 已持有
+      run_mesh_gemm(m, config_.hidden_size, config_.intermediate_size, ba, bc, slot_ptr, ith, nth, qlen);
+      mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+    } else if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式 slot 未命中：同步从 SSD 加载到 slot（down_bb_ 为空，不能回退）
+      slot_ptr = mesh::hook::load_down_bb(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      if (slot_ptr) {
+        // 加载成功，reader 已持有
+        run_mesh_gemm(m, config_.hidden_size, config_.intermediate_size, ba, bc, slot_ptr, ith, nth, qlen);
+        mesh::hook::release_reader(config_.mesh_residency, config_.layer_idx, tp_part_idx, expert_idx);
+      }
     } else {
-      amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      // 原版路径
+      auto& bb = down_bb_[expert_idx];
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, ba, bb, bc, ith, nth);
+      }
     }
   }
   void load_weights() {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版 mmap/file/bf16 路径
+    if (config_.mesh_enabled && config_.mesh_residency) {
+      // MESH 模式下 gate_bb_/up_bb_/down_bb_ 在 forward 时由 mesh hook 动态重定向到 slot buffer
+      // 实际权重加载由 ResidencyManager.bootstrap() 完成
+      return;
+    }
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     if (config_.gate_projs.size()) {
@@ -363,6 +460,14 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
   using Base::Base;
 
   void load_weights() override {
+    // MESH 插件：权重由 MeshResidencyManager 接管，跳过原版加载路径
+    if (this->config.mesh_enabled && this->config.mesh_residency) {
+      for (auto i = 0; i < this->tp_count; i++) {
+        this->tps[i]->load_weights();  // 各 TP 走 mesh 分支
+      }
+      this->weights_loaded = true;
+      return;
+    }
     auto& config = this->config;
     auto& tps = this->tps;
     auto& tp_count = this->tp_count;

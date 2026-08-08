@@ -257,6 +257,12 @@ struct GeneralMOEConfig {
     return expert_id < 0 || expert_id >= expert_num || (gpu_experts_mask && gpu_experts_mask[expert_id]);
   }
 
+  // ===== MESH 插件接入点 =====
+  // mesh_enabled=false 时所有 mesh 路径不生效，行为完全等价于原版 KT。
+  // mesh_residency 指向 mesh::MeshResidencyManager，实际类型由 mesh_hook.hpp 处理。
+  bool mesh_enabled = false;
+  void* mesh_residency = nullptr;  // 实际类型: mesh::MeshResidencyManager*
+
   void* gate_proj = nullptr;
   void* up_proj = nullptr;
   void* down_proj = nullptr;

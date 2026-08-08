@@ -25,6 +25,7 @@ Environment knobs (export before running pip install .):
   CPUINFER_ENABLE_AVX512_BF16=OFF ON/OFF -> -DLLAMA_AVX512_BF16
   CPUINFER_ENABLE_AVX512_VBMI=OFF ON/OFF -> -DLLAMA_AVX512_VBMI (required for FP8 MoE)
   CPUINFER_ENABLE_CPPTRACE=ON/OFF  ON/OFF -> -DKTRANSFORMERS_ENABLE_CPPTRACE (debug-only)
+  CPUINFER_ENABLE_MESH=OFF        ON/OFF -> -DKT_ENABLE_MESH (MESH io_uring resident-cache plugin)
   CPUINFER_BLIS_ROOT=/path/to/blis  Forward to -DBLIS_ROOT
 
 
@@ -658,6 +659,9 @@ class CMakeBuild(build_ext):
         _forward_str_env(cmake_args, "CPUINFER_LTO_MODE", "CPUINFER_LTO_MODE")
         _forward_bool_env(cmake_args, "CPUINFER_ENABLE_CPPTRACE", "KTRANSFORMERS_ENABLE_CPPTRACE")
 
+        # MESH 插件开关
+        _forward_bool_env(cmake_args, "CPUINFER_ENABLE_MESH", "KT_ENABLE_MESH")
+
         # CUDA static runtime toggle
         _forward_bool_env(cmake_args, "CPUINFER_CUDA_STATIC_RUNTIME", "KTRANSFORMERS_CUDA_STATIC_RUNTIME")
 
@@ -798,6 +802,7 @@ setup(
     packages=[
         "kt_kernel",
         "kt_kernel.utils",
+        "kt_kernel.utils.mesh",  # MESH 插件
         "kt_kernel.sft",
         "kt_kernel.cli",
         "kt_kernel.cli.commands",
@@ -808,6 +813,7 @@ setup(
     package_dir={
         "kt_kernel": "python",
         "kt_kernel.utils": "python/utils",
+        "kt_kernel.utils.mesh": "python/utils/mesh",  # MESH 插件
         "kt_kernel.sft": "python/sft",
         "kt_kernel.cli": "python/cli",
         "kt_kernel.cli.commands": "python/cli/commands",

@@ -18,11 +18,109 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <map>
+#include <mutex>
+#include <set>
+#include <sstream>
 #include <stdexcept>
+#include <unistd.h>
 
 #include "hwloc.h"
 
 thread_local int WorkerPool::thread_local_id = -1;
+
+// 自动检测被占用的 CPU: 采样 /proc/stat 两次，计算每个 CPU 的 idle 率。
+// idle < threshold 的 CPU 被认为是"被占用"，绑定时跳过。
+// 这样不需要手动设 KT_SKIP_CPUS，自动避开其他用户的 worker。
+static std::set<int> detect_busy_cpus(double idle_threshold = 0.3, int sample_us = 200000) {
+  std::set<int> busy;
+  auto read_idle = [](std::vector<std::pair<long, long>>* out) {
+    FILE* f = fopen("/proc/stat", "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+      if (strncmp(line, "cpu", 3) != 0 || !isdigit((unsigned char)line[3])) continue;
+      int cpu_id;
+      long user, nice, system, idle, iowait, irq, softirq, steal;
+      int n = sscanf(line, "cpu%d %ld %ld %ld %ld %ld %ld %ld %ld", &cpu_id, &user, &nice,
+                     &system, &idle, &iowait, &irq, &softirq, &steal);
+      if (n >= 5) {
+        long total = user + nice + system + idle + iowait + irq + softirq + steal;
+        if (cpu_id >= (int)out->size()) out->resize(cpu_id + 1, {0, 0});
+        (*out)[cpu_id] = {idle, total};
+      }
+    }
+    fclose(f);
+  };
+  std::vector<std::pair<long, long>> first, second;
+  read_idle(&first);
+  usleep(sample_us);
+  read_idle(&second);
+  for (size_t i = 0; i < first.size() && i < second.size(); i++) {
+    long d_idle = second[i].first - first[i].first;
+    long d_total = second[i].second - first[i].second;
+    if (d_total > 0) {
+      double idle_rate = (double)d_idle / d_total;
+      if (idle_rate < idle_threshold) {
+        busy.insert((int)i);
+      }
+    }
+  }
+  return busy;
+}
+
+// 返回需要跳过的 CPU 集合。
+// 优先用环境变量 KT_SKIP_CPUS (逗号分隔的物理 CPU ID)；
+// 若未设置，则自动检测 (采样 /proc/stat，idle<30% 的 CPU)。
+static const std::set<int>& get_skip_cpus() {
+  static std::set<int> skip;
+  static bool inited = false;
+  if (!inited) {
+    inited = true;
+    const char* env = getenv("KT_SKIP_CPUS");
+    if (env && *env) {
+      std::stringstream ss(env);
+      std::string item;
+      while (std::getline(ss, item, ',')) {
+        if (!item.empty()) {
+          try {
+            skip.insert(std::stoi(item));
+          } catch (...) {
+          }
+        }
+      }
+      fprintf(stderr, "[MESH] KT_SKIP_CPUS manual (%zu cpus): ", skip.size());
+      for (int c : skip) fprintf(stderr, "%d ", c);
+      fprintf(stderr, "\n");
+    } else {
+      skip = detect_busy_cpus(0.30, 200000);
+      fprintf(stderr, "[MESH] auto-detected %zu busy cpus (idle<30%%): ", skip.size());
+      for (int c : skip) fprintf(stderr, "%d ", c);
+      fprintf(stderr, "\n");
+    }
+  }
+  return skip;
+}
+
+// 全局 core 分配器: 每个 NUMA 节点维护一个 next_core_idx，
+// NumaJobDistributor (main worker) 和 InNumaPool (worker) 共享，
+// 避免多个线程绑到同一个 core。
+static std::mutex g_core_alloc_mtx;
+static std::map<int, int> g_next_core_idx;  // numa_id -> next available core idx
+
+static int alloc_core_idx(int numa_id, int hint_idx) {
+  std::lock_guard<std::mutex> lock(g_core_alloc_mtx);
+  auto it = g_next_core_idx.find(numa_id);
+  int idx = (it == g_next_core_idx.end()) ? hint_idx : std::max(it->second, hint_idx);
+  return idx;
+}
+
+static void advance_core_idx(int numa_id, int used_idx) {
+  std::lock_guard<std::mutex> lock(g_core_alloc_mtx);
+  if (g_next_core_idx[numa_id] <= used_idx) {
+    g_next_core_idx[numa_id] = used_idx + 1;
+  }
+}
 
 InNumaPool::InNumaPool(int max_thread_num) {
   printf("In Numa Worker Pool at NUMA %d, %d threads\n", numa_node_of_cpu(sched_getcpu()), max_thread_num);
@@ -77,18 +175,39 @@ InNumaPool::InNumaPool(int max_thread_num, int numa_id, int threads_id_start) {
       // throw std::runtime_error("NUMA node not found");
       continue;
     }
-    core_obj = hwloc_get_obj_inside_cpuset_by_type(topology, numa_obj->cpuset, HWLOC_OBJ_CORE, i + threads_id_start);
+    // 跳过被其他用户占用的 core: 用全局 alloc_core_idx 获取起始位置，
+    // 确保不会和 NumaJobDistributor main worker 或其他 InNumaPool worker 重复。
+    const auto& skip_cpus = get_skip_cpus();
+    int core_search_idx = alloc_core_idx(numa_id, i + threads_id_start);
+    int bound_cpu_id = -1;
+    while (true) {
+      core_obj = hwloc_get_obj_inside_cpuset_by_type(topology, numa_obj->cpuset, HWLOC_OBJ_CORE, core_search_idx);
+      if (!core_obj) {
+        break;
+      }
+      int cpu_id = hwloc_bitmap_first(core_obj->cpuset);
+      if (cpu_id >= 0 && skip_cpus.count(cpu_id)) {
+        fprintf(stderr, "[MESH] Skip occupied CPU %d (core idx %d) for worker %d\n", cpu_id, core_search_idx, i);
+        core_search_idx++;
+        continue;
+      }
+      bound_cpu_id = cpu_id;
+      break;
+    }
     if (!core_obj) {
-      fprintf(stderr, "Core %d inside NUMA node %d not found\n", i, numa_id);
+      fprintf(stderr, "Core %d inside NUMA node %d not found (searched from %d)\n", i, numa_id, i + threads_id_start);
       // throw std::runtime_error("Core not found inside NUMA node");
       continue;
     }
+    advance_core_idx(numa_id, core_search_idx);
     cpuset = hwloc_bitmap_alloc();
     hwloc_bitmap_copy(cpuset, core_obj->cpuset);
     hwloc_bitmap_singlify(cpuset);
     auto res = hwloc_set_thread_cpubind(topology, native_handle, cpuset, HWLOC_CPUBIND_STRICT);
     if (res != 0) {
       fprintf(stderr, "Failed to set thread CPU binding: %s\n", strerror(errno));
+    } else {
+      fprintf(stderr, "[MESH] numa_%d_t_%d -> CPU %d (core idx %d)\n", numa_id, i + threads_id_start, bound_cpu_id, core_search_idx);
     }
   }
 }
@@ -116,23 +235,33 @@ int InNumaPool::get_thread_num() {
 void InNumaPool::set_restricted_worker_count(int count) { restricted_worker_count = count; }
 
 void InNumaPool::wait() {
+  auto wait_start = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < worker_count; i++) {
     while (thread_state_[i].status.load(std::memory_order_acquire) == ThreadStatus::WORKING) {
     }
   }
+  auto wait_end = std::chrono::high_resolution_clock::now();
+  long wait_us = std::chrono::duration_cast<std::chrono::microseconds>(wait_end - wait_start).count();
 
 #ifdef PROFILE_BALANCE
-  size_t max_time = 0;
-  size_t min_time = thread_state_[0].finish_ns;
-  size_t sum = 0;
-  for (int i = 0; i < worker_count; i++) {
-    sum += thread_state_[i].finish_ns;
-    max_time = std::max(max_time, thread_state_[i].finish_ns);
-    min_time = std::min(min_time, thread_state_[i].finish_ns);
+  if (wait_us > 1000) {  // 超过 1ms，打印每个 worker 的唤醒延迟与执行时间分解
+    fprintf(stderr, "[WAIT_SLOW] wait=%ldus wc=%d", wait_us, worker_count);
+    for (int j = 0; j < worker_count; j++) {
+      // wake_us: worker 检测到 WORKING 的唤醒延迟 (detect - work_set)
+      // exec_us: worker process_tasks 执行耗时 (finish_ns)
+      long wake_us = 0, exec_us = 0;
+      if (thread_state_[j].work_set_ns > 0 && thread_state_[j].detect_ns >= thread_state_[j].work_set_ns) {
+        wake_us = (long)((thread_state_[j].detect_ns - thread_state_[j].work_set_ns) / 1000);
+      } else if (thread_state_[j].work_set_ns == 0) {
+        wake_us = -1;  // work_set_ns 未被设置（主线程 thread 0 路径）
+      } else {
+        wake_us = -2;  // detect < work_set，时钟异常
+      }
+      exec_us = (long)(thread_state_[j].finish_ns / 1000);
+      fprintf(stderr, " w[%d]{wake=%ld exec=%ld}us", j, wake_us, exec_us);
+    }
+    fprintf(stderr, "\n");
   }
-  double balance = 1.0 * sum / (max_time * worker_count);
-  printf("max_time: %ld, min_time: %ld, sum_time: %ld, balance: %f\n", max_time, min_time, sum, balance);
-
 #endif
 }
 
@@ -159,6 +288,10 @@ void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int
     {
       std::lock_guard<std::mutex> lock(thread_state_[i].mutex);
       thread_state_[i].status.store(ThreadStatus::WORKING, std::memory_order_release);
+#ifdef PROFILE_BALANCE
+      thread_state_[i].work_set_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+#endif
     }
     thread_state_[i].cv.notify_one();
   }
@@ -169,10 +302,20 @@ void InNumaPool::do_work_stealing_job_async(int task_num, std::function<void(int
 void InNumaPool::process_tasks(int thread_id) {
 #ifdef PROFILE_BALANCE
   auto start = std::chrono::high_resolution_clock::now();
+  thread_state_[thread_id].detect_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      start.time_since_epoch()).count();
+  size_t init_ns = 0, compute_ns = 0, finalize_ns = 0;
 #endif
   auto& s = thread_state_[thread_id];
   if (init_func_ != nullptr) {
+#ifdef PROFILE_BALANCE
+    auto init_start = std::chrono::high_resolution_clock::now();
+#endif
     init_func_(thread_id);
+#ifdef PROFILE_BALANCE
+    init_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::high_resolution_clock::now() - init_start).count();
+#endif
   }
 
   // omp-guided-style work scheduling
@@ -194,18 +337,35 @@ void InNumaPool::process_tasks(int thread_id) {
       if (task_id + i >= end_) {
         break;
       }
+#ifdef PROFILE_BALANCE
+      auto comp_start = std::chrono::high_resolution_clock::now();
+#endif
       compute_func_(task_id + i);
+#ifdef PROFILE_BALANCE
+      compute_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::high_resolution_clock::now() - comp_start).count();
+#endif
     }
   }
 
   if (finalize_func_ != nullptr) {
+#ifdef PROFILE_BALANCE
+    auto fin_start = std::chrono::high_resolution_clock::now();
+#endif
     finalize_func_(thread_id);
+#ifdef PROFILE_BALANCE
+    finalize_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::high_resolution_clock::now() - fin_start).count();
+#endif
   }
 
   s.status.store(ThreadStatus::WAITING, std::memory_order_release);
 #ifdef PROFILE_BALANCE
   s.finish_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - start).count();
+  s.init_ns = init_ns;
+  s.compute_ns = compute_ns;
+  s.finalize_ns = finalize_ns;
 #endif
 }
 
@@ -223,11 +383,14 @@ void InNumaPool::worker_thread(int thread_id, int numa_id) {
     } else if (status == ThreadStatus::WAITING) {
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-      if (duration > 50) {
+      // 短暂 busy-wait 后进入 cv.wait：CPU 空闲时 cv.notify_one 唤醒延迟 <1ms，
+      // 避免永久 busy-wait 导致几十个核空转。
+      if (duration > 5) {
         std::unique_lock<std::mutex> lock(thread_state_[thread_id].mutex);
         thread_state_[thread_id].cv.wait(lock, [&] {
           return thread_state_[thread_id].status.load(std::memory_order_acquire) != ThreadStatus::WAITING;
         });
+        start = std::chrono::high_resolution_clock::now();
       }
     } else if (status == ThreadStatus::EXIT) {
       return;
@@ -299,12 +462,31 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
       // throw std::runtime_error("NUMA node not found");
       continue;
     }
-    core_obj = hwloc_get_obj_inside_cpuset_by_type(topology, numa_obj->cpuset, HWLOC_OBJ_CORE, start_id);
+    // 跳过被占用的 core: NumaJobDistributor 主线程也要避开 djh 满载的 CPU。
+    // 用全局 alloc_core_idx 确保和 InNumaPool worker 不冲突。
+    const auto& skip_cpus = get_skip_cpus();
+    int main_search_idx = alloc_core_idx(this_numa, start_id);
+    int main_bound_cpu = -1;
+    while (true) {
+      core_obj = hwloc_get_obj_inside_cpuset_by_type(topology, numa_obj->cpuset, HWLOC_OBJ_CORE, main_search_idx);
+      if (!core_obj) {
+        break;
+      }
+      int cpu_id = hwloc_bitmap_first(core_obj->cpuset);
+      if (cpu_id >= 0 && skip_cpus.count(cpu_id)) {
+        fprintf(stderr, "[MESH] Skip occupied CPU %d (core idx %d) for numa_%d main worker\n", cpu_id, main_search_idx, this_numa);
+        main_search_idx++;
+        continue;
+      }
+      main_bound_cpu = cpu_id;
+      break;
+    }
     if (!core_obj) {
       fprintf(stderr, "Core %d inside NUMA node %d not found\n", 0, this_numa);
       // throw std::runtime_error("Core not found inside NUMA node");
       continue;
     }
+    advance_core_idx(this_numa, main_search_idx);
     // 精简 cpuset
     auto cpuset_simple = hwloc_bitmap_alloc();
     hwloc_bitmap_copy(cpuset_simple, core_obj->cpuset);
@@ -316,6 +498,8 @@ void NumaJobDistributor::init(std::vector<int> numa_ids, std::vector<int> thread
     auto res = hwloc_set_thread_cpubind(topology, native_handle, cpuset_simple, HWLOC_CPUBIND_STRICT);
     if (res != 0) {
       fprintf(stderr, "Failed to set thread CPU binding: %s\n", strerror(errno));
+    } else {
+      fprintf(stderr, "[MESH] numa_%d_m_%d -> CPU %d (core idx %d)\n", this_numa, start_id, main_bound_cpu, main_search_idx);
     }
     // 检查线程是否绑定到指定的 核上了
     hwloc_cpuset_t cpuset = hwloc_bitmap_alloc();
@@ -399,7 +583,10 @@ void NumaJobDistributor::worker_thread(int numa_id) {
     } else if (stat == ThreadStatus::WAITING) {
       auto now = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-      if (duration > 50) {
+      // 禁用 cv.wait：decode 阶段层间间隔可能 > 50ms（attention 慢），
+      // worker 进入 cv.wait 后唤醒延迟 11-27ms，导致 decode 性能从 36 tok/s 暴跌到 1 tok/s。
+      // 改为永久 busy-wait，确保 worker 在下次 do_work_stealing_job_async 时立即响应。
+      if (duration > 3600000) {
         std::unique_lock<std::mutex> lock(*mutexes[numa_id]);
         cvs[numa_id]->wait(lock, [&] {
           return status[numa_id]->load(std::memory_order_acquire) != ThreadStatus::WAITING;
