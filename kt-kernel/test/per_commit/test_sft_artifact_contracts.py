@@ -152,6 +152,13 @@ def test_v2_producer_resolves_a_strict_pretrained_load_plan(tmp_path):
     assert plan.manifest["converter"]["name"] == "kt-kernel.prepare-non-expert-cache"
 
 
+def test_pretrained_load_plan_rejects_explicit_quantization_override(tmp_path):
+    source, _, _, config = _make_pretrained_artifacts(tmp_path)
+
+    with pytest.raises(KTArtifactError, match="explicit quantization_config"):
+        resolve_kt_pretrained_artifacts(config, source, object())
+
+
 def test_non_expert_weight_path_is_an_authoritative_kt_config_field():
     assert "kt_non_expert_weight_path" in {field.name for field in fields(KTConfig)}
 
