@@ -928,6 +928,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         layer_wrapper._lora_alpha = float(lora_alpha)
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
+        layer_wrapper._kt_expert_weight_format = expert_weight_format or "bf16"
 
         setattr(layer, moe_config.moe_layer_attr, layer_wrapper)
         # Base weights have been copied into the C++ kernel's internal BufferB format.
@@ -968,6 +969,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         )
 
     logger.info(f"Wrapped {moe_layer_count} MoE layers with KTMoEWrapper")
+    model._kt_expert_weight_format = expert_weight_format or "bf16"
 
     # Link wrappers for async backward repack (higher layer triggers repack for lower)
     for i in range(1, len(wrappers)):
@@ -1251,6 +1253,7 @@ def load_kt_model(
     model._kt_use_lora_experts = bool(getattr(cfg, "kt_use_lora_experts", False))
     model._kt_full_weight_grad = bool(getattr(cfg, "kt_full_weight_grad", False))
     model._kt_train_mode = getattr(cfg, "kt_train_mode", "lora")
+    model._kt_expert_weight_format = getattr(cfg, "kt_expert_weight_format", None) or "bf16"
 
     logger.info("Model loaded with KTMoEWrapper backend successfully")
     return model

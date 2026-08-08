@@ -311,9 +311,10 @@ class _Backend:
         self.initialized = buffers
 
 
-def _fused_model():
+def _fused_model(*, expert_weight_format="bf16"):
     model = torch.nn.Module()
     model.config = SimpleNamespace(name_or_path="/models/base", _name_or_path="/models/base")
+    model._kt_expert_weight_format = expert_weight_format
     wrapper = SimpleNamespace(
         layer_idx=0,
         moe_config=SimpleNamespace(expert_num=1, intermediate_size=2),
@@ -324,6 +325,7 @@ def _fused_model():
         _fused_experts=False,
         _lora_rank=1,
         _lora_alpha=2.0,
+        _kt_expert_weight_format=expert_weight_format,
         _uses_authoritative_optimizer_grads=False,
         _full_weight_grad=False,
         lora_experts=None,
@@ -331,6 +333,56 @@ def _fused_model():
     )
     model._kt_wrappers = [wrapper]
     return model, wrapper
+
+
+def _write_standard_adapter(output):
+    output.mkdir()
+    _write_json(output / "adapter_config.json", {"r": 1})
+    save_file({"router.lora_A.weight": torch.ones(1, 2)}, output / "adapter_model.safetensors")
+
+
+@pytest.mark.parametrize("expert_weight_format", ["fp8", "int8"])
+def test_quantized_adapter_manifest_uses_explicit_runtime_provenance(
+    tmp_path, monkeypatch, expert_weight_format
+):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    model, _ = _fused_model(expert_weight_format=expert_weight_format)
+    kt_adapt_peft_lora(model)
+    output = tmp_path / expert_weight_format
+    _write_standard_adapter(output)
+
+    saved = save_kt_adapter_artifacts(model, output)
+    loaded = load_kt_adapter_artifacts(model, output)
+
+    assert saved.payload["expert_weight_format"] == expert_weight_format
+    assert "non_expert_cache" not in saved.payload
+    assert "int8_experts" not in saved.payload
+    assert loaded.payload == saved.payload
+
+
+def test_adapter_load_rejects_expert_weight_format_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    source, _ = _fused_model(expert_weight_format="fp8")
+    kt_adapt_peft_lora(source)
+    output = tmp_path / "adapter"
+    _write_standard_adapter(output)
+    save_kt_adapter_artifacts(source, output)
+
+    incompatible, _ = _fused_model(expert_weight_format="int8")
+    with pytest.raises(KTArtifactError, match="expert_weight_format does not match"):
+        load_kt_adapter_artifacts(incompatible, output)
+
+
+def test_adapter_save_rejects_conflicting_owner_provenance(tmp_path, monkeypatch):
+    monkeypatch.setattr("kt_kernel.sft.lora._distributed_rank_world_size", lambda: (0, 1))
+    model, wrapper = _fused_model(expert_weight_format="fp8")
+    wrapper._kt_expert_weight_format = "int8"
+    kt_adapt_peft_lora(model)
+    output = tmp_path / "adapter"
+    _write_standard_adapter(output)
+
+    with pytest.raises(KTArtifactError, match="conflicting KT expert weight provenance"):
+        save_kt_adapter_artifacts(model, output)
 
 
 def test_adaptation_is_idempotent_and_publishes_stable_parameter_names(monkeypatch):
@@ -505,7 +557,9 @@ def test_legacy_int8_adapter_manifest_without_explicit_format_remains_loadable(t
     config.kt_lora_rank = 1
     config.kt_lora_alpha = 2.0
     plan = resolve_kt_pretrained_artifacts(config, source)
-    model, _ = _fused_model()
+    model, wrapper = _fused_model()
+    del model._kt_expert_weight_format
+    del wrapper._kt_expert_weight_format
     model.config.name_or_path = str(source)
     model.config._name_or_path = str(source)
     model._kt_pretrained_load_plan = plan

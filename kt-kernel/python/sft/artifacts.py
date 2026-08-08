@@ -64,6 +64,7 @@ _SUPPORTED_MOE_ARCHITECTURES = (
     "Glm4Moe",
     "Mixtral",
 )
+_EXPERT_WEIGHT_FORMATS = frozenset({"bf16", "int8", "fp8"})
 
 
 class KTArtifactError(RuntimeError):
@@ -1041,6 +1042,62 @@ def _find_plan(model: Any) -> KTPretrainedLoadPlan | None:
     return None
 
 
+def _runtime_expert_weight_format(
+    model: Any, plan: KTPretrainedLoadPlan | None
+) -> str:
+    """Resolve routed-expert precision from explicit KT ownership metadata."""
+
+    provenance: list[tuple[str, Any]] = []
+    queue = [model]
+    visited: set[int] = set()
+    while queue:
+        candidate = queue.pop(0)
+        if candidate is None or id(candidate) in visited:
+            continue
+        visited.add(id(candidate))
+        value = getattr(candidate, "_kt_expert_weight_format", None)
+        if value is not None:
+            provenance.append((type(candidate).__name__, value))
+        config = getattr(candidate, "config", None)
+        value = getattr(config, "kt_expert_weight_format", None)
+        if value is not None:
+            provenance.append((f"{type(candidate).__name__}.config", value))
+        for attribute in ("base_model", "model", "module"):
+            child = getattr(candidate, attribute, None)
+            if child is not None and child is not candidate:
+                queue.append(child)
+
+    for wrapper in _find_wrappers(model):
+        value = getattr(wrapper, "_kt_expert_weight_format", None)
+        if value is not None:
+            provenance.append((f"KT wrapper layer {getattr(wrapper, 'layer_idx', '?')}", value))
+
+    if plan is not None:
+        provenance.append(
+            (
+                "routed expert manifest",
+                plan.routed_manifest.get("expert_weight_format"),
+            )
+        )
+
+    normalized: list[tuple[str, str]] = []
+    for source, value in provenance:
+        if not isinstance(value, str) or value.strip().lower() not in _EXPERT_WEIGHT_FORMATS:
+            raise KTArtifactError(f"invalid {source} expert_weight_format {value!r}")
+        normalized.append((source, value.strip().lower()))
+    formats = {value for _, value in normalized}
+    if len(formats) > 1:
+        details = ", ".join(f"{source}={value}" for source, value in normalized)
+        raise KTArtifactError(f"conflicting KT expert weight provenance: {details}")
+    if formats:
+        return formats.pop()
+    if plan is not None:
+        raise KTArtifactError("validated pretrained plan lacks routed expert format provenance")
+    # Older BF16 wrappers predate explicit ownership metadata. Quantized
+    # runtimes never take this compatibility path.
+    return "bf16"
+
+
 def _dtype_name(dtype: Any) -> str:
     values = {
         "torch.bfloat16": "BF16",
@@ -1193,8 +1250,13 @@ def _adapter_provenance(model: Any, plan: KTPretrainedLoadPlan | None) -> dict[s
         raise KTArtifactError(
             f"fused wrapper LoRA alpha {float(alpha)} does not match the pretrained plan alpha {plan.lora_alpha}"
         )
+    expert_weight_format = _runtime_expert_weight_format(model, plan)
+    if plan is not None and expert_weight_format != "int8":
+        raise KTArtifactError(
+            "a KT non-expert load plan requires INT8 routed expert provenance"
+        )
     payload: dict[str, Any] = {
-        "expert_weight_format": "int8" if plan is not None else "bf16",
+        "expert_weight_format": expert_weight_format,
         "base": {"model_name_or_path": _base_model_name(model, plan)},
         "lora": {"rank": rank, "alpha": float(alpha)},
     }
@@ -1302,7 +1364,11 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
     plan = _find_plan(model)
     expected_provenance = _adapter_provenance(model, plan)
     saved_format = payload.get("expert_weight_format")
-    if saved_format is None and plan is not None:
+    if (
+        saved_format is None
+        and "non_expert_cache" in payload
+        and "int8_experts" in payload
+    ):
         # LLaMA-Factory's legacy schema-v1 writer predated the explicit format
         # field; its INT8 provenance fields are unambiguous.
         saved_format = "int8"
@@ -1311,10 +1377,9 @@ def _validate_adapter_manifest(model: Any, adapter_path: Path) -> KTAdapterManif
     for field in ("base", "lora"):
         if payload.get(field) != expected_provenance[field]:
             raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
-    if plan is not None:
-        for field in ("non_expert_cache", "int8_experts"):
-            if payload.get(field) != expected_provenance[field]:
-                raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
+    for field in ("non_expert_cache", "int8_experts"):
+        if payload.get(field) != expected_provenance.get(field):
+            raise KTArtifactError(f"{manifest_path}: {field} does not match the runtime")
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, dict) or FUSED_EXPERT_LORA_NAME not in artifacts:
         raise KTArtifactError(f"{manifest_path}: artifacts must include fused expert LoRA")
