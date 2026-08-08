@@ -1355,8 +1355,8 @@ def load_kt_adapter_artifacts(
     manifest = None
     if manifest_path.exists():
         manifest = _validate_adapter_manifest(model, root)
-    elif contract and _find_plan(model) is not None:
-        raise KTArtifactError(f"INT8 fused adapter is missing {manifest_path}")
+    elif contract:
+        raise KTArtifactError(f"fused adapter is missing {manifest_path}")
     load_kt_moe_from_adapter(model, str(root))
     return manifest
 

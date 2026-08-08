@@ -402,6 +402,14 @@ def test_combined_adapter_save_load_is_manifest_last_and_fail_closed(tmp_path, m
     assert (output / KT_ADAPTER_MANIFEST_NAME).is_file()
     for parameter, tensor in zip(wrapper._fused_expert_lora_params, expected):
         assert torch.equal(parameter, tensor)
+
+    manifest_path = output / KT_ADAPTER_MANIFEST_NAME
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_path.unlink()
+    with pytest.raises(KTArtifactError, match="fused adapter is missing"):
+        load_kt_adapter_artifacts(model, output)
+    manifest_path.write_bytes(manifest_bytes)
+
     non_owner_model, non_owner_wrapper = _fused_model()
     non_owner_wrapper._uses_authoritative_optimizer_grads = True
     non_owner_wrapper._fused_expert_lora_params = []
