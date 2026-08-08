@@ -934,6 +934,7 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         layer_wrapper._use_fused_expert_lora = _use_fused_expert_lora
         layer_wrapper._force_fused_expert_lora = force_fused_expert_lora
         layer_wrapper._lora_rank = lora_rank
+        layer_wrapper._lora_alpha = float(lora_alpha)
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
 

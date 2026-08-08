@@ -249,6 +249,7 @@ class KTConfig:
 
     # Weight loading
     kt_weight_path: str | None = None
+    kt_non_expert_weight_path: str | None = None
     kt_expert_weight_format: ExpertWeightFormat | str | None = None
     kt_weight_lifecycle: WeightLifecycle | str | None = None
     kt_expert_checkpoint_path: str | None = None  # HF expert checkpoint or KT Full checkpoint directory
@@ -401,6 +402,10 @@ class KTConfig:
             self.kt_threadpool_count = _env_int("ACCELERATE_KT_THREADPOOL_COUNT", 1)
         if self.kt_weight_path is None:
             self.kt_weight_path = os.environ.get("ACCELERATE_KT_WEIGHT_PATH", None)
+        if self.kt_non_expert_weight_path is None:
+            self.kt_non_expert_weight_path = os.environ.get(
+                "ACCELERATE_KT_NON_EXPERT_WEIGHT_PATH", None
+            )
         if self.kt_expert_checkpoint_path is None:
             self.kt_expert_checkpoint_path = os.environ.get("ACCELERATE_KT_EXPERT_CHECKPOINT_PATH", None)
         if self.kt_num_gpu_experts is None:
@@ -443,6 +448,11 @@ class KTConfig:
             if "ACCELERATE_KT_SKIP_EXPERT_LOADING" in os.environ:
                 self.kt_skip_expert_loading = _env_bool("ACCELERATE_KT_SKIP_EXPERT_LOADING", True)
 
+        if self.kt_non_expert_weight_path and self.kt_expert_weight_format != "int8":
+            raise ValueError(
+                "kt_non_expert_weight_path is supported only with "
+                "kt_expert_weight_format='int8'"
+            )
         if self.kt_expert_weight_format == "int8":
             if str(self.kt_backend).lower() != INT8_BACKEND.lower():
                 raise ValueError(
