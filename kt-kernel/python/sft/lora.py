@@ -224,6 +224,17 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         if experts is None:
             continue
 
+        if getattr(wrapper, "_kt_freeze_experts", False):
+            wrapper._kt_managed_lora_enabled = False
+            wrapper._peft_lora_modules = None
+            wrapper._fused_expert_lora_params = []
+            logger.info(
+                f"[kt_adapt_peft_lora] Layer {layer_idx}: language experts are frozen; "
+                "using the input-gradient-only backend"
+            )
+            adapted_count += 1
+            continue
+
         # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
         # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init
         # and wrap them as nn.Parameter objects for optimizer injection.
