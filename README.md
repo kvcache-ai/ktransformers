@@ -124,6 +124,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
+**VLM LoRA (Qwen3.5):** Clone the `main` branches of [KTransformers](https://github.com/Illumination111/ktransformers) and [LLaMA-Factory](https://github.com/Illumination111/LlamaFactory), install LLaMA-Factory with `pip install -e .` first, then run `pip install -r requirements-vlm-lora.txt` from the KTransformers root. Set the model and dataset paths in the LLaMA-Factory `qwen3_5moe_vlm_{text,vision,all}_lora_sft_kt.yaml` example for the desired LoRA scope, then launch it with:
+
+```bash
+LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 llamafactory-cli train \
+  examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml
+```
+
 ---
 
 ## 🔥 Citation
