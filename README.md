@@ -124,91 +124,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
-#### Qwen3.5 VLM LoRA
+**Qwen3.5 VLM LoRA:** Fine-tune language modules, vision/projector modules, or both with the KT backend and LlamaFactory.
 
-1. **Clone the two integration repositories.** Keep both checkouts under the same parent directory so the commands below can use relative paths.
-
-   ```bash
-   git clone https://github.com/Illumination111/LlamaFactory.git
-   git clone https://github.com/Illumination111/ktransformers.git
-   ```
-
-2. **Install LlamaFactory first.** This establishes the base training environment before the KT-patched packages are installed.
-
-   ```bash
-   cd LlamaFactory
-   pip install -e .
-   ```
-
-3. **Install the VLM LoRA dependency set from the KTransformers root.** The dedicated requirements file pins `torch==2.9.1`, `torchvision==0.24.1`, and `torchaudio==2.9.1`; installs the local `kt-kernel[vlm-sft]` and `ktransformers[vlm-sft]`; and pulls in the verified `transformers-kt==5.6.0.post1`, `accelerate-kt==1.14.0.post1`, and `ms-swift>=4.4.2,<4.5` compatibility stack. Keep this step after the LlamaFactory installation so the KT forks are the active implementations.
-
-   ```bash
-   cd ../ktransformers
-   pip install -r requirements-vlm-lora.txt
-   ```
-
-4. **Prepare the model and dataset.** Put the Qwen3.5 VLM weights at a local or Hugging Face path, register a custom multimodal dataset in `LlamaFactory/data/dataset_info.json`, and set `model_name_or_path` and `dataset` below. The built-in `mllm_demo` dataset can be used for a smoke test without additional registration.
-
-5. **Create or edit the training YAML.** The repository already provides `examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml`; the following is a complete `all`-scope example:
-
-   ```yaml
-   ### model
-   model_name_or_path: Qwen/Qwen3.5-122B-A10B
-   image_max_pixels: 262144
-   video_max_pixels: 16384
-   trust_remote_code: true
-
-   ### method
-   stage: sft
-   do_train: true
-   finetuning_type: lora
-   lora_rank: 8
-   lora_alpha: 16
-   lora_target: all
-   vlm_lora_scope: all
-
-   ### dataset
-   dataset: mllm_demo
-   template: qwen3_5
-   cutoff_len: 512
-   overwrite_cache: true
-   preprocessing_num_workers: 4
-   dataloader_num_workers: 1
-
-   ### output
-   output_dir: saves/KT_FT_qwen35Moe_VLM_all
-   logging_steps: 1
-   save_steps: 100
-   plot_loss: true
-   overwrite_output_dir: true
-   report_to: none
-
-   ### train
-   per_device_train_batch_size: 1
-   gradient_accumulation_steps: 1
-   learning_rate: 1.0e-4
-   num_train_epochs: 3.0
-   lr_scheduler_type: cosine
-   warmup_ratio: 0.1
-   bf16: true
-   gradient_checkpointing: true
-   gradient_checkpointing_kwargs: {use_reentrant: false}
-   ddp_timeout: 360000000
-
-   ### ktransformers
-   use_kt: true
-   ```
-
-   Set `vlm_lora_scope` to `text`, `vision`, or `all` to train language modules, vision/projector modules, or both. Keep `lora_target: all` for every non-default VLM scope. Matching ready-to-run YAML files for all three scopes are under `LlamaFactory/examples/ktransformers/train_lora/`.
-
-6. **Launch training from the LlamaFactory root and check the configured output directory.**
-
-   ```bash
-   cd ../LlamaFactory
-   LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 \
-     llamafactory-cli train \
-     examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml
-   ```
+👉 **[VLM Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md#qwen35-vlm-lora-quick-start)**
+👉 **[VLM Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md#qwen35-vlm-lora-full-guide)**
 
 ---
 
