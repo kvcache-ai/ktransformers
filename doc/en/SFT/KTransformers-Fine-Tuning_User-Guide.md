@@ -443,6 +443,23 @@ Replace the YAML filename with the `text` or `vision` example to use those scope
 
 At startup, verify that the selected VLM LoRA scope is reported, the expected trainable modules are listed, and the KT VLM Conv3D compatibility path is enabled for trainable Qwen VLM runs on PyTorch 2.9.x. Training artifacts are written to `output_dir`; depending on the selected scope, they include the PEFT adapter metadata and non-expert LoRA weights, plus KT fused expert LoRA weights when language experts are trainable.
 
+#### Verified Qwen3.5 VLM LoRA smoke-test results
+
+Test server configuration:
+
+- 2 x Intel Xeon Platinum 8488C CPUs, 96 physical cores / 192 threads, and 2 NUMA nodes;
+- 2.0 TiB host memory with no swap;
+- 8 x NVIDIA GeForce RTX 4090 GPUs;
+- Python 3.12.13, PyTorch 2.9.1+cu128, Transformers-KT 5.6.0, Accelerate-KT 1.14.0, and ms-swift 4.4.2;
+- FSDP2 with 8 processes and KT `AMXBF16`, tensor parallelism enabled, 80 KT CPU threads, and 2 NUMA-aware thread pools.
+
+| Model | Result | Trainable LoRA parameters | One-step runtime | Host RAM panel peak (increase) | GPU VRAM peak |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-122B-A10B | PASS | 21,639,936 | 22.90 s | 328.02 GiB (311.62 GiB) | 10.69 GiB/GPU; 85.19 GiB total |
+| Qwen3.5-397B-A17B | PASS | 29,005,568 | 51.46 s | 886.11 GiB (869.35 GiB) | 13.96 GiB/GPU; 111.20 GiB total |
+
+Both runs used `vlm_lora_scope: all`, LoRA rank 8, cutoff length 512, batch size 1 per device, and 8 RTX 4090 GPUs. A real image batch produced non-zero language and vision LoRA gradients, and sampled parameters in both modalities changed by approximately `1.0e-4` after the optimizer step. Host RAM is the `htop`/`free` top-panel physical-memory value, not a sum of process RSS; the value in parentheses is the peak increase over the pre-launch baseline.
+
 Common failures:
 
 - If LlamaFactory rejects stock `transformers==5.6.0`, reinstall with `requirements-vlm-lora.txt` and keep `LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1` in a direct CLI launch.
