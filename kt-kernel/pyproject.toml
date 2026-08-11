@@ -45,6 +45,9 @@ test = [
   "pytest>=7.0.0",
   "psutil>=5.9.0",
 ]
+vlm-sft = [
+  "ms-swift>=4.4.2,<4.5",
+]
 
 [project.scripts]
 kt = "kt_kernel.cli.main:main"

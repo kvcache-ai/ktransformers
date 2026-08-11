@@ -2,6 +2,7 @@
 
 Extras:
   - ktransformers[sft] installs transformers-kt + accelerate-kt
+  - ktransformers[vlm-sft] adds the verified ms-swift Conv3D compatibility dependency
   - ktransformers[sglang] installs sglang-kt
 """
 from pathlib import Path
@@ -21,6 +22,11 @@ setup(
         "sft": [
             "transformers-kt==5.6.0.post1",
             "accelerate-kt==1.14.0.post1",
+        ],
+        "vlm-sft": [
+            "transformers-kt==5.6.0.post1",
+            "accelerate-kt==1.14.0.post1",
+            f"kt-kernel[vlm-sft]=={_v}",
         ],
         "sglang": [
             f"sglang-kt=={_v}",
