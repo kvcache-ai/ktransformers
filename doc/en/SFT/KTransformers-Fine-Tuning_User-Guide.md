@@ -254,6 +254,204 @@ cpu_infer: 32
 chunk_size: 8192
 ```
 
+<a id="qwen35-vlm-lora-full-guide"></a>
+
+## Qwen3.5 VLM LoRA Full Guide
+
+This module documents end-to-end Qwen3.5 VLM LoRA SFT with the KTransformers backend and the matching LlamaFactory integration. It covers the verified Qwen3.5-122B-A10B example and applies to compatible Qwen3.5 VLM checkpoints after their model path and resource settings are adjusted.
+
+### 1. Choose the VLM LoRA scope
+
+`vlm_lora_scope` controls which modality receives LoRA adapters; it does not make the base model weights trainable.
+
+| Value | Trainable LoRA modules | KT offloaded language experts |
+| --- | --- | --- |
+| `text` | Language-side Linear/Conv modules | LoRA enabled |
+| `vision` | Vision tower and multimodal projector Linear/Conv modules, including Conv3D patch embedding | Frozen; KT computes only required input gradients |
+| `all` | The union of text and vision targets | LoRA enabled |
+
+Use `lora_target: all` with every non-default VLM scope. Existing non-VLM configurations remain unchanged because the default scope is `default`.
+
+### 2. Clone the matching `main` branches
+
+Keep both repositories under the same parent directory:
+
+```bash
+mkdir qwen35-vlm-lora
+cd qwen35-vlm-lora
+git clone https://github.com/Illumination111/LlamaFactory.git
+git clone https://github.com/Illumination111/ktransformers.git
+```
+
+The VLM examples live in LlamaFactory, while the patched kernel, compatibility layer, and dedicated requirements file live in KTransformers.
+
+### 3. Create the environment and install dependencies
+
+Use Python 3.11 or later. Install LlamaFactory first so that the second installation step leaves the KT-patched Transformer and Accelerate implementations active:
+
+```bash
+conda create -n kt-vlm-lora python=3.11 -y
+conda activate kt-vlm-lora
+
+cd LlamaFactory
+pip install -e .
+
+cd ../ktransformers
+pip install -r requirements-vlm-lora.txt
+```
+
+[`requirements-vlm-lora.txt`](../../../requirements-vlm-lora.txt) provides the verified VLM stack:
+
+- `torch==2.9.1`, `torchvision==0.24.1`, and `torchaudio==2.9.1`
+- the local editable `kt-kernel[vlm-sft]` and `ktransformers[vlm-sft]`
+- `transformers-kt==5.6.0.post1` and `accelerate-kt==1.14.0.post1`
+- `ms-swift>=4.4.2,<4.5` for the PyTorch 2.9 Conv3D compatibility path
+
+Confirm that the KT distributions and import packages resolve together:
+
+```bash
+python - <<'PY'
+import importlib.metadata as md
+import accelerate
+import torch
+import transformers
+
+print("torch:", torch.__version__)
+print("transformers:", transformers.__version__)
+print("transformers-kt:", md.version("transformers-kt"))
+print("accelerate:", accelerate.__version__)
+print("accelerate-kt:", md.version("accelerate-kt"))
+print("kt-kernel:", md.version("kt-kernel"))
+PY
+```
+
+### 4. Prepare the model weights
+
+Download the Qwen3.5 VLM checkpoint or use its Hugging Face identifier. The training YAML accepts either form:
+
+```yaml
+model_name_or_path: Qwen/Qwen3.5-122B-A10B
+```
+
+For a local checkpoint, replace it with an absolute directory containing the model configuration, tokenizer/processor files, and all weight shards. Keep `trust_remote_code: true`.
+
+### 5. Prepare and register the multimodal dataset
+
+Place the dataset JSON and referenced media under `LlamaFactory/data/`. Each `<image>` placeholder must have a corresponding entry in `images`. A minimal ShareGPT example is:
+
+```json
+[
+  {
+    "messages": [
+      {"role": "user", "content": "<image>Describe this image."},
+      {"role": "assistant", "content": "A concise description of the image."}
+    ],
+    "images": ["my_vlm_data/example.jpg"]
+  }
+]
+```
+
+Register the file in `LlamaFactory/data/dataset_info.json`:
+
+```json
+"my_vlm_sft": {
+  "file_name": "my_vlm_sft.json",
+  "formatting": "sharegpt",
+  "columns": {
+    "messages": "messages",
+    "images": "images"
+  },
+  "tags": {
+    "role_tag": "role",
+    "content_tag": "content",
+    "user_tag": "user",
+    "assistant_tag": "assistant"
+  }
+}
+```
+
+Set `dataset: my_vlm_sft` in the training YAML. For an initial smoke test, use the built-in `mllm_demo` dataset without adding a new registration.
+
+### 6. Configure the training YAML
+
+LlamaFactory provides matching `text`, `vision`, and `all` examples under `examples/ktransformers/train_lora/`. The complete `all`-scope example is:
+
+```yaml
+### model
+model_name_or_path: Qwen/Qwen3.5-122B-A10B
+image_max_pixels: 262144
+video_max_pixels: 16384
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_target: all
+vlm_lora_scope: all
+
+### dataset
+dataset: mllm_demo
+template: qwen3_5
+cutoff_len: 512
+overwrite_cache: true
+preprocessing_num_workers: 4
+dataloader_num_workers: 1
+
+### output
+output_dir: saves/KT_FT_qwen35Moe_VLM_all
+logging_steps: 1
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs: {use_reentrant: false}
+ddp_timeout: 360000000
+
+### ktransformers
+use_kt: true
+```
+
+Reduce `image_max_pixels`, `video_max_pixels`, `cutoff_len`, or the per-device batch size if GPU memory is insufficient. Increase gradient accumulation to preserve the desired effective batch size.
+
+### 7. Launch training
+
+Run from the LlamaFactory root. Direct CLI launches must explicitly allow the verified Transformers-KT fork:
+
+```bash
+cd ../LlamaFactory
+LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 \
+  llamafactory-cli train \
+  examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml
+```
+
+Replace the YAML filename with the `text` or `vision` example to use those scopes. Do not omit `use_kt: true`.
+
+### 8. Check the run and outputs
+
+At startup, verify that the selected VLM LoRA scope is reported, the expected trainable modules are listed, and the KT VLM Conv3D compatibility path is enabled for trainable Qwen VLM runs on PyTorch 2.9.x. Training artifacts are written to `output_dir`; depending on the selected scope, they include the PEFT adapter metadata and non-expert LoRA weights, plus KT fused expert LoRA weights when language experts are trainable.
+
+Common failures:
+
+- If LlamaFactory rejects stock `transformers==5.6.0`, reinstall with `requirements-vlm-lora.txt` and keep `LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1` in a direct CLI launch.
+- If the Conv3D compatibility API is unavailable, confirm that `kt-kernel[vlm-sft]` and `ms-swift>=4.4.2,<4.5` are installed from the dedicated requirements file.
+- If a non-default scope is rejected, use a current LlamaFactory `main` checkout and keep `lora_target: all`.
+- If image placeholder counts do not match the `images` array, fix the dataset record before retrying.
+
+For serving a converted KT LoRA adapter, continue with [Qwen3.5 MoE KT LoRA Serving with SGLang-KT](./Qwen3.5-SGLang-LoRA-Serving.md).
+
 
 
 ## KT Fine-Tuning Speed (User-Side View)

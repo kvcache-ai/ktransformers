@@ -133,6 +133,39 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
+<a id="qwen35-vlm-lora-quick-start"></a>
+
+## 5.1 Qwen3.5 VLM LoRA Quick Start
+
+1. Clone the integration repositories from their `main` branches:
+
+   ```bash
+   git clone https://github.com/Illumination111/LlamaFactory.git
+   git clone https://github.com/Illumination111/ktransformers.git
+   ```
+
+2. Install LlamaFactory first, then install the KT VLM dependency set from the KTransformers root:
+
+   ```bash
+   cd LlamaFactory
+   pip install -e .
+   cd ../ktransformers
+   pip install -r requirements-vlm-lora.txt
+   ```
+
+3. In the LlamaFactory checkout, edit one of the ready-to-run `qwen3_5moe_vlm_{text,vision,all}_lora_sft_kt.yaml` files under `examples/ktransformers/train_lora/`. Set `model_name_or_path`, `dataset`, and `output_dir`; keep `lora_target: all`, and select the requested modules with `vlm_lora_scope: text`, `vision`, or `all`.
+
+4. Launch from the LlamaFactory root:
+
+   ```bash
+   cd ../LlamaFactory
+   LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 \
+     llamafactory-cli train \
+     examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml
+   ```
+
+For dependency details, multimodal dataset registration, the complete YAML, output checks, and troubleshooting, see the [VLM Full Documentation](./KTransformers-Fine-Tuning_User-Guide.md#qwen35-vlm-lora-full-guide).
+
 ## 6. Other MoE Examples
 
 | Model path | accelerate config | train yaml |
