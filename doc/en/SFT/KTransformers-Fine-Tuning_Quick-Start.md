@@ -143,7 +143,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 | --- | --- | --- |
 | Qwen3 MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml` | `examples/ktransformers/train_lora/qwen3moe_lora_sft_kt.yaml` |
 | Qwen3.5 MoE INT8 | `examples/ktransformers/accelerate/fsdp2_kt_int8.yaml` | `examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml` |
-| Qwen3-VL MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml` | `examples/ktransformers/train_lora/qwen3vlmoe_lora_sft_kt.yaml` |
+| Qwen3-VL MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml` | `examples/ktransformers/train_lora/qwen3vlmoe_lora_sft_kt.yaml` |
 | DeepSeek-V2 MoE | `examples/ktransformers/accelerate/` KT configs | `examples/ktransformers/train_lora/deepseek_v2_lora_sft_kt.yaml` |
 | DeepSeek-V3 MoE | `examples/ktransformers/accelerate/` KT configs | `examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml` |
 
