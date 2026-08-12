@@ -5,6 +5,7 @@
   - [Core Feature 1: Use KTransformers backend to fine-tune ultra-large MoE models](#core-feature-1-use-ktransformers-backend-to-fine-tune-ultra-large-moe-models)
   - [Core Feature 2: Chat with the fine-tuned model (base + LoRA adapter)](#core-feature-2-chat-with-the-fine-tuned-model-base--lora-adapter)
   - [Core Feature 3: Batch inference + metrics (base + LoRA adapter)](#core-feature-3-batch-inference--metrics-base--lora-adapter)
+- [Qwen3.5 and Qwen3-VL LoRA Full Guide](#qwen-vlm-lora-full-guide)
 - [KT Fine-Tuning Speed (User-Side View)](#kt-fine-tuning-speed-user-side-view)
   - [End-to-End Performance](#end-to-end-performance)
   - [GPU/CPU Memory Footprint](#gpucpu-memory-footprint)
@@ -254,11 +255,20 @@ cpu_infer: 32
 chunk_size: 8192
 ```
 
+<a id="qwen-vlm-lora-full-guide"></a>
 <a id="qwen35-vlm-lora-full-guide"></a>
+<a id="qwen3vl-vlm-lora-full-guide"></a>
 
-## Qwen3.5 VLM LoRA Full Guide
+## Qwen3.5 and Qwen3-VL LoRA Full Guide
 
-This module documents end-to-end Qwen3.5 VLM LoRA SFT with the KTransformers backend and the matching LlamaFactory integration. It covers the verified Qwen3.5-122B-A10B example and applies to compatible Qwen3.5 VLM checkpoints after their model path and resource settings are adjusted.
+This module documents end-to-end Qwen VLM LoRA SFT with the KTransformers backend and the matching LLaMA-Factory integration. It covers the verified Qwen3.5-122B-A10B, Qwen3.5-397B-A17B, and Qwen3-VL-30B-A3B-Instruct paths.
+
+| Model family | Example checkpoint | LLaMA-Factory template | Checked-in training YAML | KT support |
+| --- | --- | --- | --- | --- |
+| Qwen3.5 VLM MoE | `Qwen/Qwen3.5-122B-A10B` | `qwen3_5` | `qwen3_5moe_vlm_{text,vision,all}_lora_sft_kt.yaml` | Language MoE experts offloaded to KT |
+| Qwen3-VL MoE | `Qwen/Qwen3-VL-30B-A3B-Instruct` | `qwen3_vl` | `qwen3vlmoe_vlm_all_lora_sft_kt.yaml` | Language MoE experts offloaded to KT |
+
+Qwen3-VL dense checkpoints do not contain MoE experts and must use `use_kt: false`. The Qwen3-VL KT path is intended for MoE variants such as 30B-A3B and 235B-A22B.
 
 ### 1. Choose the VLM LoRA scope
 
@@ -277,8 +287,8 @@ Use `lora_target: all` with every non-default VLM scope. Existing non-VLM config
 Keep both repositories under the same parent directory:
 
 ```bash
-mkdir qwen35-vlm-lora
-cd qwen35-vlm-lora
+mkdir qwen-vlm-lora
+cd qwen-vlm-lora
 git clone https://github.com/Illumination111/LlamaFactory.git
 git clone https://github.com/Illumination111/ktransformers.git
 ```
@@ -327,10 +337,14 @@ PY
 
 ### 4. Prepare the model weights
 
-Download the Qwen3.5 VLM checkpoint or use its Hugging Face identifier. The training YAML accepts either form:
+Download the matching VLM checkpoint or use its Hugging Face identifier. The training YAML accepts either form:
 
 ```yaml
+# Qwen3.5 VLM MoE
 model_name_or_path: Qwen/Qwen3.5-122B-A10B
+
+# or Qwen3-VL MoE
+model_name_or_path: Qwen/Qwen3-VL-30B-A3B-Instruct
 ```
 
 For a local checkpoint, replace it with an absolute directory containing the model configuration, tokenizer/processor files, and all weight shards. Keep `trust_remote_code: true`.
@@ -374,7 +388,7 @@ Set `dataset: my_vlm_sft` in the training YAML. For an initial smoke test, use t
 
 ### 6. Configure the training YAML
 
-LlamaFactory provides matching `text`, `vision`, and `all` examples under `examples/ktransformers/train_lora/`. The complete `all`-scope example is:
+LLaMA-Factory provides matching `text`, `vision`, and `all` Qwen3.5 examples under `examples/ktransformers/train_lora/`. The complete Qwen3.5 `all`-scope example is:
 
 ```yaml
 ### model
@@ -424,11 +438,51 @@ ddp_timeout: 360000000
 use_kt: true
 ```
 
+For Qwen3-VL-MoE, start from `qwen3vlmoe_vlm_all_lora_sft_kt.yaml`. Its model-specific fields are:
+
+```yaml
+### model
+model_name_or_path: Qwen/Qwen3-VL-30B-A3B-Instruct
+image_max_pixels: 262144
+video_max_pixels: 16384
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_target: all
+vlm_lora_scope: all
+
+### dataset
+dataset: mllm_demo
+template: qwen3_vl
+cutoff_len: 512
+
+### output
+output_dir: saves/KT_FT_qwen3vl_30b_a3b_all
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-4
+bf16: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs: {use_reentrant: false}
+
+### ktransformers
+use_kt: true
+```
+
+Keep `template: qwen3_vl`; `qwen3_5` is not interchangeable with it. To run Qwen3-VL with only one modality, copy the example and set `vlm_lora_scope: text` or `vision`. All non-default scopes still require `lora_target: all`.
+
 Reduce `image_max_pixels`, `video_max_pixels`, `cutoff_len`, or the per-device batch size if GPU memory is insufficient. Increase gradient accumulation to preserve the desired effective batch size.
 
 ### 7. Launch training
 
-Run from the LlamaFactory root. Direct CLI launches must explicitly allow the verified Transformers-KT fork:
+Run from the LLaMA-Factory root. Direct CLI launches must explicitly allow the verified Transformers-KT fork. For Qwen3.5 VLM:
 
 ```bash
 cd ../LlamaFactory
@@ -438,6 +492,18 @@ LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 \
 ```
 
 Replace the YAML filename with the `text` or `vision` example to use those scopes. Do not omit `use_kt: true`.
+
+For Qwen3-VL-30B-A3B-Instruct, use its matching eight-process FSDP2 configuration:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  accelerate launch \
+  --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml \
+  src/train.py \
+  examples/ktransformers/train_lora/qwen3vlmoe_vlm_all_lora_sft_kt.yaml
+```
+
+The FSDP2 configuration wraps `Qwen3VLMoeTextDecoderLayer`, enables the KT AMXBF16 backend and KT tensor parallelism, and uses two NUMA-aware thread pools. Adjust process count, CPU threads, and thread-pool layout only after matching them to the target server.
 
 ### 8. Check the run and outputs
 
@@ -460,14 +526,26 @@ Test server configuration:
 
 Both runs used `vlm_lora_scope: all`, LoRA rank 8, cutoff length 512, batch size 1 per device, and 8 RTX 4090 GPUs. A real image batch produced non-zero language and vision LoRA gradients, and sampled parameters in both modalities changed by approximately `1.0e-4` after the optimizer step. Host RAM is the `htop`/`free` top-panel physical-memory value, not a sum of process RSS; the value in parentheses is the peak increase over the pre-launch baseline.
 
+#### Verified Qwen3-VL LoRA formal-test result
+
+Qwen3-VL-30B-A3B-Instruct completed a 20-step `all`-scope functional/stability test on the same 8 x RTX 4090 class of server:
+
+| Model | Result | Optimizer steps | PEFT-reported trainable parameters | Runtime | Host RAM panel peak (increase) | GPU VRAM peak |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Qwen3-VL-30B-A3B-Instruct | PASS | 20 / 20 | 11,899,648 | 143.75 s | 106.39 GiB (89.80 GiB) | 6.16 GiB/GPU; 49.06 GiB total |
+
+Every optimizer step received a real image, produced finite non-zero gradients in both requested modalities, and changed sampled vision and text LoRA parameters. The saved PEFT adapter contained 714 LoRA tensors (480 text and 234 vision), and KT also saved the fused language-expert LoRA tensors. This is a LoRA integration and short-stability result, not full-parameter fine-tuning, convergence, or task-quality evaluation.
+
 Common failures:
 
 - If LlamaFactory rejects stock `transformers==5.6.0`, reinstall with `requirements-vlm-lora.txt` and keep `LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1` in a direct CLI launch.
 - If the Conv3D compatibility API is unavailable, confirm that `kt-kernel[vlm-sft]` and `ms-swift>=4.4.2,<4.5` are installed from the dedicated requirements file.
 - If a non-default scope is rejected, use a current LlamaFactory `main` checkout and keep `lora_target: all`.
+- If `Qwen3VLMoeForConditionalGeneration` is rejected by KT, use current `Illumination111/ktransformers:main`; older kernels lack the Qwen3-VL-MoE architecture and checkpoint-prefix mapping.
+- If Qwen3-VL preprocessing selects the wrong prompt format, set `template: qwen3_vl` and confirm that the current LLaMA-Factory checkout registers `qwen3_vl_moe` as a composite model.
 - If image placeholder counts do not match the `images` array, fix the dataset record before retrying.
 
-For serving a converted KT LoRA adapter, continue with [Qwen3.5 MoE KT LoRA Serving with SGLang-KT](./Qwen3.5-SGLang-LoRA-Serving.md).
+For serving a converted Qwen3.5 KT LoRA adapter, continue with [Qwen3.5 MoE KT LoRA Serving with SGLang-KT](./Qwen3.5-SGLang-LoRA-Serving.md). Validate Qwen3-VL adapter conversion and serving compatibility separately before deployment; the linked serving guide is Qwen3.5-specific.
 
 
 
