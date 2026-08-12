@@ -34,13 +34,21 @@ Environment knobs (export before running pip install .):
   CPUINFER_NATIVE=ON               (override LLAMA_NATIVE)
 
 
-GPU backends:
+GPU/NPU backends:
   CPUINFER_USE_CUDA=0/1           -DKTRANSFORMERS_USE_CUDA
   CPUINFER_USE_SYCL=0/1           -DKTRANSFORMERS_USE_SYCL (GPTQ INT4 MoE)
   CPUINFER_USE_ROCM=0/1           -DKTRANSFORMERS_USE_ROCM
   CPUINFER_USE_MUSA=0/1           -DKTRANSFORMERS_USE_MUSA
   CPUINFER_USE_MACA=0/1           -DKTRANSFORMERS_USE_MACA
   MACA_PATH=/opt/maca             MACA SDK root
+  CPUINFER_USE_ASCEND_NPU=0/1     -DKTRANSFORMERS_USE_ASCEND_NPU (auto-detects $ASCEND_TOOLKIT_HOME)
+
+ARM aarch64 feature toggles (Kunpeng / Neoverse / Apple Silicon):
+  CPUINFER_ARM_DOTPROD=ON/OFF     -DLLAMA_ARM_DOTPROD (default ON on armv8.2+)
+  CPUINFER_ARM_FP16=ON/OFF        -DLLAMA_ARM_FP16    (default ON on armv8.2+)
+  CPUINFER_ARM_SVE=ON/OFF         -DLLAMA_ARM_SVE     (default OFF; K920 lacks SVE)
+  CPUINFER_ARM_BF16=ON/OFF        -DLLAMA_ARM_BF16    (default OFF; K920 lacks BF16)
+  CPUINFER_ARM_I8MM=ON/OFF        -DLLAMA_ARM_I8MM    (default OFF; needs Neoverse N2/V1+)
 
 Usage:
   pip install .
@@ -206,6 +214,20 @@ class CMakeBuild(build_ext):
                     if m:
                         flags.update(m.group(1).lower().split())
                 info["raw"]["flags"] = flags
+
+                # ARM feature summary (Kunpeng / Neoverse / Apple Silicon).
+                # /proc/cpuinfo on Linux/aarch64 lists these in "Features:".
+                if info["vendor"] == "arm" or "aarch64" in info["arch"]:
+                    if "asimddp" in flags:
+                        info["features"].add("ARM_DOTPROD")
+                    if "asimdhp" in flags or "fphp" in flags:
+                        info["features"].add("ARM_FP16")
+                    if "sve" in flags:
+                        info["features"].add("ARM_SVE")
+                    if "bf16" in flags:
+                        info["features"].add("ARM_BF16")
+                    if "i8mm" in flags:
+                        info["features"].add("ARM_I8MM")
 
                 # feature summary
                 if any(f in flags or f in low for f in ["avx512f", "avx512bw", "avx512dq", "avx512vl"]):
@@ -479,6 +501,20 @@ class CMakeBuild(build_ext):
                 return True
             return False
 
+        # Auto-detect Ascend CANN toolkit if user did not explicitly set CPUINFER_USE_ASCEND_NPU.
+        # We check $ASCEND_TOOLKIT_HOME, $CANN_HOME, and the default install
+        # prefix /usr/local/Ascend/ascend-toolkit/latest; treat the toolkit as
+        # available iff include/acl/acl_rt.h exists under that root.
+        def detect_cann_toolkit() -> str | None:
+            for env_name in ("ASCEND_TOOLKIT_HOME", "CANN_HOME"):
+                p = os.environ.get(env_name)
+                if p and (Path(p) / "include" / "acl" / "acl_rt.h").exists():
+                    return p
+            default_root = Path("/usr/local/Ascend/ascend-toolkit/latest")
+            if (default_root / "include" / "acl" / "acl_rt.h").exists():
+                return str(default_root)
+            return None
+
         # Locate nvcc executable (without forcing user to set -DCMAKE_CUDA_COMPILER)
         def find_nvcc_path() -> str | None:
             cuda_home = os.environ.get("CUDA_HOME")
@@ -545,6 +581,22 @@ class CMakeBuild(build_ext):
         ]
         if len(enabled_gpu_backends) > 1:
             raise RuntimeError(f"GPU backends are mutually exclusive, but enabled: {', '.join(enabled_gpu_backends)}")
+
+        # Normalize CPUINFER_USE_ASCEND_NPU. We only auto-enable when the host
+        # is aarch64 and no CUDA was detected; on x86 boxes with CUDA we keep
+        # the CUDA path even if a CANN toolkit happens to be installed.
+        npu_env = _env_get_bool("CPUINFER_USE_ASCEND_NPU", None)
+        if npu_env is None:
+            cann_root = detect_cann_toolkit()
+            host_is_arm = (platform.machine().lower() in ("aarch64", "arm64"))
+            cuda_active = os.environ.get("CPUINFER_USE_CUDA") == "1"
+            auto_npu = (cann_root is not None) and host_is_arm and (not cuda_active)
+            os.environ["CPUINFER_USE_ASCEND_NPU"] = "1" if auto_npu else "0"
+            if auto_npu:
+                # Forward toolkit root so CMake's find_path can locate acl/acl_rt.h.
+                os.environ.setdefault("ASCEND_TOOLKIT_HOME", cann_root)
+            print(f"-- CPUINFER_USE_ASCEND_NPU not set; auto-detected CANN toolkit: "
+                  f"{'YES (' + str(cann_root) + ')' if auto_npu else 'NO'}")
 
         # Base CMake args
         cmake_args = [
@@ -701,6 +753,45 @@ class CMakeBuild(build_ext):
             if maca_path and not os.environ.get("MACA_PATH"):
                 cmake_args.append(f"-DMACA_PATH={maca_path}")
             print("-- Enabling MACA backend (-DKTRANSFORMERS_USE_MACA=ON)")
+        if _env_get_bool("CPUINFER_USE_ASCEND_NPU", False):
+            cmake_args.append("-DKTRANSFORMERS_USE_ASCEND_NPU=ON")
+            print("-- Enabling Ascend NPU backend (-DKTRANSFORMERS_USE_ASCEND_NPU=ON)")
+            cann_root = os.environ.get("ASCEND_TOOLKIT_HOME") or os.environ.get(
+                "CANN_HOME") or detect_cann_toolkit()
+            if cann_root:
+                print(f"-- CANN root: {cann_root}")
+            else:
+                print("-- Warning: ASCEND_TOOLKIT_HOME not set and no default CANN install"
+                      " found; CMake configure will likely fail.")
+            # CPU-only MoE on Kunpeng must NOT enable the KML SVE micro-kernels
+            # (kt-kernel/operators/moe_kernel/mat_kernel/kml_kernel/*.cpp). These
+            # require SVE which K920/Cortex-A76 lacks. Force them off unless the
+            # user explicitly opts in.
+            if not _env_get_bool("CPUINFER_ENABLE_KML", None):
+                os.environ.setdefault("CPUINFER_ENABLE_KML", "OFF")
+            if not _env_get_bool("CPUINFER_ENABLE_BLIS", None):
+                os.environ.setdefault("CPUINFER_ENABLE_BLIS", "OFF")
+
+        # ---- ARM feature toggles (aarch64 only) -------------------------
+        # The CMake side starts from armv8.2-a baseline and appends features
+        # via LLAMA_ARM_{DOTPROD,FP16,SVE,BF16,I8MM}. Auto-detect once and
+        # forward as -D flags so binary distribution still works.
+        if platform.machine().lower() in ("aarch64", "arm64"):
+            arm_feature_map = [
+                ("CPUINFER_ARM_DOTPROD", "LLAMA_ARM_DOTPROD", "ARM_DOTPROD"),
+                ("CPUINFER_ARM_FP16",    "LLAMA_ARM_FP16",    "ARM_FP16"),
+                ("CPUINFER_ARM_SVE",     "LLAMA_ARM_SVE",     "ARM_SVE"),
+                ("CPUINFER_ARM_BF16",    "LLAMA_ARM_BF16",    "ARM_BF16"),
+                ("CPUINFER_ARM_I8MM",    "LLAMA_ARM_I8MM",    "ARM_I8MM"),
+            ]
+            for env_name, cmake_flag, feature in arm_feature_map:
+                if _forward_bool_env(cmake_args, env_name, cmake_flag):
+                    continue
+                if feature in d["features"]:
+                    cmake_args.append(f"-D{cmake_flag}=ON")
+                    print(f"-- aarch64 {feature} detected; -D{cmake_flag}=ON")
+                else:
+                    cmake_args.append(f"-D{cmake_flag}=OFF")
 
         # Respect user extra CMAKE_ARGS (space separated)
         extra = os.environ.get("CMAKE_ARGS")
