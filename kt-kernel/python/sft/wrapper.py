@@ -50,23 +50,6 @@ def _supports_checkpoint_forward_reuse(full_weight_grad: bool, lora_rank: int) -
     return (full_weight_grad and lora_rank == 0) or (not full_weight_grad and lora_rank > 0)
 
 
-def _get_frozen_expert_method(kt_method: str) -> str:
-    r"""Select the matching input-gradient-only backend without changing its precision."""
-    frozen_methods = {
-        "AMXBF16_SFT": "AMXBF16_SFT_SkipLoRA",
-        "AMXINT8_SFT": "AMXINT8_SFT_SkipLoRA",
-        "AMXINT4_SFT": "AMXINT4_SFT_SkipLoRA",
-    }
-    if kt_method.endswith("_SkipLoRA"):
-        return kt_method
-    if kt_method not in frozen_methods:
-        raise KTAMXConfigError(
-            f"KT frozen-expert training does not support backend {kt_method!r}. "
-            f"Supported backends: {sorted(frozen_methods)}"
-        )
-    return frozen_methods[kt_method]
-
-
 # =============================================================================
 # Device-map builders
 # =============================================================================
@@ -239,10 +222,6 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
             f"kt_backend '{kt_backend}' matched via case-insensitive lookup -> '{kt_method}'. "
             f"Please use the exact name from: {list(kt_backend_map.keys())}"
         )
-
-    freeze_experts = bool(getattr(cfg, "kt_freeze_experts", False))
-    if freeze_experts:
-        kt_method = _get_frozen_expert_method(kt_method)
 
     if "SkipLoRA" in kt_method:
         logger.info(f"Using SkipLoRA backend: {kt_method} (MoE LoRA gradients will be skipped)")
@@ -497,7 +476,6 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
         )
         layer_wrapper._fused_experts = _layer_is_fused
         layer_wrapper._lora_rank = lora_rank
-        layer_wrapper._kt_freeze_experts = freeze_experts
         layer_wrapper._kt_owner_rank = 0
         layer_wrapper._kt_world_size_at_wrap = distributed_world_size
 
@@ -557,10 +535,6 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
 
     configured_lora_rank = getattr(finetuning_args, "lora_rank", None) if finetuning_args else None
     configured_lora_alpha = getattr(finetuning_args, "lora_alpha", None) if finetuning_args else None
-    configured_use_lora_experts = getattr(model_args, "kt_use_lora_experts", None)
-    vision_only_lora = getattr(finetuning_args, "vlm_lora_scope", "default") == "vision"
-    if vision_only_lora:
-        configured_use_lora_experts = False
     if kt_train_mode == "full":
         configured_lora_rank = None
         configured_lora_alpha = None
@@ -574,8 +548,7 @@ def _build_kt_plugin_from_args(model_args: Any, finetuning_args: Any | None = No
         kt_num_gpu_experts=getattr(model_args, "kt_num_gpu_experts", None),
         kt_weight_path=getattr(model_args, "kt_weight_path", None),
         kt_expert_checkpoint_path=getattr(model_args, "kt_expert_checkpoint_path", None),
-        kt_use_lora_experts=configured_use_lora_experts,
-        kt_freeze_experts=vision_only_lora,
+        kt_use_lora_experts=getattr(model_args, "kt_use_lora_experts", None),
         kt_lora_expert_num=getattr(model_args, "kt_lora_expert_num", None),
         kt_lora_expert_intermediate_size=getattr(model_args, "kt_lora_expert_intermediate_size", None),
         kt_lora_rank=configured_lora_rank,

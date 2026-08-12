@@ -167,7 +167,6 @@ class KTConfig:
     kt_use_lora_experts: bool | None = None
     kt_lora_expert_num: int | None = None
     kt_lora_expert_intermediate_size: int | None = None
-    kt_freeze_experts: bool | None = None  # vision-only LoRA: backward inputs without expert parameter grads
 
     # Runtime state (set during wrapping, not by user)
     kt_checkpoint_files: list[str] | None = None
@@ -212,8 +211,6 @@ class KTConfig:
             self.kt_share_cache_pool = False
         if self.kt_use_lora_experts is None:
             self.kt_use_lora_experts = _env_bool("ACCELERATE_KT_USE_LORA_EXPERTS", False)
-        if self.kt_freeze_experts is None:
-            self.kt_freeze_experts = _env_bool("ACCELERATE_KT_FREEZE_EXPERTS", False)
         if self.kt_lora_expert_num is None:
             self.kt_lora_expert_num = _env_int("ACCELERATE_KT_LORA_EXPERT_NUM", None)
         if self.kt_lora_expert_intermediate_size is None:

@@ -124,11 +124,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
-**Qwen VLM LoRA:** Fine-tune language modules, vision/projector modules, or both with the KT backend and LLaMA-Factory. The documented paths cover Qwen3.5 VLM checkpoints and Qwen3-VL MoE checkpoints such as Qwen3-VL-30B-A3B-Instruct.
-
-👉 **[Qwen3.5 / Qwen3-VL Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md#qwen-vlm-lora-quick-start)**
-👉 **[Qwen3.5 / Qwen3-VL Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md#qwen-vlm-lora-full-guide)**
-
 ---
 
 ## 🔥 Citation

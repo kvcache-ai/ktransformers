@@ -9,7 +9,7 @@ This Quick Start is for LLaMA-Factory users who want to run KTransformers-backed
 - Task: MoE LoRA SFT
 - Training entry: LLaMA-Factory `src/train.py` and YAML configs
 - KT package entry: `ktransformers[sft]`
-- Example models: Qwen3 MoE / Qwen3.5 MoE / Qwen3.5 VLM / Qwen3-VL MoE
+- Example models: Qwen3 MoE / Qwen3.5 MoE / Qwen3-VL MoE
 - Recommended baseline: Python 3.11 and `torch==2.9.1`
 
 KT inference uses a separate SGLang-KT package path. See [KT Inference Packages](#7-kt-inference-packages).
@@ -54,7 +54,11 @@ pip install -e .
 pip install -r requirements/ktransformers.txt
 ```
 
-`requirements/ktransformers.txt` should contain one line:
+The maintained integration requirements install the KT-compatible Transformers,
+Accelerate, and `kt-kernel[vlm-sft]` packages. The VLM extra supplies the verified
+Conv3D compatibility implementation required by the torch 2.9 KT training stack.
+
+For released packages, the equivalent base entry is:
 
 ```text
 ktransformers[sft]
@@ -133,67 +137,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
-<a id="qwen-vlm-lora-quick-start"></a>
-<a id="qwen35-vlm-lora-quick-start"></a>
-<a id="qwen3vl-vlm-lora-quick-start"></a>
-
-## 5.1 Qwen3.5 and Qwen3-VL LoRA Quick Start
-
-1. Clone the integration repositories from their `main` branches:
-
-   ```bash
-   git clone https://github.com/Illumination111/LlamaFactory.git
-   git clone https://github.com/Illumination111/ktransformers.git
-   ```
-
-2. Install LlamaFactory first, then install the KT VLM dependency set from the KTransformers root:
-
-   ```bash
-   cd LlamaFactory
-   pip install -e .
-   cd ../ktransformers
-   pip install -r requirements-vlm-lora.txt
-   ```
-
-3. Choose the matching examples in the LLaMA-Factory checkout:
-
-   | Model family | Training YAML | Accelerate configuration |
-   | --- | --- | --- |
-   | Qwen3.5 VLM | `examples/ktransformers/train_lora/qwen3_5moe_vlm_{text,vision,all}_lora_sft_kt.yaml` | Use the launch method already selected for the Qwen3.5 model size |
-   | Qwen3-VL MoE | `examples/ktransformers/train_lora/qwen3vlmoe_vlm_all_lora_sft_kt.yaml` | `examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml` |
-
-   Set `model_name_or_path`, `dataset`, and `output_dir`. Keep `lora_target: all`, and select the requested modules with `vlm_lora_scope: text`, `vision`, or `all`. The checked-in Qwen3-VL example uses `all`; copy it and change only `vlm_lora_scope` when a text-only or vision-only run is required.
-
-4. Launch from the LLaMA-Factory root. For Qwen3.5 VLM:
-
-   ```bash
-   cd ../LlamaFactory
-   LLAMAFACTORY_ALLOW_TRANSFORMERS_KT=1 \
-     llamafactory-cli train \
-     examples/ktransformers/train_lora/qwen3_5moe_vlm_all_lora_sft_kt.yaml
-   ```
-
-   For Qwen3-VL-30B-A3B-Instruct on the matching eight-process FSDP2 configuration:
-
-   ```bash
-   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-     accelerate launch \
-     --config_file examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml \
-     src/train.py \
-     examples/ktransformers/train_lora/qwen3vlmoe_vlm_all_lora_sft_kt.yaml
-   ```
-
-KT expert offload applies to Qwen3-VL **MoE** checkpoints, including Qwen3-VL-30B-A3B and Qwen3-VL-235B-A22B. Dense Qwen3-VL checkpoints do not have MoE experts for KT to offload; run those with `use_kt: false`.
-
-For dependency details, model-specific templates, multimodal dataset registration, output checks, verified test results, and troubleshooting, see the [VLM Full Documentation](./KTransformers-Fine-Tuning_User-Guide.md#qwen-vlm-lora-full-guide).
-
 ## 6. Other MoE Examples
 
 | Model path | accelerate config | train yaml |
 | --- | --- | --- |
 | Qwen3 MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16.yaml` | `examples/ktransformers/train_lora/qwen3moe_lora_sft_kt.yaml` |
 | Qwen3.5 MoE INT8 | `examples/ktransformers/accelerate/fsdp2_kt_int8.yaml` | `examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml` |
-| Qwen3-VL MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml` | `examples/ktransformers/train_lora/qwen3vlmoe_vlm_all_lora_sft_kt.yaml` |
+| Qwen3-VL MoE BF16 | `examples/ktransformers/accelerate/fsdp2_kt_bf16_qwen3_vl_moe.yaml` | `examples/ktransformers/train_lora/qwen3vlmoe_lora_sft_kt.yaml` |
 | DeepSeek-V2 MoE | `examples/ktransformers/accelerate/` KT configs | `examples/ktransformers/train_lora/deepseek_v2_lora_sft_kt.yaml` |
 | DeepSeek-V3 MoE | `examples/ktransformers/accelerate/` KT configs | `examples/ktransformers/train_lora/deepseek_v3_lora_sft_kt.yaml` |
 
@@ -250,10 +200,6 @@ Try the following first:
 - reduce batch size
 - start from INT8 / INT4 KT configs
 - increase CPU memory or reduce other concurrent workloads
-
-### `Qwen3VLMoeForConditionalGeneration` is not supported
-
-Use current `main` checkouts of both `Illumination111/ktransformers` and `Illumination111/LlamaFactory`. Older `kt-kernel` builds do not contain the Qwen3-VL-MoE architecture mapping or the `model.language_model.layers` checkpoint prefix.
 
 ## 9. Related Links
 

@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from kt_kernel.sft.arch import MOEArchConfig, _get_layers_prefix, get_moe_arch_config
 from kt_kernel.sft.layer import KTMoELayerWrapper
 from kt_kernel.sft.weights import extract_moe_weights
+
+
+MODULE_PATH = Path(__file__).resolve().parents[2] / "python" / "sft" / "arch.py"
+SPEC = importlib.util.spec_from_file_location("kt_sft_arch_under_test", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+arch = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = arch
+SPEC.loader.exec_module(arch)
 
 
 def _qwen3_vl_moe_modules():
@@ -43,20 +53,20 @@ def test_qwen3_vl_moe_architecture_and_checkpoint_prefix():
         text_config=_text_config(),
     )
 
-    moe_config = get_moe_arch_config(config)
+    moe_config = arch.get_moe_arch_config(config)
 
     assert moe_config.expert_num == 2
     assert moe_config.intermediate_size == 4
     assert moe_config.num_experts_per_tok == 1
     assert moe_config.has_shared_experts is False
-    assert _get_layers_prefix(config) == "model.language_model.layers"
+    assert arch._get_layers_prefix(config) == "model.language_model.layers"
 
 
 def test_qwen3_vl_moe_fused_weights_and_router_match_transformers():
     _, modeling = _qwen3_vl_moe_modules()
     text_config = _text_config()
     original_moe = modeling.Qwen3VLMoeTextSparseMoeBlock(text_config)
-    moe_config = MOEArchConfig(
+    moe_config = arch.MOEArchConfig(
         moe_layer_attr="mlp",
         router_attr="gate",
         experts_attr="experts",
@@ -73,7 +83,9 @@ def test_qwen3_vl_moe_fused_weights_and_router_match_transformers():
 
     hidden_states = torch.randn(2, 3, text_config.hidden_size)
     with torch.no_grad():
-        _, expected_weights, expected_ids = original_moe.gate(hidden_states.reshape(-1, text_config.hidden_size))
+        _, expected_weights, expected_ids = original_moe.gate(
+            hidden_states.reshape(-1, text_config.hidden_size)
+        )
 
     wrapped_moe = KTMoELayerWrapper(
         original_moe=original_moe,
@@ -87,4 +99,6 @@ def test_qwen3_vl_moe_fused_weights_and_router_match_transformers():
     actual_ids, actual_weights = wrapped_moe._compute_routing(hidden_states)
 
     assert torch.equal(actual_ids, expected_ids)
-    torch.testing.assert_close(actual_weights, expected_weights.to(torch.bfloat16), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(
+        actual_weights, expected_weights.to(torch.bfloat16), rtol=2e-2, atol=2e-2
+    )
