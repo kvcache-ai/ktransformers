@@ -456,6 +456,37 @@ add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
+
+# The pinned llama.cpp (b3173) needs the patches in third_party_patches/llama.cpp
+# (MXFP4 block type consumed unconditionally by the CPU-MoE sources, NumPy2 gguf-py).
+# Apply them once at configure time; a marker file keeps this idempotent. If the tree
+# was modified locally and the patches no longer apply, fail with the manual command.
+set(KT_LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp)
+set(KT_LLAMA_CPP_PATCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party_patches/llama.cpp)
+set(KT_LLAMA_CPP_PATCH_MARKER ${KT_LLAMA_CPP_DIR}/.kt_patches_applied)
+if(NOT EXISTS ${KT_LLAMA_CPP_PATCH_MARKER})
+    file(GLOB KT_LLAMA_CPP_PATCHES ${KT_LLAMA_CPP_PATCH_DIR}/*.patch)
+    list(SORT KT_LLAMA_CPP_PATCHES)
+    foreach(KT_PATCH ${KT_LLAMA_CPP_PATCHES})
+        execute_process(
+            COMMAND git apply --check ${KT_PATCH}
+            WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
+            RESULT_VARIABLE KT_PATCH_CHECK)
+        if(NOT KT_PATCH_CHECK EQUAL 0)
+            message(FATAL_ERROR
+                "third_party/llama.cpp is missing required patches and ${KT_PATCH} "
+                "does not apply cleanly (locally modified tree?). Apply manually:\n"
+                "  cd third_party/llama.cpp && git apply ../../kt-kernel/third_party_patches/llama.cpp/*.patch\n"
+                "then touch ${KT_LLAMA_CPP_PATCH_MARKER}")
+        endif()
+        execute_process(
+            COMMAND git apply ${KT_PATCH}
+            WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR})
+        message(STATUS "Applied llama.cpp patch: ${KT_PATCH}")
+    endforeach()
+    file(TOUCH ${KT_LLAMA_CPP_PATCH_MARKER})
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
