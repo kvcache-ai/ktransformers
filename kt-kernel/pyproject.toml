@@ -21,7 +21,9 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
   # Core dependencies
-  "torch==2.9.1",
+  # Keep the kernel usable with both the 2.9 reference stack and CANN 9 images
+  # whose torch-npu package requires torch 2.10 exactly.
+  "torch>=2.9.1,<2.11",
   "safetensors>=0.4.0",
   "numpy>=1.24.0",
   "triton>=2.0.0",
