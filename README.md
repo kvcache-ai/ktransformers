@@ -124,6 +124,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
+**VLM LoRA fine-tuning:** Heterogeneous LoRA FT for Qwen3-VL MoE and Qwen3.5 MoE with KTransformers and LLaMA-Factory.
+
+👉 **[VLM Quick Start →](./doc/en/SFT/KTransformers-VLM-LoRA-Fine-Tuning-Guide.md#quick-start)**
+👉 **[VLM Full Documentation →](./doc/en/SFT/KTransformers-VLM-LoRA-Fine-Tuning-Guide.md#full-documentation)**
+
 ---
 
 ## 🔥 Citation
