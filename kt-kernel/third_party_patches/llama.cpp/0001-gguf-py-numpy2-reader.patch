@@ -1,0 +1,44 @@
+diff --git a/gguf-py/gguf/gguf_reader.py b/gguf-py/gguf/gguf_reader.py
+index e48bc00..be7a994 100644
+--- a/gguf-py/gguf/gguf_reader.py
++++ b/gguf-py/gguf/gguf_reader.py
+@@ -35,6 +35,16 @@ logger = logging.getLogger(__name__)
+ READER_SUPPORTED_VERSIONS = [2, GGUF_VERSION]
+ 
+ 
++def _np_apply_byteorder(
++    arr: npt.NDArray[Any],
++    order: Literal["I"] | Literal["S"] | Literal["<"] | Literal[">"] | None,
++) -> npt.NDArray[Any]:
++    """NumPy 2+ compatible replacement for ndarray.newbyteorder (removed in NumPy 2.0)."""
++    if order is None or order == "I":
++        return arr
++    return arr.view(arr.dtype.newbyteorder(order))
++
++
+ class ReaderField(NamedTuple):
+     # Offset to start of this field.
+     offset: int
+@@ -96,7 +106,7 @@ class GGUFReader:
+             # If we get 0 here that means it's (probably) a GGUF file created for
+             # the opposite byte order of the machine this script is running on.
+             self.byte_order = 'S'
+-            temp_version = temp_version.newbyteorder(self.byte_order)
++            temp_version = _np_apply_byteorder(temp_version, self.byte_order)
+         version = temp_version[0]
+         if version not in READER_SUPPORTED_VERSIONS:
+             raise ValueError(f'Sorry, file appears to be version {version} which we cannot handle')
+@@ -135,10 +145,9 @@ class GGUFReader:
+         count = int(count)
+         itemsize = int(np.empty([], dtype = dtype).itemsize)
+         end_offs = offset + itemsize * count
+-        return (
+-            self.data[offset:end_offs]
+-            .view(dtype = dtype)[:count]
+-            .newbyteorder(override_order or self.byte_order)
++        return _np_apply_byteorder(
++            self.data[offset:end_offs].view(dtype=dtype)[:count],
++            override_order or self.byte_order,
+         )
+ 
+     def _push_field(self, field: ReaderField, skip_sum: bool = False) -> int:

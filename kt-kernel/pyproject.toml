@@ -20,11 +20,14 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-  # Core dependencies
-  "torch==2.9.1",
+  # Core: on Ascend, torch_npu 2.8.x requires exactly torch==2.8.0. Do not pin to 2.9.x, which
+  # makes libtorch_npu.so fail with undefined symbols.
+  "torch>=2.8.0,<2.9.0",
   "safetensors>=0.4.0",
   "numpy>=1.24.0",
-  "triton>=2.0.0",
+  # Triton mainly serves the x86 GPU path. aarch64 + NPU inference does not need it, and it pulls
+  # in hundreds of MB of wheels tightly coupled to torch.
+  "triton>=2.0.0; platform_machine == 'x86_64' or platform_machine == 'AMD64'",
   "gguf>=0.17.0",
   # CLI dependencies
   "typer>=0.9.0",

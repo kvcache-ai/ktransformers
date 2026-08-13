@@ -1,6 +1,9 @@
-import torch
-from typing import List, Optional
+from __future__ import annotations
+
 import os
+from typing import Dict, List, Optional
+
+import torch
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -22,9 +25,13 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
     """
     Llamafile-based MoE wrapper implementation.
     Supports GGUF quantized weights with llamafile backend.
+
+    GGUFLoader is cached **per resolved weight path** (file or directory): multiple MoE layers
+    that share one merged GGUF reuse a single mmap; **per-layer split GGUFs** each get their own
+    loader.
     """
 
-    _gguf_loader_instance = None  # Singleton GGUFLoader
+    _gguf_loaders_by_path: Dict[str, GGUFLoader] = {}
 
     def __init__(
         self,
@@ -73,10 +80,10 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         if not os.path.exists(weight_path):
             raise FileNotFoundError(f"GGUF weight path not found: {weight_path}")
 
-        # Initialize GGUF loader (singleton)
-        if LlamafileMoEWrapper._gguf_loader_instance is None:
-            LlamafileMoEWrapper._gguf_loader_instance = GGUFLoader(weight_path)
-        self.gguf_loader = LlamafileMoEWrapper._gguf_loader_instance
+        cache_key = os.path.realpath(weight_path)
+        if cache_key not in LlamafileMoEWrapper._gguf_loaders_by_path:
+            LlamafileMoEWrapper._gguf_loaders_by_path[cache_key] = GGUFLoader(weight_path)
+        self.gguf_loader = LlamafileMoEWrapper._gguf_loaders_by_path[cache_key]
 
         # Validate TP configuration with QK_K alignment
         QK_K = 256
@@ -176,12 +183,14 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
         base_key = f"blk.{self.layer_idx}"
 
+        _load_tensor = self.gguf_loader.get_undequanted_tensor_and_ggml_type
+
         # Load quantized tensors from GGUF
-        gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_gate_exps.weight")
+        gate_data, gate_type = _load_tensor(f"{base_key}.ffn_gate_exps.weight")
 
-        up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
+        up_data, up_type = _load_tensor(f"{base_key}.ffn_up_exps.weight")
 
-        down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_down_exps.weight")
+        down_data, down_type = _load_tensor(f"{base_key}.ffn_down_exps.weight")
 
         # Keep tensors alive
         self.weights_to_keep = (gate_data, up_data, down_data)
@@ -202,8 +211,24 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         # Llamafile-specific configuration
         moe_config.m_block = 32  # Parallel block size
         moe_config.group_min_len = 10  # Use forward_one when qlen < 10
-        moe_config.max_len = self.chunked_prefill_size
-        moe_config.group_max_len = max(1, int(self.chunked_prefill_size))
+        # Defensive fallback: chunked_prefill_size <= 0 (e.g. -1 meaning "disabled" in sglang
+        # baseline) would otherwise let C++ compute max_possible_qlen() = max(max_len=-1,
+        # group_max_len=max(1,-1)=1) = 1, sizing per-NUMA fp32 output buffer
+        # (moe-tp.hpp:130 local_output_numa[i]) to a single token. The very first prefill
+        # with qlen > 1 then overruns the buffer and corrupts glibc tcache metadata
+        # (observed as "malloc(): unaligned tcache chunk detected" Fatal Python error).
+        # Clamp to a safe positive value so KT can always alloc a fp32 buffer at least as
+        # large as the per-call qlen the caller will pass.
+        _effective_chunk = int(self.chunked_prefill_size)
+        if _effective_chunk <= 0:
+            _effective_chunk = 2048
+            print(
+                f"[LlamafileMoEWrapper] chunked_prefill_size={self.chunked_prefill_size} "
+                f"<= 0 is unsafe for KT MoE C++ buffer sizing; falling back to "
+                f"{_effective_chunk}."
+            )
+        moe_config.max_len = _effective_chunk
+        moe_config.group_max_len = _effective_chunk
 
         # Set weight pointers
         moe_config.gate_proj = gate_data.data_ptr()
@@ -211,10 +236,10 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         moe_config.down_proj = down_data.data_ptr()
 
         # Set quantization types
-        moe_config.gate_type = gate_type
-        moe_config.up_type = up_type
-        moe_config.down_type = down_type
-        moe_config.hidden_type = hidden_type
+        moe_config.gate_type = int(gate_type)
+        moe_config.up_type = int(up_type)
+        moe_config.down_type = int(down_type)
+        moe_config.hidden_type = int(ggml_type.BF16)
 
         # Create MoE module
         self.moe = MOE(moe_config)

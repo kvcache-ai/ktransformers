@@ -2,9 +2,9 @@
 # These dependencies will be automatically installed when running `pip install .`
 # You can skip this file if you already have these packages installed
 
-# Core dependencies (minimum versions)
-torch==2.9.1
+# aarch64 / generic: use torch 2.8.x to match torch_npu; install triton on x86_64 only
+torch>=2.8.0,<2.9.0
 safetensors>=0.4.0
 numpy>=1.24.0
-triton>=2.0.0
+triton>=2.0.0; platform_machine == "x86_64"
 gguf>=0.17.0
