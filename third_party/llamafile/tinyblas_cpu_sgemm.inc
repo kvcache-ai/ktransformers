@@ -257,6 +257,37 @@ bool llamafile_sgemm_impl(long m, long n, long k, const void* A, long lda, const
 #endif
         }
 
+        case GGML_TYPE_MXFP4: {
+            if (Btype != GGML_TYPE_Q8_0)
+                return NOT_SUPPORTED;
+            if (task != GGML_TASK_TYPE_COMPUTE)
+                return true;
+
+            // MXFP4 is an upstream GGML type, but llamafile has no native
+            // tinyBLAS tile for it yet.  Use the GGML vec-dot implementation
+            // (NEON accelerated on AArch64) so LLAMAFILE MoE can consume
+            // MXFP4 GGUF weights instead of rejecting them at first token.
+            const block_mxfp4* a = static_cast<const block_mxfp4*>(A);
+            const block_q8_0* b = static_cast<const block_q8_0*>(B);
+            const long jobs = m * n;
+            for (long job = ith; job < jobs; job += nth) {
+                const long i = job % m;
+                const long j = job / m;
+                float value = 0.0f;
+                ggml_vec_dot_mxfp4_q8_0(
+                    k * QK_MXFP4,
+                    &value,
+                    0,
+                    a + i * lda,
+                    0,
+                    b + j * ldb,
+                    0,
+                    1);
+                C[j * ldc + i] = static_cast<TC>(value);
+            }
+            return true;
+        }
+
         default:
             return NOT_SUPPORTED;
     }
