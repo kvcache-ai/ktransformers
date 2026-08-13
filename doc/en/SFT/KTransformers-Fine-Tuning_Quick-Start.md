@@ -1,14 +1,14 @@
-# KTransformers v0.6.1 KT SFT Quick Start
+# KTransformers v0.6.4 KT SFT Quick Start
 
-Last updated: 2026-04-30
+Last updated: 2026-08-13
 
-This Quick Start is for LLaMA-Factory users who want to run KTransformers-backed MoE LoRA SFT. KTransformers has supported fine-tuning since v0.4.1 and later releases; v0.6.1 refactors and upgrades the existing KT SFT path with a pip-installable package entry, a cleaner dependency boundary, and LLaMA-Factory-compatible examples.
+This Quick Start is for LLaMA-Factory users who want to run KTransformers-backed MoE LoRA SFT. KTransformers has supported fine-tuning since v0.4.1 and later releases; v0.6.4 adds the Qwen3-VL MoE mapping and the verified VLM Conv3D compatibility path.
 
 ## 1. Scope
 
 - Task: MoE LoRA SFT
 - Training entry: LLaMA-Factory `src/train.py` and YAML configs
-- KT package entry: `ktransformers[sft]`
+- KT package entry: LLaMA-Factory `requirements/ktransformers.txt`
 - Example models: Qwen3 MoE / Qwen3.5 MoE / Qwen3-VL MoE
 - Recommended baseline: Python 3.11 and `torch==2.9.1`
 
@@ -54,14 +54,16 @@ pip install -e .
 pip install -r requirements/ktransformers.txt
 ```
 
-The maintained integration requirements install the KT-compatible Transformers,
-Accelerate, and `kt-kernel[vlm-sft]` packages. The VLM extra supplies the verified
-Conv3D compatibility implementation required by the torch 2.9 KT training stack.
+The maintained integration requirements first retain LLaMA-Factory-compatible
+`transformers==5.8.0` and `accelerate==1.11.0` distribution metadata, then install
+the KT forks and `kt-kernel[vlm-sft]`. Install LLaMA-Factory first and use a clean
+environment so the KT fork files are applied after the upstream packages. The VLM
+extra supplies the verified Conv3D implementation required by the torch 2.9 stack.
 
 For released packages, the equivalent base entry is:
 
 ```text
-ktransformers[sft]
+ktransformers[vlm-sft]
 ```
 
 This entry installs the KT SFT stack:
@@ -71,10 +73,10 @@ This entry installs the KT SFT stack:
 - `transformers-kt`
 - `accelerate-kt`
 
-If your LLaMA-Factory checkout does not yet provide `requirements/ktransformers.txt`, you can install the KT SFT package entry directly:
+After a release contains the VLM extra, the package entry can be installed directly:
 
 ```bash
-pip install "ktransformers[sft]"
+pip install "ktransformers[vlm-sft]"
 ```
 
 For LLaMA-Factory users, the requirements file is preferred because it keeps the examples and optional dependency flow together.
@@ -88,28 +90,30 @@ import torch
 import transformers
 import accelerate
 import kt_kernel
-import ktransformers
 from accelerate.utils.dataclasses import KTransformersPlugin
+from kt_kernel.sft.conv3d_compat import prepare_vlm_conv3d, validate_vlm_conv3d
+from transformers.integrations.kt import is_kt_expert_loading_enabled
 
 print("torch         =", torch.__version__)
-print("transformers  =", transformers.__version__)
-print("accelerate    =", accelerate.__version__)
+print("transformers dist/module =", md.version("transformers"), transformers.__version__)
+print("accelerate dist/module   =", md.version("accelerate"), accelerate.__version__)
 print("kt_kernel     =", kt_kernel.__version__)
-print("ktransformers =", ktransformers.__version__)
 print("transformers-kt dist =", md.version("transformers-kt"))
 print("accelerate-kt dist   =", md.version("accelerate-kt"))
 print("KTransformersPlugin  =", KTransformersPlugin.__name__)
+print("Conv3D API            =", prepare_vlm_conv3d.__name__, validate_vlm_conv3d.__name__)
+print("Transformers KT hook =", is_kt_expert_loading_enabled.__name__)
 PY
 ```
 
 Expected values should be close to:
 
 - `torch = 2.9.1+cu128` or `2.9.1+cu130`
-- `transformers = 5.6.0`
-- `accelerate = 1.14.0`
-- `kt_kernel = 0.6.1`
-- `ktransformers = 0.6.1`
+- `transformers dist/module = 5.8.0 / 5.6.0`
+- `accelerate dist/module = 1.11.0 / 1.14.0`
+- `kt_kernel = 0.6.4`
 - `KTransformersPlugin = KTransformersPlugin`
+- both Conv3D API names and the Transformers KT hook are printed
 
 ## 5. Run Qwen3.5 MoE LoRA SFT
 
@@ -163,12 +167,6 @@ LLaMA-Factory KT SFT continues to use:
 pip install -r requirements/ktransformers.txt
 ```
 
-with:
-
-```text
-ktransformers[sft]
-```
-
 Keep `sglang-kt` out of LLaMA-Factory SFT requirements.
 
 ## 8. Troubleshooting
@@ -182,9 +180,9 @@ pip install -e .
 pip install -r requirements/ktransformers.txt
 ```
 
-Then rerun the post-install check and confirm `accelerate = 1.14.0` and `KTransformersPlugin` imports successfully.
+Then rerun the post-install check and confirm the Accelerate module reports `1.14.0` and `KTransformersPlugin` imports successfully.
 
-### `kt_kernel` or `ktransformers` is missing
+### `kt_kernel` or the Conv3D compatibility API is missing
 
 Confirm that the KT SFT dependency step was run from the LLaMA-Factory checkout:
 
@@ -204,6 +202,5 @@ Try the following first:
 ## 9. Related Links
 
 - KTransformers: https://github.com/kvcache-ai/ktransformers
-- KTransformers v0.6.1 Release: https://github.com/kvcache-ai/ktransformers/releases/tag/v0.6.1
 - LLaMA-Factory KT PR: https://github.com/hiyouga/LLaMA-Factory/pull/10430
 - KTransformers docs: https://ktransformers.net/docs
