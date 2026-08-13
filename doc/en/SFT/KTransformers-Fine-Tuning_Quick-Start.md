@@ -60,6 +60,22 @@ the KT forks and `kt-kernel[vlm-sft]`. Install LLaMA-Factory first and use a cle
 environment so the KT fork files are applied after the upstream packages. The VLM
 extra supplies the verified Conv3D implementation required by the torch 2.9 stack.
 
+If you build KTransformers from a source checkout instead of the requirements
+entry, initialize its pinned native submodules before installing `kt-kernel`:
+
+```bash
+git clone --recursive https://github.com/kvcache-ai/ktransformers.git
+```
+
+For an existing checkout:
+
+```bash
+git submodule update --init --recursive
+```
+
+An incomplete checkout cannot build `kt-kernel` because the pinned `llama.cpp`
+and `pybind11` CMake sources are absent.
+
 For released packages, the equivalent base entry is:
 
 ```text
