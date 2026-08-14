@@ -2,11 +2,34 @@ import gc
 import glob
 import logging
 import os
+import time
 import torch
 import ctypes
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _rss_gb() -> float:
+    """Current process RSS in GiB (reads /proc/self/statm)."""
+    try:
+        with open("/proc/self/statm") as f:
+            pages = int(f.read().split()[1])
+        return pages * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+    except (OSError, ValueError, IndexError):
+        return -1.0
+
+
+def _is_gguf_path(path: str) -> bool:
+    """True when path is a .gguf file or a directory containing .gguf files."""
+    if os.path.isfile(path):
+        return path.endswith(".gguf")
+    if os.path.isdir(path):
+        try:
+            return any(f.endswith(".gguf") for f in os.listdir(path))
+        except OSError:
+            return False
+    return False
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -18,8 +41,11 @@ from .loader import (
     GPTQSafeTensorLoader,
     MXFP4SafeTensorLoader,
     MXFP8SafeTensorLoader,
+    GGUFLoader,
 )
+from .gguf_cache import GGUFCacheManager
 from kt_kernel_ext.moe import MOEConfig
+import kt_kernel_ext
 import kt_kernel_ext.moe as _moe_mod
 
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
@@ -43,6 +69,14 @@ SYCLGPTQInt4_MOE = getattr(_moe_mod, "SYCLGPTQInt4_MOE", None)
 
 _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
+_HAS_AMXINT4_KGROUP_SUPPORT = AMXInt4_KGroup_MOE is not None
+# Task-specific fused two-stage MOEs (stage pair -> per-attribute mix)
+_FUSED_4x8_MOE = getattr(_moe_mod, "AMXFused4x8_MOE", None)    # int4 -> int8
+_FUSED_8x16_MOE = getattr(_moe_mod, "AMXFused8x16_MOE", None)  # int8 -> bf16
+_FUSED_4x16_MOE = getattr(_moe_mod, "AMXFused4x16_MOE", None)  # int4 -> bf16
+# K2/RAWINT4 K-group quant: number of weight columns sharing one int8 scale
+# along k. 32 ≈ Q4_K's sub-block granularity; 64/128 trade accuracy for size.
+_AMXINT4_KGROUP_SIZE = int(os.environ.get("KT_AMXINT4_KGROUP_SIZE", "32"))
 _HAS_RAWINT4_SUPPORT = AMXInt4_KGroup_MOE is not None
 _HAS_RAWINT4_BLOCKED_SUPPORT = AMXInt4_KGroupBlocked_MOE is not None
 _HAS_MXFP4_SUPPORT = AMXFP4_KGroup_MOE is not None
@@ -252,6 +286,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
     """
 
     _safetensor_loader_instance = None  # Singleton SafeTensorLoader
+    _gguf_loader_instance = None  # Singleton GGUFLoader (keeps the mmap alive)
+    _ggml_inited = False
+    _smart_down_nodes = {}  # layer_idx -> down node, for the (prev,cur) edge log
 
     def __init__(
         self,
@@ -303,6 +340,12 @@ class AMXMoEWrapper(BaseMoEWrapper):
                 "  - AVX512F + AVX512BW (VNNI optional)\n"
                 "Please recompile kt_kernel_ext with AVX512 enabled."
             )
+        if method in ("AMXINT4_KGROUP", "AMXINT4_SMART") and not _HAS_AMXINT4_KGROUP_SUPPORT:
+            raise RuntimeError(
+                f"{method} backend not available. Required ISA:\n"
+                "  - AVX512F + AVX512BW (VNNI optional)\n"
+                "Please recompile kt_kernel_ext with AVX512 enabled."
+            )
 
         # Initialize base class
         super().__init__(
@@ -324,9 +367,48 @@ class AMXMoEWrapper(BaseMoEWrapper):
 
         # AMX-specific: Check if we should load merged safetensor weights
         self.load_merged_weight = False
-        import glob
+        # GGUF source: when weight_path is a .gguf file/dir, the C++ side
+        # dequantizes 64-row strips straight from the mmap'd GGUF blocks
+        # ("online quant from gguf") and the first boot writes the INT8 cache
+        # (see gguf_cache.py). No BF16/FP32 materialization in Python.
+        self.gguf_loader = None
+        self.gguf_cache = None
+        self.is_gguf = _is_gguf_path(weight_path)
+        self._smart_errs = None
+        self._smart_pair = None
 
-        if glob.glob(os.path.join(weight_path, "*.safetensors")):
+        if self.is_gguf:
+            # ggml_init() fills ggml_table_f32_f16 — required by conversion.h's
+            # to_float fallback for exotic GGML types (IQ*, ...). Idempotent.
+            if not AMXMoEWrapper._ggml_inited:
+                kt_kernel_ext.utils.ggml_init()
+                AMXMoEWrapper._ggml_inited = True
+            if AMXMoEWrapper._gguf_loader_instance is None:
+                AMXMoEWrapper._gguf_loader_instance = GGUFLoader(weight_path)
+            self.gguf_loader = AMXMoEWrapper._gguf_loader_instance
+            if method in ("AMXINT4_KGROUP",):
+                # No disk cache: K2 KGroup quantizes every boot.
+                self.gguf_cache = None
+                logger.info(
+                    "[AMXMoEWrapper] Layer %d: GGUF source %s (%s, no cache)",
+                    layer_idx, weight_path, method,
+                )
+            else:
+                self.gguf_cache = GGUFCacheManager(
+                    weight_path,
+                    self.gguf_loader,
+                    method=method,
+                    threadpool_count=threadpool_count,
+                    hidden_size=hidden_size,
+                    moe_intermediate_size=moe_intermediate_size,
+                    expert_num=num_experts,
+                )
+            logger.info(
+                "[AMXMoEWrapper] Layer %d: GGUF source %s (INT8 cache: %s)",
+                layer_idx, weight_path,
+                self.gguf_cache.cache_dir if self.gguf_cache is not None else "disabled",
+            )
+        elif glob.glob(os.path.join(weight_path, "*.safetensors")):
             self.load_merged_weight = True
 
         # Initialize SafeTensor loader (singleton)
@@ -359,6 +441,19 @@ class AMXMoEWrapper(BaseMoEWrapper):
             down_proj: Down projection weights [num_experts, hidden_size, intermediate_size]
             physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
         """
+        # Free old C++ MoE object BEFORE creating a new one.
+        # ~AMX_MOE_BASE() now frees the aligned_alloc'd BufferB weights
+        # (~3.6GB/layer for MiniMax 1536x3072 INT8 × 256 experts) in its
+        # destructor (owned_aligned_allocs_), so destroying the previous
+        # layer's object actually returns that memory — without this the
+        # per-layer quantize loop accumulates ~3.6GB/layer and OOMs
+        # around layer 60 of a 61-layer model.
+        if self.moe is not None:
+            del self.moe
+            self.moe = None
+            import gc
+            gc.collect()
+
         # Store tensors as instance variables to keep them alive
         self.gate_proj = gate_proj.contiguous()
         self.up_proj = up_proj.contiguous()
@@ -400,6 +495,186 @@ class AMXMoEWrapper(BaseMoEWrapper):
         self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
         self.cpu_infer.sync()
 
+    def _make_moe_config(self) -> MOEConfig:
+        """Build a MOEConfig with the common fields for this layer."""
+        moe_config = MOEConfig(
+            self.num_experts,
+            self.num_experts_per_tok,
+            self.hidden_size,
+            self.moe_intermediate_size,
+            self.gpu_experts_mask.data_ptr(),
+        )
+        moe_config.layer_idx = self.layer_idx
+        moe_config.pool = self.cpu_infer.backend_
+        moe_config.max_len = self.chunked_prefill_size
+        return moe_config
+
+    def _create_and_load_moe(self, moe_config: MOEConfig, physical_to_logical_map_cpu: torch.Tensor) -> None:
+        """Create the AMX MoE module and run its load_weights task to completion."""
+        # Free the previous layer's C++ MoE object first; ~AMX_MOE_BASE() frees
+        # the aligned_alloc'd BufferB weights, so the per-layer quantize loop
+        # does not accumulate ~3.4 GB/layer.
+        if self.moe is not None:
+            del self.moe
+            self.moe = None
+            import gc
+
+            gc.collect()
+
+        if self.method == "AMXINT4":
+            self.moe = AMXInt4_MOE(moe_config)
+        elif self.method == "AMXINT8":
+            self.moe = AMXInt8_MOE(moe_config)
+        elif self.method == "AMXINT4_KGROUP":
+            moe_config.quant_config.group_size = _AMXINT4_KGROUP_SIZE
+            self.moe = AMXInt4_KGroup_MOE(moe_config)
+        elif self.method == "AMXINT4_SMART":
+            # Fused-stage routing: the load-time per-attribute nodes form the
+            # (upstream, downstream) pair. Uniform pairs use the plain single-
+            # precision MOEs; mixed pairs are the task-specific fused kernels
+            # (F4x8 / F8x16 / F4x16) — until those kernels land, a mixed pair
+            # falls back to the more-accurate plain layer (correct, slower).
+            up = getattr(moe_config, "upstream_precision", 0)
+            dw = getattr(moe_config, "downstream_precision", 0)
+            # Fused pairs are implemented as WRAPPERS around the existing
+            # kernels: the layer's weights are converted at load to the higher
+            # precision of the pair (int4/int8 -> the AMXINT8 format, or ->
+            # the BF16 format) and served by the existing kernel. That is the
+            # 3-dtype storage rule: the layer is stored at the max class of
+            # its attributes (AMXINT4 <= Q4, AMXINT8 for (Q4,Q8], BF16 for
+            # F32/F16/BF16). (The dedicated FusedTwoStage kernels remain
+            # parked in amx_fused.hpp; the routing uses the wrappers.)
+            stored = max(up, dw)
+            self.moe = {0: AMXInt4_MOE, 1: AMXInt8_MOE, 2: AMXBF16_MOE}[stored](moe_config)
+        elif self.method == "BF16":
+            self.moe = AMXBF16_MOE(moe_config)
+        else:
+            raise NotImplementedError(f"Unsupported AMX method: {self.method}")
+        self.cpu_infer.submit(self.moe.load_weights_task(physical_to_logical_map_cpu.data_ptr()))
+        self.cpu_infer.sync()
+
+    def _load_weights_gguf(self, physical_to_logical_map_cpu: torch.Tensor) -> None:
+        """
+        Load layer weights from a GGUF source (C++ strip dequant + INT8 cache).
+
+        Cache hit: load the packed INT8 .kt files directly — no GGUF access,
+        RAM stays at INT8 size. Cache miss (or first boot): feed the C++ side
+        mmap pointers + GGML types into the existing online-quant path; the
+        save step populates the cache as a side effect. No BF16/FP32 tensor is
+        ever materialized in Python.
+        """
+        cache = self.gguf_cache
+        if cache is not None and cache.enabled and cache.layer_complete(self.layer_idx):
+            logger.info(
+                "[AMXMoEWrapper] Layer %d: INT8 cache hit, loading from %s",
+                self.layer_idx, cache.cache_dir,
+            )
+            moe_config = self._make_moe_config()
+            moe_config.load = True
+            moe_config.save = False
+            moe_config.path = cache.cache_dir
+            self._create_and_load_moe(moe_config, physical_to_logical_map_cpu)
+            return
+
+        t0 = time.time()
+        E, I, H = self.num_experts, self.moe_intermediate_size, self.hidden_size
+        loader = self.gguf_loader
+        if loader is None:
+            raise RuntimeError("GGUF loader not initialized for GGUF weight path")
+        base = f"blk.{self.layer_idx}"
+        gate_src = loader.get_expert_gguf_source(
+            f"{base}.ffn_gate_exps.weight", expected_shape=[E, I, H]
+        )
+        up_src = loader.get_expert_gguf_source(
+            f"{base}.ffn_up_exps.weight", expected_shape=[E, I, H]
+        )
+        down_src = loader.get_expert_gguf_source(
+            f"{base}.ffn_down_exps.weight", expected_shape=[E, H, I]
+        )
+
+        moe_config = self._make_moe_config()
+        moe_config.gate_gguf = gate_src["ptr"]
+        moe_config.gate_gguf_stride = gate_src["stride"]
+        moe_config.gate_gguf_type = gate_src["ggml_type"]
+        moe_config.up_gguf = up_src["ptr"]
+        moe_config.up_gguf_stride = up_src["stride"]
+        moe_config.up_gguf_type = up_src["ggml_type"]
+        moe_config.down_gguf = down_src["ptr"]
+        moe_config.down_gguf_stride = down_src["stride"]
+        moe_config.down_gguf_type = down_src["ggml_type"]
+        moe_config.gguf_full_intermediate_size = I
+
+        if self.method == "AMXINT4_SMART":
+            # Load-time per-row INT4 round-trip error per attribute, measured
+            # with the same kt::gguf dequant the strips use (first-expert row
+            # sample; no extra quantization, no full-tensor materialization).
+            # Drives the per-layer INT4-vs-INT8 routing in _create_and_load_moe
+            # and the fused-kernel stage pair (upstream = gate/up node,
+            # downstream = down node).
+            errs = kt_kernel_ext.moe.per_row_int4_err(
+                gate_src["ptr"], gate_src["stride"], gate_src["ggml_type"],
+                up_src["ptr"], up_src["stride"], up_src["ggml_type"],
+                down_src["ptr"], down_src["stride"], down_src["ggml_type"],
+                I, H, 128,
+            )
+            self._smart_errs = [float(e) if e >= 0.0 else 0.0 for e in errs]
+            # 3 storage dtypes per layer (the rule is unchanged): the layer's
+            # tensors decide — any F32/F16/BF16 -> BF16 storage; else any
+            # tensor in (Q4, Q8] (Q5_0/Q5_1/Q5_K/Q6_K/Q8_0/IQ*/I*) -> AMXINT8
+            # storage; else (all at-or-below Q4) -> per-row AMXINT4 storage.
+            def _cls(ggml_type: int) -> int:
+                if ggml_type in (0, 1, 30):  # F32/F16/BF16 -> BF16 storage
+                    return 2
+                if ggml_type in (6, 7, 8, 13, 14) or ggml_type in (15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 29):
+                    return 1  # (Q4, Q8] -> AMXINT8 storage
+                return 0  # at-or-below Q4 -> AMXINT4 storage
+
+            stored = max(_cls(gate_src["ggml_type"]), _cls(up_src["ggml_type"]), _cls(down_src["ggml_type"]))
+            up = max(_cls(gate_src["ggml_type"]), _cls(up_src["ggml_type"]))
+            dw = _cls(down_src["ggml_type"])
+            moe_config.upstream_precision = up
+            moe_config.downstream_precision = dw
+            # the pair is an edge between two layers: (prev_down -> this_gate).
+            # Stash this layer's stored class for the next layer's edge log.
+            prev = AMXMoEWrapper._smart_down_nodes.get(self.layer_idx - 1)
+            if prev is not None:
+                logger.info(
+                    "[AMXMoEWrapper] (%d, %d): stage edge (%d -> %d)",
+                    self.layer_idx - 1, self.layer_idx, prev, moe_config.upstream_precision,
+                )
+            AMXMoEWrapper._smart_down_nodes[self.layer_idx] = stored
+            _names = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 10: "Q2_K",
+                      11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 30: "BF16"}
+            logger.info(
+                "[AMXMoEWrapper] Layer %d: AMXINT4_SMART original gate=%s up=%s down=%s "
+                "-> stored %s (per-row INT4 err %.4f/%.4f/%.4f)",
+                self.layer_idx, _names.get(gate_src["ggml_type"], str(gate_src["ggml_type"])),
+                _names.get(up_src["ggml_type"], str(up_src["ggml_type"])),
+                _names.get(down_src["ggml_type"], str(down_src["ggml_type"])),
+                ("AMXINT4" if stored == 0 else "AMXINT8" if stored == 1 else "BF16"),
+                self._smart_errs[0], self._smart_errs[1], self._smart_errs[2],
+            )
+
+        if cache is not None and cache.enabled:
+            # First boot / refresh: quantize and populate the cache.
+            moe_config.save = True
+            moe_config.load = False
+            moe_config.path = cache.cache_dir
+        else:
+            # KT_GGUF_CACHE=0: pure online quant from GGUF every boot.
+            moe_config.save = False
+            moe_config.load = False
+            moe_config.path = ""
+
+        self._create_and_load_moe(moe_config, physical_to_logical_map_cpu)
+
+        if cache is not None and cache.enabled:
+            cache.mark_layer_complete(self.layer_idx)
+            logger.info(
+                "[AMXMoEWrapper] Layer %d: GGUF→INT8 quantize + cache done in %.1fs (%s)",
+                self.layer_idx, time.time() - t0, cache.cache_dir,
+            )
+
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
         """
         Load weights for this layer and initialize the MoE module.
@@ -407,6 +682,14 @@ class AMXMoEWrapper(BaseMoEWrapper):
         Args:
             physical_to_logical_map_cpu: Mapping from physical to logical expert IDs
         """
+        # GGUF path: C++ dequantizes 64-row strips straight from the mmap'd
+        # GGUF blocks and packs them to INT8. The first boot writes the INT8
+        # cache as a side effect; later boots load the cache directly — no
+        # GGUF access, RAM stays at INT8 size.
+        if self.is_gguf:
+            self._load_weights_gguf(physical_to_logical_map_cpu)
+            return
+
         gate_ptr = 0
         up_ptr = 0
         down_ptr = 0

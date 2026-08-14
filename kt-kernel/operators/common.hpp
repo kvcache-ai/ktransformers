@@ -261,6 +261,44 @@ struct GeneralMOEConfig {
   void* up_proj = nullptr;
   void* down_proj = nullptr;
 
+  // GGUF source for online quantization ("online quant from gguf").
+  // `*_gguf` points at row 0 of expert 0 of the ffn_*_exps tensor (mmap'd
+  // GGUF data, never copied); `*_gguf_stride` is the byte stride between
+  // consecutive experts; `*_gguf_type` is the GGML quantization type.
+  // `gguf_full_intermediate_size` is the FULL moe intermediate size (per-NUMA
+  // configs divide it; the `down` tensor's row width is the full I).
+  // The per-NUMA slice of each expert matrix is derived from tp_part_idx:
+  //   gate/up: rows [tp*I/tp_count, (tp+1)*I/tp_count) of the [I, H] matrix
+  //   down:    columns [tp*I/tp_count, (tp+1)*I/tp_count) of the [H, I] matrix
+  // Empty/0 keeps every existing path byte-identical.
+  void* gate_gguf = nullptr;
+  void* up_gguf = nullptr;
+  void* down_gguf = nullptr;
+  int64_t gate_gguf_stride = 0;
+  int64_t up_gguf_stride = 0;
+  int64_t down_gguf_stride = 0;
+  int gate_gguf_type = 0;  // ggml_type
+  int up_gguf_type = 0;
+  int down_gguf_type = 0;
+  int gguf_full_intermediate_size = 0;  // 0 -> config_.intermediate_size
+
+  // AMXINT4_SMART: per-attribute backend tags ("header" of each attribute's
+  // buffer region). 0 = Int4 KGroup (default), 1 = Int8, 2 = BF16. Set by the
+  // python side from the GGUF tensor dtypes (Q2_K..Q6_K -> 0, Q8_0/IQ* -> 1,
+  // BF16/F16/F32 -> 2). The K2 wrapper routes each attribute's GEMM to the
+  // matching node of the 3-GEMM graph (KGroup-int4 / Int8 / BF16).
+  int gate_precision = 0;
+  int up_precision = 0;
+  int down_precision = 0;
+
+  // AMXINT4_SMART fused dispatch: the precision pair of the two GEMM stages
+  // (upstream = gate/up node, downstream = down node). 0 = int4 per-row,
+  // 1 = int8, 2 = bf16. When both are equal the layer runs the plain two-stage
+  // path; a mixed pair selects the task-specific fused kernel (F4x8, F8x16,
+  // F4x16) that computes both stages in one pass.
+  int upstream_precision = 0;
+  int downstream_precision = 0;
+
   void* gate_scale = nullptr;
   void* up_scale = nullptr;
   void* down_scale = nullptr;

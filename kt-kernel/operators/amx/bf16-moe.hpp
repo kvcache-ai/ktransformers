@@ -17,6 +17,7 @@
 #include "la/amx_raw_buffers.hpp"
 #include "la/amx_raw_kernels.hpp"
 #include "la/amx_utils.hpp"  // For transpose_16x16_32bit
+#include "../gguf/dequant.hpp"
 #include "moe_base.hpp"
 
 /**
@@ -165,6 +166,71 @@ class AMX_BF16_MOE_TP : public AMX_MOE_BASE<T, AMX_BF16_MOE_TP<T>> {
   void load_weights() {
     const uint64_t* physical_to_logical_map = (const uint64_t*)config_.physical_to_logical_map;
     auto pool = config_.pool->get_subpool(tp_part_idx);
+
+    if (config_.gate_gguf != nullptr) {
+      // ================= online dequant from gguf (BF16, lossless) =================
+      // Same strip flow as the quantized backends, but the bf16 buffer just
+      // copies the dequantized strip (no scales, no codes). Serves GGUF
+      // tensors stored at >= 8-bit precision (Q8_0/BF16/F16/F32) where a 4-bit
+      // re-quant would dominate the error — the "rare cases" bound for the
+      // AMXINT4_SMART dispatch.
+      if (tp_part_idx == 0) {
+        std::cout << "  online dequant from gguf (BF16)" << std::endl;
+      }
+      const int tp_count = (int)config_.pool->config.subpool_count;
+      const int64_t full_I = config_.gguf_full_intermediate_size > 0
+                                 ? (int64_t)config_.gguf_full_intermediate_size
+                                 : (int64_t)config_.intermediate_size * tp_count;
+      const int64_t row_off = (int64_t)config_.intermediate_size * tp_part_idx;
+      const int64_t down_col_begin = row_off;
+      const int64_t down_col_end = row_off + config_.intermediate_size;
+      // gate/up: per-NUMA matrix [I/tp, H]; strips along I/tp, full columns
+      {
+        int nth = T::recommended_nth(config_.intermediate_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, row_off](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
+              if (n_start >= n_end) return;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * config_.hidden_size);
+              const char* gate_base = (const char*)config_.gate_gguf + logical_expert_id * config_.gate_gguf_stride;
+              kt::gguf::dequant_rows_bf16(gate_base, (ggml_type)config_.gate_gguf_type, config_.hidden_size,
+                                          row_off + n_start, row_off + n_end, strip.data());
+              gate_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+              const char* up_base = (const char*)config_.up_gguf + logical_expert_id * config_.up_gguf_stride;
+              kt::gguf::dequant_rows_bf16(up_base, (ggml_type)config_.up_gguf_type, config_.hidden_size,
+                                          row_off + n_start, row_off + n_end, strip.data());
+              up_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      }
+      // down: per-NUMA matrix [H, I/tp]; strips along H, columns sliced
+      {
+        int nth = T::recommended_nth(config_.hidden_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, down_col_begin, down_col_end, full_I](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] = T::split_range_n(config_.hidden_size, ith, nth);
+              if (n_start >= n_end) return;
+              const int64_t dcol = down_col_end - down_col_begin;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * dcol);
+              const char* down_base = (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
+              kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
+                                          down_col_begin, down_col_end, strip.data());
+              down_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      }
+      return;
+    }
 
     if (config_.gate_proj == nullptr) {
       throw std::runtime_error("BF16 MOE requires native BF16 weight.");
@@ -448,6 +514,29 @@ class TP_MOE<AMX_BF16_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_BF16_MOE_TP
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
 
     // BF16 has no quantization check needed
+    if (config.gate_gguf != nullptr) {
+      // From GGUF: no per-TP bf16 copies — each NUMA part dequantizes its own
+      // strips from the mmap'd GGUF blocks at load time (see
+      // AMX_BF16_MOE_TP::load_weights). Lossless: dequant -> bf16 copy.
+      printf("From GGUF (BF16)\n");
+      for (auto i = 0; i < tp_count; i++) {
+        auto& tpc = tps[i]->config_;
+        tpc.gate_gguf = config.gate_gguf;
+        tpc.gate_gguf_stride = config.gate_gguf_stride;
+        tpc.gate_gguf_type = config.gate_gguf_type;
+        tpc.up_gguf = config.up_gguf;
+        tpc.up_gguf_stride = config.up_gguf_stride;
+        tpc.up_gguf_type = config.up_gguf_type;
+        tpc.down_gguf = config.down_gguf;
+        tpc.down_gguf_stride = config.down_gguf_stride;
+        tpc.down_gguf_type = config.down_gguf_type;
+        tpc.gguf_full_intermediate_size = config.gguf_full_intermediate_size;
+      }
+      DO_TPS_LOAD_WEIGHTS(pool);
+      this->weights_loaded = true;
+      return;
+    }
+
     if (config.gate_projs.empty() && config.gate_proj == nullptr) {
       throw std::runtime_error("no weight source");
     }

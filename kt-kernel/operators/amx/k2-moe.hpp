@@ -14,6 +14,9 @@
 // #define LOAD_TIME_PROFILE
 
 #include "moe_base.hpp"
+#include "../gguf/dequant.hpp"
+#include "la/amx_raw_kernels.hpp"  // GemmKernel224BF16 (+ fp32 dot fallback)
+#include "la/amx_raw_buffers.hpp"  // BufferBBF16Impl etc.
 
 /**
  * @brief K2 Int4 MoE operator using CRTP pattern
@@ -39,10 +42,63 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
   using Base::tp_part_idx;
   using Base::up_bb_;
   using Base::up_bc_;
+  using Base::m_local_gate_output_ptr_;
+  using Base::m_local_down_output_ptr_;
+  using Base::m_local_input_;
+  using Base::m_local_gate_output_;
+  using Base::m_local_up_output_;
+  using Base::m_local_down_output_;
+  using Base::m_local_input_ptr_;
+  using Base::m_local_up_output_ptr_;
+  using Base::m_expert_id_map_;
+  using Base::m_local_pos_;
+  using Base::pool_count_;
+  using Base::gate_up_ba_pool_;
+  using Base::gate_bc_pool_;
+  using Base::up_bc_pool_;
+  using Base::down_ba_pool_;
+  using Base::down_bc_pool_;
+  using Base::gate_up_ba_pool_bytes_;
+  using Base::gate_bc_pool_bytes_;
+  using Base::up_bc_pool_bytes_;
+  using Base::down_ba_pool_bytes_;
+  using Base::down_bc_pool_bytes_;
+  using Base::apply_activation;
 
- public:
-  using typename Base::input_t;
-  using typename Base::output_t;
+  public:
+    using typename Base::input_t;
+    using typename Base::output_t;
+
+    // ============================================================================
+    // AMXINT4_SMART: the 3-GEMM layer graph.
+    // Each attribute carries a precision tag (its "header"): 0 = Int4 KGroup,
+    // 1 = Int8, 2 = BF16. Gate/up stay on the KGroup node (Q4_K/Q6_K tensors);
+    // the down slot routes to the Int8 or BF16 node for Q8_0/BF16/F16/F32 down
+    // tensors. The edges between nodes are the A-side conversions: quantize to
+    // int8-KGroup (nodes 0/1) or fp32->bf16 copy (node 2).
+    static constexpr int PREC_INT4 = 0;
+    static constexpr int PREC_INT8 = 1;
+    static constexpr int PREC_BF16 = 2;
+    using Int8A = amx::GemmKernel224Int8::BufferA;
+    using Int8B = amx::GemmKernel224Int8::BufferB;
+    using Int8C = amx::GemmKernel224Int8::BufferC;
+    using BF16A = amx::GemmKernel224BF16::BufferA;
+    using BF16B = amx::GemmKernel224BF16::BufferB;
+    using BF16C = amx::GemmKernel224BF16::BufferC;
+
+    int gate_prec_ = PREC_INT4;
+    int up_prec_ = PREC_INT4;
+    int down_prec_ = PREC_INT4;
+
+    // Alternate down trios (activated only when down_prec_ != PREC_INT4);
+    // allocated in derived_init, freed in the destructor.
+    std::vector<std::shared_ptr<Int8A>> down_ba8_;
+    std::vector<std::shared_ptr<Int8B>> down_bb8_;
+    std::vector<std::shared_ptr<Int8C>> down_bc8_;
+    std::vector<std::shared_ptr<BF16A>> down_ba16_;
+    std::vector<std::shared_ptr<BF16B>> down_bb16_;
+    std::vector<std::shared_ptr<BF16C>> down_bc16_;
+    std::vector<void*> alt_mem_blocks_;
 
   AMX_K2_MOE_TP() = default;
 
@@ -56,7 +112,11 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     printf("Creating AMX_K2_MOE_TP %d at numa %d\n", tp_part_idx, numa_node_of_cpu(sched_getcpu()));
   }
 
-  ~AMX_K2_MOE_TP() = default;
+  virtual ~AMX_K2_MOE_TP() {
+    for (auto p : alt_mem_blocks_) {
+      free(p);
+    }
+  }
 
   // ============================================================================
   // CRTP buffer creation - with group_size
@@ -103,12 +163,62 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     auto& group_size = config_.quant_config.group_size;
     int m = m_local_num_[expert_idx];
 
+    if (down_prec_ == PREC_BF16) {
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, down_ba16_[expert_idx],
+                     down_bb16_[expert_idx], down_bc16_[expert_idx], ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, down_ba16_[expert_idx],
+                     down_bb16_[expert_idx], down_bc16_[expert_idx], ith, nth);
+      }
+      return;
+    }
+    if (down_prec_ == PREC_INT8) {
+      if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
+        amx::mat_mul(m, config_.hidden_size, config_.intermediate_size, down_ba8_[expert_idx],
+                     down_bb8_[expert_idx], down_bc8_[expert_idx], ith, nth);
+      } else {
+        amx::vec_mul(m, config_.hidden_size, config_.intermediate_size, down_ba8_[expert_idx],
+                     down_bb8_[expert_idx], down_bc8_[expert_idx], ith, nth);
+      }
+      return;
+    }
+
     if (qlen > 4 * config_.expert_num / config_.num_experts_per_tok) {
       amx::mat_mul_kgroup(m, config_.hidden_size, config_.intermediate_size, group_size, down_ba_[expert_idx],
                           down_bb_[expert_idx], down_bc_[expert_idx], ith, nth);
     } else {
       amx::vec_mul_kgroup(m, config_.hidden_size, config_.intermediate_size, group_size, down_ba_[expert_idx],
                           down_bb_[expert_idx], down_bc_[expert_idx], ith, nth);
+    }
+  }
+
+  // ============================================================================
+  // AMXINT4_SMART forward hooks. The single-tp objects are statically typed as
+  // AMX_MOE_BASE, whose forward is non-virtual — so overriding forward here
+  // would never dispatch. Instead the base's forward calls these two CRTP
+  // hooks (fill_down_a / down_output), which route the down slot by its
+  // precision tag: Int8/BF16 nodes fill their alternate A and release their
+  // alternate C; the Int4 KGroup node falls through to the base defaults.
+  // ============================================================================
+
+  void fill_down_a(int expert_idx, int m, ggml_bf16_t* src) {
+    if (down_prec_ == PREC_BF16) {
+      down_ba16_[expert_idx]->from_mat(m, src, 0, 1);
+    } else if (down_prec_ == PREC_INT8) {
+      down_ba8_[expert_idx]->from_mat(m, src, 0, 1);
+    } else {
+      Base::fill_down_a(expert_idx, m, src);
+    }
+  }
+
+  void down_output(int expert_idx, int m, ggml_bf16_t* dst, int ith, int nth) {
+    if (down_prec_ == PREC_BF16) {
+      down_bc16_[expert_idx]->to_mat(m, dst, ith, nth);
+    } else if (down_prec_ == PREC_INT8) {
+      down_bc8_[expert_idx]->to_mat(m, dst, ith, nth);
+    } else {
+      Base::down_output(expert_idx, m, dst, ith, nth);
     }
   }
 
@@ -130,6 +240,161 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
     if (quant_config.group_size == 0 || quant_config.zero_point) {
       throw std::runtime_error("Kimi AVX MOE only support KGroup Int4.");
     }
+
+    // AMXINT4_SMART: read the per-attribute precision headers (must run at
+    // load time, AFTER construction — derived_init runs from the base ctor
+    // where the derived members do not exist yet) and allocate the alternate
+    // down buffer trio when the down slot is routed to the Int8/BF16 node.
+    gate_prec_ = config_.gate_precision;
+    up_prec_ = config_.up_precision;
+    down_prec_ = config_.down_precision;
+    if (gate_prec_ != PREC_INT4 || up_prec_ != PREC_INT4) {
+      throw std::runtime_error("AMXINT4_SMART: gate/up precision tags must be Int4 KGroup in this build");
+    }
+    if (down_prec_ != PREC_INT4 && down_prec_ != PREC_INT8 && down_prec_ != PREC_BF16) {
+      throw std::runtime_error("AMXINT4_SMART: invalid down precision tag");
+    }
+    if (down_prec_ != PREC_INT4 && down_bb16_.empty() && down_bb8_.empty()) {
+      const char* prec_names[3] = {"INT4_KGROUP", "INT8", "BF16"};
+      if (tp_part_idx == 0) {
+        std::cout << "  AMXINT4_SMART down node: " << prec_names[down_prec_] << std::endl;
+      }
+      const int e = (int)config_.expert_num;
+      const int n = config_.hidden_size;
+      const int k = config_.intermediate_size;
+      auto alloc_block = [this](size_t sz) -> void* {
+        void* p = nullptr;
+        if (posix_memalign(&p, 64, std::max<size_t>(sz, 1)) != 0) throw std::bad_alloc();
+        alt_mem_blocks_.push_back(p);
+        return p;
+      };
+      if (down_prec_ == PREC_INT8) {
+        for (int i = 0; i < e; i++) {
+          down_ba8_.push_back(std::make_shared<Int8A>(config_.max_len, k, alloc_block(Int8A::required_size(config_.max_len, k))));
+          down_bb8_.push_back(std::make_shared<Int8B>(n, k, alloc_block(Int8B::required_size(n, k))));
+          down_bc8_.push_back(std::make_shared<Int8C>(config_.max_len, n, alloc_block(Int8C::required_size(config_.max_len, n))));
+        }
+      } else {  // PREC_BF16
+        for (int i = 0; i < e; i++) {
+          down_ba16_.push_back(std::make_shared<BF16A>(config_.max_len, k, alloc_block(BF16A::required_size(config_.max_len, k))));
+          down_bb16_.push_back(std::make_shared<BF16B>(n, k, alloc_block(BF16B::required_size(n, k))));
+          down_bc16_.push_back(std::make_shared<BF16C>(config_.max_len, n, alloc_block(BF16C::required_size(config_.max_len, n))));
+        }
+      }
+    }
+
+    // ================= online quant from gguf (K2 KGroup) =================
+    // Same strip-dequant flow as AMX_MOE_TP::load_weights: each worker
+    // dequantizes only the rows/columns it packs, straight from the mmap'd
+    // GGUF blocks. Per k-group scales are computed inside from_mat_strip.
+    if constexpr (requires(typename T::BufferB& bb, ggml_bf16_t* s, int i, int n) { bb.from_mat_strip(s, i, n); }) {
+      if (config_.gate_gguf != nullptr) {
+      if (tp_part_idx == 0) {
+        std::cout << "  online quant from gguf (K2 KGroup, group_size=" << group_size << ")" << std::endl;
+      }
+      const int tp_count = (int)config_.pool->config.subpool_count;
+      const int64_t full_I = config_.gguf_full_intermediate_size > 0
+                                 ? (int64_t)config_.gguf_full_intermediate_size
+                                 : (int64_t)config_.intermediate_size * tp_count;
+      const int64_t row_off = (int64_t)config_.intermediate_size * tp_part_idx;
+      const int64_t down_col_begin = row_off;
+      const int64_t down_col_end = row_off + config_.intermediate_size;
+      // gate/up: per-NUMA matrix is [I/tp, H]; strips along I/tp, full columns
+      {
+        int nth = T::recommended_nth(config_.intermediate_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, row_off](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] =
+                  T::BufferB::split_range_n(config_.intermediate_size, ith, nth);
+              if (n_start >= n_end) return;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * config_.hidden_size);
+              const char* gate_base = (const char*)config_.gate_gguf + logical_expert_id * config_.gate_gguf_stride;
+              kt::gguf::dequant_rows_bf16(gate_base, (ggml_type)config_.gate_gguf_type, config_.hidden_size,
+                                          row_off + n_start, row_off + n_end, strip.data());
+              gate_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+              const char* up_base = (const char*)config_.up_gguf + logical_expert_id * config_.up_gguf_stride;
+              kt::gguf::dequant_rows_bf16(up_base, (ggml_type)config_.up_gguf_type, config_.hidden_size,
+                                          row_off + n_start, row_off + n_end, strip.data());
+              up_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      }
+      // down: per-NUMA matrix is [H, I/tp]; strips along H, columns sliced.
+      // Routed by the precision tag: Int4 KGroup (default), Int8 or BF16 node.
+      if (down_prec_ == PREC_BF16) {
+            int nth = amx::GemmKernel224BF16::recommended_nth(config_.hidden_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, down_col_begin, down_col_end, full_I](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] = amx::GemmKernel224BF16::split_range_n(config_.hidden_size, ith, nth);
+              if (n_start >= n_end) return;
+              const int64_t dcol = down_col_end - down_col_begin;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * dcol);
+              const char* down_base =
+                  (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
+              kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
+                                          down_col_begin, down_col_end, strip.data());
+              down_bb16_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      } else if (down_prec_ == PREC_INT8) {
+        int nth = amx::GemmKernel224Int8::recommended_nth(config_.hidden_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, down_col_begin, down_col_end, full_I](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] = amx::GemmKernel224Int8::split_range_n(config_.hidden_size, ith, nth);
+              if (n_start >= n_end) return;
+              const int64_t dcol = down_col_end - down_col_begin;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * dcol);
+              const char* down_base =
+                  (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
+              kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
+                                          down_col_begin, down_col_end, strip.data());
+              down_bb8_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      } else {
+      int nth = T::recommended_nth(config_.hidden_size);
+        pool->do_work_stealing_job(
+            nth * config_.expert_num, nullptr,
+            [this, nth, physical_to_logical_map, down_col_begin, down_col_end, full_I](int task_id) {
+              int64_t expert_idx = task_id / nth;
+              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+              int ith = task_id % nth;
+              auto [n_start, n_end] =
+                  T::BufferB::split_range_n(config_.hidden_size, ith, nth);
+              if (n_start >= n_end) return;
+              const int64_t dcol = down_col_end - down_col_begin;
+              thread_local std::vector<ggml_bf16_t> strip;
+              strip.resize((size_t)(n_end - n_start) * dcol);
+              const char* down_base =
+                  (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
+              kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
+                                          down_col_begin, down_col_end, strip.data());
+              down_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            },
+            nullptr);
+      }
+      return;
+      }
+    } else if (config_.gate_gguf != nullptr) {
+      throw std::runtime_error(
+          "K2 GGUF path requires BufferB::from_mat_strip (use AMXInt4_KGroup_MOE / SmallKGroup kernels)");
+    }
+
     if (config_.gate_scale == nullptr) {
       throw std::runtime_error("Kimi AVX MOE only support load native weight.");
     }
@@ -543,7 +808,13 @@ class AMX_K2_MOE_TP : public AMX_MOE_BASE<T, AMX_K2_MOE_TP<T>> {
 
 // ============================================================================
 // TP_MOE specialization for AMX_K2_MOE_TP
-// Inherits from TP_MOE<AMX_MOE_BASE<...>> to reuse merge_results implementation
+// Inherits from TP_MOE<AMX_MOE_BASE<...>> to reuse merge_results implementation.
+// NOTE: the base TP_MOE<AMX_MOE_BASE<T, Derived>> specialization (moe_base.hpp)
+// now sizes the single-tp objects as the FULL Derived via TP_MOE_Common's
+// Concrete parameter, so derived classes (AMX_K2_MOE_TP carries the SMART
+// precision tags and alternate down trios) allocate in-bounds. Do NOT add a
+// second specialization for AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>> here — it would
+// shadow the merge_results provider and make the outer abstract.
 // ============================================================================
 
 template <typename K>
@@ -566,6 +837,40 @@ class TP_MOE<AMX_K2_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_K2_MOE_TP<K>>
 #endif
 
     bool use_per_expert_ptrs = !config.gate_projs.empty();
+
+    // GGUF source: no raw int4 buffers to slice — each TP part dequantizes its
+    // own strips from the mmap'd GGUF blocks (see "online quant from gguf" in
+    // AMX_K2_MOE_TP::load_weights) and computes per-k-group scales itself.
+    if (config.gate_gguf != nullptr) {
+      if (config.quant_config.group_size == 0) {
+        throw std::runtime_error("K2 GGUF path requires quant_config.group_size");
+      }
+      // The K2 kernels apply scales at 16-lane granularity (make_kblock_abscale
+      // quarters); 32 is the validated production width (16 hits an A-side
+      // quantization gap, coarser widths are covered by the int16/fp32 bounds).
+      if (config.quant_config.group_size != 32) {
+        throw std::runtime_error("K2 GGUF path requires k_group_size == 32 (got " +
+                                 std::to_string(config.quant_config.group_size) + ")");
+      }
+      printf("From GGUF (K2 KGroup)\n");
+      for (auto i = 0; i < tp_count; i++) {
+        auto& tpc = tps[i]->config_;
+        tpc.gate_gguf = config.gate_gguf;
+        tpc.up_gguf = config.up_gguf;
+        tpc.down_gguf = config.down_gguf;
+        tpc.gate_gguf_stride = config.gate_gguf_stride;
+        tpc.up_gguf_stride = config.up_gguf_stride;
+        tpc.down_gguf_stride = config.down_gguf_stride;
+        tpc.gate_gguf_type = config.gate_gguf_type;
+        tpc.up_gguf_type = config.up_gguf_type;
+        tpc.down_gguf_type = config.down_gguf_type;
+        tpc.gguf_full_intermediate_size = config.gguf_full_intermediate_size;
+        tpc.quant_config.group_size = config.quant_config.group_size;
+      }
+      DO_TPS_LOAD_WEIGHTS(pool);
+      this->weights_loaded = true;
+      return;
+    }
 
     if (config.gate_projs.empty() && config.gate_scale == nullptr) {
       throw std::runtime_error("K2 MoE only supports Packed Int4 with KGroup Scale");

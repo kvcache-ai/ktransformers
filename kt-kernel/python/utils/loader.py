@@ -12,6 +12,7 @@ import os
 import numpy as np
 import torch
 from enum import IntEnum
+from typing import Optional
 from safetensors import safe_open
 from gguf.gguf_reader import GGUFReader
 
@@ -48,6 +49,40 @@ class GGMLQuantizationType(IntEnum):
     F64 = 28
     IQ1_M = 29
     BF16 = 30
+
+
+# (block_size, type_size_bytes) per GGML type — used for raw byte math.
+GGML_QUANT_SIZES = {
+    GGMLQuantizationType.F32: (1, 4),
+    GGMLQuantizationType.F16: (1, 2),
+    GGMLQuantizationType.BF16: (1, 2),
+    GGMLQuantizationType.Q4_0: (32, 2 + 16),
+    GGMLQuantizationType.Q4_1: (32, 2 + 2 + 16),
+    GGMLQuantizationType.Q5_0: (32, 2 + 4 + 16),
+    GGMLQuantizationType.Q5_1: (32, 2 + 2 + 4 + 16),
+    GGMLQuantizationType.Q8_0: (32, 2 + 32),
+    GGMLQuantizationType.Q8_1: (32, 4 + 4 + 32),
+    GGMLQuantizationType.Q2_K: (256, 2 + 2 + 256 // 16 + 256 // 4),
+    GGMLQuantizationType.Q3_K: (256, 2 + 256 // 4 + 256 // 8 + 12),
+    GGMLQuantizationType.Q4_K: (256, 2 + 2 + 256 // 2 + 12),
+    GGMLQuantizationType.Q5_K: (256, 2 + 2 + 256 // 2 + 256 // 8 + 12),
+    GGMLQuantizationType.Q6_K: (256, 2 + 256 // 2 + 256 // 4 + 256 // 16),
+    GGMLQuantizationType.Q8_K: (256, 4 + 256 + 256 // 8),
+    GGMLQuantizationType.IQ2_XXS: (256, 2 + 256 // 4),
+    GGMLQuantizationType.IQ2_XS: (256, 2 + 256 // 4 + 256 // 32),
+    GGMLQuantizationType.IQ3_XXS: (256, 2 + 256 // 4 + 256 // 8),
+    GGMLQuantizationType.IQ1_S: (256, 2 + 256 // 8 + 256 // 16),
+    GGMLQuantizationType.IQ4_NL: (32, 2 + 16),
+    GGMLQuantizationType.IQ3_S: (256, 2 + 256 // 4 + 256 // 8 + 256 // 32 + 4),
+    GGMLQuantizationType.IQ2_S: (256, 2 + 256 // 4 + 256 // 16),
+    GGMLQuantizationType.IQ4_XS: (256, 2 + 2 + 256 // 2 + 256 // 64),
+    GGMLQuantizationType.I8: (1, 1),
+    GGMLQuantizationType.I16: (1, 2),
+    GGMLQuantizationType.I32: (1, 4),
+    GGMLQuantizationType.I64: (1, 8),
+    GGMLQuantizationType.F64: (1, 8),
+    GGMLQuantizationType.IQ1_M: (256, 256 // 8 + 256 // 16 + 256 // 32),
+}
 
 
 def translate_name_to_gguf(name):
@@ -1024,38 +1059,6 @@ class GGUFLoader:
         n_elements = info["n_elements"]
         ggml_type = info["dtype"]
 
-        GGML_QUANT_SIZES = {
-            GGMLQuantizationType.F32: (1, 4),
-            GGMLQuantizationType.F16: (1, 2),
-            GGMLQuantizationType.BF16: (1, 2),
-            GGMLQuantizationType.Q4_0: (32, 2 + 16),
-            GGMLQuantizationType.Q4_1: (32, 2 + 2 + 16),
-            GGMLQuantizationType.Q5_0: (32, 2 + 4 + 16),
-            GGMLQuantizationType.Q5_1: (32, 2 + 2 + 4 + 16),
-            GGMLQuantizationType.Q8_0: (32, 2 + 32),
-            GGMLQuantizationType.Q8_1: (32, 4 + 4 + 32),
-            GGMLQuantizationType.Q2_K: (256, 2 + 2 + 256 // 16 + 256 // 4),
-            GGMLQuantizationType.Q3_K: (256, 2 + 256 // 4 + 256 // 8 + 12),
-            GGMLQuantizationType.Q4_K: (256, 2 + 2 + 256 // 2 + 12),
-            GGMLQuantizationType.Q5_K: (256, 2 + 2 + 256 // 2 + 256 // 8 + 12),
-            GGMLQuantizationType.Q6_K: (256, 2 + 256 // 2 + 256 // 4 + 256 // 16),
-            GGMLQuantizationType.Q8_K: (256, 4 + 256 + 256 // 8),
-            GGMLQuantizationType.IQ2_XXS: (256, 2 + 256 // 4),
-            GGMLQuantizationType.IQ2_XS: (256, 2 + 256 // 4 + 256 // 32),
-            GGMLQuantizationType.IQ3_XXS: (256, 2 + 256 // 4 + 256 // 8),
-            GGMLQuantizationType.IQ1_S: (256, 2 + 256 // 8 + 256 // 16),
-            GGMLQuantizationType.IQ4_NL: (32, 2 + 16),
-            GGMLQuantizationType.IQ3_S: (256, 2 + 256 // 4 + 256 // 8 + 256 // 32 + 4),
-            GGMLQuantizationType.IQ2_S: (256, 2 + 256 // 4 + 256 // 16),
-            GGMLQuantizationType.IQ4_XS: (256, 2 + 2 + 256 // 2 + 256 // 64),
-            GGMLQuantizationType.I8: (1, 1),
-            GGMLQuantizationType.I16: (1, 2),
-            GGMLQuantizationType.I32: (1, 4),
-            GGMLQuantizationType.I64: (1, 8),
-            GGMLQuantizationType.F64: (1, 8),
-            GGMLQuantizationType.IQ1_M: (256, 256 // 8 + 256 // 16 + 256 // 32),
-        }
-
         block_size, type_size = GGML_QUANT_SIZES[ggml_type]
         n_bytes = n_elements * type_size // block_size
 
@@ -1063,6 +1066,80 @@ class GGUFLoader:
         data = torch.from_numpy(np.frombuffer(data_bytes, dtype=np.uint8).copy())
 
         return data, ggml_type
+
+    def get_expert_gguf_source(self, name: str, expected_shape: Optional[list] = None):
+        """
+        Get a zero-copy pointer into the mmap'd GGUF data for an expert tensor.
+
+        Unlike get_undequanted_tensor_and_ggml_type (which copies the raw bytes
+        into a torch tensor), this returns the absolute address of expert 0's
+        row 0 plus the byte stride between consecutive experts, so the C++
+        side can dequantize 64-row strips straight from the mmap. The mmap is
+        kept alive by the GGUFLoader singleton for the wrapper's lifetime.
+
+        Args:
+            name: Tensor name (PyTorch format, translated to GGUF format)
+            expected_shape: Optional [E, ...] shape to assert against (catches
+                [E, I, H] vs [E, H, I] confusion at load time)
+
+        Returns:
+            dict with keys: ptr (int), stride (int, bytes per expert),
+            ggml_type (int, ggml_type enum value), shape (list), n_elements (int)
+        """
+        name = translate_name_to_gguf(name)
+
+        if name not in self.tensor_info:
+            raise KeyError(f"Tensor '{name}' not found in GGUF files")
+
+        info = self.tensor_info[name]
+        file_path = self.tensor_file_map[name]
+        mmap_data = self.file_data_map[file_path]
+
+        shape = info["shape"]
+        if expected_shape is not None:
+            if list(shape) != list(expected_shape):
+                raise ValueError(
+                    f"GGUF tensor '{name}' shape {shape} does not match expected {list(expected_shape)} "
+                    f"(ffn_gate_exps/ffn_up_exps are [E, I, H], ffn_down_exps is [E, H, I])"
+                )
+        if len(shape) != 3:
+            raise ValueError(f"GGUF tensor '{name}' is not a 3D expert tensor: shape={shape}")
+
+        n_elements = info["n_elements"]
+        ggml_type = info["dtype"]
+        block_size, type_size = GGML_QUANT_SIZES.get(ggml_type, (None, None))
+        if block_size is None:
+            raise NotImplementedError(f"GGML type {ggml_type.name} not in GGML_QUANT_SIZES")
+
+        per_expert_elements = n_elements // shape[0]
+        if n_elements % shape[0] != 0:
+            raise ValueError(f"GGUF tensor '{name}': n_elements {n_elements} not divisible by expert count {shape[0]}")
+        if per_expert_elements % block_size != 0:
+            raise ValueError(
+                f"GGUF tensor '{name}': per-expert elements {per_expert_elements} not a multiple of "
+                f"block size {block_size} — rows are not block-aligned"
+            )
+
+        # Row width k must be block-aligned too (rows run along the last dim).
+        row_k = shape[2]
+        if row_k % block_size != 0 and block_size > 1:
+            raise ValueError(
+                f"GGUF tensor '{name}': row width {row_k} not a multiple of block size {block_size}"
+            )
+
+        stride = per_expert_elements * type_size // block_size
+        base_ptr = int(mmap_data.__array_interface__["data"][0])
+        if base_ptr == 0:
+            raise RuntimeError(f"GGUF tensor '{name}': mmap returned null data pointer")
+        ptr = base_ptr + int(info["offset"])
+
+        return {
+            "ptr": ptr,
+            "stride": stride,
+            "ggml_type": int(ggml_type),
+            "shape": shape,
+            "n_elements": n_elements,
+        }
 
 
 class GPTQSafeTensorLoader(FP8SafeTensorLoader):

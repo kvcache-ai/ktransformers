@@ -14,6 +14,30 @@
 
 namespace amx {
 
+// ===========================================================================
+// BF16 dot fallback for hosts without AVX512-BF16 (Cascade Lake and older).
+//
+// With -mavx512bf16 (SPR+) the hardware BF16 dot is used. Otherwise emulate:
+// a __m512 holds 32 bf16, i.e. 16 lanes of two packed bf16 each. Shifting by
+// 16 turns one half of each lane into its fp32 representation (bf16 == the
+// high 16 bits of fp32), so a dpbf16ps (2 products per lane, fp32 accumulate)
+// becomes two fmadds. Same arithmetic as the AVX2 BF16 backend, 512-bit.
+//   lane_j = bf16[2j] | bf16[2j+1]<<16  ->  lo = lane<<16 = fp32(bf16[2j])
+//                                           hi = (lane>>16)<<16 = fp32(bf16[2j+1])
+#if defined(__AVX512BF16__)
+#define KT_DOT_BF16(acc, a, b) _mm512_dpbf16_ps(acc, a, b)
+#else
+static inline __m512 kt_dot_bf16_f32(__m512 acc, __m512i a, __m512i b) {
+  __m512 alo = _mm512_castsi512_ps(_mm512_slli_epi32(a, 16));
+  __m512 ahi = _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_srli_epi32(a, 16), 16));
+  __m512 blo = _mm512_castsi512_ps(_mm512_slli_epi32(b, 16));
+  __m512 bhi = _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_srli_epi32(b, 16), 16));
+  acc = _mm512_fmadd_ps(alo, blo, acc);
+  return _mm512_fmadd_ps(ahi, bhi, acc);
+}
+#define KT_DOT_BF16(acc, a, b) kt_dot_bf16_f32(acc, (__m512i)(a), (__m512i)(b))
+#endif
+
 struct GemmKernel224BF16 {
   using dt = ggml_bf16_t;
   using output_t = float;
@@ -144,8 +168,8 @@ struct GemmKernel224BF16 {
       for (int m_i = 0; m_i < m_block_end; m_i++) {
         for (int k_i = 0; k_i < 16; k_i++) {
           __m512bh ma = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i]);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma, b512[k_i]);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma, b512[16 + k_i]);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma, b512[k_i]);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma, b512[16 + k_i]);
         }
       }
     }
@@ -196,24 +220,24 @@ struct GemmKernel224BF16 {
           __m512bh ma3_1 = (__m512bh)_mm512_set1_epi32(a32[(m_i + 1) * 16 + k_i + 3]);
 
           // Process row 0
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0_0, b0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0_0, b0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1_0, b1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1_0, b1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2_0, b2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2_0, b2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3_0, b3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3_0, b3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0_0, b0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0_0, b0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1_0, b1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1_0, b1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2_0, b2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2_0, b2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3_0, b3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3_0, b3_hi);
 
           // Process row 1
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma0_1, b0_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma0_1, b0_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma1_1, b1_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma1_1, b1_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma2_1, b2_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma2_1, b2_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma3_1, b3_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma3_1, b3_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma0_1, b0_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma0_1, b0_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma1_1, b1_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma1_1, b1_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma2_1, b2_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma2_1, b2_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma3_1, b3_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma3_1, b3_hi);
         }
         // Handle remaining row
         for (; m_i < m_block_end; m_i++) {
@@ -222,14 +246,14 @@ struct GemmKernel224BF16 {
           __m512bh ma2 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 2]);
           __m512bh ma3 = (__m512bh)_mm512_set1_epi32(a32[m_i * 16 + k_i + 3]);
 
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, b0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, b0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, b1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, b1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2, b2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2, b2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3, b3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3, b3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0, b0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0, b0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1, b1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1, b1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2, b2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2, b2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3, b3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3, b3_hi);
         }
       }
     }
@@ -378,13 +402,13 @@ struct GemmKernel224FP8 {
           // Compute dpbf16 for all
           __m512bh bbf16_0_0 = (__m512bh)_mm512_unpacklo_epi8(b_lo_0, b_hi_0);
           __m512bh bbf16_1_0 = (__m512bh)_mm512_unpackhi_epi8(b_lo_0, b_hi_0);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, bbf16_0_0);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, bbf16_1_0);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0, bbf16_0_0);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0, bbf16_1_0);
 
           __m512bh bbf16_0_1 = (__m512bh)_mm512_unpacklo_epi8(b_lo_1, b_hi_1);
           __m512bh bbf16_1_1 = (__m512bh)_mm512_unpackhi_epi8(b_lo_1, b_hi_1);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, bbf16_0_1);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, bbf16_1_1);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1, bbf16_0_1);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1, bbf16_1_1);
         }
       }
     }
@@ -463,23 +487,23 @@ struct GemmKernel224FP8 {
           __m512bh ma3_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 3) * 2]);
 
           // Process row 0, then row 1 - sequential to avoid dependencies
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0_0, bbf16_0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0_0, bbf16_0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1_0, bbf16_1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1_0, bbf16_1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2_0, bbf16_2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2_0, bbf16_2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3_0, bbf16_3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3_0, bbf16_3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0_0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0_0, bbf16_0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1_0, bbf16_1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1_0, bbf16_1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2_0, bbf16_2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2_0, bbf16_2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3_0, bbf16_3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3_0, bbf16_3_hi);
 
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma0_1, bbf16_0_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma0_1, bbf16_0_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma1_1, bbf16_1_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma1_1, bbf16_1_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma2_1, bbf16_2_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma2_1, bbf16_2_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma3_1, bbf16_3_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma3_1, bbf16_3_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma0_1, bbf16_0_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma0_1, bbf16_0_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma1_1, bbf16_1_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma1_1, bbf16_1_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma2_1, bbf16_2_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma2_1, bbf16_2_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma3_1, bbf16_3_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma3_1, bbf16_3_hi);
         }
         // Handle remaining row
         for (; m_i < m_block_end; m_i++) {
@@ -488,14 +512,14 @@ struct GemmKernel224FP8 {
           __m512bh ma2 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 2) * 2]);
           __m512bh ma3 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 3) * 2]);
 
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, bbf16_0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, bbf16_0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, bbf16_1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, bbf16_1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2, bbf16_2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2, bbf16_2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3, bbf16_3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3, bbf16_3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0, bbf16_0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1, bbf16_1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1, bbf16_1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2, bbf16_2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2, bbf16_2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3, bbf16_3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3, bbf16_3_hi);
         }
       }
     }
@@ -767,23 +791,23 @@ struct GemmKernel224FP8PerChannel {
           __m512bh ma2_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 2) * 2]);
           __m512bh ma3_1 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[(m_i + 1) * K_STEP + (k_i + 3) * 2]);
 
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0_0, bbf16_0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0_0, bbf16_0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1_0, bbf16_1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1_0, bbf16_1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2_0, bbf16_2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2_0, bbf16_2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3_0, bbf16_3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3_0, bbf16_3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0_0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0_0, bbf16_0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1_0, bbf16_1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1_0, bbf16_1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2_0, bbf16_2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2_0, bbf16_2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3_0, bbf16_3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3_0, bbf16_3_hi);
 
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma0_1, bbf16_0_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma0_1, bbf16_0_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma1_1, bbf16_1_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma1_1, bbf16_1_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma2_1, bbf16_2_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma2_1, bbf16_2_hi);
-          c512[(m_i + 1) * 2] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2], ma3_1, bbf16_3_lo);
-          c512[(m_i + 1) * 2 + 1] = _mm512_dpbf16_ps(c512[(m_i + 1) * 2 + 1], ma3_1, bbf16_3_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma0_1, bbf16_0_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma0_1, bbf16_0_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma1_1, bbf16_1_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma1_1, bbf16_1_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma2_1, bbf16_2_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma2_1, bbf16_2_hi);
+          c512[(m_i + 1) * 2] = KT_DOT_BF16(c512[(m_i + 1) * 2], ma3_1, bbf16_3_lo);
+          c512[(m_i + 1) * 2 + 1] = KT_DOT_BF16(c512[(m_i + 1) * 2 + 1], ma3_1, bbf16_3_hi);
         }
         // Handle remaining row
         for (; m_i < m_block_end; m_i++) {
@@ -792,14 +816,14 @@ struct GemmKernel224FP8PerChannel {
           __m512bh ma2 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 2) * 2]);
           __m512bh ma3 = (__m512bh)_mm512_set1_epi32(*(int32_t*)&abf16[m_i * K_STEP + (k_i + 3) * 2]);
 
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma0, bbf16_0_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma0, bbf16_0_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma1, bbf16_1_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma1, bbf16_1_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma2, bbf16_2_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma2, bbf16_2_hi);
-          c512[m_i * 2] = _mm512_dpbf16_ps(c512[m_i * 2], ma3, bbf16_3_lo);
-          c512[m_i * 2 + 1] = _mm512_dpbf16_ps(c512[m_i * 2 + 1], ma3, bbf16_3_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma0, bbf16_0_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma0, bbf16_0_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma1, bbf16_1_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma1, bbf16_1_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma2, bbf16_2_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma2, bbf16_2_hi);
+          c512[m_i * 2] = KT_DOT_BF16(c512[m_i * 2], ma3, bbf16_3_lo);
+          c512[m_i * 2 + 1] = KT_DOT_BF16(c512[m_i * 2 + 1], ma3, bbf16_3_hi);
         }
       }
     }

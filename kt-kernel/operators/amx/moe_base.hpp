@@ -74,6 +74,14 @@ class AMX_MOE_BASE {
   void* down_ba_pool_ = nullptr;
   void* down_bc_pool_ = nullptr;
 
+  // aligned_alloc'd blocks owned by this MoE object (one per expert × gate/up/down).
+  // Must be freed in the destructor — BufferB itself only wraps the raw pointer
+  // and has no destructor, so a defaulted ~AMX_MOE_BASE() leaks ~3.6GB/layer
+  // (256 experts × 3 matrices × ~4.7MB for MiniMax 1536×3072 INT8), which
+  // accumulates to OOM after ~60 layers during GGUF→AMXINT8 conversion.
+  // Same pattern as AVX2_MOE_BASE::owned_aligned_allocs_.
+  std::vector<void*> owned_aligned_allocs_;
+
   GeneralMOEConfig config_;
   using input_t = ggml_bf16_t;
   using output_t = float;
@@ -119,13 +127,19 @@ class AMX_MOE_BASE {
 
       void* gate_bb_ptr =
           std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      if (!gate_bb_ptr) throw std::runtime_error("aligned_alloc failed for gate BufferB");
+      owned_aligned_allocs_.push_back(gate_bb_ptr);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
       void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      if (!up_bb_ptr) throw std::runtime_error("aligned_alloc failed for up BufferB");
+      owned_aligned_allocs_.push_back(up_bb_ptr);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
       void* down_bb_ptr =
           std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      if (!down_bb_ptr) throw std::runtime_error("aligned_alloc failed for down BufferB");
+      owned_aligned_allocs_.push_back(down_bb_ptr);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
     // TODO: need update to all *.hpp
@@ -147,7 +161,15 @@ class AMX_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AMX_MOE_BASE() = default;
+  virtual ~AMX_MOE_BASE() {
+    // Free the aligned_alloc'd BufferB weight blocks owned by this object.
+    // BufferB::b/d are raw pointers with no destructor, so without this the
+    // per-layer INT8/INT4 weights are leaked every time a MoE object is
+    // destroyed (e.g. per-layer GGUF→AMXINT8 conversion loop). This is what
+    // made RAM "eagerly fill up" around layer 60 of a 61-layer model.
+    for (void* p : owned_aligned_allocs_) std::free(p);
+    owned_aligned_allocs_.clear();
+  }
 
   void warm_up() {
     int qlen = config_.max_len;
@@ -162,12 +184,26 @@ class AMX_MOE_BASE {
     forward(qlen, config_.num_experts_per_tok, expert_ids.data(), weights.data(), input.data(), output.data());
   }
 
-  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
+  virtual void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
+                     void* output) {
     if (qlen > 1) {
       forward_prefill(qlen, k, expert_ids, weights, input, output);
     } else {
       forward_decode(k, expert_ids, weights, input, output);
     }
+  }
+
+  // Down activation fill, hookable by derived (AMXINT4_SMART routes the alt A).
+  // Virtual so the static-typed base pointer still dispatches. Default:
+  // int8-KGroup quantize of the gate output into the int4 kernel's A.
+  virtual void fill_down_a(int expert_idx, int m, ggml_bf16_t* src) {
+    down_ba_[expert_idx]->from_mat(m, src, 0, 1);
+  }
+
+  // Down accumulation release, hookable by derived (AMXINT4_SMART routes the
+  // alt C's to_mat). Default: reduce the int4 C into the bf16-paired output.
+  virtual void down_output(int expert_idx, int m, ggml_bf16_t* dst, int ith, int nth) {
+    down_bc_[expert_idx]->to_mat(m, dst, ith, nth);
   }
 
   template <typename... Args>
@@ -365,7 +401,7 @@ class AMX_MOE_BASE {
         activated_expert, nullptr,
         [this](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
+          this->fill_down_a(expert_idx, m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx]);
         },
         nullptr);
 
@@ -384,7 +420,7 @@ class AMX_MOE_BASE {
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
           derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
+          this->down_output(expert_idx, m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
 
@@ -572,7 +608,7 @@ class AMX_MOE_BASE {
         activated_expert, nullptr,
         [this, qlen](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(qlen, m_local_gate_output_ptr_[expert_idx], 0, 1);
+          this->fill_down_a(expert_idx, qlen, m_local_gate_output_ptr_[expert_idx]);
         },
         nullptr);
 
@@ -591,7 +627,7 @@ class AMX_MOE_BASE {
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
           derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
+          this->down_output(expert_idx, qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
 
@@ -717,9 +753,10 @@ class AMX_MOE_BASE {
 // ============================================================================
 
 template <class T, class Derived>
-class TP_MOE<AMX_MOE_BASE<T, Derived>> : public TP_MOE_Common<AMX_MOE_BASE<T, Derived>> {
+class TP_MOE<AMX_MOE_BASE<T, Derived>>
+    : public TP_MOE_Common<AMX_MOE_BASE<T, Derived>, Derived> {
  public:
-  using TP_MOE_Common<AMX_MOE_BASE<T, Derived>>::TP_MOE_Common;
+  using TP_MOE_Common<AMX_MOE_BASE<T, Derived>, Derived>::TP_MOE_Common;
 
   // Default load_weights implementation - can be overridden by derived TP_MOE classes
   void load_weights() override { throw std::runtime_error("Not Implemented"); }

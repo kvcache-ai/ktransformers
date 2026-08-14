@@ -1141,6 +1141,18 @@ struct GemmKernel224Int8 {
       _pack_block(src + (size_t)n_block_begin * k, k, n_block_begin, n_block_size);
     }
 
+    // GGUF strip path: src holds only rows [n_start, n_end) of the (per-NUMA)
+    // matrix — strip-relative, no n_block_begin offset. _pack_block indexes
+    // rows relative to src_data and columns via src_stride, so a strip whose
+    // row 0 == global row n_block_begin packs into the same global layout.
+    void from_mat_strip(ggml_bf16_t* src, int ith, int nth) {
+      auto [n_start, n_end] = split_range_n(n, ith, nth);
+      int n_block_begin = n_start;
+      int n_block_size = n_end - n_block_begin;
+      if (n_block_size <= 0) return;
+      _pack_block(src, k, n_block_begin, n_block_size);
+    }
+
     /**
      * @brief Pack a transposed matrix into INT8 BufferB format.
      *
@@ -3279,12 +3291,32 @@ struct GemmKernel224Int4SmallKGroup {
     return _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
   }
 
+  // Build the 64-lane activation*weight scale vector for one 64-column
+  // k-block with 16-lane quarters: quarter q covers columns [64*k_block + q*16,
+  // +16) and belongs to group (64*k_block + q*16)/k_group_size. Works for any
+  // k_group_size >= 16 (16/32/64/128...); for 32 the quarters pair up into the
+  // classic two-32-lane halves and match make_scale_pair bit-for-bit.
+  static inline __m512 make_kblock_abscale(int k_block, int k_group_size, const float* as, const float* bs) {
+    const int kb = k_block * 64;
+    const float g0 = as[(kb + 0) / k_group_size] * bs[(kb + 0) / k_group_size];
+    const float g1 = as[(kb + 16) / k_group_size] * bs[(kb + 16) / k_group_size];
+    const float g2 = as[(kb + 32) / k_group_size] * bs[(kb + 32) / k_group_size];
+    const float g3 = as[(kb + 48) / k_group_size] * bs[(kb + 48) / k_group_size];
+    return _mm512_set_ps(g3, g3, g3, g3, g2, g2, g2, g2, g1, g1, g1, g1, g0, g0, g0, g0);
+  }
+
   static inline __m512 dot_scaled_decoded_kblock(__m512i a512, __m512i w512, __m512 abscale) {
     __m512i mul = _mm512_setzero_si512();
     mul = _mm512_dpbssd_epi32(mul, a512, w512);
     return _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul));
   }
 
+  static inline __m512 dot_scaled_kblock(__m512i a512, __m256i b256, __m512 abscale) {
+    return dot_scaled_decoded_kblock(a512, compressed_int4_to_int8_avx512(b256), abscale);
+  }
+
+  // gs=32 convenience overload (two 32-lane halves); kept for call sites that
+  // assume the classic 32-wide K-group split.
   static inline __m512 dot_scaled_kblock(__m512i a512, __m256i b256, float scale0, float scale1) {
     return dot_scaled_decoded_kblock(a512, compressed_int4_to_int8_avx512(b256), make_scale_pair(scale0, scale1));
   }
@@ -3318,8 +3350,8 @@ struct GemmKernel224Int4SmallKGroup {
 
         __m512 sum = _mm512_setzero_ps();
         for (int k_block = 0; k_block < k / 64; k_block++) {
-          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block], as[k_block * 2] * bs[k_block * 2],
-                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block],
+                                                     make_kblock_abscale(k_block, k_group_size, as, bs)));
         }
 
         c[n_block_begin - n_start] = _mm512_reduce_add_ps(sum) / 16;
@@ -3381,14 +3413,10 @@ struct GemmKernel224Int4SmallKGroup {
 
 #define K2_INT4_ACCUM_ROW4(M_I)                                                                          \
   do {                                                                                                    \
-    const __m512 ab0 = make_scale_pair(as[M_I][k_block * 2] * bs[0][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[0][k_block * 2 + 1]);                 \
-    const __m512 ab1 = make_scale_pair(as[M_I][k_block * 2] * bs[1][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[1][k_block * 2 + 1]);                 \
-    const __m512 ab2 = make_scale_pair(as[M_I][k_block * 2] * bs[2][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[2][k_block * 2 + 1]);                 \
-    const __m512 ab3 = make_scale_pair(as[M_I][k_block * 2] * bs[3][k_block * 2],                         \
-                                       as[M_I][k_block * 2 + 1] * bs[3][k_block * 2 + 1]);                 \
+    const __m512 ab0 = make_kblock_abscale(k_block, k_group_size, as[M_I], bs[0]);                        \
+    const __m512 ab1 = make_kblock_abscale(k_block, k_group_size, as[M_I], bs[1]);                        \
+    const __m512 ab2 = make_kblock_abscale(k_block, k_group_size, as[M_I], bs[2]);                        \
+    const __m512 ab3 = make_kblock_abscale(k_block, k_group_size, as[M_I], bs[3]);                        \
     accumulate_row4(acc[M_I], a_rows[M_I][k_block], w[0], w[1], w[2], w[3], ab0, ab1, ab2, ab3);           \
   } while (0)
           K2_INT4_ACCUM_ROW4(0);
@@ -3447,9 +3475,7 @@ struct GemmKernel224Int4SmallKGroup {
               compressed_int4_to_int8_avx512(b_rows[3][k_block]),
           };
           for (int j = 0; j < NB; j++) {
-            __m256 abscale0 = _mm256_set1_ps(as[k_block * 2] * bs[j][k_block * 2]);
-            __m256 abscale1 = _mm256_set1_ps(as[k_block * 2 + 1] * bs[j][k_block * 2 + 1]);
-            __m512 abscale = _mm512_insertf32x8(_mm512_castps256_ps512(abscale0), abscale1, 1);
+            __m512 abscale = make_kblock_abscale(k_block, k_group_size, as, bs[j]);
             __m512i mul = _mm512_setzero_si512();
             mul = _mm512_dpbssd_epi32(mul, a512[k_block], w[j]);
             acc[j] = _mm512_add_ps(acc[j], _mm512_mul_ps(abscale, _mm512_cvtepi32_ps(mul)));
@@ -3462,8 +3488,8 @@ struct GemmKernel224Int4SmallKGroup {
         float* bs = (float*)bb->get_scale(n, n_pos, k, 0);
         __m512 sum = _mm512_setzero_ps();
         for (int k_block = 0; k_block < k_blocks; k_block++) {
-          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block], as[k_block * 2] * bs[k_block * 2],
-                                                     as[k_block * 2 + 1] * bs[k_block * 2 + 1]));
+          sum = _mm512_add_ps(sum, dot_scaled_kblock(a512[k_block], b256[k_block],
+                                                     make_kblock_abscale(k_block, k_group_size, as, bs)));
         }
         c[n_pos - n_start] = _mm512_reduce_add_ps(sum) / 16;
       }

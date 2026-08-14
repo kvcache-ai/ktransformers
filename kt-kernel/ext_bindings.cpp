@@ -52,6 +52,7 @@ static const bool _is_plain_ = false;
 #include "operators/amx/la/amx_kernels.hpp"
 #include "operators/amx/moe.hpp"
 #include "operators/amx/sft_moe.hpp"
+#include "operators/gguf/dequant.hpp"
 #include "operators/moe-sft-tp.hpp"
 #endif
 // AVX2 backends — always available on x86_64 (no AMX/AVX512 dependency)
@@ -80,6 +81,7 @@ static const bool _is_plain_ = false;
 #include "operators/llamafile/mla.hpp"
 #include "operators/llamafile/mlp.h"
 #include "operators/llamafile/moe.hpp"
+#include "operators/amx/fused-moe.hpp"
 #include "pybind11/pybind11.h"
 
 namespace py = pybind11;
@@ -749,6 +751,22 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       .DEF_PTR_PROPERTY(GeneralMOEConfig, up_proj)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, down_proj)
 
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_gguf)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, up_gguf)
+      .DEF_PTR_PROPERTY(GeneralMOEConfig, down_gguf)
+      .def_readwrite("gate_gguf_stride", &GeneralMOEConfig::gate_gguf_stride)
+      .def_readwrite("up_gguf_stride", &GeneralMOEConfig::up_gguf_stride)
+      .def_readwrite("down_gguf_stride", &GeneralMOEConfig::down_gguf_stride)
+      .def_readwrite("gate_gguf_type", &GeneralMOEConfig::gate_gguf_type)
+      .def_readwrite("up_gguf_type", &GeneralMOEConfig::up_gguf_type)
+      .def_readwrite("down_gguf_type", &GeneralMOEConfig::down_gguf_type)
+      .def_readwrite("gguf_full_intermediate_size", &GeneralMOEConfig::gguf_full_intermediate_size)
+      .def_readwrite("gate_precision", &GeneralMOEConfig::gate_precision)
+      .def_readwrite("up_precision", &GeneralMOEConfig::up_precision)
+      .def_readwrite("down_precision", &GeneralMOEConfig::down_precision)
+      .def_readwrite("upstream_precision", &GeneralMOEConfig::upstream_precision)
+      .def_readwrite("downstream_precision", &GeneralMOEConfig::downstream_precision)
+
       .DEF_PTR_PROPERTY(GeneralMOEConfig, gate_scale)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, up_scale)
       .DEF_PTR_PROPERTY(GeneralMOEConfig, down_scale)
@@ -800,6 +818,37 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
       ;
 
+  // GGUF strip dequantization (tests + diagnostics): dequantizes rows
+  // [row_begin, row_end) x cols [col_begin, col_end) of a row-major GGUF
+  // tensor of `k` columns into a BF16 torch tensor. Bit-exact with
+  // ggml to_float + ggml_fp32_to_bf16 for the supported fast types.
+  moe_module.def(
+      "dequant_rows_bf16",
+      [](uintptr_t src, int type, int64_t k, int64_t row_begin, int64_t row_end, int64_t col_begin, int64_t col_end) {
+        if (type < 0 || type >= GGML_TYPE_COUNT) {
+          PyErr_SetString(PyExc_ValueError, "Invalid ggml_type");
+          throw py::error_already_set();
+        }
+        py::module torch = py::module::import("torch");
+        py::list dims;
+        dims.append(row_end - row_begin);
+        dims.append(col_end - col_begin);
+        py::dict kwargs;
+        kwargs["dtype"] = torch.attr("bfloat16");
+        py::object tensor = torch.attr("empty")(dims, **kwargs);
+        uintptr_t out_ptr = tensor.attr("data_ptr")().cast<uintptr_t>();
+        try {
+          kt::gguf::dequant_rows_bf16(reinterpret_cast<const void*>(src), (ggml_type)type, k, row_begin, row_end,
+                                      col_begin, col_end, reinterpret_cast<ggml_bf16_t*>(out_ptr));
+        } catch (const std::exception& e) {
+          PyErr_SetString(PyExc_RuntimeError, e.what());
+          throw py::error_already_set();
+        }
+        return tensor;
+      },
+      py::arg("src"), py::arg("type"), py::arg("k"), py::arg("row_begin"), py::arg("row_end"), py::arg("col_begin"),
+      py::arg("col_end"));
+
   // MOESFTConfig - extends GeneralMOEConfig with LoRA support
   py::class_<MOESFTConfig, GeneralMOEConfig>(moe_module, "MOESFTConfig")
       .def(py::init<>())
@@ -824,6 +873,22 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 
   bind_moe_module<LLAMA_MOE_TP>(moe_module, "MOE");
 
+  moe_module.def("per_row_int4_err",
+                [](uintptr_t gate, int64_t gate_stride, int gate_type, uintptr_t up, int64_t up_stride, int up_type,
+                   uintptr_t down, int64_t down_stride, int down_type, int64_t full_I, int64_t H, int64_t sample_rows) {
+                  // Uses the load-time quantizer's own dequant (kt::gguf
+                  // dequant_rows_bf16) on a first-expert row sample: per-row
+                  // INT4 requant round-trip relative-RMS error per attribute.
+                  // full_I = full moe intermediate (down rows span full-I
+                  // columns). Used by AMXINT4_SMART to route a layer to the
+                  // fast per-row INT4 node or the INT8 node at load time.
+                  return py::make_tuple(
+                      kt::gguf::per_row_int4_roundtrip_err((const void*)gate, (ggml_type)gate_type, H, sample_rows),
+                      kt::gguf::per_row_int4_roundtrip_err((const void*)up, (ggml_type)up_type, H, sample_rows),
+                      kt::gguf::per_row_int4_roundtrip_err((const void*)down, (ggml_type)down_type, full_I,
+                                                           sample_rows));
+                });
+
 #if defined(__x86_64__) && defined(USE_AMX_AVX_KERNEL)
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int8>>(moe_module, "AMXInt8_MOE");
   bind_moe_module<AMX_MOE_TP<amx::GemmKernel224Int4>>(moe_module, "AMXInt4_MOE");
@@ -831,6 +896,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_AWQ_MOE_TP<amx::GemmKernel224Int4_1_LowKGroup>>(moe_module, "AMXInt4_1KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroup>>(moe_module, "AMXInt4_KGroup_MOE");
   bind_moe_module<AMX_K2_MOE_TP<amx::GemmKernel224Int4SmallKGroupBlocked>>(moe_module, "AMXInt4_KGroupBlocked_MOE");
+  bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int4, amx::GemmKernel224Int8>>(moe_module, "AMXFused4x8_MOE");
+  bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int8, amx::GemmKernel224BF16>>(moe_module, "AMXFused8x16_MOE");
+  bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int4, amx::GemmKernel224BF16>>(moe_module, "AMXFused4x16_MOE");
 #if defined(__AVX512F__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");
@@ -1029,6 +1097,11 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
            [](KVCache& kvcache, int cache_total_len) { kvcache.update_cache_total_len(cache_total_len); });
 
   auto utils = m.def_submodule("utils");
+
+  // Initialize ggml (fills ggml_table_f32_f16 etc.). Required before any
+  // ggml to_float/from_float work — including the GGUF dequant generic
+  // fallback — because on x86 GGML_FP16_TO_FP32 reads that global table.
+  utils.def("ggml_init", []() { init_ggml(); });
 
   // 注册转换函数
   utils.def("to_float", &to_float_ptr, "Convert tensor from any GGML type to float32", py::arg("input"),
