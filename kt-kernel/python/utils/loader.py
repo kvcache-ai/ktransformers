@@ -52,8 +52,6 @@ class GGMLQuantizationType(IntEnum):
 
 
 # (block_size, type_size) per GGML quant type — bytes per `block_size` elements.
-# Module-level so both the real loader and the dummy-weight fabrication path
-# (KT_DUMMY_CPU_WEIGHTS) share one source of truth.
 GGML_QUANT_SIZES = {
     GGMLQuantizationType.F32: (1, 4),
     GGMLQuantizationType.F16: (1, 2),
@@ -1077,34 +1075,6 @@ class GGUFLoader:
         # torch.frombuffer — the latter is redirected to NPU by torch_npu's transfer_to_npu.)
         data = torch.from_numpy(np.frombuffer(data_bytes, dtype=np.uint8))
 
-        return data, ggml_type
-
-    def get_dummy_tensor_and_ggml_type(self, name: str):
-        """Fabricate a zero buffer matching a tensor's on-disk byte layout.
-
-        Used only by the ``KT_DUMMY_CPU_WEIGHTS`` fast-iteration path: it reads
-        tensor metadata (shape / quant type / element count) from the cheap
-        ``tensor_info`` map and allocates a same-sized ``uint8`` buffer WITHOUT
-        touching the mmap'd weight bytes. This skips the multi-GB GGUF disk read
-        so graph capture can be iterated quickly; the returned values are
-        meaningless and must NOT be used for accuracy validation.
-
-        Returns ``(data, ggml_type)`` with the same contract as
-        ``get_undequanted_tensor_and_ggml_type``.
-        """
-        name = translate_name_to_gguf(name)
-
-        if name not in self.tensor_info:
-            raise KeyError(f"Tensor '{name}' not found in GGUF files")
-
-        info = self.tensor_info[name]
-        n_elements = info["n_elements"]
-        ggml_type = info["dtype"]
-
-        block_size, type_size = GGML_QUANT_SIZES[ggml_type]
-        n_bytes = n_elements * type_size // block_size
-
-        data = torch.zeros(n_bytes, dtype=torch.uint8)
         return data, ggml_type
 
 

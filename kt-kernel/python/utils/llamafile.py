@@ -188,28 +188,12 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
         base_key = f"blk.{self.layer_idx}"
 
-        # KT_DUMMY_CPU_WEIGHTS: skip the multi-GB GGUF disk read and fabricate
-        # same-layout zero buffers so the C++ MOE / load_weights_task path runs
-        # identically (buffer sizing, kernel selection, capture) but loads much
-        # faster. Debug-only: weights are meaningless — never use for accuracy.
-        if os.environ.get("KT_DUMMY_CPU_WEIGHTS"):
-            if self.layer_idx == 0:
-                print(
-                    "[LlamafileMoEWrapper] KT_DUMMY_CPU_WEIGHTS=1: fabricating zero "
-                    "CPU MoE weights (skips GGUF read). Outputs are MEANINGLESS — "
-                    "for capture iteration only, not accuracy validation.",
-                    flush=True,
-                )
-            _load_tensor = self.gguf_loader.get_dummy_tensor_and_ggml_type
-        else:
-            _load_tensor = self.gguf_loader.get_undequanted_tensor_and_ggml_type
+        # Load quantized tensors from GGUF
+        gate_data, gate_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_gate_exps.weight")
 
-        # Load quantized tensors from GGUF (or fabricate dummies)
-        gate_data, gate_type = _load_tensor(f"{base_key}.ffn_gate_exps.weight")
+        up_data, up_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_up_exps.weight")
 
-        up_data, up_type = _load_tensor(f"{base_key}.ffn_up_exps.weight")
-
-        down_data, down_type = _load_tensor(f"{base_key}.ffn_down_exps.weight")
+        down_data, down_type = self.gguf_loader.get_undequanted_tensor_and_ggml_type(f"{base_key}.ffn_down_exps.weight")
 
         # Keep tensors alive
         self.weights_to_keep = (gate_data, up_data, down_data)
