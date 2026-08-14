@@ -531,6 +531,8 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
       "Subscribe an aclrtStream with the global callback worker.");
   m.def("shutdown_ascend_callback_worker", &kt::ascend::shutdown_callback_worker,
         "Stop the ACL callback worker thread.");
+  m.def("is_ascend_callback_worker_running", &kt::ascend::callback_worker_running,
+        "True iff the ACL callback worker is started and dispatching reports.");
 #endif
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")

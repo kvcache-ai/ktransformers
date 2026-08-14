@@ -21,6 +21,10 @@ aclrtContext g_context = nullptr;
 std::thread g_worker;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_started{false};
+// Set by the worker thread once it has a usable ACL context and is about to
+// enter the aclrtProcessReport() loop.  aclrtSubscribeReport() must not run
+// before that, otherwise the very first callbacks can be dropped.
+std::atomic<bool> g_worker_ready{false};
 uint64_t g_worker_thread_id = 0;
 
 void worker_main(aclrtContext ctx) {
@@ -32,9 +36,21 @@ void worker_main(aclrtContext ctx) {
                    static_cast<int>(err));
     }
   }
+  g_worker_ready.store(true, std::memory_order_release);
 
   while (!g_stop.load(std::memory_order_acquire)) {
     (void)aclrtProcessReport(kProcessReportTimeoutMs);
+  }
+
+  // Drain callbacks that were enqueued between the last loop iteration and the
+  // stop request; without this they are silently dropped and their waiters hang.
+  (void)aclrtProcessReport(kProcessReportTimeoutMs);
+
+  // ACL requires the *subscribing* thread to unsubscribe.  Doing it from
+  // shutdown_callback_worker() after join() would target a dead thread id and
+  // silently do nothing.
+  for (aclrtStream stream : g_subscribed_streams) {
+    (void)aclrtUnSubscribeReport(g_worker_thread_id, stream);
   }
 }
 
@@ -44,9 +60,15 @@ void start_worker_locked(aclrtContext ctx) {
   }
   g_context = ctx;
   g_stop.store(false, std::memory_order_release);
+  g_worker_ready.store(false, std::memory_order_release);
   g_worker = std::thread([ctx]() { worker_main(ctx); });
   g_worker_thread_id = static_cast<uint64_t>(g_worker.native_handle());
   g_started.store(true, std::memory_order_release);
+
+  // Barrier: no aclrtSubscribeReport() before the worker is in its report loop.
+  while (!g_worker_ready.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
 
   for (aclrtStream stream : g_subscribed_streams) {
     aclError err = aclrtSubscribeReport(g_worker_thread_id, stream);
@@ -112,14 +134,18 @@ void shutdown_callback_worker() {
   }
   g_stop.store(true, std::memory_order_release);
   if (g_worker.joinable()) {
+    // worker_main() drains the report queue and unsubscribes before returning.
     g_worker.join();
-  }
-  for (aclrtStream stream : g_subscribed_streams) {
-    (void)aclrtUnSubscribeReport(g_worker_thread_id, stream);
   }
   g_subscribed_streams.clear();
   g_started.store(false, std::memory_order_release);
+  g_worker_ready.store(false, std::memory_order_release);
   g_worker_thread_id = 0;
+}
+
+bool callback_worker_running() {
+  std::lock_guard<std::mutex> lock(g_mu);
+  return g_started.load(std::memory_order_acquire) && g_worker_ready.load(std::memory_order_acquire);
 }
 
 }  // namespace kt::ascend

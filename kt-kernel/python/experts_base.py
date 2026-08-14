@@ -12,10 +12,13 @@ from __future__ import annotations
 import torch
 from typing import Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
-import os
 import ctypes
+import logging
+import os
 
 from kt_kernel import kt_kernel_ext
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # NPU stream-callback bypass.
@@ -39,10 +42,43 @@ from kt_kernel import kt_kernel_ext
 # -----------------------------------------------------------------------------
 
 
+# Memoized result of the C++ worker probe. None = not probed yet.
+_ascend_worker_degraded: Optional[bool] = None
+
+
+def _ascend_callback_worker_running() -> Optional[bool]:
+    """Probe the C++ callback worker; None when the build predates the probe."""
+    probe = getattr(kt_kernel_ext, "is_ascend_callback_worker_running", None)
+    if probe is None:
+        return None
+    try:
+        return bool(probe())
+    except Exception:
+        return None
+
+
+def _ascend_callback_worker_degraded() -> bool:
+    """True iff the ACL callback worker is known NOT to be dispatching reports.
+
+    Probed once and memoized: the worker's state only changes at start-up and at
+    interpreter shutdown, and this sits on the per-layer forward path. Builds
+    without the probe are treated as healthy (backwards compatible).
+    """
+    global _ascend_worker_degraded
+    if _ascend_worker_degraded is None:
+        _ascend_worker_degraded = _ascend_callback_worker_running() is False
+    return _ascend_worker_degraded
+
+
 def _should_bypass_stream_callback(device: torch.device) -> bool:
     """Return True iff we must use the synchronous submit/sync path."""
     if os.environ.get("KT_FORCE_SYNC_SUBMIT", "") == "1":
         return True
+    if device.type == "npu" and not _uses_external_npu_report_subscriber():
+        # Without a dispatcher thread, aclrtLaunchCallback tasks never fire and
+        # submit_with_cuda_stream would hang forever. Degrade to sync instead.
+        if _ascend_callback_worker_degraded():
+            return True
     return False
 
 
@@ -60,6 +96,14 @@ def _ensure_ascend_callback_worker() -> None:
         return
     kt_kernel_ext.init_ascend_callback_worker()
     _ensure_ascend_callback_worker._done = True  # type: ignore[attr-defined]
+
+    global _ascend_worker_degraded
+    _ascend_worker_degraded = _ascend_callback_worker_running() is False
+    if _ascend_worker_degraded:
+        logger.warning(
+            "kt-kernel ACL callback worker failed to start (no ACL context?); "
+            "falling back to the synchronous CPU-MoE submit/sync path."
+        )
     if hasattr(kt_kernel_ext, "shutdown_ascend_callback_worker"):
         import atexit
 
@@ -714,11 +758,19 @@ class BaseMoEWrapper(_MoEBase, ABC):
         bsz_slot_tensor = bsz_tensor_cpu[current_slot]
 
         bypass = _should_bypass_stream_callback(hidden_states.device)
-        # Both paths now submit the CPU-MoE synchronously on this host thread, which
-        # reads input_tensor_cpu immediately -> the input D2H (queued async on the
-        # stream by copy_inputs_to_cpu_buffers) MUST be finished first, else the CPU
-        # MoE reads a half-copied input. Wait unconditionally (bypass already did).
-        _wait_device(hidden_states.device)
+        # NPU only: submit the CPU-MoE synchronously on this host thread.
+        # ``submit_with_cuda_stream`` enqueues it via an ACL host callback whose
+        # firing is not host-observable (NO_BLOCK) -> a later host-side drain can
+        # race ahead of it (empty queue -> stale output_cpu read by the H2D;
+        # nondeterministic on heavy prefill). The synchronous submit still runs on
+        # the WorkerPool and overlaps the device experts queued after it.
+        # CUDA keeps the upstream async submit_with_cuda_stream path unchanged.
+        sync_submit = bypass or hidden_states.device.type == "npu"
+        if sync_submit:
+            # The synchronous submit reads input_tensor_cpu immediately -> the input
+            # D2H queued async on the stream by _prepare_forward_cpu_buffers MUST be
+            # finished first, else the CPU MoE reads a half-copied input.
+            _wait_device(hidden_states.device)
 
         incremental = BaseMoEWrapper._layer_has_pending_deferred.get(self.layer_idx - 1, False)
         immediate_task = self.moe.forward_task(
@@ -730,29 +782,25 @@ class BaseMoEWrapper(_MoEBase, ABC):
             output_cpu[current_slot].data_ptr(),
             incremental,
         )
-        if bypass:
-            self.cpu_infer.submit(immediate_task)
-        else:
-            # Correct + fast async path. ``submit_with_cuda_stream`` enqueues the
-            # CPU-MoE via an ACL host callback whose firing is not host-observable
-            # (NO_BLOCK) -> a later host-side drain can race ahead of it (empty
-            # queue -> stale output_cpu read by the H2D; nondeterministic on heavy
-            # prefill). Enqueue synchronously on this host thread instead (work is
-            # guaranteed submitted; it still runs on the WorkerPool and overlaps the
-            # GPU experts queued after). Keep subscribe_ascend_stream — that stream
-            # registration is what keeps decode's host-callback dispatch fast; the
-            # async submit itself is not required for it.
+        if sync_submit:
+            # Keep subscribe_ascend_stream — that stream registration is what keeps
+            # decode's host-callback dispatch (sync_forward) fast; the async submit
+            # itself is not required for it.
             if (
-                hidden_states.device.type == "npu"
+                not bypass
+                and hidden_states.device.type == "npu"
                 and not _uses_external_npu_report_subscriber()
                 and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
             ):
                 kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
             self.cpu_infer.submit(immediate_task)
+        else:
+            self.cpu_infer.submit_with_cuda_stream(cuda_stream, immediate_task)
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         if deferred_ids is not None:
-            _wait_device(hidden_states.device)
+            if sync_submit:
+                _wait_device(hidden_states.device)
             deferred_task = self.moe.forward_task(
                 bsz_slot_tensor.data_ptr(),
                 deferred_experts_ids_cpu[current_slot].size(-1),
@@ -762,16 +810,10 @@ class BaseMoEWrapper(_MoEBase, ABC):
                 output_cpu[next_slot].data_ptr(),
                 False,
             )
-            if bypass:
+            if sync_submit:
                 self.cpu_infer.submit(deferred_task)
             else:
-                if (
-                    hidden_states.device.type == "npu"
-                    and not _uses_external_npu_report_subscriber()
-                    and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
-                ):
-                    kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
-                self.cpu_infer.submit(deferred_task)
+                self.cpu_infer.submit_with_cuda_stream(cuda_stream, deferred_task)
             BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = True
 
     def copy_forward_output_to_device(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -834,26 +876,6 @@ class BaseMoEWrapper(_MoEBase, ABC):
             else:
                 self.cpu_infer.sync_with_cuda_stream(cuda_stream, allow_pending)
 
-        if os.environ.get("KT_DEBUG_MOE_OUT", "") == "1":
-            oc = output_cpu[current_slot]
-            ic = _input_tensor_cpu[current_slot]
-            wc = _weights_cpu[current_slot]
-            ec = _immediate_experts_ids_cpu[current_slot]
-            finite_oc = torch.isfinite(oc).all().item()
-            finite_ic = torch.isfinite(ic).all().item()
-            finite_wc = torch.isfinite(wc).all().item()
-            nan_count = int(torch.isnan(oc).sum().item())
-            inf_count = int(torch.isinf(oc).sum().item())
-            print(
-                f"[KT_DEBUG] layer={self.layer_idx} slot={current_slot} bypass={bypass} "
-                f"output_cpu: finite={finite_oc} nan={nan_count}/{oc.numel()} inf={inf_count} "
-                f"first16={oc.float().flatten()[:16].tolist()} | "
-                f"input_cpu.finite={finite_ic} first8={ic.float().flatten()[:8].tolist()} | "
-                f"weights_cpu.finite={finite_wc} first={wc.flatten()[:8].tolist()} | "
-                f"expert_ids={ec.flatten()[:12].tolist()}",
-                flush=True,
-            )
-
         return self.copy_forward_output_to_device(hidden_states)
 
     def forward(
@@ -915,3 +937,4 @@ class BaseMoEWrapper(_MoEBase, ABC):
         KExpertsCPUBuffer.capture_buffers.clear()
         KExpertsCPUBuffer.temp_bs = 0
         KExpertsCPUBuffer.temp_buffer = tuple()
+

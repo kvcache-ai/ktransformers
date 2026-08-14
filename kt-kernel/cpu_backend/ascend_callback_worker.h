@@ -24,6 +24,11 @@ void ensure_stream_subscribed(aclrtStream stream);
 // Optional shutdown (process exit).
 void shutdown_callback_worker();
 
+// True iff the worker thread was started and has entered its aclrtProcessReport
+// loop.  When this is false, stream callbacks are never dispatched and callers
+// must fall back to the synchronous submit/sync path.
+bool callback_worker_running();
+
 }  // namespace kt::ascend
 
 #endif  // KTRANSFORMERS_USE_ASCEND_NPU
