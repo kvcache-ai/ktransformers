@@ -323,6 +323,8 @@ AMXINT8/AMXINT4 can also consume a GGUF directory directly — no `convert_cpu_w
   - `KT_GGUF_CACHE=refresh` — force a rebuild.
 - Accuracy note: this is double quantization (Q4_K → BF16 → INT8 per-row). The error is dominated by the original GGUF quantization; the INT8 step over already-4-bit values adds little. The goal is AMX throughput on an existing GGUF, not better quality than the GGUF.
 
+**`AMXINT4_SMART`** routes each layer's storage by its original quantization (AMXINT4 / AMXINT8 / BF16) so mixed-precision GGUFs never pay a second 4-bit requant on their 5-8-bit tensors. See [docs/amxint4-smart.md](docs/amxint4-smart.md).
+
 #### 3. Launch SGLang Server
 
 Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:

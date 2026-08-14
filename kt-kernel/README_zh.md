@@ -176,6 +176,8 @@ AMXINT8/AMXINT4 也可以直接消费 GGUF 目录，无需 `convert_cpu_weights.
   - `KT_GGUF_CACHE=refresh` — 强制重建缓存。
 - 精度说明：这是双重量化（Q4_K → BF16 → 每行 INT8）。误差主要来自原始 GGUF 量化，对已量化的 4-bit 值再做 INT8 增加的误差很小。目标是让现有 GGUF 在 AMX 上获得吞吐，而不是比 GGUF 本身更好。
 
+**`AMXINT4_SMART`** 按每层的原始量化类型路由存储精度（AMXINT4 / AMXINT8 / BF16），使混合精度 GGUF 的 5-8-bit 张量不再承受第二次 4-bit 重量化。详见 [docs/amxint4-smart.md](docs/amxint4-smart.md)。
+
 #### 3. 启动 SGLang Server
 
 在通常的 SGLang 启动参数基础上，增加如下 KT-Kernel 相关参数，以启用 CPU-GPU 异构推理：
