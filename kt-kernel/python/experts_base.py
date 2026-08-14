@@ -17,7 +17,6 @@ import ctypes
 
 from kt_kernel import kt_kernel_ext
 
-
 # -----------------------------------------------------------------------------
 # NPU stream-callback bypass.
 #
@@ -26,17 +25,17 @@ from kt_kernel import kt_kernel_ext
 # requires a dedicated subscriber thread (registered via `aclrtSubscribeReport`
 # and continuously running `aclrtProcessReport`) to dispatch those callbacks.
 #
-# kt-kernel does NOT currently start such a worker (see
-# `cpu_backend/vendors/ascend_npu.h` — marked TODO Phase 3). Without a
-# subscriber, queued callbacks **silently never fire**, so the CPU forward
-# task never runs and `output_cpu` stays all-zero. `sync_with_cuda_stream`
-# likewise schedules its sync_ via the same callback queue and silently
-# completes without actually syncing anything.
+# Without such a subscriber, queued callbacks **silently never fire**, so the
+# CPU forward task never runs and `output_cpu` stays all-zero.
+# `sync_with_cuda_stream` likewise schedules its sync_ via the same callback
+# queue and silently completes without actually syncing anything.
 #
-# When the ACL callback worker is active (ascend_callback_worker.cpp, started
-# via ``init_ascend_callback_worker``), ``submit_with_cuda_stream`` callbacks
-# are dispatched and CPU/NPU overlap works.  Set ``KT_FORCE_SYNC_SUBMIT=1`` to
-# force the legacy synchronous path for debugging.
+# kt-kernel therefore starts the subscriber itself (see
+# `cpu_backend/ascend_callback_worker.cpp`, entered via
+# ``init_ascend_callback_worker``); ``subscribe_ascend_stream`` registers each
+# stream with it, after which ``submit_with_cuda_stream`` callbacks are
+# dispatched and CPU/NPU overlap works.  Set ``KT_FORCE_SYNC_SUBMIT=1`` to fall
+# back to the synchronous submit/sync path for debugging.
 # -----------------------------------------------------------------------------
 
 
@@ -282,8 +281,7 @@ class _MoEBase:
             if numa_nodes is not None:
                 if len(numa_nodes) != threadpool_count:
                     raise ValueError(
-                        f"numa_nodes length ({len(numa_nodes)}) must match "
-                        f"threadpool_count ({threadpool_count})"
+                        f"numa_nodes length ({len(numa_nodes)}) must match " f"threadpool_count ({threadpool_count})"
                     )
                 subpool_numa_map = list(numa_nodes)
             else:
@@ -524,9 +522,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
         topk_ids_long = topk_ids.to(torch.long)
         if self.max_deferred_experts_per_token > 0:
             protected_k = self.num_experts_per_tok - self.max_deferred_experts_per_token
-            immediate_ids, deferred_ids = self.select_deferred_experts(
-                topk_ids_long, topk_weights, protected_k
-            )
+            immediate_ids, deferred_ids = self.select_deferred_experts(topk_ids_long, topk_weights, protected_k)
         else:
             immediate_ids = topk_ids_long
             deferred_ids = None
@@ -605,17 +601,14 @@ class BaseMoEWrapper(_MoEBase, ABC):
             if (
                 hidden_states.device.type == "npu"
                 and not _uses_external_npu_report_subscriber()
-                and hasattr(
-                kt_kernel_ext, "subscribe_ascend_stream"
-                )
+                and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
             ):
                 kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
             self.cpu_infer.submit(immediate_task)
 
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         has_deferred = (
-            self.max_deferred_experts_per_token > 0
-            and (deferred_experts_ids_cpu[current_slot] >= 0).any().item()
+            self.max_deferred_experts_per_token > 0 and (deferred_experts_ids_cpu[current_slot] >= 0).any().item()
         )
         if has_deferred:
             deferred_task = self.moe.forward_task(
@@ -673,8 +666,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
         self.cpu_infer.submit(immediate_task)
         BaseMoEWrapper._layer_has_pending_deferred[self.layer_idx] = False
         has_deferred = (
-            self.max_deferred_experts_per_token > 0
-            and (deferred_experts_ids_cpu[current_slot] >= 0).any().item()
+            self.max_deferred_experts_per_token > 0 and (deferred_experts_ids_cpu[current_slot] >= 0).any().item()
         )
         if has_deferred:
             deferred_task = self.moe.forward_task(
@@ -707,8 +699,8 @@ class BaseMoEWrapper(_MoEBase, ABC):
             topk_weights: Top-k expert weights [batch_size, num_experts_per_tok]
             cuda_stream: CUDA stream for synchronization
         """
-        _immediate_ids, deferred_ids, _buffers, current_slot, next_slot = (
-            self._prepare_forward_cpu_buffers(hidden_states, topk_ids, topk_weights)
+        _immediate_ids, deferred_ids, _buffers, current_slot, next_slot = self._prepare_forward_cpu_buffers(
+            hidden_states, topk_ids, topk_weights
         )
         (
             input_tensor_cpu,
@@ -753,9 +745,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
             if (
                 hidden_states.device.type == "npu"
                 and not _uses_external_npu_report_subscriber()
-                and hasattr(
-                kt_kernel_ext, "subscribe_ascend_stream"
-                )
+                and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
             ):
                 kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
             self.cpu_infer.submit(immediate_task)
@@ -778,9 +768,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
                 if (
                     hidden_states.device.type == "npu"
                     and not _uses_external_npu_report_subscriber()
-                    and hasattr(
-                    kt_kernel_ext, "subscribe_ascend_stream"
-                    )
+                    and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
                 ):
                     kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
                 self.cpu_infer.submit(deferred_task)
@@ -833,9 +821,7 @@ class BaseMoEWrapper(_MoEBase, ABC):
             if (
                 hidden_states.device.type == "npu"
                 and not _uses_external_npu_report_subscriber()
-                and hasattr(
-                kt_kernel_ext, "subscribe_ascend_stream"
-                )
+                and hasattr(kt_kernel_ext, "subscribe_ascend_stream")
             ):
                 kt_kernel_ext.subscribe_ascend_stream(int(cuda_stream))
             if hidden_states.device.type == "npu":

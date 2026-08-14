@@ -19,8 +19,8 @@
 //   * The submit_with_cuda_stream / sync_with_cuda_stream path therefore
 //     requires the host process to also spin up a callback worker (see
 //     cpu_backend/ascend_callback_worker.cpp). The synchronous CPUInfer::submit()
-//     / sync() path works without it
-//     and is what the Phase 1 PoC uses.
+//     / sync() path works without it and is used as the fallback when no
+//     callback worker is available.
 // ============================================================================
 
 #include <acl/acl_base.h>

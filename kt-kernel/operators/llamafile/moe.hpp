@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <vector>
 
@@ -26,16 +27,30 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// KT_MOE_PHASE_TIMING=1 — Session D Phase-0 测量：decode (forward_one) 三段
-// (input量化 / gate+up job / down job) + TP 层 merge 的累计耗时，定位固定开销 F
-// 的构成。env 关闭时仅一次 getenv + 分支，零扰动。每 tp 每 4300 次调用
-// (=43层×100 token) 打一行均值到 stderr。
-// 线程安全性：同一 tp_part_idx 的 forward_one 在 decode 流内串行（逐层），
-// 不同 tp 并行但写不同槽位 → 无需原子。
+// KT_MOE_PHASE_TIMING=1 accumulates the per-stage cost of decode
+// (forward_one): input quantization, the gate+up job, the down job, and the
+// TP-level merge.  It is meant for locating the fixed per-call overhead.
+// When the env var is unset the cost is a single getenv plus a branch, so the
+// instrumentation is non-perturbing.  One averaged line is printed to stderr
+// every kt_phase_report_interval() calls per TP partition.
+// Thread safety: forward_one for a given tp_part_idx runs serially within the
+// decode stream (layer by layer), and different TP partitions write to
+// different slots, so no atomics are required.
 // ---------------------------------------------------------------------------
 static inline bool kt_phase_timing_on() {
   static const bool on = std::getenv("KT_MOE_PHASE_TIMING") != nullptr;
   return on;
+}
+// How many accumulated calls to average over before printing one report line.
+// Override with KT_MOE_PHASE_TIMING_INTERVAL; the default is only a convenient
+// order of magnitude, not a model-specific constant.
+static inline uint64_t kt_phase_report_interval() {
+  static const uint64_t interval = [] {
+    const char* raw = std::getenv("KT_MOE_PHASE_TIMING_INTERVAL");
+    const uint64_t parsed = raw ? std::strtoull(raw, nullptr, 10) : 0;
+    return parsed ? parsed : 4096;
+  }();
+  return interval;
 }
 struct KtPhaseAcc {
   uint64_t calls = 0;
@@ -54,25 +69,27 @@ inline void debug_quant(void* input, ggml_type type) {
 
 // ---------------------------------------------------------------------------
 // kt_effective_vec_dot_type
-//   解决 aarch64 (Kunpeng K920 / Cortex-A76, **no SVE / no i8mm**) 上
-//   kt-kernel llamafile sgemm 的 BF16/Q8_0 路径不健全问题：
+//   Works around the incomplete BF16 path of the llamafile sgemm on aarch64
+//   cores without SVE and without i8mm (armv8.2-a + fp16 + dotprod only):
 //
-//   * BF16 weight + BF16 input：tinyblas_cpu_sgemm.inc ARM_NEON path 要求
-//     `Btype == GGML_TYPE_F32`（line 209: `if (Btype != F32) return NOT_SUPPORTED;`），
-//     但 ggml type_traits 对 BF16 给出 `vec_dot_type = BF16`，
-//     上层 forward_one/forward_many 默认把 BF16 input 喂给 sgemm
-//     → llamafile_sgemm 返回 false → `throw "llamafile not supported"`。
+//   * BF16 weight with BF16 input: the ARM_NEON path in
+//     tinyblas_cpu_sgemm.inc requires `Btype == GGML_TYPE_F32` and otherwise
+//     returns NOT_SUPPORTED, but the ggml type traits report
+//     `vec_dot_type = BF16` for BF16.  forward_one/forward_many therefore feed
+//     a BF16 input to the sgemm, llamafile_sgemm returns false and the caller
+//     throws "llamafile not supported".
 //
-//   * 解法：在 aarch64-without-SVE 平台上，把 BF16 weight 的有效 vec_dot_type
-//     声明为 F32。input 路径会因此走 to_float(bf16 → fp32) + memcpy(F32→F32 buffer)
-//     （`from_float()` 已在 conversion.h 对 F32 short-circuit 成 memcpy），
-//     buffer 大小自动按 fp32 (4 bytes/elem) 分配 —— 比原 BF16 (2 bytes/elem)
-//     大一倍，足够装 fp32 数据。sgemm 则走 ARM_NEON 已支持的
-//     `Atype=BF16, Btype=F32, Ctype=F32` 路径（tinyblas_cpu_sgemm.inc line 125-133）。
+//   * Fix: on aarch64 without SVE, declare the effective vec_dot_type of a
+//     BF16 weight to be F32.  The input path then runs to_float(bf16 -> fp32)
+//     followed by a memcpy into the F32 buffer (from_float() already
+//     short-circuits to a memcpy for F32 in conversion.h), and the buffer is
+//     sized for fp32 (4 bytes/elem), i.e. twice the BF16 size, which is enough
+//     to hold the fp32 data.  The sgemm then takes the
+//     `Atype=BF16, Btype=F32, Ctype=F32` path that ARM_NEON already supports.
 //
-//   * SVE 机器走原 BF16-BF16 path（vec_dot_type 不改），不打扰原性能优化。
-//   * 其他 weight type（Q8_0/Q4_K/…）走原 vec_dot_type，不动；
-//     若 Q8_0 NaN 仍存在，单独在 sgemm 内部修复，而非这里。
+//   * Cores with SVE keep the original BF16-BF16 path so their existing
+//     performance tuning is untouched.
+//   * Other weight types (Q8_0, Q4_K, ...) keep their original vec_dot_type.
 // ---------------------------------------------------------------------------
 static inline ggml_type kt_effective_vec_dot_type(ggml_type weight_type) {
 #if defined(__aarch64__) && !defined(__ARM_FEATURE_SVE)
@@ -547,7 +564,7 @@ class LLAMA_MOE_TP {
       acc.quant_ns += ns(kt_pt0, kt_pt1);
       acc.gateup_ns += ns(kt_pt1, kt_pt2);
       acc.down_ns += ns(kt_pt2, kt_pt3);
-      if (acc.calls % 4300 == 0) {
+      if (acc.calls % kt_phase_report_interval() == 0) {
         fprintf(stderr, "[KT_PHASE tp%d] n=%llu avg/layer-call: quant=%.1fus gateup=%.1fus down=%.1fus\n",
                 tp_part_idx, (unsigned long long)acc.calls, acc.quant_ns / 1e3 / acc.calls,
                 acc.gateup_ns / 1e3 / acc.calls, acc.down_ns / 1e3 / acc.calls);
@@ -893,8 +910,9 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
     if (kt_pt) kt_m0 = std::chrono::high_resolution_clock::now();
     // Tile over (token, hidden-chunk) so decode (qlen=1) still spreads across the
     // whole pool instead of running the 8-NUMA reduce + from_float on a single core.
-    // F-opt Phase 1 (Session D): merge was ~98us/layer single-core at qlen=1
-    // (~11% of cpu_moe_wall). Only chunk when hidden_type is unblocked (BF16/F16/F32,
+    // Before this change the merge ran single-core and was a significant part
+    // of the fixed per-layer cost at qlen=1.
+    // Only chunk when hidden_type is unblocked (BF16/F16/F32,
     // blck==1) so an arbitrary element boundary is always valid; block-quant hidden
     // types fall back to per-token (num_chunks=1), preserving the original behavior.
     const int H = config.hidden_size;
@@ -931,11 +949,11 @@ class TP_MOE<LLAMA_MOE_TP> : public TP_MOE_Common<LLAMA_MOE_TP> {
         nullptr);
     if (kt_pt) {
       auto kt_m1 = std::chrono::high_resolution_clock::now();
-      // 槽位 15 专用于 merge（forward_one 只用 tp 0..7）
+      // Slot 15 is reserved for the merge; forward_one only uses slots 0..7.
       auto& acc = g_kt_phase_acc[15];
       acc.calls++;
       acc.quant_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(kt_m1 - kt_m0).count();
-      if (acc.calls % 4300 == 0) {
+      if (acc.calls % kt_phase_report_interval() == 0) {
         fprintf(stderr, "[KT_PHASE merge] n=%llu avg/layer-call: merge=%.1fus (qlen=%d)\n",
                 (unsigned long long)acc.calls, acc.quant_ns / 1e3 / acc.calls, qlen);
       }

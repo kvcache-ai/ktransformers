@@ -28,7 +28,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
 
     GGUFLoader is cached **per resolved weight path** (file or directory): multiple MoE layers
     that share one merged GGUF reuse a single mmap; **per-layer split GGUFs** each get their own
-    loader (Phase 2-B).
+    loader.
     """
 
     _gguf_loaders_by_path: Dict[str, GGUFLoader] = {}
