@@ -471,6 +471,70 @@ add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${ARCH_FLAGS}>")
 add_compile_options("$<$<COMPILE_LANGUAGE:C>:${ARCH_FLAGS}>")
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11 ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11)
+
+# ---------------------------------------------------------------------------
+# third_party/llama.cpp patches
+#
+# The llama.cpp submodule is pinned to an upstream commit (tag b3173) so that
+# `git clone --recursive` works for everyone.  That tag predates MXFP4, which
+# DeepSeek-V4 GGUF experts require, so the delta is kept as a patch series in
+# kt-kernel/third_party_patches/llama.cpp and applied here, before the
+# add_subdirectory() below configures llama.cpp.
+#
+# Idempotency without a marker file (a marker inside the submodule would show
+# up as untracked forever): an already-applied patch fails `git apply --check`
+# but succeeds `git apply --reverse --check`.
+# ---------------------------------------------------------------------------
+set(KT_LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp)
+set(KT_LLAMA_CPP_PATCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party_patches/llama.cpp)
+file(GLOB KT_LLAMA_CPP_PATCHES "${KT_LLAMA_CPP_PATCH_DIR}/*.patch")
+list(SORT KT_LLAMA_CPP_PATCHES)
+
+if(KT_LLAMA_CPP_PATCHES)
+    find_package(Git QUIET)
+    if(NOT GIT_EXECUTABLE)
+        set(GIT_EXECUTABLE git)
+    endif()
+endif()
+
+foreach(KT_PATCH IN LISTS KT_LLAMA_CPP_PATCHES)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} apply --check "${KT_PATCH}"
+        WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
+        RESULT_VARIABLE KT_PATCH_CHECK
+        OUTPUT_QUIET
+        ERROR_QUIET)
+    if(KT_PATCH_CHECK EQUAL 0)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} apply "${KT_PATCH}"
+            WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
+            RESULT_VARIABLE KT_PATCH_APPLY
+            ERROR_VARIABLE KT_PATCH_APPLY_ERR)
+        if(NOT KT_PATCH_APPLY EQUAL 0)
+            message(FATAL_ERROR
+                "Failed to apply llama.cpp patch ${KT_PATCH}:\n${KT_PATCH_APPLY_ERR}")
+        endif()
+        message(STATUS "llama.cpp: applied patch ${KT_PATCH}")
+    else()
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} apply --reverse --check "${KT_PATCH}"
+            WORKING_DIRECTORY ${KT_LLAMA_CPP_DIR}
+            RESULT_VARIABLE KT_PATCH_REVERSE_CHECK
+            OUTPUT_QUIET
+            ERROR_QUIET)
+        if(KT_PATCH_REVERSE_CHECK EQUAL 0)
+            message(STATUS "llama.cpp: patch already applied, skipping ${KT_PATCH}")
+        else()
+            message(FATAL_ERROR
+                "llama.cpp patch ${KT_PATCH} neither applies nor is already applied.\n"
+                "third_party/llama.cpp is probably not at the pinned commit or has local edits.\n"
+                "Reset it and retry:\n"
+                "  git submodule update --init --force third_party/llama.cpp\n"
+                "  cd third_party/llama.cpp && git apply ${KT_PATCH}")
+        endif()
+    endif()
+endforeach()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/third_party/llama.cpp)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
