@@ -287,6 +287,15 @@ class LLAMA_MOE_TP {
     uint8_t* down_proj = (uint8_t*)config.down_proj + offset * ggml_type_size((ggml_type)config.down_type) /
                                                           ggml_blck_size((ggml_type)config.down_type);
 
+    // The reshuffle below always copies. It degenerates to an identity copy only when this TP owns
+    // the whole tensor (offset == 0 && complete_intermediate_size == config.intermediate_size),
+    // which is the sole case where the three m_local_*_proj_ pointers could instead alias the
+    // caller's GGUF mmap and save the ~137GB of node-local buffers. TP_MOE::load_weights splits the
+    // tensor across threadpool_count subpools, so that case needs threadpool_count == 1; every
+    // supported deployment runs one subpool per NUMA node (8), where each TP gets
+    // intermediate_size / 8 and no alias is possible. Do not add the alias branch without also
+    // making a single-subpool configuration real -- it would be dead code.
+
     // Per-expert byte strides. The source tensors are laid out with the FULL
     // intermediate_size (complete_intermediate_size); this TP only owns the
     // [offset, offset+intermediate_size) block — hence the base-pointer offset
