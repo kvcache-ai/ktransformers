@@ -125,24 +125,24 @@ install_dependencies() {
   # Install dependencies based on OS
   case "$OS" in
     debian|ubuntu|linuxmint|pop)
-      echo "Detected Debian-based system. Installing libhwloc-dev and pkg-config..."
+      echo "Detected Debian-based system. Installing libhwloc-dev, libnuma-dev and pkg-config..."
       $SUDO apt update
-      $SUDO apt install -y libhwloc-dev pkg-config
+      $SUDO apt install -y libhwloc-dev libnuma-dev pkg-config
       ;;
     fedora|rhel|centos|rocky|almalinux)
-      echo "Detected Red Hat-based system. Installing hwloc-devel and pkgconfig..."
-      $SUDO dnf install -y hwloc-devel pkgconfig || $SUDO yum install -y hwloc-devel pkgconfig
+      echo "Detected Red Hat-based system. Installing hwloc-devel, numactl-devel and pkgconfig..."
+      $SUDO dnf install -y hwloc-devel numactl-devel pkgconfig || $SUDO yum install -y hwloc-devel numactl-devel pkgconfig
       ;;
     arch|manjaro)
-      echo "Detected Arch-based system. Installing hwloc and pkgconf..."
-      $SUDO pacman -S --noconfirm hwloc pkgconf
+      echo "Detected Arch-based system. Installing hwloc, numactl and pkgconf..."
+      $SUDO pacman -S --noconfirm hwloc numactl pkgconf
       ;;
     opensuse*|sles)
-      echo "Detected openSUSE-based system. Installing hwloc-devel and pkg-config..."
-      $SUDO zypper install -y hwloc-devel pkg-config
+      echo "Detected openSUSE-based system. Installing hwloc-devel, libnuma-devel and pkg-config..."
+      $SUDO zypper install -y hwloc-devel libnuma-devel pkg-config
       ;;
     *)
-      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev and pkg-config."
+      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev, libnuma-dev and pkg-config."
       ;;
   esac
 }
