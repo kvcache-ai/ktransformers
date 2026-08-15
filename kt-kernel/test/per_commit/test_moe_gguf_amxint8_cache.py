@@ -535,11 +535,16 @@ def test_gguf_smart_accuracy():
             up = max(cls(cfg.gate_gguf_type), cls(cfg.up_gguf_type))
             dw = cls(cfg.down_gguf_type)
             pair = (up, dw)
-            # mixed pairs -> the fused two-stage computational wrappers
+            # mixed pairs -> the fused two-stage computational wrappers (each
+            # serves BOTH orientations: the wrapper decides at entry which
+            # stage is the wider one)
             fused_map = {
                 (0, 1): kt_kernel.kt_kernel_ext.moe.AMXFused4x8_MOE,
                 (1, 2): kt_kernel.kt_kernel_ext.moe.AMXFused8x16_MOE,
                 (0, 2): kt_kernel.kt_kernel_ext.moe.AMXFused4x16_MOE,
+                (1, 0): kt_kernel.kt_kernel_ext.moe.AMXFused4x8_MOE,
+                (2, 1): kt_kernel.kt_kernel_ext.moe.AMXFused8x16_MOE,
+                (2, 0): kt_kernel.kt_kernel_ext.moe.AMXFused4x16_MOE,
             }
             plain = {
                 (0, 0): kt_kernel.kt_kernel_ext.moe.AMXInt4_MOE,
@@ -587,10 +592,33 @@ def test_gguf_smart_accuracy():
     assert s == (0, 1) and cls is kt_kernel.kt_kernel_ext.moe.AMXFused4x8_MOE
     assert d < 0.30, f"Q5_K-down F4x8 layer diff too large: {d:.6f}"
 
-    # Q6_K up + Q4 down -> (1,0) uncovered mix -> max-class (INT8) storage
-    d, s, cls = run_case(GGMLQuantizationType.Q4_K, "Q6_K-up -> INT8 storage", up_dtype=GGMLQuantizationType.Q6_K)
-    assert s == (1, 0) and cls is kt_kernel.kt_kernel_ext.moe.AMXInt8_MOE
-    assert d < 0.05, f"Q6_K-up INT8 layer diff too large: {d:.6f}"
+    # Q6_K up + Q4 down -> reversed (1,0) -> the SAME fused F4x8 wrapper:
+    # the wrapper decides at entry that the gate/up stage is the wider one
+    # (INT8) and the down stays per-row INT4. Accuracy = the down's per-row
+    # INT4 class (~0.2).
+    d, s, cls = run_case(
+        GGMLQuantizationType.Q4_K, "Q6_K-up/Q4_K-down -> F4x8(flipped)", up_dtype=GGMLQuantizationType.Q6_K
+    )
+    assert s == (1, 0) and cls is kt_kernel.kt_kernel_ext.moe.AMXFused4x8_MOE
+    assert d < 0.30, f"Q6_K-up F4x8(flipped) layer diff too large: {d:.6f}"
+
+    # BF16 up + Q6_K down -> reversed (2,1) -> the SAME fused F8x16 wrapper
+    # (flipped): gate/up stay BF16, the down stays INT8. Accuracy = the
+    # down's INT8 class (~0.02).
+    d, s, cls = run_case(
+        GGMLQuantizationType.Q6_K, "BF16-up/Q6_K-down -> F8x16(flipped)", up_dtype=GGMLQuantizationType.BF16
+    )
+    assert s == (2, 1) and cls is kt_kernel.kt_kernel_ext.moe.AMXFused8x16_MOE
+    assert d < 0.05, f"BF16-up F8x16(flipped) layer diff too large: {d:.6f}"
+
+    # BF16 up + Q4_K down -> reversed (2,0) -> the SAME fused F4x16 wrapper
+    # (flipped): gate/up stay BF16, the down stays per-row INT4. Accuracy =
+    # the down's per-row INT4 class (~0.2).
+    d, s, cls = run_case(
+        GGMLQuantizationType.Q4_K, "BF16-up/Q4_K-down -> F4x16(flipped)", up_dtype=GGMLQuantizationType.BF16
+    )
+    assert s == (2, 0) and cls is kt_kernel.kt_kernel_ext.moe.AMXFused4x16_MOE
+    assert d < 0.30, f"BF16-up F4x16(flipped) layer diff too large: {d:.6f}"
 
     print("  SMART pair->fused routing validation OK")
 

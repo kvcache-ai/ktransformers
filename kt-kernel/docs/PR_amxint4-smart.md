@@ -35,9 +35,13 @@ attribute instead.
   the layer keeps its per-attribute precisions in RAM (gate/up at the upstream
   node, down at the downstream node — the smallest possible footprint) and
   the mixed GEMMs run through the fused two-stage kernels at compute time.
-  Only the activations are widened in the fused decode, never the stored
-  weights; a tensor is only ever expanded when its adjacent stage lives in a
-  larger format.
+  Each fused wrapper serves **both orientations** of its pair — the wrapper
+  decides at entry, one step before the GEMM loops, which stage is the wider
+  one (from the per-attribute nodes) and picks the kernel composition
+  accordingly (e.g. the same `F4x8` wrapper runs `(0,1)` with gate/up at
+  INT4 and `(1,0)` with gate/up at INT8). Only the activations are widened
+  in the fused decode, never the stored weights; a tensor is only ever
+  expanded when its adjacent stage lives in a larger format.
 - Per-layer source/storage logging and the (prev, cur) stage-edge log between
   consecutive layers.
 - Registered in `INFERENCE_METHODS` / backend routing alongside the other AMX
@@ -89,7 +93,9 @@ attribute instead.
   | Full BF16 | 0.0050 |
   | SMART, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
   | SMART, Q5_K-down → F4x8 fused | 0.155 |
-  | SMART, Q6_K-up → INT8 (uncovered mix) | 0.0205 |
+  | SMART, Q6_K-up/Q4_K-down → F4x8 (flipped) | 0.178 |
+  | SMART, BF16-up/Q6_K-down → F8x16 (flipped) | 0.0136 |
+  | SMART, BF16-up/Q4_K-down → F4x16 (flipped) | 0.171 |
   | AMXINT8 | 0.0188 |
   | AMXINT4_KGROUP | 0.1680 |
   | AMXINT4 per-row | 0.2167 |

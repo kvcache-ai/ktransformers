@@ -67,6 +67,16 @@ fused decode, never the stored weights; a tensor is only ever expanded when
 its adjacent stage lives in a larger format, trading a little RAM traffic for
 the hardware throughput of the wider node with minimal accuracy loss.
 
+Each fused wrapper serves **both orientations** of its stage pair. The
+wrapper decides at entry — one step before the GEMM loops — which stage is
+the wider one, from the layer's per-attribute nodes, and picks the kernel
+composition accordingly. The same `F4x8` wrapper therefore runs `(0,1)`
+layers with gate/up at per-row INT4 and `(1,0)` layers with gate/up at INT8;
+in both cases only the used buffer group is allocated, so RAM stays at the
+per-attribute precisions. The stage dispatch is decided at the same entry
+point (the int-family stages run `integer_mat_mul`, the BF16 stage
+`float_mat_vec`), so the compositions stay symmetric at minimal runtime cost.
+
 Consequences on the real model (MiniMax-M2.7 UD-Q4_K_XL): gate/up are Q4_K,
 down are Q5_K/Q6_K → upstream node 0, downstream node 1 → gate/up stay in the
 per-row INT4 format (half the RAM of an INT8 storage) while the down runs at
@@ -134,14 +144,17 @@ event (e.g. `(60, 61): (1->0)`) before the next layer loads.
 | Full BF16 (upper bound) | 0.0050 |
 | **AMXINT4_SMART**, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
 | **AMXINT4_SMART**, Q5_K-down → F4x8 fused | 0.155 |
-| **AMXINT4_SMART**, Q6_K-up → INT8 (uncovered mix) | 0.0205 |
+| **AMXINT4_SMART**, Q6_K-up/Q4_K-down → F4x8 (flipped) | 0.178 |
+| **AMXINT4_SMART**, BF16-up/Q6_K-down → F8x16 (flipped) | 0.0136 |
+| **AMXINT4_SMART**, BF16-up/Q4_K-down → F4x16 (flipped) | 0.171 |
 | AMXINT8 (whole layer) | 0.0188 |
 | AMXINT4_KGROUP | 0.1680 |
 | AMXINT4 per-row (whole layer) | 0.2167 |
 
-The SMART mixed pairs land at the int4-upstream accuracy class (0.154 —
-the gate/up per-row INT4 bound) while keeping the gate/up at half the RAM of
-an INT8 storage; the down contributes INT8-level error.
+The SMART mixed pairs land at the accuracy class of the **narrower** stage
+(0.154–0.178 when the down is per-row INT4, 0.0136 when the down is INT8 —
+in both orientations the down is the accuracy-critical stage since it is the
+largest tensor); RAM stays at the per-attribute precisions.
 
 ## Verification
 

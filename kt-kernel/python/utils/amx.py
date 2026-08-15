@@ -72,9 +72,9 @@ _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
 _HAS_AMXINT4_KGROUP_SUPPORT = AMXInt4_KGroup_MOE is not None
 # Task-specific fused two-stage MOEs (stage pair -> per-attribute mix)
-_FUSED_4x8_MOE = getattr(_moe_mod, "AMXFused4x8_MOE", None)  # int4 -> int8
-_FUSED_8x16_MOE = getattr(_moe_mod, "AMXFused8x16_MOE", None)  # int8 -> bf16
-_FUSED_4x16_MOE = getattr(_moe_mod, "AMXFused4x16_MOE", None)  # int4 -> bf16
+_FUSED_4x8_MOE = getattr(_moe_mod, "AMXFused4x8_MOE", None)  # int4 x int8 (either orientation)
+_FUSED_8x16_MOE = getattr(_moe_mod, "AMXFused8x16_MOE", None)  # int8 x bf16 (either orientation)
+_FUSED_4x16_MOE = getattr(_moe_mod, "AMXFused4x16_MOE", None)  # int4 x bf16 (either orientation)
 # K2/RAWINT4 K-group quant: number of weight columns sharing one int8 scale
 # along k. 32 ≈ Q4_K's sub-block granularity; 64/128 trade accuracy for size.
 _AMXINT4_KGROUP_SIZE = int(os.environ.get("KT_AMXINT4_KGROUP_SIZE", "32"))
@@ -547,12 +547,17 @@ class AMXMoEWrapper(BaseMoEWrapper):
             # node, down at the downstream node — smallest possible footprint)
             # and the mixed GEMMs run through the fused two-stage kernels at
             # compute time. Only the activations are widened in the fused
-            # decode, never the stored weights. Uniform pairs use the plain
-            # single-precision MOEs.
+            # decode, never the stored weights. Each fused wrapper serves
+            # BOTH orientations of its pair: the wrapper decides at entry
+            # (from the per-attribute nodes) which stage is the wider one.
+            # Uniform pairs use the plain single-precision MOEs.
             fused_map = {
                 (0, 1): _FUSED_4x8_MOE,
                 (1, 2): _FUSED_8x16_MOE,
                 (0, 2): _FUSED_4x16_MOE,
+                (1, 0): _FUSED_4x8_MOE,
+                (2, 1): _FUSED_8x16_MOE,
+                (2, 0): _FUSED_4x16_MOE,
             }
             if pair in fused_map and fused_map[pair] is not None:
                 self.moe = fused_map[pair](moe_config)
@@ -563,8 +568,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             elif pair == (2, 2):
                 self.moe = AMXBF16_MOE(moe_config)
             else:
-                # reversed/uncovered mix (e.g. (1,0)): the upstream is the
-                # larger node — store at the max class (no fused kernel for it)
+                # defensive: every (0..2)x(0..2) pair is covered above
                 self.moe = {0: AMXInt4_MOE, 1: AMXInt8_MOE, 2: AMXBF16_MOE}[max(up, dw)](moe_config)
         elif self.method == "BF16":
             self.moe = AMXBF16_MOE(moe_config)

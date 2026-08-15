@@ -62,6 +62,7 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
   using DB = typename KB::BufferB;
   using DC = typename KB::BufferC;
   using Fused = amx::FusedTwoStage<KA, KB>;
+  using FusedBA = amx::FusedTwoStage<KB, KA>;  // the flipped orientation
 
   AMX_FUSED_MOE_TP() = default;
   AMX_FUSED_MOE_TP(GeneralMOEConfig config, int tp_part_idx_ = 0) : Base(config, tp_part_idx_) {}
@@ -78,6 +79,10 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
     const int e = (int)config_.expert_num;
     const int n = config_.intermediate_size;
     const int k = config_.hidden_size;
+    // orientation decided once at entry: the per-attribute nodes tell which
+    // stage is wider; only the used buffer group is allocated (per-attribute
+    // RAM at the native precisions).
+    const bool flipped = config_.upstream_precision > config_.downstream_precision;
     auto alloc_block = [this](size_t sz) -> void* {
       void* p = nullptr;
       if (posix_memalign(&p, 64, std::max<size_t>(sz, 1)) != 0) throw std::bad_alloc();
@@ -86,15 +91,32 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
     };
     const int cm = (config_.max_len + KA::M_STEP - 1) / KA::M_STEP * KA::M_STEP;
     for (int i = 0; i < e; i++) {
-      gate_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
-      up_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
-      gate_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
-      up_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
-      gate_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
-      up_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
-      down_a_.push_back(std::make_shared<DA>(config_.max_len, n, alloc_block(DA::required_size(config_.max_len, n))));
-      down_b_.push_back(std::make_shared<DB>(k, n, alloc_block(DB::required_size(k, n))));
-      down_c_.push_back(std::make_shared<DC>(cm, k, alloc_block(DC::required_size(cm, k))));
+      // gate/up at the upstream node's kernel (KB group when flipped)
+      if (flipped) {
+        gate_a_w_.push_back(std::make_shared<DA>(config_.max_len, k, alloc_block(DA::required_size(config_.max_len, k))));
+        up_a_w_.push_back(std::make_shared<DA>(config_.max_len, k, alloc_block(DA::required_size(config_.max_len, k))));
+        gate_b_w_.push_back(std::make_shared<DB>(n, k, alloc_block(DB::required_size(n, k))));
+        up_b_w_.push_back(std::make_shared<DB>(n, k, alloc_block(DB::required_size(n, k))));
+        gate_c_w_.push_back(std::make_shared<DC>(cm, n, alloc_block(DC::required_size(cm, n))));
+        up_c_w_.push_back(std::make_shared<DC>(cm, n, alloc_block(DC::required_size(cm, n))));
+      } else {
+        gate_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
+        up_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
+        gate_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
+        up_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
+        gate_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
+        up_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
+      }
+      // down at the downstream node's kernel (KA group when flipped)
+      if (flipped) {
+        down_a_n_.push_back(std::make_shared<UA>(config_.max_len, n, alloc_block(UA::required_size(config_.max_len, n))));
+        down_b_n_.push_back(std::make_shared<UB>(k, n, alloc_block(UB::required_size(k, n))));
+        down_c_n_.push_back(std::make_shared<UC>(cm, k, alloc_block(UC::required_size(cm, k))));
+      } else {
+        down_a_.push_back(std::make_shared<DA>(config_.max_len, n, alloc_block(DA::required_size(config_.max_len, n))));
+        down_b_.push_back(std::make_shared<DB>(k, n, alloc_block(DB::required_size(k, n))));
+        down_c_.push_back(std::make_shared<DC>(cm, k, alloc_block(DC::required_size(cm, k))));
+      }
       g_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
       u_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
       h_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
@@ -131,42 +153,53 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
     if (config_.gate_gguf == nullptr) throw std::runtime_error("fused MOE requires GGUF source");
     if (gate_b_.empty()) alloc_buffers();  // post-construction member allocation
 
-    // gate/up on KA (per-row INT4: per-row d; INT8: per-row d)
+    // gate/up at the upstream node's kernel (the KB group when flipped; the
+    // strip split must match the target kernel)
     {
-      int nth = KA::recommended_nth(config_.intermediate_size);
+      const bool flipped = config_.upstream_precision > config_.downstream_precision;
+      int nth = flipped ? KB::recommended_nth(config_.intermediate_size) : KA::recommended_nth(config_.intermediate_size);
       pool->do_work_stealing_job(
           nth * config_.expert_num, nullptr,
-          [this, nth, physical_to_logical_map, row_off](int task_id) {
+          [this, nth, physical_to_logical_map, row_off, flipped](int task_id) {
             int64_t expert_idx = task_id / nth;
             uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
             int ith = task_id % nth;
-            auto [n_start, n_end] = KA::split_range_n(config_.intermediate_size, ith, nth);
+            auto [n_start, n_end] = flipped ? KB::split_range_n(config_.intermediate_size, ith, nth)
+                                            : KA::split_range_n(config_.intermediate_size, ith, nth);
             if (n_start >= n_end) return;
             thread_local std::vector<ggml_bf16_t> strip;
             strip.resize((size_t)(n_end - n_start) * config_.hidden_size);
             const char* gate_base = (const char*)config_.gate_gguf + logical_expert_id * config_.gate_gguf_stride;
             kt::gguf::dequant_rows_bf16(gate_base, (ggml_type)config_.gate_gguf_type, config_.hidden_size,
                                         row_off + n_start, row_off + n_end, strip.data());
-            gate_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
-            if (this->gate_bb_.size() > logical_expert_id) this->gate_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            if (flipped) {
+              gate_b_w_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            } else {
+              gate_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            }
             const char* up_base = (const char*)config_.up_gguf + logical_expert_id * config_.up_gguf_stride;
             kt::gguf::dequant_rows_bf16(up_base, (ggml_type)config_.up_gguf_type, config_.hidden_size,
                                         row_off + n_start, row_off + n_end, strip.data());
-            up_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
-            if (this->up_bb_.size() > logical_expert_id) this->up_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            if (flipped) {
+              up_b_w_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            } else {
+              up_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            }
           },
           nullptr);
     }
-    // down on KB
+    // down at the downstream node's kernel (the KA group when flipped)
     {
-      int nth = KB::recommended_nth(config_.hidden_size);
+      const bool flipped = config_.upstream_precision > config_.downstream_precision;
+      int nth = flipped ? KA::recommended_nth(config_.hidden_size) : KB::recommended_nth(config_.hidden_size);
       pool->do_work_stealing_job(
           nth * config_.expert_num, nullptr,
-          [this, nth, physical_to_logical_map, row_off, full_I](int task_id) {
+          [this, nth, physical_to_logical_map, row_off, full_I, flipped](int task_id) {
             int64_t expert_idx = task_id / nth;
             uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
             int ith = task_id % nth;
-            auto [n_start, n_end] = KB::split_range_n(config_.hidden_size, ith, nth);
+            auto [n_start, n_end] = flipped ? KA::split_range_n(config_.hidden_size, ith, nth)
+                                            : KB::split_range_n(config_.hidden_size, ith, nth);
             if (n_start >= n_end) return;
             const int64_t dcol = config_.intermediate_size;
             thread_local std::vector<ggml_bf16_t> strip;
@@ -174,7 +207,11 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
             const char* down_base = (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
             kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
                                         row_off, row_off + dcol, strip.data());
-            down_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            if (flipped) {
+              down_b_n_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            } else {
+              down_b_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            }
           },
           nullptr);
     }
@@ -200,6 +237,31 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
           },
           nullptr);
     }
+    // the base's own gate/up buffers (the prefill fallback always runs the
+    // KA kernel on them): a separate pass with KA strips.
+    {
+      int nth = KA::recommended_nth(config_.intermediate_size);
+      pool->do_work_stealing_job(
+          nth * config_.expert_num, nullptr,
+          [this, nth, physical_to_logical_map, row_off](int task_id) {
+            int64_t expert_idx = task_id / nth;
+            uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+            int ith = task_id % nth;
+            auto [n_start, n_end] = KA::split_range_n(config_.intermediate_size, ith, nth);
+            if (n_start >= n_end) return;
+            thread_local std::vector<ggml_bf16_t> strip;
+            strip.resize((size_t)(n_end - n_start) * config_.hidden_size);
+            const char* gate_base = (const char*)config_.gate_gguf + logical_expert_id * config_.gate_gguf_stride;
+            kt::gguf::dequant_rows_bf16(gate_base, (ggml_type)config_.gate_gguf_type, config_.hidden_size,
+                                        row_off + n_start, row_off + n_end, strip.data());
+            if (this->gate_bb_.size() > logical_expert_id) this->gate_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+            const char* up_base = (const char*)config_.up_gguf + logical_expert_id * config_.up_gguf_stride;
+            kt::gguf::dequant_rows_bf16(up_base, (ggml_type)config_.up_gguf_type, config_.hidden_size,
+                                        row_off + n_start, row_off + n_end, strip.data());
+            if (this->up_bb_.size() > logical_expert_id) this->up_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+          },
+          nullptr);
+    }
   }
 
   // ---- qlen=1 decode: fused two-stage per activated expert ----
@@ -210,6 +272,10 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
     }
     const int H = config_.hidden_size;
     const int I = config_.intermediate_size;
+    // orientation decided at entry, one step before the multiplication loop:
+    // which stage is the wider one comes from the per-attribute nodes. Only
+    // the used buffer group was allocated at load, so the branch is cheap.
+    const bool flipped = config_.upstream_precision > config_.downstream_precision;
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const ggml_bf16_t* x = (const ggml_bf16_t*)input;
     float* f32out = (float*)output;
@@ -221,17 +287,17 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
       if (config_.should_skip_expert(expert_ids[j])) continue;
       const int64_t e = expert_ids[j];
       const int m = 1;
-      auto& ga = gate_a_[e];
-      auto& gb = gate_b_[e];
-      auto& gc = gate_c_[e];
-      auto& ua = up_a_[e];
-      auto& ub = up_b_[e];
-      auto& uc = up_c_[e];
-      auto& da = down_a_[e];
-      auto& db = down_b_[e];
-      auto& dc = down_c_[e];
-      Fused::run(m, I, H, const_cast<ggml_bf16_t*>(x), ga.get(), gb.get(), gc.get(), ua.get(), ub.get(), uc.get(),
-                 da.get(), db.get(), dc.get(), g_[e]->data(), u_[e]->data(), h_[e]->data(), out_[e]->data());
+      if (flipped) {
+        FusedBA::run(m, I, H, const_cast<ggml_bf16_t*>(x), gate_a_w_[e].get(), gate_b_w_[e].get(),
+                     gate_c_w_[e].get(), up_a_w_[e].get(), up_b_w_[e].get(), up_c_w_[e].get(),
+                     down_a_n_[e].get(), down_b_n_[e].get(), down_c_n_[e].get(), g_[e]->data(), u_[e]->data(),
+                     h_[e]->data(), out_[e]->data());
+      } else {
+        Fused::run(m, I, H, const_cast<ggml_bf16_t*>(x), gate_a_[e].get(), gate_b_[e].get(),
+                   gate_c_[e].get(), up_a_[e].get(), up_b_[e].get(), up_c_[e].get(),
+                   down_a_[e].get(), down_b_[e].get(), down_c_[e].get(), g_[e]->data(), u_[e]->data(),
+                   h_[e]->data(), out_[e]->data());
+      }
       // weighted blend into the fp32 output
       const float w = weights[j];
       const ggml_bf16_t* src = out_[e]->data();
@@ -268,12 +334,24 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
   }
 
  protected:
-  std::vector<std::shared_ptr<UA>> gate_a_, up_a_;
+  // Two buffer groups per stage pair. The orientation (which stage is the
+  // wider one) is decided once at entry from the config's per-attribute
+  // nodes; only the used group is allocated, so RAM stays at the per-
+  // attribute precisions. Default orientation (upstream <= downstream):
+  // gate/up on the KA group, down on the KB group. Flipped: gate/up on the
+  // KB (wider) group, down on the KA (narrower) group.
+  std::vector<std::shared_ptr<UA>> gate_a_, up_a_;        // KA-typed gate/up
   std::vector<std::shared_ptr<UB>> gate_b_, up_b_;
   std::vector<std::shared_ptr<UC>> gate_c_, up_c_;
-  std::vector<std::shared_ptr<DA>> down_a_;
+  std::vector<std::shared_ptr<DA>> gate_a_w_, up_a_w_;    // KB-typed gate/up
+  std::vector<std::shared_ptr<DB>> gate_b_w_, up_b_w_;
+  std::vector<std::shared_ptr<DC>> gate_c_w_, up_c_w_;
+  std::vector<std::shared_ptr<DA>> down_a_;               // KB-typed down
   std::vector<std::shared_ptr<DB>> down_b_;
   std::vector<std::shared_ptr<DC>> down_c_;
+  std::vector<std::shared_ptr<UA>> down_a_n_;             // KA-typed down
+  std::vector<std::shared_ptr<UB>> down_b_n_;
+  std::vector<std::shared_ptr<UC>> down_c_n_;
   std::vector<std::shared_ptr<std::vector<ggml_bf16_t>>> g_, u_, h_, out_;
   std::vector<void*> alt_mem_blocks_;
 };

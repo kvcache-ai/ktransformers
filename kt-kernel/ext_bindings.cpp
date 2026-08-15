@@ -899,6 +899,9 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int4, amx::GemmKernel224Int8>>(moe_module, "AMXFused4x8_MOE");
   bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int8, amx::GemmKernel224BF16>>(moe_module, "AMXFused8x16_MOE");
   bind_moe_module<AMX_FUSED_MOE_TP<amx::GemmKernel224Int4, amx::GemmKernel224BF16>>(moe_module, "AMXFused4x16_MOE");
+  // Each fused wrapper serves BOTH orientations of its stage pair: the
+  // wrapper decides at entry (from the per-attribute nodes) which stage is
+  // the wider one and picks the kernel composition accordingly.
 #if defined(__AVX512F__)
   bind_moe_module<AMX_BF16_MOE_TP<amx::GemmKernel224BF16>>(moe_module, "AMXBF16_MOE");
   bind_moe_module<AMX_FP8_MOE_TP<amx::GemmKernel224FP8>>(moe_module, "AMXFP8_MOE");

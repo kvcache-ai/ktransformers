@@ -143,14 +143,19 @@ struct FusedTwoStage {
                   ggml_bf16_t* out) {
     // ---- stage 1: gate + up on the upstream node KA ----
     // Maximum reuse: every stage runs the EXISTING kernel of its precision
-    // (the wrapper only orchestrates). The int4 node uses the production
-    // integer_mat_mul<GemmKernel224Int4> + apply_scale on the correctly
-    // loaded per-row-int4 buffers; the int8 node the plain int8 dpbssd path.
+    // (the wrapper only orchestrates). The int-family nodes use the
+    // production integer_mat_mul + apply_scale on the correctly loaded
+    // buffers; the BF16 node the float_mat_vec path. The dispatch is decided
+    // at entry, one step before the GEMM loops begin.
     gate_a->from_mat(m, x, 0, 1);
     {
       const int nth = KA::recommended_nth(I);
       for (int ith = 0; ith < nth; ith++) {
-        integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+        if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
+          float_mat_vec<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+        } else {
+          integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+        }
         gate_c->to_mat(m, g, ith, nth);
       }
     }
@@ -159,7 +164,11 @@ struct FusedTwoStage {
     {
       const int nth = KA::recommended_nth(I);
       for (int ith = 0; ith < nth; ith++) {
-        integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+        if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
+          float_mat_vec<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+        } else {
+          integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+        }
         up_c->to_mat(m, u, ith, nth);
       }
     }
@@ -177,16 +186,14 @@ struct FusedTwoStage {
 
     // ---- stage 2: down on the downstream node KB ----
     down_a->from_mat(m, h, 0, 1);
-    if constexpr (std::is_same_v<KB, amx::GemmKernel224Int8>) {
+    {
       const int nth = KB::recommended_nth(H);
       for (int ith = 0; ith < nth; ith++) {
-        integer_mat_mul<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
-        down_c->to_mat(m, out, ith, nth);
-      }
-    } else {
-      const int nth = KB::recommended_nth(H);
-      for (int ith = 0; ith < nth; ith++) {
-        float_mat_vec<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
+        if constexpr (std::is_same_v<KB, amx::GemmKernel224BF16>) {
+          float_mat_vec<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
+        } else {
+          integer_mat_mul<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
+        }
         down_c->to_mat(m, out, ith, nth);
       }
     }
