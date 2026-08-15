@@ -89,38 +89,44 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
       alt_mem_blocks_.push_back(p);
       return p;
     };
-    const int cm = (config_.max_len + KA::M_STEP - 1) / KA::M_STEP * KA::M_STEP;
+    // The fused wrapper's own buffers serve the DECODE path only (qlen=1,
+    // m=1; qlen>1 falls back to the base's pooled buffers), so the
+    // activation-side buffers need just the M_STEP-padded m, NOT the full
+    // context length. Allocating max_len × k per expert blew up to ~900 GB
+    // for MiniMax (256 experts × 163840 × 3072) and got the scheduler OOM
+    // killed.
+    const int dm = KA::M_STEP;
     for (int i = 0; i < e; i++) {
       // gate/up at the upstream node's kernel (KB group when flipped)
       if (flipped) {
-        gate_a_w_.push_back(std::make_shared<DA>(config_.max_len, k, alloc_block(DA::required_size(config_.max_len, k))));
-        up_a_w_.push_back(std::make_shared<DA>(config_.max_len, k, alloc_block(DA::required_size(config_.max_len, k))));
+        gate_a_w_.push_back(std::make_shared<DA>(dm, k, alloc_block(DA::required_size(dm, k))));
+        up_a_w_.push_back(std::make_shared<DA>(dm, k, alloc_block(DA::required_size(dm, k))));
         gate_b_w_.push_back(std::make_shared<DB>(n, k, alloc_block(DB::required_size(n, k))));
         up_b_w_.push_back(std::make_shared<DB>(n, k, alloc_block(DB::required_size(n, k))));
-        gate_c_w_.push_back(std::make_shared<DC>(cm, n, alloc_block(DC::required_size(cm, n))));
-        up_c_w_.push_back(std::make_shared<DC>(cm, n, alloc_block(DC::required_size(cm, n))));
+        gate_c_w_.push_back(std::make_shared<DC>(dm, n, alloc_block(DC::required_size(dm, n))));
+        up_c_w_.push_back(std::make_shared<DC>(dm, n, alloc_block(DC::required_size(dm, n))));
       } else {
-        gate_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
-        up_a_.push_back(std::make_shared<UA>(config_.max_len, k, alloc_block(UA::required_size(config_.max_len, k))));
+        gate_a_.push_back(std::make_shared<UA>(dm, k, alloc_block(UA::required_size(dm, k))));
+        up_a_.push_back(std::make_shared<UA>(dm, k, alloc_block(UA::required_size(dm, k))));
         gate_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
         up_b_.push_back(std::make_shared<UB>(n, k, alloc_block(UB::required_size(n, k))));
-        gate_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
-        up_c_.push_back(std::make_shared<UC>(cm, n, alloc_block(UC::required_size(cm, n))));
+        gate_c_.push_back(std::make_shared<UC>(dm, n, alloc_block(UC::required_size(dm, n))));
+        up_c_.push_back(std::make_shared<UC>(dm, n, alloc_block(UC::required_size(dm, n))));
       }
       // down at the downstream node's kernel (KA group when flipped)
       if (flipped) {
-        down_a_n_.push_back(std::make_shared<UA>(config_.max_len, n, alloc_block(UA::required_size(config_.max_len, n))));
+        down_a_n_.push_back(std::make_shared<UA>(dm, n, alloc_block(UA::required_size(dm, n))));
         down_b_n_.push_back(std::make_shared<UB>(k, n, alloc_block(UB::required_size(k, n))));
-        down_c_n_.push_back(std::make_shared<UC>(cm, k, alloc_block(UC::required_size(cm, k))));
+        down_c_n_.push_back(std::make_shared<UC>(dm, k, alloc_block(UC::required_size(dm, k))));
       } else {
-        down_a_.push_back(std::make_shared<DA>(config_.max_len, n, alloc_block(DA::required_size(config_.max_len, n))));
+        down_a_.push_back(std::make_shared<DA>(dm, n, alloc_block(DA::required_size(dm, n))));
         down_b_.push_back(std::make_shared<DB>(k, n, alloc_block(DB::required_size(k, n))));
-        down_c_.push_back(std::make_shared<DC>(cm, k, alloc_block(DC::required_size(cm, k))));
+        down_c_.push_back(std::make_shared<DC>(dm, k, alloc_block(DC::required_size(dm, k))));
       }
-      g_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
-      u_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
-      h_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * n));
-      out_.push_back(std::make_shared<std::vector<ggml_bf16_t>>(config_.max_len * k));
+      g_.push_back(std::make_shared<std::vector<ggml_bf16_t>>((size_t)dm * n));
+      u_.push_back(std::make_shared<std::vector<ggml_bf16_t>>((size_t)dm * n));
+      h_.push_back(std::make_shared<std::vector<ggml_bf16_t>>((size_t)dm * n));
+      out_.push_back(std::make_shared<std::vector<ggml_bf16_t>>((size_t)dm * k));
     }
   }
 
