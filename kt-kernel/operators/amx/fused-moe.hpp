@@ -288,12 +288,12 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
       const int64_t e = expert_ids[j];
       const int m = 1;
       if (flipped) {
-        FusedBA::run(m, I, H, const_cast<ggml_bf16_t*>(x), gate_a_w_[e].get(), gate_b_w_[e].get(),
+        FusedBA::run(m, I, H, pool, const_cast<ggml_bf16_t*>(x), gate_a_w_[e].get(), gate_b_w_[e].get(),
                      gate_c_w_[e].get(), up_a_w_[e].get(), up_b_w_[e].get(), up_c_w_[e].get(),
                      down_a_n_[e].get(), down_b_n_[e].get(), down_c_n_[e].get(), g_[e]->data(), u_[e]->data(),
                      h_[e]->data(), out_[e]->data());
       } else {
-        Fused::run(m, I, H, const_cast<ggml_bf16_t*>(x), gate_a_[e].get(), gate_b_[e].get(),
+        Fused::run(m, I, H, pool, const_cast<ggml_bf16_t*>(x), gate_a_[e].get(), gate_b_[e].get(),
                    gate_c_[e].get(), up_a_[e].get(), up_b_[e].get(), up_c_[e].get(),
                    down_a_[e].get(), down_b_[e].get(), down_c_[e].get(), g_[e]->data(), u_[e]->data(),
                    h_[e]->data(), out_[e]->data());

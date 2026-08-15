@@ -29,6 +29,7 @@
 
 #include "amx_kernels.hpp"
 #include "amx_raw_kernels.hpp"
+#include "../../../cpu_backend/worker_pool.h"  // InNumaPool for the stage parallelism
 #include "../../gguf/dequant.hpp"  // fp32_to_bf16_ggml for the fused intermediate
 
 namespace amx {
@@ -138,37 +139,41 @@ struct FusedTwoStage {
     }
   }
 
-  static void run(int m, int I, int H, ggml_bf16_t* x, UA* gate_a, UB* gate_b, UC* gate_c, UA* up_a, UB* up_b,
-                  UC* up_c, DA* down_a, DB* down_b, DC* down_c, ggml_bf16_t* g, ggml_bf16_t* u, ggml_bf16_t* h,
-                  ggml_bf16_t* out) {
+  static void run(int m, int I, int H, InNumaPool* pool, ggml_bf16_t* x, UA* gate_a, UB* gate_b, UC* gate_c,
+                  UA* up_a, UB* up_b, UC* up_c, DA* down_a, DB* down_b, DC* down_c, ggml_bf16_t* g,
+                  ggml_bf16_t* u, ggml_bf16_t* h, ggml_bf16_t* out) {
     // ---- stage 1: gate + up on the upstream node KA ----
     // Maximum reuse: every stage runs the EXISTING kernel of its precision
     // (the wrapper only orchestrates). The int-family nodes use the
     // production integer_mat_mul + apply_scale on the correctly loaded
     // buffers; the BF16 node the float_mat_vec path. The dispatch is decided
-    // at entry, one step before the GEMM loops begin.
+    // at entry, one step before the GEMM loops begin; the gemm slices run
+    // through the pool (gate and up in one work-stealing pass).
     gate_a->from_mat(m, x, 0, 1);
-    {
-      const int nth = KA::recommended_nth(I);
-      for (int ith = 0; ith < nth; ith++) {
-        if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
-          float_mat_vec<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
-        } else {
-          integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
-        }
-        gate_c->to_mat(m, g, ith, nth);
-      }
-    }
-
     up_a->from_mat(m, x, 0, 1);
     {
       const int nth = KA::recommended_nth(I);
+      pool->do_work_stealing_job(
+          2 * nth, nullptr,
+          [&, m, I, H, nth](int task_id) {
+            const int ith = task_id % nth;
+            if (task_id < nth) {
+              if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
+                float_mat_vec<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+              } else {
+                integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+              }
+            } else {
+              if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
+                float_mat_vec<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+              } else {
+                integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+              }
+            }
+          },
+          nullptr);
       for (int ith = 0; ith < nth; ith++) {
-        if constexpr (std::is_same_v<KA, amx::GemmKernel224BF16>) {
-          float_mat_vec<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
-        } else {
-          integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
-        }
+        gate_c->to_mat(m, g, ith, nth);
         up_c->to_mat(m, u, ith, nth);
       }
     }
@@ -188,12 +193,17 @@ struct FusedTwoStage {
     down_a->from_mat(m, h, 0, 1);
     {
       const int nth = KB::recommended_nth(H);
+      pool->do_work_stealing_job(
+          nth, nullptr,
+          [&, m, H, I, nth](int ith) {
+            if constexpr (std::is_same_v<KB, amx::GemmKernel224BF16>) {
+              float_mat_vec<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
+            } else {
+              integer_mat_mul<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
+            }
+          },
+          nullptr);
       for (int ith = 0; ith < nth; ith++) {
-        if constexpr (std::is_same_v<KB, amx::GemmKernel224BF16>) {
-          float_mat_vec<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
-        } else {
-          integer_mat_mul<KB, false>(m, H, I, down_a, down_b, down_c, ith, nth);
-        }
         down_c->to_mat(m, out, ith, nth);
       }
     }
