@@ -142,26 +142,25 @@ struct FusedTwoStage {
                   UC* up_c, DA* down_a, DB* down_b, DC* down_c, ggml_bf16_t* g, ggml_bf16_t* u, ggml_bf16_t* h,
                   ggml_bf16_t* out) {
     // ---- stage 1: gate + up on the upstream node KA ----
+    // Maximum reuse: every stage runs the EXISTING kernel of its precision
+    // (the wrapper only orchestrates). The int4 node uses the production
+    // integer_mat_mul<GemmKernel224Int4> + apply_scale on the correctly
+    // loaded per-row-int4 buffers; the int8 node the plain int8 dpbssd path.
     gate_a->from_mat(m, x, 0, 1);
-    up_a->from_mat(m, x, 0, 1);
-    if constexpr (std::is_same_v<KA, amx::GemmKernel224Int4>) {
-      // the int4 node: the self-contained int16-staged madd decode
-      int4_stage1(m, I, H, gate_a, gate_b, gate_c, g);
-      int4_stage1(m, I, H, up_a, up_b, up_c, u);
-    } else {
-      {
-        const int nth = KA::recommended_nth(I);
-        for (int ith = 0; ith < nth; ith++) {
-          integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
-          gate_c->to_mat(m, g, ith, nth);
-        }
+    {
+      const int nth = KA::recommended_nth(I);
+      for (int ith = 0; ith < nth; ith++) {
+        integer_mat_mul<KA, false>(m, I, H, gate_a, gate_b, gate_c, ith, nth);
+        gate_c->to_mat(m, g, ith, nth);
       }
-      {
-        const int nth = KA::recommended_nth(I);
-        for (int ith = 0; ith < nth; ith++) {
-          integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
-          up_c->to_mat(m, u, ith, nth);
-        }
+    }
+
+    up_a->from_mat(m, x, 0, 1);
+    {
+      const int nth = KA::recommended_nth(I);
+      for (int ith = 0; ith < nth; ith++) {
+        integer_mat_mul<KA, false>(m, I, H, up_a, up_b, up_c, ith, nth);
+        up_c->to_mat(m, u, ith, nth);
       }
     }
 

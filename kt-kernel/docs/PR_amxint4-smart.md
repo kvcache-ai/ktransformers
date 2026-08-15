@@ -30,11 +30,14 @@ attribute instead.
   - ≤ Q4 (`Q2_K`/`Q3_K`/`Q4_K`/`Q4_0`/`Q4_1`) → **AMXINT4** (per-row)
   - (Q4, Q8] (`Q5_0`/`Q5_K`/`Q6_K`/`Q8_0`/`IQ*`) → **AMXINT8**
   - `F32`/`F16`/`BF16` → **BF16**
-- `upstream = max(node(gate), node(up))`, `downstream = node(down)`,
-  layer stored at `max(upstream, downstream)`.
-- Mixed stage pairs `(0→1)`, `(1→2)`, `(0→2)` are **load-time conversion
-  wrappers** around the existing AMXINT8/BF16 kernels — no new compute kernels
-  in the routing path.
+- `upstream = max(node(gate), node(up))`, `downstream = node(down)`.
+- Mixed stage pairs `(0→1)`, `(1→2)`, `(0→2)` are **computational wrappers**:
+  the layer keeps its per-attribute precisions in RAM (gate/up at the upstream
+  node, down at the downstream node — the smallest possible footprint) and
+  the mixed GEMMs run through the fused two-stage kernels at compute time.
+  Only the activations are widened in the fused decode, never the stored
+  weights; a tensor is only ever expanded when its adjacent stage lives in a
+  larger format.
 - Per-layer source/storage logging and the (prev, cur) stage-edge log between
   consecutive layers.
 - Registered in `INFERENCE_METHODS` / backend routing alongside the other AMX
@@ -84,9 +87,9 @@ attribute instead.
   | Configuration | rel. error |
   |---|---|
   | Full BF16 | 0.0050 |
-  | SMART, Q8_0-down → INT8 wrapper | 0.0184 |
-  | SMART, Q5_K-down → INT8 wrapper | 0.0191 |
-  | SMART, Q6_K-up → INT8 wrapper | 0.0194 |
+  | SMART, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
+  | SMART, Q5_K-down → F4x8 fused | 0.155 |
+  | SMART, Q6_K-up → INT8 (uncovered mix) | 0.0205 |
   | AMXINT8 | 0.0188 |
   | AMXINT4_KGROUP | 0.1680 |
   | AMXINT4 per-row | 0.2167 |
@@ -109,10 +112,11 @@ python -m sglang.launch_server ... --kt-method AMXINT4_SMART \
 
 ## Notes / limitations
 
-- The dedicated `FusedTwoStage` kernels and the fused-MOE host wrapper are
-  parked (bound but unrouted by design) — the routing uses the conversion
-  wrappers; a per-attribute compute mode can be enabled behind a flag later.
-- On an all-Q4-family GGUF the rule degrades to plain AMXINT4_KGROUP-class
+- The dedicated `FusedTwoStage` kernels and the fused-MOE host wrapper are the
+  compute path for the mixed pairs; uniform pairs use the plain single-
+  precision MOEs. The per-attribute compute mode is the default behavior for
+  mixed layers.
+- On an all-Q4-family GGUF the rule degrades to the plain per-row INT4
   routing; the INT8/BF16 escape hatches are per-layer automatic via the dtype
   rule.
 - Decode-speed A/B of per-row INT4 vs INT8 at real dims on the target model

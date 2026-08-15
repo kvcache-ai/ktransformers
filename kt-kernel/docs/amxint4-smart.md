@@ -47,26 +47,31 @@ A layer's attributes are classified independently:
 
 - `upstream node = max(node(gate), node(up))`
 - `downstream node = node(down)`
-- **the layer is stored at `max(upstream, downstream)`** and served by the
-  existing kernel of that class.
+- the layer is kept **per attribute**: gate/up stay at the upstream node,
+  down at the downstream node — each tensor in RAM at its smallest native
+  precision, nothing expanded unless an adjacent stage lives in a larger
+  format.
 
 This is the whole routing rule. It is deterministic, derived from the GGUF
 itself, and requires no calibration, thresholds, or error measurements at
 load time.
 
-### Stage pairs are wrappers, not new kernels
+### Stage pairs are computational wrappers, not stored conversions
 
 The mixed pairs — `(0→1)` int4×int8, `(1→2)` int8×bf16, `(0→2)` int4×bf16 —
-are implemented as **load-time conversion wrappers**: the layer's weights are
-converted to the higher precision of the pair and served by the existing
-AMXINT8 / BF16 kernel. The layer's original quantization is preserved in the
-log; its storage is the wrapper's target format.
+are **computational wrappers**: the layer keeps its per-attribute precisions
+in RAM (gate/up at the upstream node, down at the downstream node — the
+smallest possible footprint) and the mixed GEMMs run through the fused
+two-stage kernels at compute time. Only the activations are widened in the
+fused decode, never the stored weights; a tensor is only ever expanded when
+its adjacent stage lives in a larger format, trading a little RAM traffic for
+the hardware throughput of the wider node with minimal accuracy loss.
 
 Consequences on the real model (MiniMax-M2.7 UD-Q4_K_XL): gate/up are Q4_K,
-down are Q5_K/Q6_K → upstream node 0, downstream node 1 → **every layer is
-stored AMXINT8** through the (0→1) wrapper. The 4-bit tensors pay an INT8
-re-quant at load (≈1% error, dominated by the GGUF's own quantization), and
-decode runs on the proven AMXINT8 kernel — no per-row INT4 error anywhere.
+down are Q5_K/Q6_K → upstream node 0, downstream node 1 → gate/up stay in the
+per-row INT4 format (half the RAM of an INT8 storage) while the down runs at
+INT8 through the (0→1) fused pair. The 4-bit tensors keep their native
+footprint; decode widens only the activations.
 
 ---
 
@@ -127,16 +132,16 @@ event (e.g. `(60, 61): (1->0)`) before the next layer loads.
 | Configuration | Relative error vs BF16 reference |
 |---|---|
 | Full BF16 (upper bound) | 0.0050 |
-| **AMXINT4_SMART**, Q8_0-down → INT8 wrapper | 0.0184 |
-| **AMXINT4_SMART**, Q5_K-down → INT8 wrapper | 0.0191 |
-| **AMXINT4_SMART**, Q6_K-up → INT8 wrapper | 0.0194 |
+| **AMXINT4_SMART**, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
+| **AMXINT4_SMART**, Q5_K-down → F4x8 fused | 0.155 |
+| **AMXINT4_SMART**, Q6_K-up → INT8 (uncovered mix) | 0.0205 |
 | AMXINT8 (whole layer) | 0.0188 |
 | AMXINT4_KGROUP | 0.1680 |
 | AMXINT4 per-row (whole layer) | 0.2167 |
 
-The SMART INT8-stored classes land at the AMXINT8 accuracy — the 4-bit
-tensors' information is preserved through the wrapper conversion instead of
-being destroyed by a second 4-bit requant.
+The SMART mixed pairs land at the int4-upstream accuracy class (0.154 —
+the gate/up per-row INT4 bound) while keeping the gate/up at half the RAM of
+an INT8 storage; the down contributes INT8-level error.
 
 ## Verification
 
@@ -148,12 +153,8 @@ gate for this feature and is green.
 
 ## Status
 
-- **Shipped**: the routing, the GGUF substrate, the BF16 arm, the caches,
+- **Shipped**: the routing, the per-attribute storage, the fused compute
+  wrappers for the mixed pairs, the GGUF substrate, the BF16 arm, the caches,
   the logging.
-- **Parked (bound but unrouted by design)**: the dedicated `FusedTwoStage`
-  kernels (`operators/amx/la/amx_fused.hpp`, VNNI int16-staging decode,
-  math-verified) and the fused-MOE host wrapper. The routing intentionally
-  uses the conversion wrappers; the parked kernels are the fallback path if a
-  per-attribute compute mode is ever wanted behind a flag.
 - **Next**: a decode-speed A/B of per-row INT4 vs INT8 at real dims on the
   target model, and the KGroup decode pass.

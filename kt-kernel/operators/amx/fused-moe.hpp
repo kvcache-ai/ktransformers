@@ -213,6 +213,7 @@ class AMX_FUSED_MOE_TP : public AMX_MOE_BASE<KA, AMX_FUSED_MOE_TP<KA, KB>> {
     auto pool = config_.pool->get_subpool(tp_part_idx);
     const ggml_bf16_t* x = (const ggml_bf16_t*)input;
     float* f32out = (float*)output;
+    for (int c = 0; c < H; c++) f32out[c] = 0.0f;  // zero the blend accumulator
 
     // activated experts
     int act = 0;

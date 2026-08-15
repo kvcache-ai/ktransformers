@@ -15,7 +15,7 @@ def _rss_gb() -> float:
     try:
         with open("/proc/self/statm") as f:
             pages = int(f.read().split()[1])
-        return pages * os.sysconf("SC_PAGE_SIZE") / (1024 ** 3)
+        return pages * os.sysconf("SC_PAGE_SIZE") / (1024**3)
     except (OSError, ValueError, IndexError):
         return -1.0
 
@@ -30,6 +30,7 @@ def _is_gguf_path(path: str) -> bool:
         except OSError:
             return False
     return False
+
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -71,7 +72,7 @@ _HAS_AMXINT4_SUPPORT = AMXInt4_MOE is not None
 _HAS_AMXINT8_SUPPORT = AMXInt8_MOE is not None
 _HAS_AMXINT4_KGROUP_SUPPORT = AMXInt4_KGroup_MOE is not None
 # Task-specific fused two-stage MOEs (stage pair -> per-attribute mix)
-_FUSED_4x8_MOE = getattr(_moe_mod, "AMXFused4x8_MOE", None)    # int4 -> int8
+_FUSED_4x8_MOE = getattr(_moe_mod, "AMXFused4x8_MOE", None)  # int4 -> int8
 _FUSED_8x16_MOE = getattr(_moe_mod, "AMXFused8x16_MOE", None)  # int8 -> bf16
 _FUSED_4x16_MOE = getattr(_moe_mod, "AMXFused4x16_MOE", None)  # int4 -> bf16
 # K2/RAWINT4 K-group quant: number of weight columns sharing one int8 scale
@@ -391,7 +392,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
                 self.gguf_cache = None
                 logger.info(
                     "[AMXMoEWrapper] Layer %d: GGUF source %s (%s, no cache)",
-                    layer_idx, weight_path, method,
+                    layer_idx,
+                    weight_path,
+                    method,
                 )
             else:
                 self.gguf_cache = GGUFCacheManager(
@@ -405,7 +408,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
                 )
             logger.info(
                 "[AMXMoEWrapper] Layer %d: GGUF source %s (INT8 cache: %s)",
-                layer_idx, weight_path,
+                layer_idx,
+                weight_path,
                 self.gguf_cache.cache_dir if self.gguf_cache is not None else "disabled",
             )
         elif glob.glob(os.path.join(weight_path, "*.safetensors")):
@@ -452,6 +456,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             del self.moe
             self.moe = None
             import gc
+
             gc.collect()
 
         # Store tensors as instance variables to keep them alive
@@ -536,16 +541,31 @@ class AMXMoEWrapper(BaseMoEWrapper):
             # falls back to the more-accurate plain layer (correct, slower).
             up = getattr(moe_config, "upstream_precision", 0)
             dw = getattr(moe_config, "downstream_precision", 0)
-            # Fused pairs are implemented as WRAPPERS around the existing
-            # kernels: the layer's weights are converted at load to the higher
-            # precision of the pair (int4/int8 -> the AMXINT8 format, or ->
-            # the BF16 format) and served by the existing kernel. That is the
-            # 3-dtype storage rule: the layer is stored at the max class of
-            # its attributes (AMXINT4 <= Q4, AMXINT8 for (Q4,Q8], BF16 for
-            # F32/F16/BF16). (The dedicated FusedTwoStage kernels remain
-            # parked in amx_fused.hpp; the routing uses the wrappers.)
-            stored = max(up, dw)
-            self.moe = {0: AMXInt4_MOE, 1: AMXInt8_MOE, 2: AMXBF16_MOE}[stored](moe_config)
+            pair = (up, dw)
+            # Mixed stage pairs are COMPUTATIONAL wrappers: the layer keeps
+            # its per-attribute precisions in RAM (gate/up at the upstream
+            # node, down at the downstream node — smallest possible footprint)
+            # and the mixed GEMMs run through the fused two-stage kernels at
+            # compute time. Only the activations are widened in the fused
+            # decode, never the stored weights. Uniform pairs use the plain
+            # single-precision MOEs.
+            fused_map = {
+                (0, 1): _FUSED_4x8_MOE,
+                (1, 2): _FUSED_8x16_MOE,
+                (0, 2): _FUSED_4x16_MOE,
+            }
+            if pair in fused_map and fused_map[pair] is not None:
+                self.moe = fused_map[pair](moe_config)
+            elif pair == (0, 0):
+                self.moe = AMXInt4_MOE(moe_config)
+            elif pair == (1, 1):
+                self.moe = AMXInt8_MOE(moe_config)
+            elif pair == (2, 2):
+                self.moe = AMXBF16_MOE(moe_config)
+            else:
+                # reversed/uncovered mix (e.g. (1,0)): the upstream is the
+                # larger node — store at the max class (no fused kernel for it)
+                self.moe = {0: AMXInt4_MOE, 1: AMXInt8_MOE, 2: AMXBF16_MOE}[max(up, dw)](moe_config)
         elif self.method == "BF16":
             self.moe = AMXBF16_MOE(moe_config)
         else:
@@ -567,7 +587,8 @@ class AMXMoEWrapper(BaseMoEWrapper):
         if cache is not None and cache.enabled and cache.layer_complete(self.layer_idx):
             logger.info(
                 "[AMXMoEWrapper] Layer %d: INT8 cache hit, loading from %s",
-                self.layer_idx, cache.cache_dir,
+                self.layer_idx,
+                cache.cache_dir,
             )
             moe_config = self._make_moe_config()
             moe_config.load = True
@@ -582,15 +603,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         if loader is None:
             raise RuntimeError("GGUF loader not initialized for GGUF weight path")
         base = f"blk.{self.layer_idx}"
-        gate_src = loader.get_expert_gguf_source(
-            f"{base}.ffn_gate_exps.weight", expected_shape=[E, I, H]
-        )
-        up_src = loader.get_expert_gguf_source(
-            f"{base}.ffn_up_exps.weight", expected_shape=[E, I, H]
-        )
-        down_src = loader.get_expert_gguf_source(
-            f"{base}.ffn_down_exps.weight", expected_shape=[E, H, I]
-        )
+        gate_src = loader.get_expert_gguf_source(f"{base}.ffn_gate_exps.weight", expected_shape=[E, I, H])
+        up_src = loader.get_expert_gguf_source(f"{base}.ffn_up_exps.weight", expected_shape=[E, I, H])
+        down_src = loader.get_expert_gguf_source(f"{base}.ffn_down_exps.weight", expected_shape=[E, H, I])
 
         moe_config = self._make_moe_config()
         moe_config.gate_gguf = gate_src["ptr"]
@@ -612,12 +627,21 @@ class AMXMoEWrapper(BaseMoEWrapper):
             # and the fused-kernel stage pair (upstream = gate/up node,
             # downstream = down node).
             errs = kt_kernel_ext.moe.per_row_int4_err(
-                gate_src["ptr"], gate_src["stride"], gate_src["ggml_type"],
-                up_src["ptr"], up_src["stride"], up_src["ggml_type"],
-                down_src["ptr"], down_src["stride"], down_src["ggml_type"],
-                I, H, 128,
+                gate_src["ptr"],
+                gate_src["stride"],
+                gate_src["ggml_type"],
+                up_src["ptr"],
+                up_src["stride"],
+                up_src["ggml_type"],
+                down_src["ptr"],
+                down_src["stride"],
+                down_src["ggml_type"],
+                I,
+                H,
+                128,
             )
             self._smart_errs = [float(e) if e >= 0.0 else 0.0 for e in errs]
+
             # 3 storage dtypes per layer (the rule is unchanged): the layer's
             # tensors decide — any F32/F16/BF16 -> BF16 storage; else any
             # tensor in (Q4, Q8] (Q5_0/Q5_1/Q5_K/Q6_K/Q8_0/IQ*/I*) -> AMXINT8
@@ -640,19 +664,38 @@ class AMXMoEWrapper(BaseMoEWrapper):
             if prev is not None:
                 logger.info(
                     "[AMXMoEWrapper] (%d, %d): stage edge (%d -> %d)",
-                    self.layer_idx - 1, self.layer_idx, prev, moe_config.upstream_precision,
+                    self.layer_idx - 1,
+                    self.layer_idx,
+                    prev,
+                    moe_config.upstream_precision,
                 )
             AMXMoEWrapper._smart_down_nodes[self.layer_idx] = stored
-            _names = {0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 6: "Q5_0", 7: "Q5_1", 8: "Q8_0", 10: "Q2_K",
-                      11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K", 30: "BF16"}
+            _names = {
+                0: "F32",
+                1: "F16",
+                2: "Q4_0",
+                3: "Q4_1",
+                6: "Q5_0",
+                7: "Q5_1",
+                8: "Q8_0",
+                10: "Q2_K",
+                11: "Q3_K",
+                12: "Q4_K",
+                13: "Q5_K",
+                14: "Q6_K",
+                30: "BF16",
+            }
             logger.info(
                 "[AMXMoEWrapper] Layer %d: AMXINT4_SMART original gate=%s up=%s down=%s "
                 "-> stored %s (per-row INT4 err %.4f/%.4f/%.4f)",
-                self.layer_idx, _names.get(gate_src["ggml_type"], str(gate_src["ggml_type"])),
+                self.layer_idx,
+                _names.get(gate_src["ggml_type"], str(gate_src["ggml_type"])),
                 _names.get(up_src["ggml_type"], str(up_src["ggml_type"])),
                 _names.get(down_src["ggml_type"], str(down_src["ggml_type"])),
                 ("AMXINT4" if stored == 0 else "AMXINT8" if stored == 1 else "BF16"),
-                self._smart_errs[0], self._smart_errs[1], self._smart_errs[2],
+                self._smart_errs[0],
+                self._smart_errs[1],
+                self._smart_errs[2],
             )
 
         if cache is not None and cache.enabled:
@@ -672,7 +715,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
             cache.mark_layer_complete(self.layer_idx)
             logger.info(
                 "[AMXMoEWrapper] Layer %d: GGUF→INT8 quantize + cache done in %.1fs (%s)",
-                self.layer_idx, time.time() - t0, cache.cache_dir,
+                self.layer_idx,
+                time.time() - t0,
+                cache.cache_dir,
             )
 
     def load_weights(self, physical_to_logical_map_cpu: torch.Tensor):
