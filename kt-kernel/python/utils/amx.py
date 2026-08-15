@@ -536,9 +536,9 @@ class AMXMoEWrapper(BaseMoEWrapper):
         elif self.method == "AMXINT4_SMART":
             # Fused-stage routing: the load-time per-attribute nodes form the
             # (upstream, downstream) pair. Uniform pairs use the plain single-
-            # precision MOEs; mixed pairs are the task-specific fused kernels
-            # (F4x8 / F8x16 / F4x16) — until those kernels land, a mixed pair
-            # falls back to the more-accurate plain layer (correct, slower).
+            # precision MOEs; mixed pairs are the computational wrappers
+            # (F4x8 / F8x16 / F4x16) around the downstream node's default
+            # kernel.
             up = getattr(moe_config, "upstream_precision", 0)
             dw = getattr(moe_config, "downstream_precision", 0)
             pair = (up, dw)
@@ -620,12 +620,13 @@ class AMXMoEWrapper(BaseMoEWrapper):
         moe_config.gguf_full_intermediate_size = I
 
         if self.method == "AMXINT4_SMART":
-            # Load-time per-row INT4 round-trip error per attribute, measured
-            # with the same kt::gguf dequant the strips use (first-expert row
-            # sample; no extra quantization, no full-tensor materialization).
-            # Drives the per-layer INT4-vs-INT8 routing in _create_and_load_moe
-            # and the fused-kernel stage pair (upstream = gate/up node,
-            # downstream = down node).
+            # Per-attribute dtype nodes (3 storage dtypes per layer, from the
+            # GGUF types alone — no error measurement in the routing): any
+            # F32/F16/BF16 -> node 2 (BF16 storage); else any tensor in
+            # (Q4, Q8] (Q5_0/Q5_1/Q5_K/Q6_K/Q8_0/IQ*/I*) -> node 1 (AMXINT8
+            # storage); else (all at-or-below Q4) -> node 0 (per-row AMXINT4
+            # storage). The per-row INT4 error is still measured for the log
+            # only.
             errs = kt_kernel_ext.moe.per_row_int4_err(
                 gate_src["ptr"],
                 gate_src["stride"],
@@ -658,6 +659,7 @@ class AMXMoEWrapper(BaseMoEWrapper):
             dw = _cls(down_src["ggml_type"])
             moe_config.upstream_precision = up
             moe_config.downstream_precision = dw
+            self._smart_pair = (up, dw)
             # the pair is an edge between two layers: (prev_down -> this_gate).
             # Stash this layer's stored class for the next layer's edge log.
             prev = AMXMoEWrapper._smart_down_nodes.get(self.layer_idx - 1)
