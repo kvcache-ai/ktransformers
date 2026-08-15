@@ -31,6 +31,17 @@ This is required because the DeepSeek-V4 GGUF stores its CPU-offloaded expert
 tensors as MXFP4; without it ggml rejects the tensor type and kt-kernel cannot
 load the experts.
 
+### `0002-gguf-numpy2-byteorder.patch`
+
+`gguf-py/gguf/gguf_reader.py` — routes the two byte-order conversions through a
+`_np_apply_byteorder` helper that calls `dtype.newbyteorder` instead of
+`ndarray.newbyteorder`, which NumPy 2.0 removed.
+
+`kt-kernel/python/utils/loader.py` reads the per-layer expert GGUFs through
+`gguf.gguf_reader.GGUFReader`, so on NumPy >= 2.0 the unpatched reader raises
+`AttributeError` before any expert is loaded. Environments still on NumPy 1.x are
+unaffected either way — the helper is a no-op rewrite there.
+
 ## Applying by hand
 
 The build applies these automatically. To do it manually (e.g. when debugging):
