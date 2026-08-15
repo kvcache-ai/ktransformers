@@ -195,6 +195,7 @@ class AMX_MOE_BASE {
     };
     dump_down_internals(1);
     dump_down_internals(2);
+    fflush(stdout);
   }
 
   ggml_bf16_t* m_local_input_ = nullptr;
