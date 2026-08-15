@@ -196,7 +196,7 @@ def load_cache_cfg(pool, layer_idx, cache_dir):
     return cfg
 
 
-def forward(pool, moe, map_t, seed, out_dtype=torch.bfloat16):
+def forward(pool, moe, map_t, seed, out_dtype=torch.float32):
     torch.manual_seed(seed)
     bsz = torch.tensor([1], dtype=torch.int32)
     expert_ids = torch.stack([torch.randperm(EXPERT_NUM)[:NUM_EXPERTS_PER_TOK] for _ in range(1)]).contiguous()

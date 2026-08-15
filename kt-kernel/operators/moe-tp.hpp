@@ -27,6 +27,16 @@ class TP_MOE_Common : public MoE_Interface {
   static_assert(std::is_base_of_v<T, Concrete>);
   static_assert(std::is_constructible_v<Concrete, GeneralMOEConfig, int>);
 
+ public:
+  // RAM-state diagnostic: forwards to every TP instance that exposes it.
+  void debug_ram_stats(const char* tag = "moe") {
+    for (auto& tp : tps) {
+      if constexpr (requires { std::declval<T&>().debug_ram_stats(""); }) {
+        if (tp) tp->debug_ram_stats(tag);
+      }
+    }
+  }
+
  protected:
   std::vector<GeneralMOEConfig> tp_configs;
   int tp_count;

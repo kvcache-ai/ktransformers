@@ -469,6 +469,12 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
       .def("load_weights", &MoeClass::load_weights)
       .def("forward", &MoeClass::forward_binding);
 
+  // RAM-state diagnostic for the AMX MOE family (the packed buffers' scales
+  // and zero-fraction after load)
+  if constexpr (requires { std::declval<MoeClass&>().debug_ram_stats(""); }) {
+    moe_cls.def("debug_ram_stats", &MoeClass::debug_ram_stats, py::arg("tag") = "moe");
+  }
+
   // Bind write_weight_scale_to_buffer_task for MoE types that support it
   // Uses SFINAE to detect if MoeClass has write_weight_scale_to_buffer method
   if constexpr (requires { &MoeClass::write_weight_scale_to_buffer; }) {
