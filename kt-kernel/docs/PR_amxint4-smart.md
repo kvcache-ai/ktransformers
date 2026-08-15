@@ -91,11 +91,11 @@ attribute instead.
   | Configuration | rel. error |
   |---|---|
   | Full BF16 | 0.0050 |
-  | SMART, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
-  | SMART, Q5_K-down → F4x8 fused | 0.155 |
-  | SMART, Q6_K-up/Q4_K-down → F4x8 (flipped) | 0.178 |
-  | SMART, BF16-up/Q6_K-down → F8x16 (flipped) | 0.0136 |
-  | SMART, BF16-up/Q4_K-down → F4x16 (flipped) | 0.171 |
+  | SMART, IN-RAM (gate Q4→INT4, up Q4→INT4, down Q8_0→INT8) → F4x8 | 0.154 |
+  | SMART, IN-RAM (gate Q4→INT4, up Q4→INT4, down Q5_K→INT8) → F4x8 | 0.155 |
+  | SMART, IN-RAM (gate Q6_K→INT8, up Q6_K→INT8, down Q4_K→INT4) → F4x8 (flipped) | 0.178 |
+  | SMART, IN-RAM (gate BF16, up BF16, down Q6_K→INT8) → F8x16 (flipped) | 0.0136 |
+  | SMART, IN-RAM (gate BF16, up BF16, down Q4_K→INT4) → F4x16 (flipped) | 0.171 |
   | AMXINT8 | 0.0188 |
   | AMXINT4_KGROUP | 0.1680 |
   | AMXINT4 per-row | 0.2167 |

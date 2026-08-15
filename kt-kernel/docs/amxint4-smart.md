@@ -78,10 +78,29 @@ point (the int-family stages run `integer_mat_mul`, the BF16 stage
 `float_mat_vec`), so the compositions stay symmetric at minimal runtime cost.
 
 Consequences on the real model (MiniMax-M2.7 UD-Q4_K_XL): gate/up are Q4_K,
-down are Q5_K/Q6_K → upstream node 0, downstream node 1 → gate/up stay in the
-per-row INT4 format (half the RAM of an INT8 storage) while the down runs at
-INT8 through the (0→1) fused pair. The 4-bit tensors keep their native
-footprint; decode widens only the activations.
+down are Q5_K/Q6_K → the layers land on the FusedInt4xInt8 wrapper; the
+4-bit tensors keep their native footprint; decode widens only the
+activations.
+
+#### Display convention (user-facing form)
+
+The pair id `(0, 1)` is an **internal routing key only** — it is not a
+storage format. The user-facing display of a routed layer reads as:
+
+```
+IN-RAM:  (gate: Q4 -> AMXINT4, up: Q4 -> AMXINT4, down: Q5 -> AMXINT8)
+Operators Engaged:
+  In (bf16) --(In_Type, node 0)--> AMXINT4 [gate/up per-row INT4]
+    -> h = silu(g)*u  (1, 1)  (bf16 intermediate, node-1 quantization for the down-A)
+  --AMXINT8 [down per-row INT8]--> Out (bf16)
+  via the FusedInt4xInt8 two-stage wrapper (one fused class per precision
+  pair; the internal pair (0,1)/(1,0) selects the orientation at entry)
+```
+
+The `(1, 1)` is the intermediate state: the fused decode materializes
+`h = silu(g)·u` in bf16 between the stages (the same scratch the plain
+decode uses), then quantizes it per-row for the down stage — one
+(1 token × 1 expert) computation at a time.
 
 ---
 
@@ -142,9 +161,9 @@ event (e.g. `(60, 61): (1->0)`) before the next layer loads.
 | Configuration | Relative error vs BF16 reference |
 |---|---|
 | Full BF16 (upper bound) | 0.0050 |
-| **AMXINT4_SMART**, Q4-up/Q8_0-down → F4x8 fused | 0.154 |
-| **AMXINT4_SMART**, Q5_K-down → F4x8 fused | 0.155 |
-| **AMXINT4_SMART**, Q6_K-up/Q4_K-down → F4x8 (flipped) | 0.178 |
+| **AMXINT4_SMART**, IN-RAM (gate Q4→INT4, up Q4→INT4, down Q8_0→INT8) → F4x8 | 0.154 |
+| **AMXINT4_SMART**, IN-RAM (gate Q4→INT4, up Q4→INT4, down Q5_K→INT8) → F4x8 | 0.155 |
+| **AMXINT4_SMART**, IN-RAM (gate Q6_K→INT8, up Q6_K→INT8, down Q4_K→INT4) → F4x8 (flipped) | 0.178 |
 | **AMXINT4_SMART**, BF16-up/Q6_K-down → F8x16 (flipped) | 0.0136 |
 | **AMXINT4_SMART**, BF16-up/Q4_K-down → F4x16 (flipped) | 0.171 |
 | AMXINT8 (whole layer) | 0.0188 |
