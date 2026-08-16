@@ -1007,3 +1007,37 @@ class NativeMoEWrapper(BaseMoEWrapper):
         """
         # The CPUInfer.sync() call blocks until pending tasks complete.
         self.cpu_infer.sync()
+
+    def run_layerwise_fp8_batch(
+        self,
+        transport,
+        epoch: int,
+        layer_id: int,
+        expert_count: int,
+    ):
+        """Run one block-FP8 layer's native writer/H2D transport pipeline.
+
+        The transport owns the hot per-expert protocol.  Python enters once per
+        layer, while the C++ producer overlaps writing expert ``e + 1`` with
+        each rank's local H2D copy of expert ``e``.
+        """
+        if self.method != "FP8":
+            raise RuntimeError(
+                "run_layerwise_fp8_batch is only valid for the block-FP8 NativeMoEWrapper backend"
+            )
+        if self.moe is None:
+            raise RuntimeError("MoE instance not initialized; cannot run FP8 layerwise transport.")
+        if not hasattr(self.moe, "run_layerwise_fp8_batch"):
+            raise NotImplementedError(
+                "The installed kt-kernel extension does not expose run_layerwise_fp8_batch."
+            )
+        # The native batch calls the shared NUMA distributor directly.  Drain
+        # CPUInfer first so it cannot race a previously queued task against the
+        # non-reentrant distributor state.
+        self.cpu_infer.sync()
+        return self.moe.run_layerwise_fp8_batch(
+            transport,
+            epoch,
+            layer_id,
+            expert_count,
+        )
