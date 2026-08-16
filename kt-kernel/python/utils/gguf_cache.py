@@ -144,7 +144,7 @@ class GGUFCacheManager:
         }
         self.key = hashlib.sha256(json.dumps(key_fields, sort_keys=True).encode()).hexdigest()[:16]
         self.root = resolve_cache_root(gguf_dir)
-        self.cache_dir = os.path.join(self.root, f"{method.lower()}-tp{threadpool_count}-{self.key}")
+        self.cache_dir = os.path.join(self.root, f"{method.lower()}-{self.key}")
         self.manifest_path = os.path.join(self.cache_dir, "manifest.json")
         self.manifest = self._load_manifest()
         # Key fields are merged into the manifest only at write time (see

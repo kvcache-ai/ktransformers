@@ -40,54 +40,89 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
 
   inline void write_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
-                            size_t scale_size) {
+                            size_t scale_size, int tp_index = 0) {
+    // The cache holds the FULL quantized matrix once (one copy on disk);
+    // each tp writes its own slice at its offset (quant bytes contiguous,
+    // then all tps' scales). First writer truncates (wb), the rest reopen
+    // r+b — offsets are disjoint, so the concurrent per-NUMA writes are
+    // safe. The per-NUMA RAM buffers stay slices (their union is exactly
+    // one copy — the LLAMAFILE philosophy).
+    const int64_t quant_off = (int64_t)tp_index * (size - scale_size);
+    const int64_t scale_off = (int64_t)tp_index * scale_size;
     auto quant_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt");
-    std::ofstream of(quant_path, std::ios::binary);
-    if (of.is_open() == false) {
+                                std::to_string(size - scale_size) + "Byte" + "_quant_"
+                                + ".kt");
+    // Only tp-0 may create/truncate the file; the other tps reopen r+b (no
+    // truncate!) and wait briefly for tp-0's create — a late "wb" from tp-1
+    // would clobber tp-0's already-written slice.
+    FILE* of = fopen(quant_path.c_str(), "r+b");
+    if (!of && tp_index == 0) of = fopen(quant_path.c_str(), "wb");
+    for (int tries = 0; !of && tries < 200; tries++) {
+      usleep(1000);
+      of = fopen(quant_path.c_str(), "r+b");
+    }
+    if (!of) {
       throw std::runtime_error("kt cache write failed (cannot open): " + quant_path.string());
     }
-    of.write((char*)bb, size - scale_size);
-    if (!of) {
+    if (fseek(of, quant_off, SEEK_SET) != 0) {
+      throw std::runtime_error("kt cache write failed (seek): " + quant_path.string());
+    }
+    if (fwrite(bb, 1, size - scale_size, of) != size - scale_size) {
       throw std::runtime_error("kt cache write failed (short write): " + quant_path.string());
     }
-    of.close();
+    fclose(of);
     auto scale_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                std::to_string(scale_size) + "Byte" + "_scale_" + ".kt");
-    of.open(scale_path, std::ios::binary);
-    if (of.is_open() == false) {
+                                std::to_string(scale_size) + "Byte" + "_scale_"
+                                + ".kt");
+    FILE* of2 = fopen(scale_path.c_str(), "r+b");
+    if (!of2 && tp_index == 0) of2 = fopen(scale_path.c_str(), "wb");
+    for (int tries = 0; !of2 && tries < 200; tries++) {
+      usleep(1000);
+      of2 = fopen(scale_path.c_str(), "r+b");
+    }
+    if (!of2) {
       throw std::runtime_error("kt cache write failed (cannot open): " + scale_path.string());
     }
-    of.write(((char*)bb) + size - scale_size, scale_size);
-    if (!of) {
+    if (fseek(of2, scale_off, SEEK_SET) != 0) {
+      throw std::runtime_error("kt cache write failed (seek): " + scale_path.string());
+    }
+    if (fwrite(((char*)bb) + size - scale_size, 1, scale_size, of2) != scale_size) {
       throw std::runtime_error("kt cache write failed (short write): " + scale_path.string());
     }
+    fclose(of2);
   }
 
   inline void read_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
                            size_t scale_size, uint8_t mat_split, uint8_t mat_split_idex) {
+    // The file holds the FULL matrix (each tp's slice concatenated: tp-0's
+    // whole buffer, then tp-1's, ...); this tp reads its own contiguous
+    // slice into its own buffer — one copy of the weights in RAM across all
+    // tps, the split being a cheap seek.
     auto quant_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt");
+                                std::to_string(size - scale_size) + "Byte" + "_quant_"
+                                + ".kt");
     std::ifstream f(quant_path, std::ios::binary);
     if (f.is_open() == false) {
       throw std::runtime_error("kt cache missing: " + quant_path.string());
     }
-    const size_t quant_part = (size - scale_size) / mat_split;
+    (void)mat_split;
+    const size_t quant_part = (size - scale_size);
     f.seekg(mat_split_idex * quant_part);
-    f.read(((char*)bb) + mat_split_idex * quant_part, quant_part);
+    f.read((char*)bb, quant_part);
     if (!f) {
       throw std::runtime_error("kt cache short read: " + quant_path.string());
     }
     f.close();
     auto scale_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                std::to_string(scale_size) + "Byte" + "_scale_" + ".kt");
+                                std::to_string(scale_size) + "Byte" + "_scale_"
+                                + ".kt");
     f.open(scale_path, std::ios::binary);
     if (f.is_open() == false) {
       throw std::runtime_error("kt cache missing: " + scale_path.string());
     }
-    const size_t scale_part = scale_size / mat_split;
+    const size_t scale_part = scale_size;
     f.seekg(mat_split_idex * scale_part);
-    f.read((((char*)bb) + size - scale_size) + mat_split_idex * scale_part, scale_part);
+    f.read(((char*)bb) + size - scale_size, scale_part);
     if (!f) {
       throw std::runtime_error("kt cache short read: " + scale_path.string());
     }
@@ -144,11 +179,15 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     auto& save = config_.save;
 
     std::filesystem::path prefix = config_.path;
-    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx));
     if (save) {
       // Atomic layer writes: files are written into <prefix>.tmp and renamed
       // over <prefix> only after the whole save job completes, so an
       // interrupted first boot can never leave a half-written layer behind.
+      // The cache holds the FULL quantized weights once (tp-agnostic — the
+      // quantize+store is the expensive part); the per-NUMA slices are taken
+      // at load time by seeking each tp's offset in the shared files (the
+      // same philosophy as LLAMA_MOE_TP::load_weights(complete, offset)).
       std::filesystem::create_directories(prefix);
       std::filesystem::path tmp_prefix = prefix;
       tmp_prefix += ".tmp";
@@ -258,17 +297,22 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
       std::filesystem::path prefix = config_.path;
-      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx));
 
       if (config_.load) {
-        std::cout << "Loading from \"" << prefix << "\"" << std::endl;
+        // The disk cache holds the FULL quantized weights once; each NUMA's
+        // slice is taken by seeking its own offset (mat_split_idex =
+        // tp_part_idx) — the split is a cheap seek, not a separate file set.
+        mat_split = config_.pool->config.subpool_count;
+        std::cout << "Loading from \"" << prefix << "\" (tp " << tp_part_idx << " of " << (int)mat_split << ")"
+                  << std::endl;
         pool->do_work_stealing_job(
-            config_.expert_num * mat_type_all * mat_split,
+            config_.expert_num * mat_type_all,
             [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
-              int64_t expert_idx = task_id / (mat_type_all * mat_split);
+              int64_t expert_idx = task_id / mat_type_all;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-              uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
-              uint8_t mat_split_idex = task_id % mat_split;
+              uint8_t mat_class = task_id % mat_type_all;
+              uint8_t mat_split_idex = tp_part_idx;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
@@ -418,27 +462,27 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
               int64_t expert_idx = task_id / mat_type_all;
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
+              const int tp_idx = tp_part_idx;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(tmp_prefix, "_up_", (char*)up_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_up_", (char*)up_bb_[expert_idx]->b, expert_idx, size, scale_size, tp_idx);
               } else if (mat_class == 1) {
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(tmp_prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, expert_idx, size, scale_size,
+                              tp_idx);
               } else if (mat_class == 2) {
                 size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
                 size_t scale_size = config_.hidden_size * sizeof(float);
-                write_weights(tmp_prefix, "_down_", (char*)down_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_down_", (char*)down_bb_[expert_idx]->b, expert_idx, size, scale_size,
+                              tp_idx);
               }
             },
             nullptr);
-        std::error_code ec;
-        std::filesystem::remove_all(prefix, ec);
-        std::filesystem::rename(tmp_prefix, prefix, ec);
-        if (ec) {
-          throw std::runtime_error("kt cache rename failed: " + tmp_prefix.string() + " -> " + prefix.string());
-        }
+        // The publish (rename tmp -> layer) happens in TP_MOE::load_weights
+        // after ALL numa jobs finished, so no tp races the rename while the
+        // others still write their slices.
       }
     }
   }
@@ -537,6 +581,23 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");
+    }
+    // Publish the layer cache (every branch may save): all tps wrote their
+    // slices into <layer>.tmp during load; only now, with every numa job
+    // done, is it safe to rename over the old layer (the rename fails when
+    // the destination directory exists and is non-empty, and the other tps
+    // must not still be writing into the tmp).
+    if (config.save) {
+      std::filesystem::path prefix =
+          std::filesystem::path(config.path) / ("_layer_" + std::to_string(config.layer_idx));
+      std::filesystem::path tmp_prefix = prefix;
+      tmp_prefix += ".tmp";
+      std::error_code ec;
+      std::filesystem::remove_all(prefix, ec);
+      std::filesystem::rename(tmp_prefix, prefix, ec);
+      if (ec) {
+        throw std::runtime_error("kt cache rename failed: " + tmp_prefix.string() + " -> " + prefix.string());
+      }
     }
   }
 

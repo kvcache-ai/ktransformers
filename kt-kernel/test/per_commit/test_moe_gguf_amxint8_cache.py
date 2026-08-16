@@ -316,10 +316,12 @@ def test_gguf_cache_equivalence():
             pool.sync()
             cache.mark_layer_complete(0)
             assert cache.layer_complete(0), f"{method}: layer 0 must be complete after save"
-            assert os.path.isdir(os.path.join(cache.cache_dir, "_layer_0", "_numa_0")), f"{method}: cache files missing"
-            assert os.path.isdir(
-                os.path.join(cache.cache_dir, "_layer_0", "_numa_1")
-            ), f"{method}: both NUMA shards missing"
+            layer_files = os.listdir(os.path.join(cache.cache_dir, "_layer_0"))
+            assert any(f.endswith("_quant_.kt") for f in layer_files), f"{method}: cache files missing"
+            assert any(f.endswith("_scale_.kt") for f in layer_files), f"{method}: cache scale files missing"
+            assert not any(d.startswith("_numa_") for d in layer_files), (
+                f"{method}: cache must be tp-agnostic (no per-NUMA dirs)"
+            )
             out_a, expert_ids, weights, input_data = forward(pool, moe_a, map_t, seed=11)
 
             # --- second boot: reload from cache, must be bitwise identical ---
