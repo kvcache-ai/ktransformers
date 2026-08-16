@@ -75,6 +75,7 @@ static const bool _is_plain_ = false;
 #include <memory>
 #include <type_traits>
 
+#include "fp8_layerwise_transport.hpp"
 #include "operators/kvcache/kvcache.h"
 #include "operators/llamafile/linear.h"
 #include "operators/llamafile/mla.hpp"
@@ -513,6 +514,25 @@ void bind_moe_module(py::module_& moe_module, const char* name) {
     moe_cls.def("write_weight_scale_to_buffer_task", &WriteWeightScaleToBufferBindings::cpuinfer_interface,
                 py::arg("gpu_tp_count"), py::arg("expert_id"), py::arg("w13_weight_ptrs"), py::arg("w13_scale_ptrs"),
                 py::arg("w2_weight_ptrs"), py::arg("w2_scale_ptrs"));
+
+    moe_cls.def(
+        "run_layerwise_fp8_batch",
+        [](std::shared_ptr<MoeClass> moe, const std::shared_ptr<kt::layerwise::FP8LayerwiseTransport>& transport,
+           std::uint64_t epoch, std::int64_t layer_id, int expert_count) {
+          if (!transport) throw std::invalid_argument("FP8 layerwise transport is null");
+          const int tp_size = transport->tp_size();
+          transport->run_producer(
+              epoch, layer_id, expert_count,
+              [moe, tp_size](int expert_id, const std::vector<std::uintptr_t>& w13_weight_ptrs,
+                             const std::vector<std::uintptr_t>& w13_scale_ptrs,
+                             const std::vector<std::uintptr_t>& w2_weight_ptrs,
+                             const std::vector<std::uintptr_t>& w2_scale_ptrs) {
+                moe->write_weight_scale_to_buffer(tp_size, expert_id, w13_weight_ptrs, w13_scale_ptrs, w2_weight_ptrs,
+                                                  w2_scale_ptrs);
+              });
+        },
+        py::arg("transport"), py::arg("epoch"), py::arg("layer_id"), py::arg("expert_count"),
+        py::call_guard<py::gil_scoped_release>());
   }
 }
 
@@ -543,6 +563,51 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
   m.attr("__fp8_kernel__") = "unsupported";
 #endif
   m.attr("__fp8_weight_layout__") = "block-e4m3-128x128";
+
+  m.def("initialize_fp8_layerwise_control", &kt::layerwise::initialize_fp8_layerwise_control,
+        py::arg("control_ptr"), py::arg("control_size"), py::arg("tp_size"));
+
+  py::class_<kt::layerwise::FP8LayerwiseTransport, std::shared_ptr<kt::layerwise::FP8LayerwiseTransport>>(
+      m, "FP8LayerwiseTransport")
+      .def(py::init<std::uintptr_t, std::size_t, int, int, int, const std::vector<std::uintptr_t>&,
+                    const std::vector<std::uintptr_t>&, const std::vector<std::uintptr_t>&,
+                    const std::vector<std::size_t>&, int, std::uint64_t>(),
+           py::arg("control_ptr"), py::arg("control_size"), py::arg("rank"), py::arg("tp_size"),
+           py::arg("cuda_device"), py::arg("local_host_ptrs"), py::arg("local_gpu_ptrs"),
+           py::arg("all_rank_host_ptrs"), py::arg("expert_nbytes"), py::arg("num_experts"),
+           py::arg("timeout_ms") = 60000)
+      .def("join", &kt::layerwise::FP8LayerwiseTransport::join, py::arg("epoch"), py::arg("layer_id"),
+           py::arg("expert_count"), py::call_guard<py::gil_scoped_release>())
+      .def(
+          "wait",
+          [](kt::layerwise::FP8LayerwiseTransport& transport, std::uint64_t epoch) {
+            kt::layerwise::FP8LayerwiseStats stats;
+            {
+              py::gil_scoped_release release;
+              stats = transport.wait(epoch);
+            }
+            py::dict result;
+            result["epoch"] = stats.epoch;
+            result["layer_id"] = stats.layer_id;
+            result["expert_count"] = stats.expert_count;
+            result["rank"] = stats.rank;
+            result["writer_ms"] = stats.writer_ms;
+            result["slot_wait_ms"] = stats.slot_wait_ms;
+            result["h2d_ms"] = stats.h2d_ms;
+            result["total_ms"] = stats.total_ms;
+            result["bytes"] = stats.bytes;
+            result["poisoned"] = stats.poisoned;
+            result["error_code"] = stats.error_code;
+            result["error_rank"] = stats.error_rank;
+            result["error_message"] = stats.error_message;
+            return result;
+          },
+          py::arg("epoch"))
+      .def("close", &kt::layerwise::FP8LayerwiseTransport::close, py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly("rank", &kt::layerwise::FP8LayerwiseTransport::rank)
+      .def_property_readonly("tp_size", &kt::layerwise::FP8LayerwiseTransport::tp_size)
+      .def_property_readonly("num_experts", &kt::layerwise::FP8LayerwiseTransport::num_experts)
+      .def_property_readonly("closed", &kt::layerwise::FP8LayerwiseTransport::closed);
 
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
