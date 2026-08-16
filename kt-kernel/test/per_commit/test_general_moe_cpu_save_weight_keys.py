@@ -2,13 +2,18 @@
 
 Asserts the branch actually consumes the gate/up/down weights
 SafeTensorLoader.load_experts() returns, stacked into the per-expert layout
-the native kernel expects.
+the native kernel expects, AND that it queries the loader with the same
+"blk.{layer_idx}" key convention the load_merged_weight branch above it
+uses. SafeTensorLoader.load_experts() only recognizes "blk."-prefixed keys;
+a "model.layers."-prefixed key raises ValueError before this branch's
+gate/up/down handling ever runs, which a loader mock that ignores its
+base_key argument cannot catch.
 
 Runs without the compiled kt_kernel_ext extension or real model weights: the
 native symbols touched at construction time are stubbed and
 SafeTensorLoader.load_experts() is mocked, matching the mocking style
-test_native_moe_loader_auto_release.py already uses in this directory for
-the same reason (no compiled binary in CI).
+test_native_moe_loader_auto_release.py uses in the parent test/ directory
+for the same reason (no compiled binary in CI).
 """
 
 import importlib.util
@@ -22,7 +27,12 @@ import numpy as np
 import torch
 from safetensors.torch import save_file
 
-PYTHON_DIR = os.path.join(os.path.dirname(__file__), "..", "python")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=5, suite="default")
+
+PYTHON_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "python")
 
 
 def _install_kt_kernel_ext_stub():
@@ -93,12 +103,19 @@ def _load_kt_kernel():
 
 
 class _FakeLoader:
-    """Stand-in for SafeTensorLoader, returning load_experts()'s documented shape."""
+    """Stand-in for SafeTensorLoader, returning load_experts()'s documented shape.
+
+    Records the base_key it was called with so a test can assert the caller
+    used the "blk."-prefixed convention the real loader requires, instead of
+    silently accepting any key the way a value-only mock would.
+    """
 
     def __init__(self, values):
         self._values = values
+        self.requested_base_keys = []
 
     def load_experts(self, base_key, device="cpu"):
+        self.requested_base_keys.append(base_key)
         return self._values
 
 
@@ -167,6 +184,23 @@ class TestGeneralMoEWrapperCpuSaveWeightKeys(unittest.TestCase):
             for expert_id in range(num_experts):
                 expected = torch.full((2, 4), base + expert_id * 10)
                 self.assertTrue(torch.equal(tensor[expert_id], expected), f"{proj} expert {expert_id}")
+
+    def test_cpu_save_queries_loader_with_blk_prefixed_key(self):
+        # wrapper.load_merged_weight is True (asserted in _make_wrapper), so
+        # load_weights() queries the loader twice in one call: once from the
+        # load_merged_weight branch just above the one under test, once from
+        # the cpu_save branch itself. Both must use the same f"blk.{layer_idx}"
+        # key convention -- the real SafeTensorLoader does not recognize any
+        # other prefix.
+        wrapper = self._make_wrapper(num_experts=2)
+
+        wrapper.load_weights(torch.arange(2, dtype=torch.int64))
+
+        expected_key = f"blk.{wrapper.layer_idx}"
+        self.assertEqual(
+            wrapper.safetensor_loader.requested_base_keys,
+            [expected_key, expected_key],
+        )
 
 
 if __name__ == "__main__":

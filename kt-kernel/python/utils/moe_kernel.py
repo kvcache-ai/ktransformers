@@ -283,7 +283,7 @@ class GeneralMoEWrapper(BaseMoEWrapper):
         if self.cpu_save:
             moe_config.save = True
             moe_config.load = False
-            base_key = f"model.layers.{self.layer_idx}"
+            base_key = f"blk.{self.layer_idx}"
             w = self.safetensor_loader.load_experts(base_key)
 
             self.gate_proj = torch.stack([torch.from_numpy(t) for t in w["gate"][0]], dim=0).contiguous()
