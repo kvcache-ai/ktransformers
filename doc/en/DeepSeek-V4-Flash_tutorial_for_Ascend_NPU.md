@@ -705,8 +705,10 @@ so `mem-fraction` has to go up with it:
 source ~/dsv4.env
 P=$(cat "$DSV4_LOG_DIR/serve.log.pid"); kill -INT $P; sleep 8; kill -TERM $P; sleep 20
 
-export DSV4_PREFILL_STREAM=1      # turns on all five: KT_PREFILL_STREAM, KT_MXFP4_DEPOOL,
-                                  # KT_DYNAMIC_RESIDENT, KT_MXFP4_GGUF_DEDUP, KT_SIDE_STREAM
+export DSV4_PREFILL_STREAM=1      # five switches — KT_PREFILL_STREAM, KT_MXFP4_DEPOOL,
+                                  # KT_DYNAMIC_RESIDENT, KT_MXFP4_GGUF_DEDUP, KT_SIDE_STREAM —
+                                  # plus the threshold and three checkpoint/op paths they need,
+                                  # nine exports in total. See the /proc check below.
 export DSV4_MEM_FRACTION=0.86     # 0.81 will not start with streaming enabled
 bash "$DSV4_TOOLS/serve.sh"
 
