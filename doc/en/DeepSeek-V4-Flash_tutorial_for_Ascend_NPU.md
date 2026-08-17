@@ -294,7 +294,8 @@ If both vendors are present and `custom_ops` imports, skip to [Step 4](#step-4-b
 Otherwise:
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/build_cann_ops.sh all
+source ~/dsv4.env
+bash "$DSV4_TOOLS/build_cann_ops.sh" all
 ```
 
 This clones two Gitcode repositories, pins them to the commits this tutorial was validated against, builds three packages and installs them into `${CANN_ROOT}/opp`. Budget 40–90 minutes.
@@ -321,10 +322,11 @@ source kt-kernel/tools/ascend_dsv4/dsv4_env.sh
 ## Step 4: Build KT-Kernel
 
 ```bash
+source ~/dsv4.env
 # Debian/Ubuntu; on openEuler/CentOS use hwloc-devel numactl-devel pkgconfig
 sudo apt-get install -y build-essential cmake git libhwloc-dev libhwloc15 libnuma-dev patchelf pkg-config
 
-bash kt-kernel/tools/ascend_dsv4/build_kt_kernel.sh
+bash "$DSV4_TOOLS/build_kt_kernel.sh"
 ```
 
 10–30 minutes on a first build. The configure log must contain all four of these lines:
@@ -341,6 +343,7 @@ The second line is the one to read carefully. `applied patch` means the MXFP4 de
 Install the resulting wheel:
 
 ```bash
+source ~/dsv4.env
 python3 -m pip install --no-deps "${DSV4_ARTIFACT_DIR}"/wheels/kt_kernel-*.whl
 ```
 
@@ -357,7 +360,8 @@ python3 -c "import sgl_kernel_npu; print('ok')"
 If that works, skip to [Step 6](#step-6-install-the-python-dependencies). On a native CANN install it almost certainly does not, and it is **not** an optional dependency: `sglang/srt/mem_cache/pool_host/mha.py` imports it unconditionally, so the server dies at startup with `ModuleNotFoundError: No module named 'sgl_kernel_npu'`.
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/build_sgl_kernel_npu.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/build_sgl_kernel_npu.sh"
 ```
 
 This clones `sgl-project/sgl-kernel-npu` at tag `2026.6.2`, builds it and installs the four wheels it produces (`sgl_kernel_npu`, `deep_ep`, `attentions`, `torch_memory_saver`). Budget 20–40 minutes.
@@ -371,7 +375,8 @@ The script works around three issues in that tag, all of which otherwise present
 ## Step 6: Install the Python Dependencies
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/install_python_deps.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/install_python_deps.sh"
 ```
 
 This reads the dependency list out of SGLang's `python/pyproject_npu.toml`, writes a pip constraints file pinning the torch family that is already installed, and installs the list against those constraints. Anything that wants a different torch fails here, loudly, instead of silently upgrading it later. Pass `--dry-run` to see the list first.
@@ -391,6 +396,7 @@ Three artifacts. The first two are downloads; the third is produced from the sec
 Download the official checkpoint:
 
 ```bash
+source ~/dsv4.env
 huggingface-cli download deepseek-ai/DeepSeek-V4-Flash \
   --local-dir "${DSV4_MODEL_ROOT}/DeepSeek-V4-Flash"
 ```
@@ -402,7 +408,8 @@ For the W8A8 side, use a **published** W8A8 quantization of the same model rathe
 Then build the GGUF set:
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/convert_mxfp4_gguf.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/convert_mxfp4_gguf.sh"
 ```
 
 The conversion is a **lossless bit repack**, not a re-quantization: the checkpoint already stores E2M1 codes with a ue8m0 per-32 scale, and only the nibble ordering within each 32-element block differs from GGUF's half-block interleave. It is also byte-deterministic, so the same checkpoint always yields the same files. Budget several hours and ~138 GiB of free space.
@@ -418,13 +425,15 @@ The script finishes by running a three-level check ([`verify_mxfp4_gguf_set.py`]
 Generate your own manifest to check the set on a second machine:
 
 ```bash
+source ~/dsv4.env
 cd "${DSV4_GGUF_DIR}" && sha256sum dsv4_layer*_mxfp4.gguf | sort -V -k2 > manifest.txt
 ```
 
 ## Step 8: Preflight
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/preflight.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/preflight.sh"
 ```
 
 Every check corresponds to a failure that is silent or badly reported at serve time: the CANN vendors and `ASCEND_CUSTOM_OPP_PATH`, the torch/torch_npu/transformers versions, `torch.ops.custom.*` resolution, the Ascend callback-worker binding in `kt_kernel_ext`, `GGMLQuantizationType.MXFP4 == 39`, `sglang.__file__` pointing at your clone, the GGUF file count, the `{layer_idx}` placeholder, and the `--chunked-prefill-size` divisibility rule.
@@ -515,6 +524,7 @@ Why each parameter is what it is:
 Stop the server with `SIGINT` first, then `SIGTERM`:
 
 ```bash
+source ~/dsv4.env
 kill -INT  "$(cat "${DSV4_LOG_DIR}/serve.log.pid")"
 sleep 5
 kill -TERM "$(cat "${DSV4_LOG_DIR}/serve.log.pid")"
@@ -525,7 +535,8 @@ kill -TERM "$(cat "${DSV4_LOG_DIR}/serve.log.pid")"
 ## Step 10: Acceptance Checks
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/verify.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/verify.sh"
 ```
 
 Four gates, all of which must pass:
@@ -556,6 +567,7 @@ curl -s --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions
 these has exactly one right answer, so a broken numerical path shows up immediately:
 
 ```bash
+source ~/dsv4.env
 ask() {
   curl -s --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
@@ -571,6 +583,7 @@ ask "Alice is taller than Bob. Bob is taller than Carol. Who is shortest? Name o
 **Streaming**, so you can watch tokens arrive rather than waiting for one blob:
 
 ```bash
+source ~/dsv4.env
 curl -sN --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"dsv4","stream":true,"messages":[{"role":"user","content":"Write one sentence about Ascend NPUs."}],"temperature":0.6,"max_tokens":60}' \
@@ -590,6 +603,7 @@ print()"
 **An interactive session** with multi-turn context:
 
 ```bash
+source ~/dsv4.env
 python3 "${DSV4_TOOLS}/dsv4_chat.py" "${DSV4_PORT}"
 ```
 
@@ -743,6 +757,7 @@ about the switches; on A2, raising it from 0.81 to 0.86 on its own is worth 0.18
 The SWA sub-pool is a fixed **10%** of the full pool, and it is what runs out first:
 
 ```bash
+source ~/dsv4.env
 grep -ohE 'swa=[0-9]+' "${DSV4_LOG_DIR}/serve.log" | sort -u
 ```
 
@@ -753,8 +768,9 @@ grep -ohE 'swa=[0-9]+' "${DSV4_LOG_DIR}/serve.log" | sort -u
 Streaming prefill stages a whole layer's expert set from DDR into HBM and runs the MoE on the NPU. It turns prefill time into a roughly constant cost instead of one that grows with prompt length. It is **off by default**:
 
 ```bash
+source ~/dsv4.env
 export DSV4_PREFILL_STREAM=1
-bash kt-kernel/tools/ascend_dsv4/serve.sh
+bash "$DSV4_TOOLS/serve.sh"
 ```
 
 Measured on the validated A2 configuration:
@@ -781,6 +797,7 @@ No single configuration covers 1k through 32k. The boundaries are narrow and eac
 > **Important:** Confirm streaming actually engaged before you believe any streaming measurement:
 >
 > ```bash
+source ~/dsv4.env
 > grep -c 'inline resident' "${DSV4_LOG_DIR}/serve.log"                       # must be > 0
 > grep -cE 'streaming failed|hybrid fallback' "${DSV4_LOG_DIR}/serve.log"     # must be 0
 > ```
@@ -843,6 +860,7 @@ lowering the expert count alone does not help.
 **Accuracy.** GPQA-Diamond (198 questions) via evalscope, thinking disabled, `temperature=1`, `top_p=1`, `max_tokens=32768`, one question at a time:
 
 ```bash
+source ~/dsv4.env
 evalscope eval \
   --model "${DSV4_MODEL_PATH}" \
   --api-url "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
