@@ -25,6 +25,7 @@ from .layer import KTMoELayerWrapper
 from .lora import LoRAExperts
 from .base import _supports_authoritative_optimizer_grads
 from .checkpoint import load_full_weight_layer, resolve_full_weight_checkpoint
+from .conv3d_compat import patch_vlm_conv3d
 from .dist_utils import _distributed_rank_world_size
 from .weights import (
     _clear_original_expert_weights,
@@ -160,6 +161,9 @@ def wrap_moe_layers_with_kt_wrapper(model: nn.Module, kt_plugin: Any) -> list[KT
     is_rank_0 = distributed_rank == 0
 
     moe_config = get_moe_arch_config(model.config)
+    patched_conv3d = patch_vlm_conv3d(model)
+    if patched_conv3d:
+        logger.info(f"Patched KT VLM Conv3D modules: {patched_conv3d}")
     _text_cfg = getattr(model.config, "text_config", model.config)
     hidden_size = _text_cfg.hidden_size
 

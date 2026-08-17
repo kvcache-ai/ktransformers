@@ -98,7 +98,7 @@ def get_moe_arch_config(config) -> MOEArchConfig:
             has_shared_experts=getattr(config, "n_shared_experts", 0) > 0,
             router_type="deepseek_gate",
         )
-    if "Qwen2Moe" in arch or "Qwen3Moe" in arch or "Qwen3_5Moe" in arch:
+    if "Qwen2Moe" in arch or "Qwen3Moe" in arch or "Qwen3VLMoe" in arch or "Qwen3_5Moe" in arch:
         cfg = getattr(config, "text_config", config)
         return MOEArchConfig(
             moe_layer_attr="mlp",
@@ -136,7 +136,8 @@ def get_moe_arch_config(config) -> MOEArchConfig:
 
     raise KTAMXModelNotSupportedError(
         f"Model architecture {arch} not supported for KT AMX. "
-        "Supported architectures: DeepseekV2, DeepseekV3, Qwen2Moe, Qwen3Moe, Qwen3_5Moe, Glm4Moe, Mixtral"
+        "Supported architectures: DeepseekV2, DeepseekV3, Qwen2Moe, Qwen3Moe, Qwen3VLMoe, "
+        "Qwen3_5Moe, Glm4Moe, Mixtral"
     )
 
 
@@ -167,7 +168,7 @@ def detect_fused_experts(experts: nn.Module) -> bool:
 
 def _get_layers_prefix(config) -> str:
     arch = config.architectures[0] if getattr(config, "architectures", None) else ""
-    if "Qwen3_5Moe" in arch:
+    if "Qwen3_5Moe" in arch or "Qwen3VLMoe" in arch:
         return "model.language_model.layers"
     return "model.layers"
 
