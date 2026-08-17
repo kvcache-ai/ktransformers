@@ -705,7 +705,8 @@ so `mem-fraction` has to go up with it:
 source ~/dsv4.env
 P=$(cat "$DSV4_LOG_DIR/serve.log.pid"); kill -INT $P; sleep 8; kill -TERM $P; sleep 20
 
-export DSV4_PREFILL_STREAM=1      # streaming prefill + depool + dynamic resident + side stream
+export DSV4_PREFILL_STREAM=1      # turns on all five: KT_PREFILL_STREAM, KT_MXFP4_DEPOOL,
+                                  # KT_DYNAMIC_RESIDENT, KT_MXFP4_GGUF_DEDUP, KT_SIDE_STREAM
 export DSV4_MEM_FRACTION=0.86     # 0.81 will not start with streaming enabled
 bash "$DSV4_TOOLS/serve.sh"
 
@@ -716,6 +717,14 @@ MAX_NEW=1000 REPEAT=3 WARMUP=1 \
 PORT="$DSV4_PORT" PY=python3 \
 bash "$DSV4_RECIPES/scripts/tools/decode_throughput_test.sh" \
   2>&1 | tee "$DSV4_LOG_DIR/perf_allon.log"
+```
+
+**Confirm the switches actually reached the process**, by reading its environment rather
+than trusting what the launcher echoed:
+
+```bash
+source ~/dsv4.env
+tr '\0' '\n' < "/proc/$(cat "$DSV4_LOG_DIR/serve.log.pid")/environ" | grep -E '^KT_' | sort
 ```
 
 **Confirm streaming actually engaged before believing the numbers:**
@@ -811,8 +820,8 @@ source ~/dsv4.env
 All figures from a single Atlas 800I A2 (910B3) die, NPU graph on, one request at a time, on an otherwise idle Kunpeng 920 host (192 cores, 8 NUMA nodes). A3 numbers are not comparable — see [Known Limitations](#known-limitations).
 
 **Throughput, with the feature switches on** — streaming prefill, MXFP4 depool, dynamic
-hot-expert residency and the CPU-MoE side stream, as enabled by `DSV4_PREFILL_STREAM=1`
-in [Step 13](#step-13-throughput-validation). Decode is the median steady-state
+hot-expert residency, GGUF dedup and the CPU-MoE side stream, all enabled together by
+`DSV4_PREFILL_STREAM=1` in [Step 13](#step-13-throughput-validation). Decode is the median steady-state
 inter-token rate after a warmup run; prefill is the mean warmed prefill time, and
 "baseline" is the same configuration with all four switches off.
 
