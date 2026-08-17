@@ -32,8 +32,19 @@ DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
 PYPROJECT="${SGLANG_REPO}/python/pyproject_npu.toml"
-[ -f "${PYPROJECT}" ] || die "not found: ${PYPROJECT}
-    SGLANG_REPO=${SGLANG_REPO} does not look like an SGLang checkout."
+if [ ! -f "${PYPROJECT}" ]; then
+  # SGLANG_REPO is the usual culprit: exporting it by hand overrides the
+  # auto-detection in dsv4_env.sh, so point at what is actually on disk.
+  _found="$(find "${DSV4_WORKSPACE}" "${KTRANSFORMERS_REPO}" -maxdepth 4 \
+      -name pyproject_npu.toml -path '*/python/*' 2>/dev/null | head -5)"
+  die "not found: ${PYPROJECT}
+    SGLANG_REPO=${SGLANG_REPO} does not look like an SGLang checkout.
+$( [ -n "${_found}" ] \
+     && printf '    Found one under:\n%s\n    Set it explicitly, e.g.\n      export SGLANG_REPO=%s' \
+          "$(printf '%s\n' "${_found}" | sed 's|^|      |')" \
+          "$(dirname "$(dirname "$(printf '%s\n' "${_found}" | head -1)")")" \
+     || printf '    No pyproject_npu.toml found under %s either — clone SGLang first.' "${DSV4_WORKSPACE}" )"
+fi
 
 WORK="${DSV4_ARTIFACT_DIR}/python-deps"
 mkdir -p "${WORK}"

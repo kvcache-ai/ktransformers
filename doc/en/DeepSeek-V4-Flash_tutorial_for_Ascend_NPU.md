@@ -23,7 +23,9 @@ Every step below is driven by a script in [`kt-kernel/tools/ascend_dsv4/`](../..
   - [Step 8: Preflight](#step-8-preflight)
   - [Step 9: Launch the Server](#step-9-launch-the-server)
   - [Step 10: Acceptance Checks](#step-10-acceptance-checks)
-  - [Step 11: Send Inference Requests](#step-11-send-inference-requests)
+  - [Step 11: Talk to the Model](#step-11-talk-to-the-model)
+  - [Step 12: Accuracy Validation (GPQA-Diamond)](#step-12-accuracy-validation-gpqa-diamond)
+  - [Step 13: Throughput Validation](#step-13-throughput-validation)
   - [Tuning](#tuning)
     - [Resident Experts vs. the KV Pool](#resident-experts-vs-the-kv-pool)
     - [Optional: Streaming Prefill](#optional-streaming-prefill)
@@ -124,7 +126,7 @@ Four things, and the deployment fails at a different place for each:
 Two repositories. SGLang is cloned next to KTransformers by default; a checkout under `third_party/sglang` is detected too.
 
 ```bash
-export DSV4_WORKSPACE=/path/to/workspace
+export DSV4_WORKSPACE=$HOME/dsv4-workspace     # same value you will put in ~/dsv4.env
 mkdir -p "${DSV4_WORKSPACE}" && cd "${DSV4_WORKSPACE}"
 
 git clone https://github.com/kvcache-ai/ktransformers.git
@@ -133,6 +135,10 @@ git clone -b dsv4-cann9-no-patch https://github.com/Pan-Boyi/sglang.git
 cd ktransformers
 git submodule update --init --progress third_party/llama.cpp third_party/pybind11
 ```
+
+> **Note:** If you clone KTransformers under a different directory name, use that name
+> for `KTRANSFORMERS_REPO` in [Step 2](#step-2-configure-your-environment) — the tutorial
+> assumes `${DSV4_WORKSPACE}/ktransformers`.
 
 > **Note:** Pass `--progress`. Git 2.25 (the Ubuntu 20.04 default) prints one `Cloning into ...` line and then stays silent for the whole fetch, which looks like a hang. `third_party/llama.cpp` is about 419 MB of history; `--depth 1` cuts that to roughly 30 MB if you do not need `git describe` to work inside the submodule.
 
@@ -144,16 +150,80 @@ git submodule update --init --progress third_party/llama.cpp third_party/pybind1
 
 Everything downstream reads [`dsv4_env.sh`](../../kt-kernel/tools/ascend_dsv4/dsv4_env.sh). It auto-detects the CANN root, the CANN version, the NUMA node count, the SoC and the Python interpreter; you only export what it cannot know.
 
-```bash
-cd "${DSV4_WORKSPACE}/ktransformers"
+Put your settings in one file and source it in every shell you use from here on.
+**This is the only place you edit paths** — everything else in this tutorial is
+copy-paste as written.
 
-# The three that are genuinely site-specific:
-export DSV4_MODEL_ROOT=/path/to/models   # holds the checkpoints and the GGUF cache
-export DSV4_NPU_DEVICE_ID=0              # an idle die, from `npu-smi info`
+```bash
+cat > ~/dsv4.env <<'EOF'
+# ---- edit these ----
+export DSV4_WORKSPACE=$HOME/dsv4-workspace   # clones and build artifacts
+export DSV4_MODEL_ROOT=/path/to/models       # parent of the three weight directories
+export DSV4_NPU_DEVICE_ID=0                  # an idle die
 export DSV4_PORT=18080
 
-bash kt-kernel/tools/ascend_dsv4/dsv4_env.sh --show
+# ---- the directory name you cloned ktransformers into ----
+export KTRANSFORMERS_REPO=$DSV4_WORKSPACE/ktransformers
+export DSV4_TOOLS=$KTRANSFORMERS_REPO/kt-kernel/tools/ascend_dsv4
+
+# ---- leave alone ----
+export DSV4_ARTIFACT_DIR=$DSV4_WORKSPACE/dsv4-artifacts
+export DSV4_LOG_DIR=$DSV4_WORKSPACE/dsv4-logs
+EOF
+
+source ~/dsv4.env
+mkdir -p "$DSV4_WORKSPACE" "$DSV4_LOG_DIR" "$DSV4_ARTIFACT_DIR"
+bash "$DSV4_TOOLS/dsv4_env.sh" --show
 ```
+
+> **Important:** Do **not** export `SGLANG_REPO` in that file. `dsv4_env.sh` finds it
+> itself — `${KTRANSFORMERS_REPO}/third_party/sglang` if that exists, otherwise
+> `${DSV4_WORKSPACE}/sglang`. Setting it by hand overrides the detection, and if your
+> clone is in the other location every later step fails with
+> `not found: .../python/pyproject_npu.toml`. Only set it if your SGLang is in a third
+> place entirely.
+
+Verify the two repository paths resolved to directories that actually exist before
+going on:
+
+```bash
+source ~/dsv4.env
+bash "$DSV4_TOOLS/dsv4_env.sh" --show | grep -E 'KTRANSFORMERS_REPO|SGLANG_REPO'
+ls "$(bash "$DSV4_TOOLS/dsv4_env.sh" --show 2>/dev/null | awk '/SGLANG_REPO/{print $2}')/python/pyproject_npu.toml"
+```
+
+### Platform profiles
+
+`dsv4_env.sh` derives the hardware-dependent values, but it is worth knowing what it
+should come up with on each platform, because a wrong NUMA count or SoC is not obvious
+later:
+
+| | **A2** (Atlas 800I A2 / 910B3) | **A3** (910_93 series) |
+|---|---|---|
+| Typical shape | container from the Ascend SGLang image | native install, often non-root |
+| `ASCEND_INSTALL_ROOT` | `/usr/local/Ascend` | often `$HOME/Ascend` |
+| `DSV4_SOC` | `ascend910b` | `ascend910_93` |
+| torch / torch_npu | 2.10 / 2.10 | 2.8.0 / 2.8.0.post4 |
+| `/usr/bin/gcc` | 11.4 (Ubuntu 22.04) | often 9.4 (Ubuntu 20.04) — see [Step 4](#step-4-build-kt-kernel) |
+| NUMA nodes → `DSV4_THREADPOOL_COUNT` | 8 | 1 |
+| → `DSV4_CPUINFER` | 128 | 16 |
+| HBM per die | 64 GB | 61 GB |
+| `sgl_kernel_npu` | shipped by the image | must be built ([Step 5](#step-5-build-sgl-kernel-npu)) |
+| `npu-smi` | works | may fail with `libc_sec.so`; use the torch probe below |
+
+If `npu-smi info` does not run, pick the idle die through the runtime instead:
+
+```bash
+source ~/dsv4.env
+source "$ASCEND_INSTALL_ROOT/ascend-toolkit/set_env.sh"
+python3 -c "
+import torch, torch_npu
+for i in range(torch.npu.device_count()):
+    free, total = torch.npu.mem_get_info(i)
+    print(f'[{i}] {torch.npu.get_device_name(i)}  free={free/2**30:.1f}G / total={total/2**30:.1f}G')"
+```
+
+Only a die whose `free` is close to `total` is idle.
 
 `--show` prints everything it resolved. Check it before going further:
 
@@ -207,10 +277,19 @@ First check whether you need this at all — vendor images frequently ship them:
 ```bash
 source kt-kernel/tools/ascend_dsv4/dsv4_env.sh
 ls "${CANN_VENDORS_DIR}"                        # want: customize  custom_transformer
-python3 -c "import custom_ops; print('ok')"
+python3 -c "import torch, torch_npu, custom_ops; print('ok')"
 ```
 
 If both vendors are present and `custom_ops` imports, skip to [Step 4](#step-4-build-kt-kernel).
+
+> **Note:** `import torch` has to come first. `custom_ops_lib*.so` lists `libc10.so`,
+> `libtorch_cpu.so` and `libtorch_npu.so` as `NEEDED` but carries no `RPATH` to torch's
+> `lib/` directory, which is not on the loader's search path. Importing torch first pulls
+> those libraries into the process so the later `dlopen` resolves against them; importing
+> `custom_ops` on its own fails with `ImportError: libc10.so: cannot open shared object
+> file`. Adding torch's `lib/` to `LD_LIBRARY_PATH` is not a fix — it resolves `libc10`
+> and then fails on the next dependency, and once all of them resolve at `dlopen` time the
+> bundled libgomp hits the aarch64 static-TLS limit instead.
 
 Otherwise:
 
@@ -357,9 +436,26 @@ Every check corresponds to a failure that is silent or badly reported at serve t
 ## Step 9: Launch the Server
 
 ```bash
-bash kt-kernel/tools/ascend_dsv4/serve.sh
+source ~/dsv4.env
+bash "$DSV4_TOOLS/serve.sh"
 tail -f "${DSV4_LOG_DIR}/serve.log"
 ```
+
+Weight loading takes 8–10 minutes, and for that whole window **the process exists but the
+port is not listening yet** — that is normal, not a hang. Wait for readiness before
+sending anything:
+
+```bash
+source ~/dsv4.env
+until curl -sf -m5 --noproxy '*' "http://127.0.0.1:${DSV4_PORT}/health" >/dev/null; do
+  echo "$(date +%T) still loading..."; sleep 30
+done
+echo "ready"
+```
+
+> **Note:** Run the server under `tmux`/`screen`, or make sure it is the backgrounded
+> `serve.sh` form. Accuracy and throughput runs take hours; if the server dies partway
+> the client reports a connection error and the whole run is wasted.
 
 The script prints the resolved `sglang.__file__` before it launches anything and refuses to start if it points outside your clone. It then sets the runtime environment and starts the server:
 
@@ -441,20 +537,193 @@ Four gates, all of which must pass:
 
 > **Important:** HTTP 200 is not an acceptance signal. With a broken CPU expert path the server still binds its port and answers health probes while generating nothing — `"text": ""` with status 200 is a failure. Greedy decoding here is deterministic, so re-run the probe and compare byte for byte, and compare against a second machine before trusting any measurement.
 
-## Step 11: Send Inference Requests
+## Step 11: Talk to the Model
+
+`verify.sh` proves the plumbing works. This step is the part you do by hand, to see the
+model actually behaving like DeepSeek-V4 rather than emitting plausible noise.
+
+**A real question, through the OpenAI-compatible endpoint:**
 
 ```bash
-curl -s --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/generate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "What is the capital of France?",
-    "sampling_params": {"temperature": 0, "max_new_tokens": 64}
-  }'
+source ~/dsv4.env
+curl -s --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"dsv4","messages":[{"role":"user","content":"Explain in three sentences what a Mixture-of-Experts model is and why it saves memory."}],"temperature":0.6,"max_tokens":300}' \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content']); print('---', d['usage'])"
 ```
 
-The OpenAI-compatible endpoint is at `/v1/chat/completions` on the same port.
+**Reasoning spot-checks.** `temperature=0` makes each answer deterministic and each of
+these has exactly one right answer, so a broken numerical path shows up immediately:
 
-> **Note:** Warm up before measuring anything. The dynamic hot-expert residency needs a few requests to converge, so the first few are noticeably slower than steady state.
+```bash
+ask() {
+  curl -s --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"dsv4\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}],\"temperature\":0,\"max_tokens\":64}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'].strip())"
+}
+
+ask "What is 27 * 43? Answer with just the number."                             # 1161
+ask "How many letter r are in the word strawberry? Answer with just the number." # 3
+ask "Alice is taller than Bob. Bob is taller than Carol. Who is shortest? Name only."  # Carol
+```
+
+**Streaming**, so you can watch tokens arrive rather than waiting for one blob:
+
+```bash
+curl -sN --noproxy '*' -X POST "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"dsv4","stream":true,"messages":[{"role":"user","content":"Write one sentence about Ascend NPUs."}],"temperature":0.6,"max_tokens":60}' \
+  | sed -u 's/^data: //' | grep -v '^\[DONE\]' \
+  | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try: d = json.loads(line)
+    except Exception: continue
+    c = d['choices'][0].get('delta', {}).get('content')
+    if c: print(c, end='', flush=True)
+print()"
+```
+
+**An interactive session** with multi-turn context:
+
+```bash
+python3 "${DSV4_TOOLS}/dsv4_chat.py" "${DSV4_PORT}"
+```
+
+`/reset` clears the context, `/quit` exits. To confirm the context is really being kept,
+tell it your name and then ask for it in the next turn.
+
+> **Note:** The server is launched with `--max-running-requests 1`, so requests are served
+> one at a time. A second client does not fail, it queues.
+
+> **Note:** Warm up before measuring anything. The dynamic hot-expert residency needs a few
+> requests to converge, so the first few are noticeably slower than steady state.
+
+## Step 12: Accuracy Validation (GPQA-Diamond)
+
+```bash
+source ~/dsv4.env
+python3 -m pip install evalscope
+
+cd "$DSV4_WORKSPACE"
+[ -d cann-recipes-infer ] || git clone --depth 1 https://gitcode.com/cann/cann-recipes-infer.git
+export DSV4_RECIPES="$DSV4_WORKSPACE/cann-recipes-infer/integration/sglang/dsv4-flash-single-npu-moe-offload"
+echo "export DSV4_RECIPES=$DSV4_RECIPES" >> ~/dsv4.env
+```
+
+**Wait for the server before starting.** A round takes about 1 h 50 min and evalscope
+retries five times and then gives up with `Connection error`, which looks like an
+evalscope problem but almost always means the server is not listening yet — weight
+loading alone is 8–10 minutes:
+
+```bash
+source ~/dsv4.env
+until curl -sf -m5 --noproxy '*' "http://127.0.0.1:${DSV4_PORT}/health" >/dev/null; do
+  echo "$(date +%T) still loading..."; sleep 30
+done
+echo "ready"
+```
+
+Then run it — in `tmux` or `screen`, because a dropped terminal loses the whole round:
+
+```bash
+source ~/dsv4.env
+REPEATS=3 \
+PORT="$DSV4_PORT" \
+MODEL_PATH="$DSV4_MODEL_ROOT/DeepSeek-V4-Flash-W8A8" \
+OUT_DIR="$DSV4_LOG_DIR/gpqa" \
+bash "$DSV4_RECIPES/scripts/tools/gpqa_accuracy_repeat.sh" 2>&1 | tee "$DSV4_LOG_DIR/gpqa.log"
+```
+
+A single round is also available directly:
+
+```bash
+source ~/dsv4.env
+evalscope eval \
+  --model "$DSV4_MODEL_ROOT/DeepSeek-V4-Flash-W8A8" \
+  --api-url "http://127.0.0.1:${DSV4_PORT}/v1/chat/completions" \
+  --api-key EMPTY --eval-type openai_api \
+  --datasets gpqa_diamond \
+  --generation-config '{"temperature":1,"top_p":1,"max_tokens":32768,"extra_body":{"chat_template_kwargs":{"thinking":false,"high_effort":false}}}' \
+  --eval-batch-size 1 --repeats 1 \
+  --work-dir "$DSV4_LOG_DIR/gpqa/R1"
+```
+
+> **Important:** Report a multi-round mean, never a single round. GPQA-Diamond is 198
+> questions and at `temperature=1` the binomial standard error of one round is about
+> ±3.2 pp — wider than the spread between rounds actually measured on A2
+> (72.22 / 71.72 / 75.76, mean **73.23%**, sample SD 2.20 pp). Those three are
+> statistically indistinguishable from each other. Chasing a "regression" smaller than
+> roughly 5 pp means averaging about ten rounds first.
+
+> **Note:** evalscope uses the OpenAI Python client, which honours `http_proxy` /
+> `all_proxy`. If you set a proxy to download the dataset, keep localhost out of it:
+> `export no_proxy="127.0.0.1,localhost,$no_proxy"`.
+
+## Step 13: Throughput Validation
+
+```bash
+source ~/dsv4.env
+uptime            # decode is host-memory-bandwidth bound; measure on an idle machine
+```
+
+**Baseline — feature switches off:**
+
+```bash
+source ~/dsv4.env
+TARGET_TOKENS_LIST="130 1000 4000 8000" \
+MAX_NEW=1000 REPEAT=3 WARMUP=1 \
+PORT="$DSV4_PORT" PY=python3 \
+bash "$DSV4_RECIPES/scripts/tools/decode_throughput_test.sh" \
+  2>&1 | tee "$DSV4_LOG_DIR/perf_baseline.log"
+```
+
+Read the `warm-pf(s)` and `dec-med` columns. `WARMUP=1` is not optional — the dynamic
+hot-expert residency needs a few requests to converge.
+
+**All feature switches on.** Restart the server first; streaming needs its own HBM slot,
+so `mem-fraction` has to go up with it:
+
+```bash
+source ~/dsv4.env
+P=$(cat "$DSV4_LOG_DIR/serve.log.pid"); kill -INT $P; sleep 8; kill -TERM $P; sleep 20
+
+export DSV4_PREFILL_STREAM=1      # streaming prefill + depool + dynamic resident + side stream
+export DSV4_MEM_FRACTION=0.86     # 0.81 will not start with streaming enabled
+bash "$DSV4_TOOLS/serve.sh"
+
+until curl -sf -m5 --noproxy '*' "http://127.0.0.1:${DSV4_PORT}/health" >/dev/null; do sleep 30; done
+
+TARGET_TOKENS_LIST="130 1000 4000 8000" \
+MAX_NEW=1000 REPEAT=3 WARMUP=1 \
+PORT="$DSV4_PORT" PY=python3 \
+bash "$DSV4_RECIPES/scripts/tools/decode_throughput_test.sh" \
+  2>&1 | tee "$DSV4_LOG_DIR/perf_allon.log"
+```
+
+**Confirm streaming actually engaged before believing the numbers:**
+
+```bash
+source ~/dsv4.env
+echo "inline resident : $(grep -c 'inline resident' "$DSV4_LOG_DIR/serve.log")"
+echo "hybrid fallback : $(grep -cE 'streaming failed|hybrid fallback' "$DSV4_LOG_DIR/serve.log")"
+```
+
+> **Important:** Only `inline resident > 0` is positive proof. `maybe_streaming_forward`
+> has several early returns that log nothing, so a run that never streamed at all also
+> reports zero fallbacks. Two silent non-streaming modes both answer requests normally:
+> a prompt shorter than `KT_PREFILL_STREAM_THRESHOLD` (512) never triggers it — so the
+> 130-token step cannot be used to evaluate streaming at all — and a layer that OOMs falls
+> back to hybrid per layer. One A2 run with 27 experts at `mem-fraction 0.86` logged
+> `inline resident=0, hybrid fallback=240`: 43 layers each attempting, OOMing by 1.00 GiB
+> and falling back, burning ~211 s of the 213.2 s it reported for an 8000-token prefill,
+> with no error anywhere.
+
+Both runs must use the **same** `--mem-fraction-static` if you want the comparison to be
+about the switches; on A2, raising it from 0.81 to 0.86 on its own is worth 0.18–0.71%.
 
 ## Tuning
 
@@ -569,6 +838,7 @@ About 1 h 50 min per round.
 |---------|---------------|
 | Server runs, but your code changes have no effect | `PYTHONPATH` was shadowed by a CANN `set_env.sh`. Export it after every environment script and check `python -c "import sglang; print(sglang.__file__)"`. |
 | `ModuleNotFoundError: No module named 'sgl_kernel_npu'` | Not an optional dependency. Build it — see [Step 5](#step-5-build-sgl-kernel-npu). |
+| `import custom_ops` fails with `libc10.so: cannot open shared object file` | Import torch first: `python3 -c "import torch, torch_npu, custom_ops"`. `custom_ops_lib.so` needs torch's libraries but has no `RPATH` to them. Do not reach for `LD_LIBRARY_PATH` — adding torch's `lib/` just moves the error to `libtorch_npu.so`, and adding both then hits the aarch64 static-TLS limit on the bundled libgomp. |
 | `OSError: libgomp.so.1: cannot allocate memory in static TLS block` | aarch64 static-TLS exhaustion when libgomp is dlopened late. `dsv4_env.sh` preloads it; if you set up the environment by hand, `export LD_PRELOAD=/lib/aarch64-linux-gnu/libgomp.so.1`. |
 | `OSError: … _torchaudio.abi3.so: undefined symbol: torch_library_impl` | `torchaudio` (or `torchvision`) is built against a different torch. `transformers` imports `torchaudio` unconditionally via `loss_rnnt`, so this breaks everything. Install the matching release: `pip install --no-deps torchaudio==$(python -c 'import torch;print(torch.__version__.split("+")[0])')`. |
 | CMake configure fails | `third_party/pybind11` not initialized, or `libhwloc-dev` missing. |
@@ -585,6 +855,9 @@ About 1 h 50 min per round.
 | Server exits during warmup with `res=<Response [502]>` | An HTTP proxy is set and intercepts the warmup request to the server's own port. |
 | `ModuleNotFoundError` for an SGLang dependency, as a non-root user | `PYTHONNOUSERSITE` is hiding `~/.local`. Current `dsv4_env.sh` only sets it when system `site-packages` is writable. |
 | `git submodule update` appears to hang | Git 2.25 does not forward sub-clone progress. Add `--progress`, and consider `--depth 1`. |
+| `not found: .../sglang/python/pyproject_npu.toml` | `SGLANG_REPO` was exported by hand and overrode the auto-detection. Unset it, or point it at the clone that exists — see [Step 2](#step-2-configure-your-environment). |
+| evalscope or any client reports `Connection error` and retries 5× | The server is not listening — either still loading weights (8–10 min) or no longer running. `curl /health` first; see the readiness loop in [Step 9](#step-9-launch-the-server). |
+| The process is alive but the port is closed | Still loading. `grep 'Load weight end' ` the log; `Uvicorn running` is the line that means the port is open. |
 
 ## Known Limitations
 
@@ -603,4 +876,5 @@ Stated as measured, not as expected behaviour:
 - [KT-Kernel Parameters](https://github.com/kvcache-ai/ktransformers/tree/main/kt-kernel#kt-kernel-parameters)
 - `kt-kernel/third_party_patches/llama.cpp/README.md` — what is patched into `b3173` and why
 - [Deployment scripts](../../kt-kernel/tools/ascend_dsv4) and the [MXFP4 GGUF tools](../../kt-kernel/tools/mxfp4_gguf)
+- `cann-recipes-infer` — the accuracy and throughput harnesses used in Steps 12 and 13
 - [DeepSeek-V4-Flash model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)

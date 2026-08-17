@@ -24,6 +24,7 @@ bash convert_mxfp4_gguf.sh       # 6. build + verify the per-layer GGUF set
 bash preflight.sh                # 7. must print PREFLIGHT OK
 bash serve.sh                    # 8. launch
 bash verify.sh                   # 9. four acceptance gates
+python3 dsv4_chat.py             # 10. talk to it yourself
 ```
 
 Steps 2, 4 and 6 are the slow ones (40–90 min, 20–40 min, and a few hours) and
@@ -42,6 +43,7 @@ all three are skippable when the artifacts already exist.
 | `preflight.sh` | Checks everything the server needs. Exit 0 means safe to launch. |
 | `serve.sh` | Launches the server. `--foreground` stays attached. |
 | `verify.sh` | Four acceptance gates against a running server. |
+| `dsv4_chat.py` | Interactive streaming chat client with multi-turn context. Standard library only. |
 
 The GGUF conversion and verification tools themselves live in
 [`../mxfp4_gguf/`](../mxfp4_gguf) and can be run directly.
