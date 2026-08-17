@@ -40,11 +40,13 @@ class SharedMemBuffer {
   ~SharedMemBuffer();
 
   void alloc(void* object, MemoryRequest requests);
+  void dealloc(void* object);
 
  private:
   void* buffer;
   uint64_t size;
-  std::vector<MemoryRequest> object_requests;
+  std::map<void*, std::vector<MemoryRequest>> object_requests;
+  std::mutex lock;
 };
 
 static SharedMemBuffer shared_mem_buffer;
@@ -56,6 +58,7 @@ class SharedMemBufferNuma {
 
  public:
   void alloc(int numa, void* object, MemoryRequest requests);
+  void dealloc(int numa, void* object);
 };
 
 static SharedMemBufferNuma shared_mem_buffer_numa;

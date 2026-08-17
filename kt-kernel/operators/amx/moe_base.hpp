@@ -161,7 +161,7 @@ class AMX_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AMX_MOE_BASE() = default;
+  ~AMX_MOE_BASE() { shared_mem_buffer_numa.dealloc(tp_part_idx, this); }
 
   void warm_up() {
     int qlen = config_.max_len;

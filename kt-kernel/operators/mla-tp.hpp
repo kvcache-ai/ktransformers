@@ -79,6 +79,8 @@ class TP_MLA_Common : public MLA_Interface {
     shared_mem_buffer.alloc(this, mem_requests);
   }
 
+  ~TP_MLA_Common() { shared_mem_buffer.dealloc(this); }
+
   void forward(std::vector<int> qlens, std::vector<std::vector<int>> page_tables, std::vector<int> kv_lens,
                const void* input, void* output) override {
     if (weights_loaded == false) [[unlikely]] {

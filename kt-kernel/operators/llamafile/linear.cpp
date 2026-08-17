@@ -23,7 +23,7 @@ Linear::Linear(LinearConfig config) {
   shared_mem_buffer.alloc(this, mem_requests);
 }
 
-Linear::~Linear() {}
+Linear::~Linear() { shared_mem_buffer.dealloc(this); }
 
 void Linear::warm_up(WorkerPool* backend) {
   std::vector<float> input_fp32(config_.input_size);
