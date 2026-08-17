@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from .arch import MOEArchConfig
+from .conv3d_compat import _canonicalize_qwen3_vl_fused_expert_weights
 from .dist_utils import _maybe_zero3_gathered_parameters
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,9 @@ def extract_moe_weights(
         _require_materialized_expert_weight("down_proj", down_parameter)
         gate_up = gate_up_parameter.data
         down_fused = down_parameter.data
+        vlm_weights = _canonicalize_qwen3_vl_fused_expert_weights(gate_up, down_fused, moe_config)
+        if vlm_weights is not None:
+            return vlm_weights
         # gate_up_proj is [E, 2*I, H], split into gate [E, I, H] and up [E, I, H]
         intermediate = gate_up.shape[1] // 2
         gate_proj = gate_up[:, :intermediate, :].contiguous()
@@ -657,10 +661,15 @@ def load_experts_from_checkpoint_files(
         if gate_up is None or down is None:
             raise FileNotFoundError(f"Missing fused expert weights for layer {layer_idx}")
         gate_up = gate_up.cpu().to(torch.bfloat16).contiguous()
-        intermediate = gate_up.shape[1] // 2
-        gate_proj = gate_up[:, :intermediate, :].contiguous()
-        up_proj = gate_up[:, intermediate:, :].contiguous()
-        down_proj = down.cpu().to(torch.bfloat16).contiguous()
+        down = down.cpu().to(torch.bfloat16)
+        vlm_weights = _canonicalize_qwen3_vl_fused_expert_weights(gate_up, down, moe_config)
+        if vlm_weights is not None:
+            gate_proj, up_proj, down_proj = vlm_weights
+        else:
+            intermediate = gate_up.shape[1] // 2
+            gate_proj = gate_up[:, :intermediate, :].contiguous()
+            up_proj = gate_up[:, intermediate:, :].contiguous()
+            down_proj = down.contiguous()
         del gate_up
         print(
             f"[kt_moe] Layer {layer_idx}: fused expert format — "

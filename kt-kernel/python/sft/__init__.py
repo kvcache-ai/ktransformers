@@ -62,6 +62,7 @@ from .arch import (
     KTAMXConfigError,
 )
 from .autograd import KTMoEFunction
+from .conv3d_compat import is_vlm_conv3d_compatible, patch_vlm_conv3d
 from .layer import KTMoELayerWrapper
 from .weights import (
     extract_moe_weights,
@@ -148,6 +149,8 @@ __all__ = [
     "KTAMXModelNotSupportedError",
     "KTAMXConfigError",
     "KTMoEFunction",
+    "patch_vlm_conv3d",
+    "is_vlm_conv3d_compatible",
     "KTMoELayerWrapper",
     "extract_moe_weights",
     "get_kt_expert_placeholders",
