@@ -791,20 +791,54 @@ No single configuration covers 1k through 32k. The boundaries are narrow and eac
 
 ## Measured Results
 
-All figures from a single 910B3 die, NPU graph on, one request at a time, on an otherwise idle host.
+All figures from a single Atlas 800I A2 (910B3) die, NPU graph on, one request at a time, on an otherwise idle Kunpeng 920 host (192 cores, 8 NUMA nodes). A3 numbers are not comparable — see [Known Limitations](#known-limitations).
 
-**Throughput.** Decode is the median steady-state inter-token rate after a warmup run; prefill is the mean warmed prefill time.
+**Throughput, with the feature switches on** — streaming prefill, MXFP4 depool, dynamic
+hot-expert residency and the CPU-MoE side stream, as enabled by `DSV4_PREFILL_STREAM=1`
+in [Step 13](#step-13-throughput-validation). Decode is the median steady-state
+inter-token rate after a warmup run; prefill is the mean warmed prefill time, and
+"baseline" is the same configuration with all four switches off.
 
-| Prompt tokens | Decode | Prefill |
-|--------------:|-------:|--------:|
-| 118 | 16.84 tok/s | 2.0 s |
-| 801 | 16.86 tok/s | 10.9 s |
-| 3,944 | 16.93 tok/s | 43.1 s |
-| 7,823 | 16.76 tok/s | 85.1 s |
-| 15,568 | 16.72 tok/s | 169.3 s |
-| 31,540 | 16.57 tok/s | 343.9 s |
+| Prompt tokens | Prefill | vs. baseline | Decode | vs. baseline |
+|--------------:|--------:|-------------:|-------:|-------------:|
+| 118 | 2.0 s <sup>1</sup> | 1.00× | 18.61 tok/s | +9.6% |
+| 801 | 18.5 s | 0.59× (slower) | 19.24 tok/s | +13.4% |
+| 3,944 | 19.0 s | 2.27× | 19.44 tok/s | +14.8% |
+| 7,823 | 19.2 s | 4.43× | not measured <sup>2</sup> | — |
+| 15,568 | 19.9 s | 8.50× | not measured <sup>2</sup> | — |
+| 31,540 | 22.1 s | 15.56× | not measured <sup>2</sup> | — |
 
-Decode is flat across context length: it is dominated by the per-token host-side expert reads, not by KV growth. Prefill grows linearly, roughly `2.3 s + 0.0107 s × prompt`, because every chunk pays the full CPU MoE cost.
+The baseline these are measured against, for reference: prefill
+2.0 / 10.9 / 43.1 / 85.1 / 169.2 / 343.9 s and decode 16.84 / 16.86 / 16.93 / 16.76 /
+16.72 tok/s across the same prompt lengths.
+
+**Prefill becomes a fixed cost.** Across a 39× range of prompt length it moves only from
+18.5 s to 22.1 s, because a whole layer's expert set is staged into HBM once and the MoE
+then runs on the NPU. The crossover against the baseline is near **1,500 tokens** — at 801
+tokens streaming is genuinely *slower*, since the fixed cost is not amortised, and the
+512-token default threshold sits below that crossover.
+
+**Decode is flat across context length** in both configurations: it is dominated by the
+per-token host-side expert reads, not by KV growth. Without streaming, prefill instead
+grows linearly, roughly `2.3 s + 0.0107 s × prompt`, because every chunk pays the full CPU
+MoE cost.
+
+The switch-on decode gain is not an artifact of the larger memory budget: a control run
+with the switches off at the same `mem-fraction 0.86` measured 16.98 / 16.97 / 16.94 tok/s,
+within 0.18–0.71% of the 0.81 baseline.
+
+<sup>1</sup> Below `KT_PREFILL_STREAM_THRESHOLD`, so streaming never triggers and this row
+is the hybrid path — equal to baseline by construction. Its decode gain therefore comes
+from the depool and side-stream paths, not from streaming prefill.
+<sup>2</sup> The switches-on decode run predates a RoPE-table change that freed 3.15 GB;
+before it, 7,823 tokens and above deadlocked the scheduler at `swa=6656`. The later sweep
+that covers the long buckets used `max_new_tokens=32` to measure TTFT and so carries no
+usable decode figure.
+
+Three different `--kt-num-gpu-experts` / `--mem-fraction-static` pairs were needed across
+the prefill range: 32 / 0.81 up to 3,944 tokens, 32 / 0.83 through 15,568, and 27 / 0.785
+at 31,540. See [Resident Experts vs. the KV Pool](#resident-experts-vs-the-kv-pool) for why
+lowering the expert count alone does not help.
 
 **Accuracy.** GPQA-Diamond (198 questions) via evalscope, thinking disabled, `temperature=1`, `top_p=1`, `max_tokens=32768`, one question at a time:
 
@@ -830,7 +864,7 @@ About 1 h 50 min per round.
 
 > **Important:** Report the multi-round mean, never a single round. At 198 questions and `temperature=1` the binomial standard error of one round is roughly ±3.2 pp — wider than the spread between these three, which are therefore statistically indistinguishable.
 
-> **Important:** Decode here is **memory-bandwidth bound on the host**. On a shared machine, contention from other tenants has been observed to drop decode from 16.8 to 1.5 tok/s. A single-threaded `memcpy` benchmark does not detect it — it reported 4.4 GB/s while real throughput was 1.5 tok/s. Measure by sending a 200-token request, benchmark on an idle host, and state the host load alongside any number you publish.
+> **Important:** Decode here is **memory-bandwidth bound on the host**. On a shared machine, contention from other tenants has been observed to drop decode from 16.8 to 1.5 tok/s on the baseline configuration. A single-threaded `memcpy` benchmark does not detect it — it reported 4.4 GB/s while real throughput was 1.5 tok/s. Measure by sending a 200-token request, benchmark on an idle host, and state the host load alongside any number you publish.
 
 ## Troubleshooting
 
