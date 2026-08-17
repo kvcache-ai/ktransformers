@@ -51,6 +51,10 @@ if [ "${DSV4_PREFILL_STREAM:-0}" = "1" ]; then
   export KT_MXFP4_OP_DIR="${KT_MXFP4_OP_DIR:-${KTRANSFORMERS_REPO}/kt-kernel/tools/ascendc_mxfp4}"
   export KT_MXFP4_DEPOOL="${KT_MXFP4_DEPOOL:-1}"
   export KT_MXFP4_GGUF_DEDUP="${KT_MXFP4_GGUF_DEDUP:-1}"
+  # The dedup path reads the GGUF template from its own variable rather than from
+  # --kt-weight-path. Without it the switch is accepted and then does nothing, logging
+  # only "KT_MXFP4_GGUF_DEDUP=1 but KT_GGUF_TEMPLATE is empty".
+  export KT_GGUF_TEMPLATE="${KT_GGUF_TEMPLATE:-${DSV4_GGUF_TEMPLATE}}"
   export KT_DYNAMIC_RESIDENT="${KT_DYNAMIC_RESIDENT:-1}"
   export KT_SIDE_STREAM="${KT_SIDE_STREAM:-1}"
   echo "[serve] streaming prefill ENABLED (threshold ${KT_PREFILL_STREAM_THRESHOLD} tokens)"

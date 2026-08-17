@@ -868,6 +868,53 @@ the prefill range: 32 / 0.81 up to 3,944 tokens, 32 / 0.83 through 15,568, and 2
 at 31,540. See [Resident Experts vs. the KV Pool](#resident-experts-vs-the-kv-pool) for why
 lowering the expert count alone does not help.
 
+### The same measurement on A3
+
+Atlas A3 (`Ascend910_9362`, 61.3 GB HBM), native install, 40 cores and **one** NUMA node,
+so `--kt-cpuinfer 16` / `--kt-threadpool-count 1`. Otherwise identical: 32 resident experts,
+`mem-fraction 0.81`, `max_new_tokens=1000`, 1 warmup + 3 measured runs, streaming confirmed
+engaged (`inline resident=13`, `hybrid fallback=0`).
+
+| Prompt tokens | Prefill off | Prefill on | Decode off | Decode on | Decode gain |
+|--------------:|------------:|-----------:|-----------:|----------:|------------:|
+| 118 | 2.8 s | 2.6 s | 15.13 tok/s | 16.96 tok/s | +12.1% |
+| 801 | 16.9 s | 392.2 s | 15.10 tok/s | 18.38 tok/s | +21.7% |
+| 3944 | 82.2 s | 392.3 s | 15.07 tok/s | 17.74 tok/s | +17.7% |
+| 7823 | 163.6 s | 392.5 s | 15.03 tok/s | 18.11 tok/s | +20.5% |
+
+Read this table before assuming the A2 numbers transfer to your host — they do not, and
+the two halves move in opposite directions.
+
+**Streaming prefill is a fixed cost, but the size of that constant is the host's.** The
+constancy holds precisely here: 392.2 / 392.3 / 392.5 s across a 9.8× range of prompt
+length. But the constant is **392 s on A3 versus roughly 19 s on A2**, because staging a
+layer's expert set from DDR into HBM is bandwidth work and this host has an eighth of the
+NUMA parallelism. The A3 baseline fits at 0.0209 s/token, which puts the crossover near
+**18,800 tokens** — against roughly 1,500 on A2. Below that, enabling streaming is a
+regression, and at every length in this table it is one.
+
+**The decode gain is larger on A3**, +12% to +22% against A2's +9.6% to +14.8%. That is
+consistent rather than surprising: the depool and side-stream paths reduce per-token
+host-side expert reads, and host-side reads are exactly what is scarce here. Baseline
+decode is nearly the same on both platforms (15.0–15.1 vs 16.6–16.9 tok/s) despite an 8×
+difference in CPU-MoE threads, which is the clearest single demonstration that decode is
+bandwidth-bound, not thread-bound.
+
+> **Important:** `mem-fraction 0.86` does not work on A3. It leaves 6.34 GB after graph
+> capture; a prefill drives allocation to 59.47 of 61.27 GiB, and the per-layer 1.00 GiB
+> streaming allocation then fails on all 43 layers. The symptom is the silent one:
+> `inline resident=0`, `hybrid fallback=42`, an 811-token prefill taking 364 s, and the
+> server answering normally throughout. `0.81` leaves enough headroom, and using the same
+> value as the baseline also keeps the comparison honest.
+
+**Accuracy on A3.** One round of GPQA-Diamond under the same conditions: **72.22%**
+(143/198), inside the A2 three-round spread.
+
+> **Note:** With streaming on, a single measured run costs one 392 s prefill plus the
+> generation, so `REPEAT=3 WARMUP=1` means four of them — about 30 minutes per prompt
+> length instead of five. Probe the shape with `REPEAT=1` first and only run the full
+> matrix once you know what you are looking at.
+
 **Accuracy.** GPQA-Diamond (198 questions) via evalscope, thinking disabled, `temperature=1`, `top_p=1`, `max_tokens=32768`, one question at a time:
 
 ```bash
@@ -930,7 +977,7 @@ Stated as measured, not as expected behaviour:
 - **Measured up to a 31,540-token prompt**, not to the full 65,536-token context. The server comes up and serves at `--context-length 65536`; prompts between 31,540 and 65,536 tokens are untested.
 - **No single `--mem-fraction-static` covers 1k–32k** with streaming prefill enabled. See [Tuning](#tuning).
 - **Decode throughput is not reproducible across hosts** — it tracks available DRAM bandwidth.
-- **The published throughput and accuracy figures are A2 (910B3) only.** The A3 walkthrough reached the same weight footprint (42.38 GB against the A2's 42.37 GB) and passed all four acceptance gates, but its host has one NUMA node and 40 cores against the A2 host's eight nodes and 192, so no performance number transfers between them.
+- **Performance does not transfer between hosts.** Both platforms are measured above and they disagree sharply: streaming prefill's fixed cost is ~19 s on A2 and ~392 s on A3, moving the crossover from ~1,500 to ~18,800 tokens. Measure on the host you will serve from.
 - **The SGLang side is not upstreamed yet.** It is served from the `dsv4-cann9-no-patch` branch of the fork referenced in [Step 1](#step-1-get-the-code).
 
 ## Additional Resources
