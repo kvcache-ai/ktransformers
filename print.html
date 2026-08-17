@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0184dfb7.js";
+            window.path_to_searchindex_js = "searchindex-67b9005c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-16789068.js"></script>
@@ -959,6 +959,17 @@ export CPUINFER_ENABLE_AVX512_VNNI=OFF
 export CPUINFER_ENABLE_AVX512_BF16=OFF
 ./install.sh
 </code></pre>
+<p><strong>Optional: oneDNN INT8 BRGEMM on non-AMX AVX512 CPUs</strong></p>
+<pre><code class="language-bash"># Requires an installed oneDNN &gt;= 3.9 package:
+export CPUINFER_ENABLE_ONEDNN_VNNI=ON
+
+# Or build against a oneDNN source tree:
+export CPUINFER_ONEDNN_SOURCE_DIR=/path/to/oneDNN
+./install.sh
+
+# The compiled wheel defaults to oneDNN; native remains available for A/B tests.
+export KT_INT8_VNNI_BACKEND=auto  # auto | onednn | native
+</code></pre>
 <p>See <code>./install.sh --help</code> for all available options.</p>
 <hr>
 <h2 id="build-configuration"><a class="header" href="#build-configuration">Build Configuration</a></h2>
@@ -980,6 +991,8 @@ export CPUINFER_ENABLE_AVX512_BF16=OFF
 <tbody>
 <tr><td><code>CPUINFER_CPU_INSTRUCT</code></td><td><code>NATIVE</code>, <code>AVX512</code>, <code>AVX2</code>, <code>FANCY</code></td><td>CPU instruction set to use</td></tr>
 <tr><td><code>CPUINFER_ENABLE_AMX</code></td><td><code>ON</code>, <code>OFF</code></td><td>Enable Intel AMX support</td></tr>
+<tr><td><code>CPUINFER_ENABLE_ONEDNN_VNNI</code></td><td><code>ON</code>, <code>OFF</code></td><td>Enable oneDNN INT8 BRGEMM on non-AMX AVX512 CPUs</td></tr>
+<tr><td><code>CPUINFER_ONEDNN_SOURCE_DIR</code></td><td>Path</td><td>Optional oneDNN &gt;= 3.9 source tree</td></tr>
 <tr><td><code>CPUINFER_BUILD_TYPE</code></td><td><code>Release</code>, <code>Debug</code>, <code>RelWithDebInfo</code></td><td>Build type (default: <code>Release</code>)</td></tr>
 <tr><td><code>CPUINFER_PARALLEL</code></td><td>Number</td><td>Parallel build jobs (default: auto-detect)</td></tr>
 <tr><td><code>CPUINFER_VERBOSE</code></td><td><code>0</code>, <code>1</code></td><td>Verbose build output (default: <code>0</code>)</td></tr>
