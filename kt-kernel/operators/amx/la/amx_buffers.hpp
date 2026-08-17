@@ -81,6 +81,12 @@ struct BufferAImpl {
             __m128i s1 = _mm512_cvtsepi32_epi8(i1);
             __m128i s2 = _mm512_cvtsepi32_epi8(i2);
             __m128i s3 = _mm512_cvtsepi32_epi8(i3);
+            if constexpr (requires(__m128i value) { K::prepare_a(value); }) {
+              s0 = K::prepare_a(s0);
+              s1 = K::prepare_a(s1);
+              s2 = K::prepare_a(s2);
+              s3 = K::prepare_a(s3);
+            }
             _mm_store_si128((__m128i*)dst, s0);
             _mm_store_si128((__m128i*)(dst + 16), s1);
             _mm_store_si128((__m128i*)(dst + 32), s2);

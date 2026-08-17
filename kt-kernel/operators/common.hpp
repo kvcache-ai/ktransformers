@@ -340,6 +340,7 @@ struct MOESFTConfig : public GeneralMOEConfig {
   // LoRA configuration
   int lora_rank = 16;
   float lora_alpha = 32.0f;
+  float lora_dropout = 0.0f;
   float lora_scaling() const { return lora_alpha / lora_rank; }
 
   // LoRA weight pointers (directly pointing to Python tensor memory, zero-copy)

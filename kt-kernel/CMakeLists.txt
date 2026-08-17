@@ -27,6 +27,8 @@ option(KTRANSFORMERS_CPU_MLA "ktransformers: CPU use MLA" OFF)
 option(KTRANSFORMERS_CPU_MOE_KERNEL "ktransformers: CPU use moe kernel" OFF)
 option(KTRANSFORMERS_CPU_MOE_AMD "ktransformers: CPU use moe kernel for amd" OFF)
 option(KTRANSFORMERS_ENABLE_CPPTRACE "Enable native crash tracing in kt-kernel" OFF)
+option(KTRANSFORMERS_CPU_USE_ONEDNN_VNNI "Use oneDNN BRGEMM for AVX512-VNNI INT8 kernels" OFF)
+set(KTRANSFORMERS_ONEDNN_SOURCE_DIR "" CACHE PATH "Optional oneDNN source tree (version 3.9 or newer)")
 # LTO control
 option(CPUINFER_ENABLE_LTO "Enable link time optimization (IPO)" OFF)
 
@@ -413,6 +415,22 @@ if(KTRANSFORMERS_CPU_MOE_AMD)
     # BLIS paths and apply them after the module target is created.
 endif()
 
+if(KTRANSFORMERS_CPU_DEBUG)
+    find_package(Threads REQUIRED)
+    add_executable(
+        test_task_queue
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/test/test_task_queue.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/task_queue.cpp
+    )
+    target_link_libraries(test_task_queue PRIVATE Threads::Threads)
+    add_executable(
+        test_shared_mem_buffer_lifetime
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/test/test_shared_mem_buffer_lifetime.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp
+    )
+    target_link_libraries(test_shared_mem_buffer_lifetime PRIVATE Threads::Threads numa)
+endif()
+
 
 if(HOST_IS_X86)
     if(KTRANSFORMERS_CPU_USE_AMX_AVX512)
@@ -436,7 +454,7 @@ if(HOST_IS_X86)
                 get_filename_component(test_name ${test_src} NAME_WE)
                 add_executable(${test_name} ${test_src} ${CMAKE_CURRENT_SOURCE_DIR}/cpu_backend/shared_mem_buffer.cpp)
                 target_compile_options(${test_name} PRIVATE ${ARCH_FLAGS})
-                target_link_libraries(${test_name} llama OpenMP::OpenMP_CXX numa)
+                target_link_libraries(${test_name} PRIVATE llama OpenMP::OpenMP_CXX numa)
             endforeach()
         endif()
 
@@ -673,6 +691,33 @@ else()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
     pybind11_add_module(${PROJECT_NAME} MODULE ${ALL_SOURCES})
     message(STATUS "LTO: disabled")
+endif()
+
+if(KTRANSFORMERS_CPU_USE_ONEDNN_VNNI)
+    if(KTRANSFORMERS_ONEDNN_SOURCE_DIR)
+        if(NOT EXISTS "${KTRANSFORMERS_ONEDNN_SOURCE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR "KTRANSFORMERS_ONEDNN_SOURCE_DIR is not a oneDNN source tree: ${KTRANSFORMERS_ONEDNN_SOURCE_DIR}")
+        endif()
+        set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(DNNL_BUILD_GRAPH OFF CACHE BOOL "" FORCE)
+        set(DNNL_CPU_RUNTIME SEQ CACHE STRING "" FORCE)
+        set(DNNL_GPU_RUNTIME NONE CACHE STRING "" FORCE)
+        set(DNNL_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+        set(DNNL_EXPERIMENTAL_UKERNEL ON CACHE BOOL "" FORCE)
+        add_subdirectory("${KTRANSFORMERS_ONEDNN_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/third_party/onednn" EXCLUDE_FROM_ALL)
+        set(_KT_ONEDNN_TARGET dnnl)
+    else()
+        find_package(dnnl 3.9 CONFIG REQUIRED)
+        set(_KT_ONEDNN_TARGET DNNL::dnnl)
+    endif()
+    target_compile_definitions(${PROJECT_NAME} PRIVATE KTRANSFORMERS_USE_ONEDNN_VNNI=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${_KT_ONEDNN_TARGET})
+    if(TARGET test_onednn_int8_brgemm)
+        target_compile_definitions(test_onednn_int8_brgemm PRIVATE KTRANSFORMERS_USE_ONEDNN_VNNI=1)
+        target_link_libraries(test_onednn_int8_brgemm PRIVATE ${_KT_ONEDNN_TARGET})
+    endif()
+    message(STATUS "INT8 AVX512-VNNI backend: oneDNN BRGEMM enabled")
 endif()
 
 if(KTRANSFORMERS_USE_SYCL)

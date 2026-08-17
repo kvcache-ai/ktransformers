@@ -1,15 +1,18 @@
 #ifndef AMX_KERNELS_HPP
 #define AMX_KERNELS_HPP
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 
 #include "amx_buffers.hpp"
 #include "amx_config.hpp"
 #include "amx_quantization.hpp"
 #include "amx_utils.hpp"
+#include "onednn_int8.hpp"
 #include "llama.cpp/ggml-impl.h"
 #include "llama.cpp/ggml-quants.h"
 #include "llamafile/sgemm.h"
@@ -1064,10 +1067,23 @@ struct GemmKernel224Int8 {
   using BufferA = BufferAImpl<GemmKernel224Int8>;
   using BufferC = BufferCImpl<GemmKernel224Int8>;
 
+  static __m128i prepare_a(__m128i value) {
+#if defined(KTRANSFORMERS_USE_ONEDNN_VNNI)
+    if (int8_vnni_backend() == Int8VnniBackend::OneDnn) {
+      return _mm_xor_si128(value, _mm_set1_epi8(static_cast<char>(0x80)));
+    }
+#endif
+    return value;
+  }
+
   struct BufferB {
     int8_t* b;
     float* d;
     int n, k;
+    std::atomic<bool> compensation_ready{false};
+    std::atomic<bool> compensation_repack_in_progress{false};
+    std::mutex compensation_mutex;
+    std::vector<int32_t> compensation;
     static constexpr bool SCALE = true;
 
     static size_t required_size(int n, int k) { return sizeof(int8_t) * n * k + sizeof(float) * n; }
@@ -1085,6 +1101,7 @@ struct GemmKernel224Int8 {
     }
 
     void _pack_block(ggml_bf16_t* src_data, int src_stride, int n_block_begin, int n_block_size) {
+      compensation_ready.store(false, std::memory_order_relaxed);
       // Phase 1: compute per-row scales
       for (int n_begin = 0; n_begin < n_block_size; n_begin += N_STEP) {
         for (int i = 0; i < N_STEP; i++) {
@@ -1237,6 +1254,8 @@ struct GemmKernel224Int8 {
      *   Pass 2: 8 sub-blocks of 16×16: dequant → register transpose → quantize → VNNI-pack
      */
     void from_bb_transposed(const BufferB& src, int ith, int nth) {
+      const bool fuse_compensation = compensation_repack_in_progress.load(std::memory_order_acquire);
+      if (!fuse_compensation) compensation_ready.store(false, std::memory_order_relaxed);
       assert(n == src.k && k == src.n);
 
       auto [n_start, n_end] = split_range_n(n, ith, nth);
@@ -1300,6 +1319,8 @@ struct GemmKernel224Int8 {
 
       // === Pass 2: register-based 16×16 sub-block transpose ===
       alignas(64) int8_t quant_tile[N_STEP * K_STEP];  // 2KB
+      alignas(64) int32_t block_compensation[N_BLOCK];
+      if (fuse_compensation) memset(block_compensation, 0, dst_nb_size * sizeof(int32_t));
 
       for (int dn = 0; dn < dst_nb_size; dn += N_STEP) {
         for (int dk_block = 0; dk_block < k; dk_block += K_BLOCK) {
@@ -1338,8 +1359,12 @@ struct GemmKernel224Int8 {
                     float sv = d[abs_dn + dest_rb + i];
                     float id = sv ? 1.0f / sv : 0.0f;
                     __m512i q = _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_castsi512_ps(regs[i]), _mm512_set1_ps(id)));
-                    _mm_store_si128((__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb),
-                                    _mm512_cvtsepi32_epi8(q));
+                    __m128i q8 = _mm512_cvtsepi32_epi8(q);
+                    _mm_store_si128((__m128i*)(quant_tile + (dest_rb + i) * K_STEP + dest_cb), q8);
+                    if (fuse_compensation) {
+                      const int32_t sum = _mm512_reduce_add_epi32(_mm512_cvtepi8_epi32(q8));
+                      block_compensation[dn + dest_rb + i] -= 128 * sum;
+                    }
                   }
                 }
               }
@@ -1355,6 +1380,44 @@ struct GemmKernel224Int8 {
           }
         }
       }
+
+      if (fuse_compensation) {
+        std::copy_n(block_compensation, dst_nb_size, compensation.data() + dst_nb_begin);
+      }
+    }
+
+    void repack_from_bb_transposed(const BufferB& src) {
+      bool build_compensation = false;
+#if defined(KTRANSFORMERS_USE_ONEDNN_VNNI)
+      build_compensation = int8_vnni_backend() == Int8VnniBackend::OneDnn;
+#endif
+
+      if (build_compensation) {
+        std::lock_guard<std::mutex> guard(compensation_mutex);
+        if (compensation_repack_in_progress.load(std::memory_order_relaxed)) {
+          throw std::runtime_error("INT8 BufferB compensation repack is already in progress");
+        }
+        compensation_ready.store(false, std::memory_order_relaxed);
+        compensation.assign(n, 0);
+        compensation_repack_in_progress.store(true, std::memory_order_release);
+      } else {
+        compensation_ready.store(false, std::memory_order_relaxed);
+      }
+
+      try {
+        const int nth = recommended_nth(n);
+        for (int ith = 0; ith < nth; ++ith) from_bb_transposed(src, ith, nth);
+      } catch (...) {
+        compensation_repack_in_progress.store(false, std::memory_order_release);
+        compensation_ready.store(false, std::memory_order_release);
+        throw;
+      }
+
+      if (build_compensation) {
+        std::lock_guard<std::mutex> guard(compensation_mutex);
+        compensation_repack_in_progress.store(false, std::memory_order_release);
+        compensation_ready.store(true, std::memory_order_release);
+      }
     }
 
     int8_t* get_submat(int n, int k, int n_begin, int k_begin) {
@@ -1368,6 +1431,41 @@ struct GemmKernel224Int8 {
     }
 
     float* get_scale(int n, int n_begin) { return d + n_begin; }
+
+    bool has_ready_compensation() const { return compensation_ready.load(std::memory_order_acquire); }
+
+    const int32_t* get_onednn_compensation(int n_begin) {
+      if (!compensation_ready.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> guard(compensation_mutex);
+        if (!compensation_ready.load(std::memory_order_relaxed)) {
+          if (compensation_repack_in_progress.load(std::memory_order_acquire)) {
+            throw std::runtime_error("oneDNN compensation requested while INT8 BufferB repack is in progress");
+          }
+          compensation.assign(n, 0);
+          for (int tile_n = 0; tile_n < n; tile_n += N_STEP) {
+            for (int block_k = 0; block_k < k; block_k += K_BLOCK) {
+              const int block_size = std::min(K_BLOCK, k - block_k);
+              for (int tile_k = 0; tile_k < block_size; tile_k += K_STEP) {
+                const int8_t* tile = get_submat(n, k, tile_n, block_k + tile_k);
+                for (int half = 0; half < 2; ++half) {
+                  const int8_t* panel = tile + half * TILE_N * K_STEP;
+                  for (int group_k = 0; group_k < K_STEP / VNNI_BLK; ++group_k) {
+                    for (int column = 0; column < TILE_N; ++column) {
+                      const int8_t* values = panel + (group_k * TILE_N + column) * VNNI_BLK;
+                      int32_t sum = 0;
+                      for (int byte = 0; byte < VNNI_BLK; ++byte) sum += values[byte];
+                      compensation[tile_n + half * TILE_N + column] -= 128 * sum;
+                    }
+                  }
+                }
+              }
+            }
+          }
+          compensation_ready.store(true, std::memory_order_release);
+        }
+      }
+      return compensation.data() + n_begin;
+    }
   };
 
   static void amx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
@@ -1387,6 +1485,31 @@ struct GemmKernel224Int8 {
   }
   static void avx_kernel(int m, int n, int k, int m_begin, int n_begin, int k_block_begin, float* c, BufferA* ba,
                          BufferB* bb) {
+#if defined(KTRANSFORMERS_USE_ONEDNN_VNNI)
+    if (int8_vnni_backend() == Int8VnniBackend::OneDnn) {
+      const int rows = std::min(m - m_begin, M_STEP);
+      const int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+      const int batch_size = k_block_size / K_STEP;
+      const bool add_c = k_block_begin != 0;
+      const int8_t* a = ba->get_submat(m, k, m_begin, k_block_begin);
+      const int8_t* b = bb->get_submat(n, k, n_begin, k_block_begin);
+      OneDnnInt8Brgemm::execute(rows, batch_size, add_c, a, b, reinterpret_cast<int32_t*>(c));
+      OneDnnInt8Brgemm::execute(rows, batch_size, add_c, a, b + TILE_N * K_STEP,
+                               reinterpret_cast<int32_t*>(c) + TILE_N);
+      if (k_block_begin + K_BLOCK >= k) {
+        const int32_t* compensation = bb->get_onednn_compensation(n_begin);
+        const __m512i compensation0 = _mm512_loadu_si512(compensation);
+        const __m512i compensation1 = _mm512_loadu_si512(compensation + TILE_N);
+        for (int row = 0; row < rows; ++row) {
+          __m512i* output = reinterpret_cast<__m512i*>(c + row * N_STEP);
+          output[0] = _mm512_add_epi32(output[0], compensation0);
+          output[1] = _mm512_add_epi32(output[1], compensation1);
+        }
+      }
+      return;
+    }
+#endif
+
     __m512i* c512 = (__m512i*)c;
     int m_block_end = std::min(m - m_begin, M_STEP);
     if (k_block_begin == 0) {

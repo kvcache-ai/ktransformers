@@ -189,6 +189,8 @@ class LLAMA_MOE_TP {
         new uint8_t[size * ggml_type_size((ggml_type)config.down_type) / ggml_blck_size((ggml_type)config.down_type)];
   }
 
+  ~LLAMA_MOE_TP() { shared_mem_buffer_numa.dealloc(tp_part_idx, this); }
+
   void load_weights(int complete_intermediate_size, int offset) {
     auto local_gate_proj = m_local_gate_proj_;
     auto local_up_proj = m_local_up_proj_;

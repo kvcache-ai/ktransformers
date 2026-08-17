@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "amx_config.hpp"
@@ -299,7 +300,8 @@ struct BufferBFP8Impl {
   static size_t required_size(int n, int k, int k_group_size) {
     int n_blocks_n = (n + k_group_size - 1) / k_group_size;
     int n_blocks_k = (k + k_group_size - 1) / k_group_size;
-    return sizeof(uint8_t) * n * k + sizeof(float) * n_blocks_n * n_blocks_k;
+    const size_t bytes = sizeof(uint8_t) * (size_t)n * k + sizeof(float) * (size_t)n_blocks_n * n_blocks_k;
+    return (bytes + 63) / 64 * 64;
   }
 
   /**
@@ -386,6 +388,17 @@ struct BufferBFP8Impl {
            (size_t)k_begin * N_STEP;
   }
 
+  const uint8_t* get_submat(int n, int k, int n_begin, int k_begin) const {
+    int n_block_begin = n_begin / N_BLOCK * N_BLOCK;
+    n_begin -= n_block_begin;
+    int n_block_size = std::min(N_BLOCK, n - n_block_begin);
+    int k_block_begin = k_begin / K_BLOCK * K_BLOCK;
+    k_begin -= k_block_begin;
+    int k_block_size = std::min(K_BLOCK, k - k_block_begin);
+    return b + (size_t)n_block_begin * k + (size_t)k_block_begin * n_block_size +
+           (size_t)n_begin * k_block_size + (size_t)k_begin * N_STEP;
+  }
+
   /**
    * @brief Inverse mapping for mat_offset used in to_mat
    * mat_offset = {0, 2, 4, 6, 1, 3, 5, 7}
@@ -459,6 +472,96 @@ struct BufferBFP8Impl {
       }
     }
   }
+
+  /**
+   * @brief Repack a packed block-FP8 BufferB as its logical transpose.
+   *
+   * FP8 bytes are moved without decoding or requantization. The 128x128
+   * scale grid is transposed with the weight matrix. Phase one deliberately
+   * requires complete 128x128 blocks, including each TP-local partition.
+   */
+  void from_bb_transposed(const BufferBFP8Impl& src, int ith, int nth) {
+    constexpr int FP8_BLOCK = 128;
+    if (ith < 0 || nth <= 0 || ith >= nth) {
+      throw std::invalid_argument("FP8 BufferB transpose received an invalid thread partition");
+    }
+    if (n != src.k || k != src.n) {
+      throw std::invalid_argument("FP8 BufferB transpose destination shape must be the source transpose");
+    }
+    if (k_group_size != FP8_BLOCK || src.k_group_size != FP8_BLOCK) {
+      throw std::invalid_argument("FP8 BufferB transpose requires 128x128 block scales");
+    }
+    if (N_BLOCK != FP8_BLOCK || N_STEP != 32 || K_STEP != 32 || n % FP8_BLOCK != 0 ||
+        k % FP8_BLOCK != 0 || src.n % FP8_BLOCK != 0 || src.k % FP8_BLOCK != 0) {
+      throw std::invalid_argument("FP8 BufferB transpose requires 128-aligned local matrix dimensions");
+    }
+
+    const int dst_n_blocks = n / FP8_BLOCK;
+    const int dst_k_blocks = k / FP8_BLOCK;
+    const int src_k_blocks = src.k / FP8_BLOCK;
+    const int dst_bn_begin = dst_n_blocks * ith / nth;
+    const int dst_bn_end = dst_n_blocks * (ith + 1) / nth;
+
+    for (int dst_bn = dst_bn_begin; dst_bn < dst_bn_end; ++dst_bn) {
+      for (int dst_bk = 0; dst_bk < dst_k_blocks; ++dst_bk) {
+        std::memcpy(d + (size_t)dst_bn * dst_k_blocks + dst_bk,
+                    src.d + (size_t)dst_bk * src_k_blocks + dst_bn, sizeof(float));
+      }
+    }
+
+    alignas(64) uint8_t src_tile[N_STEP * K_STEP];
+    alignas(64) uint8_t dst_tile[N_STEP * K_STEP];
+    const int dst_n_begin = dst_bn_begin * FP8_BLOCK;
+    const int dst_n_end = dst_bn_end * FP8_BLOCK;
+    for (int dst_n = dst_n_begin; dst_n < dst_n_end; dst_n += N_STEP) {
+      for (int dst_k = 0; dst_k < k; dst_k += K_STEP) {
+        unpack_packed_tile(src.get_submat(src.n, src.k, dst_k, dst_n), src_tile);
+        for (int row = 0; row < N_STEP; ++row) {
+          for (int column = 0; column < K_STEP; ++column) {
+            dst_tile[(size_t)row * K_STEP + column] = src_tile[(size_t)column * K_STEP + row];
+          }
+        }
+        pack_packed_tile(dst_tile, get_submat(n, k, dst_n, dst_k));
+      }
+    }
+  }
+
+ private:
+  static void unpack_packed_tile(const uint8_t* packed, uint8_t* logical) {
+    const uint64_t* packed_words = reinterpret_cast<const uint64_t*>(packed);
+    for (int logical_group = 0; logical_group < 8; ++logical_group) {
+      const int packed_group = mat_offset[logical_group];
+      for (int column_pair = 0; column_pair < 16; ++column_pair) {
+        const uint64_t word = packed_words[8 * column_pair + packed_group];
+        for (int row_in_group = 0; row_in_group < 4; ++row_in_group) {
+          const uint16_t pair = static_cast<uint16_t>(word >> (16 * row_in_group));
+          const size_t offset =
+              (size_t)(logical_group * 4 + row_in_group) * K_STEP + column_pair * 2;
+          std::memcpy(logical + offset, &pair, sizeof(pair));
+        }
+      }
+    }
+  }
+
+  static void pack_packed_tile(const uint8_t* logical, uint8_t* packed) {
+    uint64_t* packed_words = reinterpret_cast<uint64_t*>(packed);
+    for (int logical_group = 0; logical_group < 8; ++logical_group) {
+      const int packed_group = mat_offset[logical_group];
+      for (int column_pair = 0; column_pair < 16; ++column_pair) {
+        uint64_t word = 0;
+        for (int row_in_group = 0; row_in_group < 4; ++row_in_group) {
+          uint16_t pair;
+          const size_t offset =
+              (size_t)(logical_group * 4 + row_in_group) * K_STEP + column_pair * 2;
+          std::memcpy(&pair, logical + offset, sizeof(pair));
+          word |= static_cast<uint64_t>(pair) << (16 * row_in_group);
+        }
+        packed_words[8 * column_pair + packed_group] = word;
+      }
+    }
+  }
+
+ public:
 };
 
 // ============================================================================

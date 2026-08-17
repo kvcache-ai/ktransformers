@@ -654,6 +654,19 @@ export CPUINFER_ENABLE_AVX512_BF16=OFF
 ./install.sh
 ```
 
+**Optional: oneDNN INT8 BRGEMM on non-AMX AVX512 CPUs**
+```bash
+# Requires an installed oneDNN >= 3.9 package:
+export CPUINFER_ENABLE_ONEDNN_VNNI=ON
+
+# Or build against a oneDNN source tree:
+export CPUINFER_ONEDNN_SOURCE_DIR=/path/to/oneDNN
+./install.sh
+
+# The compiled wheel defaults to oneDNN; native remains available for A/B tests.
+export KT_INT8_VNNI_BACKEND=auto  # auto | onednn | native
+```
+
 See `./install.sh --help` for all available options.
 
 ---
@@ -678,6 +691,8 @@ If you prefer manual installation without the `install.sh` script:
 |----------|---------|-------------|
 | `CPUINFER_CPU_INSTRUCT` | `NATIVE`, `AVX512`, `AVX2`, `FANCY` | CPU instruction set to use |
 | `CPUINFER_ENABLE_AMX` | `ON`, `OFF` | Enable Intel AMX support |
+| `CPUINFER_ENABLE_ONEDNN_VNNI` | `ON`, `OFF` | Enable oneDNN INT8 BRGEMM on non-AMX AVX512 CPUs |
+| `CPUINFER_ONEDNN_SOURCE_DIR` | Path | Optional oneDNN >= 3.9 source tree |
 | `CPUINFER_BUILD_TYPE` | `Release`, `Debug`, `RelWithDebInfo` | Build type (default: `Release`) |
 | `CPUINFER_PARALLEL` | Number | Parallel build jobs (default: auto-detect) |
 | `CPUINFER_VERBOSE` | `0`, `1` | Verbose build output (default: `0`) |

@@ -9,11 +9,56 @@ This is a leaf module — no imports from other sft/ submodules.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 import os
-from typing import Any
+from typing import Iterator
 
 import torch
+
+
+_CHECKPOINT_PHASE: ContextVar[str | None] = ContextVar(
+    "kt_activation_checkpoint_phase",
+    default=None,
+)
+_CHECKPOINT_PHASE_IDS = {
+    "none": 0,
+    "first_forward": 1,
+    "recompute": 2,
+    "other": 3,
+    "error": 4,
+}
+_CHECKPOINT_ACTION_IDS = {
+    "normal": 0,
+    "cache_first_forward": 1,
+    "reuse_recompute": 2,
+}
+_ACTIVATION_POLICY_IDS = {
+    None: 0,
+    "recompute": 1,
+    "retain": 2,
+}
+
+
+@contextmanager
+def _activation_checkpoint_phase(phase: str) -> Iterator[None]:
+    token = _CHECKPOINT_PHASE.set(phase)
+    try:
+        yield
+    finally:
+        _CHECKPOINT_PHASE.reset(token)
+
+
+def get_activation_checkpoint_context_fn():
+    """Return a ``torch.utils.checkpoint`` non-reentrant context factory."""
+
+    def context_fn():
+        return (
+            _activation_checkpoint_phase("first_forward"),
+            _activation_checkpoint_phase("recompute"),
+        )
+
+    return context_fn
 
 
 def _distributed_rank_world_size() -> tuple[int, int]:
@@ -54,6 +99,118 @@ def _all_gather_qlens(local_qlen: int, device: torch.device, world_size: int) ->
     gathered = [torch.empty(1, device=device, dtype=torch.int64) for _ in range(world_size)]
     dist.all_gather(gathered, local_qlen_t)
     return [int(t.item()) for t in gathered]
+
+
+def _all_gather_checkpoint_state(
+    local_qlen: int,
+    *,
+    layer_idx: int,
+    phase: str,
+    action: str,
+    cpu_policy: str | None = None,
+    gpu_policy: str | None = None,
+    owner_valid: bool = True,
+    device: torch.device,
+    world_size: int,
+) -> list[int]:
+    """Agree on checkpoint control flow before entering conditional collectives.
+
+    Sequence lengths may differ by rank. Layer, phase, and action must not:
+    disagreement would otherwise let ranks enter different gather/scatter paths.
+    """
+    import torch.distributed as dist
+
+    phase_id = _CHECKPOINT_PHASE_IDS.get(phase, -1)
+    action_id = _CHECKPOINT_ACTION_IDS.get(action, -1)
+    cpu_policy_id = _ACTIVATION_POLICY_IDS.get(cpu_policy, -1)
+    gpu_policy_id = _ACTIVATION_POLICY_IDS.get(gpu_policy, -1)
+    local_state = torch.tensor(
+        [
+            int(local_qlen),
+            int(layer_idx),
+            phase_id,
+            action_id,
+            cpu_policy_id,
+            gpu_policy_id,
+            int(owner_valid),
+        ],
+        device=device,
+        dtype=torch.int64,
+    )
+    if world_size == 1:
+        gathered = [local_state]
+    else:
+        if not dist.is_initialized():
+            raise RuntimeError(
+                "Checkpoint state agreement requires an initialized process group"
+            )
+        actual_world_size = int(dist.get_world_size())
+        if actual_world_size != int(world_size):
+            raise RuntimeError(
+                f"Checkpoint state world-size mismatch: got {actual_world_size}, "
+                f"expected {world_size}"
+            )
+        gathered = [
+            torch.empty(7, device=device, dtype=torch.int64)
+            for _ in range(world_size)
+        ]
+        dist.all_gather(gathered, local_state)
+
+    states = [tuple(int(value) for value in state.tolist()) for state in gathered]
+    invalid = []
+    for rank, (
+        qlen,
+        gathered_layer,
+        gathered_phase,
+        gathered_action,
+        gathered_cpu_policy,
+        gathered_gpu_policy,
+        _gathered_owner_valid,
+    ) in enumerate(states):
+        if qlen < 0:
+            invalid.append(f"rank {rank} qlen={qlen}")
+        if gathered_layer < 0:
+            invalid.append(f"rank {rank} layer={gathered_layer}")
+        if gathered_phase < 0:
+            invalid.append(f"rank {rank} phase=invalid")
+        if gathered_action < 0:
+            invalid.append(f"rank {rank} action=invalid")
+        if gathered_cpu_policy < 0:
+            invalid.append(f"rank {rank} cpu_policy=invalid")
+        if gathered_gpu_policy < 0:
+            invalid.append(f"rank {rank} gpu_policy=invalid")
+    controls = {
+        (layer, phase_id_, action_id_, cpu_policy_id_, gpu_policy_id_, owner_valid_)
+        for (
+            _,
+            layer,
+            phase_id_,
+            action_id_,
+            cpu_policy_id_,
+            gpu_policy_id_,
+            owner_valid_,
+        ) in states
+    }
+    if invalid or len(controls) != 1:
+        detail = ", ".join(
+            f"rank {rank}: qlen={qlen}, layer={layer}, phase_id={phase_id_}, "
+            f"action_id={action_id_}, cpu_policy_id={cpu_policy_id_}, "
+            f"gpu_policy_id={gpu_policy_id_}, owner_valid={owner_valid_}"
+            for rank, (
+                qlen,
+                layer,
+                phase_id_,
+                action_id_,
+                cpu_policy_id_,
+                gpu_policy_id_,
+                owner_valid_,
+            ) in enumerate(states)
+        )
+        prefix = f"Invalid checkpoint state ({'; '.join(invalid)}). " if invalid else ""
+        raise RuntimeError(
+            f"{prefix}KT checkpoint control flow differs across ranks: {detail}"
+        )
+    return [state[0] for state in states]
 
 
 def _qlen_offsets(all_qlens: list[int]) -> list[int]:
@@ -167,6 +324,10 @@ def _checkpoint_hook_mode() -> str:
       - "other": unknown hook stack entry
       - "error": failed to query hook stack
     """
+    explicit_phase = _CHECKPOINT_PHASE.get()
+    if explicit_phase is not None:
+        return explicit_phase
+
     try:
         top = torch._C._autograd._top_saved_tensors_default_hooks(False)
     except Exception:
