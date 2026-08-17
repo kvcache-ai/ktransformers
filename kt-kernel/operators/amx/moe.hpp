@@ -15,6 +15,7 @@
 // #define FORWARD_TIME_REPORT
 
 #include "moe_base.hpp"
+#include "../gguf/dequant.hpp"
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
@@ -39,54 +40,92 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 #endif
 
   inline void write_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
-                            size_t scale_size) {
-    // printf("expert %d, size %ld, scale size %ld\n", expert_idx, size, scale_size);
-    // std::ofstream of(prefix / (T::name() + mat_class + std::to_string(expert_idx)  + "_quant_" + ".kt"));
-    std::ofstream of(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                               std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"));
-    if (of.is_open() == false) {
-      printf("no such file: %s", (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                            std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"))
-                                     .c_str());
-      // throw std::runtime_error("No such file");
+                            size_t scale_size, int tp_index = 0) {
+    // The cache holds the FULL quantized matrix once (one copy on disk);
+    // each tp writes its own slice at its offset (quant bytes contiguous,
+    // then all tps' scales). First writer truncates (wb), the rest reopen
+    // r+b — offsets are disjoint, so the concurrent per-NUMA writes are
+    // safe. The per-NUMA RAM buffers stay slices (their union is exactly
+    // one copy — the LLAMAFILE philosophy).
+    const int64_t quant_off = (int64_t)tp_index * (size - scale_size);
+    const int64_t scale_off = (int64_t)tp_index * scale_size;
+    auto quant_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                                std::to_string(size - scale_size) + "Byte" + "_quant_"
+                                + ".kt");
+    // Only tp-0 may create/truncate the file; the other tps reopen r+b (no
+    // truncate!) and wait briefly for tp-0's create — a late "wb" from tp-1
+    // would clobber tp-0's already-written slice.
+    FILE* of = fopen(quant_path.c_str(), "r+b");
+    if (!of && tp_index == 0) of = fopen(quant_path.c_str(), "wb");
+    for (int tries = 0; !of && tries < 200; tries++) {
+      usleep(1000);
+      of = fopen(quant_path.c_str(), "r+b");
     }
-    of.write((char*)bb, size - scale_size);
-    of.close();
-    // of.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_scale_" + ".kt"));
-    of.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" + std::to_string(scale_size) + "Byte" +
-                      "_scale_" + ".kt"));
-    if (of.is_open() == false) {
-      printf("no such file\n");
-      // throw std::runtime_error("No such file");
+    if (!of) {
+      throw std::runtime_error("kt cache write failed (cannot open): " + quant_path.string());
     }
-    of.write(((char*)bb) + size - scale_size, scale_size);
+    if (fseek(of, quant_off, SEEK_SET) != 0) {
+      throw std::runtime_error("kt cache write failed (seek): " + quant_path.string());
+    }
+    if (fwrite(bb, 1, size - scale_size, of) != size - scale_size) {
+      throw std::runtime_error("kt cache write failed (short write): " + quant_path.string());
+    }
+    fclose(of);
+    auto scale_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                                std::to_string(scale_size) + "Byte" + "_scale_"
+                                + ".kt");
+    FILE* of2 = fopen(scale_path.c_str(), "r+b");
+    if (!of2 && tp_index == 0) of2 = fopen(scale_path.c_str(), "wb");
+    for (int tries = 0; !of2 && tries < 200; tries++) {
+      usleep(1000);
+      of2 = fopen(scale_path.c_str(), "r+b");
+    }
+    if (!of2) {
+      throw std::runtime_error("kt cache write failed (cannot open): " + scale_path.string());
+    }
+    if (fseek(of2, scale_off, SEEK_SET) != 0) {
+      throw std::runtime_error("kt cache write failed (seek): " + scale_path.string());
+    }
+    if (fwrite(((char*)bb) + size - scale_size, 1, scale_size, of2) != scale_size) {
+      throw std::runtime_error("kt cache write failed (short write): " + scale_path.string());
+    }
+    fclose(of2);
   }
 
   inline void read_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
                            size_t scale_size, uint8_t mat_split, uint8_t mat_split_idex) {
-    // std::ifstream f(prefix / (T::name() + mat_class + std::to_string(expert_idx)  + "_quant_" + ".kt"));
-    std::ifstream f(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                              std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"));
+    // The file holds the FULL matrix (each tp's slice concatenated: tp-0's
+    // whole buffer, then tp-1's, ...); this tp reads its own contiguous
+    // slice into its own buffer — one copy of the weights in RAM across all
+    // tps, the split being a cheap seek.
+    auto quant_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                                std::to_string(size - scale_size) + "Byte" + "_quant_"
+                                + ".kt");
+    std::ifstream f(quant_path, std::ios::binary);
     if (f.is_open() == false) {
-      printf("no such file: %s\n", (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                              std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"))
-                                       .c_str());
-      // throw std::runtime_error("No such file");
+      throw std::runtime_error("kt cache missing: " + quant_path.string());
     }
-    f.seekg(mat_split_idex * (size - scale_size) / mat_split);
-    f.read(((char*)bb) + mat_split_idex * (size - scale_size) / mat_split, (size - scale_size) / mat_split);
+    (void)mat_split;
+    const size_t quant_part = (size - scale_size);
+    f.seekg(mat_split_idex * quant_part);
+    f.read((char*)bb, quant_part);
+    if (!f) {
+      throw std::runtime_error("kt cache short read: " + quant_path.string());
+    }
     f.close();
-    // f.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_scale_" + ".kt"));
-    f.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" + std::to_string(scale_size) + "Byte" +
-                     "_scale_" + ".kt"));
+    auto scale_path = prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                                std::to_string(scale_size) + "Byte" + "_scale_"
+                                + ".kt");
+    f.open(scale_path, std::ios::binary);
     if (f.is_open() == false) {
-      printf("no such file: %s\n", (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                              std::to_string(scale_size) + "Byte" + "_scale_" + ".kt"))
-                                       .c_str());
-      // throw std::runtime_error("No such file");
+      throw std::runtime_error("kt cache missing: " + scale_path.string());
     }
-    f.seekg(mat_split_idex * scale_size / mat_split);
-    f.read((((char*)bb) + size - scale_size) + mat_split_idex * scale_size / mat_split, scale_size / mat_split);
+    const size_t scale_part = scale_size;
+    f.seekg(mat_split_idex * scale_part);
+    f.read(((char*)bb) + size - scale_size, scale_part);
+    if (!f) {
+      throw std::runtime_error("kt cache short read: " + scale_path.string());
+    }
   }
 #ifdef CHECK
   inline void load_check() {
@@ -140,10 +179,22 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     auto& save = config_.save;
 
     std::filesystem::path prefix = config_.path;
-    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+    prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx));
     if (save) {
-      std::cout << "Creating " << prefix << std::endl;
+      // Atomic layer writes: files are written into <prefix>.tmp and renamed
+      // over <prefix> only after the whole save job completes, so an
+      // interrupted first boot can never leave a half-written layer behind.
+      // The cache holds the FULL quantized weights once (tp-agnostic — the
+      // quantize+store is the expensive part); the per-NUMA slices are taken
+      // at load time by seeking each tp's offset in the shared files (the
+      // same philosophy as LLAMA_MOE_TP::load_weights(complete, offset)).
       std::filesystem::create_directories(prefix);
+      std::filesystem::path tmp_prefix = prefix;
+      tmp_prefix += ".tmp";
+      std::error_code ec;
+      std::filesystem::remove_all(tmp_prefix, ec);
+      std::filesystem::create_directories(tmp_prefix);
+      std::cout << "Creating " << prefix << std::endl;
     }
     if (load) {
       if (std::filesystem::exists(prefix)) {
@@ -246,17 +297,22 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       int nth = T::recommended_nth(config_.intermediate_size);
       static uint8_t mat_type_all = 3, mat_split = 1;
       std::filesystem::path prefix = config_.path;
-      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx)) / ("_numa_" + std::to_string(tp_part_idx));
+      prefix = prefix / ("_layer_" + std::to_string(config_.layer_idx));
 
       if (config_.load) {
-        std::cout << "Loading from \"" << prefix << "\"" << std::endl;
+        // The disk cache holds the FULL quantized weights once; each NUMA's
+        // slice is taken by seeking its own offset (mat_split_idex =
+        // tp_part_idx) — the split is a cheap seek, not a separate file set.
+        mat_split = config_.pool->config.subpool_count;
+        std::cout << "Loading from \"" << prefix << "\" (tp " << tp_part_idx << " of " << (int)mat_split << ")"
+                  << std::endl;
         pool->do_work_stealing_job(
-            config_.expert_num * mat_type_all * mat_split,
+            config_.expert_num * mat_type_all,
             [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
-              int64_t expert_idx = task_id / (mat_type_all * mat_split);
+              int64_t expert_idx = task_id / mat_type_all;
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-              uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
-              uint8_t mat_split_idex = task_id % mat_split;
+              uint8_t mat_class = task_id % mat_type_all;
+              uint8_t mat_split_idex = tp_part_idx;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
@@ -283,67 +339,150 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
       else
 #endif
       {
-        if (tp_part_idx == 0) {
-          std::cout << "  online quant from bf16" << std::endl;
-        }
-        pool->do_work_stealing_job(
-            nth * config_.expert_num, nullptr,
-            [this, nth, physical_to_logical_map](int task_id) {
-              int64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-              int ith = task_id % nth;
-              // gate part
-              gate_bb_[logical_expert_id]->from_mat(
-                  (ggml_bf16_t*)config_.gate_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
-                  ith, nth);
-              // up part
-              up_bb_[logical_expert_id]->from_mat(
-                  (ggml_bf16_t*)config_.up_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
-                  ith, nth);
-            },
-            nullptr);
+        if constexpr (requires(typename T::BufferB bb, ggml_bf16_t* s, int i, int n) { bb.from_mat_strip(s, i, n); }) {
+          if (config_.gate_gguf != nullptr) {
+          // ================= online quant from gguf =================
+          // Dequantize the 64-row strip each worker needs straight from the
+          // mmap'd GGUF blocks and pack it immediately. Per-thread scratch:
+          // N_BLOCK x k BF16 (~0.9 MB for gate/up at H=7168). There is never a
+          // full BF16 (or FP32) copy of a layer, and the produced bytes are
+          // identical to the "online quant from bf16" path for the same
+          // BF16 values, so the disk cache is shared between both sources.
+          if (tp_part_idx == 0) {
+            std::cout << "  online quant from gguf" << std::endl;
+          }
+          const int tp_count = (int)config_.pool->config.subpool_count;
+          const int64_t full_I = config_.gguf_full_intermediate_size > 0
+                                     ? (int64_t)config_.gguf_full_intermediate_size
+                                     : (int64_t)config_.intermediate_size * tp_count;
+          // per-NUMA slice of each expert matrix: gate/up rows [row_off, row_off+I/tp),
+          // down columns [row_off, row_off+I/tp) of each of its H rows (k = full I).
+          const int64_t row_off = (int64_t)config_.intermediate_size * tp_part_idx;
+          const int64_t down_col_begin = row_off;
+          const int64_t down_col_end = row_off + config_.intermediate_size;
+          // gate/up: per-NUMA matrix is [I/tp, H]; strips along I/tp, full columns
+          {
+            int nth = T::recommended_nth(config_.intermediate_size);
+            pool->do_work_stealing_job(
+                nth * config_.expert_num, nullptr,
+                [this, nth, physical_to_logical_map, row_off](int task_id) {
+                  int64_t expert_idx = task_id / nth;
+                  uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+                  int ith = task_id % nth;
+                  auto [n_start, n_end] = T::split_range_n(config_.intermediate_size, ith, nth);
+                  if (n_start >= n_end) return;
+                  thread_local std::vector<ggml_bf16_t> strip;
+                  strip.resize((size_t)(n_end - n_start) * config_.hidden_size);
+                  const char* gate_base = (const char*)config_.gate_gguf + logical_expert_id * config_.gate_gguf_stride;
+                  kt::gguf::dequant_rows_bf16(gate_base, (ggml_type)config_.gate_gguf_type, config_.hidden_size,
+                                              row_off + n_start, row_off + n_end, strip.data());
+                  gate_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+                  const char* up_base = (const char*)config_.up_gguf + logical_expert_id * config_.up_gguf_stride;
+                  kt::gguf::dequant_rows_bf16(up_base, (ggml_type)config_.up_gguf_type, config_.hidden_size,
+                                              row_off + n_start, row_off + n_end, strip.data());
+                  up_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+                },
+                nullptr);
+          }
+          // down: per-NUMA matrix is [H, I/tp]; strips along H, columns sliced
+          {
+            int nth = T::recommended_nth(config_.hidden_size);
+            pool->do_work_stealing_job(
+                nth * config_.expert_num, nullptr,
+                [this, nth, physical_to_logical_map, down_col_begin, down_col_end, full_I](int task_id) {
+                  int64_t expert_idx = task_id / nth;
+                  uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+                  int ith = task_id % nth;
+                  auto [n_start, n_end] = T::split_range_n(config_.hidden_size, ith, nth);
+                  if (n_start >= n_end) return;
+                  const int64_t dcol = down_col_end - down_col_begin;
+                  thread_local std::vector<ggml_bf16_t> strip;
+                  strip.resize((size_t)(n_end - n_start) * dcol);
+                  const char* down_base =
+                      (const char*)config_.down_gguf + logical_expert_id * config_.down_gguf_stride;
+                  kt::gguf::dequant_rows_bf16(down_base, (ggml_type)config_.down_gguf_type, full_I, n_start, n_end,
+                                              down_col_begin, down_col_end, strip.data());
+                  down_bb_[logical_expert_id]->from_mat_strip(strip.data(), ith, nth);
+                },
+                nullptr);
+          }
+        } else {
+          if (tp_part_idx == 0) {
+            std::cout << "  online quant from bf16" << std::endl;
+          }
+          pool->do_work_stealing_job(
+              nth * config_.expert_num, nullptr,
+              [this, nth, physical_to_logical_map](int task_id) {
+                int64_t expert_idx = task_id / nth;
+                uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+                int ith = task_id % nth;
+                // gate part
+                gate_bb_[logical_expert_id]->from_mat(
+                    (ggml_bf16_t*)config_.gate_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
+                    ith, nth);
+                // up part
+                up_bb_[logical_expert_id]->from_mat(
+                    (ggml_bf16_t*)config_.up_proj + logical_expert_id * config_.intermediate_size * config_.hidden_size,
+                    ith, nth);
+              },
+              nullptr);
 
-        nth = T::recommended_nth(config_.hidden_size);
-        pool->do_work_stealing_job(
-            nth * config_.expert_num, nullptr,
-            [this, nth, physical_to_logical_map](int task_id) {
-              int64_t expert_idx = task_id / nth;
-              uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
-              int ith = task_id % nth;
-              // down part
-              down_bb_[logical_expert_id]->from_mat(
-                  (ggml_bf16_t*)config_.down_proj + logical_expert_id * config_.hidden_size * config_.intermediate_size,
-                  ith, nth);
-              // printf("load idown, expert %ld, ith %d, total nth %d\n", expert_idx, ith, nth);
-            },
-            nullptr);
+          nth = T::recommended_nth(config_.hidden_size);
+          pool->do_work_stealing_job(
+              nth * config_.expert_num, nullptr,
+              [this, nth, physical_to_logical_map](int task_id) {
+                int64_t expert_idx = task_id / nth;
+                uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
+                int ith = task_id % nth;
+                // down part
+                down_bb_[logical_expert_id]->from_mat(
+                    (ggml_bf16_t*)config_.down_proj + logical_expert_id * config_.hidden_size * config_.intermediate_size,
+                    ith, nth);
+              },
+              nullptr);
+        }
+        } else {
+          throw std::runtime_error(
+              "online quant from gguf requires BufferB::from_mat_strip support (AMXINT8/AMXINT4)");
+        }
       }
 #ifdef CHECK
       verify_load_right();
 #endif
       // save process
       if (config_.save) {
+        // Write into <prefix>.tmp (created by derived_init) and rename over
+        // <prefix> only after every file is on disk, so an interrupted first
+        // boot can never leave a half-written layer behind.
+        std::filesystem::path tmp_prefix = prefix;
+        tmp_prefix += ".tmp";
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all, nullptr,
-            [this, physical_to_logical_map, prefix](int task_id) {
+            [this, physical_to_logical_map, tmp_prefix](int task_id) {
               int64_t expert_idx = task_id / mat_type_all;
               expert_idx = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = task_id % mat_type_all;
+              const int tp_idx = tp_part_idx;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_up_", (char*)up_bb_[expert_idx]->b, expert_idx, size, scale_size, tp_idx);
               } else if (mat_class == 1) {
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                write_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, expert_idx, size, scale_size,
+                              tp_idx);
               } else if (mat_class == 2) {
                 size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
                 size_t scale_size = config_.hidden_size * sizeof(float);
-                write_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, expert_idx, size, scale_size);
+                write_weights(tmp_prefix, "_down_", (char*)down_bb_[expert_idx]->b, expert_idx, size, scale_size,
+                              tp_idx);
               }
             },
             nullptr);
+        // The publish (rename tmp -> layer) happens in TP_MOE::load_weights
+        // after ALL numa jobs finished, so no tp races the rename while the
+        // others still write their slices.
       }
     }
   }
@@ -415,12 +554,50 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
       }
 
       this->weights_loaded = true;
+    } else if (config.gate_gguf != nullptr) {
+      printf("From GGUF\n");
+      // No per-NUMA BF16 copies: each TP part dequantizes its own strips
+      // straight from the mmap'd GGUF blocks (see "online quant from gguf" in
+      // AMX_MOE_TP::load_weights). The per-NUMA slice of each expert matrix is
+      // derived from tp_part_idx * (I/tp_count).
+      for (auto i = 0; i < tp_count; i++) {
+        auto& tpc = tps[i]->config_;
+        tpc.gate_gguf = config.gate_gguf;
+        tpc.up_gguf = config.up_gguf;
+        tpc.down_gguf = config.down_gguf;
+        tpc.gate_gguf_stride = config.gate_gguf_stride;
+        tpc.up_gguf_stride = config.up_gguf_stride;
+        tpc.down_gguf_stride = config.down_gguf_stride;
+        tpc.gate_gguf_type = config.gate_gguf_type;
+        tpc.up_gguf_type = config.up_gguf_type;
+        tpc.down_gguf_type = config.down_gguf_type;
+        tpc.gguf_full_intermediate_size = config.gguf_full_intermediate_size;
+      }
+      DO_TPS_LOAD_WEIGHTS(pool);
+      this->weights_loaded = true;
     } else if (config.path != "") {
       printf("TP Load from file %s\n", config.path.c_str());
       DO_TPS_LOAD_WEIGHTS(pool);
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");
+    }
+    // Publish the layer cache (every branch may save): all tps wrote their
+    // slices into <layer>.tmp during load; only now, with every numa job
+    // done, is it safe to rename over the old layer (the rename fails when
+    // the destination directory exists and is non-empty, and the other tps
+    // must not still be writing into the tmp).
+    if (config.save) {
+      std::filesystem::path prefix =
+          std::filesystem::path(config.path) / ("_layer_" + std::to_string(config.layer_idx));
+      std::filesystem::path tmp_prefix = prefix;
+      tmp_prefix += ".tmp";
+      std::error_code ec;
+      std::filesystem::remove_all(prefix, ec);
+      std::filesystem::rename(tmp_prefix, prefix, ec);
+      if (ec) {
+        throw std::runtime_error("kt cache rename failed: " + tmp_prefix.string() + " -> " + prefix.string());
+      }
     }
   }
 

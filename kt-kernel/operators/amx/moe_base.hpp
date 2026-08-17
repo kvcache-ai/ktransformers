@@ -40,6 +40,164 @@ class AMX_MOE_BASE {
  public:
   int tp_part_idx = 0;
 
+  // RAM-state diagnostic: shows exactly what the packed buffers hold after
+  // load — per attribute: the per-row scale stats (d), the packed-data
+  // zero fraction, and the footprint, as an ASCII map. The gate/up/down
+  // are stored per-row quantized; a scale of 0 or an all-zero packed
+  // region means the strip load left that attribute empty.
+  void debug_ram_stats(const char* tag = "moe") {
+    const int BAR = 20;
+    struct Info {
+      const char* name;
+      int n, k;
+      double fill;      // nonzero fraction of the packed data
+      double dz;        // zero fraction of the per-row scales
+      float dmin, dmax;
+      double mb;        // footprint
+      bool ok;
+    };
+    auto collect = [&](const char* name, const std::shared_ptr<typename T::BufferB>& bb) -> Info {
+      if (!bb) return {name, 0, 0, 0.0, 1.0, 0.0f, 0.0f, 0.0, false};
+      const int n = bb->n, k = bb->k;
+      int64_t d_zeros = 0;
+      float dmin = 1e30f, dmax = -1e30f;
+      if constexpr (requires { bb->d[0]; }) {
+        for (int i = 0; i < n; i++) {
+          const float d = bb->d[i];
+          if (d == 0.0f) d_zeros++;
+          dmin = std::min(dmin, d);
+          dmax = std::max(dmax, d);
+        }
+      }
+      const auto* b = (const uint8_t*)bb->b;
+      const int64_t total = (int64_t)n * k;
+      const int64_t sample = std::min<int64_t>(total, (int64_t)n * 64);
+      int64_t b_nonzero = 0;
+      for (int64_t i = 0; i < sample; i++) {
+        if (b[i] != 0) b_nonzero++;
+      }
+      if constexpr (requires { bb->d[0]; }) {
+        return {name, n, k, (double)b_nonzero / (double)sample, (double)d_zeros / (double)n, dmin, dmax,
+                (double)total / (1024.0 * 1024.0), true};
+      } else {
+        return {name, n, k, (double)b_nonzero / (double)sample, -1.0, 0.0f, 0.0f,
+                (double)total / (1024.0 * 1024.0), true};
+      }
+    };
+    Info infos[3] = {collect("gate", gate_bb_.empty() ? nullptr : gate_bb_[0]),
+                     collect("up", up_bb_.empty() ? nullptr : up_bb_[0]),
+                     collect("down", down_bb_.empty() ? nullptr : down_bb_[0])};
+
+    printf("[ram] %s (tp=%d):\n", tag, tp_part_idx);
+    for (auto& inf : infos) {
+      if (!inf.ok) {
+        printf("[ram]   %-5s : <empty>\n", inf.name);
+        continue;
+      }
+      int filled = (int)(inf.fill * BAR + 0.5);
+      if (filled > BAR) filled = BAR;
+      printf("[ram]   %-5s : [", inf.name);
+      for (int i = 0; i < BAR; i++) printf("%c", i < filled ? '#' : '.');
+      if (inf.dz >= 0.0) {
+        printf("] %4.0f%% fill  %7.2f MB  (n=%d k=%d)  scales zero-frac %.3f  dmin %.4g  dmax %.4g\n",
+               inf.fill * 100.0, inf.mb, inf.n, inf.k, inf.dz, inf.dmin, inf.dmax);
+      } else {
+        printf("] %4.0f%% fill  %7.2f MB  (n=%d k=%d)  (unscaled format)\n", inf.fill * 100.0, inf.mb, inf.n,
+               inf.k);
+      }
+    }
+    // per-row scale samples (first 5 rows of each attribute)
+    auto samples = [&](const char* name, const std::shared_ptr<typename T::BufferB>& bb) {
+      if (!bb) return;
+      if constexpr (requires { bb->d[0]; }) {
+        printf("[ram]        %s d-row[0..4]=%.4g %.4g %.4g %.4g %.4g\n", name, bb->d[0], bb->d[1], bb->d[2],
+               bb->d[3], bb->d[4]);
+      } else {
+        printf("[ram]        %s bf16 b-row[0..4]=0x%04x 0x%04x 0x%04x 0x%04x 0x%04x\n", name,
+               ((const uint16_t*)bb->b)[0], ((const uint16_t*)bb->b)[1], ((const uint16_t*)bb->b)[2],
+               ((const uint16_t*)bb->b)[3], ((const uint16_t*)bb->b)[4]);
+      }
+    };
+    auto stats_expert = [&](int ex) {
+      if (gate_bb_.size() <= (size_t)ex) return;
+      auto& gb = gate_bb_[ex];
+      auto& ub = up_bb_[ex];
+      auto& db = down_bb_[ex];
+      const int n = gb->n;
+      int64_t gz = 0, uz = 0, dz = 0;
+      for (int i = 0; i < n; i++) {
+        if constexpr (requires { gb->d[0]; }) {
+          if (gb->d[i] == 0.0f) gz++;
+          if (ub->d[i] == 0.0f) uz++;
+        }
+        if constexpr (requires { db->d[0]; }) {
+          if (db->d[i] == 0.0f) dz++;
+        }
+      }
+      printf("[ram]   expert %d: gate d-zeros=%lld up d-zeros=%lld down d-zeros=%lld\n", ex, (long long)gz,
+             (long long)uz, (long long)dz);
+      if constexpr (requires { gb->d[0]; }) {
+        printf("[ram]        gate d[0]=%.4g up d[0]=%.4g down d[0]=%.4g\n", (float)gb->d[0], (float)ub->d[0],
+               (float)db->d[0]);
+      }
+    };
+    printf("[ram]   experts 0..7:\n");
+    for (int ex = 0; ex < 8; ex++) stats_expert(ex);
+    // forward-side state: the activated-expert counts and the intermediates
+    printf("[ram]   forward state: m_local_num_[1..4]=%d %d %d %d activated=%d\n",
+           m_local_num_.size() > 1 ? m_local_num_[1] : -1, m_local_num_.size() > 2 ? m_local_num_[2] : -1,
+           m_local_num_.size() > 3 ? m_local_num_[3] : -1, m_local_num_.size() > 4 ? m_local_num_[4] : -1,
+           (int)m_expert_id_map_.size() ? (int)m_expert_id_map_.size() : -1);
+    if (m_local_gate_output_ && m_local_up_output_) {
+      printf("[ram]   g[0..4]=%.4g %.4g %.4g %.4g %.4g  u[0..4]=%.4g %.4g %.4g %.4g %.4g\n",
+             (double)ggml_bf16_to_fp32(m_local_gate_output_[0]), (double)ggml_bf16_to_fp32(m_local_gate_output_[1]),
+             (double)ggml_bf16_to_fp32(m_local_gate_output_[2]), (double)ggml_bf16_to_fp32(m_local_gate_output_[3]),
+             (double)ggml_bf16_to_fp32(m_local_gate_output_[4]), (double)ggml_bf16_to_fp32(m_local_up_output_[0]),
+             (double)ggml_bf16_to_fp32(m_local_up_output_[1]), (double)ggml_bf16_to_fp32(m_local_up_output_[2]),
+             (double)ggml_bf16_to_fp32(m_local_up_output_[3]), (double)ggml_bf16_to_fp32(m_local_up_output_[4]));
+    }
+    if (!gate_bb_.empty()) samples("gate", gate_bb_[0]);
+    if (!up_bb_.empty()) samples("up", up_bb_[0]);
+    if (!down_bb_.empty()) samples("down", down_bb_[0]);
+    // down-stage internals for expert 1 (the forward uses experts 1,2)
+    auto dump_down_internals = [&](int ex) {
+      if (down_ba_.size() <= (size_t)ex || down_bc_.size() <= (size_t)ex) return;
+      auto& dba = down_ba_[ex];
+      auto& dbc = down_bc_[ex];
+      printf("[ram]   down internals expert %d:\n", ex);
+      if constexpr (requires { dba->d[0]; }) {
+        printf("[ram]     down-A d[0..4]=%.4g %.4g %.4g %.4g %.4g (h-quant scales)\n", (float)dba->d[0],
+               (float)dba->d[1], (float)dba->d[2], (float)dba->d[3], (float)dba->d[4]);
+      }
+      float* c = (float*)dbc->c;
+      // the full-window stats of the down-C (the whole [max_m][n] pool slice)
+      double csum = 0.0;
+      int c_nz = 0;
+      const int cn = dbc->n;
+      const int c_max_m = dbc->max_m;
+      const size_t ctotal = (size_t)c_max_m * cn;
+      for (size_t i = 0; i < ctotal; i++) {
+        if (c[i] != 0.0f) c_nz++;
+        csum += c[i];
+      }
+      printf("[ram]     down-C c[0..4]=%.4g %.4g %.4g %.4g %.4g  c[512..516]=%.4g %.4g %.4g %.4g %.4g\n", c[0], c[1],
+             c[2], c[3], c[4], c[512], c[513], c[514], c[515], c[516]);
+      printf("[ram]     down-C full: max_m=%d n=%d lanes=%zu nonzero=%d/%zu sum=%.4g\n", c_max_m, cn, ctotal,
+             c_nz, c_nz, ctotal, csum);
+      if (m_local_down_output_) {
+        printf("[ram]     down-scratch out[0..4]=%.4g %.4g %.4g %.4g %.4g\n",
+               (double)ggml_bf16_to_fp32(m_local_down_output_[0]),
+               (double)ggml_bf16_to_fp32(m_local_down_output_[1]),
+               (double)ggml_bf16_to_fp32(m_local_down_output_[2]),
+               (double)ggml_bf16_to_fp32(m_local_down_output_[3]),
+               (double)ggml_bf16_to_fp32(m_local_down_output_[4]));
+      }
+    };
+    dump_down_internals(1);
+    dump_down_internals(2);
+    fflush(stdout);
+  }
+
   ggml_bf16_t* m_local_input_ = nullptr;
   ggml_bf16_t* m_local_gate_output_ = nullptr;
   ggml_bf16_t* m_local_up_output_ = nullptr;
@@ -73,6 +231,14 @@ class AMX_MOE_BASE {
   void* up_bc_pool_ = nullptr;
   void* down_ba_pool_ = nullptr;
   void* down_bc_pool_ = nullptr;
+
+  // aligned_alloc'd blocks owned by this MoE object (one per expert × gate/up/down).
+  // Must be freed in the destructor — BufferB itself only wraps the raw pointer
+  // and has no destructor, so a defaulted ~AMX_MOE_BASE() leaks ~3.6GB/layer
+  // (256 experts × 3 matrices × ~4.7MB for MiniMax 1536×3072 INT8), which
+  // accumulates to OOM after ~60 layers during GGUF→AMXINT8 conversion.
+  // Same pattern as AVX2_MOE_BASE::owned_aligned_allocs_.
+  std::vector<void*> owned_aligned_allocs_;
 
   GeneralMOEConfig config_;
   using input_t = ggml_bf16_t;
@@ -119,13 +285,19 @@ class AMX_MOE_BASE {
 
       void* gate_bb_ptr =
           std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      if (!gate_bb_ptr) throw std::runtime_error("aligned_alloc failed for gate BufferB");
+      owned_aligned_allocs_.push_back(gate_bb_ptr);
       gate_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, gate_bb_ptr));
 
       void* up_bb_ptr = std::aligned_alloc(64, buffer_b_required_size(config_.intermediate_size, config_.hidden_size));
+      if (!up_bb_ptr) throw std::runtime_error("aligned_alloc failed for up BufferB");
+      owned_aligned_allocs_.push_back(up_bb_ptr);
       up_bb_.push_back(make_buffer_b(config_.intermediate_size, config_.hidden_size, up_bb_ptr));
 
       void* down_bb_ptr =
           std::aligned_alloc(64, buffer_b_required_size(config_.hidden_size, config_.intermediate_size));
+      if (!down_bb_ptr) throw std::runtime_error("aligned_alloc failed for down BufferB");
+      owned_aligned_allocs_.push_back(down_bb_ptr);
       down_bb_.push_back(make_buffer_b(config_.hidden_size, config_.intermediate_size, down_bb_ptr));
     }
     // TODO: need update to all *.hpp
@@ -147,7 +319,15 @@ class AMX_MOE_BASE {
     shared_mem_buffer_numa.alloc(tp_part_idx, this, mem_requests);
   }
 
-  ~AMX_MOE_BASE() = default;
+  virtual ~AMX_MOE_BASE() {
+    // Free the aligned_alloc'd BufferB weight blocks owned by this object.
+    // BufferB::b/d are raw pointers with no destructor, so without this the
+    // per-layer INT8/INT4 weights are leaked every time a MoE object is
+    // destroyed (e.g. per-layer GGUF→AMXINT8 conversion loop). This is what
+    // made RAM "eagerly fill up" around layer 60 of a 61-layer model.
+    for (void* p : owned_aligned_allocs_) std::free(p);
+    owned_aligned_allocs_.clear();
+  }
 
   void warm_up() {
     int qlen = config_.max_len;
@@ -162,12 +342,26 @@ class AMX_MOE_BASE {
     forward(qlen, config_.num_experts_per_tok, expert_ids.data(), weights.data(), input.data(), output.data());
   }
 
-  void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input, void* output) {
+  virtual void forward(int qlen, int k, const int64_t* expert_ids, const float* weights, const void* input,
+                     void* output) {
     if (qlen > 1) {
       forward_prefill(qlen, k, expert_ids, weights, input, output);
     } else {
       forward_decode(k, expert_ids, weights, input, output);
     }
+  }
+
+  // Down activation fill, hookable by derived (AMXINT4_SMART routes the alt A).
+  // Virtual so the static-typed base pointer still dispatches. Default:
+  // int8-KGroup quantize of the gate output into the int4 kernel's A.
+  virtual void fill_down_a(int expert_idx, int m, ggml_bf16_t* src) {
+    down_ba_[expert_idx]->from_mat(m, src, 0, 1);
+  }
+
+  // Down accumulation release, hookable by derived (AMXINT4_SMART routes the
+  // alt C's to_mat). Default: reduce the int4 C into the bf16-paired output.
+  virtual void down_output(int expert_idx, int m, ggml_bf16_t* dst, int ith, int nth) {
+    down_bc_[expert_idx]->to_mat(m, dst, ith, nth);
   }
 
   template <typename... Args>
@@ -365,7 +559,7 @@ class AMX_MOE_BASE {
         activated_expert, nullptr,
         [this](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx], 0, 1);
+          this->fill_down_a(expert_idx, m_local_num_[expert_idx], m_local_gate_output_ptr_[expert_idx]);
         },
         nullptr);
 
@@ -384,7 +578,7 @@ class AMX_MOE_BASE {
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
           derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
+          this->down_output(expert_idx, m_local_num_[expert_idx], m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
 
@@ -572,7 +766,7 @@ class AMX_MOE_BASE {
         activated_expert, nullptr,
         [this, qlen](int task_id) {
           int expert_idx = m_expert_id_map_[task_id];
-          down_ba_[expert_idx]->from_mat(qlen, m_local_gate_output_ptr_[expert_idx], 0, 1);
+          this->fill_down_a(expert_idx, qlen, m_local_gate_output_ptr_[expert_idx]);
         },
         nullptr);
 
@@ -591,7 +785,7 @@ class AMX_MOE_BASE {
           int expert_idx = m_expert_id_map_[task_id / nth];
           int ith = task_id % nth;
           derived()->do_down_gemm(expert_idx, ith, nth, qlen);
-          down_bc_[expert_idx]->to_mat(qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
+          this->down_output(expert_idx, qlen, m_local_down_output_ptr_[expert_idx], ith, nth);
         },
         nullptr);
 
@@ -717,9 +911,10 @@ class AMX_MOE_BASE {
 // ============================================================================
 
 template <class T, class Derived>
-class TP_MOE<AMX_MOE_BASE<T, Derived>> : public TP_MOE_Common<AMX_MOE_BASE<T, Derived>> {
+class TP_MOE<AMX_MOE_BASE<T, Derived>>
+    : public TP_MOE_Common<AMX_MOE_BASE<T, Derived>, Derived> {
  public:
-  using TP_MOE_Common<AMX_MOE_BASE<T, Derived>>::TP_MOE_Common;
+  using TP_MOE_Common<AMX_MOE_BASE<T, Derived>, Derived>::TP_MOE_Common;
 
   // Default load_weights implementation - can be overridden by derived TP_MOE classes
   void load_weights() override { throw std::runtime_error("Not Implemented"); }
@@ -754,10 +949,14 @@ class TP_MOE<AMX_MOE_BASE<T, Derived>> : public TP_MOE_Common<AMX_MOE_BASE<T, De
           *((__m512*)(merge_to + e)) = _mm512_add_ps(*((__m512*)(merge_to + e)), *((__m512*)(merge_from + e)));
         }
       }
+      // The output buffer is float32 (the production convention). The old
+      // bf16 store packed 32 bf16 into 64 bytes — only HALF the float32
+      // lanes, leaving the other half uninitialized (the garbage lanes).
       for (int e = 0; e < config.hidden_size; e += 32) {
         __m512 x0 = *(__m512*)(merge_to + e);
         __m512 x1 = *(__m512*)(merge_to + e + 16);
-        avx512_32xfp32_to_32xbf16(&x0, &x1, (__m512i*)((ggml_bf16_t*)output + token_nth * config.hidden_size + e));
+        *((__m512*)((float*)output + token_nth * config.hidden_size + e)) = x0;
+        *((__m512*)((float*)output + token_nth * config.hidden_size + e + 16)) = x1;
       }
     };
 

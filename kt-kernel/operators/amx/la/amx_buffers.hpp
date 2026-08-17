@@ -628,6 +628,21 @@ struct BufferBInt4Impl {
   }
 
   /**
+   * @brief Pack a pre-dequantized strip of this BufferB's N_BLOCK partition.
+   *
+   * `src` is a row-major (n_block_size x k) BF16 matrix holding rows
+   * [n_start, n_end) of the source matrix (the caller already offset the
+   * source to this strip's first row). Used by the GGUF online-quant path.
+   * Int4 twin of GemmKernel224Int8::BufferB::from_mat_strip.
+   */
+  void from_mat_strip(ggml_bf16_t* src, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_size = n_end - n_start;
+    if (n_block_size <= 0) return;
+    _pack_block(src, k, n_start, n_block_size);
+  }
+
+  /**
    * @brief Pack a transposed matrix into INT4 BufferB format.
    *
    * src is a row-major (src_n, src_k) BF16 matrix. The target BufferB has shape (n=src_k, k=src_n).
@@ -1115,6 +1130,82 @@ struct BufferBInt4KGroupImpl {
     uint8_t* dst_weights = reinterpret_cast<uint8_t*>(b) + n_start * row_bytes;
     const uint8_t* src_weights = proj + n_start * row_bytes;
     std::memcpy(dst_weights, src_weights, rows * row_bytes);
+  }
+
+  // Round signed int8 to the nearest multiple of 16 (sign-aware), producing
+  // the shifted 4-bit code used by the online quant path (same as the
+  // BufferBKGroupImpl pack).
+  static __m128i round_4bit_s8(__m128i x) {
+    __m128i s = _mm_and_si128(x, _mm_set1_epi8(0x80));
+    s = _mm_or_si128(s, _mm_srai_epi16(s, 1));
+    s = _mm_or_si128(s, _mm_srai_epi16(s, 2));
+    s = _mm_or_si128(s, _mm_srai_epi16(s, 4));
+
+    x = _mm_abs_epi8(x);
+    x = _mm_add_epi8(x, _mm_set1_epi8(0x08));
+    x = _mm_and_si128(x, _mm_set1_epi8(0xF0));
+    x = _mm_xor_si128(x, s);
+    x = _mm_sub_epi8(x, s);
+    return x;
+  }
+
+  // Quantize a BF16 strip from GGUF dequantization online (per k-group
+  // scales, signed 4-bit codes) into this buffer. `src` holds the rows
+  // [n_start, n_end) of the per-NUMA expert matrix (full k columns) beginning
+  // at row 0; the same split as from_raw_mat bounds the strip.
+  void from_mat_strip(ggml_bf16_t* src, int ith, int nth) {
+    auto [n_start, n_end] = split_range_n(n, ith, nth);
+    if (n_start >= n_end) return;
+    const int k_group_count_ = k / k_group_size;
+    const size_t row_bytes = static_cast<size_t>(k) / 2;
+    uint8_t* dst_weights = reinterpret_cast<uint8_t*>(b) + n_start * row_bytes;
+    for (int row = n_start; row < n_end; row++) {
+      const ggml_bf16_t* srow = src + (size_t)(row - n_start) * k;
+      // 1) per-k-group scales. K2 convention: scale = amax / 7 (NOT amax/112):
+      // the stored codes carry the x16 (nibble shifted left 4) and the
+      // kernel's reduce divides the accumulated sum by 16 at the end, so the
+      // per-element value is code*16*scale/16 = code*amax/7.
+      for (int g = 0; g < k_group_count_; g++) {
+        float amax = 0.0f;
+        for (int j = g * k_group_size; j < (g + 1) * k_group_size; j += 32) {
+          __m512 f0, f1;
+          avx512_32xbf16_to_32xfp32((__m512i*)(srow + j), &f0, &f1);
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f0)));
+          amax = MAX(amax, _mm512_reduce_max_ps(_mm512_abs_ps(f1)));
+        }
+        d[(size_t)row * k_group_count_ + g] = amax / 7.0f;
+      }
+      // 2) quantize to offset 4-bit codes, packed two per byte (hi = odd k).
+      // code = round(v * 7 / amax) + 8 in [1, 15]; value = (code - 8) * amax / 7.
+      for (int j = 0; j < k; j += 32) {
+        const int g0 = j / k_group_size;
+        const int g1 = (j + 16) / k_group_size;
+        float sc0 = d[(size_t)row * k_group_count_ + g0];
+        float sc1 = d[(size_t)row * k_group_count_ + g1];
+        __m512 i0 = _mm512_set1_ps(sc0 > 0 ? (1.0f / sc0) : 0.0f);  // 7/amax
+        __m512 i1 = _mm512_set1_ps(sc1 > 0 ? (1.0f / sc1) : 0.0f);
+        __m512 f0, f1;
+        avx512_32xbf16_to_32xfp32((__m512i*)(srow + j), &f0, &f1);
+        // round-to-nearest (cvtps_epi32 truncates; truncation bias shows up as
+        // a systematic -3-5% output error on top of the 4-bit granularity)
+        __m128i q0 =
+            _mm512_cvtsepi32_epi8(_mm512_cvtps_epi32(_mm512_roundscale_ps(_mm512_mul_ps(f0, i0), _MM_FROUND_TO_NEAREST_INT)));
+        __m128i q1 =
+            _mm512_cvtsepi32_epi8(_mm512_cvtps_epi32(_mm512_roundscale_ps(_mm512_mul_ps(f1, i1), _MM_FROUND_TO_NEAREST_INT)));
+        q0 = _mm_add_epi8(q0, _mm_set1_epi8(8));  // offset code [1, 15]
+        q1 = _mm_add_epi8(q1, _mm_set1_epi8(8));
+        // pack: out[t] = code[2t] | (code[2t+1] << 4)
+        const __m128i even_idx = _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14, 0, 2, 4, 6, 8, 10, 12, 14);
+        const __m128i odd_idx = _mm_setr_epi8(1, 3, 5, 7, 9, 11, 13, 15, 1, 3, 5, 7, 9, 11, 13, 15);
+        __m128i lo0 = _mm_shuffle_epi8(q0, even_idx);
+        __m128i hi0 = _mm_shuffle_epi8(_mm_slli_epi16(q0, 4), odd_idx);
+        __m128i lo1 = _mm_shuffle_epi8(q1, even_idx);
+        __m128i hi1 = _mm_shuffle_epi8(_mm_slli_epi16(q1, 4), odd_idx);
+        uint8_t* row_dst = dst_weights + (size_t)(row - n_start) * row_bytes;
+        _mm_storel_epi64((__m128i*)(row_dst + j / 2), _mm_or_si128(lo0, hi0));
+        _mm_storel_epi64((__m128i*)(row_dst + j / 2 + 8), _mm_or_si128(lo1, hi1));
+      }
+    }
   }
 
   // Get pointer to submatrix for computation

@@ -34,6 +34,8 @@ INFERENCE_METHODS = frozenset(
     [
         "AMXINT4",
         "AMXINT8",  # AMX quantization
+        "AMXINT4_KGROUP",  # Int4 KGroup per-32-group scales
+        "AMXINT4_SMART",  # per-attribute Int4-KGroup / Int8 / BF16 routing
         "RAWINT4",
         "FP8",  # Native quantization
         "BF16",  # BF16 native MoE
@@ -337,7 +339,7 @@ def _create_inference_wrapper(
         BaseMoEWrapper instance
     """
     # Select backend based on method
-    if method in ["AMXINT4", "AMXINT8"]:
+    if method in ["AMXINT4", "AMXINT8", "AMXINT4_KGROUP", "AMXINT4_SMART"]:
         backend_cls = AMXMoEWrapper
     elif method in [
         "RAWINT4",

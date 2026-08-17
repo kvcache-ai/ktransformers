@@ -160,6 +160,17 @@ struct BufferBBF16Impl {
     pack_block(src + n_block_begin * k, k, n_block_begin, n_block_size);
   }
 
+  // GGUF strip path: src holds rows [n_start, n_end) of the (per-NUMA) matrix
+  // beginning at row 0. pack_block indexes rows relative to src_data, so no
+  // n_block_begin offset is needed (lossless BF16 copy — no scales/codes).
+  void from_mat_strip(ggml_bf16_t* src, int ith, int nth) {
+    auto [n_start, n_end] = K::split_range_n(n, ith, nth);
+    int n_block_begin = n_start;
+    int n_block_size = n_end - n_block_begin;
+    if (n_block_size <= 0) return;
+    pack_block(src, k, n_block_begin, n_block_size);
+  }
+
   void from_mat_strided(ggml_bf16_t* src, int src_stride, int ith, int nth) {
     assert(src_stride >= k);
     auto [n_start, n_end] = K::split_range_n(n, ith, nth);

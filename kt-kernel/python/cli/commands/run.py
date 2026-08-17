@@ -55,6 +55,13 @@ from kt_kernel.cli.utils.user_model_registry import UserModelRegistry
 @click.option("--weights-path", type=click.Path(), default=None, help="Custom quantized weights path")
 @click.option("--kt-method", default=None, help="KT quantization method")
 @click.option(
+    "--kt-convert-gguf-to-amxint8",
+    "kt_convert_gguf",
+    is_flag=True,
+    default=False,
+    help="Enable GGUF→AMXINT8 load-time conversion (dequantize UD-Q4 GGUF to int8 for AMXINT8/VNNI backend)",
+)
+@click.option(
     "--kt-gpu-prefill-threshold", "kt_gpu_prefill_threshold", type=int, default=None, help="GPU prefill token threshold"
 )
 @click.option("--attention-backend", default=None, help="Attention backend")
@@ -94,6 +101,7 @@ def run(
     model_path: Optional[str],
     weights_path: Optional[str],
     kt_method: Optional[str],
+    kt_convert_gguf: bool,
     kt_gpu_prefill_threshold: Optional[int],
     attention_backend: Optional[str],
     max_total_tokens: Optional[int],
@@ -151,6 +159,7 @@ def run(
         model_path=model_path_obj,
         weights_path=weights_path_obj,
         kt_method=kt_method,
+        kt_convert_gguf=kt_convert_gguf,
         kt_gpu_prefill_threshold=kt_gpu_prefill_threshold,
         attention_backend=attention_backend,
         max_total_tokens=max_total_tokens,
@@ -178,6 +187,7 @@ def _run_impl(
     model_path: Optional[Path],
     weights_path: Optional[Path],
     kt_method: Optional[str],
+    kt_convert_gguf: bool,
     kt_gpu_prefill_threshold: Optional[int],
     attention_backend: Optional[str],
     max_total_tokens: Optional[int],
@@ -499,6 +509,9 @@ def _run_impl(
 
     # Prepare environment variables
     env = os.environ.copy()
+    # Signal GGUF→AMXINT8 conversion if requested
+    if kt_convert_gguf:
+        env["KT_CONVERT_GGUF_TO_AMXINT8"] = "1"
     # Add environment variables from advanced.env
     env.update(settings.get_env_vars())
     # Add environment variables from inference.env

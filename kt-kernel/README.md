@@ -311,6 +311,20 @@ LLAMAFILE uses pre-quantized **GGUF** weights on the CPU side directly, without 
 - In SGLang integration, use that GGUF directory as `--kt-weight-path`.
   KT-Kernel supports multiple GGUF quantization formats such as `Q4_KM`, `Q4_K`, `Q5_K`, etc. Choose based on your latency and accuracy requirements.
 
+**CPU Weights (AMX backend from GGUF: `AMXINT8` / `AMXINT4`):**
+AMXINT8/AMXINT4 can also consume a GGUF directory directly — no `convert_cpu_weights.py` step. Point `--kt-weight-path` at the GGUF directory (e.g. a UD-Q4_K_XL repo) and the loader dequantizes the MoE expert tensors straight from the mmap'd GGUF blocks during the first boot, writing a local INT8 cache as a side effect. Every later boot loads that cache and boots at the usual AMXINT8 speed.
+
+- First boot: GGUF → BF16 strips → INT8 packing (AVX-512 dequant, no full BF16/FP32 materialization — RAM stays at ~INT8 size);
+- Later boots: identical command, weights come from the cache (see "AMXINT8 from GGUF" below);
+- Per-tensor GGML types are dispatched at runtime (Q4_K/Q5_K/Q6_K/Q8_0 use dedicated AVX-512 kernels; BF16/F16/F32 pass through; anything else falls back to ggml's `to_float` — a slower first boot, never a hard failure);
+- Cache controls (optional escape hatches):
+  - `KT_GGUF_CACHE_DIR=<dir>` — relocate the cache (default: `<gguf-dir>/.kt_cache` if writable, else `~/.cache/kt-kernel/gguf/`);
+  - `KT_GGUF_CACHE=0` — disable the cache (quantize from GGUF every boot);
+  - `KT_GGUF_CACHE=refresh` — force a rebuild.
+- Accuracy note: this is double quantization (Q4_K → BF16 → INT8 per-row). The error is dominated by the original GGUF quantization; the INT8 step over already-4-bit values adds little. The goal is AMX throughput on an existing GGUF, not better quality than the GGUF.
+
+**`AMXINT4_SMART`** routes each layer's storage by its original quantization (AMXINT4 / AMXINT8 / BF16) so mixed-precision GGUFs never pay a second 4-bit requant on their 5-8-bit tensors. See [docs/amxint4-smart.md](docs/amxint4-smart.md).
+
 #### 3. Launch SGLang Server
 
 Start the SGLang server with your normal SGLang parameters, and add the following KT-Kernel specific parameters to enable CPU-GPU heterogeneous inference:
@@ -763,6 +777,24 @@ python scripts/convert_cpu_weights.py \
 **Supported formats:** FP8, FP16, BF16 → INT4/INT8
 
 For LLAMAFILE backend (`LLAMAFILE`), CPU-side experts are loaded directly from **GGUF** weights. You do **not** need to run the AMX conversion script; instead, download a GGUF model from the web (e.g., a GGUF repo on Hugging Face) and point `weight_path` / SGLang `--kt-weight-path` (or `--model` when appropriate) to that GGUF directory. KT-Kernel supports multiple GGUF quantization types such as `Q4_KM`, `Q4_K`, `Q5_K`, etc.
+
+### AMXINT8 / AMXINT4 from GGUF (no pre-conversion step)
+
+AMX backends also accept a GGUF directory directly — the first boot dequantizes the MoE expert tensors straight from the mmap'd GGUF blocks (AVX-512 strip dequant → existing `BufferB` INT8 packing) and writes a local quantized cache as a side effect; every later boot loads that cache at the usual AMXINT8 speed:
+
+```bash
+# first boot: dequant + quantize + populate the cache (one-time, minutes)
+python -m sglang.launch_server --model <hf-dir> \
+  --kt-weight-path /models/DeepSeek-UD-Q4_K_XL --kt-method AMXINT8 \
+  --kt-cpuinfer 64 --kt-threadpool-count 2
+
+# every later boot: identical command, weights come from the cache
+```
+
+- **Cache location** (resolved in order): `KT_GGUF_CACHE_DIR` → `<kt-weight-path>/.kt_cache` (if writable) → `~/.cache/kt-kernel/gguf/`. The cache is keyed by a GGUF fingerprint + method + threadpool count + model dims + pack-format version + ISA tag, so a swapped model or a differently built binary can never silently load the wrong bytes (a stale manifest triggers a clean rebuild).
+- **Size**: the cache is the same size as the AMXINT8 in-RAM footprint (~1 byte/weight + f32 per-row scales, roughly 2× the Q4_K source on disk). It changes the disk budget, not the memory budget — AMXINT8 must hold the same bytes in RAM to serve at all.
+- **Escape hatches**: `KT_GGUF_CACHE=0` (quantize every boot), `KT_GGUF_CACHE=refresh` (force rebuild), `KT_GGUF_CACHE_DIR=<dir>` (relocate).
+- **Accuracy caveat**: this is double quantization (GGUF → BF16 → INT8 per-row). The error is dominated by the original GGUF quantization; the INT8 step over already-4-bit values adds little. The goal is AMX throughput on an existing GGUF, not better quality than the GGUF.
 
 ---
 

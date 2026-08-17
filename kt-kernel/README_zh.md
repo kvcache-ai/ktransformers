@@ -164,6 +164,20 @@ LLAMAFILE 在 CPU 侧直接使用预量化的 **GGUF** 权重，无需运行 `co
 - 在 SGLang 集成中，将该 GGUF 目录作为 `--kt-weight-path`。
   KT-Kernel 支持多种 GGUF 量化格式，例如 `Q4_KM`、`Q4_K`、`Q5_K` 等，可根据延迟和效果需求选择。
 
+**CPU 权重（AMX 后端直接使用 GGUF：`AMXINT8` / `AMXINT4`）：**  
+AMXINT8/AMXINT4 也可以直接消费 GGUF 目录，无需 `convert_cpu_weights.py` 预转换。把 `--kt-weight-path` 指向 GGUF 目录（例如 UD-Q4_K_XL 仓库），首次启动时加载器直接从 mmap 的 GGUF 块中按 strip 反量化（AVX-512，不产生整层 BF16/FP32 拷贝，内存保持 ~INT8 大小），并顺带写入本地 INT8 缓存；之后每次启动都直接加载缓存，达到常规 AMXINT8 的启动速度。
+
+- 首次启动：GGUF → BF16 strip → INT8 打包（并写缓存，一次性数分钟）；
+- 后续启动：命令不变，权重来自缓存；
+- 每个张量的 GGML 类型按运行时分发（Q4_K/Q5_K/Q6_K/Q8_0 走专用 AVX-512 内核；BF16/F16/F32 直通；其余类型回退到 ggml `to_float`——只会让首次启动变慢，不会失败）；
+- 缓存控制（可选环境变量）：
+  - `KT_GGUF_CACHE_DIR=<dir>` — 指定缓存目录（默认：`<gguf-dir>/.kt_cache`（可写时）或 `~/.cache/kt-kernel/gguf/`）；
+  - `KT_GGUF_CACHE=0` — 禁用缓存（每次启动都从 GGUF 量化）；
+  - `KT_GGUF_CACHE=refresh` — 强制重建缓存。
+- 精度说明：这是双重量化（Q4_K → BF16 → 每行 INT8）。误差主要来自原始 GGUF 量化，对已量化的 4-bit 值再做 INT8 增加的误差很小。目标是让现有 GGUF 在 AMX 上获得吞吐，而不是比 GGUF 本身更好。
+
+**`AMXINT4_SMART`** 按每层的原始量化类型路由存储精度（AMXINT4 / AMXINT8 / BF16），使混合精度 GGUF 的 5-8-bit 张量不再承受第二次 4-bit 重量化。详见 [docs/amxint4-smart.md](docs/amxint4-smart.md)。
+
 #### 3. 启动 SGLang Server
 
 在通常的 SGLang 启动参数基础上，增加如下 KT-Kernel 相关参数，以启用 CPU-GPU 异构推理：

@@ -185,7 +185,7 @@ install_all() {
   init_submodules
 
   # 2. System dependencies
-  install_deps
+  # install_deps
 
   # 3. Read version for sglang-kt
   read_kt_version
