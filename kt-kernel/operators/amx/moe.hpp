@@ -14,7 +14,69 @@
 // #define FORWARD_TIME_PROFILE
 // #define FORWARD_TIME_REPORT
 
+#include <exception>
+#include <limits>
+#include <mutex>
+#include <system_error>
+
 #include "moe_base.hpp"
+
+namespace kt::detail {
+
+inline std::string read_exact_weight_file_slice(const std::filesystem::path& path, char* destination,
+                                                size_t expected_size, uint8_t split_count,
+                                                uint8_t split_index) {
+  if (split_count == 0 || split_index >= split_count) {
+    return "invalid split " + std::to_string(split_index) + "/" + std::to_string(split_count) +
+           " for weight file " + path.string();
+  }
+  if (expected_size % split_count != 0) {
+    return "weight file size " + std::to_string(expected_size) + " is not divisible by split count " +
+           std::to_string(split_count) + ": " + path.string();
+  }
+  if (expected_size > 0 && destination == nullptr) {
+    return "null destination for weight file " + path.string();
+  }
+
+  std::error_code file_size_error;
+  const uintmax_t actual_size = std::filesystem::file_size(path, file_size_error);
+  if (file_size_error) {
+    if (file_size_error == std::errc::no_such_file_or_directory) {
+      return "missing weight file " + path.string();
+    }
+    return "cannot stat weight file " + path.string() + ": " + file_size_error.message();
+  }
+  if (actual_size != expected_size) {
+    return "weight file size mismatch for " + path.string() + ": expected " +
+           std::to_string(expected_size) + " bytes, got " + std::to_string(actual_size);
+  }
+
+  const size_t slice_size = expected_size / split_count;
+  const size_t slice_offset = static_cast<size_t>(split_index) * slice_size;
+  if (slice_offset > static_cast<size_t>(std::numeric_limits<std::streamoff>::max()) ||
+      slice_size > static_cast<size_t>(std::numeric_limits<std::streamsize>::max())) {
+    return "weight file slice is too large for stream I/O: " + path.string();
+  }
+
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    return "cannot open weight file " + path.string();
+  }
+  input.seekg(static_cast<std::streamoff>(slice_offset), std::ios::beg);
+  if (!input.good()) {
+    return "cannot seek weight file " + path.string() + " to byte " +
+           std::to_string(slice_offset);
+  }
+  input.read(destination + slice_offset, static_cast<std::streamsize>(slice_size));
+  const size_t bytes_read = static_cast<size_t>(input.gcount());
+  if (bytes_read != slice_size) {
+    return "short read from weight file " + path.string() + ": expected " +
+           std::to_string(slice_size) + " bytes, got " + std::to_string(bytes_read);
+  }
+  return {};
+}
+
+}  // namespace kt::detail
 
 template <class T>
 class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
@@ -62,31 +124,26 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
     of.write(((char*)bb) + size - scale_size, scale_size);
   }
 
-  inline void read_weights(std::filesystem::path prefix, std::string mat_class, char* bb, int expert_idx, size_t size,
-                           size_t scale_size, uint8_t mat_split, uint8_t mat_split_idex) {
-    // std::ifstream f(prefix / (T::name() + mat_class + std::to_string(expert_idx)  + "_quant_" + ".kt"));
-    std::ifstream f(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                              std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"));
-    if (f.is_open() == false) {
-      printf("no such file: %s\n", (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                              std::to_string(size - scale_size) + "Byte" + "_quant_" + ".kt"))
-                                       .c_str());
-      // throw std::runtime_error("No such file");
+  inline std::string read_weights(const std::filesystem::path& prefix, const std::string& mat_class, char* bb,
+                                  int expert_idx, size_t size, size_t scale_size, uint8_t mat_split,
+                                  uint8_t mat_split_index) {
+    if (scale_size > size) {
+      return "invalid packed weight size for expert " + std::to_string(expert_idx) + ": scale bytes " +
+             std::to_string(scale_size) + " exceed total bytes " + std::to_string(size);
     }
-    f.seekg(mat_split_idex * (size - scale_size) / mat_split);
-    f.read(((char*)bb) + mat_split_idex * (size - scale_size) / mat_split, (size - scale_size) / mat_split);
-    f.close();
-    // f.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_scale_" + ".kt"));
-    f.open(prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" + std::to_string(scale_size) + "Byte" +
-                     "_scale_" + ".kt"));
-    if (f.is_open() == false) {
-      printf("no such file: %s\n", (prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
-                                              std::to_string(scale_size) + "Byte" + "_scale_" + ".kt"))
-                                       .c_str());
-      // throw std::runtime_error("No such file");
-    }
-    f.seekg(mat_split_idex * scale_size / mat_split);
-    f.read((((char*)bb) + size - scale_size) + mat_split_idex * scale_size / mat_split, scale_size / mat_split);
+    const size_t quant_size = size - scale_size;
+    const auto quant_path =
+        prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                  std::to_string(quant_size) + "Byte_quant_.kt");
+    std::string error =
+        kt::detail::read_exact_weight_file_slice(quant_path, bb, quant_size, mat_split, mat_split_index);
+    if (!error.empty()) return error;
+
+    const auto scale_path =
+        prefix / (T::name() + mat_class + std::to_string(expert_idx) + "_" +
+                  std::to_string(scale_size) + "Byte_scale_.kt");
+    return kt::detail::read_exact_weight_file_slice(scale_path, bb + quant_size, scale_size, mat_split,
+                                                    mat_split_index);
   }
 #ifdef CHECK
   inline void load_check() {
@@ -250,30 +307,40 @@ class AMX_MOE_TP : public AMX_MOE_BASE<T, AMX_MOE_TP<T>> {
 
       if (config_.load) {
         std::cout << "Loading from \"" << prefix << "\"" << std::endl;
+        std::mutex load_error_mutex;
+        std::string load_error;
         pool->do_work_stealing_job(
             config_.expert_num * mat_type_all * mat_split,
-            [this, physical_to_logical_map, prefix, mat_type_all, mat_split](int task_id) {
+            [this, physical_to_logical_map, prefix, &load_error_mutex, &load_error](int task_id) {
               int64_t expert_idx = task_id / (mat_type_all * mat_split);
               uint64_t logical_expert_id = expert_map(physical_to_logical_map, expert_idx);
               uint8_t mat_class = (task_id % (mat_type_all * mat_split)) / mat_split;
-              uint8_t mat_split_idex = task_id % mat_split;
+              uint8_t mat_split_index = task_id % mat_split;
+              std::string error;
               if (mat_class == 0) {  // the up matrix
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                             mat_split, mat_split_idex);
+                error = read_weights(prefix, "_up_", (char*)up_bb_[expert_idx]->b, logical_expert_id, size,
+                                     scale_size, mat_split, mat_split_index);
               } else if (mat_class == 1) {
                 size_t size = T::BufferB::required_size(config_.intermediate_size, config_.hidden_size);
                 size_t scale_size = config_.intermediate_size * sizeof(float);
-                read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                             mat_split, mat_split_idex);
+                error = read_weights(prefix, "_gate_", (char*)gate_bb_[expert_idx]->b, logical_expert_id, size,
+                                     scale_size, mat_split, mat_split_index);
               } else {
                 size_t size = T::BufferB::required_size(config_.hidden_size, config_.intermediate_size);
                 size_t scale_size = config_.hidden_size * sizeof(float);
-                read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size, scale_size,
-                             mat_split, mat_split_idex);
+                error = read_weights(prefix, "_down_", (char*)down_bb_[expert_idx]->b, logical_expert_id, size,
+                                     scale_size, mat_split, mat_split_index);
+              }
+              if (!error.empty()) {
+                std::lock_guard<std::mutex> lock(load_error_mutex);
+                if (load_error.empty()) load_error = std::move(error);
               }
             });
+        if (!load_error.empty()) {
+          throw std::runtime_error("failed to load pre-quantized weights: " + load_error);
+        }
       }
 // check process, store down matrix to check
 #ifdef CHECK
@@ -368,9 +435,32 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
     auto& tp_count = this->tp_count;
     auto pool = config.pool;
     const uint64_t* physical_to_logical_map = (const uint64_t*)config.physical_to_logical_map;
+    auto load_tps_checked = [&](const char* context) {
+      std::vector<std::exception_ptr> errors(tp_count);
+      pool->dispense_backend()->do_numa_job([&](int numa_id) {
+        try {
+          tps[numa_id]->config_.physical_to_logical_map = config.physical_to_logical_map;
+          tps[numa_id]->load_weights();
+        } catch (...) {
+          errors[numa_id] = std::current_exception();
+        }
+      });
+      for (int numa_id = 0; numa_id < tp_count; ++numa_id) {
+        if (!errors[numa_id]) continue;
+        try {
+          std::rethrow_exception(errors[numa_id]);
+        } catch (const std::exception& error) {
+          throw std::runtime_error(std::string(context) + " failed on TP/NUMA " +
+                                   std::to_string(numa_id) + ": " + error.what());
+        } catch (...) {
+          throw std::runtime_error(std::string(context) + " failed on TP/NUMA " +
+                                   std::to_string(numa_id) + " with an unknown error");
+        }
+      }
+    };
     if (config.gate_projs.empty() == false) {
       printf("TP Load from loader\n");
-      DO_TPS_LOAD_WEIGHTS(pool);
+      load_tps_checked("pre-quantized weight load");
       this->weights_loaded = true;
     } else if (config.gate_proj != nullptr) {
       printf("From BF16\n");
@@ -405,7 +495,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
         }
       }
 
-      DO_TPS_LOAD_WEIGHTS(pool);
+      load_tps_checked("base weight load");
 
       for (auto i = 0; i < tp_count; i++) {
         auto& tpc = tps[i]->config_;
@@ -417,7 +507,7 @@ class TP_MOE<AMX_MOE_TP<K>> : public TP_MOE<AMX_MOE_BASE<K, AMX_MOE_TP<K>>> {
       this->weights_loaded = true;
     } else if (config.path != "") {
       printf("TP Load from file %s\n", config.path.c_str());
-      DO_TPS_LOAD_WEIGHTS(pool);
+      load_tps_checked("pre-quantized .kt weight load");
       this->weights_loaded = true;
     } else {
       throw std::runtime_error("no weight source");

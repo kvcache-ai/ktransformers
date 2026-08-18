@@ -49,10 +49,24 @@ class _EventTaskRunner(_TaskRunner):
         super().submit(task)
 
 
-def test_capability_is_limited_to_cpu_only_amxbf16_sft():
+def test_capability_supports_cpu_only_bf16_and_frozen_int8_lora():
     assert _supports_authoritative_optimizer_grads("AMXBF16_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT", 1)
-    assert not _supports_authoritative_optimizer_grads("AMXINT8_SFT", 0)
+    assert _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=False, lora_rank=8
+    )
+    assert _supports_authoritative_optimizer_grads(
+        "INT8_SFT", 0, full_weight_grad=False, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=True, lora_rank=8
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 0, full_weight_grad=False, lora_rank=0
+    )
+    assert not _supports_authoritative_optimizer_grads(
+        "AMXINT8_SFT", 1, full_weight_grad=False, lora_rank=8
+    )
     assert not _supports_authoritative_optimizer_grads("AMXINT4_SFT", 0)
     assert not _supports_authoritative_optimizer_grads("AMXBF16_SFT_SkipLoRA", 0)
 
@@ -226,7 +240,81 @@ def _fake_amx_backward_buffer():
     )
 
 
-@pytest.mark.parametrize("method", ["AMXBF16_SFT", "AMXINT8_SFT", "AMXINT4_SFT"])
+def _fake_lora_tensors():
+    shapes = (
+        (2, 2, 4),
+        (2, 6, 2),
+        (2, 2, 4),
+        (2, 6, 2),
+        (2, 2, 6),
+        (2, 4, 2),
+    )
+    weights = [torch.empty(shape, dtype=torch.bfloat16) for shape in shapes]
+    grads = [torch.empty(shape, dtype=torch.bfloat16) for shape in shapes]
+    return weights, grads
+
+
+def _fake_lora_init_backend():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.num_experts = 2
+    backend.lora_rank = 2
+    backend.hidden_size = 4
+    backend.moe_intermediate_size = 6
+    backend.method = "AMXINT8_SFT"
+    backend._weights_loaded = False
+    backend.moe = None
+    return backend
+
+
+def test_int8_lora_init_preserves_exact_weight_and_grad_storage():
+    backend = _fake_lora_init_backend()
+    weights, grads = _fake_lora_tensors()
+    backend.init_lora_weights(*weights, *grads)
+    names = (
+        "gate_lora_a",
+        "gate_lora_b",
+        "up_lora_a",
+        "up_lora_b",
+        "down_lora_a",
+        "down_lora_b",
+    )
+    for name, tensor in zip(names, weights):
+        assert getattr(backend, name) is tensor
+    for name, tensor in zip(names, grads):
+        assert getattr(backend, f"grad_{name}") is tensor
+
+
+def test_int8_lora_init_rejects_noncontiguous_pointer_inputs():
+    backend = _fake_lora_init_backend()
+    weights, grads = _fake_lora_tensors()
+    weights[0] = torch.empty((2, 4, 2), dtype=torch.bfloat16).transpose(1, 2)
+    assert weights[0].shape == (2, 2, 4)
+    assert not weights[0].is_contiguous()
+    with pytest.raises(ValueError, match="must be contiguous"):
+        backend.init_lora_weights(*weights, *grads)
+
+
+def test_int8_sft_rejects_online_tensor_weight_loading():
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT8_SFT"
+    tensor = torch.empty(1, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="pre-quantized"):
+        backend.load_weights_from_tensors(tensor, tensor, tensor, torch.arange(1))
+
+
+def test_int8_sft_rejects_merged_or_unconverted_weight_path(tmp_path):
+    backend = object.__new__(AMXSFTMoEWrapper)
+    backend.method = "AMXINT8_SFT"
+    backend.weight_path = str(tmp_path)
+    backend.layer_idx = 3
+    with pytest.raises(RuntimeError, match=r"pre-quantized \.kt files"):
+        backend._load_base_weights_from_file()
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["AMXBF16_SFT", "INT8_SFT", "AMXINT8_SFT", "AMXINT4_SFT"],
+)
 def test_legacy_amx_task_uses_scaled_tail_only_when_required(method):
     backend = _fake_amx_backend(method)
     buffer = _fake_amx_backward_buffer()
@@ -665,8 +753,8 @@ def _distributed_sync_helper_worker(rank, init_file, result_queue):
             dist.destroy_process_group()
 
 
-def _run_forked_workers(target, init_file, *worker_args):
-    context = mp.get_context("fork")
+def _run_spawned_workers(target, init_file, *worker_args):
+    context = mp.get_context("spawn")
     result_queue = context.Queue()
     processes = [
         context.Process(
@@ -696,7 +784,7 @@ def _run_forked_workers(target, init_file, *worker_args):
 @pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
 @pytest.mark.parametrize("gas_steps", [1, 2])
 def test_distributed_legacy_full_grad_is_averaged_before_optimizer_step(tmp_path, gas_steps):
-    results = _run_forked_workers(
+    results = _run_spawned_workers(
         _distributed_legacy_grad_worker,
         tmp_path / f"legacy-grad-gas-{gas_steps}",
         gas_steps,
@@ -713,7 +801,7 @@ def test_distributed_legacy_full_grad_is_averaged_before_optimizer_step(tmp_path
 
 @pytest.mark.skipif(not torch.distributed.is_available(), reason="torch.distributed is unavailable")
 def test_sync_helper_is_collective_free_and_leaves_ordinary_module_grads_unchanged(tmp_path):
-    results = _run_forked_workers(
+    results = _run_spawned_workers(
         _distributed_sync_helper_worker,
         tmp_path / "sync-helper-no-collective",
     )

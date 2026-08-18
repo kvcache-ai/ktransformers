@@ -17,6 +17,8 @@ import logging
 import math
 import os
 import re
+import tempfile
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -26,6 +28,17 @@ from .checkpoint import load_full_weight_checkpoint, save_full_weight_checkpoint
 from .dist_utils import _distributed_rank_world_size
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class KTAdaptationResult:
+    """Stable optimizer and placeholder ownership published by KT adaptation."""
+
+    adapted_layers: int
+    already_adapted_layers: int
+    named_optimizer_parameters: tuple[tuple[str, nn.Parameter], ...]
+    placeholders: tuple[tuple[str, nn.Parameter], ...]
+    placeholder_names: tuple[str, ...]
 
 
 # =============================================================================
@@ -186,12 +199,120 @@ def get_kt_trainable_params(model: nn.Module) -> list[nn.Parameter]:
         return _collect_kt_lora_params(wrappers)
 
 
+def get_kt_named_trainable_params(model: nn.Module) -> list[tuple[str, nn.Parameter]]:
+    """Return every optimizer-visible KT parameter with a stable unique name.
+
+    Fused LoRA and Full/Hybrid base buffers are intentionally not registered in
+    the PyTorch module tree.  Trainer integrations must use this API rather than
+    inventing anonymous parameter groups or depending on wrapper internals.
+    """
+
+    wrappers = _find_kt_wrappers(model) or []
+    if not wrappers:
+        return []
+
+    registered_names: dict[int, str] = {}
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        registered_names.setdefault(id(parameter), name)
+
+    owned_names: dict[int, str] = {}
+    fused_names = (
+        "gate_lora_a",
+        "gate_lora_b",
+        "up_lora_a",
+        "up_lora_b",
+        "down_lora_a",
+        "down_lora_b",
+    )
+    for wrapper in wrappers:
+        layer_idx = getattr(wrapper, "layer_idx", None)
+        if isinstance(layer_idx, bool) or not isinstance(layer_idx, int):
+            raise RuntimeError(f"KT wrapper has an invalid layer index {layer_idx!r}")
+        prefix = f"kt.layers.{layer_idx}.experts"
+        backend = getattr(wrapper, "wrapper", None)
+        if getattr(wrapper, "_full_weight_grad", False) and backend is not None:
+            for name, parameter in (
+                ("gate_proj", getattr(backend, "gate_proj_buf", None)),
+                ("up_proj", getattr(backend, "up_proj_buf", None)),
+                ("down_proj", getattr(backend, "down_proj_buf", None)),
+            ):
+                if isinstance(parameter, nn.Parameter):
+                    owned_names[id(parameter)] = f"{prefix}.base.{name}"
+        fused = getattr(wrapper, "_fused_expert_lora_params", None) or ()
+        if len(fused) not in {0, len(fused_names)}:
+            raise RuntimeError(
+                f"Layer {layer_idx}: expected six fused LoRA parameters, got {len(fused)}"
+            )
+        for name, parameter in zip(fused_names, fused):
+            owned_names[id(parameter)] = f"{prefix}.fused_lora.{name}"
+
+    result: list[tuple[str, nn.Parameter]] = []
+    seen_parameters: set[int] = set()
+    seen_names: set[str] = set()
+    for parameter in get_kt_trainable_params(model):
+        identity = id(parameter)
+        if identity in seen_parameters:
+            continue
+        name = registered_names.get(identity) or owned_names.get(identity)
+        if name is None:
+            raise RuntimeError("KT optimizer parameter has no stable registered or owned name")
+        if name in seen_names:
+            raise RuntimeError(f"KT optimizer parameter name is not unique: {name}")
+        seen_parameters.add(identity)
+        seen_names.add(name)
+        result.append((name, parameter))
+    return result
+
+
+def get_kt_lora_named_params(model: nn.Module) -> list[tuple[str, nn.Parameter]]:
+    """Compatibility spelling for Trainer integrations.
+
+    Like :func:`get_kt_lora_params`, this includes Full/Hybrid base parameters
+    when the active training mode requires them.
+    """
+
+    return get_kt_named_trainable_params(model)
+
+
+def get_kt_rank_local_parameter_names(model: nn.Module) -> tuple[str, ...]:
+    """Return registered expert-placeholder FQNs owned outside FSDP2.
+
+    Wrapping creates and caches these names during ``from_pretrained``, so this
+    API is valid before PEFT adaptation. Fused optimizer buffers use virtual
+    names and are deliberately excluded because they are not model FQNs.
+    """
+
+    from .weights import get_kt_expert_placeholders
+
+    return tuple(sorted(get_kt_expert_placeholders(model)))
+
+
+def _adaptation_result(
+    model: nn.Module,
+    *,
+    adapted_layers: int,
+    already_adapted_layers: int,
+) -> KTAdaptationResult:
+    from .weights import get_kt_expert_placeholders
+
+    placeholders = get_kt_expert_placeholders(model)
+    placeholder_names = get_kt_rank_local_parameter_names(model)
+    named_placeholders = tuple((name, placeholders[name]) for name in placeholder_names)
+    return KTAdaptationResult(
+        adapted_layers=adapted_layers,
+        already_adapted_layers=already_adapted_layers,
+        named_optimizer_parameters=tuple(get_kt_named_trainable_params(model)),
+        placeholders=named_placeholders,
+        placeholder_names=placeholder_names,
+    )
+
+
 # =============================================================================
 # PEFT LoRA Adaptation
 # =============================================================================
 
 
-def kt_adapt_peft_lora(model: nn.Module) -> None:
+def kt_adapt_peft_lora(model: nn.Module) -> KTAdaptationResult:
     """
     Adapt PEFT LoRA on expert modules for KT kernel.
 
@@ -209,13 +330,17 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
 
     if not wrappers:
         logger.info("[kt_adapt_peft_lora] No _kt_wrappers found, skipping")
-        return
+        return _adaptation_result(model, adapted_layers=0, already_adapted_layers=0)
 
     distributed_rank, _ = _distributed_rank_world_size()
     is_rank_0 = distributed_rank == 0
 
     adapted_count = 0
+    already_adapted_count = 0
     for wrapper in wrappers:
+        if getattr(wrapper, "_kt_peft_lora_adapted", False):
+            already_adapted_count += 1
+            continue
         moe_config = wrapper.moe_config
         layer_idx = wrapper.layer_idx
         experts_attr = getattr(wrapper, "_experts_attr", "experts")
@@ -224,10 +349,11 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         if experts is None:
             continue
 
-        # Fused experts (transformers v5): PEFT cannot auto-attach LoRA to packed
-        # nn.Parameter tensors. Create KT-managed LoRA buffers with proper init
-        # and wrap them as nn.Parameter objects for optimizer injection.
-        if getattr(wrapper, "_fused_experts", False):
+        # Packed experts, or an explicitly forced offloaded expert path, use
+        # KT-managed contiguous LoRA buffers.
+        if getattr(wrapper, "_use_fused_expert_lora", False) or getattr(
+            wrapper, "_fused_experts", False
+        ):
             lora_rank = getattr(wrapper, "_lora_rank", 1)
             authoritative_mode = bool(getattr(wrapper, "_uses_authoritative_optimizer_grads", False))
 
@@ -241,6 +367,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                     f"full mode (lora_rank=0, no LoRA buffers)"
                 )
                 adapted_count += 1
+                wrapper._kt_peft_lora_adapted = True
                 continue
 
             wrapper._kt_managed_lora_enabled = True
@@ -252,6 +379,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 wrapper._fused_expert_lora_params = []
                 wrapper._peft_lora_modules = None
                 adapted_count += 1
+                wrapper._kt_peft_lora_adapted = True
                 continue
 
             lora_buffers, lora_grad_buffers, lora_params = _create_fused_expert_lora_buffers(
@@ -285,6 +413,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
             wrapper._fused_expert_lora_params = lora_params
             wrapper._peft_lora_modules = None
             adapted_count += 1
+            wrapper._kt_peft_lora_adapted = True
             continue
 
         if len(experts) == 0:
@@ -300,6 +429,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 f"full mode (lora_rank=0, no LoRA)"
             )
             adapted_count += 1
+            wrapper._kt_peft_lora_adapted = True
             continue
 
         # Collect references to PEFT LoRA modules for each expert
@@ -343,6 +473,7 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                     f"(pure Full mode — expected, skipping)"
                 )
                 adapted_count += 1
+                wrapper._kt_peft_lora_adapted = True
                 continue
             raise RuntimeError(
                 f"[kt_adapt_peft_lora] Layer {layer_idx}: No PEFT LoRA found on any expert. "
@@ -374,14 +505,11 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
         )
 
         adapted_count += 1
+        wrapper._kt_peft_lora_adapted = True
 
-    # After collecting all LoRA references, shrink expert base weight parameters
-    # from their original shape (e.g. [768, 2048]) to scalar (1,).
-    # These base weights were already replaced with tiny-storage stride=[0] placeholders
-    # by _clear_original_expert_weights(). They have correct shape but serve no purpose
-    # after PEFT injection. FSDP2 broadcasts ALL non-DTensor params, and uses
-    # torch.empty(param.size()) on non-rank-0 — with the original shape this wastes
-    # ~28GB+. Shrinking to (1,) reduces broadcast cost to ~30KB total.
+    # Expert base weights are owned by the KT backend after PEFT injection. Keep
+    # zero-element placeholders in the module tree so FSDP cannot allocate or
+    # broadcast tensors with the original expert shapes.
     shrunk_count = 0
     shrunk_saved_bytes = 0
     for wrapper in wrappers:
@@ -402,8 +530,12 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 if storage_bytes > 2:
                     continue  # Skip non-placeholder params
 
-                # This is a tiny-storage placeholder (base weight) — replace with
-                # a scalar (1,) parameter so FSDP broadcasts only 1 element.
+                # This is a tiny-storage placeholder (base weight). Preserve its
+                # logical shape as metadata while removing its final storage.
+                original_shape = getattr(param, "_kt_original_shape", tuple(param.shape))
+                if param.numel() == 0:
+                    param._kt_original_shape = tuple(original_shape)
+                    continue
                 original_numel = param.nelement()
                 parts = param_name.split(".")
                 container = expert
@@ -412,22 +544,39 @@ def kt_adapt_peft_lora(model: nn.Module) -> None:
                 local_name = parts[-1]
                 container_params = getattr(container, "_parameters", {})
                 if isinstance(container_params, dict) and local_name in container_params:
-                    scalar_param = nn.Parameter(
-                        torch.empty(1, dtype=param.dtype, device="cpu"),
+                    empty_param = nn.Parameter(
+                        torch.empty(0, dtype=param.dtype, device="cpu"),
                         requires_grad=False,
                     )
-                    scalar_param._kt_zero_storage = True
-                    container_params[local_name] = scalar_param
+                    empty_param._kt_zero_storage = True
+                    empty_param._kt_original_shape = tuple(original_shape)
+                    container_params[local_name] = empty_param
                     shrunk_count += 1
-                    shrunk_saved_bytes += (original_numel - 1) * param.element_size()
+                    shrunk_saved_bytes += original_numel * param.element_size()
 
     if shrunk_count > 0:
         logger.info(
-            f"[kt_adapt_peft_lora] Shrunk {shrunk_count} expert base weight params "
-            f"to shape (1,), FSDP broadcast savings={shrunk_saved_bytes / 1024 / 1024:.1f} MB"
+            f"[kt_adapt_peft_lora] Removed storage from {shrunk_count} expert base "
+            f"weight params, FSDP broadcast savings={shrunk_saved_bytes / 1024 / 1024:.1f} MB"
         )
 
-    logger.info(f"[kt_adapt_peft_lora] Adapted {adapted_count} layers (PEFT LoRA mode)")
+    logger.info(
+        "[kt_adapt_peft_lora] Adapted %d layers; %d were already adapted",
+        adapted_count,
+        already_adapted_count,
+    )
+    result = _adaptation_result(
+        model,
+        adapted_layers=adapted_count,
+        already_adapted_layers=already_adapted_count,
+    )
+    model._kt_peft_lora_adaptation_result = result
+    return result
+
+
+# New integrations may use the concise name; the historical entry point stays
+# public for downstream compatibility.
+adapt_peft_lora = kt_adapt_peft_lora
 
 
 # =============================================================================
@@ -825,7 +974,9 @@ def save_kt_moe_to_adapter(model: nn.Module, output_dir: str) -> None:
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
-    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_fused_lora = any(
+        bool(getattr(w, "_fused_expert_lora_params", None)) for w in wrappers
+    )
     has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
 
     if has_full_weights:
@@ -849,7 +1000,7 @@ def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
     tensors = {}
     for w in wrappers:
         fused = getattr(w, "_fused_expert_lora_params", None)
-        if fused is None:
+        if not fused:
             continue
         for param, name in zip(fused, names):
             key = f"layers.{w.layer_idx}.experts.{name}"
@@ -857,46 +1008,91 @@ def _save_fused_expert_lora(wrappers: list, output_dir: str) -> None:
 
     if tensors:
         path = os.path.join(output_dir, "fused_expert_lora.safetensors")
-        save_file(tensors, path)
+        with tempfile.NamedTemporaryFile(
+            dir=output_dir,
+            prefix=".fused_expert_lora.",
+            suffix=".safetensors.tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = temporary.name
+        try:
+            save_file(tensors, temporary_path)
+            os.replace(temporary_path, path)
+        finally:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
         logger.info(f"[save_kt_moe] Saved {len(tensors)} fused expert LoRA tensors to {path}")
 
 
-def _load_fused_expert_lora(wrappers: list, adapter_path: str) -> None:
-    """Load fused expert LoRA params from a safetensors file into existing wrapper buffers."""
+def _load_fused_expert_lora(wrappers: list, adapter_path: str) -> int:
+    """Strictly load fused expert LoRA tensors into rank-owned buffers."""
+    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
+    owned_wrappers = {}
+    expected = {}
+    for wrapper in wrappers:
+        fused = getattr(wrapper, "_fused_expert_lora_params", None)
+        if not fused:
+            continue
+        if len(fused) != len(names):
+            raise RuntimeError(
+                f"Layer {wrapper.layer_idx}: expected {len(names)} fused expert LoRA "
+                f"parameters, found {len(fused)}"
+            )
+        if wrapper.layer_idx in owned_wrappers:
+            raise RuntimeError(
+                f"Duplicate owned fused expert LoRA layer {wrapper.layer_idx}"
+            )
+        owned_wrappers[wrapper.layer_idx] = wrapper
+        for param, name in zip(fused, names):
+            expected[f"layers.{wrapper.layer_idx}.experts.{name}"] = (wrapper, param)
+
+    if not expected:
+        return 0
+
     path = os.path.join(adapter_path, "fused_expert_lora.safetensors")
     if not os.path.isfile(path):
-        logger.warning(f"No fused_expert_lora.safetensors found at {adapter_path}")
-        return
+        raise FileNotFoundError(
+            f"Missing fused_expert_lora.safetensors in adapter {adapter_path}"
+        )
 
     from safetensors.torch import load_file
 
     saved = load_file(path)
-    names = ["gate_lora_a", "gate_lora_b", "up_lora_a", "up_lora_b", "down_lora_a", "down_lora_b"]
-    wrapper_map = {w.layer_idx: w for w in wrappers}
-    loaded_count = 0
+    actual_keys = set(saved)
+    expected_keys = set(expected)
+    missing_keys = sorted(expected_keys - actual_keys)
+    unexpected_keys = sorted(actual_keys - expected_keys)
+    if missing_keys or unexpected_keys:
+        details = []
+        if missing_keys:
+            details.append(f"missing={missing_keys}")
+        if unexpected_keys:
+            details.append(f"unexpected={unexpected_keys}")
+        raise RuntimeError(
+            "Invalid fused_expert_lora.safetensors key set: " + ", ".join(details)
+        )
 
-    for key, tensor in saved.items():
-        parts = key.split(".")
-        if len(parts) != 4 or parts[0] != "layers" or parts[2] != "experts":
-            logger.warning(f"Unexpected key in fused_expert_lora.safetensors: {key}")
-            continue
-        layer_idx = int(parts[1])
-        name = parts[3]
-        if name not in names:
-            continue
+    for key, (_, param) in expected.items():
+        tensor = saved[key]
+        if tensor.shape != param.shape:
+            raise RuntimeError(
+                f"{key} shape mismatch: expected {tuple(param.shape)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+        if tensor.dtype != param.dtype:
+            raise RuntimeError(
+                f"{key} dtype mismatch: expected {param.dtype}, got {tensor.dtype}"
+            )
 
-        wrapper = wrapper_map.get(layer_idx)
-        if wrapper is None:
-            continue
-        fused = getattr(wrapper, "_fused_expert_lora_params", None)
-        if fused is None:
-            continue
+    for key, (wrapper, param) in expected.items():
+        param.data.copy_(saved[key])
+        wrapper._lora_pointers_dirty = True
 
-        param_idx = names.index(name)
-        fused[param_idx].data.copy_(tensor)
-        loaded_count += 1
-
+    loaded_count = len(expected)
     logger.info(f"[_load_fused_expert_lora] Loaded {loaded_count} tensors from {path}")
+    return loaded_count
 
 
 def load_lora_experts_from_adapter(model: nn.Module, adapter_path: str) -> None:
@@ -976,7 +1172,9 @@ def load_kt_moe_from_adapter(model: nn.Module, adapter_path: str) -> None:
         return
 
     has_lora_experts = any(w.lora_experts is not None for w in wrappers)
-    has_fused_lora = any(getattr(w, "_fused_expert_lora_params", None) is not None for w in wrappers)
+    has_fused_lora = any(
+        bool(getattr(w, "_fused_expert_lora_params", None)) for w in wrappers
+    )
     has_full_weights = any(getattr(w, "_full_weight_grad", False) for w in wrappers)
 
     if has_full_weights:

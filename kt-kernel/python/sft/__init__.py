@@ -10,7 +10,44 @@ distributed) on top of the inference-only kt_kernel base package.
 Additional dependencies beyond base kt_kernel: torch.nn, torch.distributed, peft (optional).
 """
 
-from .config import KTConfig
+from .config import KTActivationPolicy, KTConfig
+from .backend import (
+    FP8_BACKEND,
+    FP8_SFT_METHOD,
+    INT8_BACKEND,
+    INT8_SFT_METHOD,
+    get_fp8_runtime,
+    get_int8_runtime,
+)
+from .weight_manifest import validate_persistent_int8_weights
+from .artifacts import (
+    FUSED_EXPERT_LORA_NAME,
+    KT_ADAPTER_MANIFEST_NAME,
+    KT_NON_EXPERT_MANIFEST_NAME,
+    KTAdapterManifest,
+    KTArtifactError,
+    KTNonExpertCache,
+    KTPretrainedLoadPlan,
+    claim_kt_routed_expert_subtrees,
+    hide_kt_int8_routed_experts_from_dispatch,
+    hide_kt_routed_experts_from_dispatch,
+    is_kt_int8_routed_expert_base_parameter,
+    is_kt_routed_expert_base_parameter,
+    is_kt_routed_expert_parameter_name,
+    is_kt_supported_moe_model,
+    load_kt_adapter_artifacts,
+    mark_kt_int8_routed_expert_base_parameters,
+    prepare_kt_int8_non_expert_device_map,
+    prepare_kt_non_expert_device_map,
+    project_kt_int8_routed_experts_out_of_device_map,
+    project_kt_routed_experts_out_of_device_map,
+    resolve_kt_pretrained_artifacts,
+    save_kt_adapter_artifacts,
+    validate_kt_prequantized_loading_info,
+    validate_kt_pretrained_load,
+    write_kt_non_expert_cache_manifest,
+)
+from .dist_utils import get_activation_checkpoint_context_fn
 from .base import BaseSFTMoEWrapper, KExpertsSFTBuffer
 from .amx import AMXSFTMoEWrapper
 from .arch import (
@@ -25,16 +62,25 @@ from .arch import (
     KTAMXConfigError,
 )
 from .autograd import KTMoEFunction
+from .conv3d_compat import is_vlm_conv3d_compatible, patch_vlm_conv3d
 from .layer import KTMoELayerWrapper
 from .weights import (
     extract_moe_weights,
+    get_kt_expert_placeholders,
+    load_block_fp8_experts_from_checkpoint_files,
     load_experts_from_checkpoint_files,
     load_experts_from_kt_weight_path,
     INT8ExpertWeights,
+    BlockFP8ExpertWeights,
 )
 from .lora import (
+    KTAdaptationResult,
+    adapt_peft_lora,
     kt_adapt_peft_lora,
+    get_kt_lora_named_params,
     get_kt_lora_params,
+    get_kt_named_trainable_params,
+    get_kt_rank_local_parameter_names,
     get_kt_trainable_params,
     update_kt_lora_pointers,
     sync_kt_lora_gradients,
@@ -56,6 +102,40 @@ from .profiler import collect_kt_sft_profile, format_kt_sft_profile, reset_kt_sf
 
 __all__ = [
     "KTConfig",
+    "KTActivationPolicy",
+    "INT8_BACKEND",
+    "INT8_SFT_METHOD",
+    "get_int8_runtime",
+    "FP8_BACKEND",
+    "FP8_SFT_METHOD",
+    "get_fp8_runtime",
+    "validate_persistent_int8_weights",
+    "FUSED_EXPERT_LORA_NAME",
+    "KT_ADAPTER_MANIFEST_NAME",
+    "KT_NON_EXPERT_MANIFEST_NAME",
+    "KTAdapterManifest",
+    "KTArtifactError",
+    "KTNonExpertCache",
+    "KTPretrainedLoadPlan",
+    "claim_kt_routed_expert_subtrees",
+    "hide_kt_int8_routed_experts_from_dispatch",
+    "hide_kt_routed_experts_from_dispatch",
+    "is_kt_int8_routed_expert_base_parameter",
+    "is_kt_routed_expert_base_parameter",
+    "is_kt_routed_expert_parameter_name",
+    "is_kt_supported_moe_model",
+    "load_kt_adapter_artifacts",
+    "mark_kt_int8_routed_expert_base_parameters",
+    "prepare_kt_int8_non_expert_device_map",
+    "prepare_kt_non_expert_device_map",
+    "project_kt_int8_routed_experts_out_of_device_map",
+    "project_kt_routed_experts_out_of_device_map",
+    "resolve_kt_pretrained_artifacts",
+    "save_kt_adapter_artifacts",
+    "validate_kt_prequantized_loading_info",
+    "validate_kt_pretrained_load",
+    "write_kt_non_expert_cache_manifest",
+    "get_activation_checkpoint_context_fn",
     "BaseSFTMoEWrapper",
     "KExpertsSFTBuffer",
     "AMXSFTMoEWrapper",
@@ -69,13 +149,23 @@ __all__ = [
     "KTAMXModelNotSupportedError",
     "KTAMXConfigError",
     "KTMoEFunction",
+    "patch_vlm_conv3d",
+    "is_vlm_conv3d_compatible",
     "KTMoELayerWrapper",
     "extract_moe_weights",
+    "get_kt_expert_placeholders",
+    "load_block_fp8_experts_from_checkpoint_files",
     "load_experts_from_checkpoint_files",
     "load_experts_from_kt_weight_path",
     "INT8ExpertWeights",
+    "BlockFP8ExpertWeights",
+    "KTAdaptationResult",
+    "adapt_peft_lora",
     "kt_adapt_peft_lora",
+    "get_kt_lora_named_params",
     "get_kt_lora_params",
+    "get_kt_named_trainable_params",
+    "get_kt_rank_local_parameter_names",
     "get_kt_trainable_params",
     "update_kt_lora_pointers",
     "sync_kt_lora_gradients",

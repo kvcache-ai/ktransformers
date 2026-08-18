@@ -47,8 +47,8 @@ SharedMemBuffer::~SharedMemBuffer() {
 }
 
 void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
+  std::lock_guard<std::mutex> guard(lock);
   size_t total_size = requests.total_size();
-  object_requests.push_back(requests);
 
   if (total_size > size) {
     if (buffer) {
@@ -64,12 +64,19 @@ void SharedMemBuffer::alloc(void* object, MemoryRequest requests) {
     }
     buffer = newbuf;
     size = total_size;
-    for (auto& req : object_requests) {
-      req.update_base_ptr(buffer);
+    for (auto& owner_requests : object_requests) {
+      for (auto& req : owner_requests.second) {
+        req.update_base_ptr(buffer);
+      }
     }
-  } else {
-    requests.update_base_ptr(buffer);
   }
+  requests.update_base_ptr(buffer);
+  object_requests[object].push_back(requests);
+}
+
+void SharedMemBuffer::dealloc(void* object) {
+  std::lock_guard<std::mutex> guard(lock);
+  object_requests.erase(object);
 }
 
 void SharedMemBufferNuma::alloc(int numa, void* object, MemoryRequest requests) {
@@ -82,4 +89,12 @@ void SharedMemBufferNuma::alloc(int numa, void* object, MemoryRequest requests) 
   }
   // printf("numa %d alloc for %lx\n", numa,reinterpret_cast<intptr_t> (object));
   numa_mem.at(numa)->alloc(object, requests);
+}
+
+void SharedMemBufferNuma::dealloc(int numa, void* object) {
+  std::lock_guard<std::mutex> guard(lock);
+  auto it = numa_mem.find(numa);
+  if (it != numa_mem.end()) {
+    it->second->dealloc(object);
+  }
 }

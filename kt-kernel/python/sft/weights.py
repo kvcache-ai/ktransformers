@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
 from .arch import MOEArchConfig
+from .conv3d_compat import _canonicalize_qwen3_vl_fused_expert_weights
 from .dist_utils import _maybe_zero3_gathered_parameters
 
 logger = logging.getLogger(__name__)
@@ -30,6 +29,22 @@ except ImportError:
 # =============================================================================
 # Weight Extraction
 # =============================================================================
+
+
+def _require_materialized_expert_weight(name: str, weight: torch.Tensor) -> None:
+    if weight.device.type == "meta" or getattr(weight, "_kt_zero_storage", False):
+        raise RuntimeError(
+            f"Cannot extract {name}: routed expert weight is an unmaterialized placeholder"
+        )
+    try:
+        storage_bytes = weight.untyped_storage().nbytes()
+    except (NotImplementedError, RuntimeError):
+        return
+    required_bytes = weight.numel() * weight.element_size()
+    if required_bytes and storage_bytes < required_bytes:
+        raise RuntimeError(
+            f"Cannot extract {name}: routed expert weight is a zero-storage placeholder"
+        )
 
 
 def extract_moe_weights(
@@ -52,8 +67,15 @@ def extract_moe_weights(
 
     # Fused format (transformers v5): a single nn.Module with gate_up_proj/down_proj tensors
     if detect_fused_experts(experts):
-        gate_up = getattr(experts, "gate_up_proj").data
-        down_fused = getattr(experts, "down_proj").data
+        gate_up_parameter = getattr(experts, "gate_up_proj")
+        down_parameter = getattr(experts, "down_proj")
+        _require_materialized_expert_weight("gate_up_proj", gate_up_parameter)
+        _require_materialized_expert_weight("down_proj", down_parameter)
+        gate_up = gate_up_parameter.data
+        down_fused = down_parameter.data
+        vlm_weights = _canonicalize_qwen3_vl_fused_expert_weights(gate_up, down_fused, moe_config)
+        if vlm_weights is not None:
+            return vlm_weights
         # gate_up_proj is [E, 2*I, H], split into gate [E, I, H] and up [E, I, H]
         intermediate = gate_up.shape[1] // 2
         gate_proj = gate_up[:, :intermediate, :].contiguous()
@@ -81,25 +103,31 @@ def extract_moe_weights(
         up_weights = []
         down_weights = []
 
-        for expert in experts:
+        for expert_idx, expert in enumerate(experts):
             # Handle PEFT LoRA wrapped modules - get weight tensor properly
             gate_proj = getattr(expert, gate_name)
             up_proj_mod = getattr(expert, up_name)
             down_proj_mod = getattr(expert, down_name)
 
             # Get weight tensors, handling both regular Linear and PEFT LoRA wrapped
-            def get_weight_tensor(mod):
+            def get_weight_tensor(mod, projection_name):
                 weight = mod.weight
                 if isinstance(weight, torch.Tensor):
-                    return weight.data
+                    tensor = weight
                 elif hasattr(weight, "data"):
-                    return weight.data
+                    tensor = weight.data
                 else:
-                    raise ValueError(f"Cannot extract weight from {type(mod)}, weight type={type(weight)}")
+                    raise ValueError(
+                        f"Cannot extract weight from {type(mod)}, weight type={type(weight)}"
+                    )
+                _require_materialized_expert_weight(
+                    f"expert {expert_idx} {projection_name}", tensor
+                )
+                return tensor.data
 
-            gate_weights.append(get_weight_tensor(gate_proj))
-            up_weights.append(get_weight_tensor(up_proj_mod))
-            down_weights.append(get_weight_tensor(down_proj_mod))
+            gate_weights.append(get_weight_tensor(gate_proj, gate_name))
+            up_weights.append(get_weight_tensor(up_proj_mod, up_name))
+            down_weights.append(get_weight_tensor(down_proj_mod, down_name))
 
     gate_proj = torch.stack(gate_weights, dim=0)
     up_proj = torch.stack(up_weights, dim=0)
@@ -109,7 +137,11 @@ def extract_moe_weights(
 
 
 def _clear_original_expert_weights(
-    moe_module: nn.Module, moe_config: MOEArchConfig, full_weight_grad: bool = False
+    moe_module: nn.Module,
+    moe_config: MOEArchConfig,
+    full_weight_grad: bool = False,
+    *,
+    empty_placeholders: bool = False,
 ) -> None:
     """
     Clear original expert weights to free memory after KT weights are loaded.
@@ -125,23 +157,29 @@ def _clear_original_expert_weights(
     if experts is None:
         return
 
+    def make_placeholder(parameter: torch.nn.Parameter) -> nn.Parameter:
+        if empty_placeholders:
+            fake_tensor = torch.empty(0, dtype=parameter.dtype, device="cpu")
+        else:
+            tiny_storage = torch.UntypedStorage(1, device="cpu")
+            fake_tensor = torch.tensor([], dtype=parameter.dtype, device="cpu").set_(
+                tiny_storage,
+                storage_offset=0,
+                size=parameter.shape,
+                stride=[0] * len(parameter.shape),
+            )
+        placeholder = nn.Parameter(fake_tensor, requires_grad=False)
+        placeholder._kt_zero_storage = True
+        placeholder._kt_original_shape = tuple(parameter.shape)
+        return placeholder
+
     # Fused format: replace gate_up_proj/down_proj tensors with zero-storage placeholders
     if detect_fused_experts(experts):
         for name in ("gate_up_proj", "down_proj"):
             param = getattr(experts, name, None)
             if not isinstance(param, torch.nn.Parameter):
                 continue
-            original_dtype = param.dtype
-            tiny_storage = torch.UntypedStorage(1, device="cpu")
-            fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage,
-                storage_offset=0,
-                size=param.shape,
-                stride=[0] * len(param.shape),
-            )
-            placeholder = nn.Parameter(fake_tensor, requires_grad=False)
-            placeholder._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
-            experts._parameters[name] = placeholder
+            experts._parameters[name] = make_placeholder(param)
         return
 
     def _iter_weight_params():
@@ -179,25 +217,7 @@ def _clear_original_expert_weights(
 
     with _maybe_zero3_gathered_parameters(gather_params):
         for proj, container, param_name, weight_param in _iter_weight_params():
-            original_dtype = weight_param.dtype
-
-            # Create a CPU tensor with the correct shape but NO physical memory.
-            # torch.empty(shape, device="cpu") unfortunately touches pages via the
-            # allocator, consuming real RSS.  Instead, allocate a 1-byte storage and
-            # use set_ to give it the original shape with zero strides.  The tensor
-            # is "valid" (correct dtype, device, shape) so PEFT can discover
-            # in/out features, but its storage is essentially zero-cost.
-            # NOTE: reading element values from this tensor is undefined -- it is
-            # only used for shape/dtype discovery by PEFT.
-            tiny_storage = torch.UntypedStorage(1, device="cpu")
-            fake_tensor = torch.tensor([], dtype=original_dtype, device="cpu").set_(
-                tiny_storage,
-                storage_offset=0,
-                size=weight_param.shape,
-                stride=[0] * len(weight_param.shape),
-            )
-            new_param = nn.Parameter(fake_tensor, requires_grad=False)
-            new_param._kt_zero_storage = True  # Mark for _setup_full_tuning / count_parameters to skip
+            new_param = make_placeholder(weight_param)
             replaced_count += 1
 
             # Avoid `KeyError: attribute 'weight' already exists` for parametrized modules
@@ -222,6 +242,66 @@ def _clear_original_expert_weights(
     logger.info(f"Replaced {replaced_count} expert weight params")
 
 
+_KT_RANK_LOCAL_PARAMETER_NAMES = "_kt_rank_local_parameter_names"
+
+
+def get_kt_expert_placeholders(model: nn.Module) -> dict[str, nn.Parameter]:
+    """Resolve current placeholder identities from stable, cached FQNs."""
+    placeholder_ids: set[int] = set()
+    for module in model.modules():
+        if not getattr(module, "_is_kt_moe_wrapper", False):
+            continue
+
+        experts_attr = getattr(module, "_experts_attr", None)
+        experts = getattr(module, experts_attr, None) if isinstance(experts_attr, str) else None
+        if not isinstance(experts, nn.Module):
+            raise RuntimeError("KT MoE wrapper does not expose a valid expert subtree")
+
+        placeholder_ids.update(
+            id(parameter)
+            for parameter in experts.parameters(recurse=True)
+            if getattr(parameter, "_kt_zero_storage", False)
+        )
+
+    named_parameters: dict[str, nn.Parameter] = {}
+    discovered: dict[str, nn.Parameter] = {}
+    for fqn, parameter in model.named_parameters(remove_duplicate=False):
+        if fqn in named_parameters and named_parameters[fqn] is not parameter:
+            raise RuntimeError(
+                f"Model parameter FQN {fqn!r} resolves to conflicting Parameter identities"
+            )
+        named_parameters[fqn] = parameter
+        if id(parameter) not in placeholder_ids:
+            continue
+        if fqn in discovered and discovered[fqn] is not parameter:
+            raise RuntimeError(f"KT expert placeholder FQN {fqn!r} resolves to conflicting Parameter identities")
+        discovered[fqn] = parameter
+    found_ids = {id(parameter) for parameter in discovered.values()}
+    if found_ids != placeholder_ids:
+        raise RuntimeError("KT expert placeholder is not registered in the model parameter tree")
+
+    cached_names = getattr(model, _KT_RANK_LOCAL_PARAMETER_NAMES, None)
+    if cached_names is None:
+        cached_names = tuple(sorted(discovered))
+        setattr(model, _KT_RANK_LOCAL_PARAMETER_NAMES, cached_names)
+    elif (
+        not isinstance(cached_names, tuple)
+        or any(not isinstance(name, str) or not name for name in cached_names)
+        or tuple(sorted(set(cached_names))) != cached_names
+    ):
+        raise RuntimeError("KT rank-local parameter-name cache is invalid")
+    elif set(discovered).difference(cached_names):
+        raise RuntimeError("KT expert placeholder inventory changed after its initial discovery")
+
+    placeholders = {}
+    for fqn in cached_names:
+        parameter = named_parameters.get(fqn)
+        if parameter is None:
+            raise RuntimeError(f"Cached KT rank-local parameter FQN is no longer registered: {fqn!r}")
+        placeholders[fqn] = parameter
+    return placeholders
+
+
 # =============================================================================
 # kt_weight_path Loading Functions
 # =============================================================================
@@ -237,6 +317,194 @@ class INT8ExpertWeights:
     up_scale: torch.Tensor
     down_proj: torch.Tensor
     down_scale: torch.Tensor
+
+
+@dataclass
+class BlockFP8ExpertWeights:
+    """Raw per-expert E4M3 weights and normalized block scales.
+
+    The lists intentionally remain unstacked: native FP8 packing consumes one
+    expert pointer at a time and releases these checkpoint tensors after the
+    synchronous C++ load completes.
+    """
+
+    gate_proj: list[torch.Tensor]
+    gate_scale: list[torch.Tensor]
+    up_proj: list[torch.Tensor]
+    up_scale: list[torch.Tensor]
+    down_proj: list[torch.Tensor]
+    down_scale: list[torch.Tensor]
+    block_size: tuple[int, int] = (128, 128)
+
+
+def _checkpoint_tensor_files(
+    checkpoint_files: list[str],
+    sharded_metadata: dict | None,
+) -> dict[str, str]:
+    """Return tensor key -> absolute checkpoint file without loading tensors."""
+
+    base_dir = os.path.dirname(checkpoint_files[0])
+    weight_map = (
+        sharded_metadata.get("weight_map")
+        if isinstance(sharded_metadata, dict)
+        else None
+    )
+    if weight_map:
+        return {
+            key: os.path.join(base_dir, filename)
+            for key, filename in weight_map.items()
+        }
+
+    result: dict[str, str] = {}
+    for file_path in checkpoint_files:
+        with safe_open(file_path, framework="pt") as handle:
+            for key in handle.keys():
+                result[key] = file_path
+    return result
+
+
+def load_block_fp8_experts_from_checkpoint_files(
+    checkpoint_files: list[str],
+    sharded_metadata: dict | None,
+    layers_prefix: str,
+    moe_config: MOEArchConfig,
+    layer_idx: int,
+    hidden_size: int,
+    block_size: tuple[int, int] = (128, 128),
+) -> BlockFP8ExpertWeights:
+    """Load raw block-FP8 routed experts without stacking or dequantizing.
+
+    Native FP8 SFT currently accepts only non-fused, CPU-resident E4M3FN
+    matrices with one inverse scale per 128x128 block. Scale tensors from
+    checkpoints may be BF16 or FP32; the returned scale lists are always FP32.
+    """
+
+    if not SAFETENSORS_AVAILABLE:
+        raise ImportError("safetensors is required for native FP8 expert loading")
+    if not checkpoint_files:
+        raise FileNotFoundError("checkpoint_files is empty")
+    if tuple(block_size) != (128, 128):
+        raise ValueError(
+            "native FP8 SFT requires weight_block_size=[128, 128], "
+            f"got {tuple(block_size)}"
+        )
+
+    hidden_size = int(hidden_size)
+    intermediate_size = int(moe_config.intermediate_size)
+    if hidden_size % 128 or intermediate_size % 128:
+        raise ValueError(
+            "native FP8 SFT requires hidden and routed intermediate dimensions "
+            f"divisible by 128, got hidden_size={hidden_size}, "
+            f"intermediate_size={intermediate_size}"
+        )
+
+    gate_name, up_name, down_name = moe_config.weight_names
+    experts_prefix = (
+        f"{layers_prefix}.{layer_idx}.{moe_config.moe_layer_attr}."
+        f"{moe_config.experts_attr}"
+    )
+    tensor_files = _checkpoint_tensor_files(checkpoint_files, sharded_metadata)
+    fused_keys = (
+        f"{experts_prefix}.gate_up_proj",
+        f"{experts_prefix}.gate_up_proj.weight",
+        f"{experts_prefix}.down_proj",
+        f"{experts_prefix}.down_proj.weight",
+    )
+    if any(key in tensor_files for key in fused_keys):
+        raise ValueError(
+            "native FP8 SFT requires non-fused per-expert checkpoint weights; "
+            f"layer {layer_idx} contains fused gate_up/down tensors"
+        )
+
+    projection_specs = {
+        "gate": (gate_name, (intermediate_size, hidden_size)),
+        "up": (up_name, (intermediate_size, hidden_size)),
+        "down": (down_name, (hidden_size, intermediate_size)),
+    }
+    keys: list[str] = []
+    for expert_idx in range(int(moe_config.expert_num)):
+        base = f"{experts_prefix}.{expert_idx}"
+        for projection_name, _ in projection_specs.values():
+            keys.extend(
+                (
+                    f"{base}.{projection_name}.weight",
+                    f"{base}.{projection_name}.weight_scale_inv",
+                )
+            )
+
+    missing = [key for key in keys if key not in tensor_files]
+    if missing:
+        preview = ", ".join(missing[:3])
+        suffix = " ..." if len(missing) > 3 else ""
+        raise FileNotFoundError(
+            f"layer {layer_idx} is missing {len(missing)} native FP8 tensors: "
+            f"{preview}{suffix}"
+        )
+
+    tensors: dict[str, torch.Tensor] = {}
+    keys_by_file: dict[str, list[str]] = {}
+    for key in keys:
+        keys_by_file.setdefault(tensor_files[key], []).append(key)
+    for file_path, file_keys in keys_by_file.items():
+        with safe_open(file_path, framework="pt") as handle:
+            for key in file_keys:
+                tensors[key] = handle.get_tensor(key)
+
+    output: dict[str, list[torch.Tensor]] = {
+        "gate_proj": [],
+        "gate_scale": [],
+        "up_proj": [],
+        "up_scale": [],
+        "down_proj": [],
+        "down_scale": [],
+    }
+    fp8_dtype = torch.float8_e4m3fn
+    for expert_idx in range(int(moe_config.expert_num)):
+        base = f"{experts_prefix}.{expert_idx}"
+        for label, (projection_name, expected_shape) in projection_specs.items():
+            weight_key = f"{base}.{projection_name}.weight"
+            scale_key = f"{base}.{projection_name}.weight_scale_inv"
+            weight = tensors[weight_key]
+            scale = tensors[scale_key]
+            expected_scale_shape = (
+                expected_shape[0] // 128,
+                expected_shape[1] // 128,
+            )
+            if weight.device.type != "cpu" or weight.dtype != fp8_dtype:
+                raise ValueError(
+                    f"{weight_key} must be CPU torch.float8_e4m3fn, got "
+                    f"{weight.dtype} on {weight.device}"
+                )
+            if tuple(weight.shape) != expected_shape:
+                raise ValueError(
+                    f"{weight_key} shape mismatch: expected {expected_shape}, "
+                    f"got {tuple(weight.shape)}"
+                )
+            if scale.device.type != "cpu" or scale.dtype not in {
+                torch.bfloat16,
+                torch.float32,
+            }:
+                raise ValueError(
+                    f"{scale_key} must be a BF16 or FP32 CPU tensor, got "
+                    f"{scale.dtype} on {scale.device}"
+                )
+            if tuple(scale.shape) != expected_scale_shape:
+                raise ValueError(
+                    f"{scale_key} shape mismatch for 128x128 blocks: expected "
+                    f"{expected_scale_shape}, got {tuple(scale.shape)}"
+                )
+            output[f"{label}_proj"].append(weight.contiguous())
+            output[f"{label}_scale"].append(
+                scale.to(dtype=torch.float32, device="cpu").contiguous()
+            )
+
+    logger.info(
+        "Loaded layer %d native FP8 routed experts: experts=%d, block_size=%s",
+        layer_idx,
+        moe_config.expert_num,
+        block_size,
+    )
+    return BlockFP8ExpertWeights(**output, block_size=(128, 128))
 
 
 def _find_safetensor_files(kt_weight_path: str) -> list[str]:
@@ -393,10 +661,15 @@ def load_experts_from_checkpoint_files(
         if gate_up is None or down is None:
             raise FileNotFoundError(f"Missing fused expert weights for layer {layer_idx}")
         gate_up = gate_up.cpu().to(torch.bfloat16).contiguous()
-        I = gate_up.shape[1] // 2
-        gate_proj = gate_up[:, :I, :].contiguous()
-        up_proj = gate_up[:, I:, :].contiguous()
-        down_proj = down.cpu().to(torch.bfloat16).contiguous()
+        down = down.cpu().to(torch.bfloat16)
+        vlm_weights = _canonicalize_qwen3_vl_fused_expert_weights(gate_up, down, moe_config)
+        if vlm_weights is not None:
+            gate_proj, up_proj, down_proj = vlm_weights
+        else:
+            intermediate = gate_up.shape[1] // 2
+            gate_proj = gate_up[:, :intermediate, :].contiguous()
+            up_proj = gate_up[:, intermediate:, :].contiguous()
+            down_proj = down.contiguous()
         del gate_up
         print(
             f"[kt_moe] Layer {layer_idx}: fused expert format — "

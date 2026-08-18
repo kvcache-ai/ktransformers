@@ -3,12 +3,17 @@
 import importlib.util
 import os
 import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
 
-CONFIG_PATH = Path(__file__).resolve().parents[2] / "python" / "sft" / "config.py"
-SPEC = importlib.util.spec_from_file_location("kt_sft_config_under_test", CONFIG_PATH)
+PACKAGE_PATH = Path(__file__).resolve().parents[2] / "python" / "sft"
+PACKAGE_NAME = "kt_sft_config_under_test"
+package = types.ModuleType(PACKAGE_NAME)
+package.__path__ = [str(PACKAGE_PATH)]
+sys.modules[PACKAGE_NAME] = package
+SPEC = importlib.util.spec_from_file_location(f"{PACKAGE_NAME}.config", PACKAGE_PATH / "config.py")
 assert SPEC is not None and SPEC.loader is not None
 config = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = config

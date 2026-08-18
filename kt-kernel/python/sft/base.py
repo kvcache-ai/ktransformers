@@ -12,17 +12,37 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import math
 import torch
 from typing import Optional, Tuple
 from abc import ABC, abstractmethod
 
 from ..experts_base import KExpertsCPUBuffer, _MoEBase
+from .backend import is_fp8_sft_method, is_int8_sft_method
 
 
-def _supports_authoritative_optimizer_grads(method: str, num_gpu_experts: int) -> bool:
-    """Whether this backend can use C++-authoritative optimizer gradients."""
-    return method == "AMXBF16_SFT" and int(num_gpu_experts) == 0
+def _supports_authoritative_optimizer_grads(
+    method: str,
+    num_gpu_experts: int,
+    *,
+    full_weight_grad: bool = False,
+    lora_rank: int = 1,
+) -> bool:
+    """Whether this SFT configuration can use C++-authoritative gradients.
+
+    BF16 supports both base and LoRA authoritative gradients. Quantized base
+    weights are frozen, so INT8/FP8 support the same lifecycle only for pure LoRA.
+    """
+    if int(num_gpu_experts) != 0:
+        return False
+    if method == "AMXBF16_SFT":
+        return True
+    return (
+        (is_int8_sft_method(method) or is_fp8_sft_method(method))
+        and not bool(full_weight_grad)
+        and int(lora_rank) > 0
+    )
 
 
 @dataclass(frozen=True)
@@ -33,6 +53,12 @@ class _AuthoritativeOptimizerGrad:
     parameter: torch.nn.Parameter
     grad_view: torch.Tensor
     metadata: tuple
+
+
+class _CheckpointCacheState(str, Enum):
+    EMPTY = "EMPTY"
+    READY = "READY"
+    POISONED = "POISONED"
 
 
 def _authoritative_grad_metadata(tensor: torch.Tensor) -> tuple:
@@ -175,6 +201,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         chunked_prefill_size: int,
         lora_rank: int = 16,
         lora_alpha: float = 32.0,
+        lora_dropout: float = 0.0,
         max_cache_depth: int = 1,
         full_weight_grad: bool = False,
     ):
@@ -186,7 +213,13 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             moe_intermediate_size=moe_intermediate_size,
             num_experts_per_tok=num_experts_per_tok,
         )
-        self._validate_sft_config(lora_rank, lora_alpha, max_cache_depth, full_weight_grad=full_weight_grad)
+        self._validate_sft_config(
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            max_cache_depth,
+            full_weight_grad=full_weight_grad,
+        )
 
         self.layer_idx = layer_idx
         self.num_experts = num_experts
@@ -200,6 +233,7 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
         self.lora_scaling = lora_alpha / lora_rank if lora_rank > 0 else 0.0
         self.max_cache_depth = max_cache_depth
 
@@ -225,12 +259,13 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         self._cache_depth: int = 0
         self._is_skip_lora: bool = False
         self._base_weights_dirty: bool = False
-        # AMXSFTMoEWrapper enables this capability only for AMXBF16_SFT.
-        # Keeping it false here preserves legacy INT8/INT4/SkipLoRA behavior.
+        # AMXSFTMoEWrapper enables this for supported CPU-only SFT methods.
+        # Keeping it false here preserves legacy INT4/SkipLoRA behavior.
         self._uses_authoritative_optimizer_grads: bool = False
         self._init_authoritative_optimizer_grads()
         self.reuse_checkpoint_forward: bool = False
-        self._kt_has_cached_forward: bool = False
+        self._checkpoint_cache_state = _CheckpointCacheState.EMPTY
+        self._checkpoint_cache_error: Optional[str] = None
         self._checkpoint_output_cpu: Optional[torch.Tensor] = None
         self._checkpoint_output_qlen: int = 0
         self._backward_repack_pending: bool = False
@@ -385,7 +420,11 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
 
     @staticmethod
     def _validate_sft_config(
-        lora_rank: int, lora_alpha: float, max_cache_depth: int, full_weight_grad: bool = False
+        lora_rank: int,
+        lora_alpha: float,
+        lora_dropout: float,
+        max_cache_depth: int,
+        full_weight_grad: bool = False,
     ) -> None:
         if not full_weight_grad and lora_rank <= 0:
             raise ValueError(
@@ -394,6 +433,8 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
             )
         if lora_rank > 0 and lora_alpha <= 0:
             raise ValueError(f"lora_alpha must be positive, got {lora_alpha}")
+        if not 0.0 <= lora_dropout < 1.0:
+            raise ValueError(f"lora_dropout must be in [0, 1), got {lora_dropout}")
         if max_cache_depth <= 0:
             raise ValueError(f"max_cache_depth must be positive, got {max_cache_depth}")
 
@@ -542,29 +583,84 @@ class BaseSFTMoEWrapper(_MoEBase, ABC):
         else:
             return buffer.output_cpu[:qlen].clone()
 
+    @property
+    def checkpoint_cache_state(self) -> _CheckpointCacheState:
+        return self._checkpoint_cache_state
+
+    @property
+    def _kt_has_cached_forward(self) -> bool:
+        """Compatibility view; cache state is authoritative."""
+        return self._checkpoint_cache_state is _CheckpointCacheState.READY
+
+    def poison_checkpoint_output(self, error: BaseException | str) -> None:
+        self._checkpoint_output_cpu = None
+        self._checkpoint_output_qlen = 0
+        self._checkpoint_cache_state = _CheckpointCacheState.POISONED
+        self._checkpoint_cache_error = str(error)
+
+    def validate_checkpoint_output(self, qlen: int) -> None:
+        state = self._checkpoint_cache_state
+        if state is _CheckpointCacheState.POISONED:
+            detail = f": {self._checkpoint_cache_error}" if self._checkpoint_cache_error else ""
+            raise RuntimeError(f"Checkpoint forward cache is poisoned{detail}")
+        if state is not _CheckpointCacheState.READY or self._checkpoint_output_cpu is None:
+            raise RuntimeError("No cached checkpoint forward output is available.")
+        if int(qlen) != self._checkpoint_output_qlen:
+            error = RuntimeError(
+                f"Cached checkpoint qlen mismatch: cached={self._checkpoint_output_qlen}, requested={qlen}"
+            )
+            self.poison_checkpoint_output(error)
+            raise error
+
+    def validate_checkpoint_cache_empty(self) -> None:
+        state = self._checkpoint_cache_state
+        if state is _CheckpointCacheState.POISONED:
+            detail = f": {self._checkpoint_cache_error}" if self._checkpoint_cache_error else ""
+            raise RuntimeError(f"Checkpoint forward cache is poisoned{detail}")
+        if state is not _CheckpointCacheState.EMPTY or self._checkpoint_output_cpu is not None:
+            error = RuntimeError("Checkpoint forward cache is still live before a new first forward")
+            self.poison_checkpoint_output(error)
+            raise error
+
     def cache_checkpoint_output(self, output_cpu: torch.Tensor, qlen: int) -> None:
-        if output_cpu.device.type != "cpu":
-            raise ValueError("checkpoint CPU expert output must reside on CPU")
-        if output_cpu.shape[0] < qlen:
-            raise ValueError(f"checkpoint output is shorter than qlen: {output_cpu.shape[0]} < {qlen}")
-        self._checkpoint_output_cpu = output_cpu[:qlen].contiguous()
-        self._checkpoint_output_qlen = qlen
-        self._kt_has_cached_forward = True
+        try:
+            if self._checkpoint_cache_state is _CheckpointCacheState.POISONED:
+                self.validate_checkpoint_output(qlen)
+            if self._checkpoint_cache_state is not _CheckpointCacheState.EMPTY:
+                raise RuntimeError(
+                    "Cannot replace a live checkpoint forward cache before backward consumes it"
+                )
+            if output_cpu.device.type != "cpu":
+                raise ValueError("checkpoint CPU expert output must reside on CPU")
+            if output_cpu.shape[0] < qlen:
+                raise ValueError(f"checkpoint output is shorter than qlen: {output_cpu.shape[0]} < {qlen}")
+            cached_output = output_cpu[:qlen].contiguous()
+        except Exception as exc:
+            self.poison_checkpoint_output(exc)
+            raise
+        self._checkpoint_output_cpu = cached_output
+        self._checkpoint_output_qlen = int(qlen)
+        self._checkpoint_cache_error = None
+        self._checkpoint_cache_state = _CheckpointCacheState.READY
 
     def get_checkpoint_output(self, qlen: int, output_device: Optional[torch.device] = None) -> torch.Tensor:
-        if not self._kt_has_cached_forward or self._checkpoint_output_cpu is None:
-            raise RuntimeError("No cached checkpoint forward output is available.")
-        if qlen != self._checkpoint_output_qlen:
-            raise RuntimeError(f"Cached checkpoint qlen mismatch: cached={self._checkpoint_output_qlen}, requested={qlen}")
+        self.validate_checkpoint_output(qlen)
         output = self._checkpoint_output_cpu
-        if output_device is not None:
-            return output.to(device=output_device, non_blocking=True)
-        return output
+        assert output is not None
+        try:
+            if output_device is not None:
+                return output.to(device=output_device, non_blocking=True)
+            return output
+        except Exception as exc:
+            self.poison_checkpoint_output(exc)
+            raise
 
     def clear_checkpoint_output(self) -> None:
         self._checkpoint_output_cpu = None
         self._checkpoint_output_qlen = 0
-        self._kt_has_cached_forward = False
+        if self._checkpoint_cache_state is not _CheckpointCacheState.POISONED:
+            self._checkpoint_cache_state = _CheckpointCacheState.EMPTY
+            self._checkpoint_cache_error = None
 
     def _return_grads(self, buffer: KExpertsSFTBuffer, qlen: int, output_device: Optional[torch.device]):
         if output_device is not None:

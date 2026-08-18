@@ -225,6 +225,7 @@ class MOE_KERNEL_TP
 
   ~MOE_KERNEL_TP() {
     // printf("  Destroying KML_MOE_TP %lx\n", (intptr_t)(this));
+    shared_mem_buffer_numa.dealloc(tp_part_idx, this);
     for (void* ptr : gate_up_owner_ptr_) {
       std::free(ptr);
     }
