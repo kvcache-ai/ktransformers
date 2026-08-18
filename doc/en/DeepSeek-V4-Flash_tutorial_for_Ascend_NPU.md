@@ -50,8 +50,9 @@ Every step below is driven by a script in [`kt-kernel/tools/ascend_dsv4/`](../..
 | Atlas A3 (910_93 series) | `ascend910_93` | 61 GB | 40 cores, **1 NUMA**, 229 GB RAM | ✓ native install |
 
 Both were walked end to end with the scripts in this tutorial. The throughput and
-accuracy tables below are from the A2 host; the A3 host has one NUMA node and a
-fifth of the cores, so its numbers are not comparable and are not published here.
+accuracy tables below are from the A2 host; the A3 host, with one NUMA node and a
+fifth of the cores, is measured separately in
+[Portability](#portability-the-same-measurement-on-a3).
 
 > **Note:** The A2 platform above is a container (Ubuntu 22.04, GCC 11) and the A3
 > one is a native install (Ubuntu 20.04). That difference is about the host image,
@@ -819,7 +820,7 @@ source ~/dsv4.env
 
 ## Measured Results
 
-All figures from a single Atlas 800I A2 (910B3) die, NPU graph on, one request at a time, on an otherwise idle Kunpeng 920 host (192 cores, 8 NUMA nodes). A3 numbers are not comparable — see [Known Limitations](#known-limitations).
+All figures from a single Atlas 800I A2 (910B3) die, NPU graph on, one request at a time, on an otherwise idle Kunpeng 920 host (192 cores, 8 NUMA nodes). The same run on a one-NUMA-node Atlas A3 is in [Portability](#portability-the-same-measurement-on-a3).
 
 **Throughput, with the feature switches on** — streaming prefill, MXFP4 depool, dynamic
 hot-expert residency, GGUF dedup and the CPU-MoE side stream, all enabled together by
@@ -895,43 +896,82 @@ About 1 h 50 min per round.
 
 ### Portability: the same measurement on A3
 
-The figures above are the A2 reference platform. Repeating the identical run — 32 resident
-experts, `mem-fraction 0.81`, streaming confirmed engaged — on an Atlas A3 with **one**
-NUMA node and 40 cores (against A2's eight and 192) gives a different answer, and it is
-worth knowing which half moves:
+The figures above are the A2 reference platform. The same run on an Atlas A3 — one NUMA
+node and 40 cores against A2's eight and 192, `--kt-cpuinfer 32 --kt-threadpool-count 1`,
+`mem-fraction 0.81` and 32 resident experts except where footnoted, all five switches on,
+one warmup and three measured iterations:
 
-| Prompt tokens | Prefill off | Prefill on | Decode off | Decode on | Decode gain |
-|--------------:|------------:|-----------:|-----------:|----------:|------------:|
-| 118 | 2.8 s | 2.6 s | 15.13 tok/s | 16.96 tok/s | +12.1% |
-| 801 | 16.9 s | 392.2 s | 15.10 tok/s | 18.38 tok/s | +21.7% |
-| 3944 | 82.2 s | 392.3 s | 15.07 tok/s | 17.74 tok/s | +17.7% |
-| 7823 | 163.6 s | 392.5 s | 15.03 tok/s | 18.11 tok/s | +20.5% |
+| Tier | Prompt tokens | Prefill | Decode |
+|-----:|--------------:|--------:|-------:|
+| 130 | 118 | 1.5 s <sup>1</sup> | 18.32 tok/s |
+| 1k | 801 | 15.6 s | 20.12 tok/s |
+| 8k | 7,823 | 16.5 s | 19.86 tok/s |
+| 16k | 15,568 <sup>2</sup> | 17.5 s | 20.48 tok/s |
+| 32k | 31,540 <sup>3</sup> | 20.4 s | 19.84 tok/s |
 
-**Decode carries over and then some** — +12% to +22% here against +9.6% to +14.8% on A2.
-Baseline decode is also nearly identical on the two platforms (15.0–15.1 vs 16.6–16.9
-tok/s) despite an 8× difference in CPU-MoE threads, which is the clearest demonstration
-that decode is bandwidth-bound rather than thread-bound.
+The spread across the three measured iterations is under 0.3% at every tier. The baseline
+on the same host, all switches off: prefill 1.6 / 9.0 / 42.6 s and decode 16.53 / 16.51 /
+16.43 tok/s at 118 / 801 / 3,944 tokens.
 
-**Streaming prefill does not carry over.** Its cost is still constant — 392.2 / 392.3 /
-392.5 s across a 9.8× range of prompt length — but the constant is ~392 s here versus
-~19 s on A2, because staging a layer's expert set from DDR into HBM is bandwidth work.
-That moves the crossover from ~1,500 tokens to roughly **18,800**, so on a host like this
-one streaming should stay off unless your prompts are much longer than anything measured
-here. This is the reason it is off by default.
+**Streaming prefill carries over.** It is a fixed cost here as it is on A2 — 15.6 s at 801
+tokens against 17.5 s at 15,568, a 12% rise across a 19× range of prompt length — because
+the work is staging the expert set from DDR into HBM, not processing tokens. Against the
+baseline the crossover lands near **1,400 tokens**, close to A2's ~1,500.
+
+**Decode carries over and improves slightly.** 18.3–20.5 tok/s here against 18.6–19.4 on
+A2, despite an 8× difference in CPU-MoE threads. That is the clearest evidence decode is
+bandwidth-bound rather than thread-bound.
+
+> **Important:** these numbers depend on the CPU MoE aliasing the GGUF mmap rather than
+> copying it. With one threadpool the per-NUMA reshuffle in `LLAMA_MOE_TP::load_weights` is
+> an identity copy, and taking it literally leaves a second, byte-identical 137 GiB copy of
+> the expert set in anonymous memory. On a 229 GiB host that leaves 62 GiB of page cache for
+> a 137 GiB working set, and streaming prefill — which sweeps the whole expert set on every
+> request — then re-reads about 135 GiB from disk each time. Measured on this host, that is
+> a 397 s prefill instead of 16 s. If you see a fixed prefill cost in the hundreds of
+> seconds, check `RssAnon` of the `sglang::scheduler` process: it should be a few GiB, not
+> ~140.
+
+<sup>1</sup> Below `KT_PREFILL_STREAM_THRESHOLD` (512), so this row is the hybrid path.
+It prefills in 1.5 s rather than ~15 s, at the cost of roughly 2 tok/s of decode.
+<sup>2</sup> This row needs `--swa-full-tokens-ratio 0.35`; see the table below.
+<sup>3</sup> This row needs `--kt-num-gpu-experts 28 --mem-fraction-static 0.775`.
+
+> **Important:** the two longest buckets need their own settings, and the reason is that
+> two constraints pull `--mem-fraction-static` in opposite directions. A single-chunk
+> prefill needs one SWA slot per prompt token even though the steady-state window is 128,
+> and the SWA pool is `--swa-full-tokens-ratio` (0.1) of the full pool — so admitting a
+> longer prompt wants a *larger* KV budget. Streaming prefill converts a layer at a time
+> and needs about 1 GiB of free HBM to do it, which wants a *smaller* one. At 32 resident
+> experts the two meet without overlapping: `mem-fraction 0.834` gives an SWA pool of
+> 32,768 tokens, enough to admit 31,540, but only 8.67 GB of headroom, and the conversion
+> then fails on every layer — silently, falling back to the hybrid path 172 times and
+> reporting a 487 s prefill that never used streaming at all. Dropping to 28 resident
+> experts frees about 4 GB of weights, and `mem-fraction 0.775` then satisfies both: SWA
+> pool 39,168, headroom 12.03 GB, `hybrid fallback=0` throughout.
+>
+> Three settings cover the range, and a prompt-length-dependent choice is unavoidable:
+>
+> | Prompt | `--kt-num-gpu-experts` | `--mem-fraction-static` | `--swa-full-tokens-ratio` |
+> |-------:|-----------------------:|------------------------:|--------------------------:|
+> | up to ~12k | 32 | 0.81 | 0.1 (default) |
+> | up to ~19k | 32 | 0.81 | 0.35 |
+> | up to ~39k | 28 | 0.775 | 0.1 (default) |
+>
+> **Always check `hybrid fallback` in the server log after a long-prompt run.** A prompt
+> that exceeds the SWA pool is never admitted at all — the scheduler spins, with no error
+> and no log line, and the only symptom is that the server stops logging while burning
+> CPU. A prompt that is admitted but cannot convert falls back to the hybrid path and
+> still answers, just far more slowly. Neither shows up as an error.
 
 > **Important:** `mem-fraction 0.86` does not work on A3. It leaves 6.34 GB after graph
 > capture; a prefill drives allocation to 59.47 of 61.27 GiB, and the per-layer 1.00 GiB
 > streaming allocation then fails on all 43 layers — silently: `inline resident=0`,
 > `hybrid fallback=42`, an 811-token prefill taking 364 s, and the server answering
-> normally throughout. Use `0.81`, which also keeps the comparison against the baseline
-> honest.
+> normally throughout. Use `0.81`.
 
 Accuracy on A3, one round of GPQA-Diamond under the same conditions: **72.22%** (143/198),
 inside the A2 three-round spread.
-
-> **Note:** With streaming on, one measured run costs a 392 s prefill plus the generation,
-> so `REPEAT=3 WARMUP=1` is four of them — about 30 minutes per prompt length instead of
-> five. Probe with `REPEAT=1` first.
 
 > **Important:** Decode here is **memory-bandwidth bound on the host**. On a shared machine, contention from other tenants has been observed to drop decode from 16.8 to 1.5 tok/s on the baseline configuration. A single-threaded `memcpy` benchmark does not detect it — it reported 4.4 GB/s while real throughput was 1.5 tok/s. Measure by sending a 200-token request, benchmark on an idle host, and state the host load alongside any number you publish.
 
@@ -967,10 +1007,11 @@ inside the A2 three-round spread.
 Stated as measured, not as expected behaviour:
 
 - **Single die, single request.** Tensor parallelism, expert parallelism, A2A dispatch, PD disaggregation and speculative decoding are rejected at startup with KT offload active. Validated at `--max-running-requests 1` only.
-- **Measured up to a 31,540-token prompt**, not to the full 65,536-token context. The server comes up and serves at `--context-length 65536`; prompts between 31,540 and 65,536 tokens are untested.
+- **Measured up to a 31,540-token prompt on both A2 and A3**, not to the full 65,536-token context. The server comes up and serves at `--context-length 65536`; longer prompts are untested.
 - **No single `--mem-fraction-static` covers 1k–32k** with streaming prefill enabled. See [Tuning](#tuning).
 - **Decode throughput is not reproducible across hosts** — it tracks available DRAM bandwidth.
-- **The published figures are the A2 reference platform.** Decode carries to A3 and improves further, but streaming prefill's fixed cost does not: ~19 s on A2 against ~392 s on a one-NUMA-node host, moving the crossover from ~1,500 to ~18,800 tokens. See [Portability](#portability-the-same-measurement-on-a3), and measure on the host you will serve from.
+- **The published figures are the A2 reference platform.** Both decode and streaming prefill carry over to a one-NUMA-node A3 — see [Portability](#portability-the-same-measurement-on-a3) — but decode tracks host DRAM bandwidth, so measure on the host you will serve from.
+- **No single setting covers 1k–32k on A3.** The sliding-window KV pool must transiently hold the whole prompt during a single-chunk prefill, while streaming prefill needs about 1 GiB of free HBM to convert a layer; the two pull `--mem-fraction-static` in opposite directions. Three settings cover the range — see [Portability](#portability-the-same-measurement-on-a3). Both failure modes are silent: an over-large prompt is never admitted (the scheduler spins with no error and no log line), and a prompt that cannot convert falls back to the hybrid path and answers slowly.
 - **The SGLang side is not upstreamed yet.** It is served from the `dsv4-cann9-no-patch` branch of the fork referenced in [Step 1](#step-1-get-the-code).
 
 ## Additional Resources
