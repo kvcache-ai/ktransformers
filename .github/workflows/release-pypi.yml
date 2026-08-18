@@ -128,7 +128,7 @@ jobs:
   build-sft-packages:
     name: Build accelerate-kt and transformers-kt
     needs: runner-preflight
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Checkout Accelerate-KT source
@@ -234,7 +234,7 @@ jobs:
   build-sglang-kt:
     name: Build sglang-kt
     needs: runner-preflight
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Checkout repository
@@ -439,7 +439,7 @@ jobs:
   build-ktransformers:
     name: Build ktransformers shell package
     needs: runner-preflight
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Checkout repository
@@ -531,7 +531,7 @@ jobs:
       - build-kt-kernel
       - build-ktransformers
     if: needs.runner-preflight.outputs.target != 'build-only'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
     environment: prod
     permissions:
       contents: read
@@ -685,13 +685,18 @@ jobs:
     needs:
       - runner-preflight
       - publish-all
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, gpu]
 
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Create clean verification environment
+        run: |
+          python -m venv --clear "$RUNNER_TEMP/kt-release-verify"
+          echo "$RUNNER_TEMP/kt-release-verify/bin" >> "$GITHUB_PATH"
 
       - name: Install published SFT stack
         env:
