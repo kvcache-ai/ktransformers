@@ -39,7 +39,7 @@ environment.
 ### 3. Install LLaMA-Factory and KT
 
 ```bash
-git clone https://github.com/Illumination111/LlamaFactory.git
+git clone https://github.com/hiyouga/LlamaFactory.git
 cd LlamaFactory
 pip install -e .
 pip install -r requirements/ktransformers.txt
