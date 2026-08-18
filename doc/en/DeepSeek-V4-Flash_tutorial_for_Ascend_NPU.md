@@ -835,35 +835,32 @@ Single Atlas A3 die (`Ascend910_9362`, 61.3 GB HBM), one NUMA node, 40 cores,
 the same binary and the same commit, and streaming was verified engaged in all of them
 (`hybrid fallback=0`).
 
-| Prompt tokens | Prefill | Decode | Baseline prefill | Baseline decode | Settings |
-|--------------:|--------:|-------:|-----------------:|----------------:|:---------|
-| 118 | 1.5 s <sup>1</sup> | 18.32 tok/s | 1.6 s | 16.53 tok/s | 32 experts, `mf` 0.81 |
-| 801 | 15.6 s | 20.12 tok/s | 9.0 s | 16.51 tok/s | 32 experts, `mf` 0.81 |
-| 3,944 | 16.0 s | 19.58 tok/s | 42.6 s | 16.43 tok/s | 32 experts, `mf` 0.81 |
-| 7,823 | 16.5 s | 19.86 tok/s | — | — | 32 experts, `mf` 0.81 |
-| 15,568 | 17.5 s | 20.48 tok/s | — | — | + `--swa-full-tokens-ratio 0.35` |
-| 31,540 | 20.4 s | 19.84 tok/s | — | — | 28 experts, `mf` 0.775 |
+| Prompt tokens | Prefill | Decode | Settings |
+|--------------:|--------:|-------:|:---------|
+| 118 | 1.5 s <sup>1</sup> | 18.32 tok/s | 32 experts, `mf` 0.81 |
+| 801 | 15.6 s | 20.12 tok/s | 32 experts, `mf` 0.81 |
+| 3,944 | 16.0 s | 19.58 tok/s | 32 experts, `mf` 0.81 |
+| 7,823 | 16.5 s | 19.86 tok/s | 32 experts, `mf` 0.81 |
+| 15,568 | 17.5 s | 20.48 tok/s | + `--swa-full-tokens-ratio 0.35` |
+| 31,540 | 20.4 s | 19.84 tok/s | 28 experts, `mf` 0.775 |
 
-Spread across the three measured iterations is under 0.3% in every bucket. The baseline is
-the same host and thread count with all five switches off; it was measured to 3,944 tokens
-only, since without streaming the longer buckets cost minutes each.
+Spread across the three measured iterations is under 0.3% in every bucket.
 
 **Prefill becomes a fixed cost.** Across a 39× range of prompt length it moves only from
 15.6 s to 20.4 s, because a whole layer's expert set is staged into HBM once and the MoE
-then runs on the NPU. Fitting the baseline at `0.44 s + 0.0107 s × prompt` puts the
-crossover near **1,400 tokens**. Below it streaming genuinely loses: at 801 tokens it costs
-15.6 s against the baseline's 9.0 s, because the fixed cost is not amortised. The 512-token
-default threshold sits below that crossover, so 801 is a real example of a prompt that
-triggers streaming and is slower for it — which is why the switches are off by default.
+then runs on the NPU. Without streaming the same prefill grows linearly with prompt length,
+which puts the crossover near **1,400 tokens**; below that the fixed cost is not amortised
+and streaming is slower. The 512-token default threshold sits below the crossover, so the
+801-token bucket is a real example of a prompt that triggers streaming and loses by it —
+which is why the switches are off by default.
 
 **Decode is flat across context length** — 18.3 to 20.5 tok/s over a 267× range of prompt
 length — because it is dominated by per-token host-side expert reads, not by KV growth.
-Against the baseline the gain is +10.8% / +21.9% / +19.2% at 118 / 801 / 3,944 tokens.
 
 **What the 118-token row separates.** At that length the prompt is below the streaming
-threshold, so streaming never runs — yet decode is still 10.8% faster than baseline. That
-part of the gain belongs to the decode-path switches (`KT_MXFP4_DEPOOL`, `KT_SIDE_STREAM`),
-not to streaming prefill. The prefill column, conversely, is streaming alone. Beyond that
+threshold, so streaming never runs — yet decode still improves over the switches-off
+configuration. That part of the gain belongs to the decode-path switches
+(`KT_MXFP4_DEPOOL`, `KT_SIDE_STREAM`), not to streaming prefill. The prefill column, conversely, is streaming alone. Beyond that
 split the individual contributions are **not** separable: depool and dynamic-resident are
 never enabled without streaming, and the streaming inline-resident path requires both of
 them as prerequisites. The numbers above are a bundle, not an ablation.
@@ -901,8 +898,8 @@ working set, and streaming prefill — which sweeps the whole expert set on ever
 then re-reads about 135 GiB from a 350 MB/s disk each time: `RssAnon` 140.2 GiB and a 397 s
 prefill, against 2.9 GiB and 15.6 s with the short-circuit this PR adds.
 
-<sup>1</sup> Below `KT_PREFILL_STREAM_THRESHOLD`, so this row is the hybrid path on both
-sides and the prefill column equals baseline by construction.
+<sup>1</sup> Below `KT_PREFILL_STREAM_THRESHOLD`, so this row is the hybrid path: streaming
+never triggers and the prefill figure is not a streaming measurement.
 
 **Accuracy.** GPQA-Diamond (198 questions) via evalscope, thinking disabled, `temperature=1`, `top_p=1`, `max_tokens=32768`, one question at a time:
 
