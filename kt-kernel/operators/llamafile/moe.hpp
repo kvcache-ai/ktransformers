@@ -5,6 +5,8 @@
 #endif
 #include <numa.h>
 #include <numaif.h>
+#include <sys/mman.h>  // madvise / MADV_WILLNEED (warm the aliased GGUF mmap into page cache)
+#include <unistd.h>    // sysconf(_SC_PAGESIZE)
 
 #include <algorithm>
 #include <cassert>
@@ -108,6 +110,10 @@ class LLAMA_MOE_TP {
   uint8_t* m_local_gate_proj_;  // [expert_num * intermediate_size * hidden_size ( /32 if quantized)]
   uint8_t* m_local_up_proj_;    // [expert_num * intermediate_size * hidden_size ( /32 if quantized)]
   uint8_t* m_local_down_proj_;  // [expert_num * hidden_size * intermediate_size ( /32 if quantized)]
+  // Single-NUMA (tp_count==1): the three proj pointers ALIAS the source GGUF mmap instead of
+  // owning a memcpy'd copy (see load_weights identity short-circuit). When true, the ctor's
+  // lazy new[] reservations were freed and these must NOT be delete[]'d (they point into mmap).
+  bool m_weights_aliased_ = false;
 
   float* s_input_fp32_;    // [hidden_size]
   uint8_t* s_gate_input_;  // [hidden_size * ggml_type_size(ggml_internal_get_type_traits(gate_type).vec_dot_type) /
@@ -287,14 +293,47 @@ class LLAMA_MOE_TP {
     uint8_t* down_proj = (uint8_t*)config.down_proj + offset * ggml_type_size((ggml_type)config.down_type) /
                                                           ggml_blck_size((ggml_type)config.down_type);
 
-    // The reshuffle below always copies. It degenerates to an identity copy only when this TP owns
-    // the whole tensor (offset == 0 && complete_intermediate_size == config.intermediate_size),
-    // which is the sole case where the three m_local_*_proj_ pointers could instead alias the
-    // caller's GGUF mmap and save the ~137GB of node-local buffers. TP_MOE::load_weights splits the
-    // tensor across threadpool_count subpools, so that case needs threadpool_count == 1; every
-    // supported deployment runs one subpool per NUMA node (8), where each TP gets
-    // intermediate_size / 8 and no alias is possible. Do not add the alias branch without also
-    // making a single-subpool configuration real -- it would be dead code.
+    // Single-NUMA fast path (tp_count==1 => offset==0 && intermediate==complete): the per-expert
+    // reshuffle below degenerates to an IDENTITY copy (dst layout == src layout). Instead of
+    // duplicating the whole expert set into anonymous RAM, ALIAS the source (GGUF mmap) directly:
+    //   * ~138GB anonymous RssAnon -> ~0 (weights are read-only after load; forward only reads).
+    //   * the mmap becomes the SINGLE shared copy (CPU MoE compute + streaming-prefill dedup share
+    //     one page cache) => streaming-prefill stops re-reading cold GGUF from disk.
+    // Multi-NUMA (tp_count>1) has strided per-node slices and cannot alias -> falls through to copy.
+    if (offset == 0 && complete_intermediate_size == config.intermediate_size) {
+      delete[] m_local_gate_proj_;
+      delete[] m_local_up_proj_;
+      delete[] m_local_down_proj_;
+      m_local_gate_proj_ = gate_proj;  // == (uint8_t*)config.gate_proj (offset==0)
+      m_local_up_proj_ = up_proj;
+      m_local_down_proj_ = down_proj;
+      m_weights_aliased_ = true;
+
+      // Aliasing skips the memcpy that used to (as a side effect) read the whole GGUF into page
+      // cache at load. Restore that warming WITHOUT copying: MADV_WILLNEED kicks off async
+      // readahead of the aliased expert tensors, so by the time traffic arrives the CPU-MoE /
+      // streaming-prefill shared page cache is hot (else the first long prefill pays a one-time
+      // cold read). Non-blocking, best-effort (page-align the start; ignore errors).
+      const size_t gate_bytes = (size_t)config.expert_num * config.intermediate_size * config.hidden_size *
+                                ggml_type_size((ggml_type)config.gate_type) /
+                                ggml_blck_size((ggml_type)config.gate_type);
+      const size_t up_bytes = (size_t)config.expert_num * config.intermediate_size * config.hidden_size *
+                              ggml_type_size((ggml_type)config.up_type) / ggml_blck_size((ggml_type)config.up_type);
+      const size_t down_bytes = (size_t)config.expert_num * config.hidden_size * config.intermediate_size *
+                                ggml_type_size((ggml_type)config.down_type) /
+                                ggml_blck_size((ggml_type)config.down_type);
+      const long pg = sysconf(_SC_PAGESIZE);
+      auto warm = [pg](void* p, size_t n) {
+        if (!p || !n || pg <= 0) return;
+        uintptr_t a = (uintptr_t)p, start = a & ~((uintptr_t)pg - 1);
+        madvise((void*)start, n + (a - start), MADV_WILLNEED);  // best-effort readahead
+      };
+      warm(m_local_gate_proj_, gate_bytes);
+      warm(m_local_up_proj_, up_bytes);
+      warm(m_local_down_proj_, down_bytes);
+      return;
+    }
+
 
     // Per-expert byte strides. The source tensors are laid out with the FULL
     // intermediate_size (complete_intermediate_size); this TP only owns the
