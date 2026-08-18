@@ -57,6 +57,10 @@ if [ "${DSV4_PREFILL_STREAM:-0}" = "1" ]; then
   export KT_GGUF_TEMPLATE="${KT_GGUF_TEMPLATE:-${DSV4_GGUF_TEMPLATE}}"
   export KT_DYNAMIC_RESIDENT="${KT_DYNAMIC_RESIDENT:-1}"
   export KT_SIDE_STREAM="${KT_SIDE_STREAM:-1}"
+  # Streaming prefill never exercises the CPU MoE, so without this the server warmup runs
+  # straight through the streaming path and leaves kt_kernel cold -- the first requests then
+  # decode noticeably slower. Forcing one pass through the hybrid path warms it; one is enough.
+  export KT_STREAM_WARMUP="${KT_STREAM_WARMUP:-1}"
   echo "[serve] streaming prefill ENABLED (threshold ${KT_PREFILL_STREAM_THRESHOLD} tokens)"
 fi
 
