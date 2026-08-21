@@ -750,6 +750,25 @@ Make sure you have the CUDA toolkit installed and `nvcc` is in your system PATH.
 
 Try `export CMAKE_ARGS="-D CMAKE_CUDA_COMPILER=$(which nvcc)"` and reinstall again.
 
+### CUDA Host Compiler Mismatch
+
+On newer distributions, CUDA may fail during `nvcc` compilation with messages such as
+`unsupported GNU version` or other host-compiler compatibility errors. Install a GCC/G++
+version supported by your CUDA toolkit and point `nvcc` at that host compiler:
+
+```bash
+# Install the supported GCC/G++ version (Debian/Ubuntu example)
+sudo apt install gcc-13 g++-13
+
+export CC=/usr/bin/gcc-13
+export CXX=/usr/bin/g++-13
+export CUDAHOSTCXX=/usr/bin/g++-13
+./install.sh build
+```
+
+`CUDAHOSTCXX` is forwarded to CMake as `CMAKE_CUDA_HOST_COMPILER` during the kt-kernel build.
+Adjust the GCC/G++ version to match your CUDA release.
+
 ### hwloc Not Found
 
 Run `sudo apt install libhwloc-dev` if on a Debian-based system or build from source: https://www.open-mpi.org/projects/hwloc/.
