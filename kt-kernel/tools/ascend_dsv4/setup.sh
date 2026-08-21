@@ -183,8 +183,26 @@ CPUINFER_FORCE_REBUILD=0 "${DSV4_PYTHON}" -m pip wheel \
     --no-deps --no-build-isolation \
     --wheel-dir "${DSV4_ARTIFACT_DIR}/wheels" .
 
-log "wheel -> $(ls -1 "${DSV4_ARTIFACT_DIR}"/wheels/kt_kernel-*.whl | tail -1)"
-log "install it with:  ${DSV4_PYTHON} -m pip install --no-deps ${DSV4_ARTIFACT_DIR}/wheels/kt_kernel-*.whl"
+# newest wheel, not a glob: older builds linger in this directory
+_whl="$(ls -1t "${DSV4_ARTIFACT_DIR}"/wheels/kt_kernel-*.whl | head -1)"
+[ -n "${_whl}" ] || die "no kt_kernel wheel produced"
+log "installing ${_whl}"
+"${DSV4_PYTHON}" -m pip install --no-deps --force-reinstall "${_whl}"
+
+"${DSV4_PYTHON}" - <<'PY' || die "the installed kt_kernel is not an Ascend build; see the configure output above"
+import sys
+from kt_kernel import kt_kernel_ext
+from kt_kernel.utils.loader import GGMLQuantizationType
+ok = True
+if not hasattr(kt_kernel_ext, "init_ascend_callback_worker"):
+    print("  FAIL no init_ascend_callback_worker - built without CPUINFER_USE_ASCEND_NPU=1")
+    ok = False
+if int(GGMLQuantizationType.MXFP4) != 39:
+    print(f"  FAIL GGMLQuantizationType.MXFP4 == {int(GGMLQuantizationType.MXFP4)}, expected 39")
+    ok = False
+print("  ascend backend and MXFP4 present" if ok else "")
+sys.exit(0 if ok else 1)
+PY
 }
 
 

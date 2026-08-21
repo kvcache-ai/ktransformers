@@ -127,7 +127,7 @@ image already satisfies some of them:
 | Step | What it does | Time |
 |---|---|---|
 | `deps` | SGLang's NPU runtime dependencies | minutes |
-| `kt-kernel` | build KT-Kernel, produce and install a wheel | 10–30 min |
+| `kt-kernel` | build KT-Kernel, install the wheel, check it is an Ascend build | 10–30 min |
 | `sgl-kernel` | build `sgl_kernel_npu`, `deep_ep`, `attentions`, `torch_memory_saver` | 20–40 min |
 | `cann-ops` | build the `customize`, `custom_ops` and `custom_transformer` packages | 40–90 min |
 | `gguf` | convert the checkpoint to the per-layer MXFP4 GGUF set | hours |
@@ -140,12 +140,6 @@ source ~/dsv4.env
 ls "${CANN_VENDORS_DIR}"                                  # want: customize  custom_transformer
 python3 -c "import torch, torch_npu, custom_ops; print('custom_ops ok')"
 python3 -c "import sgl_kernel_npu; print('sgl_kernel_npu ok')"
-```
-
-Install the KT-Kernel wheel if you ran `kt-kernel` on its own:
-
-```bash
-python3 -m pip install --no-deps "${DSV4_ARTIFACT_DIR}"/wheels/kt_kernel-*.whl
 ```
 
 The `cann-ops` step builds from two pinned upstream commits:
