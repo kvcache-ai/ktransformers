@@ -20,7 +20,6 @@ In this document, we will show you how to install and run KTransformers on your 
 Some preparation:
 
 - CUDA 12.1 and above, if you didn't have it yet, you may install from [here](https://developer.nvidia.com/cuda-downloads).
-
   ```sh
   # Adding CUDA to PATH
   if [ -d "/usr/local/cuda/bin" ]; then
@@ -38,6 +37,12 @@ Some preparation:
       export CUDA_PATH=$CUDA_PATH:/usr/local/cuda
   fi
   ```
+- **Ascend NPU:** the validated Ascend path currently targets Atlas 300I A2. See the
+  existing Chinese deployment examples for
+  [DeepSeek-R1/V3](../zh/DeepseekR1_V3_tutorial_zh_for_Ascend_NPU.md) and
+  [Qwen3 MoE](../zh/Qwen3-MoE_tutorial_zh_for_Ascend_NPU.md) for hardware,
+  CANN / torch_npu setup, and launch commands.
+
 - Linux-x86_64 with gcc, g++>=11 and cmake>=3.25 (using Ubuntu as an example)
 - **Note**: The default CMake version in Ubuntu 22.04 LTS or higher may not support newer CUDA language dialects (e.g., CUDA 20). This can cause errors such as Target "cmTC_xxxxxx" requires the language dialect "CUDA20", but CMake does not know the compile flags to use to enable it. To resolve this, install a newer CMake version, for instance, by adding the Kitware APT repository.
 
