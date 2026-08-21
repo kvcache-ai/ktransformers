@@ -3,8 +3,8 @@
 # You can skip this file if you already have these packages installed
 
 # Core dependencies (minimum versions)
-torch==2.9.1
+torch>=2.9.1,<2.11
 safetensors>=0.4.0
 numpy>=1.24.0
-triton>=2.0.0
+triton>=2.0.0; platform_machine == "x86_64"
 gguf>=0.17.0

@@ -10,6 +10,8 @@
 #include "musa.h"
 #elif USE_MACA
 #include "maca.h"
+#elif USE_ASCEND_NPU
+#include "ascend_npu.h"
 #endif
 
 #endif  // CPUINFER_VENDOR_VENDOR_H

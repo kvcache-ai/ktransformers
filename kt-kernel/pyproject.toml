@@ -21,10 +21,15 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
   # Core dependencies
+  # Pinned, not a range: ktransformers, sglang-kt, accelerate-kt and transformers-kt
+  # converged on 2.9.1, and the fine-tuning path depends on all of them agreeing. A CANN 9
+  # image that ships torch 2.10 therefore needs its torch-linked extensions rebuilt for
+  # 2.9.1 rather than this bound relaxed -- see the Ascend tutorial.
   "torch==2.9.1",
   "safetensors>=0.4.0",
   "numpy>=1.24.0",
-  "triton>=2.0.0",
+  # triton has no aarch64 wheels; the Ascend build does not use it.
+  "triton>=2.0.0; platform_machine == 'x86_64' or platform_machine == 'AMD64'",
   "gguf>=0.17.0",
   # CLI dependencies
   "typer>=0.9.0",

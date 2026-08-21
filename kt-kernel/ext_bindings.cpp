@@ -21,6 +21,9 @@
 
 #include "cpu_backend/cpuinfer.h"
 #include "cpu_backend/worker_pool.h"
+#if defined(KTRANSFORMERS_USE_ASCEND_NPU)
+#include "cpu_backend/ascend_callback_worker.h"
+#endif
 #include "operators/common.hpp"
 
 #if defined(USE_MOE_KERNEL)
@@ -544,6 +547,23 @@ PYBIND11_MODULE(kt_kernel_ext, m) {
 #endif
   m.attr("__fp8_weight_layout__") = "block-e4m3-128x128";
 
+#if defined(KTRANSFORMERS_USE_ASCEND_NPU)
+  m.def(
+      "init_ascend_callback_worker",
+      []() { kt::ascend::ensure_callback_worker(nullptr); },
+      "Start ACL aclrtProcessReport worker for stream callbacks (Ascend NPU).");
+  m.def(
+      "subscribe_ascend_stream",
+      [](intptr_t stream_handle) {
+        kt::ascend::ensure_stream_subscribed(reinterpret_cast<aclrtStream>(stream_handle));
+      },
+      py::arg("stream_handle"),
+      "Subscribe an aclrtStream with the global callback worker.");
+  m.def("shutdown_ascend_callback_worker", &kt::ascend::shutdown_callback_worker,
+        "Stop the ACL callback worker thread.");
+  m.def("is_ascend_callback_worker_running", &kt::ascend::callback_worker_running,
+        "True iff the ACL callback worker is started and dispatching reports.");
+#endif
   py::class_<WorkerPool>(m, "WorkerPool").def(py::init<int>());
   py::class_<WorkerPoolConfig>(m, "WorkerPoolConfig")
       .def(py::init<>())

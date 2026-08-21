@@ -76,6 +76,7 @@ Optional variables (with defaults):
   CPUINFER_ENABLE_AVX512_BF16=ON/OFF    Override BF16 detection (auto if unset)
   CPUINFER_ENABLE_AVX512_VBMI=ON/OFF    Override VBMI detection (auto if unset)
   CPUINFER_ENABLE_CPPTRACE=ON/OFF       Enable native crash tracing (default OFF)
+  CPUINFER_PIP_NO_DEPS=0/1              Install the built wheel without changing the image's Python stack
 
 Software Fallback Support:
   ✓ If VNNI not available: Uses AVX512BW fallback (2-3x slower but works)
@@ -124,26 +125,53 @@ install_dependencies() {
   # Install dependencies based on OS
   case "$OS" in
     debian|ubuntu|linuxmint|pop)
-      echo "Detected Debian-based system. Installing libhwloc-dev and pkg-config..."
+      echo "Detected Debian-based system. Installing libhwloc-dev, libnuma-dev and pkg-config..."
       $SUDO apt update
-      $SUDO apt install -y libhwloc-dev pkg-config
+      $SUDO apt install -y libhwloc-dev libnuma-dev pkg-config
       ;;
     fedora|rhel|centos|rocky|almalinux)
-      echo "Detected Red Hat-based system. Installing hwloc-devel and pkgconfig..."
-      $SUDO dnf install -y hwloc-devel pkgconfig || $SUDO yum install -y hwloc-devel pkgconfig
+      echo "Detected Red Hat-based system. Installing hwloc-devel, numactl-devel and pkgconfig..."
+      $SUDO dnf install -y hwloc-devel numactl-devel pkgconfig || $SUDO yum install -y hwloc-devel numactl-devel pkgconfig
       ;;
     arch|manjaro)
-      echo "Detected Arch-based system. Installing hwloc and pkgconf..."
-      $SUDO pacman -S --noconfirm hwloc pkgconf
+      echo "Detected Arch-based system. Installing hwloc, numactl and pkgconf..."
+      $SUDO pacman -S --noconfirm hwloc numactl pkgconf
       ;;
     opensuse*|sles)
-      echo "Detected openSUSE-based system. Installing hwloc-devel and pkg-config..."
-      $SUDO zypper install -y hwloc-devel pkg-config
+      echo "Detected openSUSE-based system. Installing hwloc-devel, libnuma-devel and pkg-config..."
+      $SUDO zypper install -y hwloc-devel libnuma-devel pkg-config
       ;;
     *)
-      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev and pkg-config."
+      echo "Warning: Unsupported OS '$OS'. Please manually install libhwloc-dev, libnuma-dev and pkg-config."
       ;;
   esac
+}
+
+# Function to detect ARM (aarch64) features from /proc/cpuinfo "Features:" line.
+# Returns: "has_dotprod has_fp16 has_sve has_bf16 has_i8mm" (space-separated 0/1 values).
+detect_arm_features() {
+  local has_dotprod=0 has_fp16=0 has_sve=0 has_bf16=0 has_i8mm=0
+  if [ -f /proc/cpuinfo ]; then
+    local feats
+    feats=$(grep -m1 -E "^Features\s*:" /proc/cpuinfo | tr ' ' '\n')
+    echo "$feats" | grep -qE "^asimddp$" && has_dotprod=1
+    echo "$feats" | grep -qE "^(asimdhp|fphp)$" && has_fp16=1
+    echo "$feats" | grep -qE "^sve$" && has_sve=1
+    echo "$feats" | grep -qE "^bf16$" && has_bf16=1
+    echo "$feats" | grep -qE "^i8mm$" && has_i8mm=1
+  fi
+  echo "$has_dotprod $has_fp16 $has_sve $has_bf16 $has_i8mm"
+}
+
+# Detect Ascend CANN install. Echoes the toolkit root if found, else empty.
+detect_cann_root() {
+  for cand in "${ASCEND_TOOLKIT_HOME:-}" "${CANN_HOME:-}" "/usr/local/Ascend/ascend-toolkit/latest"; do
+    if [ -n "$cand" ] && [ -f "$cand/include/acl/acl_rt.h" ]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo ""
 }
 
 # Function to detect CPU features
@@ -226,6 +254,59 @@ build_step() {
   echo "Auto-detecting CPU capabilities..."
   echo "=========================================="
   echo ""
+
+  HOST_ARCH="$(uname -m)"
+  echo "Host arch: $HOST_ARCH"
+
+  if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
+    # ARM (aarch64) auto-detect path: Kunpeng / Neoverse / Apple Silicon.
+    # Returns "dotprod fp16 sve bf16 i8mm"
+    ARM_FEATURES=$(detect_arm_features)
+    HAS_DOTPROD=$(echo "$ARM_FEATURES" | cut -d' ' -f1)
+    HAS_FP16=$(echo "$ARM_FEATURES"   | cut -d' ' -f2)
+    HAS_SVE=$(echo "$ARM_FEATURES"    | cut -d' ' -f3)
+    HAS_BF16=$(echo "$ARM_FEATURES"   | cut -d' ' -f4)
+    HAS_I8MM=$(echo "$ARM_FEATURES"   | cut -d' ' -f5)
+
+    echo "ARM features: DOTPROD=$HAS_DOTPROD FP16=$HAS_FP16 SVE=$HAS_SVE BF16=$HAS_BF16 I8MM=$HAS_I8MM"
+
+    export CPUINFER_CPU_INSTRUCT=NATIVE
+    export CPUINFER_ENABLE_AMX=OFF
+    [ "$HAS_DOTPROD" = "1" ] && export CPUINFER_ARM_DOTPROD=ON || export CPUINFER_ARM_DOTPROD=OFF
+    [ "$HAS_FP16" = "1" ]    && export CPUINFER_ARM_FP16=ON    || export CPUINFER_ARM_FP16=OFF
+    [ "$HAS_SVE" = "1" ]     && export CPUINFER_ARM_SVE=ON     || export CPUINFER_ARM_SVE=OFF
+    [ "$HAS_BF16" = "1" ]    && export CPUINFER_ARM_BF16=ON    || export CPUINFER_ARM_BF16=OFF
+    [ "$HAS_I8MM" = "1" ]    && export CPUINFER_ARM_I8MM=ON    || export CPUINFER_ARM_I8MM=OFF
+
+    # CANN auto-detection. If found, enable Ascend NPU backend; otherwise
+    # build pure CPU and rely on the LLAMA_MOE_TP / llamafile NEON+SDOT path.
+    CANN_ROOT="$(detect_cann_root)"
+    if [ -n "$CANN_ROOT" ]; then
+      echo "✓ CANN detected at: $CANN_ROOT"
+      export ASCEND_TOOLKIT_HOME="$CANN_ROOT"
+      export CPUINFER_USE_ASCEND_NPU=1
+    else
+      echo "ℹ CANN not detected; building CPU-only (no NPU host callback support)"
+      export CPUINFER_USE_ASCEND_NPU=0
+    fi
+
+    # K920 / Cortex-A76 cannot run the SVE micro-kernels in kt-kernel's KML path.
+    # Keep KML / BLIS off unless the user explicitly opts in.
+    : "${CPUINFER_ENABLE_KML:=OFF}"
+    : "${CPUINFER_ENABLE_BLIS:=OFF}"
+    export CPUINFER_ENABLE_KML CPUINFER_ENABLE_BLIS
+
+    echo ""
+    echo "Configuration (aarch64):"
+    echo "  CPUINFER_USE_ASCEND_NPU = $CPUINFER_USE_ASCEND_NPU"
+    echo "  CPUINFER_ARM_SVE        = $CPUINFER_ARM_SVE"
+    echo "  CPUINFER_ARM_BF16       = $CPUINFER_ARM_BF16"
+    echo "  CPUINFER_ARM_I8MM       = $CPUINFER_ARM_I8MM"
+    echo "  CPUINFER_ENABLE_KML     = $CPUINFER_ENABLE_KML  (forced OFF unless SVE present)"
+    echo ""
+    # Skip the x86-only AMX/AVX512 detection below.
+    :
+  else
 
   # detect_cpu_features returns "has_amx has_avx512f has_avx512_vnni has_avx512_bf16 has_avx512_vbmi"
   CPU_FEATURES=$(detect_cpu_features)
@@ -317,6 +398,7 @@ build_step() {
   echo ""
   echo "To use manual configuration instead, run: $0 build --manual"
   echo ""
+  fi  # end aarch64-vs-x86 branch
   else
   # Manual mode - validate user configuration (no exports)
   if [ -z "$CPUINFER_CPU_INSTRUCT" ] || [ -z "$CPUINFER_ENABLE_AMX" ]; then
@@ -399,10 +481,16 @@ echo "  CPUINFER_PARALLEL            = ${CPUINFER_PARALLEL:-AUTO}"
 echo "  CPUINFER_VERBOSE             = ${CPUINFER_VERBOSE:-1}"
 echo ""
 
+PIP_DEP_ARGS=()
+if [ "${CPUINFER_PIP_NO_DEPS:-0}" = "1" ]; then
+  PIP_DEP_ARGS+=(--no-deps)
+  echo "  pip dependency resolution disabled (CPUINFER_PIP_NO_DEPS=1)"
+fi
+
 if [ ${CPUINFER_VERBOSE:-1} = "0" ]; then
-  python3 -m pip install .
+  python3 -m pip install "${PIP_DEP_ARGS[@]}" .
 else
-  python3 -m pip install . -v
+  python3 -m pip install "${PIP_DEP_ARGS[@]}" . -v
 fi
 }
 

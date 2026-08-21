@@ -1,6 +1,9 @@
-import torch
-from typing import List, Optional
+from __future__ import annotations
+
 import os
+from typing import Dict, List, Optional
+
+import torch
 
 # Use relative imports for package structure
 from ..experts_base import BaseMoEWrapper
@@ -22,9 +25,13 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
     """
     Llamafile-based MoE wrapper implementation.
     Supports GGUF quantized weights with llamafile backend.
+
+    GGUFLoader is cached **per resolved weight path** (file or directory): multiple MoE layers
+    that share one merged GGUF reuse a single mmap; **per-layer split GGUFs** each get their own
+    loader.
     """
 
-    _gguf_loader_instance = None  # Singleton GGUFLoader
+    _gguf_loaders_by_path: Dict[str, GGUFLoader] = {}
 
     def __init__(
         self,
@@ -42,6 +49,8 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         max_deferred_experts_per_token: Optional[int] = None,
         method: str = "LLAMAFILE",
         numa_nodes: Optional[List[int]] = None,
+        swiglu_limit: float = 0.0,
+        swiglu_alpha: float = 0.0,
     ):
         """
         Initialize Llamafile MoE Wrapper.
@@ -73,10 +82,10 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         if not os.path.exists(weight_path):
             raise FileNotFoundError(f"GGUF weight path not found: {weight_path}")
 
-        # Initialize GGUF loader (singleton)
-        if LlamafileMoEWrapper._gguf_loader_instance is None:
-            LlamafileMoEWrapper._gguf_loader_instance = GGUFLoader(weight_path)
-        self.gguf_loader = LlamafileMoEWrapper._gguf_loader_instance
+        cache_key = os.path.realpath(weight_path)
+        if cache_key not in LlamafileMoEWrapper._gguf_loaders_by_path:
+            LlamafileMoEWrapper._gguf_loaders_by_path[cache_key] = GGUFLoader(weight_path)
+        self.gguf_loader = LlamafileMoEWrapper._gguf_loaders_by_path[cache_key]
 
         # Validate TP configuration with QK_K alignment
         QK_K = 256
@@ -119,6 +128,8 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             print(f"  TP {tp_id}: size={tp_size}, offset={current_offset}, blocks={tp_blocks}")
             current_offset += tp_size
 
+        self._swiglu_alpha = float(swiglu_alpha)
+
         # Initialize base class
         super().__init__(
             layer_idx=layer_idx,
@@ -135,6 +146,7 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
             max_deferred_experts_per_token=max_deferred_experts_per_token,
             method=method,
             numa_nodes=numa_nodes,
+            swiglu_limit=swiglu_limit,
         )
 
         self.weights_to_keep = None
@@ -202,8 +214,26 @@ class LlamafileMoEWrapper(BaseMoEWrapper):
         # Llamafile-specific configuration
         moe_config.m_block = 32  # Parallel block size
         moe_config.group_min_len = 10  # Use forward_one when qlen < 10
-        moe_config.max_len = self.chunked_prefill_size
-        moe_config.group_max_len = max(1, int(self.chunked_prefill_size))
+        # Defensive fallback: chunked_prefill_size <= 0 (e.g. -1 meaning "disabled" in sglang
+        # baseline) would otherwise let C++ compute max_possible_qlen() = max(max_len=-1,
+        # group_max_len=max(1,-1)=1) = 1, sizing per-NUMA fp32 output buffer
+        # (moe-tp.hpp:130 local_output_numa[i]) to a single token. The very first prefill
+        # with qlen > 1 then overruns the buffer and corrupts glibc tcache metadata
+        # (observed as "malloc(): unaligned tcache chunk detected" Fatal Python error).
+        # Clamp to a safe positive value so KT can always alloc a fp32 buffer at least as
+        # large as the per-call qlen the caller will pass.
+        _effective_chunk = int(self.chunked_prefill_size)
+        if _effective_chunk <= 0:
+            _effective_chunk = 2048
+            print(
+                f"[LlamafileMoEWrapper] chunked_prefill_size={self.chunked_prefill_size} "
+                f"<= 0 is unsafe for KT MoE C++ buffer sizing; falling back to "
+                f"{_effective_chunk}."
+            )
+        moe_config.max_len = _effective_chunk
+        moe_config.group_max_len = _effective_chunk
+        moe_config.swiglu_limit = self.swiglu_limit
+        moe_config.swiglu_alpha = self._swiglu_alpha
 
         # Set weight pointers
         moe_config.gate_proj = gate_data.data_ptr()
