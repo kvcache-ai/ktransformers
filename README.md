@@ -15,6 +15,11 @@
 
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md).
 
+> **Model provenance:** KTransformers provides inference and fine-tuning infrastructure; it does
+> not publish the training data for third-party model checkpoints used in examples. Before serving
+> or fine-tuning a model, review the model provider's license, intended-use policy, and any training
+> data / provenance notes published with that checkpoint.
+
 ## 🔥 Updates
 * **June 21, 2026**: MiniMax-M3 Day0 Support! ([Tutorial](./doc/en/kt-kernel/MiniMax-M3-Tutorial.md))
 * **June 17, 2026**: GLM-5.2 Day0 Support! ([Tutorial](./doc/en/kt-kernel/GLM-5.2-Tutorial.md))
