@@ -1,18 +1,65 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Acceptance checks for a running DeepSeek-V4-Flash single-NPU server.
+# Acceptance checks against a running server, and an interactive client.
 #
-#   bash kt-kernel/tools/ascend_dsv4/verify.sh
-#
-# All four gates must pass. HTTP 200 on its own is NOT an acceptance signal:
-# with a broken CPU-expert path the server still binds its port and answers
-# health probes while producing nothing.
-# =============================================================================
+#   verify.sh [serve.log]   run the checks
+#   verify.sh chat [port]   interactive chat (/reset clears, /quit exits)
 set -uo pipefail
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=./dsv4_env.sh
 source "${_here}/dsv4_env.sh"
+
+if [ "${1:-}" = "chat" ]; then
+  shift
+  exec "${DSV4_PYTHON}" - "${1:-${DSV4_PORT}}" <<'CHAT_PY'
+import json, sys, urllib.request
+
+PORT = sys.argv[1] if len(sys.argv) > 1 else "18080"
+URL = f"http://127.0.0.1:{PORT}/v1/chat/completions"
+history = []
+
+print(f"connected to {URL}   (/reset clears context, /quit exits)\n")
+while True:
+    try:
+        q = input("\033[1myou >\033[0m ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(); break
+    if not q:
+        continue
+    if q == "/quit":
+        break
+    if q == "/reset":
+        history.clear(); print("(context cleared)\n"); continue
+
+    history.append({"role": "user", "content": q})
+    body = json.dumps({
+        "model": "dsv4", "messages": history, "stream": True,
+        "temperature": 0.6, "max_tokens": 1024,
+    }).encode()
+    req = urllib.request.Request(URL, data=body,
+                                 headers={"Content-Type": "application/json"})
+    print("\033[1mDeepSeek >\033[0m ", end="", flush=True)
+    parts = []
+    with urllib.request.urlopen(req) as resp:
+        for raw in resp:
+            line = raw.decode().strip()
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            try:
+                delta = json.loads(payload)["choices"][0].get("delta", {})
+            except Exception:
+                continue
+            chunk = delta.get("content")
+            if chunk:
+                parts.append(chunk)
+                print(chunk, end="", flush=True)
+    print("\n")
+    history.append({"role": "assistant", "content": "".join(parts)})
+CHAT_PY
+fi
 
 LOG="${1:-${DSV4_LOG_DIR}/serve.log}"
 BASE="http://127.0.0.1:${DSV4_PORT}"
@@ -50,9 +97,6 @@ for ep in health health_generate; do
 done
 
 sec "4. Numerical probe"
-# Greedy decoding, so the completion must be identical run to run and machine
-# to machine. This is the check that separates "the server answers" from "the
-# CPU expert path is actually computing".
 _probe="$(curl -s --noproxy '*' -X POST "${BASE}/generate" \
     -H 'Content-Type: application/json' \
     -d '{"text":"The capital of France is","sampling_params":{"temperature":0,"max_new_tokens":16}}' \

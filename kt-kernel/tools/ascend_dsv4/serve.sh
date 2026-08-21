@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Launch the DeepSeek-V4-Flash single-NPU server.
-#
-#   bash kt-kernel/tools/ascend_dsv4/serve.sh              # background + log
-#   bash kt-kernel/tools/ascend_dsv4/serve.sh --foreground  # stay attached
-#
-# Every parameter comes from dsv4_env.sh; override by exporting before running.
-# Extra SGLang flags can be appended through DSV4_EXTRA_FLAGS.
-# =============================================================================
 set -uo pipefail
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -20,8 +11,6 @@ FOREGROUND=0
 mkdir -p "${DSV4_LOG_DIR}"
 LOG="${DSV4_LOG_DIR}/serve.log"
 
-# Self-check: prove we are about to run the clone, not a bundled SGLang. This
-# is the single most common way to spend a day debugging code that never ran.
 _sglang_file="$("${DSV4_PYTHON}" -c 'import sglang; print(sglang.__file__)' | tail -1)"
 echo "[serve] sglang = ${_sglang_file}"
 case "${_sglang_file}" in
@@ -30,19 +19,12 @@ case "${_sglang_file}" in
      exit 1 ;;
 esac
 
-# --- runtime environment ----------------------------------------------------
 export ASCEND_RT_VISIBLE_DEVICES="${DSV4_NPU_DEVICE_ID}"
-# Without expandable segments HBM fragments across prefill chunks: the reported
-# weight footprint grows by roughly 1.8 GB and the KV pool is sized down to match.
 export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 export TASK_QUEUE_ENABLE="${TASK_QUEUE_ENABLE:-1}"
 export SGLANG_SET_CPU_AFFINITY="${SGLANG_SET_CPU_AFFINITY:-1}"
 ulimit -n 65536 2>/dev/null || true
 
-# --- optional: streaming prefill -------------------------------------------
-# Off by default. It makes prefill time roughly constant in prompt length but
-# costs a fixed ~19 s, so it only pays above ~1500 tokens, and it needs its own
-# HBM budget (see the tuning section of the tutorial).
 if [ "${DSV4_PREFILL_STREAM:-0}" = "1" ]; then
   export KT_PREFILL_STREAM=1
   export KT_PREFILL_STREAM_THRESHOLD="${KT_PREFILL_STREAM_THRESHOLD:-512}"
@@ -51,15 +33,9 @@ if [ "${DSV4_PREFILL_STREAM:-0}" = "1" ]; then
   export KT_MXFP4_OP_DIR="${KT_MXFP4_OP_DIR:-${KTRANSFORMERS_REPO}/kt-kernel/tools/ascendc_mxfp4}"
   export KT_MXFP4_DEPOOL="${KT_MXFP4_DEPOOL:-1}"
   export KT_MXFP4_GGUF_DEDUP="${KT_MXFP4_GGUF_DEDUP:-1}"
-  # The dedup path reads the GGUF template from its own variable rather than from
-  # --kt-weight-path. Without it the switch is accepted and then does nothing, logging
-  # only "KT_MXFP4_GGUF_DEDUP=1 but KT_GGUF_TEMPLATE is empty".
   export KT_GGUF_TEMPLATE="${KT_GGUF_TEMPLATE:-${DSV4_GGUF_TEMPLATE}}"
   export KT_DYNAMIC_RESIDENT="${KT_DYNAMIC_RESIDENT:-1}"
   export KT_SIDE_STREAM="${KT_SIDE_STREAM:-1}"
-  # Streaming prefill never exercises the CPU MoE, so without this the server warmup runs
-  # straight through the streaming path and leaves kt_kernel cold -- the first requests then
-  # decode noticeably slower. Forcing one pass through the hybrid path warms it; one is enough.
   export KT_STREAM_WARMUP="${KT_STREAM_WARMUP:-1}"
   echo "[serve] streaming prefill ENABLED (threshold ${KT_PREFILL_STREAM_THRESHOLD} tokens)"
 fi

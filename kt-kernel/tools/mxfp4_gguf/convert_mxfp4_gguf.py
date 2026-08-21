@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
-"""
-Convert one DeepSeek-V4-Flash native MXFP4 MoE layer (E2M1 nibbles + ue8m0 scale)
-to a minimal GGUF with the three stacked expert tensors kt-kernel expects:
+"""Convert the DeepSeek-V4-Flash MXFP4 MoE weights to the per-layer GGUF set.
 
-  blk.{L}.ffn_gate_exps.weight   (MXFP4)
-  blk.{L}.ffn_up_exps.weight     (MXFP4)
-  blk.{L}.ffn_down_exps.weight   (MXFP4)
+    convert_mxfp4_gguf.py batch --input CKPT --output-dir DIR --jobs 8 --skip-existing
+    convert_mxfp4_gguf.py layer --input CKPT --layer-idx 16 --output OUT.gguf
 
-This is a *lossless bit repack*, NOT a re-quantization. The native checkpoint
-already stores E2M1 codes; we only:
-  - copy the ue8m0 group exponent byte verbatim into block_mxfp4.e
-  - rearrange the 4-bit codes from the model's CONSECUTIVE packing to the GGUF
-    HALF-BLOCK packing (see below)
-
-Nibble order (settled against the checkpoint's own inference/convert.py):
-  Native pack (cast_e2m1fn_to_e4m3fn): byte i -> stack([low, high]).flatten,
-    i.e. K-position 2i = low nibble, 2i+1 = high nibble  (CONSECUTIVE)
-  Upstream GGUF block_mxfp4: qs[j] low nibble = K-pos j, high nibble = K-pos j+16
-    (HALF-BLOCK interleave) — this is what ggml_vec_dot_mxfp4_q8_0 assumes.
-  So within each 32-element group (16 bytes) we reorder; the per-group scale is
-  unaffected (block boundary == scale group == 32 K-positions == 16 bytes).
-
-Numerics: ggml kvalues_mxfp4[n] * GGML_E8M0_TO_FP32_HALF(e)
-        == model FP4_TABLE[n] * 2^(e-127), bit-for-bit. Verified by
-        verify_mxfp4_layer.py (element-wise equality vs native dequant).
-
-Layout (matches the pointer arithmetic of kt-kernel's LLAMA_MOE_TP backend):
-  gate/up: per-expert (intermediate=N, hidden=K) row-major, hidden(K) inner
-  down:    per-expert (hidden=N, intermediate=K) row-major, intermediate(K) inner
-  K is the GEMM reduce dim and the MXFP4 block direction (block_size 32 along K).
+`batch` fans the layers out across processes, re-executing this file in `layer` mode
+for each. About 3.19 GiB per layer.
 """
 
 from __future__ import annotations
@@ -36,7 +13,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
+import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -58,13 +38,11 @@ from safetensors import safe_open  # noqa: E402
 
 MXFP4 = gguf.GGMLQuantizationType.MXFP4
 
-
 def _load_weight_map(model_dir: Path) -> dict[str, str]:
     index_path = model_dir / "model.safetensors.index.json"
     if not index_path.is_file():
         raise FileNotFoundError(f"Missing {index_path}")
     return json.loads(index_path.read_text())["weight_map"]
-
 
 def _detect_experts_prefix(weight_map: dict[str, str], layer_idx: int) -> str:
     """Native V4-Flash keys are stripped of the `model.` prefix: layers.{L}.ffn.experts.{i}.w1..."""
@@ -76,20 +54,17 @@ def _detect_experts_prefix(weight_map: dict[str, str], layer_idx: int) -> str:
                 return before + ".experts"
     raise ValueError(f"No native MXFP4 experts found for layer {layer_idx}")
 
-
 def _open_shard(model_dir: Path, weight_map: dict[str, str], cache: dict[str, object], key: str):
     shard = weight_map[key]
     if shard not in cache:
         cache[shard] = safe_open(model_dir / shard, framework="pt")
     return cache[shard]
 
-
 def _as_u8(t: torch.Tensor) -> np.ndarray:
     """Native I8 weight or F8_E8M0 scale -> raw bytes as uint8 numpy (no value change)."""
     if t.dtype != torch.uint8:
         t = t.view(torch.uint8)
     return t.contiguous().numpy()
-
 
 def _repack_consecutive_to_halfblock(w_u8: np.ndarray) -> np.ndarray:
     """[N, K/2] native E2M1 (byte i -> Kpos 2i,2i+1) -> [N, K/2] GGUF (byte j -> Kpos j,j+16).
@@ -110,7 +85,6 @@ def _repack_consecutive_to_halfblock(w_u8: np.ndarray) -> np.ndarray:
     gguf_hi = nib[..., 16:32]   # Kpos 16..31
     out = (gguf_lo | (gguf_hi << 4)).astype(np.uint8)  # [N, nb, 16]
     return out.reshape(N, kh)
-
 
 def _build_proj_tensor(model_dir, weight_map, experts_prefix, proj_name, num_experts):
     """Return packed uint8 ndarray [E, N, nblocks*17] for one projection across all experts."""
@@ -135,7 +109,6 @@ def _build_proj_tensor(model_dir, weight_map, experts_prefix, proj_name, num_exp
             n_dim, nblocks = N, nb
     out = np.stack(rows, axis=0).astype(np.uint8)  # [E, N, nblocks*17]
     return np.ascontiguousarray(out)
-
 
 def convert_layer(model_dir: Path, layer_idx: int, output_path: Path, num_experts: int,
                   hidden_size: int, moe_intermediate_size: int) -> None:
@@ -174,7 +147,40 @@ def convert_layer(model_dir: Path, layer_idx: int, output_path: Path, num_expert
     print(f"[convert] wrote {output_path} ({output_path.stat().st_size/1e9:.3f} GB)")
 
 
-def main() -> None:
+def _run_one_layer(py, model_dir, layer_idx, output_path, num_experts, hidden_size, moe_intermediate_size):
+    cmd = [
+        py, str(Path(__file__).resolve()), "layer",
+        "--input", model_dir,
+        "--layer-idx", str(layer_idx),
+        "--output", output_path,
+        "--num-experts", str(num_experts),
+        "--hidden-size", str(hidden_size),
+        "--moe-intermediate-size", str(moe_intermediate_size),
+    ]
+    env = os.environ.copy()
+    env.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    tail = (proc.stdout or "")[-3000:]
+    if proc.stderr:
+        tail += "\n--- stderr ---\n" + proc.stderr[-3000:]
+    return layer_idx, proc.returncode, tail
+
+def _verify_sample_paths(paths: list[Path]) -> None:
+    sys.path.insert(0, str(_GGUF_PY))
+    from gguf import GGUFReader
+
+    for p in paths:
+        if not p.is_file():
+            print(f"[verify-sample] SKIP missing: {p}")
+            continue
+        reader = GGUFReader(str(p))
+        print(f"[verify-sample] {p.name} ({p.stat().st_size / 1e9:.3f} GB) tensors={len(reader.tensors)}")
+        for t in reader.tensors:
+            tt = t.tensor_type
+            print(f"    {t.name} type={getattr(tt, 'name', tt)} shape={list(t.shape)}")
+
+
+def _layer_main(argv) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", type=Path, required=True, help="Native MXFP4 model dir (safetensors + index.json)")
     ap.add_argument("--layer-idx", type=int, required=True)
@@ -183,7 +189,7 @@ def main() -> None:
     ap.add_argument("--hidden-size", type=int, default=4096)
     ap.add_argument("--moe-intermediate-size", type=int, default=2048)
     ap.add_argument("--verify-reader", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     model_dir = args.input.expanduser().resolve()
     if not model_dir.is_dir():
@@ -198,5 +204,105 @@ def main() -> None:
             print(f"  {t.name} shape={t.shape} type={t.tensor_type}")
 
 
+def _batch_main(argv) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--input", type=Path, required=True,
+                    help="Official DeepSeek-V4-Flash checkpoint (safetensors + index.json)")
+    ap.add_argument("--output-dir", type=Path, required=True)
+    ap.add_argument("--layer-start", type=int, default=0)
+    ap.add_argument("--layer-end", type=int, default=None,
+                    help="Inclusive. Default: num_hidden_layers - 1 from config.json")
+    ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--python", type=Path, default=Path(sys.executable))
+    ap.add_argument("--num-experts", type=int, default=None, help="Default: n_routed_experts from config.json")
+    ap.add_argument("--hidden-size", type=int, default=None, help="Default: hidden_size from config.json")
+    ap.add_argument("--moe-intermediate-size", type=int, default=None,
+                    help="Default: moe_intermediate_size from config.json")
+    ap.add_argument("--name-prefix", type=str, default="dsv4_layer")
+    ap.add_argument("--name-suffix", type=str, default="_mxfp4")
+    ap.add_argument("--skip-existing", action="store_true", help="Skip outputs already larger than 1 GiB")
+    ap.add_argument("--verify-sample", type=int, default=3,
+                    help="Re-open this many random outputs and print their tensor headers")
+    ap.add_argument("--seed", type=int, default=42)
+    args = ap.parse_args(argv)
+
+    model_dir = args.input.expanduser().resolve()
+    out_dir = args.output_dir.expanduser().resolve()
+    if not model_dir.is_dir():
+        print(f"ERROR: --input is not a directory: {model_dir}", file=sys.stderr)
+        return 2
+
+    cfg_path = model_dir / "config.json"
+    if not cfg_path.is_file():
+        print(f"ERROR: no config.json in {model_dir}", file=sys.stderr)
+        return 2
+    cfg = json.loads(cfg_path.read_text())
+    num_experts = args.num_experts or int(cfg["n_routed_experts"])
+    hidden_size = args.hidden_size or int(cfg["hidden_size"])
+    moe_inter = args.moe_intermediate_size or int(cfg["moe_intermediate_size"])
+    layer_end = args.layer_end if args.layer_end is not None else int(cfg["num_hidden_layers"]) - 1
+    print(f"[batch] shapes from config.json: experts={num_experts} hidden={hidden_size} "
+          f"moe_intermediate={moe_inter} layers={args.layer_start}..{layer_end}")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    min_skip = 1 << 30
+    py = str(args.python.expanduser())
+
+    layers = list(range(args.layer_start, layer_end + 1))
+    tasks = []
+    for lid in layers:
+        outp = out_dir / f"{args.name_prefix}{lid}{args.name_suffix}.gguf"
+        if args.skip_existing and outp.is_file() and outp.stat().st_size > min_skip:
+            print(f"[batch] skip existing {outp.name}")
+            continue
+        tasks.append((py, str(model_dir), lid, str(outp), num_experts, hidden_size, moe_inter))
+
+    if not tasks:
+        print("[batch] nothing to convert (all skipped)")
+    else:
+        print(f"[batch] model={model_dir} pending={len(tasks)} jobs={args.jobs}")
+        failed = []
+        with ProcessPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            futures = {ex.submit(_run_one_layer, *t): t[2] for t in tasks}
+            for fut in as_completed(futures):
+                lid = futures[fut]
+                try:
+                    layer_idx, rc, tail = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    failed.append((lid, repr(exc)))
+                    print(f"[batch] layer {lid} worker exception: {exc!r}")
+                    continue
+                if rc != 0:
+                    failed.append((layer_idx, f"exit {rc}"))
+                    print(f"[batch] layer {layer_idx} FAILED rc={rc}\n{tail[-1500:]}")
+                else:
+                    print(f"[batch] layer {layer_idx} OK")
+        if failed:
+            print(f"[batch] {len(failed)} layers failed: {failed[:10]}", file=sys.stderr)
+            return 1
+
+    if args.verify_sample > 0:
+        rnd = random.Random(args.seed)
+        k = min(args.verify_sample, len(layers))
+        sample = sorted(rnd.sample(layers, k)) if k > 0 else []
+        paths = [out_dir / f"{args.name_prefix}{lid}{args.name_suffix}.gguf" for lid in sample]
+        print(f"[batch] verify-sample k={k} layers={sample}")
+        _verify_sample_paths(paths)
+
+    print("[batch] done. Now run verify_mxfp4_gguf.py set before serving.")
+    return 0
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or sys.argv[1] not in ("layer", "batch"):
+        print(__doc__)
+        return 0 if len(sys.argv) < 2 else 2
+    mode, rest = sys.argv[1], sys.argv[2:]
+    if mode == "layer":
+        _layer_main(rest)
+        return 0
+    return _batch_main(rest)
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
