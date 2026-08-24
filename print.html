@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d417b258.js";
+            window.path_to_searchindex_js = "searchindex-0d9a3ab5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-18b9e882.js"></script>
+        <script src="toc-bc069f9d.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -194,10 +194,10 @@
 </div>
 
 <h2 id="-overview"><a class="header" href="#-overview">🎯 Overview</a></h2>
-<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="kt-kernel/README.html">Inference</a> and <a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">SFT</a>.</p>
+<p>KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: <a href="kt-kernel/README.html">Inference</a> and <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a>.</p>
 <h2 id="-updates"><a class="header" href="#-updates">🔥 Updates</a></h2>
 <ul>
-<li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
+<li><strong>Aug 25, 2026</strong>: Uploaded a new easy-to-use <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a>, covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.</li>
 <li><strong>June 21, 2026</strong>: MiniMax-M3 Day0 Support! (<a href="doc/en/kt-kernel/MiniMax-M3-Tutorial.html">Tutorial</a>)</li>
 <li><strong>June 17, 2026</strong>: GLM-5.2 Day0 Support! (<a href="doc/en/kt-kernel/GLM-5.2-Tutorial.html">Tutorial</a>)</li>
 <li><strong>May 6, 2026</strong>: KTransformers at <a href="https://paris2026.gosim.org/zh/schedule/">GOSIM Paris 2026</a> — “Agentic AI on Edge” track. We’ll present KT’s inference performance on consumer hardware.</li>
@@ -270,7 +270,7 @@ pip install .
 </div>
 <p>👉 <strong><a href="kt-kernel/README.html">Full Documentation →</a></strong></p>
 <hr>
-<h3 id="-sft---fine-tuning-with-llamafactory"><a class="header" href="#-sft---fine-tuning-with-llamafactory">🎓 <a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">SFT</a> - Fine-Tuning with LlamaFactory</a></h3>
+<h3 id="-sft---fine-tuning-with-llamafactory"><a class="header" href="#-sft---fine-tuning-with-llamafactory">🎓 <a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">SFT</a> - Fine-Tuning with LlamaFactory</a></h3>
 <p>KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.</p>
 <p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"><span class="img-wrapper"><img src="doc/assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"></span></label></p>
 <p><strong>Key Features:</strong></p>
@@ -303,7 +303,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   src/train.py \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 </code></pre>
-<p>👉 <strong><a href="doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.html">Easy-to-Use Fine-Tuning Cookbook (中文) →</a></strong>
+<p>👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_Cookbook.html">Easy-to-Use Fine-Tuning Cookbook →</a></strong>
 👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">Quick Start →</a></strong>
 👉 <strong><a href="doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.html">Full Documentation →</a></strong></p>
 <hr>
@@ -1350,6 +1350,7 @@ chunk_size: 8192
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="ktransformers-sft-docs"><a class="header" href="#ktransformers-sft-docs">KTransformers SFT Docs</a></h1>
 <ul>
+<li><a href="#ktransformers--llamafactory-moe-fine-tuning-cookbook">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a></li>
 <li><a href="#ktransformers--llamafactory-moe-微调-cookbook">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook (中文)</a></li>
 <li><a href="en/SFT/KTransformers-Fine-Tuning_Quick-Start.html">v0.6.1 Quick Start</a></li>
 <li><a href="#ktransformers-fine-tuning--llama-factory-integration--user-guide">Fine-Tuning User Guide</a></li>
@@ -1358,6 +1359,339 @@ chunk_size: 8192
 <li><a href="#dpo-training-with-llama-factory">DPO Tutorial</a></li>
 <li><a href="#tutorial-inject-operator-step-by-step">Injection Tutorial</a></li>
 </ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ktransformers--llamafactory-moe-fine-tuning-cookbook"><a class="header" href="#ktransformers--llamafactory-moe-fine-tuning-cookbook">KTransformers × LlamaFactory MoE Fine-Tuning Cookbook</a></h1>
+<p>From Qwen3.5 to DeepSeek-V4, Kimi-K3, and GLM-5.2, each new ultra-large open model brings a major leap in capability and scale. However, the cost of high-end GPUs still prevents many researchers and developers from fine-tuning these models under constrained resources. KTransformers and LlamaFactory provide a practical alternative: with 1–4 RTX 4090 GPUs and a CPU platform with sufficient memory, users can fine-tune trillion-parameter MoE (Mixture of Experts) models such as the DeepSeek-V3/V4 family, Kimi-K2.5, and GLM-5.2.</p>
+<p>KTransformers integrates with LlamaFactory while preserving its familiar training workflow. LlamaFactory remains the unified configuration and orchestration layer for data processing, training, LoRA injection, and inference integration. The GPU runs Attention and Shared Expert modules, while KTransformers manages Routed Experts in CPU memory for heterogeneous GPU–CPU execution.</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"><span class="img-wrapper"><img src="assets/llamafactory-kt-integration-overview.png" alt="LlamaFactory and KTransformers MoE fine-tuning architecture"></span></label></p>
+<p><strong>Technical overview:</strong> KTransformers places compute-intensive Attention and shared modules on the GPU, while storing the large, sparsely activated Routed Experts in CPU memory. This avoids repeatedly transferring large Expert weights over PCIe and lets the CPU runtime select an optimized backend according to the weight format and available instruction set.</p>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/ktransformers-moe-hardware-overview.png" alt="KTransformers MoE model and heterogeneous hardware mapping"><span class="img-wrapper"><img src="assets/ktransformers-moe-hardware-overview.png" alt="KTransformers MoE model and heterogeneous hardware mapping"></span></label></p>
+<p><strong>Guide at a glance:</strong> For a first run, start with <strong>native BF16 + LoRA or full fine-tuning + <code>kt_backend: auto</code></strong>. This path requires no weight conversion and starts with two YAML files. If the model provides a native FP8 checkpoint and the training method is LoRA, KTransformers can load the native FP8 Expert weights directly to reduce host-memory usage. Use converted INT8 or AMXINT4 weights only when host memory remains the limiting resource and the matching converted artifacts are available.</p>
+<h2 id="contents"><a class="header" href="#contents">Contents</a></h2>
+<ul>
+<li><a href="#1-check-hardware-and-install">Check hardware and install</a></li>
+<li><a href="#2-choose-a-fine-tuning-setup">Choose a fine-tuning setup</a></li>
+<li><a href="#3-custom-yaml-advanced-settings">Custom YAML: advanced settings</a></li>
+<li><a href="#4-performance-and-resource-estimates">Performance and resource estimates</a></li>
+<li><a href="#appendix">Appendix: complete configurations and Q&amp;A</a></li>
+</ul>
+<h2 id="1-check-hardware-and-install"><a class="header" href="#1-check-hardware-and-install">1. Check hardware and install</a></h2>
+<h3 id="11-check-hardware-resources"><a class="header" href="#11-check-hardware-resources">1.1 Check hardware resources</a></h3>
+<p>Check the CPU instruction set first to identify the available acceleration backend:</p>
+<pre><code class="language-bash">lscpu | grep -i -E 'Model name|Socket|NUMA|avx512|amx'
+</code></pre>
+<p>Then check GPU memory, host memory, and disk capacity:</p>
+<pre><code class="language-bash">nvidia-smi
+free -h
+df -h /data
+</code></pre>
+<p>Confirm two requirements:</p>
+<ul>
+<li><strong>Instruction-set compatibility:</strong> Native FP8 requires a compatible AMD/x86 CPU with AVX512F, AVX512_BF16, AVX512_VNNI, and AVX512_VBMI. For INT8, <code>auto</code> can select an AMX-INT8 or AVX512-VNNI implementation. AMXINT4 requires AMX and matching converted weights. Native BF16 performs best when AMX is available.</li>
+<li><strong>Sufficient capacity:</strong> Host memory must hold the Expert weights and leave room for activations, gradients, and optimizer states. Disk capacity must also cover checkpoints and temporary files.</li>
+</ul>
+<h3 id="12-install-the-environment"><a class="header" href="#12-install-the-environment">1.2 Install the environment</a></h3>
+<p>Use a clean Python 3.11 environment. Pin PyTorch 2.9.1 before installing LlamaFactory, and install the KT dependencies last so standard <code>transformers</code> or <code>accelerate</code> packages do not overwrite the KT variants:</p>
+<pre><code class="language-bash">conda create -n kt-sft python=3.11 -y
+conda activate kt-sft
+
+git clone --depth 1 https://github.com/hiyouga/LlamaFactory.git
+cd LlamaFactory
+
+python -m pip install torch==2.9.1 torchaudio==2.9.1 torchvision==0.24.1
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
+</code></pre>
+<p>After installation, check dependency consistency and the versions that Python actually imports:</p>
+<pre><code class="language-bash">python -m pip check
+
+python - &lt;&lt;'PY'
+from importlib.metadata import version
+
+import accelerate
+import ktransformers
+import kt_kernel
+import torch
+import transformers
+
+for name, module in {
+    "torch": torch,
+    "transformers": transformers,
+    "accelerate": accelerate,
+    "kt_kernel": kt_kernel,
+    "ktransformers": ktransformers,
+}.items():
+    print(f"{name:14s} {getattr(module, '__version__', 'unknown')}")
+
+print(f"{'sglang-kt':14s} {version('sglang-kt')}")
+print(f"{'transformers-kt':14s} {version('transformers-kt')}")
+print(f"{'accelerate-kt':14s} {version('accelerate-kt')}")
+
+from accelerate.utils.dataclasses import KTransformersPlugin  # noqa: F401
+PY
+</code></pre>
+<p>The compatible environment should include these versions:</p>
+<pre><code class="language-text">No broken requirements found.
+torch          2.9.1
+transformers   5.6.0
+accelerate     1.14.0
+kt_kernel      0.7.0
+ktransformers  0.7.0
+sglang-kt      0.7.0
+transformers-kt 5.6.0.post2
+accelerate-kt  1.14.0.post2
+</code></pre>
+<h2 id="2-choose-a-fine-tuning-setup"><a class="header" href="#2-choose-a-fine-tuning-setup">2. Choose a fine-tuning setup</a></h2>
+<p>Choose the Expert weight format first, then select LoRA or full fine-tuning. After making both choices, use the corresponding training YAML and Accelerate YAML below.</p>
+<h3 id="21-choose-the-expert-weight-format"><a class="header" href="#21-choose-the-expert-weight-format">2.1 Choose the Expert weight format</a></h3>
+<p>Native versus converted precision describes the Expert weight format. AMX (Advanced Matrix Extensions) and AVX512 (Advanced Vector Extensions 512-bit) describe CPU instruction sets and backends; they are a separate dimension.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Weight option</th><th>When to use it</th><th>Requirements and tradeoffs</th></tr>
+</thead>
+<tbody>
+<tr><td>Native BF16 checkpoint</td><td>Host memory is sufficient and a stable, direct training path is the priority</td><td>No weight conversion is required. When AMX is available, <code>auto</code> selects the currently fastest AMXBF16 path</td></tr>
+<tr><td>Native FP8 (8-bit floating point)</td><td>The model provides a native FP8 checkpoint and should remain in its original weight format</td><td>Currently used for LoRA with frozen base Experts. Requires the complete AVX512 FP8 extension set; AMX does not support this native FP8 path</td></tr>
+<tr><td>KT-converted INT8</td><td>Native Expert weights do not fit in host memory</td><td>Requires a mutually matched pair of INT8 Routed Expert weights and a BF16 non-expert cache. <code>auto</code> can select AMX-INT8 or AVX512-VNNI</td></tr>
+<tr><td>KT-converted AMXINT4</td><td>Memory pressure is more severe and the additional accuracy risk is acceptable</td><td>Requires AMX and matching AMXINT4 weights. Validate quality on a representative evaluation set</td></tr>
+</tbody>
+</table>
+</div>
+<p>Prefer native BF16 or native FP8 when host memory allows. Use INT8 or AMXINT4 only when matching converted weights are available and reducing Expert memory is necessary.</p>
+<h3 id="22-choose-lora-or-full-fine-tuning"><a class="header" href="#22-choose-lora-or-full-fine-tuning">2.2 Choose LoRA or full fine-tuning</a></h3>
+<p>Expert weight format and parameter-update scope are separate configuration dimensions, but the supported combinations have clear boundaries. Native BF16 supports both LoRA and full fine-tuning. Native FP8, INT8, and AMXINT4 recipes use LoRA with frozen base Experts. Full fine-tuning uses BF16.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>When to use it</th><th>Resources and output</th></tr>
+</thead>
+<tbody>
+<tr><td>LoRA (Low-Rank Adaptation)</td><td>Recommended by default for rapid task adaptation, repeated experiments, or constrained resources</td><td>Lower GPU-memory, host-memory, and disk cost. Produces a LoRA adapter and KT Expert LoRA artifacts</td></tr>
+<tr><td>Full fine-tuning</td><td>The task requires updating all target parameters and can afford the higher training and checkpoint cost</td><td>Requires more GPU memory, host memory, and disk capacity. Produces a complete model checkpoint</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="23-responsibilities-of-the-two-yaml-files"><a class="header" href="#23-responsibilities-of-the-two-yaml-files">2.3 Responsibilities of the two YAML files</a></h3>
+<p><label class="checkbox-label"><input class="checkbox-img" type="checkbox"><img src="assets/llamafactory-accelerate-kt-en.svg" alt="Training YAML, Accelerate YAML, and KTransformers execution"><span class="img-wrapper"><img src="assets/llamafactory-accelerate-kt-en.svg" alt="Training YAML, Accelerate YAML, and KTransformers execution"></span></label></p>
+<p>Each run uses two YAML files. The training YAML defines the task and owns every KTransformers setting. The Accelerate YAML defines only distributed execution and FSDP2. Current LlamaFactory rejects <code>kt_config</code> in the Accelerate YAML.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>File</th><th>Responsibility</th><th>Common fields</th></tr>
+</thead>
+<tbody>
+<tr><td>Training YAML</td><td>Model, data, LoRA or full fine-tuning, batch, sequence length, output directory, and all KT settings</td><td><code>model_name_or_path</code>, <code>dataset</code>, <code>finetuning_type</code>, <code>lora_*</code>, <code>cutoff_len</code>, <code>output_dir</code>, <code>use_kt</code>, <code>kt_cpu_activation</code>, <code>kt_weight_path</code>, <code>kt_non_expert_weight_path</code>, <code>kt_config</code></td></tr>
+<tr><td>Accelerate YAML</td><td>GPU processes, FSDP2 (Fully Sharded Data Parallel 2), and global mixed precision</td><td><code>num_processes</code>, <code>mixed_precision</code>, <code>fsdp_config</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Check three relationships before launch:</p>
+<ol>
+<li>The number of GPUs in <code>CUDA_VISIBLE_DEVICES</code> must equal <code>num_processes</code>.</li>
+<li>If <code>kt_config.kt_model_max_length</code> is set manually in the training YAML, it must cover <code>cutoff_len</code> plus the runtime token margin.</li>
+<li>Write the LoRA rank only at the top level of the training YAML. LlamaFactory derives the internal KT fields. Remove LoRA-only fields for full fine-tuning.</li>
+</ol>
+<h3 id="24-base-yaml-for-four-common-setups"><a class="header" href="#24-base-yaml-for-four-common-setups">2.4 Base YAML for four common setups</a></h3>
+<p>Copy the complete configurations from Appendix A.1 and A.2, then replace the fields shown for the selected setup. Each block labels the training YAML and Accelerate YAML sections. <code>kt_config</code> always belongs in the training YAML.</p>
+<h4 id="241-native-bf16--lora"><a class="header" href="#241-native-bf16--lora">2.4.1 Native BF16 + LoRA</a></h4>
+<pre><code class="language-yaml"># File 1: training YAML
+model_name_or_path: /data/models/Your-BF16-Model
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# Do not set kt_weight_path for native BF16
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: bf16
+
+# File 2: Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="242-native-fp8--lora"><a class="header" href="#242-native-fp8--lora">2.4.2 Native FP8 + LoRA</a></h4>
+<pre><code class="language-yaml"># File 1: training YAML
+model_name_or_path: /data/models/Your-Native-FP8-Model
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# Do not set kt_weight_path for native FP8
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: fp8
+
+# File 2: Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="243-int8--amxint4--lora"><a class="header" href="#243-int8--amxint4--lora">2.4.3 INT8 / AMXINT4 + LoRA</a></h4>
+<pre><code class="language-yaml"># File 1: training YAML
+finetuning_type: lora
+lora_rank: 8
+use_kt: true
+# INT8 setup
+kt_weight_path: /data/models/Your-Routed-Experts-INT8
+kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: int8
+  kt_weight_lifecycle: persistent
+
+# For AMXINT4, use matching paths and replace kt_config above with:
+# kt_weight_path: /data/models/Your-Model-AMXINT4
+# kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16
+# kt_config:
+#   kt_backend: AMXINT4
+
+# File 2: Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h4 id="244-native-bf16--full-fine-tuning"><a class="header" href="#244-native-bf16--full-fine-tuning">2.4.4 Native BF16 + full fine-tuning</a></h4>
+<pre><code class="language-yaml"># File 1: training YAML
+finetuning_type: full
+learning_rate: 1.0e-5
+use_kt: true
+# Remove lora_rank, lora_alpha, lora_dropout, lora_target, and other LoRA fields
+kt_config:
+  kt_backend: auto
+  kt_expert_weight_format: bf16
+
+# File 2: Accelerate YAML
+mixed_precision: bf16
+num_processes: 2
+</code></pre>
+<h3 id="25-launch"><a class="header" href="#25-launch">2.5 Launch</a></h3>
+<pre><code class="language-bash">CUDA_VISIBLE_DEVICES=0,1 accelerate launch --main_process_port 0 --config_file qwen35_fsdp2_2gpu.yaml src/train.py qwen35_397b_bf16_lora.yaml
+</code></pre>
+<h2 id="3-custom-yaml-advanced-settings"><a class="header" href="#3-custom-yaml-advanced-settings">3. Custom YAML: advanced settings</a></h2>
+<p>After a base setup launches successfully, tune the following parameters according to the training objective and resource bottleneck. Keep the recommended values unless there is a clear reason to change them, and avoid changing several parameter groups at once.</p>
+<p><strong>(1) LoRA capacity: <code>lora_rank</code>, <code>lora_alpha</code>, <code>lora_target</code>, <code>lora_dropout</code></strong></p>
+<p>Change these four fields only at the top level of the training YAML. LlamaFactory automatically derives the rank, alpha, and dropout used internally by KTransformers. Do not repeat them in <code>kt_config</code> or the Accelerate YAML. Start with <code>lora_rank: 8</code>, <code>lora_alpha: 16</code>, <code>lora_target: all</code>, and <code>lora_dropout: 0.0</code>.</p>
+<p>If task adaptation is insufficient, increase the rank to 16 and then 32 while keeping alpha at about twice the rank. If a small dataset shows clear overfitting, increase dropout to <code>0.05</code>.</p>
+<p><strong>(2) Sequence length: <code>cutoff_len</code></strong></p>
+<p>Set this field in the training YAML according to the effective token length of most samples. Do not use the maximum dataset length solely for a small number of long samples. Longer sequences increase activation and KT buffer usage, which raises both host-memory and GPU-memory requirements.</p>
+<p>The system derives the KT model-length capacity from <code>cutoff_len</code>. To increase it manually, set <code>kt_model_max_length</code> in the training YAML’s <code>kt_config</code>. It must be greater than <code>cutoff_len</code> and include room for additional runtime tokens.</p>
+<p><strong>(3) Batch: <code>per_device_train_batch_size</code>, <code>gradient_accumulation_steps</code></strong></p>
+<p>Set both fields in the training YAML. For ultra-large MoE models, start with <code>per_device_train_batch_size: 1</code>. Increase the micro batch only after confirming sufficient GPU and host memory. If GPU memory is insufficient, keep the micro batch at 1 and use gradient accumulation to increase the effective batch.</p>
+<pre><code class="language-text">effective batch size = per_device_train_batch_size × number of GPUs × gradient_accumulation_steps
+</code></pre>
+<p><strong>(4) Activation recomputation and CPU Activation Reuse: <code>disable_gradient_checkpointing</code>, <code>kt_cpu_activation</code></strong></p>
+<p>In the training YAML, <code>disable_gradient_checkpointing: false</code> enables gradient checkpointing to trade additional computation for lower activation memory. Setting it to <code>true</code> retains more intermediate results and may improve speed, but uses more memory.</p>
+<p>When host memory is sufficient, add this top-level field to the same training YAML:</p>
+<pre><code class="language-yaml">kt_cpu_activation: retain
+</code></pre>
+<p>This option retains CPU Expert activations during checkpoint recomputation, using more host memory to reduce repeated CPU work. When gradient checkpointing is enabled and the field is omitted, CPU and GPU activations are recomputed. <code>kt_cpu_activation</code> controls CPU Expert activation retention, while <code>disable_gradient_checkpointing</code> controls the overall checkpoint-recomputation policy; do not treat them as one switch.</p>
+<p><strong>(5) CPU Expert reuse and threads: <code>kt_share_backward_bb</code>, <code>kt_num_threads</code></strong></p>
+<p>Both fields belong in the training YAML’s <code>kt_config</code>. Keep <code>kt_share_backward_bb: true</code> to reuse the buffer required by CPU Expert backward computation. It is separate from <code>kt_cpu_activation</code>; do not disable it unless the configuration for the current model explicitly requires that change.</p>
+<p>Set <code>kt_num_threads</code> to the number of physical CPU cores available to the job, not the total number of logical cores including SMT threads. If data preprocessing shares the same CPUs, reserve cores for the DataLoader and system processes.</p>
+<p>The system derives <code>kt_threadpool_count</code> from the NUMA topology. Change it manually only after confirming the CPU socket and NUMA layout.</p>
+<p><strong>(6) Resume from a checkpoint: <code>resume_from_checkpoint</code></strong></p>
+<p>Set this field in the training YAML to the target <code>checkpoint-*</code> directory. Omit it for a new run. Keep <code>output_dir</code> pointed at the output directory for the current job, never at the base-model directory, and keep <code>overwrite_output_dir: false</code> to avoid overwriting existing results.</p>
+<h2 id="4-performance-and-resource-estimates"><a class="header" href="#4-performance-and-resource-estimates">4. Performance and resource estimates</a></h2>
+<p>The table below uses a 2K context (<code>sequence length = 2048</code>), per-GPU batch size 1, and gradient accumulation 1. It includes only accepted KTransformers BF16 runs that completed real LoRA training. Throughput includes forward, loss, backward, and optimizer steps.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Model and weights</th><th style="text-align: right">GPUs</th><th style="text-align: right">Global batch size</th><th style="text-align: right">Minimum per-GPU memory reference</th><th style="text-align: right">Minimum host-memory reference</th><th style="text-align: right">Fine-tuning throughput (tokens/s)</th></tr>
+</thead>
+<tbody>
+<tr><td>Qwen3-235B-2507 BF16 LoRA</td><td style="text-align: right">2</td><td style="text-align: right">2</td><td style="text-align: right">≥ 27.14 GiB</td><td style="text-align: right">≥ 545.36 GiB</td><td style="text-align: right">147.91</td></tr>
+<tr><td>Qwen3.5-397B BF16 LoRA</td><td style="text-align: right">8</td><td style="text-align: right">8</td><td style="text-align: right">≥ 20.37 GiB</td><td style="text-align: right">≥ 1075.68 GiB</td><td style="text-align: right">215.25</td></tr>
+</tbody>
+</table>
+</div>
+<p>The GPU-memory column reports the highest single-GPU peak from the measured run. The host-memory column reports peak CPU RSS for the training process tree, normalized to GiB. These values are minimum references for the measured configurations, not safety margins. Reserve additional capacity for data loading, caches, checkpoint saving, and system processes.</p>
+<p>Results with different GPU counts should not be used to infer linear scaling directly. Increasing <code>cutoff_len</code>, batch size, or KT cache depth increases resource usage. Full fine-tuning also requires additional capacity for gradients, master weights, optimizer states, and complete checkpoints.</p>
+<h2 id="appendix"><a class="header" href="#appendix">Appendix</a></h2>
+<h3 id="a1-qwen35-397b-bf16-lora-training-yaml"><a class="header" href="#a1-qwen35-397b-bf16-lora-training-yaml">A.1 Qwen3.5-397B BF16 LoRA training YAML</a></h3>
+<p>Save as <code>qwen35_397b_bf16_lora.yaml</code>:</p>
+<pre><code class="language-yaml">### model
+model_name_or_path: /data/models/Qwen3.5-397B-A17B
+trust_remote_code: true
+disable_gradient_checkpointing: false
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target: all
+
+### dataset
+dataset: your_dataset
+template: qwen3_5
+cutoff_len: 2048
+packing: false
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /data/output/qwen35-bf16-lora
+logging_steps: 10
+save_strategy: steps
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: false
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-4
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+
+### ktransformers
+use_kt: true
+# kt_cpu_activation: retain  # Optional: use more host memory to reduce CPU Expert recomputation
+# kt_weight_path: /data/models/Your-Routed-Experts-INT8  # Converted INT8 Routed Experts
+# kt_non_expert_weight_path: /data/models/Your-Non-Expert-Cache-BF16  # Must match the path above
+kt_config:
+  kt_expert_weight_format: bf16
+  kt_backend: auto
+  kt_num_threads: 64
+  kt_tp_enabled: true
+  kt_threadpool_count: 2
+  kt_max_cache_depth: 2
+  kt_share_backward_bb: true
+</code></pre>
+<h3 id="a2-fsdp2-accelerate-yaml"><a class="header" href="#a2-fsdp2-accelerate-yaml">A.2 FSDP2 Accelerate YAML</a></h3>
+<p>Save as <code>qwen35_fsdp2_2gpu.yaml</code>:</p>
+<pre><code class="language-yaml">compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+fsdp_config:
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_cpu_ram_efficient_loading: true
+  fsdp_offload_params: false
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_version: 2
+mixed_precision: bf16
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+use_cpu: false
+</code></pre>
+<h3 id="a3-qa"><a class="header" href="#a3-qa">A.3 Q&amp;A</a></h3>
+<h4 id="a31-why-cant-a-native-fp8-checkpoint-use-the-converted-int8-configuration"><a class="header" href="#a31-why-cant-a-native-fp8-checkpoint-use-the-converted-int8-configuration">A.3.1 Why can’t a native FP8 checkpoint use the converted INT8 configuration?</a></h4>
+<p>The weight formats and loading paths are different. Native FP8 preserves the FP8 weights and scales from the checkpoint and uses the AVX512 native-precision backend. The INT8 recipe reads a mutually matched pair of INT8 Routed Expert weights and a BF16 non-expert cache, then lets <code>auto</code> select an AMX-INT8 or AVX512-VNNI implementation. Do not pass a native FP8 checkpoint through <code>kt_weight_path</code>.</p>
+<h4 id="a32-auto-did-not-select-the-expected-backend"><a class="header" href="#a32-auto-did-not-select-the-expected-backend">A.3.2 <code>auto</code> did not select the expected backend</a></h4>
+<p>Save the <code>lscpu</code> output and startup log, then confirm that the container or virtualization environment did not hide the required instruction set. Native BF16 can select AMXBF16 when AMX is available. Native FP8 should select AVX512. Do not force a backend that the CPU or weight format does not support.</p>
+<h4 id="a33-insufficient-host-memory"><a class="header" href="#a33-insufficient-host-memory">A.3.3 Insufficient host memory</a></h4>
+<p>First reduce concurrent data loading, sequence length, and cache depth, and confirm that two copies of the Expert weights are not loaded. If memory is still insufficient, prepare converted INT8 or AMXINT4 weights. For full fine-tuning, estimate the additional memory for gradients, master weights, and optimizer states separately.</p>
+<h4 id="a34-gpu-oom"><a class="header" href="#a34-gpu-oom">A.3.4 GPU OOM</a></h4>
+<p>OOM (Out of Memory) means GPU or host memory is insufficient. Reduce <code>cutoff_len</code>, per-GPU batch size, and activation usage first, then increase <code>gradient_accumulation_steps</code> to preserve the global batch size. <code>num_processes</code>, the visible GPU count, and the actual model placement must agree.</p>
+<h4 id="a35-kt_model_max_length-does-not-match-cutoff_len"><a class="header" href="#a35-kt_model_max_length-does-not-match-cutoff_len">A.3.5 <code>kt_model_max_length</code> does not match <code>cutoff_len</code></a></h4>
+<p>When increasing <code>cutoff_len</code>, increase <code>kt_model_max_length</code> as well and leave room for the effective runtime sequence length. A value that is too small causes buffer or shape errors; an unnecessarily large value increases host-memory usage.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="ktransformers--llamafactory-moe-微调-cookbook"><a class="header" href="#ktransformers--llamafactory-moe-微调-cookbook">KTransformers × LlamaFactory MoE 微调 Cookbook</a></h1>
 <p>从  Qwen3.5 到 DeepSeek-V4、Kimi-K3、GLM-5.2，每一次超大模型的开源都带来性能与规模上的巨大跃升。然而，多数研究者与开发者受限于昂贵的显卡，难以在资源受限条件下微调超大模型。面对这种差距，我们提出了一种更具可行性的方案：通过 KTransformers 与 LlamaFactory 的结合，仅需1~4张RTX 4090与较高内存CPU，便可微调 DeepSeek-V3&amp;V4系列/Kimi-K2.5/GLM-5.2等1T规模的 MoE（Mixture of Experts，混合专家）模型。</p>
@@ -1524,7 +1858,7 @@ kt_config:
 mixed_precision: bf16
 num_processes: 2
 </code></pre>
-<h4 id="243-int8--amxint4--lora"><a class="header" href="#243-int8--amxint4--lora">2.4.3 INT8 / AMXINT4 + LoRA</a></h4>
+<h4 id="243-int8--amxint4--lora-1"><a class="header" href="#243-int8--amxint4--lora-1">2.4.3 INT8 / AMXINT4 + LoRA</a></h4>
 <pre><code class="language-yaml"># 文件 1：训练 YAML
 finetuning_type: lora
 lora_rank: 8
@@ -1662,7 +1996,7 @@ kt_config:
   kt_max_cache_depth: 2
   kt_share_backward_bb: true
 </code></pre>
-<h3 id="a2-fsdp2-accelerate-yaml"><a class="header" href="#a2-fsdp2-accelerate-yaml">A.2 FSDP2 Accelerate YAML</a></h3>
+<h3 id="a2-fsdp2-accelerate-yaml-1"><a class="header" href="#a2-fsdp2-accelerate-yaml-1">A.2 FSDP2 Accelerate YAML</a></h3>
 <p>保存为 <code>qwen35_fsdp2_2gpu.yaml</code>：</p>
 <pre><code class="language-yaml">compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
@@ -1680,14 +2014,14 @@ rdzv_backend: static
 same_network: true
 use_cpu: false
 </code></pre>
-<h3 id="a3-qa"><a class="header" href="#a3-qa">A.3 Q&amp;A</a></h3>
+<h3 id="a3-qa-1"><a class="header" href="#a3-qa-1">A.3 Q&amp;A</a></h3>
 <h4 id="a31-原生-fp8-为什么不能选择-int8-转换权重配置"><a class="header" href="#a31-原生-fp8-为什么不能选择-int8-转换权重配置">A.3.1 原生 FP8 为什么不能选择 INT8 转换权重配置</a></h4>
 <p>两者的权重格式和加载方式不同。原生 FP8 保留 checkpoint 中的 FP8 权重与 scale，使用 AVX512 原精度后端；INT8 配方读取相互匹配的 Routed Expert INT8 权重与 BF16 non-expert cache，并由 <code>auto</code> 选择 AMX-INT8 或 AVX512-VNNI 实现。不要把原生 FP8 checkpoint 填入 <code>kt_weight_path</code>。</p>
 <h4 id="a32-auto-没有选择预期后端"><a class="header" href="#a32-auto-没有选择预期后端">A.3.2 <code>auto</code> 没有选择预期后端</a></h4>
 <p>保存 <code>lscpu</code> 输出和启动日志，确认容器或虚拟化环境没有屏蔽指令集。原生 BF16 可在支持 AMX 时选择 AMXBF16；原生 FP8 应选择 AVX512。不要强制指定本机或权重格式不支持的后端。</p>
 <h4 id="a33-cpu-系统内存不足"><a class="header" href="#a33-cpu-系统内存不足">A.3.3 CPU 系统内存不足</a></h4>
 <p>优先降低并发数据加载、序列长度和 cache 深度，并确认没有重复加载两份 Expert 权重。若仍不足，再考虑准备 INT8 / AMXINT4 转换权重。全量微调还要单独估算梯度、master weight 与 optimizer state。</p>
-<h4 id="a34-gpu-oom"><a class="header" href="#a34-gpu-oom">A.3.4 GPU OOM</a></h4>
+<h4 id="a34-gpu-oom-1"><a class="header" href="#a34-gpu-oom-1">A.3.4 GPU OOM</a></h4>
 <p>OOM（Out of Memory）表示显存或系统内存不足。先降低 <code>cutoff_len</code>、每卡 batch size 和 activation 占用，再增加 <code>gradient_accumulation_steps</code> 维持全局 batch size。<code>num_processes</code>、可见 GPU 数与模型实际放置必须一致。</p>
 <h4 id="a35-kt_model_max_length-与-cutoff_len-不一致"><a class="header" href="#a35-kt_model_max_length-与-cutoff_len-不一致">A.3.5 <code>kt_model_max_length</code> 与 <code>cutoff_len</code> 不一致</a></h4>
 <p>增大 <code>cutoff_len</code> 时同步提高 <code>kt_model_max_length</code>，并按分布式运行时的有效序列长度留出余量。值过小会导致 buffer 或 shape 错误，过大会增加系统内存占用。</p>
