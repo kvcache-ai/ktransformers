@@ -1,5 +1,6 @@
 # KTransformers SFT Docs
 
+- [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook (中文)](../../zh/KTransformers-Fine-Tuning_Cookbook_zh.md)
 - [v0.6.1 Quick Start](./KTransformers-Fine-Tuning_Quick-Start.md)
 - [Fine-Tuning User Guide](./KTransformers-Fine-Tuning_User-Guide.md)
 - [KT-FT Fine-Tuning and Inference Loop](./Qwen3.5-SGLang-LoRA-Serving.md)

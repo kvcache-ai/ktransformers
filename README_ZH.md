@@ -17,6 +17,7 @@ KTransformers 是一个专注于通过 CPU-GPU 异构计算实现大语言模型
 
 ## 🔥 更新
 
+* **2026 年 8 月 25 日**：上传了全新的易用版 [KTransformers × LlamaFactory MoE 微调 Cookbook](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md)，覆盖硬件检查、环境安装、BF16/FP8/INT8 配置、LoRA 与全量微调、资源规划及故障排查。
 * **2026 年 4 月 30 日**：KTransformers v0.6.1 更新 kt-kernel 推理和 SFT 文档，提供独立的[推理](./kt-kernel/README.md)和 [SFT Quick Start](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)入口。
 * **2025 年 12 月 5 日**：支持原生 Kimi-K2-Thinking 推理（[教程](./doc/en/kt-kernel/Kimi-K2-Thinking-Native.md)）
 * **2025 年 11 月 6 日**：支持 Kimi-K2-Thinking 推理（[教程](./doc/en/Kimi-K2-Thinking.md)）和微调（[教程](./doc/en/SFT_Installation_Guide_KimiK2.md)）
@@ -80,18 +81,18 @@ pip install .
 
 ---
 
-### 🎓 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) - LLaMA-Factory 微调
+### 🎓 [SFT](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md) - LlamaFactory 微调
 
-KTransformers × LLaMA-Factory 集成，面向超大 MoE 模型微调。
+KTransformers × LlamaFactory 集成，面向超大 MoE 模型微调。新的 Cookbook 提供从硬件检查、环境安装到 BF16/FP8/INT8 配置、LoRA/全量训练、资源规划和故障排查的易用流程。
 
-![KTransformers SFT](./doc/assets/image-20251011010558909.png)
+![LlamaFactory 与 KTransformers MoE 微调架构](./doc/assets/llamafactory-kt-integration-overview.png)
 
 **主要特性:**
 - **多后端支持**: CPU/GPU 混合微调，支持 INT8/INT4 量化
 - **超大 MoE 支持**: 在有限 GPU 内存下微调 DeepSeek-V3/R1 等模型
 - **相对 ZeRO-Offload 加速**: 在基准 MoE SFT 任务中训练速度提升 6-12 倍
 - **降低 CPU 内存**: 相比上一版 KT SFT 路径，基准配置下 CPU 内存约降至 1/2
-- **LLaMA-Factory 集成**: 与流行微调框架无缝集成
+- **LlamaFactory 集成**: 与流行微调框架无缝集成
 
 | 模型 | GPU 内存 | 训练速度 | 硬件 |
 |-------|------------|----------------|----------|
@@ -102,14 +103,16 @@ KTransformers × LLaMA-Factory 集成，面向超大 MoE 模型微调。
 **快速开始:**
 ```bash
 cd /path/to/LLaMA-Factory
-pip install -e .
-pip install -r requirements/ktransformers.txt
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
   src/train.py \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
+👉 **[易用版微调 Cookbook →](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md)**
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[完整文档 →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
