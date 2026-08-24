@@ -16,6 +16,7 @@
 KTransformers is a research project focused on efficient inference and fine-tuning of large language models through CPU-GPU heterogeneous computing. The project now exposes two user-facing capabilities from the kt-kernel source tree: [Inference](./kt-kernel/README.md) and [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md).
 
 ## 🔥 Updates
+* **Aug 25, 2026**: Uploaded a new easy-to-use [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md), covering hardware checks, installation, BF16/FP8/INT8 recipes, LoRA and full fine-tuning, resource planning, and troubleshooting.
 * **June 21, 2026**: MiniMax-M3 Day0 Support! ([Tutorial](./doc/en/kt-kernel/MiniMax-M3-Tutorial.md))
 * **June 17, 2026**: GLM-5.2 Day0 Support! ([Tutorial](./doc/en/kt-kernel/GLM-5.2-Tutorial.md))
 * **May 6, 2026**: KTransformers at [GOSIM Paris 2026](https://paris2026.gosim.org/zh/schedule/) — "Agentic AI on Edge" track. We'll present KT's inference performance on consumer hardware.
@@ -91,18 +92,18 @@ pip install .
 
 ---
 
-### 🎓 [SFT](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md) - Fine-Tuning with LLaMA-Factory
+### 🎓 [SFT](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md) - Fine-Tuning with LlamaFactory
 
-KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning.
+KTransformers × LlamaFactory integration for ultra-large MoE model fine-tuning. The new Cookbook provides an easy-to-use path from hardware checks and installation to BF16/FP8/INT8 configuration, LoRA/full training, resource planning, and troubleshooting.
 
-![KTransformers SFT](https://raw.githubusercontent.com/kvcache-ai/ktransformers/main/doc/assets/image-20251011010558909.png)
+![LlamaFactory and KTransformers MoE fine-tuning architecture](./doc/assets/llamafactory-kt-integration-overview.png)
 
 **Key Features:**
 - **Multi-Backend Support**: CPU/GPU hybrid fine-tuning with INT8/INT4 quantization
 - **Ultra-Large MoE Support**: Fine-tune models like DeepSeek-V3/R1 on limited GPU memory
 - **Faster than ZeRO-Offload**: 6-12x training speedup in benchmarked MoE SFT workloads
 - **Lower CPU Memory**: About half the CPU memory of the previous KT SFT path in the benchmarked setup
-- **LLaMA-Factory Integration**: Seamless integration with popular fine-tuning framework
+- **LlamaFactory Integration**: Seamless integration with the popular fine-tuning framework
 
 | Model | GPU Memory | Training Speed | Hardware |
 |-------|------------|----------------|----------|
@@ -113,14 +114,16 @@ KTransformers × LLaMA-Factory integration for ultra-large MoE model fine-tuning
 **Quick Start:**
 ```bash
 cd /path/to/LLaMA-Factory
-pip install -e .
-pip install -r requirements/ktransformers.txt
+python -m pip install -e .
+python -m pip install "ktransformers[sft]==0.7.0"
+python -m pip install "sglang-kt==0.7.0"
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
   --config_file examples/ktransformers/accelerate/fsdp2_kt_int8.yaml \
   src/train.py \
   examples/ktransformers/train_lora/qwen3_5moe_lora_sft_kt.yaml
 ```
 
+👉 **[Easy-to-Use Fine-Tuning Cookbook (中文) →](./doc/zh/KTransformers-Fine-Tuning_Cookbook_zh.md)**
 👉 **[Quick Start →](./doc/en/SFT/KTransformers-Fine-Tuning_Quick-Start.md)**
 👉 **[Full Documentation →](./doc/en/SFT/KTransformers-Fine-Tuning_User-Guide.md)**
 
