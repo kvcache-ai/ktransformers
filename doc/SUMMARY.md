@@ -7,6 +7,7 @@
 
 # Tutorial
 - [kt-sft part](en/SFT/README.md)
+  - [KTransformers × LlamaFactory MoE Fine-Tuning Cookbook](en/SFT/KTransformers-Fine-Tuning_Cookbook.md)
   - [KTransformers × LlamaFactory MoE 微调 Cookbook](zh/KTransformers-Fine-Tuning_Cookbook_zh.md)
   - [KT-FT Fine-Tuning and Inference Loop](en/SFT/Qwen3.5-SGLang-LoRA-Serving.md)
   - [KT-FT 微调推理闭环](zh/Qwen3.5-SGLang-LoRA-Serving_zh.md)
